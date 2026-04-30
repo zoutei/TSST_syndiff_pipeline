@@ -1,0 +1,62 @@
+# Reference recipe B — ePSF, sat template, photometry, background on sat-subtracted diffs.
+# For every `SynDiffConfig` field and default, see `syndiff_pipeline/config.py`.
+
+ffi_dir: "data/tess_ffi"
+output_dir: "output/run_b"
+gaia_catalog: "data/catalogs/gaia.csv"
+template_dir: "output/templates"
+removed_stars_csv: "output/templates/removed_stars.csv"
+
+target_ra: 210.219333
+target_dec: 81.846589
+sector: 20
+camera: 3
+ccd: 3
+
+epsf_temporal_smooth: true
+psf_type: "epsf"
+
+pipeline:
+  - kind: wcs_grouping
+  - kind: shared_mask
+  - kind: hotpants
+    science: ffi
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: ep
+  - kind: sat_template
+    inputs:
+      diffs: hp_d
+      epsf: ep
+    output: sat
+  - kind: subtract
+    inputs:
+      science: hp_d
+      template: sat
+    output: d_sat
+  - kind: forced_photometry
+    inputs:
+      diffs: d_sat
+      epsf: ep
+    output: lc_epsf_after_sat
+  - kind: background_estimate
+    inputs:
+      diffs: d_sat
+      bkg: hp_b
+    mode: rough_then_adaptive
+    output: bkg_temp_smooth
+  - kind: subtract
+    inputs:
+      science: d_sat
+      template: bkg_temp_smooth
+    output: d_after_bkg
+  - kind: forced_photometry
+    inputs:
+      diffs: d_after_bkg
+      epsf: ep
+    output: lc_epsf_final

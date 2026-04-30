@@ -1,0 +1,1005 @@
+"""
+wcs_grouping.py
+===============
+``wcs_grouping`` pipeline stage: WCS extraction and template grouping. The crop-local
+Gaia catalog is supplied externally:
+
+  1. Extract WCS from every FFI header.
+  2. Compute the pixel drift of the science target over time.
+  3. Group frames by template-offset bin (offset_threshold).
+  4. Validate and return the image crop bounds.
+
+The file ``unique_gaia_stars_for_cropped_template.csv`` (crop-local ``x``, ``y``)
+is produced by the template-creation (cluster) pipeline and loaded via
+``SynDiffConfig.gaia_catalog``.  Catalogs with only ``ra``/``dec`` (and photometry)
+are projected with :func:`ensure_gaia_crop_xy` using the reference-ffi WCS and
+``crop_bounds`` from this stage.  The helper ``build_unique_gaia_catalog``
+remains for tests or one-off builds from ``removed_stars`` CSV.
+
+Algorithmically this mirrors common pixel-shift and template-grouping workflows
+(WCS drift relative to a reference frame).
+"""
+
+import json
+import logging
+import os
+import warnings
+from pathlib import Path
+from typing import Any, Optional, Union
+
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.time import Time
+from astropy.utils.exceptions import AstropyWarning
+from astropy.wcs import WCS, FITSFixedWarning
+
+warnings.filterwarnings("ignore", category=FITSFixedWarning)
+warnings.filterwarnings("ignore", category=AstropyWarning)
+
+log = logging.getLogger(__name__)
+
+CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
+
+_VALID_CROP_QUADRANTS = frozenset({"tl", "tr", "bl", "br", "full"})
+
+# WCS header keywords needed to build an astropy WCS
+_WCS_KEYS = [
+    "NAXIS", "NAXIS1", "NAXIS2",
+    "CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2",
+    "CD1_1", "CD1_2", "CD2_1", "CD2_2",
+    "CTYPE1", "CTYPE2", "CUNIT1", "CUNIT2",
+]
+_SIP_KEY_PREFIXES = ("A_", "B_", "AP_", "BP_", "A_ORDER", "B_ORDER", "AP_ORDER", "BP_ORDER")
+
+
+# ── Internal helpers ──────────────────────────────────────────────────────────
+
+def _wcs_header_complete(header) -> bool:
+    """Return True if the header has the minimum keys to build a WCS."""
+    for key in ("CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "CD1_1", "CD2_2"):
+        if key not in header:
+            return False
+    return True
+
+
+def _header_to_wcs(header) -> WCS:
+    """Build an astropy WCS from a FITS header object."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wcs = WCS(header)
+    return wcs
+
+
+# ── Public functions ──────────────────────────────────────────────────────────
+
+def extract_wcs_from_ffi(ffi_path: str) -> dict:
+    """
+    Open an FFI FITS file (header-only) and return a dict of WCS keywords
+    plus DATE-OBS and NAXIS1/NAXIS2.
+
+    Parameters
+    ----------
+    ffi_path : str
+
+    Returns
+    -------
+    dict with keys: 'filename', 'path', 'header', 'wcs_ok', 'DATE-OBS',
+                    'NAXIS1', 'NAXIS2'
+    """
+    result = {
+        "filename": os.path.basename(ffi_path),
+        "path": ffi_path,
+        "header": None,
+        "wcs_ok": False,
+        "DATE-OBS": None,
+        "NAXIS1": None,
+        "NAXIS2": None,
+    }
+    try:
+        with fits.open(ffi_path, memmap=True) as hdul:
+            hdr = hdul[1].header
+            result["header"] = hdr
+            result["wcs_ok"] = _wcs_header_complete(hdr)
+            result["DATE-OBS"] = hdr.get("DATE-OBS", None)
+            result["NAXIS1"] = hdr.get("NAXIS1", None)
+            result["NAXIS2"] = hdr.get("NAXIS2", None)
+    except Exception as exc:
+        log.warning(f"Could not open {ffi_path}: {exc}")
+    return result
+
+
+def _ffi_usable_for_target_pixel(ffi_path: str, target_coord: SkyCoord) -> bool:
+    """True if ``extract_wcs_from_ffi`` WCS maps ``target_coord`` to finite pixels."""
+    info = extract_wcs_from_ffi(ffi_path)
+    if not info["wcs_ok"]:
+        return False
+    try:
+        wcs = _header_to_wcs(info["header"])
+        x, y = wcs.world_to_pixel(target_coord)
+        if not (np.isfinite(x) and np.isfinite(y)):
+            return False
+    except Exception:
+        return False
+    return True
+
+
+def select_ffis_with_valid_target_wcs(
+    sorted_ffi_paths: list,
+    target_ra: Optional[float],
+    target_dec: Optional[float],
+    *,
+    max_ffis: Optional[int] = None,
+) -> list:
+    """
+    Choose FFI paths in sort order, skipping files with unusable WCS for the target.
+
+    When ``max_ffis`` is set, keep scanning until that many usable paths are
+    found (or raise if the pool is exhausted). When ``max_ffis`` is ``None``,
+    return all ``sorted_ffi_paths`` without pre-filtering (same as before).
+
+    Parameters
+    ----------
+    sorted_ffi_paths : list of str
+        Typically time-sorted local FFI paths.
+    target_ra, target_dec : float or None
+        Target sky position in degrees; required when ``max_ffis`` is set.
+    max_ffis : int or None
+        Cap on the number of FFIs to return, counting only WCS-valid frames.
+
+    Returns
+    -------
+    list of str
+    """
+    if not sorted_ffi_paths:
+        return []
+    if max_ffis is None:
+        return list(sorted_ffi_paths)
+
+    if target_ra is None or target_dec is None:
+        raise ValueError(
+            "target_ra and target_dec are required when max_ffis is set "
+            "(needed to skip FFIs without usable WCS for the science target)."
+        )
+    cap = int(max_ffis)
+    if cap < 1:
+        return list(sorted_ffi_paths)
+
+    target_coord = SkyCoord(ra=target_ra, dec=target_dec, unit="deg")
+    selected = []
+    skipped = 0
+    log_first = 0
+    for ffi_path in sorted_ffi_paths:
+        if _ffi_usable_for_target_pixel(ffi_path, target_coord):
+            selected.append(ffi_path)
+            if len(selected) >= cap:
+                break
+        else:
+            skipped += 1
+            if log_first < 3:
+                log.info(
+                    "  Skipping %s (no usable WCS for target).",
+                    os.path.basename(ffi_path),
+                )
+                log_first += 1
+    if skipped > 3:
+        log.info(
+            "  ... and %d more FFI(s) skipped (no usable WCS for target).",
+            skipped - 3,
+        )
+
+    if len(selected) < cap:
+        raise RuntimeError(
+            f"Only {len(selected)} FFI(s) have usable WCS for the target among "
+            f"{len(sorted_ffi_paths)} on disk (need {cap} for max_ffis={cap}). "
+            "Check target_ra/dec, sector/camera/ccd, or FFI products; or lower max_ffis."
+        )
+
+    log.info(
+        "  Using %d FFI(s) with valid target WCS (max_ffis=%d; skipped %d unusable).",
+        len(selected),
+        cap,
+        skipped,
+    )
+    return selected
+
+
+def build_wcs_table(ffi_paths: list, target_ra: float,
+                    target_dec: float) -> pd.DataFrame:
+    """
+    For each FFI, build a WCS and compute the pixel position of the science
+    target.  The pixel drift (delta_x, delta_y) is measured relative to the
+    first valid frame.
+
+    Parameters
+    ----------
+    ffi_paths : list of str
+        Paths to all FFI FITS files, sorted by time.
+    target_ra, target_dec : float
+        RA/Dec (degrees, J2000) of the science target.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: filename, path, delta_x, delta_y, btjd, x_pix, y_pix, wcs_ok
+    """
+    target_coord = SkyCoord(ra=target_ra, dec=target_dec, unit="deg")
+    rows = []
+    x0, y0 = None, None
+
+    log.info(f"Building WCS table for {len(ffi_paths)} FFIs ...")
+
+    for ffi_path in ffi_paths:
+        info = extract_wcs_from_ffi(ffi_path)
+        row = {
+            "filename": info["filename"],
+            "path": info["path"],
+            "wcs_ok": info["wcs_ok"],
+            "DATE-OBS": info["DATE-OBS"],
+            "delta_x": np.nan,
+            "delta_y": np.nan,
+            "x_pix": np.nan,
+            "y_pix": np.nan,
+            "btjd": np.nan,
+        }
+
+        if info["wcs_ok"]:
+            try:
+                wcs = _header_to_wcs(info["header"])
+                x, y = wcs.world_to_pixel(target_coord)
+                x, y = float(x), float(y)
+                row["x_pix"] = x
+                row["y_pix"] = y
+
+                if x0 is None:
+                    x0, y0 = x, y
+
+                row["delta_x"] = x - x0
+                row["delta_y"] = y - y0
+
+                if info["DATE-OBS"]:
+                    t = Time(info["DATE-OBS"], format="isot", scale="utc")
+                    try:
+                        row["btjd"] = float(t.btjd)
+                    except AttributeError:
+                        # Older astropy: BTJD = BJD - 2457000.0
+                        row["btjd"] = float(t.jd) - 2457000.0
+            except Exception as exc:
+                log.warning(f"WCS computation failed for {info['filename']}: {exc}")
+                row["wcs_ok"] = False
+
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    n_ok = df["wcs_ok"].sum()
+    log.info(f"WCS table built: {n_ok}/{len(df)} frames have valid WCS.")
+    return df
+
+
+def summarize_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
+    """
+    Build the per-group summary table (``group_id``, ``group_dx``, ``group_dy``,
+    ``n_frames``) from a ``wcs_table`` that already has group columns assigned.
+    """
+    if "group_id" not in wcs_table.columns:
+        raise ValueError("wcs_table must have assign_template_groups run first.")
+    v = wcs_table[wcs_table["group_id"] >= 0]
+    if v.empty:
+        return pd.DataFrame(
+            columns=["group_id", "group_dx", "group_dy", "n_frames"]
+        )
+    g = (
+        v.groupby("group_id", sort=True)
+        .agg(
+            group_dx=("group_dx", "first"),
+            group_dy=("group_dy", "first"),
+            n_frames=("group_id", "size"),
+        )
+        .reset_index()
+    )
+    return g
+
+
+def load_cluster_template_job(output_dir: str) -> dict:
+    """Load ``cluster_template_job.json`` from ``output_dir``."""
+    path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Missing cluster handoff: {path}")
+    with open(path) as fh:
+        return json.load(fh)
+
+
+def crop_bounds_from_cluster_payload(payload: dict) -> dict:
+    """
+    Build a ``crop_bounds`` dict (including ``shape`` as ``(ny, nx)`` tuples)
+    from a loaded cluster-template JSON payload.
+    """
+    required = ("x_min", "x_max", "y_min", "y_max")
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise KeyError(
+            f"cluster_template_job.json missing {missing}; re-run wcs_grouping."
+        )
+    out = {k: int(payload[k]) for k in required}
+    if "shape" in payload:
+        sh = payload["shape"]
+        if isinstance(sh, (list, tuple)) and len(sh) == 2:
+            out["shape"] = (int(sh[0]), int(sh[1]))
+        else:
+            out["shape"] = (
+                out["y_max"] - out["y_min"],
+                out["x_max"] - out["x_min"],
+            )
+    else:
+        out["shape"] = (
+            out["y_max"] - out["y_min"],
+            out["x_max"] - out["x_min"],
+        )
+    return out
+
+
+def load_reference_ffi_path(
+    output_dir: str, fallback: Optional[str] = None
+) -> Optional[str]:
+    """
+    Reference FFI absolute path from ``cluster_template_job.json``, or legacy
+    ``ref_ffi_path.txt``, or ``fallback`` (e.g. ``cfg.ref_ffi_path``).
+    """
+    job = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    if os.path.isfile(job):
+        with open(job) as fh:
+            return str(json.load(fh)["reference_ffi_path"])
+    txt = os.path.join(output_dir, "ref_ffi_path.txt")
+    if os.path.isfile(txt):
+        with open(txt) as fh:
+            return fh.read().strip()
+    return str(fallback) if fallback else None
+
+
+def write_cluster_template_job_json(
+    summary_df: pd.DataFrame,
+    ref_ffi_path: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    offset_threshold: float,
+    output_dir: str,
+    crop_bounds: Optional[dict] = None,
+) -> str:
+    """
+    Write a JSON bundle for the cluster template job: reference FFI name/path,
+    instrument IDs, threshold, optional FFI crop (``x_min`` … ``y_max``), and the
+    per-group table formerly in ``group_offsets.csv`` (now only in this JSON).
+
+    Parameters
+    ----------
+    crop_bounds : dict, optional
+        From ``get_crop_bounds``. When given, writes ``x_min`` … ``y_max`` and
+        ``shape`` ``[ny, nx]`` for downstream reload without separate crop JSON.
+    """
+    def _json_val(x: Any) -> Union[int, float, str]:
+        if isinstance(x, (np.integer, int)):
+            return int(x)
+        if isinstance(x, (np.floating, float)):
+            return float(x)
+        return str(x)
+
+    ref_abs = os.path.abspath(os.path.expanduser(ref_ffi_path))
+    groups = []
+    for _, row in summary_df.iterrows():
+        groups.append(
+            {
+                "group_id": _json_val(row["group_id"]),
+                "group_dx": _json_val(row["group_dx"]),
+                "group_dy": _json_val(row["group_dy"]),
+                "n_frames": _json_val(row["n_frames"]),
+            }
+        )
+    payload = {
+        "schema_version": 1,
+        "reference_ffi_basename": os.path.basename(ref_abs),
+        "reference_ffi_path": ref_abs,
+        "sector": int(sector),
+        "camera": int(camera),
+        "ccd": int(ccd),
+        "offset_threshold": float(offset_threshold),
+        "groups": groups,
+    }
+    if crop_bounds is not None:
+        for key in ("x_min", "x_max", "y_min", "y_max"):
+            if key in crop_bounds:
+                payload[key] = int(crop_bounds[key])
+        if "shape" in crop_bounds:
+            sh = crop_bounds["shape"]
+            payload["shape"] = [int(sh[0]), int(sh[1])]
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    with open(out_path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+    log.info(f"Cluster template job JSON written to {out_path}")
+    return out_path
+
+
+def plot_wcs_drift_and_template_assignment(
+    wcs_table: pd.DataFrame,
+    output_path: str,
+    time_col: str = "btjd",
+) -> Optional[str]:
+    """
+    Three stacked panels: ``delta_x`` vs time, ``delta_y`` vs time, ``group_id`` vs time.
+
+    Rows with invalid time or no group assignment (``group_id`` < 0) are omitted
+    from the first two panels or shown in gray in the third where applicable.
+    """
+    need = {"delta_x", "delta_y", "group_id"}
+    if not need.issubset(wcs_table.columns):
+        log.warning("wcs_table missing columns for drift plot; skipping.")
+        return None
+    if time_col not in wcs_table.columns:
+        log.warning(f"wcs_table missing {time_col!r}; skipping drift plot.")
+        return None
+
+    t = pd.to_numeric(wcs_table[time_col], errors="coerce")
+    dx = pd.to_numeric(wcs_table["delta_x"], errors="coerce")
+    dy = pd.to_numeric(wcs_table["delta_y"], errors="coerce")
+    gid = wcs_table["group_id"]
+
+    valid_xy = t.notna() & dx.notna() & dy.notna() & (gid >= 0)
+    valid_t = t.notna()
+
+    gids_pos = gid[gid >= 0].unique()
+    gids_sorted = sorted(int(x) for x in gids_pos)
+    cmap = plt.cm.tab10(np.linspace(0, 1, max(len(gids_sorted), 1)))[: len(gids_sorted)]
+    color_by_gid = {g: cmap[i % len(cmap)] for i, g in enumerate(gids_sorted)}
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True, layout="constrained")
+
+    ax0, ax1, ax2 = axes
+    ax0.scatter(t[valid_xy], dx[valid_xy], s=8, alpha=0.6, c="C0")
+    ax0.set_ylabel(r"$\delta x$ (pix)")
+    ax0.grid(True, alpha=0.3)
+
+    ax1.scatter(t[valid_xy], dy[valid_xy], s=8, alpha=0.6, c="C1")
+    ax1.set_ylabel(r"$\delta y$ (pix)")
+    ax1.grid(True, alpha=0.3)
+
+    for g in gids_sorted:
+        m = valid_t & (gid == g)
+        if not m.any():
+            continue
+        color = color_by_gid[g]
+        ax2.scatter(t[m], np.full(m.sum(), g), s=12, alpha=0.7, color=color, label=f"g{g}")
+
+    unassigned = valid_t & (gid < 0)
+    if unassigned.any():
+        ax2.scatter(
+            t[unassigned],
+            np.full(unassigned.sum(), -1.0),
+            s=6,
+            alpha=0.4,
+            c="0.5",
+            label="unassigned",
+        )
+
+    ax2.set_ylabel("group_id")
+    yticks = list(gids_sorted)
+    if unassigned.any():
+        yticks = [-1] + yticks
+    if not yticks:
+        yticks = [0]
+    ax2.set_yticks(yticks)
+    ax2.set_yticklabels(["—" if y == -1 else str(y) for y in yticks])
+    ax2.grid(True, alpha=0.3)
+    if gids_sorted:
+        ax2.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.9)
+
+    ax2.set_xlabel(f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col)
+    fig.suptitle("WCS drift at target and assigned template group vs time")
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
+    fig.savefig(output_path, dpi=150)
+    plt.close(fig)
+    log.info(f"WCS drift / template debug figure saved to {output_path}")
+    return output_path
+
+
+def assign_template_groups(wcs_table: pd.DataFrame,
+                            offset_threshold: float = 0.01,
+                            output_dir: str = None) -> pd.DataFrame:
+    """
+    Round (delta_x, delta_y) to the nearest offset_threshold grid and assign
+    a unique integer group_id to each distinct rounded value.
+
+    Parameters
+    ----------
+    wcs_table : pd.DataFrame
+        Output of build_wcs_table.
+    offset_threshold : float
+        Grid spacing in TESS pixels.
+    output_dir : str, optional
+        Deprecated, ignored. Group summary is written only to
+        ``cluster_template_job.json`` from the ``wcs_grouping`` stage.
+
+    Returns
+    -------
+    pd.DataFrame
+        wcs_table augmented with columns: group_id, group_dx, group_dy.
+    """
+    df = wcs_table.copy()
+    df["group_id"] = -1
+    df["group_dx"] = np.nan
+    df["group_dy"] = np.nan
+
+    valid = df["wcs_ok"] & df["delta_x"].notna() & df["delta_y"].notna()
+
+    if valid.sum() == 0:
+        log.error("No valid WCS frames found; cannot assign template groups.")
+        return df
+
+    # Round offsets to grid
+    dx_rounded = (df.loc[valid, "delta_x"] / offset_threshold).round() * offset_threshold
+    dy_rounded = (df.loc[valid, "delta_y"] / offset_threshold).round() * offset_threshold
+
+    # Map rounded pairs to group_id (in order of first occurrence)
+    group_map = {}
+    group_id_col = []
+    for dx, dy in zip(dx_rounded, dy_rounded):
+        key = (round(dx, 6), round(dy, 6))
+        if key not in group_map:
+            group_map[key] = len(group_map)
+        group_id_col.append(group_map[key])
+
+    df.loc[valid, "group_id"] = group_id_col
+    df.loc[valid, "group_dx"] = dx_rounded.values
+    df.loc[valid, "group_dy"] = dy_rounded.values
+
+    summary_df = summarize_template_groups(df)
+
+    log.info(f"\nTemplate groups ({len(group_map)} total, threshold={offset_threshold} px):")
+    log.info("\n" + summary_df.to_string(index=False))
+    print(f"\nTemplate groups ({len(group_map)} total, threshold={offset_threshold} px):")
+    print(summary_df.to_string(index=False))
+    print(
+        "\n→ Handoff for the cluster: cluster_template_job.json (written by wcs_grouping "
+        "after the reference FFI and crop are set)."
+    )
+    print("  Then fill cfg.template_paths = {group_id: path} in your YAML and run hotpants.")
+
+    return df
+
+
+def get_crop_bounds(
+    ffi_header,
+    x_min=None,
+    x_max=None,
+    y_min=None,
+    y_max=None,
+    crop_quadrant: str = "tr",
+    x_left_dead: int = 44,
+    x_right_dead: int = 44,
+    y_edge_strip: int = 30,
+) -> dict:
+    """
+    Compute and validate the crop region for the pipeline.
+
+    **Explicit mode** — if any of ``x_min``, ``x_max``, ``y_min``, ``y_max`` is
+    not ``None``: those values define the box. Any edge left ``None`` is set to
+    the corresponding corner of the **usable** rectangle (dead strips removed);
+    then all edges are clamped to valid FFI indices ``[0, nx]`` / ``[0, ny]``.
+
+    **Quadrant mode** — if all four are ``None``: use ``crop_quadrant`` on the
+    usable rectangle. Usable area is
+    ``x ∈ [x_left_dead, nx - x_right_dead)``,
+    ``y ∈ [0, ny - y_edge_strip)``.
+    For ``'tl'``/``'tr'``/``'bl'``/``'br'``, subdivide using chip midlines
+    ``nx // 2`` and ``ny // 2`` (same convention as the historical default
+    ``'tr'`` quadrant). ``'full'`` selects the entire usable rectangle.
+
+    Parameters
+    ----------
+    ffi_header : astropy.io.fits.Header
+    x_min, x_max, y_min, y_max : int or None
+    crop_quadrant : str
+        ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` | ``'full'`` (quadrant mode only).
+    x_left_dead, x_right_dead : int
+        Dead columns on left and right (usable x excludes them).
+    y_edge_strip : int
+        Dead rows on the **top** only; usable y is ``[0, ny - y_edge_strip)``.
+
+    Returns
+    -------
+    dict with keys: x_min, x_max, y_min, y_max, shape (ny_crop, nx_crop)
+    """
+    nx = int(ffi_header["NAXIS1"])
+    ny = int(ffi_header["NAXIS2"])
+
+    x_usable_lo = int(x_left_dead)
+    x_usable_hi = nx - int(x_right_dead)
+    y_usable_lo = 0
+    y_usable_hi = ny - int(y_edge_strip)
+
+    if x_usable_lo >= x_usable_hi or y_usable_lo >= y_usable_hi:
+        raise ValueError(
+            f"Usable area is empty after dead strips: x=[{x_usable_lo},{x_usable_hi}), "
+            f"y=[{y_usable_lo},{y_usable_hi}), FFI shape {ny}×{nx}."
+        )
+
+    q = str(crop_quadrant).strip().lower()
+    if q not in _VALID_CROP_QUADRANTS:
+        raise ValueError(
+            f"crop_quadrant must be one of {sorted(_VALID_CROP_QUADRANTS)}, got {crop_quadrant!r}"
+        )
+
+    explicit = any(v is not None for v in (x_min, x_max, y_min, y_max))
+
+    if explicit:
+        xm = int(x_min) if x_min is not None else x_usable_lo
+        xM = int(x_max) if x_max is not None else x_usable_hi
+        ym = int(y_min) if y_min is not None else y_usable_lo
+        yM = int(y_max) if y_max is not None else y_usable_hi
+    else:
+        if q == "full":
+            xm, xM, ym, yM = x_usable_lo, x_usable_hi, y_usable_lo, y_usable_hi
+        else:
+            x_mid = nx // 2
+            y_mid = ny // 2
+            if q == "tr":
+                xm = max(x_usable_lo, x_mid)
+                xM = x_usable_hi
+                ym = max(y_usable_lo, y_mid)
+                yM = y_usable_hi
+            elif q == "tl":
+                xm = x_usable_lo
+                xM = min(x_usable_hi, x_mid)
+                ym = max(y_usable_lo, y_mid)
+                yM = y_usable_hi
+            elif q == "br":
+                xm = max(x_usable_lo, x_mid)
+                xM = x_usable_hi
+                ym = y_usable_lo
+                yM = min(y_usable_hi, y_mid)
+            else:  # bl
+                xm = x_usable_lo
+                xM = min(x_usable_hi, x_mid)
+                ym = y_usable_lo
+                yM = min(y_usable_hi, y_mid)
+
+    xm = max(0, min(xm, nx - 1))
+    xM = max(1, min(xM, nx))
+    ym = max(0, min(ym, ny - 1))
+    yM = max(1, min(yM, ny))
+
+    if xm >= xM or ym >= yM:
+        raise ValueError(
+            f"Invalid crop bounds: x=[{xm}, {xM}), y=[{ym}, {yM}). "
+            f"FFI shape: {ny}×{nx}."
+        )
+
+    bounds = {
+        "x_min": xm,
+        "x_max": xM,
+        "y_min": ym,
+        "y_max": yM,
+        "shape": (yM - ym, xM - xm),
+    }
+    log.info(
+        f"Crop bounds: x=[{xm}, {xM}), y=[{ym}, {yM}), "
+        f"shape={bounds['shape']} (ny×nx)"
+    )
+    return bounds
+
+
+def crop_image(data: np.ndarray, bounds: dict) -> np.ndarray:
+    """Apply crop bounds dict to a 2D array."""
+    return data[bounds["y_min"]:bounds["y_max"], bounds["x_min"]:bounds["x_max"]]
+
+
+def log_gaia_crop_alignment(gaia_df: pd.DataFrame, crop_bounds: dict) -> None:
+    """
+    Log catalog x,y range and the fraction of rows inside the crop shape.
+
+    Call before ePSF fitting to spot FFI-vs-crop-local mix-ups early.
+    """
+    if gaia_df is None or len(gaia_df) == 0:
+        log.info("Gaia vs crop: catalog is empty.")
+        return
+    if "x" not in gaia_df.columns or "y" not in gaia_df.columns:
+        log.info(
+            "Gaia vs crop: no x,y columns (sky-only or not yet projected)."
+        )
+        return
+    ny, nx = crop_bounds["shape"]
+    x = pd.to_numeric(gaia_df["x"], errors="coerce").to_numpy(dtype=float)
+    y = pd.to_numeric(gaia_df["y"], errors="coerce").to_numpy(dtype=float)
+    inside = (
+        np.isfinite(x)
+        & np.isfinite(y)
+        & (x >= 0)
+        & (x < nx)
+        & (y >= 0)
+        & (y < ny)
+    )
+    frac = float(np.mean(inside)) if x.size else 0.0
+    log.info(
+        "Gaia vs crop: N=%d, x [%.2f, %.2f], y [%.2f, %.2f]; "
+        "crop (ny,nx)=%s; fraction inside crop=%.1f%%",
+        len(gaia_df),
+        float(np.nanmin(x)),
+        float(np.nanmax(x)),
+        float(np.nanmin(y)),
+        float(np.nanmax(y)),
+        (ny, nx),
+        100.0 * frac,
+    )
+
+
+def ensure_gaia_crop_xy(
+    gaia_df: pd.DataFrame,
+    ref_ffi_path: str,
+    crop_bounds: dict,
+    *,
+    ra_col: str = "ra",
+    dec_col: str = "dec",
+    xy_in_crop_fraction_min: float = 0.5,
+) -> pd.DataFrame:
+    """
+    Ensure crop-local ``x``, ``y`` columns suitable for masking and ePSF.
+
+    * If ``x`` and ``y`` are already present **and** at least a fraction
+      ``xy_in_crop_fraction_min`` of rows lie inside ``[0, nx) × [0, ny)``
+      (``crop_bounds["shape"]`` is ``(ny, nx)``), return a copy unchanged.
+    * If ``x``/``y`` look inconsistent with the crop (common when catalog
+      pixels are full-chip but labeled as crop-local), they are dropped and
+      ``x_ffi``/``y_ffi`` or ``ra``/``dec`` are used when available.
+    * Else if ``x_ffi`` / ``y_ffi`` are present, rebase to crop-local coords and
+      keep only rows inside the crop (same as ``build_unique_gaia_catalog``).
+    * Else if ``ra`` / ``dec`` are present, project with the reference FFI WCS
+      (HDU 1), keep on-chip sources inside ``crop_bounds``, then set
+      ``x = x_ffi - x_min``, ``y = y_ffi - y_min``.
+
+    Parameters
+    ----------
+    gaia_df : pd.DataFrame
+    ref_ffi_path : str
+        Path to reference TESS FFI (WCS read from extension 1).
+    crop_bounds : dict
+        ``x_min``, ``x_max``, ``y_min``, ``y_max`` from :func:`get_crop_bounds`.
+    ra_col, dec_col : str
+        Sky coordinate column names for the WCS branch.
+    xy_in_crop_fraction_min : float
+        Minimum fraction of finite ``x``, ``y`` rows that must fall inside the
+        crop to trust pre-existing pixel columns (default ``0.5``).
+
+    Returns
+    -------
+    pd.DataFrame
+    """
+    df = gaia_df.copy()
+    ny, nx = crop_bounds["shape"]
+
+    if "x" in df.columns and "y" in df.columns:
+        if len(df) == 0:
+            return df.reset_index(drop=True)
+        xv = pd.to_numeric(df["x"], errors="coerce").to_numpy(dtype=float)
+        yv = pd.to_numeric(df["y"], errors="coerce").to_numpy(dtype=float)
+        inside = (
+            np.isfinite(xv)
+            & np.isfinite(yv)
+            & (xv >= 0)
+            & (xv < nx)
+            & (yv >= 0)
+            & (yv < ny)
+        )
+        frac = float(np.mean(inside))
+        if frac >= xy_in_crop_fraction_min:
+            return df.reset_index(drop=True)
+        log.warning(
+            "Gaia catalog: only %.1f%% of rows have x,y inside the image crop "
+            "[0,%d)×[0,%d); dropping x,y and re-deriving positions if possible.",
+            100.0 * frac,
+            nx,
+            ny,
+        )
+        df = df.drop(columns=["x", "y"], errors="ignore")
+
+    x_min = crop_bounds["x_min"]
+    y_min = crop_bounds["y_min"]
+    x_max = crop_bounds["x_max"]
+    y_max = crop_bounds["y_max"]
+
+    if "x_ffi" in df.columns and "y_ffi" in df.columns:
+        in_crop = (
+            (df["x_ffi"] >= x_min)
+            & (df["x_ffi"] < x_max)
+            & (df["y_ffi"] >= y_min)
+            & (df["y_ffi"] < y_max)
+        )
+        out = df[in_crop].copy()
+        out["x"] = out["x_ffi"] - x_min
+        out["y"] = out["y_ffi"] - y_min
+        out = out.drop(columns=[c for c in ("x_ffi", "y_ffi") if c in out.columns])
+        n = len(out)
+        log.info(
+            f"Gaia catalog: rebased x_ffi/y_ffi to crop-local x,y; {n} stars in crop"
+        )
+        return out.reset_index(drop=True)
+
+    if ra_col not in df.columns or dec_col not in df.columns:
+        raise ValueError(
+            "Gaia catalog needs crop-local 'x'/'y', or 'x_ffi'/'y_ffi', or "
+            f"'{ra_col}'/'{dec_col}' for WCS projection (got columns: "
+            f"{list(df.columns)!r})"
+        )
+
+    with fits.open(ref_ffi_path, memmap=True) as hdul:
+        ref_header = hdul[1].header
+        nx = int(ref_header["NAXIS1"])
+        ny = int(ref_header["NAXIS2"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wcs = WCS(ref_header)
+
+    coords = SkyCoord(
+        ra=df[ra_col].values,
+        dec=df[dec_col].values,
+        unit="deg",
+    )
+    x_pix, y_pix = wcs.world_to_pixel(coords)
+    df = df.copy()
+    df["x_ffi"] = x_pix
+    df["y_ffi"] = y_pix
+
+    on_chip = (
+        (df["x_ffi"] >= 0)
+        & (df["x_ffi"] < nx)
+        & (df["y_ffi"] >= 0)
+        & (df["y_ffi"] < ny)
+    )
+    n_all = len(df)
+    n_on = int(on_chip.sum())
+    df = df[on_chip].copy()
+    log.info(f"Gaia catalog: {n_on} / {n_all} rows on FFI chip after WCS")
+
+    in_crop = (
+        (df["x_ffi"] >= x_min)
+        & (df["x_ffi"] < x_max)
+        & (df["y_ffi"] >= y_min)
+        & (df["y_ffi"] < y_max)
+    )
+    cropped = df[in_crop].copy()
+    log.info(f"Gaia catalog: {len(cropped)} stars within crop after WCS projection")
+
+    cropped["x"] = cropped["x_ffi"] - x_min
+    cropped["y"] = cropped["y_ffi"] - y_min
+    cropped = cropped.drop(columns=["x_ffi", "y_ffi"]).reset_index(drop=True)
+    return cropped
+
+
+def build_unique_gaia_catalog(removed_stars_csv: str,
+                               ref_ffi_path: str,
+                               crop_bounds: dict,
+                               output_dir: str) -> pd.DataFrame:
+    """
+    Create the Gaia catalog used by epsf_fitting and sat_template, derived
+    from the removed_stars CSV produced by the PS1 pipeline.
+
+    Steps:
+      1. Load removed_stars_csv; deduplicate by source_id; drop unmatched
+         rows (source_id == -1).
+      2. Keep diagnostic columns: source_id, ra, dec, tess_mag,
+         phot_rp_mean_mag, phot_g_mean_mag, phot_bp_mean_mag.
+      3. Open ref_ffi_path (HDU 1); build WCS; project (ra, dec) → (x, y).
+      4. Filter: keep only stars on chip (0 ≤ x < nx, 0 ≤ y < ny).
+      5. Further filter: x ≥ x_min and y ≥ y_min (within the crop quadrant).
+      6. Rebase: x -= x_min;  y -= y_min  (crop-local coordinates).
+      7. Save output_dir/unique_gaia_stars_for_cropped_template.csv.
+
+    Parameters
+    ----------
+    removed_stars_csv : str
+    ref_ffi_path : str
+    crop_bounds : dict  (from get_crop_bounds)
+    output_dir : str
+
+    Returns
+    -------
+    pd.DataFrame with columns: source_id, ra, dec, tess_mag, phot_*, x, y
+    """
+    log.info(f"Building unique Gaia catalog from {removed_stars_csv} ...")
+
+    ps1_df = pd.read_csv(removed_stars_csv)
+
+    # Deduplicate by Gaia source_id; drop unmatched entries
+    unique_df = ps1_df.drop_duplicates(subset="source_id").copy()
+    unique_df = unique_df[unique_df["source_id"] != -1].copy()
+    log.info(f"  {len(ps1_df)} rows → {len(unique_df)} unique Gaia matches after dedup")
+
+    # Keep only required columns (gracefully handle missing optional columns)
+    keep_cols = ["source_id", "ra", "dec", "tess_mag"]
+    for col in ("phot_rp_mean_mag", "phot_g_mean_mag", "phot_bp_mean_mag"):
+        if col in unique_df.columns:
+            keep_cols.append(col)
+    unique_df = unique_df[keep_cols].reset_index(drop=True)
+
+    # Project sky coords to FFI pixel coords using reference FFI WCS
+    with fits.open(ref_ffi_path, memmap=True) as hdul:
+        ref_header = hdul[1].header
+        nx = int(ref_header["NAXIS1"])
+        ny = int(ref_header["NAXIS2"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wcs = WCS(ref_header)
+
+    coords = SkyCoord(
+        ra=unique_df["ra"].values,
+        dec=unique_df["dec"].values,
+        unit="deg",
+    )
+    x_pix, y_pix = wcs.world_to_pixel(coords)
+    unique_df["x_ffi"] = x_pix
+    unique_df["y_ffi"] = y_pix
+
+    # Filter: on chip
+    on_chip = (
+        (unique_df["x_ffi"] >= 0) & (unique_df["x_ffi"] < nx) &
+        (unique_df["y_ffi"] >= 0) & (unique_df["y_ffi"] < ny)
+    )
+    unique_df = unique_df[on_chip].copy()
+    log.info(f"  {on_chip.sum()} stars on chip")
+
+    # Filter: within crop quadrant
+    x_min = crop_bounds["x_min"]
+    y_min = crop_bounds["y_min"]
+    x_max = crop_bounds["x_max"]
+    y_max = crop_bounds["y_max"]
+    in_crop = (
+        (unique_df["x_ffi"] >= x_min) & (unique_df["x_ffi"] < x_max) &
+        (unique_df["y_ffi"] >= y_min) & (unique_df["y_ffi"] < y_max)
+    )
+    cropped_df = unique_df[in_crop].copy()
+    log.info(f"  {len(cropped_df)} stars within crop bounds")
+
+    # Rebase to crop-local coordinates
+    cropped_df["x"] = cropped_df["x_ffi"] - x_min
+    cropped_df["y"] = cropped_df["y_ffi"] - y_min
+    cropped_df = cropped_df.drop(columns=["x_ffi", "y_ffi"]).reset_index(drop=True)
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(output_dir, "unique_gaia_stars_for_cropped_template.csv")
+    cropped_df.to_csv(out_path, index=False)
+    log.info(f"  Unique Gaia catalog saved to {out_path}")
+
+    return cropped_df
+
+
+def save_crop_bounds(bounds: dict, output_dir: str) -> None:
+    """Persist crop bounds to ``crop_bounds.json`` (legacy debugging; prefer cluster JSON)."""
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, "crop_bounds.json")
+    with open(path, "w") as fh:
+        json.dump(bounds, fh, indent=2)
+    log.info(f"Crop bounds saved to {path}")
+
+
+def load_crop_bounds(output_dir: str) -> dict:
+    """
+    Load crop bounds from ``cluster_template_job.json`` (preferred) or legacy
+    ``crop_bounds.json``.
+    """
+    job_path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    if os.path.isfile(job_path):
+        with open(job_path) as fh:
+            return crop_bounds_from_cluster_payload(json.load(fh))
+    legacy = os.path.join(output_dir, "crop_bounds.json")
+    if os.path.isfile(legacy):
+        with open(legacy) as fh:
+            d = json.load(fh)
+        d["shape"] = tuple(d["shape"])
+        return d
+    raise FileNotFoundError(
+        f"No crop bounds: expected {job_path} or {legacy}"
+    )

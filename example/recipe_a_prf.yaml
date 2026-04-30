@@ -1,0 +1,72 @@
+# Reference recipe A — PRF photometry, Hotpants bkg workspace, background subtract chain.
+# Processes **all FFIs** with valid target WCS (omit ``max_ffis`` unless you pass ``--max-ffis`` on the CLI).
+# Expect long runtime and large disk use when the sector has many epochs (~1000+ × crop size).
+#
+# Path layout (all relative paths resolve vs. this file’s directory — see config.load_config):
+#   output_dir     → under example/output/<run>/ (gitignored): manifest, cluster_template_job.json,
+#                    and ws/<stage_label>/ for each pipeline stage.
+#   ffi_dir        → nested tess_ffi tree: s{sector:04d}/cam{camera}_ccd{ccd}/
+#   template_dir   → folder with syndiff_template_*.fits OR group_*/ps1_template.fits (hotpants picks).
+#   gaia_catalog   → crop/catalog CSV (ra/dec ok — pipeline projects to crop-local x,y).
+#
+# Run from repo root:
+#   mamba activate syndiff
+#   python -m syndiff_pipeline.run_pipeline --config syndiff_pipeline/example/recipe_a_prf.yaml
+#
+# Optional logging:
+#   python -m syndiff_pipeline.run_pipeline --config syndiff_pipeline/example/recipe_a_prf.yaml 2>&1 | tee syndiff_pipeline/example/output/recipe_a_prf/pipeline_run.log
+
+ffi_dir: "../../development/data/tess_ffi"
+output_dir: "output/recipe_a_prf"
+gaia_catalog: "../../development/combined_template/gaia_catalog_s0020_3_3_top_right.csv"
+template_dir: "templates"
+
+target_ra: 210.219333
+target_dec: 81.846589
+sector: 20
+camera: 3
+ccd: 3
+
+psf_type: "prf"
+
+pipeline_plots: true
+
+n_jobs: 8
+
+pipeline:
+  - kind: wcs_grouping
+  - kind: shared_mask
+  - kind: hotpants
+    science: ffi
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+    psf: prf
+    output: lc_prf_on_diffs
+  - kind: background_rough
+    inputs:
+      diffs: hp_d
+      bkg: hp_b
+    output: bkg_rough
+    stream_load_rough: true
+    write_per_frame_fits: true
+  - kind: background_adaptive
+    inputs:
+      rough: bkg_rough
+      diffs: hp_d
+      bkg: hp_b
+    output: bkg_temp_smooth
+    write_per_frame_fits: true
+  - kind: subtract
+    inputs:
+      expression: "hp_d - bkg_temp_smooth + hp_b"
+    output: diffs_minus_bkg
+  - kind: forced_photometry
+    inputs:
+      diffs: diffs_minus_bkg
+    psf: prf
+    output: lc_prf_after_bkg
