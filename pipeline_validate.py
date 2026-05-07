@@ -20,7 +20,6 @@ STAGE_KINDS = frozenset(
         "background_rough",
         "background_adaptive",
         "background_estimate",
-        "diff_final",
         "forced_photometry",
     }
 )
@@ -43,8 +42,6 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         "background_estimate",
         "forced_photometry",
     ):
-        return [stage["output"]]
-    if kind == "diff_final":
         return [stage["output"]]
     return []
 
@@ -97,11 +94,6 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
             v = inp.get(key)
             if v is not None and str(v).strip():
                 refs.append(str(v).strip())
-    elif kind == "diff_final":
-        for key in ("diffs", "bkg_final", "sat_hr", "epsf"):
-            v = inp.get(key)
-            if v:
-                refs.append(v)
     elif kind == "forced_photometry":
         d = inp.get("diffs")
         if d is not None and str(d).strip():
@@ -132,6 +124,10 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
             raise ValueError(f"pipeline[{idx}]: unknown kind {kind!r}")
 
         for ref in _inputs_refs(stage, idx):
+            # ``ffi`` in subtract expressions is virtual: cropped science from manifest paths,
+            # not ``ws/ffi/``.
+            if kind == "subtract" and ref == "ffi":
+                continue
             if ref not in available:
                 raise ValueError(
                     f"pipeline[{idx}] ({kind}): input label {ref!r} is not produced "
@@ -145,10 +141,11 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                     raise ValueError(
                         f"pipeline[{idx}] hotpants: output.{req} is required (non-empty string label)."
                     )
-            sci = stage.get("science", "ffi")
-            if sci != "ffi":
+            sci = str(stage.get("science", "ffi")).strip()
+            if sci != "ffi" and sci not in available:
                 raise ValueError(
-                    f"pipeline[{idx}] hotpants: only science: ffi is implemented (got {sci!r})."
+                    f"pipeline[{idx}] hotpants: science workspace label {sci!r} is not available "
+                    f"(available: {sorted(available)!r}). Use science: ffi for raw cropped FFIs."
                 )
 
         if kind == "epsf":
@@ -209,16 +206,6 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                 )
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] background_estimate: output label required")
-
-        if kind == "diff_final":
-            inp = stage.get("inputs") or {}
-            for req in ("diffs", "bkg_final", "sat_hr", "epsf"):
-                if req not in inp or not str(inp[req]).strip():
-                    raise ValueError(
-                        f"pipeline[{idx}] diff_final: inputs.{req} required (label)"
-                    )
-            if "output" not in stage or not str(stage["output"]).strip():
-                raise ValueError(f"pipeline[{idx}] diff_final: output label required")
 
         if kind == "forced_photometry":
             inp = stage.get("inputs") or {}

@@ -25,7 +25,6 @@ TESS Full Frame Image (FFI) difference imaging pipeline for transient detection 
   - [background_rough](#background_rough)
   - [background_adaptive](#background_adaptive)
   - [background_estimate](#background_estimate)
-  - [diff_final](#diff_final)
   - [forced_photometry](#forced_photometry)
 - [Workspace and Output Layout](#workspace-and-output-layout)
 - [CLI Usage](#cli-usage)
@@ -48,10 +47,9 @@ SynDiff performs difference imaging on TESS FFIs against PS1 (Pan-STARRS1) templ
 3. **Shared Masking** — build a bitmask from Gaia catalog (bright stars, saturation crosses, TESS straps).
 4. **Image Differencing** — Hotpants-based (pyhotpants) kernel-matching subtraction of FFI crops against PS1 templates.
 5. **Empirical PSF Fitting** — tiled ePSF fitting using TGLC across difference images.
-6. **Saturated Star Templates** — model images of removed saturated stars from the ePSF.
+6. **Saturated Star Templates** — model images of removed saturated stars from the ePSF; subtract them from diffs with the **`subtract`** stage when needed.
 7. **Background Estimation** — rough background via inpainting/smoothing, then adaptive temporal median filtering using TESSVectors.
-8. **Final Difference Images** — Fourier deconvolution/reconvolution of the saturated star model with the ePSF.
-9. **Forced Photometry** — PSF-fitted flux extraction at the target position (ePSF or official TESS PRF).
+8. **Forced Photometry** — PSF-fitted flux extraction at the target position (ePSF or official TESS PRF).
 
 ---
 
@@ -74,13 +72,12 @@ SynDiff performs difference imaging on TESS FFIs against PS1 (Pan-STARRS1) templ
 | `sat_template.py`        | **Ready** | Native-resolution and high-resolution saturated star template construction. Sub-pixel ePSF stamp placement. Block-sum downsampling. Per-group save/load.                                                                                                                                                                                             |
 | `background.py`          | **Ready** | Per-frame rough background (`estimate_frame_background`: shared-masked diff + `Smooth_bkg`, then add Hotpants polynomial bkg). **Per-frame joblib loky** when `n_jobs` > 1 (via `background_loop(..., n_jobs=cfg.n_jobs)`). Vendored TESSreduce `Smooth_bkg` and `inpaint_biharmonic`.                                                                                                                                                                                |
 | `adaptive_background.py` | **Ready** | `adaptive_medfilt_3d` adaptive median on the background cube; uses ``cfg.n_jobs`` for **coarse-scale / window-size** joblib tasks (not one task per FFI). Earth/Moon angles, gap-aware segments, block-reduce. Vendored from TESSreduce dev branch.                                                                                                                   |
-| `final_diff.py`          | **Ready** | Fourier deconvolution/reconvolution (Wiener-style) of high-res sat template from Hotpants Gaussian kernel to ePSF. Per-frame final difference image production.                                                                                                                                                                                      |
 | `photometry.py`          | **Ready** | Forced PSF photometry with `create_psf` (vendored TESSreduce). `EpsfLocator` for ePSF. Per-epoch joblib **loky** when `n_jobs` > 1. Brightest-frame position fit. Light curve CSV + diagnostic plot.                                                                            |
 | `frame_manifest.py`      | **Ready** | Per-FFI manifest CSV management. Hotpants/ePSF status columns (round IDs and labeled workspaces). Ordered diff path lookup for photometry.                                                                                                                                                                                                    |
 | `paths.py`               | **Ready** | Workspace directory convention (`{output_dir}/ws/{label}/`). Manifest path resolution.                                                                                                                                                                                                                                                               |
 | `pipeline_context.py`    | **Ready** | `PipelineInvocationContext` dataclass (resolved paths for config-driven execution).                                                                                                                                                                                                                                                                  |
 | `pipeline_validate.py`   | **Ready** | Config-driven pipeline validation: checks stage `kind` membership, required keys per stage, input label dependency graph (every input label must be produced by an earlier stage or listed in `pipeline_external_workspace_labels`).                                                                                                                 |
-| `pipeline_execute.py`    | **Ready** | Config-driven orchestrator (`run_config_pipeline`). Executes all 9 stage kinds in YAML order. Handles state bootstrap when `wcs_grouping` is omitted (resume from existing manifest).                                                                                                                                                                |
+| `pipeline_execute.py`    | **Ready** | Config-driven orchestrator (`run_config_pipeline`). Executes pipeline stage kinds in YAML order. Handles state bootstrap when `wcs_grouping` is omitted (resume from existing manifest).                                                                                                                                                                |
 | `run_pipeline.py`        | **Ready** | Main CLI entry point; requires non-empty `pipeline:` and delegates to `pipeline_execute`.                                                                                                                                                                                                           |
 | `plot_pipeline.py`       | **Ready** | Background removal animated GIF (round-1 smooth bkg cube).                                                                                                                                                                                                                                                                                           |
 
@@ -208,7 +205,7 @@ The frame manifest (`syndiff_ffi_frames.csv`) tracks per-FFI WCS drift, template
 | `tile_nx` / `tile_ny`                       | int     | `4` / `4`       | Number of tiles along x/y for ePSF fitting.                                                                                                   |
 | `epsf_oversample`                           | int     | `2`             | ePSF oversampling factor.                                                                                                                     |
 | `psf_size`                                  | int     | `11`            | Half-size of ePSF stamp in native pixels. `over_size = 2 * psf_size + 1`.                                                                     |
-| `high_res_os`                               | int     | `9`             | Oversampling for the Fourier deconv/reconv step in `final_diff.py`.                                                                           |
+| `high_res_os`                               | int     | `9`             | Oversampling for the high-res saturated-star template canvas in ``sat_template``.                                                                           |
 | `temporal_smooth_window`                    | int     | `11`            | Window size (frames) for ePSF temporal smoothing.                                                                                             |
 | `epsf_temporal_smooth`                      | bool    | `true`          | Whether to apply temporal filtering to ePSF stacks.                                                                                           |
 | `bkg_vector_path`                           | str     | `null`          | Local directory with TESSVectors CSV. If null, downloaded from HEASARC.                                                                       |
@@ -222,7 +219,8 @@ The frame manifest (`syndiff_ffi_frames.csv`) tracks per-FFI WCS drift, template
 | `pipeline_plots`                            | bool    | `false`         | Write diagnostic figures (WCS drift, background GIF, light curve plot). Light-curve titles append the `forced_photometry` stage `output` label. |
 | `pipeline_plot_dpi`                         | int     | `150`           | DPI for diagnostic PNGs.                                                                                                                      |
 | `pipeline_external_workspace_labels`        | list    | `null`          | Pre-existing workspace labels to include in the dependency graph during validation.                                                           |
-| `n_jobs`                                    | int     | `8`             | Joblib **loky** workers for **Hotpants**, **forced photometry** (per epoch), **rough background** (`background_loop`, per frame), plus **adaptive** smoother **sub-tasks** (not one worker per FFI in `adaptive_medfilt_3d`). ePSF over frames stays serial. Lower if RAM is tight. |
+| `n_jobs`                                    | int     | `8`             | Joblib **loky** workers for **forced photometry** (per epoch), **rough background** (`background_loop`, per frame), plus **adaptive** smoother **sub-tasks**. Hotpants uses this unless ``hotpants_n_jobs`` is set. ePSF over frames stays serial. Lower if RAM is tight. |
+| `hotpants_n_jobs`                           | int     | `null`          | If set, overrides ``n_jobs`` for the **hotpants** stage only. Each worker allocates a full ``HotpantsState`` for the crop; use ``1`` when memory is limited. |
 | `max_ffis`                                  | int     | `null`          | Cap on number of FFIs to process (requires `target_ra`/`target_dec`; skips bad WCS).                                                          |
 | `pipeline`                                  | list    | `[]`            | **Required (non-empty to run):** ordered list of stage dicts (`kind` + fields).                                                                |
 
@@ -242,7 +240,6 @@ The recognized stage kinds for the `pipeline:` list include:
 | `background_rough`     | Per-frame rough background stack (`rough_bkg_r*.npz` + `.npy`, optional per-frame FITS) |
 | `background_adaptive`  | Temporal adaptive smoothing from a rough stack → `bkg_smooth.npz` + `.npy` (optional per-frame FITS) |
 | `background_estimate`  | Convenience: rough + adaptive in one stage (`mode: rough_then_adaptive`) |
-| `diff_final`           | Final diff via Fourier deconv/reconv of sat template         |
 | `forced_photometry`    | PSF-fitted flux extraction at target coordinates             |
 
 
@@ -285,6 +282,7 @@ No pipeline-specific fields. Requires `wcs_grouping` to have run first.
 - `output.bkg` is optional. If omitted, the Hotpants polynomial background is used internally for the diff but not saved to disk.
 - `inputs.bkg` + `inputs.convolved` enable a second-pass Hotpants (FFI − saved_bkg).
 - `inputs.convolved` is accepted but logged as a warning ("ignored in this version").
+- Parallel Hotpants uses a **per-process initializer** so the shared mask, Gaia ``x,y`` table, and config are not re-pickled for every FFI. Peak memory still scales with ``n_jobs`` (or ``hotpants_n_jobs`` if set); cap those when crops are large.
 
 ### epsf
 
@@ -364,20 +362,6 @@ No pipeline-specific fields. Requires `wcs_grouping` to have run first.
 ```
 
 **Produces**: Same as running `background_rough` then `background_adaptive` into the **same** output workspace: `rough_bkg_r1.npz` / `.npy`, `bkg_smooth.npz` / `.npy`, and the same optional `{stem}_rough_bkg.fits` / `{stem}_bkg_smooth.fits` behavior. Hotpants diff/bkg arrays are stripped from RAM before the adaptive step to reduce peak memory.
-
-### diff_final
-
-```yaml
-- kind: diff_final
-  inputs:
-    diffs: <label>          # required — round-2 diff workspace
-    bkg_final: <label>      # required — workspace containing bkg_final.npy
-    sat_hr: <label>         # required — high-res sat template workspace
-    epsf: <label>           # required — ePSF workspace
-  output: <label>           # required — workspace for final diff FITS
-```
-
-**Produces**: Final difference FITS under `ws/<output_label>/`.
 
 ### forced_photometry
 
@@ -721,7 +705,6 @@ SynDiff assumes the following inputs exist before the pipeline runs:
 | `adaptive_background.py` | Adaptive median filter (`adaptive_medfilt_3d`), TESSVectors fetch, `AdaptiveBackground` class         | ~516  |
 | `sat_template.py`        | Saturated star template construction (native + high-res), sub-pixel ePSF placement                    | ~332  |
 | `background.py`          | Rough background estimation (`Smooth_bkg`, inpainting), frame-level stacking                          | 225   |
-| `final_diff.py`          | Fourier deconvolution/reconvolution, final difference image production                                | 314   |
 | `photometry.py`          | Forced PSF photometry (`create_psf`), `EpsfLocator`, light curve CSV + diagnostic plot                | 619   |
 | `frame_manifest.py`      | Frame manifest CSV management, hotpants/ePSF status tracking, diff path lookup                        | 313   |
 | `paths.py`               | Workspace dir and manifest path conventions                                                           | 39    |
@@ -742,6 +725,5 @@ SynDiff assumes the following inputs exist before the pipeline runs:
 4. **No per-stage checkpointing** — each run re-executes every stage in the `pipeline:` list. To skip work, trim the list and use `pipeline_external_workspace_labels` to declare pre-existing workspaces.
 5. **Source extraction / astrometry not included** — SynDiff reads WCS from FFI FITS headers directly. If mission WCS quality is insufficient for drift grouping or PS1 alignment, external astrometric correction is required before `wcs_grouping`.
 6. **PS1 template creation is separate** — the `TSST_Syndiff_Core` package handles pancakes, PS1 download, processing, and multi-offset downsampling. This must be run independently before SynDiff.
-7. `**diff_final` stage** — currently requires all four input labels (`diffs`, `bkg_final`, `sat_hr`, `epsf`). There is no simplified variant that skips the Fourier deconvolution step.
-8. **Sequential-only execution** — stages run sequentially within a single process. There is no distributed or DAG-based execution scheduler.
+7. **Sequential-only execution** — stages run sequentially within a single process. There is no distributed or DAG-based execution scheduler.
 

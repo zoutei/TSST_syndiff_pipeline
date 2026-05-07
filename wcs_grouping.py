@@ -5,7 +5,8 @@ wcs_grouping.py
 Gaia catalog is supplied externally:
 
   1. Extract WCS from every FFI header.
-  2. Compute the pixel drift of the science target over time.
+  2. Compute the pixel drift of the science target over time; optionally smooth
+     ``delta_x``/``delta_y`` with a Savitzky–Golay filter (time-ordered valid frames).
   3. Group frames by template-offset bin (offset_threshold).
   4. Validate and return the image crop bounds.
 
@@ -30,6 +31,7 @@ from typing import Any, Optional, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from scipy.signal import savgol_filter
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.time import Time
@@ -278,6 +280,103 @@ def build_wcs_table(ffi_paths: list, target_ra: float,
     return df
 
 
+def smooth_wcs_drift_savgol(
+    wcs_table: pd.DataFrame,
+    *,
+    window_length: Optional[int] = 11,
+    polyorder: int = 2,
+    time_col: str = "btjd",
+) -> pd.DataFrame:
+    """
+    Smooth ``delta_x`` and ``delta_y`` with a Savitzky–Golay filter along the
+    sequence of frames with valid WCS and finite drifts, ordered by ``time_col``
+    (secondary key: row index for stable ordering).
+
+    Raw values are copied to ``delta_x_raw`` / ``delta_y_raw`` when smoothing
+    runs. Rows outside the valid mask are unchanged. If there are too few
+    points or ``window_length`` is ``None`` or < 3, returns the table
+    unmodified (no raw columns added).
+
+    Parameters
+    ----------
+    wcs_table : pd.DataFrame
+        Output of :func:`build_wcs_table`.
+    window_length : int or None
+        SG window length (odd). Even values are increased by 1. Capped to the
+        number of valid frames; if the cap makes smoothing impossible, skipped.
+    polyorder : int
+        Polynomial order (clamped to ``window_length - 1``).
+    time_col : str
+        Column used to sort valid frames before filtering (e.g. ``btjd``).
+
+    Returns
+    -------
+    pd.DataFrame
+        Copy of ``wcs_table`` with smoothed ``delta_x`` / ``delta_y`` (and
+        optionally raw columns).
+    """
+    if window_length is None or int(window_length) < 3:
+        return wcs_table
+
+    base = wcs_table["wcs_ok"] & wcs_table["delta_x"].notna() & wcs_table["delta_y"].notna()
+    n = int(base.sum())
+    if n < 3:
+        log.info(
+            "WCS drift SG smooth skipped: only %d valid drift samples (need >= 3).",
+            n,
+        )
+        return wcs_table
+
+    if time_col not in wcs_table.columns:
+        log.warning(
+            "WCS drift SG smooth skipped: time column %r missing.", time_col
+        )
+        return wcs_table
+
+    valid_idx = np.flatnonzero(base.to_numpy())
+    tkey = wcs_table.loc[valid_idx, time_col].to_numpy(dtype=float)
+    tkey = np.where(np.isfinite(tkey), tkey, np.inf)
+    order = np.lexsort((valid_idx, tkey))
+    sorted_idx = valid_idx[order]
+
+    wl = int(window_length)
+    if wl % 2 == 0:
+        wl += 1
+    wl = min(wl, n)
+    if wl % 2 == 0:
+        wl -= 1
+    if wl < 3:
+        log.info(
+            "WCS drift SG smooth skipped: effective window %d for %d samples.",
+            wl,
+            n,
+        )
+        return wcs_table
+
+    po = min(max(int(polyorder), 0), wl - 1)
+
+    df = wcs_table.copy()
+    dx = df.loc[sorted_idx, "delta_x"].to_numpy(dtype=float)
+    dy = df.loc[sorted_idx, "delta_y"].to_numpy(dtype=float)
+
+    df["delta_x_raw"] = df["delta_x"]
+    df["delta_y_raw"] = df["delta_y"]
+    sx = savgol_filter(dx, wl, po, mode="interp")
+    sy = savgol_filter(dy, wl, po, mode="interp")
+    df.loc[sorted_idx, "delta_x"] = sx
+    df.loc[sorted_idx, "delta_y"] = sy
+
+    log.info(
+        "WCS drift Savitzky–Golay smooth: %d samples, window=%d, polyorder=%d "
+        "(time-sorted on %r).",
+        n,
+        wl,
+        po,
+        time_col,
+    )
+    return df
+
+
 def summarize_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
     """
     Build the per-group summary table (``group_id``, ``group_dx``, ``group_dy``,
@@ -430,8 +529,10 @@ def plot_wcs_drift_and_template_assignment(
     """
     Three stacked panels: ``delta_x`` vs time, ``delta_y`` vs time, ``group_id`` vs time.
 
-    Rows with invalid time or no group assignment (``group_id`` < 0) are omitted
-    from the first two panels or shown in gray in the third where applicable.
+    When ``delta_x_raw`` / ``delta_y_raw`` are present (after Savitzky–Golay smoothing),
+    the first two panels overlay **original** scatter points and a **smoothed** polyline
+    in time order. Rows with invalid time or no group assignment (``group_id`` < 0)
+    are omitted from the first two panels or shown in gray in the third where applicable.
     """
     need = {"delta_x", "delta_y", "group_id"}
     if not need.issubset(wcs_table.columns):
@@ -457,13 +558,73 @@ def plot_wcs_drift_and_template_assignment(
     fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True, layout="constrained")
 
     ax0, ax1, ax2 = axes
-    ax0.scatter(t[valid_xy], dx[valid_xy], s=8, alpha=0.6, c="C0")
+    has_raw = {"delta_x_raw", "delta_y_raw"}.issubset(wcs_table.columns)
+    if has_raw:
+        dx0 = pd.to_numeric(wcs_table["delta_x_raw"], errors="coerce")
+        dy0 = pd.to_numeric(wcs_table["delta_y_raw"], errors="coerce")
+        m0 = t.notna() & dx0.notna() & dy0.notna() & (gid >= 0)
+        ax0.scatter(
+            t[m0],
+            dx0[m0],
+            s=22,
+            facecolors="none",
+            edgecolors="0.35",
+            linewidths=0.9,
+            alpha=0.9,
+            label="original",
+            zorder=2,
+        )
+        ax1.scatter(
+            t[m0],
+            dy0[m0],
+            s=22,
+            facecolors="none",
+            edgecolors="0.35",
+            linewidths=0.9,
+            alpha=0.9,
+            label="original",
+            zorder=2,
+        )
+
+        idx_xy = np.flatnonzero(valid_xy.to_numpy())
+        ts = t.to_numpy(dtype=float)[idx_xy]
+        order = np.argsort(ts, kind="mergesort")
+        idx_s = idx_xy[order]
+        ax0.plot(
+            t.iloc[idx_s],
+            dx.iloc[idx_s],
+            color="C0",
+            linewidth=1.85,
+            alpha=0.95,
+            solid_capstyle="round",
+            label="smoothed",
+            zorder=3,
+        )
+        ax1.plot(
+            t.iloc[idx_s],
+            dy.iloc[idx_s],
+            color="C1",
+            linewidth=1.85,
+            alpha=0.95,
+            solid_capstyle="round",
+            label="smoothed",
+            zorder=3,
+        )
+    else:
+        ax0.scatter(t[valid_xy], dx[valid_xy], s=8, alpha=0.6, c="C0", label=r"$\delta x$")
+        ax1.scatter(t[valid_xy], dy[valid_xy], s=8, alpha=0.6, c="C1", label=r"$\delta y$")
+
     ax0.set_ylabel(r"$\delta x$ (pix)")
     ax0.grid(True, alpha=0.3)
+    h0, lab0 = ax0.get_legend_handles_labels()
+    if h0:
+        ax0.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    ax1.scatter(t[valid_xy], dy[valid_xy], s=8, alpha=0.6, c="C1")
     ax1.set_ylabel(r"$\delta y$ (pix)")
     ax1.grid(True, alpha=0.3)
+    h1, lab1 = ax1.get_legend_handles_labels()
+    if h1:
+        ax1.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
     for g in gids_sorted:
         m = valid_t & (gid == g)
@@ -496,7 +657,14 @@ def plot_wcs_drift_and_template_assignment(
         ax2.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.9)
 
     ax2.set_xlabel(f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col)
-    fig.suptitle("WCS drift at target and assigned template group vs time")
+    sub = (
+        "; drift: original (hollow) vs Savitzky–Golay smoothed (line)"
+        if has_raw
+        else ""
+    )
+    fig.suptitle(
+        f"WCS drift at target and assigned template group vs time{sub}"
+    )
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150)
@@ -515,7 +683,7 @@ def assign_template_groups(wcs_table: pd.DataFrame,
     Parameters
     ----------
     wcs_table : pd.DataFrame
-        Output of build_wcs_table.
+        Output of :func:`build_wcs_table` (optionally after other edits).
     offset_threshold : float
         Grid spacing in TESS pixels.
     output_dir : str, optional

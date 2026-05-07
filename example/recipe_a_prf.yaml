@@ -1,4 +1,7 @@
-# Reference recipe A — PRF photometry, Hotpants bkg workspace, background subtract chain.
+# Reference recipe A — PRF photometry, Hotpants bkg workspace, rough background + second Hotpants.
+# ``background_adaptive`` is omitted (currently unreliable); corrected diffs use ``hp_d - bkg_rough``
+# like ``recipe_a_prf_adaptive_only.yaml``. Second Hotpants uses ``ffi_wo_bkg`` =
+# ``ffi - bkg_rough - hp_b`` (see ``recipe_a_prf_second_hotpants.yaml``).
 # Processes **all FFIs** with valid target WCS (omit ``max_ffis`` unless you pass ``--max-ffis`` on the CLI).
 # Expect long runtime and large disk use when the sector has many epochs (~1000+ × crop size).
 #
@@ -16,13 +19,29 @@
 # Optional logging:
 #   python -m syndiff_pipeline.run_pipeline --config syndiff_pipeline/example/recipe_a_prf.yaml 2>&1 | tee syndiff_pipeline/example/output/recipe_a_prf/pipeline_run.log
 
-ffi_dir: "../../development/data/tess_ffi"
-output_dir: "output/recipe_a_prf"
-gaia_catalog: "../../development/combined_template/gaia_catalog_s0020_3_3_top_right.csv"
-template_dir: "templates"
+ffi_dir: "/astro/armin/koji/syndiff/data/tess_ffi"
+output_dir: "/astro/armin/koji/syndiff_pipeline_output/recipe_a_prf"
+gaia_catalog: "/astro/armin/koji/syndiff/data/catalogs/sector_0020/camera_3/ccd_3/gaia_catalog_s0020_3_3.csv"
+template_dir: "/astro/armin/koji/syndiff/data/shifted_downsampled/sector0020_camera3_ccd3_x1068-2092_y1039-2048"
 
 target_ra: 210.219333
 target_dec: 81.846589
+# WCS grouping, crop, and templates use only target_ra / target_dec. Optional
+# additional_forced_targets: each entry gets its own forced photometry under
+# ws/<forced_photometry output>/target_NNN_ra*_dec*/lightcurve.csv (same diffs as primary).
+additional_forced_targets:
+  - ra: 210.2696410
+    dec: 81.8743734
+    name: bottom
+  
+  - ra: 210.4040975
+    dec: 81.8386144
+    name: right
+  
+  - ra: 209.9103214
+    dec: 81.8537931
+    name: top
+ 
 sector: 20
 camera: 3
 ccd: 3
@@ -31,7 +50,7 @@ psf_type: "prf"
 
 pipeline_plots: true
 
-n_jobs: 8
+n_jobs: 20
 
 pipeline:
   - kind: wcs_grouping
@@ -54,19 +73,27 @@ pipeline:
     output: bkg_rough
     stream_load_rough: true
     write_per_frame_fits: true
-  - kind: background_adaptive
-    inputs:
-      rough: bkg_rough
-      diffs: hp_d
-      bkg: hp_b
-    output: bkg_temp_smooth
-    write_per_frame_fits: true
   - kind: subtract
     inputs:
-      expression: "hp_d - bkg_temp_smooth + hp_b"
+      expression: "hp_d - bkg_rough"
     output: diffs_minus_bkg
   - kind: forced_photometry
     inputs:
       diffs: diffs_minus_bkg
     psf: prf
     output: lc_prf_after_bkg
+  - kind: subtract
+    inputs:
+      expression: "ffi - bkg_rough - hp_b"
+    output: ffi_wo_bkg
+  - kind: hotpants
+    science: ffi_wo_bkg
+    output:
+      diffs: hp2_d
+      convolved: hp2_c
+      bkg: hp2_b
+  - kind: forced_photometry
+    inputs:
+      diffs: hp2_d
+    psf: prf
+    output: lc_prf_on_diffs_loop2

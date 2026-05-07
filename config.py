@@ -13,9 +13,10 @@ Usage:
 import argparse
 import logging
 import os
+import re
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
@@ -119,6 +120,12 @@ class SynDiffConfig:
     target_dec: Optional[float] = None
     """Dec (deg, J2000) of the science target."""
 
+    additional_forced_targets: list = field(default_factory=list)
+    """Extra entries ``{ra, dec, name}`` (degrees, J2000; ``name`` is a short label).
+    Each produces ``ws/<forced_photometry output>/lightcurve_<name>.csv`` (primary
+    stays ``lightcurve.csv``). WCS grouping and templates use ``target_ra`` /
+    ``target_dec`` only."""
+
     # ── Instrument ────────────────────────────────────────────────────────────
     sector: int = 20
     camera: int = 3
@@ -152,6 +159,15 @@ class SynDiffConfig:
     # ── Template grouping ─────────────────────────────────────────────────────
     offset_threshold: float = 0.01
     """Maximum pixel offset (TESS pixels) before a new template group is needed."""
+
+    wcs_drift_savgol_window: Optional[int] = 11
+    """If not ``None`` and ≥ 3: apply a Savitzky–Golay filter along time-ordered
+    valid frames to ``delta_x``/``delta_y`` before template grouping (must be odd;
+    even values are bumped up). Set to ``None`` to disable."""
+
+    wcs_drift_savgol_polyorder: int = 2
+    """Polynomial order for :func:`wcs_grouping.smooth_wcs_drift_savgol`
+    (must be ``< wcs_drift_savgol_window``)."""
 
     # ── Hotpants ──────────────────────────────────────────────────────────────
     sci_fwhm: float = 1.0
@@ -209,21 +225,12 @@ class SynDiffConfig:
     """Half-size of the ePSF stamp in native pixels (before oversampling).
     The saturated-star template is also built at this oversampling."""
 
-    # ── Final deconvolution ───────────────────────────────────────────────────
+    # ── Saturated-star template (high-res canvas) ─────────────────────────────
     high_res_os: int = 9
-    """Oversampling used only during the Fourier deconvolve/reconvolve step
-    in final_diff.py.  Not used for the main sat template."""
+    """Oversampling for the high-resolution saturated-star template canvas in
+    ``sat_template`` (block-sum downsampled to native pixels for storage)."""
 
-    # ── Temporal smoothing ────────────────────────────────────────────────────
-    temporal_smooth_window: int = 11
-    """Window size (in frames) for scipy.ndimage.uniform_filter1d on ePSF stacks
-    when ``epsf_temporal_smooth`` is True."""
-
-    epsf_temporal_smooth: bool = True
-    """If True (default), apply time-axis interpolation + uniform filtering to
-    ePSF stacks after fitting (rounds 1 and 2). If False, use per-frame fitted
-    ePSFs with only all-NaN tile repair (no temporal low-pass)."""
-
+    # ── Background temporal (AdaptiveBackground) & spatial (TESSreduce-like) ───
     bkg_vector_path: Optional[str] = None
     """Directory containing TESSVectors CSV (``TessVectors_SXXX_CY_FFI.csv``).
     If unset, files are downloaded from HEASARC when background smoothing runs."""
@@ -233,8 +240,10 @@ class SynDiffConfig:
     along time; default, matches upstream TESSreduce) or ``\"adaptive\"``
     (adaptive temporal median / ``adaptive_medfilt_3d``)."""
 
-    bkg_adaptive_savgol_window: int = 31
-    """Savitzky–Golay window length (odd frames) when ``bkg_adaptive_method`` is ``\"savgol\"``."""
+    bkg_adaptive_savgol_window: Optional[int] = None
+    """Savitzky–Golay window length (odd frames) when ``bkg_adaptive_method`` is ``\"savgol\"``.
+    ``None`` lets vendored :class:`adaptive_background.AdaptiveBackground` choose a
+    cadence-based window (~6 h), matching upstream TESSreduce defaults."""
 
     bkg_adaptive_savgol_polyorder: int = 2
     """Savitzky–Golay polynomial order when ``bkg_adaptive_method`` is ``\"savgol\"``."""
@@ -255,6 +264,40 @@ class SynDiffConfig:
     domain where re-adding the polynomial bkg before ``Smooth_bkg`` matches your
     Hotpants convention."""
 
+    bkg_tessreduce_spatial_pipeline: bool = True
+    """If True, :func:`background.background_loop` stacks Hotpants frames and runs the
+    spatial portion of ``TESSreduce.tessreduce.background()`` (``Smooth_bkg`` passes,
+    optional strap QE, ``fix_background_anomalies``). The rough workspace then holds
+    that cube; ``background_adaptive`` / ``background_estimate`` apply only
+    :class:`adaptive_background.AdaptiveBackground` temporal Savitzky–Golay (no second
+    Hotpants polynomial add). Incompatible with ``stream_load_rough``."""
+
+    bkg_gauss_smooth: float = 2.0
+    """Gaussian sigma for the refined ``Smooth_bkg`` pass when ``rerun_negative`` is True
+    (TESSreduce ``bkg_gauss_sigma`` default)."""
+
+    bkg_calc_qe: bool = True
+    """Strap QE multiplication on the background cube (TESSreduce ``calc_qe``)."""
+
+    bkg_strap_iso: bool = True
+    """If True, valid sky pixels require ``mask == 0`` (TESSreduce ``strap_iso``)."""
+
+    bkg_source_hunt: bool = False
+    """PSF-based source hunt per frame; requires PRF kernel + residual cube wiring (not
+    yet exposed from YAML — keep False unless extended)."""
+
+    bkg_interpolate: bool = True
+    """Passed to vendored ``Smooth_bkg`` as ``interpolate`` (griddata vs inpaint)."""
+
+    bkg_rerun_negative: bool = False
+    """TESSreduce ``rerun_negative`` oversubtraction mask refinement."""
+
+    bkg_rerun_diff: bool = False
+    """TESSreduce ``rerun_diff`` residual mask refinement."""
+
+    bkg_use_error_image: bool = False
+    """Use per-pixel flux errors for ``rerun_negative`` threshold (needs ``eflux`` cube)."""
+
     # ── Photometry ────────────────────────────────────────────────────────────
     psf_type: str = "epsf"
     """'epsf' — use the fitted empirical ePSF (EpsfLocator).
@@ -267,15 +310,16 @@ class SynDiffConfig:
     """Polynomial order for the local background surface fit in create_psf.psf_flux."""
 
     phot_snap: str = "brightest"
-    """Position-fit strategy: 'brightest' | 'ref' | 'fixed'."""
+    """Position-fit strategy: 'brightest' | 'ref' | 'fixed' (TESSreduce-compatible; see photometry)."""
 
     pipeline_plots: bool = False
     """If True, write diagnostic figures: after ``wcs_grouping``,
     ``wcs_drift_template_debug.png`` and ``lightcurve_<stage>.png`` under
     ``{output_dir}/{pipeline_plots_dir}/`` by default; adaptive-background GIF
     (when hooked up) in the same folder. Forced-photometry light-curve PNG titles
-    include the stage ``output`` workspace label. ``lightcurve.csv`` still lives in each
-    ``ws/<output>/`` photometry workspace."""
+    include the stage ``output`` workspace label. CSVs live under ``ws/<output>/``
+    (``lightcurve.csv`` for the primary, ``lightcurve_<name>.csv`` for each
+    ``additional_forced_targets`` entry)."""
 
     pipeline_plot_dpi: int = 150
     """Resolution for PNGs written when ``pipeline_plots`` is True."""
@@ -292,14 +336,25 @@ class SynDiffConfig:
     is absent from ``pipeline:``, ``run_config_pipeline`` reloads the frame manifest
     and ``cluster_template_job.json`` from ``output_dir``."""
 
+    master_fits_mirror: bool = True
+    """If True (default), every per-FFI FITS under ``ws/<label>/`` is also exposed via a
+    relative symlink directly under ``master/`` (flat layout), refreshed after each
+    pipeline stage. Disable for read-only filesystems where symlink creation is unsupported."""
+
     # ── Parallelism ───────────────────────────────────────────────────────────
     n_jobs: int = 8
-    """Number of parallel workers (joblib **loky**) for :func:`hotpants_runner.hotpants_loop`,
-    :func:`photometry.run_forced_photometry` (cutout load + per-epoch ``psf_flux`` when ``n_jobs`` > 1),
+    """Number of parallel workers (joblib **loky**) for :func:`photometry.run_forced_photometry`
+    (cutout load + per-epoch ``psf_flux`` when ``n_jobs`` > 1),
     :func:`background.background_loop` (per-frame rough ``Smooth_bkg`` when ``n_jobs`` > 1),
     and sub-tasks inside :func:`adaptive_background.adaptive_medfilt_3d` when
     ``bkg_adaptive_method`` is ``\"adaptive\"`` (via ``cfg.n_jobs`` passed from
-    :func:`temporal_smooth.adaptive_smooth_background`). ePSF fitting remains serial over frames."""
+    :func:`background.adaptive_smooth_background`). For Hotpants only, see
+    ``hotpants_n_jobs`` (defaults to this value when unset). ePSF fitting remains serial over frames."""
+
+    hotpants_n_jobs: Optional[int] = None
+    """If set, overrides ``n_jobs`` for :func:`hotpants_runner.hotpants_loop` only (per-frame
+    differencing). Use ``1`` when peak RAM is tight: each worker holds a full ``HotpantsState``
+    for the crop. When unset, ``n_jobs`` is used."""
 
     max_ffis: Optional[int] = None
     """If set (positive int), use at most this many FFIs after **time sort**, skipping any
@@ -309,6 +364,66 @@ class SynDiffConfig:
 
 
 # ── YAML I/O ─────────────────────────────────────────────────────────────────
+
+
+def _sanitize_forced_lightcurve_name(name: str) -> str:
+    """Map user ``name`` to a safe fragment for ``lightcurve_<name>.csv`` / PNG."""
+    s = str(name).strip()
+    if not s:
+        raise ValueError("additional_forced_targets entry 'name' must be non-empty")
+    if os.sep in s or (os.altsep and os.altsep in s) or "/" in s or "\\" in s:
+        raise ValueError("additional_forced_targets 'name' must not contain path separators")
+    out = re.sub(r"[^0-9A-Za-z._+-]+", "_", s)
+    out = re.sub(r"_+", "_", out).strip("_")
+    if not out or out in (".", ".."):
+        raise ValueError(f"invalid light curve name after sanitization: {name!r}")
+    return out
+
+
+def normalize_additional_forced_targets(raw: Any) -> List[Dict[str, Any]]:
+    """
+    Parse ``additional_forced_targets`` from YAML into a list of
+    ``{"ra": float, "dec": float, "name": str}`` dicts.
+    """
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            "additional_forced_targets must be a list of mappings with keys "
+            "'ra', 'dec', and 'name'"
+        )
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"additional_forced_targets[{i}] must be a mapping, got {type(item).__name__}"
+            )
+        if "ra" not in item or "dec" not in item:
+            raise ValueError(
+                f"additional_forced_targets[{i}] must include 'ra' and 'dec' (degrees)"
+            )
+        if "name" not in item or item["name"] is None or not str(item["name"]).strip():
+            raise ValueError(
+                f"additional_forced_targets[{i}]: non-empty 'name' is required "
+                "(used for lightcurve_<name>.csv and debug PNG)"
+            )
+        try:
+            ra = float(item["ra"])
+            dec = float(item["dec"])
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"additional_forced_targets[{i}]: ra/dec must be numeric"
+            ) from e
+        sname = _sanitize_forced_lightcurve_name(str(item["name"]))
+        if sname in seen:
+            raise ValueError(
+                f"duplicate additional_forced_targets name {sname!r}; names must be unique"
+            )
+        seen.add(sname)
+        out.append({"ra": ra, "dec": dec, "name": sname})
+    return out
+
 
 def _cfg_to_dict(cfg: SynDiffConfig) -> dict:
     d = asdict(cfg)
@@ -412,6 +527,9 @@ def load_config(yaml_path: str) -> SynDiffConfig:
     cfg = SynDiffConfig(**filtered)
     if cfg.template_dir and not cfg.template_paths:
         cfg.template_paths = discover_template_paths(cfg.template_dir)
+    cfg.additional_forced_targets = normalize_additional_forced_targets(
+        cfg.additional_forced_targets
+    )
     return cfg
 
 
@@ -446,6 +564,13 @@ def add_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--ffi-dir",    type=str,   default=None, dest="ffi_dir")
     parser.add_argument("--n-jobs",     type=int,   default=None, dest="n_jobs")
     parser.add_argument(
+        "--hotpants-n-jobs",
+        type=int,
+        default=None,
+        dest="hotpants_n_jobs",
+        help="Override n_jobs for the hotpants stage only (default: same as n_jobs).",
+    )
+    parser.add_argument(
         "--max-ffis", type=int, default=None, dest="max_ffis",
         help="Cap number of FFIs (after glob sort); for quick tests.",
     )
@@ -468,7 +593,7 @@ def config_from_args(args: argparse.Namespace) -> SynDiffConfig:
     """
     cfg = load_config(args.config)
     for attr in (
-        "sector", "camera", "ccd", "output_dir", "ffi_dir", "n_jobs", "max_ffis",
+        "sector", "camera", "ccd", "output_dir", "ffi_dir", "n_jobs", "hotpants_n_jobs", "max_ffis",
         "psf_type", "pipeline_plots",
     ):
         val = getattr(args, attr, None)

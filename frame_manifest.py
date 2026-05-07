@@ -15,6 +15,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from .ffi_naming import (
+    parse_workspace_frame_stem,
+    sanitize_workspace_label,
+    tess_product_id_from_ffi_path,
+    workspace_frame_stem,
+)
 from .paths import DEFAULT_MANIFEST_BASENAME, workspace_dir
 
 
@@ -108,10 +114,27 @@ def manifest_has_hotpants_label(
     return f"hotpants_{safe}_ok" in df.columns
 
 
-def row_stem_series(df: pd.DataFrame) -> pd.Series:
+def row_ffi_product_id_series(df: pd.DataFrame) -> pd.Series:
+    """Series of ``tess<digits>`` product ids parsed from manifest ``filename``/``path``."""
     if "filename" in df.columns:
-        return df["filename"].map(lambda f: Path(str(f)).stem)
-    return df["path"].map(lambda p: Path(str(p)).stem)
+        return df["filename"].map(lambda f: tess_product_id_from_ffi_path(str(f)) or "")
+    return df["path"].map(lambda p: tess_product_id_from_ffi_path(str(p)) or "")
+
+
+def _result_product_id(res: dict) -> str:
+    """Pull product id from a hotpants-shaped result dict (explicit field or stem)."""
+    pid = res.get("ffi_product_id")
+    if pid:
+        return str(pid)
+    stem = res.get("stem")
+    if stem:
+        parsed = parse_workspace_frame_stem(str(stem))
+        if parsed is not None:
+            return parsed[0]
+        guess = tess_product_id_from_ffi_path(str(stem))
+        if guess:
+            return guess
+    return ""
 
 
 def apply_hotpants_results(
@@ -124,11 +147,13 @@ def apply_hotpants_results(
     ok_col = f"hotpants_r{round_id}_ok"
     err_col = f"hotpants_r{round_id}_error"
     path_col = f"diff_r{round_id}_path"
-    stems_index = row_stem_series(df)
+    pids_index = row_ffi_product_id_series(df)
 
     for ffi_path, res in zip(ffi_paths, results):
-        stem = Path(ffi_path).stem
-        m = stems_index == stem
+        pid = tess_product_id_from_ffi_path(str(ffi_path))
+        if not pid:
+            continue
+        m = pids_index == pid
         if not m.any():
             continue
         success = bool(res.get("success", False))
@@ -150,15 +175,17 @@ def apply_hotpants_workspace_results(
 ) -> pd.DataFrame:
     """Update manifest columns for a labeled Hotpants workspace (``diff_<label>_path``)."""
     df = _ensure_hotpants_label_columns(df, label)
-    safe = str(label).replace(" ", "_")
+    safe = sanitize_workspace_label(label)
     ok_col = f"hotpants_{safe}_ok"
     err_col = f"hotpants_{safe}_error"
     path_col = f"diff_{safe}_path"
-    stems_index = row_stem_series(df)
+    pids_index = row_ffi_product_id_series(df)
 
     for ffi_path, res in zip(ffi_paths, results):
-        stem = Path(ffi_path).stem
-        m = stems_index == stem
+        pid = tess_product_id_from_ffi_path(str(ffi_path))
+        if not pid:
+            continue
+        m = pids_index == pid
         if not m.any():
             continue
         success = bool(res.get("success", False))
@@ -172,19 +199,37 @@ def apply_hotpants_workspace_results(
     return df
 
 
+def _coerce_to_product_id(value: object) -> str:
+    """Extract ``tess<digits>`` from a product id, workspace stem, path, or basename."""
+    if value is None:
+        return ""
+    s = str(value)
+    if not s:
+        return ""
+    parsed = parse_workspace_frame_stem(s)
+    if parsed is not None:
+        return parsed[0]
+    pid = tess_product_id_from_ffi_path(s)
+    return pid or ""
+
+
 def apply_epsf_status(
     df: pd.DataFrame,
-    ffi_stems: list,
+    ffi_product_ids: list,
     epsf_ok: list,
     round_id: int,
 ) -> pd.DataFrame:
+    """Update epsf status columns by joining on ``tess<digits>`` product ids."""
     df = _ensure_epsf_columns(df, round_id)
     ok_col = f"epsf_r{round_id}_ok"
     err_col = f"epsf_r{round_id}_error"
-    stems_index = row_stem_series(df)
+    pids_index = row_ffi_product_id_series(df)
 
-    for stem, ok in zip(ffi_stems, epsf_ok):
-        m = stems_index == str(stem)
+    for raw, ok in zip(ffi_product_ids, epsf_ok):
+        pid = _coerce_to_product_id(raw)
+        if not pid:
+            continue
+        m = pids_index == pid
         if not m.any():
             continue
         ok_b = bool(ok)
@@ -195,44 +240,52 @@ def apply_epsf_status(
 
 def epsf_row_indices_for_group(
     df: pd.DataFrame,
-    ffi_stems: np.ndarray | list,
+    ffi_product_ids: np.ndarray | list,
     group_id: int,
 ) -> np.ndarray:
-    stems_index = row_stem_series(df)
-    stem_to_epsf = {str(s): j for j, s in enumerate(ffi_stems)}
+    """Indices into *ffi_product_ids* for rows of *df* in *group_id* (matched by product id)."""
+    pids_index = row_ffi_product_id_series(df)
+    pid_to_epsf = {
+        _coerce_to_product_id(s): j for j, s in enumerate(ffi_product_ids)
+    }
+    pid_to_epsf.pop("", None)
     rows = []
-    for stem, gid in zip(stems_index, df["group_id"]):
+    for pid, gid in zip(pids_index, df["group_id"]):
         try:
             gid_i = int(gid) if pd.notna(gid) else -999
         except (TypeError, ValueError):
             gid_i = -999
         if gid_i != group_id:
             continue
-        k = str(stem)
-        if k in stem_to_epsf:
-            rows.append(stem_to_epsf[k])
+        k = str(pid)
+        if k in pid_to_epsf:
+            rows.append(pid_to_epsf[k])
     return np.asarray(rows, dtype=np.int64)
 
 
-def group_ids_from_ffi_stems(df: pd.DataFrame, ffi_stems: np.ndarray | list) -> np.ndarray:
+def group_ids_from_ffi_stems(
+    df: pd.DataFrame, ffi_product_ids: np.ndarray | list
+) -> np.ndarray:
+    """Group id per *ffi_product_ids* entry (looked up via the manifest product id)."""
     if "group_id" not in df.columns:
         raise ValueError("frame manifest table missing group_id")
-    stems_index = row_stem_series(df)
-    stem_to_gid = {}
-    for i, s in enumerate(stems_index):
+    pids_index = row_ffi_product_id_series(df)
+    pid_to_gid: dict[str, int] = {}
+    for i, s in enumerate(pids_index):
         sk = str(s)
-        if sk in stem_to_gid:
+        if sk in pid_to_gid:
             continue
         gid = df.iloc[i]["group_id"]
         try:
             gid_i = int(gid) if pd.notna(gid) else -1
         except (TypeError, ValueError):
             gid_i = -1
-        stem_to_gid[sk] = gid_i
+        pid_to_gid[sk] = gid_i
 
     out = []
-    for s in ffi_stems:
-        out.append(stem_to_gid.get(str(s), -1))
+    for s in ffi_product_ids:
+        pid = _coerce_to_product_id(s)
+        out.append(pid_to_gid.get(pid, -1))
     return np.asarray(out, dtype=np.int64)
 
 
@@ -248,9 +301,10 @@ def ordered_photometry_diff_paths(
         )
     subdir = {"final": "diff_final", "r1": "diff_r1", "r2": "diff_r2"}[src]
     path_col = f"diff_{src}_path"
-    stems = row_stem_series(df).reset_index(drop=True)
+    pids = row_ffi_product_id_series(df).reset_index(drop=True)
     df_reset = df.reset_index(drop=True)
     use_col = path_col if path_col in df_reset.columns else None
+    label = sanitize_workspace_label(subdir)
     out: list = []
     for i in range(len(df_reset)):
         p = None
@@ -261,10 +315,13 @@ def ordered_photometry_diff_paths(
                 if os.path.isfile(cand):
                     p = str(Path(cand).resolve())
         if p is None:
-            stem = str(stems.iloc[i])
-            cand = os.path.join(output_dir, subdir, f"{stem}.fits")
-            if os.path.isfile(cand):
-                p = str(Path(cand).resolve())
+            pid = str(pids.iloc[i])
+            if pid:
+                cand = os.path.join(
+                    output_dir, subdir, f"{workspace_frame_stem(pid, label)}.fits"
+                )
+                if os.path.isfile(cand):
+                    p = str(Path(cand).resolve())
         out.append(p)
     return out
 
@@ -279,11 +336,11 @@ def ordered_diff_paths_for_workspace(
     One FITS path per manifest row for a workspace label (``ws/<label>/``).
 
     Uses column ``diff_<label>_path`` when present and valid; otherwise
-    ``{output_dir}/ws/{label}/{stem}.fits``.
+    ``{output_dir}/ws/{label}/{tess<digits>}_{label}.fits``.
     """
-    safe = str(label).replace(" ", "_")
+    safe = sanitize_workspace_label(label)
     path_col = f"diff_{safe}_path"
-    stems = row_stem_series(df).reset_index(drop=True)
+    pids = row_ffi_product_id_series(df).reset_index(drop=True)
     df_reset = df.reset_index(drop=True)
     ws = workspace_dir(output_dir, label)
     use_col = path_col if path_col in df_reset.columns else None
@@ -297,10 +354,11 @@ def ordered_diff_paths_for_workspace(
                 if os.path.isfile(cand):
                     p = str(Path(cand).resolve())
         if p is None:
-            stem = str(stems.iloc[i])
-            cand = os.path.join(ws, f"{stem}.fits")
-            if os.path.isfile(cand):
-                p = str(Path(cand).resolve())
+            pid = str(pids.iloc[i])
+            if pid:
+                cand = os.path.join(ws, f"{workspace_frame_stem(pid, safe)}.fits")
+                if os.path.isfile(cand):
+                    p = str(Path(cand).resolve())
         out.append(p)
     return out
 

@@ -3,6 +3,12 @@ hotpants_runner.py
 ==================
 Hotpants differencing: FFI (cropped) vs PS1 template, Gaia reference stars.
 
+When ``cfg.n_jobs`` (or ``cfg.hotpants_n_jobs`` if set) is greater than 1,
+:func:`hotpants_loop` uses joblib **loky** with a **worker initializer** so the
+shared mask, reference-star coordinates, and template map are installed once per
+process instead of being cloudpickled with every FFI task (only per-frame
+arguments are serialized per task).
+
 Supports **legacy** layout (``diff_rN/``, optional ``convolved_rN/``) and
 **workspace** layout (separate dirs for diffs, convolved model, optional bkg).
 
@@ -39,9 +45,101 @@ from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 from joblib import Parallel, delayed
 
+from .ffi_naming import (
+    sanitize_workspace_label,
+    tess_product_id_from_ffi_path,
+    workspace_frame_stem,
+    workspace_label_from_dir,
+)
+
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
 log = logging.getLogger(__name__)
+
+
+def write_diff_noise_mask_fits(
+    out_path: str,
+    diff_img: np.ndarray,
+    noise_img: Optional[np.ndarray],
+    mask_img: Optional[np.ndarray],
+) -> None:
+    """
+    Write one multi-extension FITS: PRIMARY = difference, extensions NOISE (1σ)
+    and MASK when provided. Uses float32 for all arrays.
+    """
+    primary = fits.PrimaryHDU(np.asarray(diff_img, dtype=np.float32))
+    hdul: list = [primary]
+    if noise_img is not None:
+        hdul.append(
+            fits.ImageHDU(np.asarray(noise_img, dtype=np.float32), name="NOISE")
+        )
+    if mask_img is not None:
+        hdul.append(
+            fits.ImageHDU(np.asarray(mask_img, dtype=np.float32), name="MASK")
+        )
+    fits.HDUList(hdul).writeto(out_path, overwrite=True)
+
+
+# Loky workers: large read-only objects are set once per process via initializer
+# (avoids cloudpickling them with every task).
+_HOTPANTS_LOKY_PAYLOAD: Optional[dict[str, Any]] = None
+
+
+def _hotpants_loky_initializer(
+    mask: np.ndarray,
+    ref_stars_xy: np.ndarray,
+    cfg: Any,
+    template_path_map: dict,
+    crop_bounds: dict,
+    workspace_dirs: HotpantsWorkspaceDirs,
+    round_id: int,
+    legacy_bkg_sidecar: bool,
+    sci_workspace_dir: Optional[str],
+) -> None:
+    global _HOTPANTS_LOKY_PAYLOAD
+    _HOTPANTS_LOKY_PAYLOAD = {
+        "mask": mask,
+        "ref_stars_xy": ref_stars_xy,
+        "cfg": cfg,
+        "template_path_map": template_path_map,
+        "crop_bounds": crop_bounds,
+        "workspace_dirs": workspace_dirs,
+        "round_id": round_id,
+        "legacy_bkg_sidecar": legacy_bkg_sidecar,
+        "sci_workspace_dir": sci_workspace_dir,
+    }
+
+
+def _hotpants_loky_run_task(
+    task: tuple,
+) -> dict:
+    """Run one Hotpants frame inside a loky worker (uses :data:`_HOTPANTS_LOKY_PAYLOAD`)."""
+    global _HOTPANTS_LOKY_PAYLOAD
+    p = _HOTPANTS_LOKY_PAYLOAD
+    if p is None:
+        return {
+            "stem": None,
+            "success": False,
+            "error_msg": "hotpants loky worker not initialized",
+        }
+    ffi_path, product_id, group_id, bkg_i = task
+    if product_id is None:
+        return {"stem": None, "success": False, "error_msg": "not in wcs_table"}
+    return _process_one_frame(
+        ffi_path=ffi_path,
+        product_id=product_id,
+        group_id=group_id,
+        cfg=p["cfg"],
+        template_path_map=p["template_path_map"],
+        mask=p["mask"],
+        crop_bounds=p["crop_bounds"],
+        ref_stars_xy=p["ref_stars_xy"],
+        dirs=p["workspace_dirs"],
+        round_id=p["round_id"],
+        sci_bkg=bkg_i,
+        legacy_diff_sidecar_bkg=p["legacy_bkg_sidecar"],
+        sci_workspace_dir=p.get("sci_workspace_dir"),
+    )
 
 
 @dataclass
@@ -52,13 +150,15 @@ class HotpantsWorkspaceDirs:
     convolved: str
     bkg: Optional[str] = None
     """
-    If set, polynomial background FITS are written here as ``{stem}.fits``.
+    If set, polynomial background FITS are written here as
+    ``{tess<digits>}_{bkg_label}.fits`` (label derived from ``os.path.basename(bkg)``).
     If None, backgrounds are not persisted (still used inside Hotpants for the diff).
     """
     stamps: Optional[str] = None
     """
-    If set, ``{stem}_stamps.fits`` (Hotpants stamp region) is written here.
-    If None, :func:`build_hotpants_config` falls back to ``diffs`` (legacy).
+    If set, ``{tess<digits>}_{diffs_label}_stamps.fits`` (Hotpants stamp region)
+    is written here. If None, :func:`build_hotpants_config` falls back to ``diffs``
+    (legacy).
     """
 
 
@@ -272,25 +372,29 @@ def build_hotpants_config(
     os.makedirs(stamp_out_dir, exist_ok=True)
 
     hp_config = HotpantsConfig(
-        rkernel=kernel_halfwidth,
-        ko=cfg.hp_ko,
-        bgo=cfg.hp_bgo,
-        nstampx=cfg.hp_nstampx,
-        nstampy=cfg.hp_nstampy,
-        nss=cfg.hp_nss,
-        rss=substamp_halfwidth,
-        ngauss=cfg.hp_ngauss,
-        deg_fixe=list(cfg.hp_deg_fixe),
-        sigma_gauss=[sci_fwhm / 2.5, sci_fwhm, sci_fwhm * 2],
-        kf_spread_mask1=cfg.hp_kf_spread_mask1,
-        ks=cfg.hp_ks,
-        kfm=cfg.hp_kfm,
-        fitthresh=cfg.hp_fitthresh,
-        stat_sig=cfg.hp_stat_sig,
-        force_convolve=cfg.hp_force_convolve,
-        normalize=cfg.hp_normalize,
+        rkernel=int(kernel_halfwidth),
+        ko=int(cfg.hp_ko),
+        bgo=int(cfg.hp_bgo),
+        nstampx=int(cfg.hp_nstampx),
+        nstampy=int(cfg.hp_nstampy),
+        nss=int(cfg.hp_nss),
+        rss=int(substamp_halfwidth),
+        ngauss=int(cfg.hp_ngauss),
+        deg_fixe=[int(d) for d in cfg.hp_deg_fixe],
+        sigma_gauss=[float(sci_fwhm / 2.5), float(sci_fwhm), float(sci_fwhm * 2)],
+        kf_spread_mask1=float(cfg.hp_kf_spread_mask1) if getattr(cfg, 'hp_kf_spread_mask1', None) is not None else 1.0,
+        ks=int(cfg.hp_ks) if getattr(cfg, 'hp_ks', None) is not None else 0,
+        kfm=int(cfg.hp_kfm) if getattr(cfg, 'hp_kfm', None) is not None else 0,
+        fitthresh=float(cfg.hp_fitthresh) if getattr(cfg, 'hp_fitthresh', None) is not None else 500,
+        stat_sig=float(cfg.hp_stat_sig) if getattr(cfg, 'hp_stat_sig', None) is not None else 3.0,
+        force_convolve=str(cfg.hp_force_convolve),
+        normalize=str(cfg.hp_normalize),
         verbose=0,
-        output_file=os.path.join(diff_dir, f"{frame_stem}.fits"),
+        # Diff / noise / mask: written in one multi-extension FITS via Astropy after run_pipeline.
+        output_file=None,
+        noise_image_file=None,
+        mask_image_file=None,
+        sigma_image_file=None,
         convolved_image_file=os.path.join(convolved_dir, f"{frame_stem}.fits"),
         stamp_region_file=os.path.join(stamp_out_dir, f"{frame_stem}_stamps.fits"),
     )
@@ -304,33 +408,57 @@ def run_hotpants_frame(
     mask_array: np.ndarray,
     ref_stars_xy: np.ndarray,
     hp_config,
+    *,
+    science_ffi_path: Optional[str] = None,
+    diff_fits_path_for_logs: Optional[str] = None,
 ) -> dict:
+    """
+    Run Hotpants on in-memory template/science arrays.
+
+    ``science_ffi_path`` is included in log lines when pyhotpants emits its
+    minimal-header FITS warning (arrays are passed, so no science FITS header).
+    """
     Hotpants, _ = _get_hotpants_classes()
     result = {
         "diff": None,
         "bkg": None,
         "convolved": None,
         "noise": None,
+        "mask": None,
         "success": False,
         "error_msg": "",
     }
     try:
         hp = Hotpants(
-            template_data=tmpl_array.astype(np.float64),
-            image_data=sci_array.astype(np.float64),
-            t_error=np.zeros_like(tmpl_array),
-            i_error=sci_err_array.astype(np.float64),
-            t_mask=(np.isnan(tmpl_array)).astype(bool),
-            i_mask=(mask_array > 0).astype(bool),
-            star_catalog=ref_stars_xy,
+            template_data=np.ascontiguousarray(tmpl_array, dtype=np.float64),
+            image_data=np.ascontiguousarray(sci_array, dtype=np.float64),
+            t_error=np.zeros(tmpl_array.shape, dtype=np.float64),
+            i_error=np.ascontiguousarray(sci_err_array, dtype=np.float64),
+            t_mask=np.ascontiguousarray(np.isnan(tmpl_array), dtype=bool),
+            i_mask=np.ascontiguousarray(mask_array > 0, dtype=bool),
+            star_catalog=np.ascontiguousarray(ref_stars_xy, dtype=np.float64),
             config=hp_config,
             output_header=None,
         )
-        res = hp.run_pipeline()
+        # pyhotpants warns when saving FITS from in-memory arrays (no WCS header).
+        # Record warnings so we can append the science FFI path for debugging.
+        _HEADER_WARN_SUBSTR = "No FITS header available"
+        with warnings.catch_warnings(record=True) as wrec:
+            warnings.simplefilter("always")
+            res = hp.run_pipeline()
+        for w in wrec:
+            msg = str(w.message)
+            if _HEADER_WARN_SUBSTR in msg:
+                ffi = science_ffi_path or "unknown"
+                outf = getattr(hp_config, "output_file", None) or diff_fits_path_for_logs
+                log.warning("%s science_ffi=%r diff_output=%r", msg, ffi, outf)
+            else:
+                warnings.warn(w.message, category=w.category, stacklevel=1)
         result["diff"] = res.get("diff_image")
         result["bkg"] = res.get("background")
         result["convolved"] = res.get("convolved_image")
         result["noise"] = res.get("noise_image")
+        result["mask"] = res.get("output_mask")
         result["success"] = result["diff"] is not None
         if result["success"]:
             arrays = None
@@ -379,20 +507,21 @@ def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
     return data[y0:y1, x0:x1]
 
 
-def _save_bkg_fits(bkg: np.ndarray, stem: str, bkg_dir: str) -> None:
+def _save_bkg_fits(bkg: np.ndarray, basename: str, bkg_dir: str) -> None:
+    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits``."""
     os.makedirs(bkg_dir, exist_ok=True)
     fits.writeto(
-        os.path.join(bkg_dir, f"{stem}.fits"),
+        os.path.join(bkg_dir, f"{basename}.fits"),
         bkg.astype(np.float32),
         overwrite=True,
     )
 
 
-def _legacy_save_bkg_sidecar(bkg: np.ndarray, stem: str, diff_dir: str) -> None:
-    """Write ``_bkg.fits`` next to the diff (diff itself is written by Hotpants ``save_outputs``)."""
+def _legacy_save_bkg_sidecar(bkg: np.ndarray, diff_basename: str, diff_dir: str) -> None:
+    """Write ``{diff_basename}_bkg.fits`` next to the diff (legacy layout)."""
     os.makedirs(diff_dir, exist_ok=True)
     fits.writeto(
-        os.path.join(diff_dir, f"{stem}_bkg.fits"),
+        os.path.join(diff_dir, f"{diff_basename}_bkg.fits"),
         bkg.astype(np.float32),
         overwrite=True,
     )
@@ -400,7 +529,7 @@ def _legacy_save_bkg_sidecar(bkg: np.ndarray, stem: str, diff_dir: str) -> None:
 
 def _process_one_frame(
     ffi_path,
-    stem,
+    product_id,
     group_id,
     cfg,
     template_path_map,
@@ -411,25 +540,65 @@ def _process_one_frame(
     round_id: int,
     sci_bkg=None,
     legacy_diff_sidecar_bkg: bool = False,
+    sci_workspace_dir: Optional[str] = None,
 ):
-    sci_crop, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
+    diffs_label = workspace_label_from_dir(dirs.diffs)
+    diff_stem = workspace_frame_stem(product_id, diffs_label)
+
+    if sci_workspace_dir:
+        sci_label = workspace_label_from_dir(sci_workspace_dir)
+        sci_stem = workspace_frame_stem(product_id, sci_label)
+        sp = os.path.join(sci_workspace_dir, f"{sci_stem}.fits")
+        if not os.path.isfile(sp):
+            log.error("science workspace FITS missing for %s: %s", product_id, sp)
+            return {
+                "stem": diff_stem,
+                "ffi_product_id": product_id,
+                "group_id": group_id,
+                "success": False,
+                "error_msg": f"missing science FITS {sp}",
+            }
+        sci_crop = fits.getdata(sp).astype(np.float64)
+        # Use the same cropped noise map as a raw-FFI pass. All-zero i_error makes
+        # Hotpants weights degenerate and often triggers LUDCMP / clipped-stamp failures.
+        _, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
+        err_crop = np.asarray(err_crop, dtype=np.float64)
+        if err_crop.shape != sci_crop.shape:
+            log.warning(
+                "Science %s shape %s != FFI err %s; using sqrt(|sci|)+1 heuristic errors",
+                product_id,
+                sci_crop.shape,
+                err_crop.shape,
+            )
+            err_crop = np.sqrt(np.abs(sci_crop)) + 1.0
+        else:
+            err_crop = np.maximum(err_crop, np.sqrt(np.abs(sci_crop)) + 1.0)
+    else:
+        sci_crop, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
 
     if round_id > 1 and sci_bkg is not None:
         sci_crop = sci_crop - sci_bkg
 
     tmpl_path = template_path_map.get(group_id)
     if tmpl_path is None:
-        log.error("No template for group_id=%s; frame %s skipped.", group_id, stem)
-        return {"stem": stem, "group_id": group_id, "success": False, "error_msg": "missing template"}
+        log.error("No template for group_id=%s; frame %s skipped.", group_id, product_id)
+        return {
+            "stem": diff_stem,
+            "ffi_product_id": product_id,
+            "group_id": group_id,
+            "success": False,
+            "error_msg": "missing template",
+        }
 
     tmpl_crop = _load_template_cropped(tmpl_path, crop_bounds)
 
+    diff_out_path = os.path.join(dirs.diffs, f"{diff_stem}.fits")
     hp_config = build_hotpants_config(
         sci_fwhm=cfg.sci_fwhm,
         cfg=cfg,
         diff_dir=dirs.diffs,
         convolved_dir=dirs.convolved,
-        frame_stem=stem,
+        frame_stem=diff_stem,
         stamps_dir=dirs.stamps,
     )
 
@@ -440,25 +609,41 @@ def _process_one_frame(
         mask_array=mask,
         ref_stars_xy=ref_stars_xy,
         hp_config=hp_config,
+        science_ffi_path=str(ffi_path),
+        diff_fits_path_for_logs=diff_out_path,
     )
 
     if result["success"]:
+        try:
+            write_diff_noise_mask_fits(
+                diff_out_path,
+                result["diff"],
+                result.get("noise"),
+                result.get("mask"),
+            )
+        except Exception as exc:
+            log.error("Failed writing %s: %s", diff_out_path, exc)
+            result["success"] = False
+            result["error_msg"] = str(exc)
         if legacy_diff_sidecar_bkg and result.get("bkg") is not None:
-            _legacy_save_bkg_sidecar(result["bkg"], stem, dirs.diffs)
+            _legacy_save_bkg_sidecar(result["bkg"], diff_stem, dirs.diffs)
         elif dirs.bkg and result.get("bkg") is not None:
-            _save_bkg_fits(result["bkg"], stem, dirs.bkg)
+            bkg_label = workspace_label_from_dir(dirs.bkg)
+            bkg_basename = workspace_frame_stem(product_id, bkg_label)
+            _save_bkg_fits(result["bkg"], bkg_basename, dirs.bkg)
         k_arrays = result.pop("kernel_params_arrays", None)
         if k_arrays:
             try:
                 _save_frame_kernel_params_npz(
-                    stem, kernel_params_dir(dirs.diffs), k_arrays, cfg
+                    diff_stem, kernel_params_dir(dirs.diffs), k_arrays, cfg
                 )
             except Exception as exc:
-                log.warning("Saving kernel params npz failed for %s: %s", stem, exc)
+                log.warning("Saving kernel params npz failed for %s: %s", diff_stem, exc)
 
-    result["stem"] = stem
+    result["stem"] = diff_stem
+    result["ffi_product_id"] = product_id
     result["group_id"] = group_id
-    result["path"] = os.path.join(dirs.diffs, f"{stem}.fits")
+    result["path"] = diff_out_path
     return result
 
 
@@ -474,12 +659,17 @@ def hotpants_loop(
     round_id: int = 1,
     sci_bkg_stack: np.ndarray = None,
     workspace_dirs: Optional[HotpantsWorkspaceDirs] = None,
+    sci_workspace_dir: Optional[str] = None,
 ) -> list:
     """
     Run hotpants over all FFIs in parallel.
 
     If ``workspace_dirs`` is None, use legacy paths: ``diff_r{round_id}/``,
     ``convolved_r{round_id}/``, and ``*_bkg.fits`` sidecars in the diff directory.
+
+    When ``sci_workspace_dir`` is set, each frame's science array is read from
+    ``{sci_workspace_dir}/{stem}.fits`` (crop-sized), e.g. from a prior ``subtract``
+    stage, instead of cropping the raw FFI.
     """
     if workspace_dirs is None:
         diff_base = os.path.join(output_dir, f"diff_r{round_id}")
@@ -514,49 +704,75 @@ def hotpants_loop(
         row_idx = path_to_row.get(str(ffi_path))
         if row_idx is None:
             log.warning("FFI not in wcs_table: %s", ffi_path)
-            tasks.append((ffi_path, None, 0))
+            tasks.append((ffi_path, None, 0, None))
             continue
         row = wcs_table.iloc[row_idx]
-        stem = Path(ffi_path).stem
+        product_id = tess_product_id_from_ffi_path(ffi_path)
+        if product_id is None:
+            log.warning("FFI basename does not start with tess<digits>: %s", ffi_path)
+            tasks.append((ffi_path, None, 0, None))
+            continue
         group_id = int(row.get("group_id", 0))
         bkg_i = sci_bkg_stack[i] if (sci_bkg_stack is not None and i < len(sci_bkg_stack)) else None
-        tasks.append((ffi_path, stem, group_id, bkg_i))
+        tasks.append((ffi_path, product_id, group_id, bkg_i))
+
+    hn = getattr(cfg, "hotpants_n_jobs", None)
+    if hn is None:
+        n_workers = max(1, int(cfg.n_jobs or 1))
+    else:
+        n_workers = max(1, int(hn))
 
     log.info(
         "Running hotpants round %s on %d frames (n_jobs=%s) ...",
         round_id,
         len(tasks),
-        cfg.n_jobs,
+        n_workers,
     )
 
-    def worker(args):
-        ffi_path, stem, group_id, bkg_i = args
-        if stem is None:
-            return {"stem": None, "success": False, "error_msg": "not in wcs_table"}
-        return _process_one_frame(
-            ffi_path=ffi_path,
-            stem=stem,
-            group_id=group_id,
-            cfg=cfg,
-            template_path_map=template_path_map,
-            mask=mask,
-            crop_bounds=crop_bounds,
-            ref_stars_xy=ref_stars_xy,
-            dirs=workspace_dirs,
-            round_id=round_id,
-            sci_bkg=bkg_i,
-            legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
-        )
+    if n_workers == 1:
+        def _serial_worker(args):
+            ffi_path, product_id, group_id, bkg_i = args
+            if product_id is None:
+                return {"stem": None, "success": False, "error_msg": "not in wcs_table"}
+            return _process_one_frame(
+                ffi_path=ffi_path,
+                product_id=product_id,
+                group_id=group_id,
+                cfg=cfg,
+                template_path_map=template_path_map,
+                mask=mask,
+                crop_bounds=crop_bounds,
+                ref_stars_xy=ref_stars_xy,
+                dirs=workspace_dirs,
+                round_id=round_id,
+                sci_bkg=bkg_i,
+                legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
+                sci_workspace_dir=sci_workspace_dir,
+            )
 
-    if cfg.n_jobs == 1:
-        results = [worker(t) for t in tasks]
+        results = [_serial_worker(t) for t in tasks]
     else:
         # Process pool: pyhotpants C extension does not release the GIL, so
         # prefer="threads" would serialize CPU work across frames. loky runs
         # each frame in a separate interpreter for real multi-core speed.
-        results = Parallel(n_jobs=cfg.n_jobs, backend="loky")(
-            delayed(worker)(t) for t in tasks
+        # Initializer injects large read-only arrays once per worker (not per task).
+        parallel = Parallel(
+            n_jobs=n_workers,
+            backend="loky",
+            initializer=_hotpants_loky_initializer,
+            initargs=(
+                mask,
+                ref_stars_xy,
+                cfg,
+                template_path_map,
+                crop_bounds,
+                workspace_dirs,
+                round_id,
+                legacy_bkg_sidecar,
+                sci_workspace_dir,
+            ),
         )
+        results = parallel(delayed(_hotpants_loky_run_task)(t) for t in tasks)
 
     n_ok = sum(1 for r in results if r.get("success"))
     log.info("Round %s hotpants: %d/%d frames succeeded.", round_id, n_ok, len(results))

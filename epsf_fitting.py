@@ -6,6 +6,9 @@ Steps 4 & 10 of the SynDiff pipeline:
   Fit an empirical PSF (ePSF) on each difference image using TGLC's
   get_psf / fit_psf, tiling the image into tile_nx × tile_ny sub-regions.
 
+Also persists fitted stacks / repaired stacks (``epsf_r*_smooth.npz``), loads them for later stages,
+and writes per-template-group median ePSFs.
+
 Uses ``tglc.effective_psf`` (TGLC — TESS Gaia Light Curve toolkit).
 Install or clone TGLC and ensure ``tglc`` is importable (e.g. ``PYTHONPATH``).
 """
@@ -21,6 +24,8 @@ import pandas as pd
 from astropy.io import fits
 from astropy.table import Table
 from joblib import Parallel, delayed
+
+from .ffi_naming import parse_workspace_frame_stem, tess_product_id_from_ffi_path
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +76,137 @@ def load_epsf_stack_bundle(output_dir: str, round_id: int) -> tuple:
             raise ValueError(f"{npz_p!r} missing required array 'ffi_stem'")
         raw = z["ffi_stem"]
         ffi_stem = [str(x) for x in raw.tolist()]
+    finally:
+        z.close()
+    return stack, ffi_stem
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ── Smoothed / repaired ePSF stack (saved alongside fitting workspace) ────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def prepare_epsf_stack(epsf_stack: np.ndarray) -> np.ndarray:
+    """
+    Per-frame fitted ePSFs with all-NaN tiles repaired (global median ePSF per pixel).
+
+    No temporal filtering — aligns with using raw fits before downstream grouping.
+
+    Parameters
+    ----------
+    epsf_stack : ndarray, shape (n_frames, n_tiles, over_size²)
+    """
+    n_frames, n_tiles, n_pix = epsf_stack.shape
+    out = np.array(epsf_stack, copy=True)
+
+    global_med = np.nanmedian(out.reshape(-1, n_pix), axis=0)
+    n_nan_tiles = 0
+    for t in range(n_tiles):
+        if np.isnan(out[:, t, :]).all():
+            out[:, t, :] = global_med
+            n_nan_tiles += 1
+
+    if n_nan_tiles:
+        log.warning(
+            "  prepare_epsf_stack: %d tiles were all-NaN; filled with global median ePSF.",
+            n_nan_tiles,
+        )
+
+    return out
+
+
+def compute_group_epsf(
+    epsf_smooth: np.ndarray,
+    group_ids: np.ndarray,
+    output_dir: str | None = None,
+    group_subdir: str = "group_epsf",
+) -> dict:
+    """
+    One median ePSF per template group (median across frames in that group).
+
+    Parameters
+    ----------
+    epsf_smooth : ndarray (n_frames, n_tiles, over_size²)
+    group_ids : ndarray (n_frames,)
+    output_dir : str, optional — saves ``group_epsf_{gid}.npy`` under ``group_subdir``
+    """
+    group_ids = np.asarray(group_ids)
+    if group_ids.shape[0] != epsf_smooth.shape[0]:
+        raise ValueError(
+            f"group_ids length {group_ids.shape[0]} != n_frames "
+            f"{epsf_smooth.shape[0]}"
+        )
+    unique_groups = [g for g in sorted(set(group_ids.tolist())) if g >= 0]
+
+    group_epsf: dict[int, np.ndarray] = {}
+    for gid in unique_groups:
+        frame_mask = group_ids == gid
+        if frame_mask.sum() == 0:
+            continue
+        group_stack = epsf_smooth[frame_mask]
+        group_epsf[gid] = np.nanmedian(group_stack, axis=0)
+        log.info(
+            "  Group %s: %d frames → ePSF shape %s",
+            gid,
+            int(frame_mask.sum()),
+            group_epsf[gid].shape,
+        )
+
+    if output_dir:
+        out_subdir = os.path.join(output_dir, group_subdir)
+        os.makedirs(out_subdir, exist_ok=True)
+        for gid, epsf in group_epsf.items():
+            np.save(os.path.join(out_subdir, f"group_epsf_{gid}.npy"), epsf)
+        log.info("  Group ePSFs saved to %s/", out_subdir)
+
+    return group_epsf
+
+
+def save_epsf_smooth(
+    epsf_smooth: np.ndarray,
+    output_dir: str,
+    round_id: int,
+    ffi_stem: np.ndarray | list,
+) -> str:
+    """Save stack to ``epsf_rN_smooth.npz`` with ``ffi_stem`` (one per axis-0 row)."""
+    if ffi_stem is None:
+        raise TypeError("ffi_stem is required for save_epsf_smooth")
+    os.makedirs(output_dir, exist_ok=True)
+    path = os.path.join(output_dir, f"epsf_r{round_id}_smooth.npz")
+    np.savez_compressed(
+        path,
+        stack=np.asarray(epsf_smooth),
+        ffi_stem=np.asarray(ffi_stem, dtype=object),
+    )
+    log.info("Smoothed ePSF stack saved to %s", path)
+    return path
+
+
+def load_epsf_smooth_stems_only(output_dir: str, round_id: int) -> list | None:
+    """Load only ``ffi_stem`` from ``epsf_r{round_id}_smooth.npz``, if present."""
+    npz_p = os.path.join(output_dir, f"epsf_r{round_id}_smooth.npz")
+    if not os.path.isfile(npz_p):
+        return None
+    z = np.load(npz_p, allow_pickle=True)
+    try:
+        if "ffi_stem" in z.files:
+            return [str(x) for x in z["ffi_stem"].tolist()]
+    finally:
+        z.close()
+    return None
+
+
+def load_epsf_smooth(output_dir: str, round_id: int) -> tuple:
+    """Load ``epsf_r{round_id}_smooth.npz``. Returns ``stack``, ``ffi_stem`` list."""
+    npz_p = os.path.join(output_dir, f"epsf_r{round_id}_smooth.npz")
+    if not os.path.isfile(npz_p):
+        raise FileNotFoundError(f"No smoothed ePSF at {npz_p}")
+    z = np.load(npz_p, allow_pickle=True)
+    try:
+        stack = np.asarray(z["stack"])
+        if "ffi_stem" not in z.files:
+            raise ValueError(f"{npz_p!r} missing required array 'ffi_stem'")
+        ffi_stem = [str(x) for x in z["ffi_stem"].tolist()]
     finally:
         z.close()
     return stack, ffi_stem
@@ -576,7 +712,7 @@ def fit_epsf_all_frames(diff_paths: list,
     -------
     epsf_stack  : ndarray (n_frames, n_tiles, over_size²)
     tile_centers: list of (cx, cy) [same for all frames — from first valid frame]
-    ffi_stems   : list of str — stem per ``diff_paths`` row (axis-0 identity)
+    ffi_stems   : list of str — ``tess<digits>`` product id per row (axis-0 identity)
     epsf_ok     : list of bool — True if difference image loaded and ePSF fitted
     """
     over_size = 2 * cfg.psf_size + 1
@@ -585,7 +721,15 @@ def fit_epsf_all_frames(diff_paths: list,
 
     epsf_stack   = np.full((n_frames, n_tiles, over_size ** 2), np.nan)
     tile_centers = None
-    ffi_stems    = [Path(p).stem for p in diff_paths]
+
+    def _diff_path_to_pid(p: str) -> str:
+        stem = Path(str(p)).stem
+        parsed = parse_workspace_frame_stem(stem)
+        if parsed is not None:
+            return parsed[0]
+        return tess_product_id_from_ffi_path(stem) or stem
+
+    ffi_stems    = [_diff_path_to_pid(p) for p in diff_paths]
     epsf_ok      = []
 
     for i, diff_path in enumerate(diff_paths):

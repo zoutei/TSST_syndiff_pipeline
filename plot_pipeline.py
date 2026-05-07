@@ -93,7 +93,7 @@ def write_background_removal_animation(
     Full_n = bkg_smooth_r1.shape[0]
     btjd = None
     try:
-        from .temporal_smooth import btjd_for_hotpants_order
+        from .background import btjd_for_hotpants_order
 
         if wcs_table is not None and len(hotpants_results):
             btjd = btjd_for_hotpants_order(wcs_table, hotpants_results)

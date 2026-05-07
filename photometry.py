@@ -4,6 +4,11 @@ photometry.py
 ``forced_photometry`` pipeline stage — forced PSF photometry on difference images.
 When ``cfg.n_jobs`` > 1, cutout I/O and per-epoch ``psf_flux`` use joblib **loky**
 (process pool); use ``n_jobs: 1`` for a fully serial run.
+
+**FITS inputs:** Multi-extension files may include extension ``NOISE`` (per-pixel
+ERROR, treated like TESSreduce ``ecut``: the fitter uses ``residual² / error``).
+When absent, photometry uses unit ``error`` (same as TESSreduce ``use_error_image=False``
+with flat weights).
 Supports two modes:
   • 'epsf' — use the fitted empirical ePSF (EpsfLocator wrapper)
   • 'prf'  — use the official TESS PRF (TESS_PRF from the PRF package)
@@ -32,6 +37,118 @@ from scipy.signal import fftconvolve
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 log = logging.getLogger(__name__)
+
+
+def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[np.ndarray]]:
+    """
+    Load PRIMARY difference image and optional per-pixel ERROR map (same role as
+    TESSreduce ``ecut`` / ``flux_err`` for weighting).
+
+    Looks for extension ``NOISE``; if not found but a second HDU exists, uses HDU 1.
+    Shape mismatch returns ``None`` for the error array.
+    """
+    with fits.open(path, memmap=True) as hdul:
+        data = np.asarray(hdul[0].data, dtype=np.float64)
+        noise: Optional[np.ndarray] = None
+        if len(hdul) > 1:
+            for hdu in hdul[1:]:
+                if hdu.data is None:
+                    continue
+                name = str(hdu.header.get("EXTNAME", "")).strip().upper()
+                if name == "NOISE":
+                    noise = np.asarray(hdu.data, dtype=np.float64)
+                    break
+            if noise is None and hdul[1].data is not None:
+                noise = np.asarray(hdul[1].data, dtype=np.float64)
+        if noise is not None and noise.shape != data.shape:
+            log.warning(
+                "NOISE shape %s != PRIMARY %s in %s; ignoring NOISE for photometry",
+                noise.shape,
+                data.shape,
+                path,
+            )
+            noise = None
+    return data, noise
+
+
+def per_frame_target_crop_xy(
+    wcs_table: pd.DataFrame,
+    ra: float,
+    dec: float,
+    crop_bounds: dict,
+) -> np.ndarray:
+    """
+    For each manifest row, open that FFI and map (ra, dec) to **crop-local** (x, y).
+
+    Uses the same column as the pipeline manifest: ``path`` or ``filename``.
+    Rows with missing paths or WCS failures get ``(nan, nan)``.
+    """
+    from astropy import units as u
+    from astropy.coordinates import SkyCoord
+    from astropy.wcs import WCS
+
+    path_col = "path" if "path" in wcs_table.columns else "filename"
+    coord_rd = SkyCoord(ra=float(ra) * u.deg, dec=float(dec) * u.deg)
+    x_min = float(crop_bounds["x_min"])
+    y_min = float(crop_bounds["y_min"])
+    n = len(wcs_table)
+    out = np.full((n, 2), np.nan, dtype=np.float64)
+    for i in range(n):
+        p = wcs_table.iloc[i].get(path_col)
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            continue
+        ps = str(p).strip()
+        if not ps or not os.path.isfile(ps):
+            continue
+        try:
+            with fits.open(ps, memmap=True) as hdul:
+                wcs = WCS(hdul[1].header, fix=False)
+                x_ffi, y_ffi = wcs.world_to_pixel(coord_rd)
+            out[i, 0] = float(x_ffi) - x_min
+            out[i, 1] = float(y_ffi) - y_min
+        except Exception as exc:
+            log.debug("  per_frame_target_crop_xy row %s: %s", i, exc)
+    return out
+
+
+def _tessreduce_error_plane(
+    ecut: Optional[np.ndarray],
+    shape: tuple[int, ...],
+) -> np.ndarray:
+    """
+    Per-pixel ``error`` for ``create_psf.psf_flux`` / ``psf_position``.
+
+    TESSreduce passes ``flux_err`` (or flat 0.1) **without squaring**; the
+    objective is ``sum((residual)**2 / error)``. Non-finite or ~zero entries
+    fall back to 1.0 to avoid division blow-ups.
+    """
+    if ecut is None:
+        return np.ones(shape, dtype=np.float64)
+    e = np.asarray(ecut, dtype=np.float64)
+    e = np.where(np.isfinite(e), np.abs(e), 1.0)
+    e = np.where(e > 1e-30, e, 1.0)
+    return e
+
+
+def _tessreduce_brightest_weight(
+    cut: np.ndarray,
+    ecut: Optional[np.ndarray],
+) -> float:
+    """
+    TESSreduce ``snap='brightest'`` weights frames by ``|sum(cut/ecut)|`` in a 3×3
+    patch at the stamp center (target is centered in the extracted cutout).
+    """
+    h, w = cut.shape
+    hc, wc = h // 2, w // 2
+    y0, y1 = max(0, hc - 1), min(h, hc + 2)
+    x0, x1 = max(0, wc - 1), min(w, wc + 2)
+    patch = cut[y0:y1, x0:x1]
+    if ecut is None:
+        denom = np.ones_like(patch, dtype=np.float64)
+    else:
+        denom = ecut[y0:y1, x0:x1]
+    denom = _tessreduce_error_plane(denom, patch.shape)
+    return float(np.abs(np.nansum(patch / denom)))
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -386,27 +503,35 @@ def _locator_from_bundle(bundle: tuple) -> Any:
 
 def _forced_phot_cutout_worker(
     task: Tuple[int, Optional[str], float, float, int],
-) -> Tuple[int, Optional[np.ndarray], float]:
-    """Load one diff FITS and extract cutout; return (index, cutout_or_none, snr)."""
+) -> Tuple[int, Optional[np.ndarray], float, Optional[np.ndarray]]:
+    """Load one diff FITS; return (index, cutout, tess_brightest_weight, ecut_cut)."""
     i, path, target_x, target_y, phot_cutout_size = task
     if path is None or not os.path.exists(path):
-        return i, None, -np.inf
+        return i, None, -1.0, None
+    if not (np.isfinite(target_x) and np.isfinite(target_y)):
+        return i, None, -1.0, None
     try:
-        img = fits.getdata(path).astype(np.float64)
-        cut = _extract_cutout(img, target_x, target_y, phot_cutout_size)
+        data, sigma_full = read_diff_primary_and_noise_sigma(path)
+        cut = _extract_cutout(data, float(target_x), float(target_y), phot_cutout_size)
+        sigma_cut = None
+        if sigma_full is not None:
+            sigma_cut = _extract_cutout(
+                sigma_full, float(target_x), float(target_y), phot_cutout_size
+            )
     except Exception as exc:
         log.warning("  Cannot read %s: %s", path, exc)
-        return i, None, -np.inf
+        return i, None, -1.0, None
     finite = cut[np.isfinite(cut)]
     if len(finite) == 0:
-        return i, cut, -np.inf
-    snr = float(np.nansum(cut) / max(np.nanstd(cut), 1e-12))
-    return i, cut, snr
+        return i, cut, -1.0, sigma_cut
+    tw = _tessreduce_brightest_weight(cut, sigma_cut)
+    return i, cut, tw, sigma_cut
 
 
 def _forced_phot_flux_worker(
     task: Tuple[
         int,
+        Optional[np.ndarray],
         Optional[np.ndarray],
         float,
         float,
@@ -426,6 +551,7 @@ def _forced_phot_flux_worker(
     (
         i,
         cut,
+        sigma_cut,
         source_x,
         source_y,
         locator_bundle,
@@ -447,7 +573,7 @@ def _forced_phot_flux_worker(
     psf_obj = create_psf(prf, phot_cutout_size)
     psf_obj.source_x = float(source_x)
     psf_obj.source_y = float(source_y)
-    error = np.ones_like(cut)
+    error = _tessreduce_error_plane(sigma_cut, cut.shape)
     try:
         psf_obj.psf_flux(
             cut,
@@ -468,15 +594,38 @@ def _forced_phot_flux_worker(
     }
 
 
+def _sigma_clipped_mean(values: np.ndarray, *, n_sigma: float) -> float:
+    """Mean of finite ``values`` after rejecting points outside mean ± n_sigma·std."""
+    v = np.asarray(values, dtype=float)
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        return float(np.nan)
+    if v.size == 1:
+        return float(v[0])
+    mu = float(np.nanmean(v))
+    sig = float(np.nanstd(v))
+    if not np.isfinite(sig) or sig <= 0.0:
+        return mu
+    lo, hi = mu - n_sigma * sig, mu + n_sigma * sig
+    clipped = v[(v >= lo) & (v <= hi)]
+    if clipped.size == 0:
+        return float(np.nanmean(v))
+    return float(np.nanmean(clipped))
+
+
 def _centered_time_average_btjd(
     btjd_sorted: np.ndarray,
     flux_sorted: np.ndarray,
     *,
     window_hours: float,
+    n_sigma_clip: Optional[float] = 3.0,
 ) -> np.ndarray:
     """
-    For each sorted epoch ``t``, return the nanmean of ``flux`` over samples with
+    For each sorted epoch ``t``, return the mean of ``flux`` over samples with
     ``|btjd - t| <= window_hours/2`` (centered moving average in BTJD days).
+
+    When ``n_sigma_clip`` is not None, each window uses a mean with points outside
+    ``mean ± n_sigma_clip·std`` removed first (3σ clipping by default).
     """
     t = np.asarray(btjd_sorted, dtype=float)
     f = np.asarray(flux_sorted, dtype=float)
@@ -487,7 +636,11 @@ def _centered_time_average_btjd(
     out = np.empty(n, dtype=float)
     for i in range(n):
         sel = (t >= t[i] - half_days) & (t <= t[i] + half_days)
-        out[i] = np.nanmean(f[sel])
+        vals = f[sel]
+        if n_sigma_clip is None:
+            out[i] = np.nanmean(vals)
+        else:
+            out[i] = _sigma_clipped_mean(vals, n_sigma=float(n_sigma_clip))
     return out
 
 
@@ -498,13 +651,15 @@ def write_lightcurve_diagnostic_plot(
     dpi: int = 150,
     title_line: str = "",
     smooth_window_hours: float = 6.0,
+    smooth_n_sigma_clip: Optional[float] = 3.0,
     zoom_ylim_pad_frac: float = 0.08,
     png_path: Optional[str] = None,
 ) -> Optional[str]:
     """
     Write ``lightcurve_control.png``: BTJD vs flux with ``eflux`` error bars, a
-    centered moving average (default 6 h), and a second panel with the same series
-    but y-limits from the min/max of that average (plus a small margin).
+    centered moving average (default 6 h) with optional 3σ rejection inside each
+    time window before averaging, and a second panel with the same series but
+    y-limits from the min/max of that average (plus a small margin).
     """
     try:
         import matplotlib.pyplot as plt
@@ -534,10 +689,20 @@ def write_lightcurve_diagnostic_plot(
     xs = x[order]
     ys = y[order]
     yers = yerr[order]
-    y_smooth = _centered_time_average_btjd(xs, ys, window_hours=smooth_window_hours)
+    y_smooth = _centered_time_average_btjd(
+        xs,
+        ys,
+        window_hours=smooth_window_hours,
+        n_sigma_clip=smooth_n_sigma_clip,
+    )
 
     n = int(ok.sum())
-    subtitle = f"{n} epochs · {smooth_window_hours:g} h centered mean"
+    clip_note = (
+        f" · {smooth_n_sigma_clip:g}σ-clip mean"
+        if smooth_n_sigma_clip is not None
+        else ""
+    )
+    subtitle = f"{n} epochs · {smooth_window_hours:g} h centered mean{clip_note}"
 
     fig, (ax_top, ax_bot) = plt.subplots(
         2,
@@ -568,7 +733,11 @@ def write_lightcurve_diagnostic_plot(
             "-",
             color="tab:blue",
             lw=1.8,
-            label=f"{smooth_window_hours:g} h mean",
+            label=(
+                f"{smooth_window_hours:g} h mean ({smooth_n_sigma_clip:g}σ clip)"
+                if smooth_n_sigma_clip is not None
+                else f"{smooth_window_hours:g} h mean"
+            ),
             zorder=3,
         )
         ax.set_ylabel("Difference-image flux")
@@ -583,8 +752,13 @@ def write_lightcurve_diagnostic_plot(
     _plot_panel(ax_top, set_title=True)
     _plot_panel(ax_bot, set_title=False)
     ax_bot.set_xlabel("BTJD")
+    zoom_src = (
+        f"{smooth_window_hours:g} h mean (σ-clip) min/max"
+        if smooth_n_sigma_clip is not None
+        else f"{smooth_window_hours:g} h mean min/max"
+    )
     ax_bot.set_title(
-        f"Zoom: y-range from {smooth_window_hours:g} h mean min/max",
+        f"Zoom: y-range from {zoom_src}",
         fontsize=10,
         color="0.35",
     )
@@ -614,88 +788,109 @@ def write_lightcurve_diagnostic_plot(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_forced_photometry(
-    diff_final_paths: list,
-    target_x: float,
-    target_y: float,
+    diff_paths: list,
+    target_xy: np.ndarray,
     epsf_r2_smooth: np.ndarray,
     tile_centers: list,
     wcs_table: pd.DataFrame,
     crop_bounds: dict,
     cfg,
     output_dir: str,
+    *,
+    ref_frame_index: Optional[int] = None,
     lightcurve_plot_path: Optional[str] = None,
     plot_title_suffix: Optional[str] = None,
+    lightcurve_csv_filename: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Perform forced PSF photometry on all final difference images.
+    Forced PSF photometry on difference-image FITS (SynDiff pipeline).
 
-    Parameters
-    ----------
-    diff_final_paths : list of str (or None) — FITS paths from final_diff.py
-    target_x, target_y : float  (crop-local pixel coordinates of the target)
-    epsf_r2_smooth   : ndarray (n_frames, n_tiles, over_size²) or
-                       (n_tiles, over_size²) if a single group ePSF is passed
-    tile_centers     : list of (cx, cy)
-    wcs_table        : pd.DataFrame (for btjd and group_id lookup)
-    crop_bounds      : dict
-    cfg              : SynDiffConfig (``n_jobs``: parallel cutouts + flux when > 1)
-    output_dir       : str
-    lightcurve_plot_path : str or None
-        If set, ``lightcurve_control`` PNG is written to this path (e.g. under
-        ``output_dir / pipeline_plots_dir``). If None, PNG is
-        ``{output_dir}/lightcurve_control.png``.
-    plot_title_suffix : str or None
-        When ``cfg.pipeline_plots`` is True, appended to the diagnostic figure title
-        (e.g. pipeline ``forced_photometry`` workspace ``output`` label).
+    Per-epoch **cutouts** use rows of ``target_xy`` (crop-local x, y), e.g. from
+    each FFI WCS in the frame manifest. The PSF locator (PRF / ePSF) is built at
+    the **median** crop position across epochs.
 
-    Returns
-    -------
-    pd.DataFrame with columns: btjd, flux, eflux, filename, group_id
+    **Error / noise:** Same convention as TESSreduce ``create_psf``: the optimizer
+    uses ``sum((residual)**2 / error)`` where ``error`` is the ``NOISE`` HDU
+    (equivalent to ``ecut`` / ``flux_err``) when present, or ones otherwise.
+
+    **snap** (``cfg.phot_snap``): ``brightest`` uses TESSreduce's
+    ``|sum(cut/ecut)|`` in a central 3×3 patch to pick the reference epoch;
+    ``ref`` fits position on ``ref_frame_index``; ``fixed`` uses (0, 0) offsets
+    only.
     """
+    csv_name = lightcurve_csv_filename or "lightcurve.csv"
+    if os.path.basename(csv_name) != csv_name or ".." in csv_name:
+        raise ValueError(
+            f"lightcurve_csv_filename must be a plain basename, got {csv_name!r}"
+        )
+    txy = np.asarray(target_xy, dtype=np.float64)
+    if txy.ndim != 2 or txy.shape[1] != 2:
+        raise ValueError("target_xy must have shape (n_epochs, 2)")
+    n_epochs = len(diff_paths)
+    if txy.shape[0] != n_epochs:
+        raise ValueError(
+            f"target_xy length {txy.shape[0]} != len(diff_paths) {n_epochs}"
+        )
+
     over_size = 2 * cfg.psf_size + 1
 
-    # Use group-median ePSF if stack is 3D; otherwise expect (n_tiles, n_pix)
     if epsf_r2_smooth.ndim == 3:
-        # Use median across all frames
         group_epsf = np.nanmedian(epsf_r2_smooth, axis=0)
     else:
         group_epsf = epsf_r2_smooth
 
-    # Build PSF locator
+    tx_med = float(np.nanmedian(txy[:, 0]))
+    ty_med = float(np.nanmedian(txy[:, 1]))
+    if not (np.isfinite(tx_med) and np.isfinite(ty_med)):
+        raise ValueError(
+            "forced photometry: need at least one finite (x, y) in target_xy"
+        )
+
     prf_or_epsf = build_psf_kernel(
         cfg, group_epsf, tile_centers,
-        target_x, target_y, over_size, crop_bounds,
+        tx_med, ty_med, over_size, crop_bounds,
     )
     psf_obj = create_psf(prf_or_epsf, cfg.phot_cutout_size)
 
     n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
-    n_epochs = len(diff_final_paths)
     parallel = n_jobs != 1 and n_epochs > 1
+    snap = str(getattr(cfg, "phot_snap", "brightest") or "brightest").lower()
 
-    # Snap: find best S/N frame to determine sub-pixel position (cutouts)
     best_idx = None
-    best_snr = -np.inf
+    best_tw = -1.0
     cutouts: list = []
+    sigma_cutouts: list = []
 
     if not parallel:
-        for i, path in enumerate(diff_final_paths):
+        for i, path in enumerate(diff_paths):
             if path is None or not os.path.exists(path):
                 cutouts.append(None)
+                sigma_cutouts.append(None)
+                continue
+            tx_i, ty_i = float(txy[i, 0]), float(txy[i, 1])
+            if not (np.isfinite(tx_i) and np.isfinite(ty_i)):
+                cutouts.append(None)
+                sigma_cutouts.append(None)
                 continue
             try:
-                img = fits.getdata(path).astype(np.float64)
-                cut = _extract_cutout(img, target_x, target_y, cfg.phot_cutout_size)
+                data, sigma_full = read_diff_primary_and_noise_sigma(path)
+                cut = _extract_cutout(data, tx_i, ty_i, cfg.phot_cutout_size)
+                sigma_cut = None
+                if sigma_full is not None:
+                    sigma_cut = _extract_cutout(
+                        sigma_full, tx_i, ty_i, cfg.phot_cutout_size
+                    )
             except Exception as exc:
                 log.warning("  Cannot read %s: %s", path, exc)
                 cutouts.append(None)
+                sigma_cutouts.append(None)
                 continue
             cutouts.append(cut)
-
-            finite = cut[np.isfinite(cut)]
-            if len(finite) > 0:
-                snr = np.nansum(cut) / max(np.nanstd(cut), 1e-12)
-                if snr > best_snr:
-                    best_snr = snr
+            sigma_cutouts.append(sigma_cut)
+            if cut is not None:
+                tw = _tessreduce_brightest_weight(cut, sigma_cut)
+                if tw > best_tw:
+                    best_tw = tw
                     best_idx = i
     else:
         log.info(
@@ -704,55 +899,85 @@ def run_forced_photometry(
             n_epochs,
         )
         cut_tasks = [
-            (i, path, target_x, target_y, cfg.phot_cutout_size)
-            for i, path in enumerate(diff_final_paths)
+            (i, path, float(txy[i, 0]), float(txy[i, 1]), cfg.phot_cutout_size)
+            for i, path in enumerate(diff_paths)
         ]
         cut_results = Parallel(n_jobs=n_jobs, backend="loky")(
             delayed(_forced_phot_cutout_worker)(t) for t in cut_tasks
         )
         cut_results.sort(key=lambda r: r[0])
         cutouts = [None] * n_epochs
-        for i, cut, snr in cut_results:
+        sigma_cutouts = [None] * n_epochs
+        for i, cut, tw, sigc in cut_results:
             cutouts[i] = cut
-            if cut is not None and snr > best_snr:
-                best_snr = snr
+            sigma_cutouts[i] = sigc
+            if cut is not None and tw > best_tw:
+                best_tw = tw
                 best_idx = i
 
-    # Determine sub-pixel position from best frame
-    if best_idx is not None and cfg.phot_snap == "brightest":
-        best_cut = cutouts[best_idx]
-        error = np.ones_like(best_cut)
-        psf_obj.source()
-        psf_obj.psf_position(best_cut, error=error)
-        log.info(
-            "  PSF position fit on frame %s: dx=%.3f, dy=%.3f",
-            best_idx,
-            psf_obj.source_x,
-            psf_obj.source_y,
+    psf_obj.source()
+    if snap == "ref":
+        ri = ref_frame_index
+        if (
+            ri is not None
+            and 0 <= ri < len(cutouts)
+            and cutouts[ri] is not None
+        ):
+            rc = cutouts[ri]
+            psf_obj.psf_position(
+                rc, error=_tessreduce_error_plane(sigma_cutouts[ri], rc.shape)
+            )
+            log.info(
+                "  PSF position fit on ref frame %s: dx=%.3f, dy=%.3f",
+                ri,
+                psf_obj.source_x,
+                psf_obj.source_y,
+            )
+        else:
+            log.warning(
+                "  phot_snap='ref' but ref cutout unavailable; using default (0,0) offsets"
+            )
+    elif snap == "brightest":
+        if best_idx is not None and cutouts[best_idx] is not None:
+            bc = cutouts[best_idx]
+            psf_obj.psf_position(
+                bc,
+                error=_tessreduce_error_plane(
+                    sigma_cutouts[best_idx], bc.shape
+                ),
+            )
+            log.info(
+                "  PSF position fit on brightest frame %s: dx=%.3f, dy=%.3f",
+                best_idx,
+                psf_obj.source_x,
+                psf_obj.source_y,
+            )
+    elif snap != "fixed":
+        log.warning(
+            "  Unknown phot_snap=%r; using 'fixed' (source at stamp centre only)",
+            snap,
         )
-    else:
-        psf_obj.source()
 
     btjd_col = (
         wcs_table["btjd"].values
         if "btjd" in wcs_table.columns
-        else np.full(len(diff_final_paths), np.nan)
+        else np.full(n_epochs, np.nan)
     )
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
-        else np.zeros(len(diff_final_paths), int)
+        else np.zeros(n_epochs, int)
     )
 
     locator_bundle = _locator_bundle_for_parallel(
-        prf_or_epsf, cfg, crop_bounds, target_x, target_y
+        prf_or_epsf, cfg, crop_bounds, tx_med, ty_med
     )
     sx = float(psf_obj.source_x)
     sy = float(psf_obj.source_y)
 
     if not parallel:
         records = []
-        for i, (path, cut) in enumerate(zip(diff_final_paths, cutouts)):
+        for i, (path, cut) in enumerate(zip(diff_paths, cutouts)):
             if cut is None:
                 records.append(
                     {
@@ -765,7 +990,7 @@ def run_forced_photometry(
                 )
                 continue
 
-            error = np.ones_like(cut)
+            error = _tessreduce_error_plane(sigma_cutouts[i], cut.shape)
             try:
                 psf_obj.psf_flux(
                     cut,
@@ -790,7 +1015,7 @@ def run_forced_photometry(
     else:
         log.info("  forced_photometry: psf_flux n_jobs=%s (loky)", n_jobs)
         flux_tasks = []
-        for i, path in enumerate(diff_final_paths):
+        for i, path in enumerate(diff_paths):
             cut = cutouts[i]
             btjd = float(btjd_col[i]) if i < len(btjd_col) else float(np.nan)
             gid = int(gid_col[i]) if i < len(gid_col) else -1
@@ -798,6 +1023,7 @@ def run_forced_photometry(
                 (
                     i,
                     cut,
+                    sigma_cutouts[i],
                     sx,
                     sy,
                     locator_bundle,
@@ -817,7 +1043,7 @@ def run_forced_photometry(
     lc_df = pd.DataFrame(records)
 
     os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, "lightcurve.csv")
+    out_path = os.path.join(output_dir, csv_name)
     lc_df.to_csv(out_path, index=False)
     log.info(f"Light curve saved to {out_path}  ({len(lc_df)} epochs)")
 

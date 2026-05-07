@@ -1,0 +1,4 @@
+.cursor/
+.vscode/
+__pycache__/
+example/output/

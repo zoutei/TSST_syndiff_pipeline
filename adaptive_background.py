@@ -1,7 +1,10 @@
 """
 Adaptive median-filter background smoother for TESS FFI background cubes.
 
-Vendored from TESSreduce ``tessreduce/adaptive_background.py`` (dev branch).
+Vendored verbatim from:
+  TESSreduce/tessreduce/adaptive_background.py
+(SynDiff does not depend on the tessreduce package; this file is copied from the
+in-repo TESSreduce subtree.)
 
 Public API
 ----------
@@ -16,9 +19,6 @@ get_tessvectors(sector, camera, data_path=None)
 adaptive_medfilt_3d(data, time, ...)
     Low-level 3-D adaptive median filter. Can be used directly with
     pre-fetched angle arrays or without angles.
-
-savgol_smooth_3d(data, time, ...)
-    Savitzky–Golay smoothing along time (gap-aware); optional outlier rejection.
 """
 
 import os
@@ -51,9 +51,9 @@ def get_tessvectors(sector, camera, data_path=None):
 
     Returns
     -------
-    pandas.DataFrame or None
+    pandas.DataFrame
         Columns include ``MidTime`` (BTJD), ``Earth_Camera_Angle``,
-        ``Moon_Camera_Angle``. ``None`` if the remote download fails.
+        ``Moon_Camera_Angle``.
     """
     fname = _TESSVECTORS_FNAME.format(sector=sector, camera=camera)
 
@@ -89,27 +89,6 @@ def _make_odd(x):
     return x if x % 2 == 1 else x + 1
 
 
-def _clamp_time_median_size(w: int, t_len: int) -> int:
-    """
-    Odd window along time (axis 0) for ``median_filter``, never longer than the
-    segment. SciPy can misbehave if ``size[0] > t_len`` for short stacks.
-    """
-    w = int(w)
-    if t_len < 1:
-        return 1
-    cap = t_len if (t_len % 2 == 1) else t_len - 1
-    cap = max(cap, 1)
-    w = min(w, cap)
-    if w < 1:
-        return 1
-    if w < 3:
-        return 1
-    if w % 2 == 0:
-        w -= 1
-    w = min(w, cap)
-    return max(w, 1)
-
-
 def _get_segments(time, gap_thresh):
     dt = np.diff(time)
     median_dt = np.median(dt)
@@ -133,9 +112,9 @@ def _block_reduce(arr, bs):
 def _upsample_nearest(arr, X, Y, bs):
     """Nearest-neighbour upsample (T, Xd, Yd) back to (T, X, Y)."""
     up = np.repeat(np.repeat(arr, bs, axis=1), bs, axis=2)
-    while up.shape[1] < X:
+    if up.shape[1] < X:
         up = np.concatenate([up, up[:, -1:, :]], axis=1)
-    while up.shape[2] < Y:
+    if up.shape[2] < Y:
         up = np.concatenate([up, up[:, :, -1:]], axis=2)
     return up[:, :X, :Y]
 
@@ -165,6 +144,7 @@ def adaptive_medfilt_3d(
     moon_angle=None,
     scatter_angle_thresh=50.0,
     block_size=1,
+    sigma_clip=5.0,
 ):
     """Adaptive median filter for a (T, X, Y) background cube.
 
@@ -400,11 +380,17 @@ def adaptive_medfilt_3d(
         seg_levels = np.unique(seg_wins)
 
         def _smooth_seg(w, seg=seg_data):
-            w_use = _clamp_time_median_size(int(w), seg.shape[0])
-            return w, median_filter(seg, size=(w_use, 1, 1), mode='reflect')
+            return w, median_filter(seg, size=(w, 1, 1), mode='reflect')
 
         for w, smoothed_w in Parallel(n_jobs=n_jobs)(delayed(_smooth_seg)(w) for w in seg_levels):
             result[s:e][seg_wins == w] = smoothed_w[seg_wins == w]
+
+    if sigma_clip is not None:
+        frame_resid = np.nanmedian(np.abs(result - data_filled), axis=(1, 2))
+        typical = np.nanmedian(frame_resid)
+        mad_frame = np.nanmedian(np.abs(frame_resid - typical))
+        frame_outlier = frame_resid > typical + sigma_clip * 1.4826 * mad_frame
+        result[frame_outlier] = data_filled[frame_outlier]
 
     result[nan_mask] = np.nan
     return result, windows, variability, windows_pre_smooth
@@ -412,7 +398,7 @@ def adaptive_medfilt_3d(
 
 # ── Savitzky-Golay smoother ────────────────────────────────────────────────────
 
-def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorder=2, sigma_clip=5.0):
+def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyorder=2, sigma_clip=5.0):
     """Apply a Savitzky-Golay filter along the time axis of a (T, X, Y) cube.
 
     Smoothing is applied independently per segment (gaps are not crossed).
@@ -425,8 +411,9 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
     data : array (T, X, Y)
     time : array (T,), optional
     gap_thresh : float
-    window_length : int
+    window_length : int or None
         Must be odd; reduced automatically if shorter than a segment.
+        If None (default), computed from the cadence to span 6 hours.
     polyorder : int
     sigma_clip : float
         Per-pixel frames more than sigma_clip * MAD above the median are
@@ -463,6 +450,10 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
                 m = np.isfinite(ts)
                 seg_flat[:, j] = np.interp(t_seg, t_seg[m], ts[m])
 
+    if window_length is None:
+        cadence = float(np.median(np.diff(time))) if len(time) > 1 else 1.0
+        n_frames = max(3, int(round(0.25 / cadence)))  # 6 hours = 0.25 days
+        window_length = n_frames if n_frames % 2 == 1 else n_frames + 1
     wl = window_length if window_length % 2 == 1 else window_length + 1
 
     def _apply_savgol(arr):
@@ -486,7 +477,8 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
         resid_flat = resid.reshape(T, -1)
         mad = np.nanmedian(np.abs(resid_flat - np.nanmedian(resid_flat, axis=0)), axis=0)
         robust_std = 1.4826 * mad
-        outlier = resid_flat > sigma_clip * robust_std
+        # clip both positive and negative outliers
+        outlier = np.abs(resid_flat) > sigma_clip * robust_std
         data_filled2 = data_filled.copy().reshape(T, -1)
         data_filled2[outlier] = np.nan
         for s, e in segments:
@@ -505,6 +497,15 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=31, polyorde
         result = _apply_savgol(data_filled2)
     else:
         result = first_pass
+
+    # Per-frame fallback: if the whole frame deviates significantly from the
+    # smooth (i.e. the smooth has smeared a sharp scattered-light transition),
+    # restore the original unsmoothed value for that frame.
+    frame_resid = np.nanmedian(np.abs(result - data_filled), axis=(1, 2))
+    typical = np.nanmedian(frame_resid)
+    mad_frame = np.nanmedian(np.abs(frame_resid - typical))
+    frame_outlier = frame_resid > typical + sigma_clip * 1.4826 * mad_frame
+    result[frame_outlier] = data_filled[frame_outlier]
 
     result[nan_mask] = np.nan
     return result
@@ -571,7 +572,7 @@ class AdaptiveBackground:
     def smooth(
         self,
         method='savgol',
-        savgol_window=31,
+        savgol_window=None,
         savgol_polyorder=2,
         gap_thresh=3.0,
         w_min=3,
@@ -591,6 +592,7 @@ class AdaptiveBackground:
         window_smooth_size=1,
         scatter_angle_thresh=50.0,
         block_size=None,
+        sigma_clip=5.0,
     ):
         """Run background smoothing and store results on the instance.
 
@@ -647,6 +649,7 @@ class AdaptiveBackground:
                     moon_angle=self.moon_angle,
                     scatter_angle_thresh=scatter_angle_thresh,
                     block_size=block_size,
+                    sigma_clip=sigma_clip,
                 )
             )
         return self

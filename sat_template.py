@@ -6,8 +6,8 @@ using the smoothed empirical ePSF.  Two resolutions are produced:
 
   • Native-resolution template at cfg.epsf_oversample (default 2×), used for
     subtraction in rough background and later Hotpants rounds.
-  • High-resolution template at cfg.high_res_os (default 9×), used in the
-    Fourier deconvolve/reconvolve step in final_diff.py.
+  • High-resolution template at cfg.high_res_os (default 9×), block-sum
+    downsampled to native pixels for storage and optional downstream use.
 
 Stamps are shifted, flux-scaled copies of the tiled empirical ePSF.
 """
@@ -178,8 +178,8 @@ def build_sat_template_highres(removed_stars_df: pd.DataFrame,
                                  high_res_os: int,
                                  over_size: int) -> np.ndarray:
     """
-    Build the high-resolution saturated-star template for the Fourier
-    deconvolve/reconvolve step in final_diff.py.
+    Build the high-resolution saturated-star template (oversampled canvas,
+    then block-sum downsampled to native resolution).
 
     The ePSF is zoomed from epsf_os → high_res_os before stamp placement,
     so the canvas is at resolution (ny*high_res_os, nx*high_res_os).
