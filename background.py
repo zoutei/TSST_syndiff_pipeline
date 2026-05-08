@@ -402,6 +402,7 @@ __all__ = [
     "save_background_stack",
     "btjd_for_hotpants_order",
     "adaptive_smooth_background",
+    "build_prf_kernel_for_par_psf_source_mask",
 ]
 
 
@@ -460,6 +461,7 @@ def tessreduce_style_background_spatial(
     residual_for_source_hunt: Optional[np.ndarray] = None,
     prf_kernel_2d: Optional[np.ndarray] = None,
     source_hunt_sigma: float = 5.0,
+    source_hunt_union_fits_path: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Spatial stages of ``TESSreduce.tessreduce.background()`` through
@@ -472,6 +474,9 @@ def tessreduce_style_background_spatial(
     -------
     bkg : ndarray (T, ny, nx)
     mask_out : ndarray — copy of ``mask`` after optional bit-8 update when ``calc_qe`` is False
+
+    If ``source_hunt`` is True and ``source_hunt_union_fits_path`` is set, writes a 2D FITS
+    float32 image (1 = masked as a source in at least one epoch, 0 = never) to that path.
     """
     if source_hunt and (
         residual_for_source_hunt is None or prf_kernel_2d is None
@@ -502,6 +507,23 @@ def tessreduce_style_background_spatial(
             parallel=parallel,
             num_cores=nj,
         ).astype(float)
+        if source_hunt_union_fits_path:
+            # par_psf_source_mask: 0 = source footprint, 1 = usable sky
+            union = np.any(sm < 0.5, axis=0)
+            parent = os.path.dirname(os.path.abspath(source_hunt_union_fits_path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            fits.writeto(
+                source_hunt_union_fits_path,
+                union.astype(np.float32),
+                overwrite=True,
+            )
+            log.info(
+                "  Wrote source-hunt union mask (%d of %d pixels) %s",
+                int(np.sum(union)),
+                int(union.size),
+                source_hunt_union_fits_path,
+            )
         sm[sm == 0] = np.nan
         m = sm * m
 
@@ -601,6 +623,41 @@ def tessreduce_style_background_spatial(
         mask_out = mask_arr | (new_sources.astype(mask_arr.dtype) * 8)
 
     return np.asarray(bkg, dtype=np.float32), mask_out
+
+
+def build_prf_kernel_for_par_psf_source_mask(cfg, crop_bounds: dict, ref_ffi_path: str):
+    """
+    11×11 PRF stamp for :func:`par_psf_source_mask`, matching
+    ``TESSreduce.tessreduce.tessreduce.psf_source_mask`` → ``prf.locate(5, 5, (11, 11))``.
+    """
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    try:
+        from PRF import TESS_PRF
+    except ImportError as exc:
+        raise ImportError(
+            "``bkg_source_hunt`` requires the ``PRF`` package "
+            "(``pip install PRF``). Same dependency as ``psf_type: prf``."
+        ) from exc
+
+    from .photometry import get_target_pixel_crop
+
+    ra, dec = cfg.target_ra, cfg.target_dec
+    if ra is None or dec is None:
+        raise ValueError(
+            "bkg_source_hunt requires config ``target_ra`` and ``target_dec`` "
+            "for TESS_PRF placement on the FFI."
+        )
+    with fits.open(ref_ffi_path, memmap=True) as hdul:
+        ref_wcs = WCS(hdul[1].header)
+    tx, ty = get_target_pixel_crop(ref_wcs, float(ra), float(dec), crop_bounds)
+    col_ffi = float(tx + crop_bounds["x_min"])
+    row_ffi = float(ty + crop_bounds["y_min"])
+    prf_obj = TESS_PRF(
+        int(cfg.camera), int(cfg.ccd), int(cfg.sector), col_ffi, row_ffi
+    )
+    return np.asarray(prf_obj.locate(5, 5, (11, 11)), dtype=np.float64)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -912,6 +969,27 @@ def _tqdm_iter(tasks: list, desc: str):
         return tasks
 
 
+def _assign_rough_slice_and_maybe_write_fits(
+    rough_stack: np.ndarray,
+    frame_index: int,
+    rough_bkg: Optional[np.ndarray],
+    *,
+    per_frame_fits_dir: Optional[str],
+    product_id: str,
+) -> None:
+    """Write ``rough_stack[i]`` and, if requested, ``{stem}.fits`` under ``per_frame_fits_dir``."""
+    if rough_bkg is not None:
+        rough_stack[frame_index] = rough_bkg
+    if per_frame_fits_dir and rough_bkg is not None and product_id:
+        label = workspace_label_from_dir(per_frame_fits_dir)
+        stem = workspace_frame_stem(product_id, label)
+        fits.writeto(
+            os.path.join(per_frame_fits_dir, f"{stem}.fits"),
+            np.asarray(rough_bkg, dtype=np.float32),
+            overwrite=True,
+        )
+
+
 def background_loop_streaming(
     ffi_paths: Sequence[Union[str, Path]],
     diff_dir: str,
@@ -925,8 +1003,14 @@ def background_loop_streaming(
     n_jobs: int = 1,
     *,
     interpolate_per_frame: bool = True,
+    per_frame_fits_dir: Optional[str] = None,
 ) -> np.ndarray:
-    """Per-frame load + :func:`estimate_frame_background` (RAM-friendly)."""
+    """Per-frame load + :func:`estimate_frame_background` (RAM-friendly).
+
+    If ``per_frame_fits_dir`` is set, each successful frame's rough map is written to
+    ``{stem}.fits`` as soon as that frame finishes (completion order may differ from
+    time order when ``n_jobs`` > 1).
+    """
     ffi_paths = list(ffi_paths)
     n_frames = len(ffi_paths)
     if n_frames == 0:
@@ -973,21 +1057,74 @@ def background_loop_streaming(
             n_jobs_eff,
             n_frames,
         )
-        frame_results = _parallel_map_with_optional_tqdm(
-            (delayed(_load_and_rough_stream_worker)(t) for t in tasks),
-            n_frames,
-            "Rough bkg (load+est)",
-            n_jobs_eff,
-        )
-    else:
-        frame_results = [
-            _load_and_rough_stream_worker(t)
-            for t in _tqdm_iter(tasks, "Rough bkg (load+est)")
-        ]
+        delayed_calls = (delayed(_load_and_rough_stream_worker)(t) for t in tasks)
+        if per_frame_fits_dir:
+            log.info(
+                "  background_loop_streaming: writing per-frame FITS under %s as each worker finishes",
+                per_frame_fits_dir,
+            )
+            try:
+                gen = Parallel(
+                    n_jobs=n_jobs_eff, backend="loky", return_as="generator"
+                )(delayed_calls)
+            except TypeError:
+                log.debug(
+                    "joblib Parallel(return_as=...) unavailable; per-frame FITS after batch."
+                )
+                frame_results = Parallel(n_jobs=n_jobs_eff, backend="loky")(
+                    delayed_calls
+                )
+                for i, rough_bkg in frame_results:
+                    pid = product_ids[i] if i < len(product_ids) else ""
+                    _assign_rough_slice_and_maybe_write_fits(
+                        rough_bkg_stack,
+                        i,
+                        rough_bkg,
+                        per_frame_fits_dir=per_frame_fits_dir,
+                        product_id=pid,
+                    )
+            else:
+                try:
+                    from tqdm.auto import tqdm
 
-    for i, rough_bkg in frame_results:
-        if rough_bkg is not None:
-            rough_bkg_stack[i] = rough_bkg
+                    it = tqdm(
+                        gen,
+                        total=n_frames,
+                        desc="Rough bkg (load+est)",
+                        unit="frame",
+                    )
+                except ImportError:
+                    it = gen
+                for i, rough_bkg in it:
+                    pid = product_ids[i] if i < len(product_ids) else ""
+                    _assign_rough_slice_and_maybe_write_fits(
+                        rough_bkg_stack,
+                        i,
+                        rough_bkg,
+                        per_frame_fits_dir=per_frame_fits_dir,
+                        product_id=pid,
+                    )
+        else:
+            frame_results = _parallel_map_with_optional_tqdm(
+                delayed_calls,
+                n_frames,
+                "Rough bkg (load+est)",
+                n_jobs_eff,
+            )
+            for i, rough_bkg in frame_results:
+                if rough_bkg is not None:
+                    rough_bkg_stack[i] = rough_bkg
+    else:
+        for t in _tqdm_iter(tasks, "Rough bkg (load+est)"):
+            i, rough_bkg = _load_and_rough_stream_worker(t)
+            pid = product_ids[i] if i < len(product_ids) else ""
+            _assign_rough_slice_and_maybe_write_fits(
+                rough_bkg_stack,
+                i,
+                rough_bkg,
+                per_frame_fits_dir=per_frame_fits_dir,
+                product_id=pid,
+            )
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -1032,12 +1169,18 @@ def background_loop(
     residual_for_source_hunt: Optional[np.ndarray] = None,
     prf_kernel_2d: Optional[np.ndarray] = None,
     interpolate_legacy_per_frame: bool = True,
+    per_frame_fits_dir: Optional[str] = None,
+    source_hunt_union_fits_path: Optional[str] = None,
 ) -> np.ndarray:
     """
     Build rough background stack from Hotpants rows.
 
     When ``tessreduce_spatial`` is True, runs :func:`tessreduce_style_background_spatial`
     on the full flux cube. Otherwise per-frame :func:`estimate_frame_background`.
+
+    If ``per_frame_fits_dir`` is set and ``tessreduce_spatial`` is False, each successful
+    frame is written to ``{stem}.fits`` as soon as that frame finishes (when ``n_jobs``>1,
+    completion order may differ from frame index order).
     """
     n_frames = len(hotpants_results)
 
@@ -1051,6 +1194,17 @@ def background_loop(
             raise ValueError(
                 f"time_mjd length {len(time_mjd)} != flux cube T={flux_cube.shape[0]}"
             )
+        res_cube = residual_for_source_hunt
+        prf_k = prf_kernel_2d
+        if source_hunt:
+            if res_cube is None:
+                res_cube = np.asarray(flux_cube, dtype=np.float64)
+            if prf_k is None:
+                raise ValueError(
+                    "source_hunt=True requires prf_kernel_2d (pipeline supplies it via "
+                    "build_prf_kernel_for_par_psf_source_mask when "
+                    "bkg_source_hunt is enabled)."
+                )
         par = (n_jobs > 1) if parallel is None else bool(parallel)
         nj = max(1, int(n_jobs or 1))
         rough, _mask_out = tessreduce_style_background_spatial(
@@ -1071,8 +1225,9 @@ def background_loop(
             use_error_image=use_error_image,
             eflux=eflux,
             vector_path=vector_path,
-            residual_for_source_hunt=residual_for_source_hunt,
-            prf_kernel_2d=prf_kernel_2d,
+            residual_for_source_hunt=res_cube,
+            prf_kernel_2d=prf_k,
+            source_hunt_union_fits_path=source_hunt_union_fits_path,
         )
     else:
         shape = None
@@ -1100,21 +1255,77 @@ def background_loop(
                 n_jobs_eff,
                 n_frames,
             )
-            frame_results = _parallel_map_with_optional_tqdm(
-                (delayed(_background_frame_worker)(t) for t in tasks),
-                n_frames,
-                "Rough bkg (estimate)",
-                n_jobs_eff,
-            )
-        else:
-            frame_results = [
-                _background_frame_worker(t)
-                for t in _tqdm_iter(tasks, "Rough bkg (estimate)")
-            ]
+            delayed_calls = (delayed(_background_frame_worker)(t) for t in tasks)
+            if per_frame_fits_dir:
+                log.info(
+                    "  background_loop: writing per-frame FITS under %s as each worker finishes",
+                    per_frame_fits_dir,
+                )
+                try:
+                    gen = Parallel(
+                        n_jobs=n_jobs_eff, backend="loky", return_as="generator"
+                    )(delayed_calls)
+                except TypeError:
+                    log.debug(
+                        "joblib Parallel(return_as=...) unavailable; per-frame FITS after batch."
+                    )
+                    frame_results = Parallel(n_jobs=n_jobs_eff, backend="loky")(
+                        delayed_calls
+                    )
+                    for i, rough_bkg in frame_results:
+                        row = hotpants_results[i]
+                        pid = str(row.get("ffi_product_id") or "")
+                        _assign_rough_slice_and_maybe_write_fits(
+                            rough,
+                            i,
+                            rough_bkg,
+                            per_frame_fits_dir=per_frame_fits_dir,
+                            product_id=pid,
+                        )
+                else:
+                    try:
+                        from tqdm.auto import tqdm
 
-        for i, rough_bkg in frame_results:
-            if rough_bkg is not None:
-                rough[i] = rough_bkg
+                        it = tqdm(
+                            gen,
+                            total=n_frames,
+                            desc="Rough bkg (estimate)",
+                            unit="frame",
+                        )
+                    except ImportError:
+                        it = gen
+                    for i, rough_bkg in it:
+                        row = hotpants_results[i]
+                        pid = str(row.get("ffi_product_id") or "")
+                        _assign_rough_slice_and_maybe_write_fits(
+                            rough,
+                            i,
+                            rough_bkg,
+                            per_frame_fits_dir=per_frame_fits_dir,
+                            product_id=pid,
+                        )
+            else:
+                frame_results = _parallel_map_with_optional_tqdm(
+                    delayed_calls,
+                    n_frames,
+                    "Rough bkg (estimate)",
+                    n_jobs_eff,
+                )
+                for i, rough_bkg in frame_results:
+                    if rough_bkg is not None:
+                        rough[i] = rough_bkg
+        else:
+            for t in _tqdm_iter(tasks, "Rough bkg (estimate)"):
+                i, rough_bkg = _background_frame_worker(t)
+                row = hotpants_results[i]
+                pid = str(row.get("ffi_product_id") or "")
+                _assign_rough_slice_and_maybe_write_fits(
+                    rough,
+                    i,
+                    rough_bkg,
+                    per_frame_fits_dir=per_frame_fits_dir,
+                    product_id=pid,
+                )
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)

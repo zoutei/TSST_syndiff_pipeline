@@ -48,6 +48,7 @@ from .hotpants_runner import HotpantsWorkspaceDirs
 from .paths import (
     ADAPTIVE_BKG_STACK_BASENAME,
     BACKGROUND_STACK_NPZ_ARRAY_KEY,
+    BKG_SOURCE_HUNT_UNION_FITS_BASENAME,
     link_workspace_fits_master,
 )
 from .pipeline_context import PipelineInvocationContext
@@ -483,6 +484,24 @@ def _bkg_vector_path(cfg: SynDiffConfig) -> Optional[str]:
     if p is None or (isinstance(p, str) and not str(p).strip()):
         return None
     return str(p)
+
+
+def _optional_prf_kernel_for_bkg_source_hunt(
+    cfg: SynDiffConfig,
+    crop_bounds: Optional[dict],
+    ref_ffi_path: Optional[str],
+) -> Optional[np.ndarray]:
+    """PRF stamp for ``par_psf_source_mask`` when spatial TESSreduce background + source hunt."""
+    if not cfg.bkg_source_hunt or not cfg.bkg_tessreduce_spatial_pipeline:
+        return None
+    if crop_bounds is None or not ref_ffi_path:
+        raise RuntimeError(
+            "bkg_source_hunt with bkg_tessreduce_spatial_pipeline requires crop_bounds "
+            "and ref_ffi_path (complete wcs_grouping / resume with cluster metadata)."
+        )
+    return background.build_prf_kernel_for_par_psf_source_mask(
+        cfg, crop_bounds, ref_ffi_path
+    )
 
 
 def _add_hotpants_bkg_to_stack_inplace(
@@ -1039,6 +1058,13 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 processing_ffi_paths = _ffi_paths_for_processing(cfg)
             round_id = int(stage.get("round_id", 1))
             stream = bool(stage.get("stream_load_rough", False))
+            write_pf = bool(stage.get("write_per_frame_fits", True))
+            incremental_rough_fits = write_pf and not cfg.bkg_tessreduce_spatial_pipeline
+            sh_union_fits = (
+                os.path.join(out, BKG_SOURCE_HUNT_UNION_FITS_BASENAME)
+                if cfg.bkg_source_hunt and cfg.bkg_tessreduce_spatial_pipeline
+                else None
+            )
             if stream and cfg.bkg_tessreduce_spatial_pipeline:
                 raise RuntimeError(
                     "background_rough: stream_load_rough is incompatible with "
@@ -1062,6 +1088,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
                     interpolate_per_frame=cfg.bkg_interpolate,
+                    per_frame_fits_dir=out_ws if incremental_rough_fits else None,
                 )
                 hp_results = _hotpants_result_stems_for_ordering(
                     processing_ffi_paths, wcs_table, diff_dir
@@ -1077,7 +1104,12 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     processing_ffi_paths, wcs_table, diff_dir, hp_bkg_dir
                 )
                 log.info(
-                    "  background_rough: FITS load complete; starting per-frame rough stack"
+                    "  background_rough: FITS load complete; starting rough stack "
+                    "(TESSreduce spatial=%s)",
+                    cfg.bkg_tessreduce_spatial_pipeline,
+                )
+                prf_k = _optional_prf_kernel_for_bkg_source_hunt(
+                    cfg, crop_bounds, ref_ffi_path
                 )
                 rough = background.background_loop(
                     hotpants_results=hp_results,
@@ -1103,18 +1135,28 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     rerun_negative=cfg.bkg_rerun_negative,
                     rerun_diff=cfg.bkg_rerun_diff,
                     use_error_image=cfg.bkg_use_error_image,
+                    prf_kernel_2d=prf_k,
+                    per_frame_fits_dir=out_ws if incremental_rough_fits else None,
+                    source_hunt_union_fits_path=sh_union_fits,
                 )
-            if bool(stage.get("write_per_frame_fits", True)):
-                _write_per_frame_background_fits(
-                    out_ws,
-                    rough,
-                    hp_results,
-                    "{stem}.fits",
-                    row_ok=lambda r: bool(r.get("success")) and r.get("diff") is not None,
-                )
-                log.info(
-                    "  background_rough: wrote per-frame %s/*.fits", out_ws
-                )
+            if write_pf:
+                if incremental_rough_fits:
+                    log.info(
+                        "  background_rough: per-frame FITS written incrementally under %s",
+                        out_ws,
+                    )
+                else:
+                    _write_per_frame_background_fits(
+                        out_ws,
+                        rough,
+                        hp_results,
+                        "{stem}.fits",
+                        row_ok=lambda r: bool(r.get("success"))
+                        and r.get("diff") is not None,
+                    )
+                    log.info(
+                        "  background_rough: wrote per-frame %s/*.fits", out_ws
+                    )
             _maybe_write_background_gif(
                 cfg,
                 out,
@@ -1208,6 +1250,20 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 processing_ffi_paths = _ffi_paths_for_processing(cfg)
             round_id = int(stage.get("round_id", 1))
             stream = bool(stage.get("stream_load_rough", False))
+            write_pf_est = bool(stage.get("write_per_frame_fits", True))
+            incremental_rough_fits_est = (
+                write_pf_est and not cfg.bkg_tessreduce_spatial_pipeline
+            )
+            sh_union_fits = (
+                os.path.join(out, BKG_SOURCE_HUNT_UNION_FITS_BASENAME)
+                if cfg.bkg_source_hunt and cfg.bkg_tessreduce_spatial_pipeline
+                else None
+            )
+            if stream and cfg.bkg_tessreduce_spatial_pipeline:
+                raise RuntimeError(
+                    "background_estimate: stream_load_rough is incompatible with "
+                    "bkg_tessreduce_spatial_pipeline=True (full flux cube required)."
+                )
             if stream:
                 log.info(
                     "  background_estimate: stream_load_rough — load+estimate per frame "
@@ -1225,6 +1281,8 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     round_id=round_id,
                     recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
+                    interpolate_per_frame=cfg.bkg_interpolate,
+                    per_frame_fits_dir=out_ws if incremental_rough_fits_est else None,
                 )
                 hp_results = _hotpants_result_stems_for_ordering(
                     processing_ffi_paths, wcs_table, diff_dir
@@ -1240,27 +1298,59 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     processing_ffi_paths, wcs_table, diff_dir, hp_bkg_dir
                 )
                 log.info(
-                    "  background_estimate: FITS load complete; starting rough per-frame stack"
+                    "  background_estimate: FITS load complete; starting rough stack "
+                    "(TESSreduce spatial=%s)",
+                    cfg.bkg_tessreduce_spatial_pipeline,
+                )
+                prf_k = _optional_prf_kernel_for_bkg_source_hunt(
+                    cfg, crop_bounds, ref_ffi_path
                 )
                 rough = background.background_loop(
                     hotpants_results=hp_results,
                     mask=shared_mask,
                     output_dir=out_ws,
                     round_id=round_id,
+                    gauss_smooth=cfg.bkg_gauss_smooth,
                     recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
+                    tessreduce_spatial=cfg.bkg_tessreduce_spatial_pipeline,
+                    time_mjd=(
+                        _time_mjd_for_hotpants_rows(wcs_table, hp_results)
+                        if cfg.bkg_tessreduce_spatial_pipeline
+                        else None
+                    ),
+                    sector=int(cfg.sector),
+                    camera=int(cfg.camera),
+                    vector_path=_bkg_vector_path(cfg),
+                    calc_qe=cfg.bkg_calc_qe,
+                    strap_iso=cfg.bkg_strap_iso,
+                    source_hunt=cfg.bkg_source_hunt,
+                    interpolate=cfg.bkg_interpolate,
+                    rerun_negative=cfg.bkg_rerun_negative,
+                    rerun_diff=cfg.bkg_rerun_diff,
+                    use_error_image=cfg.bkg_use_error_image,
+                    prf_kernel_2d=prf_k,
+                    per_frame_fits_dir=out_ws if incremental_rough_fits_est else None,
+                    source_hunt_union_fits_path=sh_union_fits,
                 )
-            if bool(stage.get("write_per_frame_fits", True)):
-                _write_per_frame_background_fits(
-                    out_ws,
-                    rough,
-                    hp_results,
-                    "{stem}.fits",
-                    row_ok=lambda r: bool(r.get("success")) and r.get("diff") is not None,
-                )
-                log.info(
-                    "  background_estimate: wrote per-frame %s/*.fits", out_ws
-                )
+            if write_pf_est:
+                if incremental_rough_fits_est:
+                    log.info(
+                        "  background_estimate: per-frame FITS written incrementally under %s",
+                        out_ws,
+                    )
+                else:
+                    _write_per_frame_background_fits(
+                        out_ws,
+                        rough,
+                        hp_results,
+                        "{stem}.fits",
+                        row_ok=lambda r: bool(r.get("success"))
+                        and r.get("diff") is not None,
+                    )
+                    log.info(
+                        "  background_estimate: wrote per-frame %s/*.fits", out_ws
+                    )
             _maybe_write_background_gif(
                 cfg,
                 out,
@@ -1450,6 +1540,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     ref_frame_index=ref_idx,
                     lightcurve_plot_path=lc_plot_path,
                     plot_title_suffix=label_out,
+                    plot_source_label=lc_name or "primary",
                     lightcurve_csv_filename=csv_fname,
                 )
 
@@ -1464,7 +1555,6 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
 
     log.info("=" * 70)
     log.info("Config pipeline complete. Outputs: %s", out)
-
 
 def _load_group_epsf_from_dir(output_dir: str, subdir: str = "group_epsf") -> dict:
     d = {}
@@ -1500,3 +1590,4 @@ def _load_removed_stars_in_crop(
         & (df["y"] < ny)
     )
     return df[in_crop].copy().reset_index(drop=True)
+

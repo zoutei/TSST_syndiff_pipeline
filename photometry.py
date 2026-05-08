@@ -644,22 +644,89 @@ def _centered_time_average_btjd(
     return out
 
 
+def _robust_std_1d(x: np.ndarray) -> float:
+    """MAD-based robust scale (same construction as PRF LC comparison notebook)."""
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0:
+        return float("nan")
+    med = float(np.median(x))
+    mad = float(np.median(np.abs(x - med)))
+    return float(1.4826 * max(mad, 1e-12 * (1.0 + abs(med))))
+
+
+def _binned_sigma_clip_btjd(
+    btjd: np.ndarray,
+    flux: np.ndarray,
+    *,
+    bin_width_days: float,
+    sigma: float,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Bin by BTJD, σ-clip within each bin using median and MAD-scale robust std,
+    then average clipped fluxes / times per bin (matches
+    ``scripts/recipe_prf_lightcurve_compare.ipynb`` ``binned_sigma_clip``).
+    """
+    btjd = np.asarray(btjd, dtype=float)
+    flux = np.asarray(flux, dtype=float)
+    mask = np.zeros_like(flux, dtype=bool)
+    if btjd.size == 0:
+        return mask, np.array([]), np.array([])
+
+    tmin = float(np.nanmin(btjd))
+    tmax = float(np.nanmax(btjd))
+    if not np.isfinite(tmin) or not np.isfinite(tmax):
+        return mask, np.array([]), np.array([])
+
+    bins = np.arange(tmin, tmax + bin_width_days, bin_width_days)
+    inds = np.digitize(btjd, bins)
+
+    binned_avg_flux_list: list[float] = []
+    binned_avg_time_list: list[float] = []
+
+    for b in np.unique(inds):
+        in_bin = inds == b
+        if np.sum(in_bin) < 1:
+            continue
+        f = flux[in_bin]
+        t = btjd[in_bin]
+        if np.sum(in_bin) < 3:
+            mask[in_bin] = True
+            binned_avg_flux_list.append(float(np.nanmean(f)))
+            binned_avg_time_list.append(float(np.nanmean(t)))
+            continue
+        med = float(np.median(f))
+        rob_std = _robust_std_1d(f)
+        keep = np.abs(f - med) <= sigma * rob_std
+        mask[in_bin] = keep
+        if np.any(keep):
+            binned_avg_flux_list.append(float(np.nanmean(f[keep])))
+            binned_avg_time_list.append(float(np.nanmean(t[keep])))
+        else:
+            binned_avg_flux_list.append(float("nan"))
+            binned_avg_time_list.append(float("nan"))
+
+    b_avg_f = np.asarray(binned_avg_flux_list, dtype=float)
+    b_avg_t = np.asarray(binned_avg_time_list, dtype=float)
+    return mask, b_avg_t, b_avg_f
+
+
 def write_lightcurve_diagnostic_plot(
     lc_df: pd.DataFrame,
     output_dir: str,
     *,
     dpi: int = 150,
     title_line: str = "",
-    smooth_window_hours: float = 6.0,
-    smooth_n_sigma_clip: Optional[float] = 3.0,
+    bin_width_days: float = 0.5,
+    bin_sigma: float = 3.0,
     zoom_ylim_pad_frac: float = 0.08,
     png_path: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Write ``lightcurve_control.png``: BTJD vs flux with ``eflux`` error bars, a
-    centered moving average (default 6 h) with optional 3σ rejection inside each
-    time window before averaging, and a second panel with the same series but
-    y-limits from the min/max of that average (plus a small margin).
+    Write ``lightcurve_control.png``: BTJD vs flux with ``eflux`` error bars on
+    the top panel, and a bottom panel with the same comparison notebook-style
+    **binned σ-clip**: epochs kept after per-bin robust clipping, native flux
+    scale, plus large markers for per-bin averages of the clipped points.
     """
     try:
         import matplotlib.pyplot as plt
@@ -689,20 +756,16 @@ def write_lightcurve_diagnostic_plot(
     xs = x[order]
     ys = y[order]
     yers = yerr[order]
-    y_smooth = _centered_time_average_btjd(
+
+    mask_kept, binned_t, binned_f = _binned_sigma_clip_btjd(
         xs,
         ys,
-        window_hours=smooth_window_hours,
-        n_sigma_clip=smooth_n_sigma_clip,
+        bin_width_days=bin_width_days,
+        sigma=bin_sigma,
     )
 
     n = int(ok.sum())
-    clip_note = (
-        f" · {smooth_n_sigma_clip:g}σ-clip mean"
-        if smooth_n_sigma_clip is not None
-        else ""
-    )
-    subtitle = f"{n} epochs · {smooth_window_hours:g} h centered mean{clip_note}"
+    subtitle = f"{n} epochs"
 
     fig, (ax_top, ax_bot) = plt.subplots(
         2,
@@ -713,64 +776,83 @@ def write_lightcurve_diagnostic_plot(
         gridspec_kw={"height_ratios": [1.0, 1.0]},
     )
 
-    def _plot_panel(ax, *, set_title: bool) -> None:
-        ax.errorbar(
-            xs,
-            ys,
-            yerr=yers,
+    ax_top.errorbar(
+        xs,
+        ys,
+        yerr=yers,
+        fmt="o",
+        capsize=2,
+        color="0.35",
+        ecolor="0.55",
+        ms=4,
+        alpha=0.75,
+        label="per epoch",
+        zorder=2,
+    )
+    ax_top.set_ylabel("Difference-image flux")
+    ax_top.grid(True, alpha=0.35)
+    ax_top.legend(loc="best", fontsize=8)
+    if title_line:
+        ax_top.set_title(f"{title_line}\n{subtitle}")
+    else:
+        ax_top.set_title(f"SynDiff forced photometry — {subtitle}")
+
+    ax_bot.set_xlabel("BTJD")
+    bin_note = (
+        f"Binned σ-clip ({bin_width_days:g} d bins · MAD vs median · σ={bin_sigma:g})"
+    )
+    ax_bot.set_title(bin_note, fontsize=10, color="0.35")
+
+    if np.any(mask_kept):
+        ax_bot.errorbar(
+            xs[mask_kept],
+            ys[mask_kept],
+            yerr=yers[mask_kept],
             fmt="o",
             capsize=2,
             color="0.35",
             ecolor="0.55",
             ms=4,
             alpha=0.75,
-            label="per epoch",
+            label="per epoch (kept)",
             zorder=2,
         )
-        ax.plot(
-            xs,
-            y_smooth,
-            "-",
+
+    fin_b = np.isfinite(binned_f) & np.isfinite(binned_t)
+    if np.any(fin_b):
+        ax_bot.plot(
+            binned_t[fin_b],
+            binned_f[fin_b],
+            "o",
+            ms=9,
             color="tab:blue",
-            lw=1.8,
-            label=(
-                f"{smooth_window_hours:g} h mean ({smooth_n_sigma_clip:g}σ clip)"
-                if smooth_n_sigma_clip is not None
-                else f"{smooth_window_hours:g} h mean"
-            ),
+            markeredgecolor="white",
+            markeredgewidth=0.6,
+            label="binned avg",
             zorder=3,
+            linestyle="None",
         )
-        ax.set_ylabel("Difference-image flux")
-        ax.grid(True, alpha=0.35)
-        ax.legend(loc="best", fontsize=8)
-        if set_title:
-            if title_line:
-                ax.set_title(f"{title_line}\n{subtitle}")
-            else:
-                ax.set_title(f"SynDiff forced photometry — {subtitle}")
 
-    _plot_panel(ax_top, set_title=True)
-    _plot_panel(ax_bot, set_title=False)
-    ax_bot.set_xlabel("BTJD")
-    zoom_src = (
-        f"{smooth_window_hours:g} h mean (σ-clip) min/max"
-        if smooth_n_sigma_clip is not None
-        else f"{smooth_window_hours:g} h mean min/max"
-    )
-    ax_bot.set_title(
-        f"Zoom: y-range from {zoom_src}",
-        fontsize=10,
-        color="0.35",
-    )
+    ax_bot.set_ylabel("Difference-image flux")
+    ax_bot.grid(True, alpha=0.35)
+    ax_bot.legend(loc="best", fontsize=8)
 
-    smin = np.nanmin(y_smooth)
-    smax = np.nanmax(y_smooth)
-    if np.isfinite(smin) and np.isfinite(smax):
-        span = smax - smin
-        pad = max(span * zoom_ylim_pad_frac, 1e-6 * (abs(smax) + abs(smin) + 1.0))
-        if span <= 0 or not np.isfinite(span):
-            pad = max(abs(smin), abs(smax), 1.0) * zoom_ylim_pad_frac
-        ax_bot.set_ylim(smin - pad, smax + pad)
+    y_parts: list[np.ndarray] = []
+    if np.any(mask_kept):
+        y_parts.append(ys[mask_kept])
+    if np.any(fin_b):
+        y_parts.append(binned_f[fin_b])
+    if y_parts:
+        yy = np.concatenate(y_parts)
+        yy = yy[np.isfinite(yy)]
+        if yy.size > 0:
+            lo = float(np.nanmin(yy))
+            hi = float(np.nanmax(yy))
+            span = hi - lo
+            pad = max(span * zoom_ylim_pad_frac, 1e-6 * (abs(hi) + abs(lo) + 1.0))
+            if span <= 0 or not np.isfinite(span):
+                pad = max(abs(lo), abs(hi), 1.0) * zoom_ylim_pad_frac
+            ax_bot.set_ylim(lo - pad, hi + pad)
 
     if png_path is not None:
         out_path = os.path.expanduser(png_path)
@@ -800,6 +882,7 @@ def run_forced_photometry(
     ref_frame_index: Optional[int] = None,
     lightcurve_plot_path: Optional[str] = None,
     plot_title_suffix: Optional[str] = None,
+    plot_source_label: Optional[str] = None,
     lightcurve_csv_filename: Optional[str] = None,
 ) -> pd.DataFrame:
     """
@@ -1053,7 +1136,12 @@ def run_forced_photometry(
             f"Sector {cfg.sector} cam{cfg.camera} ccd{cfg.ccd} · "
             f"{cfg.psf_type.upper()}"
         )
-        title = f"{base} · {plot_title_suffix}" if plot_title_suffix else base
+        parts = [base]
+        if plot_source_label:
+            parts.append(str(plot_source_label))
+        if plot_title_suffix:
+            parts.append(str(plot_title_suffix))
+        title = " · ".join(parts)
         write_lightcurve_diagnostic_plot(
             lc_df,
             output_dir,

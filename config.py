@@ -282,9 +282,11 @@ class SynDiffConfig:
     bkg_strap_iso: bool = True
     """If True, valid sky pixels require ``mask == 0`` (TESSreduce ``strap_iso``)."""
 
-    bkg_source_hunt: bool = False
-    """PSF-based source hunt per frame; requires PRF kernel + residual cube wiring (not
-    yet exposed from YAML — keep False unless extended)."""
+    bkg_source_hunt: bool = True
+    """TESSreduce ``source_hunt``: PSF-shaped detection (``par_psf_source_mask`` /
+    StarFinder) on each frame **before** ``Smooth_bkg``, only when
+    ``bkg_tessreduce_spatial_pipeline`` is True. Requires the ``PRF`` package and
+    ``target_ra`` / ``target_dec`` for PRF placement (same as ``psf_type: prf``)."""
 
     bkg_interpolate: bool = True
     """Passed to vendored ``Smooth_bkg`` as ``interpolate`` (griddata vs inpaint)."""

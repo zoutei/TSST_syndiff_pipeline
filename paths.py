@@ -26,6 +26,9 @@ BACKGROUND_STACK_NPZ_ARRAY_KEY = "stack"
 # Basename (no extension) for adaptive background stacks under ``ws/<label>/``
 ADAPTIVE_BKG_STACK_BASENAME = "bkg_temp_smooth"
 
+# Union mask (2D): pixels where PRF source-hunt excluded sky in any epoch (output_dir root)
+BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits"
+
 
 def workspace_dir(output_dir: str, label: str) -> str:
     """Absolute path to the workspace directory for a pipeline label."""

@@ -18,14 +18,16 @@ flat ``syndiff_template_*_dx*_dy*.fits`` names (matched to ``group_dx``/``group_
 or ``group_<id>/ps1_template.fits`` (see :func:`syndiff_pipeline.config.discover_template_paths`).
 
 Kernel artifacts (each :func:`hotpants_loop` pass): beside the diffs directory,
-``{basename}_kernel_reconstruction.npz`` holds the shared raw ``basis`` stack and
-Hotpants geometry metadata; ``{basename}_kernel_params/{stem}.npz`` holds per-FFI
+``{basename}_kernel_reconstruction.npz`` holds the shared raw ``basis`` stack (built
+in-repo to match HOTPANTS ``kernel_vector`` / ``getKernelVec``, since pyhotpants does
+not ship a Python entry point for it) and Hotpants geometry metadata;
+``{basename}_kernel_params/{stem}.npz`` holds per-FFI
 fitted parameters: per-stamp data from ``get_substamp_details()`` (padded
 ``local_kernel_solution`` and coordinates) plus the **global** ``kernel_solution``
 vector from ``run_pipeline()`` / ``get_final_outputs()`` (current pyhotpants does
 not include that vector in ``get_substamp_details()``). See
-:func:`write_kernel_reconstruction_npz` and :func:`kernel_reconstruction_npz_path` /
-:func:`kernel_params_dir`.
+:func:`write_kernel_reconstruction_npz` / :func:`_calculate_kernel_basis` and
+:func:`kernel_reconstruction_npz_path` / :func:`kernel_params_dir`.
 """
 
 from __future__ import annotations
@@ -206,33 +208,79 @@ def _kernel_sigma_deg_for_basis(cfg) -> tuple[int, list[float], list[int], int]:
     return rkernel, sigma_full[:n], deg_full[:n], ngauss
 
 
+def _calculate_kernel_basis(
+    shape: tuple[int, int],
+    sigma_gauss: list[float],
+    deg_fixe: list[int],
+) -> list[np.ndarray]:
+    """
+    Non-PCA HOTPANTS kernel basis images, matching ``kernel_vector`` / ``getKernelVec``
+    in pyhotpants' ``alard.c``. The installed ``hotpants`` package does not expose this;
+    we duplicate the small pure-numeric piece here for ``*_kernel_reconstruction.npz``.
+    """
+    height, width = int(shape[0]), int(shape[1])
+    if height != width:
+        raise ValueError(f"kernel basis must be square; got shape={shape!r}")
+    if width % 2 != 1:
+        raise ValueError(f"kernel basis width must be odd; got shape={shape!r}")
+
+    half_width = width // 2
+    n_comp_ker = sum(((int(d) + 1) * (int(d) + 2)) // 2 for d in deg_fixe)
+    filter_x = np.zeros((n_comp_ker, width), dtype=np.float64)
+    filter_y = np.zeros((n_comp_ker, width), dtype=np.float64)
+    basis: list[np.ndarray] = []
+
+    nvec = 0
+    for ig, dmax in enumerate(deg_fixe):
+        sigma_g = float(sigma_gauss[ig])
+        for deg_x in range(int(dmax) + 1):
+            for deg_y in range(int(dmax) + 1 - deg_x):
+                dx = (deg_x // 2) * 2 - deg_x
+                dy = (deg_y // 2) * 2 - deg_y
+                sum_x = 0.0
+                sum_y = 0.0
+
+                for ix in range(width):
+                    x = float(ix - half_width)
+                    qe = np.exp(-x * x * sigma_g)
+                    filter_x[nvec, ix] = qe * (x**deg_x)
+                    filter_y[nvec, ix] = qe * (x**deg_y)
+                    sum_x += filter_x[nvec, ix]
+                    sum_y += filter_y[nvec, ix]
+
+                vec = np.zeros(width * width, dtype=np.float64)
+                if dx == 0 and dy == 0:
+                    filter_x[nvec, :] *= 1.0 / sum_x
+                    filter_y[nvec, :] *= 1.0 / sum_y
+
+                for i in range(width):
+                    for j in range(width):
+                        vec[i + width * j] = filter_x[nvec, i] * filter_y[nvec, j]
+
+                if dx == 0 and dy == 0 and nvec > 0:
+                    vec -= basis[0].ravel()
+
+                basis.append(vec.reshape(height, width))
+                nvec += 1
+
+    return basis
+
+
 def write_kernel_reconstruction_npz(cfg, path: str) -> bool:
     """
     Write one shared archive: stacked raw kernel ``basis`` (``n_basis``, H, W) from
-    ``hotpants.pure.kernel.calculate_kernel_basis``, plus scalars matching the run.
+    :func:`_calculate_kernel_basis`, plus scalars matching the run.
 
-    Returns True if the file was written, False if ``calculate_kernel_basis`` could
-    not be imported or construction failed.
+    Returns True if the file was written, False if construction failed.
     """
-    _get_hotpants_classes()
-    try:
-        from hotpants.pure.kernel import calculate_kernel_basis
-    except ImportError as exc:
-        log.error(
-            "Cannot import hotpants.pure.kernel.calculate_kernel_basis; "
-            "skip kernel reconstruction npz (%s): %s",
-            path,
-            exc,
-        )
-        return False
     rkernel, sigma_gauss, deg_fixe, _ngauss = _kernel_sigma_deg_for_basis(cfg)
     size = 2 * rkernel + 1
     shape = (size, size)
     try:
-        basis_list = calculate_kernel_basis(shape, sigma_gauss, deg_fixe)
+        basis_list = _calculate_kernel_basis(shape, sigma_gauss, deg_fixe)
         basis = np.stack([np.asarray(b, dtype=np.float64) for b in basis_list], axis=0)
     except Exception as exc:
-        log.error("calculate_kernel_basis failed; skip %s: %s", path, exc)
+        log.error("_calculate_kernel_basis failed; skip %s: %s", path, exc)
         return False
     rss = int(2.5 * float(cfg.sci_fwhm))
     meta: dict[str, Any] = {
@@ -335,21 +383,32 @@ def _save_frame_kernel_params_npz(
 def _get_hotpants_classes():
     try:
         from hotpants import Hotpants, HotpantsConfig
+
         return Hotpants, HotpantsConfig
     except ImportError:
-        pass
+        sys.modules.pop("hotpants", None)
     here = Path(__file__).resolve()
-    for parent in [here, *here.parents]:
+    for parent in [here.parent, *here.parents]:
         candidate = parent / "pyhotpants"
-        if candidate.exists() and str(candidate) not in sys.path:
-            sys.path.insert(0, str(candidate))
-            try:
-                from hotpants import Hotpants, HotpantsConfig
-                return Hotpants, HotpantsConfig
-            except ImportError:
+        if not candidate.is_dir():
+            continue
+        root = str(candidate.resolve())
+        inserted = False
+        if root not in sys.path:
+            sys.path.insert(0, root)
+            inserted = True
+        try:
+            from hotpants import Hotpants, HotpantsConfig
+
+            return Hotpants, HotpantsConfig
+        except ImportError:
+            sys.modules.pop("hotpants", None)
+            if inserted and sys.path and sys.path[0] == root:
                 sys.path.pop(0)
+            continue
     raise ImportError(
-        "pyhotpants not found. Ensure the 'pyhotpants' directory is on sys.path."
+        "pyhotpants not found. Ensure the 'hotpants' directory is on sys.path "
+        "or install the hotpants package."
     )
 
 
