@@ -38,6 +38,11 @@ from astropy.time import Time
 from astropy.utils.exceptions import AstropyWarning
 from astropy.wcs import WCS, FITSFixedWarning
 
+try:
+    from .adaptive_background import get_tessvectors
+except ImportError:
+    from adaptive_background import get_tessvectors
+
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 warnings.filterwarnings("ignore", category=AstropyWarning)
 
@@ -377,6 +382,182 @@ def smooth_wcs_drift_savgol(
     return df
 
 
+def _wcs_ok_mask(wok: pd.Series) -> pd.Series:
+    return wok.apply(lambda x: x is True or str(x).lower() in ("true", "1"))
+
+
+def attach_tessvector_earth_moon_angles(
+    wcs_table: pd.DataFrame,
+    *,
+    sector: int,
+    camera: int,
+    tessvectors_data_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Add ``earth_deg`` and ``moon_deg`` (camera–body angles, degrees) by
+    interpolating TESSVectors FFI CSV onto each row's ``btjd``.
+    """
+    out = wcs_table.copy()
+    out["earth_deg"] = np.nan
+    out["moon_deg"] = np.nan
+    if "btjd" not in out.columns:
+        log.warning("wcs_table has no btjd; cannot attach TESSVectors angles.")
+        return out
+
+    df = get_tessvectors(int(sector), int(camera), data_path=tessvectors_data_path)
+    if df is None or df.empty:
+        log.warning(
+            "TESSVectors unavailable for sector=%s camera=%s; earth_deg/moon_deg left NaN.",
+            sector,
+            camera,
+        )
+        return out
+
+    vec_t = np.asarray(df["MidTime"].values, dtype=float)
+    earth_v = np.asarray(df["Earth_Camera_Angle"].values, dtype=float)
+    moon_v = np.asarray(df["Moon_Camera_Angle"].values, dtype=float)
+    btjd = pd.to_numeric(out["btjd"], errors="coerce")
+    m = btjd.notna()
+    if not m.any():
+        return out
+    bi = btjd.loc[m].to_numpy(dtype=float)
+    out.loc[m, "earth_deg"] = np.interp(bi, vec_t, earth_v)
+    out.loc[m, "moon_deg"] = np.interp(bi, vec_t, moon_v)
+    return out
+
+
+def _pick_closest_to_median_smoothed(
+    sub: pd.DataFrame, median_dx: float, median_dy: float
+) -> str:
+    """Return ``path`` of row minimizing squared distance to median smoothed drift."""
+    dx = pd.to_numeric(sub["delta_x"], errors="coerce").to_numpy(dtype=float)
+    dy = pd.to_numeric(sub["delta_y"], errors="coerce").to_numpy(dtype=float)
+    d2 = (dx - median_dx) ** 2 + (dy - median_dy) ** 2
+    pos = int(np.nanargmin(d2))
+    return str(sub.iloc[pos]["path"])
+
+
+def choose_reference_ffi_path(
+    wcs_table: pd.DataFrame,
+    *,
+    earth_deg_min: float = 45.0,
+    moon_deg_min: float = 25.0,
+    max_smoothed_residual: float = 0.05,
+) -> str:
+    """
+    Pick a reference FFI path after WCS drift smoothing.
+
+    Uses smoothed ``delta_x``/``delta_y`` medians as the target pointing, prefers
+    frames with small raw–smooth residual (when ``delta_x_raw`` exist), TESSVectors
+    Earth/Moon angle cuts when ``earth_deg``/``moon_deg`` are present on the table,
+    and otherwise falls back with logged warnings.
+
+    Call :func:`attach_tessvector_earth_moon_angles` first so angle columns are
+    populated (unless intentionally omitting scatter-light screening).
+    """
+    dx = pd.to_numeric(wcs_table["delta_x"], errors="coerce")
+    dy = pd.to_numeric(wcs_table["delta_y"], errors="coerce")
+    ok = dx.notna() & dy.notna()
+    if "wcs_ok" in wcs_table.columns:
+        ok = ok & _wcs_ok_mask(wcs_table["wcs_ok"])
+    if not ok.any():
+        raise RuntimeError("No FFI with usable WCS offsets for ref frame.")
+
+    S = ok
+    sub_S = wcs_table.loc[S]
+    median_dx = float(np.nanmedian(sub_S["delta_x"].astype(float)))
+    median_dy = float(np.nanmedian(sub_S["delta_y"].astype(float)))
+
+    has_raw = {"delta_x_raw", "delta_y_raw"}.issubset(wcs_table.columns)
+    has_angles = {"earth_deg", "moon_deg"}.issubset(wcs_table.columns)
+
+    if has_raw:
+        dx_s = pd.to_numeric(wcs_table["delta_x"], errors="coerce")
+        dy_s = pd.to_numeric(wcs_table["delta_y"], errors="coerce")
+        dx0 = pd.to_numeric(wcs_table["delta_x_raw"], errors="coerce")
+        dy0 = pd.to_numeric(wcs_table["delta_y_raw"], errors="coerce")
+        r = np.hypot(dx0 - dx_s, dy0 - dy_s)
+        residual_ok = dx0.notna() & dy0.notna() & (r <= float(max_smoothed_residual))
+    else:
+        residual_ok = pd.Series(True, index=wcs_table.index)
+
+    if has_angles:
+        ed = pd.to_numeric(wcs_table["earth_deg"], errors="coerce")
+        md = pd.to_numeric(wcs_table["moon_deg"], errors="coerce")
+        angle_ok = (
+            ed.notna()
+            & md.notna()
+            & (ed >= float(earth_deg_min))
+            & (md >= float(moon_deg_min))
+        )
+    else:
+        angle_ok = pd.Series(True, index=wcs_table.index)
+
+    trials = [
+        ("residual+Earth/Moon angle cuts", S & residual_ok & angle_ok),
+        ("Earth/Moon angle cuts only (no residual gate)", S & angle_ok),
+        ("residual gate only (no angle cuts)", S & residual_ok),
+        ("all usable WCS rows", S),
+    ]
+
+    for label, mask in trials:
+        if not mask.any():
+            continue
+        sub = wcs_table.loc[mask]
+        path = _pick_closest_to_median_smoothed(sub, median_dx, median_dy)
+        if label != trials[0][0]:
+            log.warning(
+                "Reference FFI: using fallback selection (%s); chosen path may have "
+                "worse scatter-light geometry or larger raw–smooth drift.",
+                label,
+            )
+        log.info(
+            "Reference FFI selected (%s): median smoothed drift (%.4f, %.4f) px; %d candidates.",
+            label,
+            median_dx,
+            median_dy,
+            len(sub),
+        )
+        return path
+
+    first = str(wcs_table.loc[S].iloc[0]["path"])
+    log.warning(
+        "Reference FFI: unexpected empty trial masks; using first usable row: %s",
+        first,
+    )
+    return first
+
+
+def _ref_ffi_btjd(wcs_table: pd.DataFrame, ref_ffi_path: Optional[str]) -> float:
+    """BTJD of the manifest row matching ``ref_ffi_path``, or NaN."""
+    if not ref_ffi_path or ref_ffi_path.strip() == "" or "btjd" not in wcs_table.columns:
+        return float("nan")
+    path_col = "path" if "path" in wcs_table.columns else "filename"
+    try:
+        ref_r = Path(ref_ffi_path).resolve()
+    except Exception:
+        ref_r = Path(os.path.expanduser(ref_ffi_path))
+    ref_abs = os.path.abspath(os.path.expanduser(str(ref_ffi_path)))
+    for i in range(len(wcs_table)):
+        p = wcs_table.iloc[i].get(path_col)
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            continue
+        ps = str(p).strip()
+        if not ps:
+            continue
+        try:
+            match = Path(ps).resolve() == ref_r
+        except Exception:
+            match = os.path.abspath(os.path.expanduser(ps)) == ref_abs
+        if match:
+            t = wcs_table.iloc[i].get("btjd")
+            try:
+                return float(t)
+            except (TypeError, ValueError):
+                return float("nan")
+    return float("nan")
+
+
 def summarize_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
     """
     Build the per-group summary table (``group_id``, ``group_dx``, ``group_dy``,
@@ -525,14 +706,19 @@ def plot_wcs_drift_and_template_assignment(
     wcs_table: pd.DataFrame,
     output_path: str,
     time_col: str = "btjd",
+    *,
+    ref_ffi_path: Optional[str] = None,
+    ref_earth_deg_min: float = 45.0,
+    ref_moon_deg_min: float = 25.0,
 ) -> Optional[str]:
     """
-    Three stacked panels: ``delta_x`` vs time, ``delta_y`` vs time, ``group_id`` vs time.
+    Four stacked panels: ``delta_x``, ``delta_y``, ``group_id``, and Earth/Moon
+    camera angles (TESSVectors) vs time.
 
     When ``delta_x_raw`` / ``delta_y_raw`` are present (after Savitzky–Golay smoothing),
     the first two panels overlay **original** scatter points and a **smoothed** polyline
-    in time order. Rows with invalid time or no group assignment (``group_id`` < 0)
-    are omitted from the first two panels or shown in gray in the third where applicable.
+    in time order. Optional ``ref_ffi_path`` draws a vertical reference line on all
+    panels at that FFI's ``btjd``.
     """
     need = {"delta_x", "delta_y", "group_id"}
     if not need.issubset(wcs_table.columns):
@@ -555,9 +741,12 @@ def plot_wcs_drift_and_template_assignment(
     cmap = plt.cm.tab10(np.linspace(0, 1, max(len(gids_sorted), 1)))[: len(gids_sorted)]
     color_by_gid = {g: cmap[i % len(cmap)] for i, g in enumerate(gids_sorted)}
 
-    fig, axes = plt.subplots(3, 1, figsize=(12, 10), sharex=True, layout="constrained")
+    t_ref = _ref_ffi_btjd(wcs_table, ref_ffi_path)
+    show_vline = np.isfinite(t_ref)
 
-    ax0, ax1, ax2 = axes
+    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True, layout="constrained")
+
+    ax0, ax1, ax2, ax3 = axes
     has_raw = {"delta_x_raw", "delta_y_raw"}.issubset(wcs_table.columns)
     if has_raw:
         dx0 = pd.to_numeric(wcs_table["delta_x_raw"], errors="coerce")
@@ -616,9 +805,6 @@ def plot_wcs_drift_and_template_assignment(
 
     ax0.set_ylabel(r"$\delta x$ (pix)")
     ax0.grid(True, alpha=0.3)
-    h0, lab0 = ax0.get_legend_handles_labels()
-    if h0:
-        ax0.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
     ax1.set_ylabel(r"$\delta y$ (pix)")
     ax1.grid(True, alpha=0.3)
@@ -656,14 +842,72 @@ def plot_wcs_drift_and_template_assignment(
     if gids_sorted:
         ax2.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.9)
 
-    ax2.set_xlabel(f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col)
+    if {"earth_deg", "moon_deg"}.issubset(wcs_table.columns):
+        earth = pd.to_numeric(wcs_table["earth_deg"], errors="coerce")
+        moon = pd.to_numeric(wcs_table["moon_deg"], errors="coerce")
+        ma = t.notna() & earth.notna() & moon.notna()
+        if ma.any():
+            ax3.scatter(
+                t[ma], earth[ma], s=10, alpha=0.65, c="C2", label="Earth–camera (deg)"
+            )
+            ax3.scatter(
+                t[ma], moon[ma], s=10, alpha=0.65, c="C3", label="Moon–camera (deg)"
+            )
+        ax3.axhline(
+            ref_earth_deg_min,
+            color="C2",
+            linestyle=":",
+            linewidth=1.0,
+            alpha=0.45,
+            label=f"Earth min ({ref_earth_deg_min:g}°)",
+        )
+        ax3.axhline(
+            ref_moon_deg_min,
+            color="C3",
+            linestyle=":",
+            linewidth=1.0,
+            alpha=0.45,
+            label=f"Moon min ({ref_moon_deg_min:g}°)",
+        )
+        ax3.set_ylabel("angle (deg)")
+        ax3.grid(True, alpha=0.3)
+        h3, _ = ax3.get_legend_handles_labels()
+        if h3:
+            ax3.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.9)
+    else:
+        ax3.text(0.5, 0.5, "no earth_deg/moon_deg (run TESSVectors attach)", ha="center", va="center", transform=ax3.transAxes, fontsize=9)
+        ax3.set_ylabel("angle (deg)")
+
+    if show_vline:
+        ax0.axvline(
+            t_ref,
+            color="0.25",
+            linestyle="--",
+            linewidth=1.2,
+            zorder=5,
+            label="reference FFI",
+        )
+        for ax in (ax1, ax2, ax3):
+            ax.axvline(
+                t_ref,
+                color="0.25",
+                linestyle="--",
+                linewidth=1.2,
+                zorder=4,
+            )
+
+    h0, _ = ax0.get_legend_handles_labels()
+    if h0:
+        ax0.legend(loc="upper right", fontsize=8, framealpha=0.9)
+
+    ax3.set_xlabel(f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col)
     sub = (
         "; drift: original (hollow) vs Savitzky–Golay smoothed (line)"
         if has_raw
         else ""
     )
     fig.suptitle(
-        f"WCS drift at target and assigned template group vs time{sub}"
+        f"WCS drift, template groups, and Earth/Moon angles vs time{sub}"
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)

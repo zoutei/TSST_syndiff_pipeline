@@ -5,6 +5,12 @@ photometry.py
 When ``cfg.n_jobs`` > 1, cutout I/O and per-epoch ``psf_flux`` use joblib **loky**
 (process pool); use ``n_jobs: 1`` for a fully serial run.
 
+**Multiple sky targets** (``additional_forced_targets``): :func:`run_forced_photometry_multi`
+reads each difference FITS once per epoch and runs ``psf_flux`` for every source
+(``phot_snap='brightest'`` adds one full-epoch scan pass before flux). A single
+target still uses :func:`_run_forced_photometry_single` so cutouts are reused and
+FITS are not read twice.
+
 **FITS inputs:** Multi-extension files may include extension ``NOISE`` (per-pixel
 ERROR, treated like TESSreduce ``ecut``: the fitter uses ``residual² / error``).
 When absent, photometry uses unit ``error`` (same as TESSreduce ``use_error_image=False``
@@ -24,7 +30,8 @@ from __future__ import annotations
 import logging
 import os
 import warnings
-from typing import Any, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -37,6 +44,17 @@ from scipy.signal import fftconvolve
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class ForcedPhotTargetSpec:
+    """One forced-photometry source for :func:`run_forced_photometry_multi`."""
+
+    target_xy: np.ndarray
+    csv_basename: str = "lightcurve.csv"
+    plot_source_label: str = "primary"
+    plot_png_path: Optional[str] = None
+    tag: str = "primary"
 
 
 def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[np.ndarray]]:
@@ -373,20 +391,24 @@ class EpsfLocator:
 # ── PSF kernel builder (epsf or prf) ─────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def build_psf_kernel(cfg,
-                     epsf_smooth: np.ndarray,
-                     tile_centers: list,
-                     target_x: float,
-                     target_y: float,
-                     over_size: int,
-                     crop_bounds: dict):
+def build_psf_kernel(
+    phot,
+    cfg,
+    epsf_smooth: np.ndarray,
+    tile_centers: list,
+    target_x: float,
+    target_y: float,
+    over_size: int,
+    crop_bounds: dict,
+):
     """
     Return a PSF locator object (either EpsfLocator or TESS_PRF) based on
-    cfg.psf_type.
+    ``phot.psf_type``.
 
     Parameters
     ----------
-    cfg          : SynDiffConfig
+    phot         : ForcedPhotometryParams
+    cfg          : SynDiffConfig (camera, ccd, sector for PRF)
     epsf_smooth  : ndarray (n_tiles, over_size²) — per-tile group ePSF
     tile_centers : list of (cx, cy)
     target_x, target_y : float  (crop-local pixel position of the target)
@@ -399,13 +421,13 @@ def build_psf_kernel(cfg,
     """
     from .sat_template import get_tile_epsf_at_position
 
-    if cfg.psf_type == "epsf":
+    if phot.psf_type == "epsf":
         epsf_2d = get_tile_epsf_at_position(
             epsf_smooth, tile_centers, target_x, target_y, over_size,
         )
-        return EpsfLocator(epsf_2d, cfg.epsf_oversample)
+        return EpsfLocator(epsf_2d, phot.epsf_oversample)
 
-    elif cfg.psf_type == "prf":
+    if phot.psf_type == "prf":
         try:
             from PRF import TESS_PRF
         except ImportError:
@@ -417,8 +439,7 @@ def build_psf_kernel(cfg,
         row_ffi = target_y + crop_bounds["y_min"]
         return TESS_PRF(cfg.camera, cfg.ccd, cfg.sector, col_ffi, row_ffi)
 
-    else:
-        raise ValueError(f"Unknown psf_type '{cfg.psf_type}'. Must be 'epsf' or 'prf'.")
+    raise ValueError(f"Unknown psf_type '{phot.psf_type}'. Must be 'epsf' or 'prf'.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -462,19 +483,19 @@ def _extract_cutout(image: np.ndarray, x: float, y: float, size: int) -> np.ndar
     return cutout
 
 
-def _locator_bundle_for_parallel(prf_or_epsf, cfg, crop_bounds, target_x, target_y):
+def _locator_bundle_for_parallel(prf_or_epsf, phot, cfg, crop_bounds, target_x, target_y):
     """
     Picklable description of the PSF locator for joblib workers.
 
     TESS_PRF objects may not pickle reliably; workers reconstruct from metadata.
     """
-    if cfg.psf_type == "epsf":
+    if phot.psf_type == "epsf":
         return (
             "epsf",
             np.ascontiguousarray(prf_or_epsf.epsf_os, dtype=np.float64),
             int(prf_or_epsf.os_factor),
         )
-    if cfg.psf_type == "prf":
+    if phot.psf_type == "prf":
         col_ffi = float(target_x + crop_bounds["x_min"])
         row_ffi = float(target_y + crop_bounds["y_min"])
         return (
@@ -485,7 +506,7 @@ def _locator_bundle_for_parallel(prf_or_epsf, cfg, crop_bounds, target_x, target
             col_ffi,
             row_ffi,
         )
-    raise ValueError(f"Unknown psf_type {cfg.psf_type!r}")
+    raise ValueError(f"Unknown psf_type {phot.psf_type!r}")
 
 
 def _locator_from_bundle(bundle: tuple) -> Any:
@@ -592,6 +613,147 @@ def _forced_phot_flux_worker(
         "filename": path or "",
         "group_id": group_id,
     }
+
+
+def _offsets_after_source_only(locator_bundle: tuple, phot_cutout_size: int) -> Tuple[float, float]:
+    """Match ``create_psf.source()`` defaults when ``psf_position`` is not used."""
+    prf = _locator_from_bundle(locator_bundle)
+    psf_obj = create_psf(prf, phot_cutout_size)
+    psf_obj.source()
+    return float(psf_obj.source_x), float(psf_obj.source_y)
+
+
+def _forced_phot_brightest_scan_multi_worker(
+    task: Tuple[int, Optional[str], Tuple[Tuple[float, float], ...], int],
+) -> Tuple[int, List[Tuple[Optional[np.ndarray], Optional[np.ndarray], float]]]:
+    """
+    One epoch: read FITS once, extract each source's cutout and brightest weight.
+
+    Returns (frame_index, per_source list of (cut, sigma_cut, tess_weight)).
+    """
+    i, path, coords_per_source, phot_cutout_size = task
+    n_src = len(coords_per_source)
+    empty = [(None, None, -1.0)] * n_src
+    if path is None or not os.path.exists(path):
+        return i, list(empty)
+    try:
+        data, sigma_full = read_diff_primary_and_noise_sigma(path)
+    except Exception as exc:
+        log.warning("  Cannot read %s: %s", path, exc)
+        return i, list(empty)
+    out: List[Tuple[Optional[np.ndarray], Optional[np.ndarray], float]] = []
+    for tx, ty in coords_per_source:
+        if not (np.isfinite(tx) and np.isfinite(ty)):
+            out.append((None, None, -1.0))
+            continue
+        try:
+            cut = _extract_cutout(data, float(tx), float(ty), phot_cutout_size)
+            sigma_cut = None
+            if sigma_full is not None:
+                sigma_cut = _extract_cutout(
+                    sigma_full, float(tx), float(ty), phot_cutout_size
+                )
+        except Exception:
+            out.append((None, None, -1.0))
+            continue
+        finite = cut[np.isfinite(cut)]
+        if len(finite) == 0:
+            out.append((cut, sigma_cut, -1.0))
+            continue
+        tw = _tessreduce_brightest_weight(cut, sigma_cut)
+        out.append((cut, sigma_cut, tw))
+    return i, out
+
+
+def _forced_phot_multi_flux_worker(
+    task: Tuple[
+        int,
+        Optional[str],
+        float,
+        int,
+        int,
+        int,
+        tuple,
+        str,
+    ],
+) -> Tuple[int, List[dict]]:
+    """
+    One epoch: read FITS once; run ``psf_flux`` for each source (isolated ``create_psf``).
+
+    ``per_source`` entries are
+    (locator_bundle, tx_i, ty_i, source_x, source_y).
+    """
+    (
+        i,
+        path,
+        btjd,
+        group_id,
+        phot_cutout_size,
+        phot_bkg_poly_order,
+        per_source,
+        path_str,
+    ) = task
+
+    def _nan_record() -> dict:
+        return {
+            "btjd": btjd,
+            "flux": np.nan,
+            "eflux": np.nan,
+            "filename": path_str or "",
+            "group_id": group_id,
+        }
+
+    if path is None or not os.path.exists(path):
+        return i, [_nan_record() for _ in per_source]
+
+    try:
+        data, sigma_full = read_diff_primary_and_noise_sigma(path)
+    except Exception as exc:
+        log.warning("  Cannot read %s: %s", path, exc)
+        return i, [_nan_record() for _ in per_source]
+
+    records: List[dict] = []
+    for locator_bundle, tx, ty, sx, sy in per_source:
+        if not (np.isfinite(tx) and np.isfinite(ty)):
+            records.append(_nan_record())
+            continue
+        try:
+            cut = _extract_cutout(data, float(tx), float(ty), phot_cutout_size)
+            sigma_cut = None
+            if sigma_full is not None:
+                sigma_cut = _extract_cutout(
+                    sigma_full, float(tx), float(ty), phot_cutout_size
+                )
+        except Exception:
+            records.append(_nan_record())
+            continue
+
+        prf = _locator_from_bundle(locator_bundle)
+        psf_obj = create_psf(prf, phot_cutout_size)
+        psf_obj.source_x = float(sx)
+        psf_obj.source_y = float(sy)
+        error = _tessreduce_error_plane(sigma_cut, cut.shape)
+        try:
+            psf_obj.psf_flux(
+                cut,
+                error=error,
+                surface=True,
+                poly_order=phot_bkg_poly_order,
+            )
+            flux, eflux = psf_obj.flux, psf_obj.eflux
+        except Exception as exc:
+            log.debug("  psf_flux failed for frame %s: %s", i, exc)
+            flux, eflux = np.nan, np.nan
+        records.append(
+            {
+                "btjd": btjd,
+                "flux": flux,
+                "eflux": eflux,
+                "filename": path_str or "",
+                "group_id": group_id,
+            }
+        )
+    return i, records
 
 
 def _sigma_clipped_mean(values: np.ndarray, *, n_sigma: float) -> float:
@@ -869,7 +1031,8 @@ def write_lightcurve_diagnostic_plot(
 # ── Main photometry function ──────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def run_forced_photometry(
+
+def _run_forced_photometry_single(
     diff_paths: list,
     target_xy: np.ndarray,
     epsf_r2_smooth: np.ndarray,
@@ -877,6 +1040,7 @@ def run_forced_photometry(
     wcs_table: pd.DataFrame,
     crop_bounds: dict,
     cfg,
+    phot,
     output_dir: str,
     *,
     ref_frame_index: Optional[int] = None,
@@ -886,20 +1050,8 @@ def run_forced_photometry(
     lightcurve_csv_filename: Optional[str] = None,
 ) -> pd.DataFrame:
     """
-    Forced PSF photometry on difference-image FITS (SynDiff pipeline).
-
-    Per-epoch **cutouts** use rows of ``target_xy`` (crop-local x, y), e.g. from
-    each FFI WCS in the frame manifest. The PSF locator (PRF / ePSF) is built at
-    the **median** crop position across epochs.
-
-    **Error / noise:** Same convention as TESSreduce ``create_psf``: the optimizer
-    uses ``sum((residual)**2 / error)`` where ``error`` is the ``NOISE`` HDU
-    (equivalent to ``ecut`` / ``flux_err``) when present, or ones otherwise.
-
-    **snap** (``cfg.phot_snap``): ``brightest`` uses TESSreduce's
-    ``|sum(cut/ecut)|`` in a central 3×3 patch to pick the reference epoch;
-    ``ref`` fits position on ``ref_frame_index``; ``fixed`` uses (0, 0) offsets
-    only.
+    Original single-target path: one FITS read per epoch during cutouts, then
+    flux reuses cutouts (no second read). Used when only one source is requested.
     """
     csv_name = lightcurve_csv_filename or "lightcurve.csv"
     if os.path.basename(csv_name) != csv_name or ".." in csv_name:
@@ -915,7 +1067,7 @@ def run_forced_photometry(
             f"target_xy length {txy.shape[0]} != len(diff_paths) {n_epochs}"
         )
 
-    over_size = 2 * cfg.psf_size + 1
+    over_size = 2 * phot.psf_size + 1
 
     if epsf_r2_smooth.ndim == 3:
         group_epsf = np.nanmedian(epsf_r2_smooth, axis=0)
@@ -930,14 +1082,20 @@ def run_forced_photometry(
         )
 
     prf_or_epsf = build_psf_kernel(
-        cfg, group_epsf, tile_centers,
-        tx_med, ty_med, over_size, crop_bounds,
+        phot,
+        cfg,
+        group_epsf,
+        tile_centers,
+        tx_med,
+        ty_med,
+        over_size,
+        crop_bounds,
     )
-    psf_obj = create_psf(prf_or_epsf, cfg.phot_cutout_size)
+    psf_obj = create_psf(prf_or_epsf, phot.phot_cutout_size)
 
     n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
     parallel = n_jobs != 1 and n_epochs > 1
-    snap = str(getattr(cfg, "phot_snap", "brightest") or "brightest").lower()
+    snap = str(phot.phot_snap or "brightest").lower()
 
     best_idx = None
     best_tw = -1.0
@@ -957,11 +1115,11 @@ def run_forced_photometry(
                 continue
             try:
                 data, sigma_full = read_diff_primary_and_noise_sigma(path)
-                cut = _extract_cutout(data, tx_i, ty_i, cfg.phot_cutout_size)
+                cut = _extract_cutout(data, tx_i, ty_i, phot.phot_cutout_size)
                 sigma_cut = None
                 if sigma_full is not None:
                     sigma_cut = _extract_cutout(
-                        sigma_full, tx_i, ty_i, cfg.phot_cutout_size
+                        sigma_full, tx_i, ty_i, phot.phot_cutout_size
                     )
             except Exception as exc:
                 log.warning("  Cannot read %s: %s", path, exc)
@@ -982,7 +1140,7 @@ def run_forced_photometry(
             n_epochs,
         )
         cut_tasks = [
-            (i, path, float(txy[i, 0]), float(txy[i, 1]), cfg.phot_cutout_size)
+            (i, path, float(txy[i, 0]), float(txy[i, 1]), phot.phot_cutout_size)
             for i, path in enumerate(diff_paths)
         ]
         cut_results = Parallel(n_jobs=n_jobs, backend="loky")(
@@ -1053,7 +1211,7 @@ def run_forced_photometry(
     )
 
     locator_bundle = _locator_bundle_for_parallel(
-        prf_or_epsf, cfg, crop_bounds, tx_med, ty_med
+        prf_or_epsf, phot, cfg, crop_bounds, tx_med, ty_med
     )
     sx = float(psf_obj.source_x)
     sy = float(psf_obj.source_y)
@@ -1079,7 +1237,7 @@ def run_forced_photometry(
                     cut,
                     error=error,
                     surface=True,
-                    poly_order=cfg.phot_bkg_poly_order,
+                    poly_order=phot.phot_bkg_poly_order,
                 )
                 flux, eflux = psf_obj.flux, psf_obj.eflux
             except Exception as exc:
@@ -1110,8 +1268,8 @@ def run_forced_photometry(
                     sx,
                     sy,
                     locator_bundle,
-                    int(cfg.phot_cutout_size),
-                    int(cfg.phot_bkg_poly_order),
+                    int(phot.phot_cutout_size),
+                    int(phot.phot_bkg_poly_order),
                     btjd,
                     gid,
                     str(path) if path else "",
@@ -1134,7 +1292,7 @@ def run_forced_photometry(
         dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
         base = (
             f"Sector {cfg.sector} cam{cfg.camera} ccd{cfg.ccd} · "
-            f"{cfg.psf_type.upper()}"
+            f"{phot.psf_type.upper()}"
         )
         parts = [base]
         if plot_source_label:
@@ -1151,3 +1309,401 @@ def run_forced_photometry(
         )
 
     return lc_df
+
+
+def run_forced_photometry_multi(
+    diff_paths: list,
+    targets: List[ForcedPhotTargetSpec],
+    epsf_r2_smooth: np.ndarray,
+    tile_centers: list,
+    wcs_table: pd.DataFrame,
+    crop_bounds: dict,
+    cfg,
+    phot,
+    output_dir: str,
+    *,
+    ref_frame_index: Optional[int] = None,
+    plot_title_suffix: Optional[str] = None,
+) -> List[pd.DataFrame]:
+    """
+    Forced PSF photometry for **multiple** sources sharing the same difference-image list.
+
+    Builds a PRF/ePSF locator per source (median WCS position), resolves ``phot_snap``
+    offsets per source, then loads each FITS **once per epoch** and runs ``psf_flux``
+    for every source (see :class:`ForcedPhotTargetSpec`).
+
+    Returns one light-curve DataFrame per target, in the same order as ``targets``.
+    """
+    if not targets:
+        raise ValueError("run_forced_photometry_multi: targets list is empty")
+
+    n_epochs = len(diff_paths)
+    n_src = len(targets)
+
+    if n_src == 1:
+        sp = targets[0]
+        return [
+            _run_forced_photometry_single(
+                diff_paths,
+                sp.target_xy,
+                epsf_r2_smooth,
+                tile_centers,
+                wcs_table,
+                crop_bounds,
+                cfg,
+                phot,
+                output_dir,
+                ref_frame_index=ref_frame_index,
+                lightcurve_plot_path=sp.plot_png_path,
+                plot_title_suffix=plot_title_suffix,
+                plot_source_label=sp.plot_source_label,
+                lightcurve_csv_filename=sp.csv_basename,
+            )
+        ]
+
+    for spec in targets:
+        cname = spec.csv_basename
+        if os.path.basename(cname) != cname or ".." in cname:
+            raise ValueError(
+                f"csv_basename must be a plain basename, got {cname!r} "
+                f"(source tag {spec.tag!r})"
+            )
+        txy = np.asarray(spec.target_xy, dtype=np.float64)
+        if txy.ndim != 2 or txy.shape[1] != 2:
+            raise ValueError(
+                f"target_xy must have shape (n_epochs, 2); got {txy.shape} for {spec.tag!r}"
+            )
+        if txy.shape[0] != n_epochs:
+            raise ValueError(
+                f"target {spec.tag!r}: target_xy length {txy.shape[0]} != "
+                f"len(diff_paths) {n_epochs}"
+            )
+
+    over_size = 2 * phot.psf_size + 1
+    if epsf_r2_smooth.ndim == 3:
+        group_epsf = np.nanmedian(epsf_r2_smooth, axis=0)
+    else:
+        group_epsf = epsf_r2_smooth
+
+    locator_bundles: list[tuple] = []
+    for spec in targets:
+        txy = np.asarray(spec.target_xy, dtype=np.float64)
+        tx_med = float(np.nanmedian(txy[:, 0]))
+        ty_med = float(np.nanmedian(txy[:, 1]))
+        if not (np.isfinite(tx_med) and np.isfinite(ty_med)):
+            raise ValueError(
+                f"forced photometry [{spec.tag}]: need at least one finite (x, y) "
+                "in target_xy"
+            )
+        prf_or_epsf = build_psf_kernel(
+            phot,
+            cfg,
+            group_epsf,
+            tile_centers,
+            tx_med,
+            ty_med,
+            over_size,
+            crop_bounds,
+        )
+        locator_bundles.append(
+            _locator_bundle_for_parallel(
+                prf_or_epsf, phot, cfg, crop_bounds, tx_med, ty_med
+            )
+        )
+
+    n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
+    parallel = n_jobs != 1 and n_epochs > 1
+    snap = str(phot.phot_snap or "brightest").lower()
+    phot_size = int(phot.phot_cutout_size)
+    poly_order = int(phot.phot_bkg_poly_order)
+
+    sx = np.zeros(n_src, dtype=np.float64)
+    sy = np.zeros(n_src, dtype=np.float64)
+
+    if snap == "fixed":
+        for s in range(n_src):
+            sx[s], sy[s] = _offsets_after_source_only(locator_bundles[s], phot_size)
+
+    elif snap == "ref":
+        ri = ref_frame_index
+        ref_ok = (
+            ri is not None
+            and 0 <= ri < n_epochs
+            and diff_paths[ri] is not None
+            and os.path.exists(str(diff_paths[ri]))
+        )
+        if ref_ok:
+            path_ref = str(diff_paths[ri])
+            try:
+                data, sigma_full = read_diff_primary_and_noise_sigma(path_ref)
+            except Exception as exc:
+                log.warning(
+                    "  phot_snap='ref': cannot read ref frame %s: %s; "
+                    "using fixed offsets for all sources",
+                    path_ref,
+                    exc,
+                )
+                ref_ok = False
+            if ref_ok:
+                for s, spec in enumerate(targets):
+                    txy = np.asarray(spec.target_xy, dtype=np.float64)
+                    tx_i, ty_i = float(txy[ri, 0]), float(txy[ri, 1])
+                    if not (np.isfinite(tx_i) and np.isfinite(ty_i)):
+                        log.warning(
+                            "  phot_snap='ref' but ref cutout unavailable for [%s]; "
+                            "using default offsets",
+                            spec.tag,
+                        )
+                        sx[s], sy[s] = _offsets_after_source_only(
+                            locator_bundles[s], phot_size
+                        )
+                        continue
+                    cut = _extract_cutout(data, tx_i, ty_i, phot_size)
+                    sigma_cut = None
+                    if sigma_full is not None:
+                        sigma_cut = _extract_cutout(
+                            sigma_full, tx_i, ty_i, phot_size
+                        )
+                    psf_obj = create_psf(
+                        _locator_from_bundle(locator_bundles[s]), phot_size
+                    )
+                    psf_obj.source()
+                    psf_obj.psf_position(
+                        cut,
+                        error=_tessreduce_error_plane(sigma_cut, cut.shape),
+                    )
+                    sx[s] = float(psf_obj.source_x)
+                    sy[s] = float(psf_obj.source_y)
+                    log.info(
+                        "  PSF position fit [%s] on ref frame %s: dx=%.3f, dy=%.3f",
+                        spec.tag,
+                        ri,
+                        psf_obj.source_x,
+                        psf_obj.source_y,
+                    )
+        if not ref_ok:
+            log.warning(
+                "  phot_snap='ref' but ref cutout unavailable; using default (0,0) offsets"
+            )
+            for s in range(n_src):
+                sx[s], sy[s] = _offsets_after_source_only(locator_bundles[s], phot_size)
+
+    elif snap == "brightest":
+        best_tw = [-1.0] * n_src
+        best_cut: list[Optional[np.ndarray]] = [None] * n_src
+        best_sig: list[Optional[np.ndarray]] = [None] * n_src
+        best_idx: list[Optional[int]] = [None] * n_src
+
+        scan_tasks = []
+        for i, path in enumerate(diff_paths):
+            coords = tuple(
+                (
+                    float(np.asarray(targets[s].target_xy, dtype=np.float64)[i, 0]),
+                    float(np.asarray(targets[s].target_xy, dtype=np.float64)[i, 1]),
+                )
+                for s in range(n_src)
+            )
+            scan_tasks.append((i, path, coords, phot_size))
+
+        if not parallel:
+            for t in scan_tasks:
+                i, per_src = _forced_phot_brightest_scan_multi_worker(t)
+                for s, (cut, sigc, tw) in enumerate(per_src):
+                    if tw > best_tw[s]:
+                        best_tw[s] = tw
+                        best_idx[s] = i
+                        best_cut[s] = cut
+                        best_sig[s] = sigc
+        else:
+            log.info(
+                "  forced_photometry: brightest scan n_jobs=%s (loky), %d epochs, %d sources",
+                n_jobs,
+                n_epochs,
+                n_src,
+            )
+            scan_results = Parallel(n_jobs=n_jobs, backend="loky")(
+                delayed(_forced_phot_brightest_scan_multi_worker)(t) for t in scan_tasks
+            )
+            scan_results.sort(key=lambda r: r[0])
+            for i, per_src in scan_results:
+                for s, (cut, sigc, tw) in enumerate(per_src):
+                    if tw > best_tw[s]:
+                        best_tw[s] = tw
+                        best_idx[s] = i
+                        best_cut[s] = cut
+                        best_sig[s] = sigc
+
+        for s, spec in enumerate(targets):
+            if best_cut[s] is not None:
+                psf_obj = create_psf(
+                    _locator_from_bundle(locator_bundles[s]), phot_size
+                )
+                psf_obj.source()
+                psf_obj.psf_position(
+                    best_cut[s],
+                    error=_tessreduce_error_plane(best_sig[s], best_cut[s].shape),
+                )
+                sx[s] = float(psf_obj.source_x)
+                sy[s] = float(psf_obj.source_y)
+                log.info(
+                    "  PSF position fit [%s] on brightest frame %s: dx=%.3f, dy=%.3f",
+                    spec.tag,
+                    best_idx[s],
+                    psf_obj.source_x,
+                    psf_obj.source_y,
+                )
+            else:
+                sx[s], sy[s] = _offsets_after_source_only(locator_bundles[s], phot_size)
+
+    else:
+        log.warning(
+            "  Unknown phot_snap=%r; using 'fixed' (source at stamp centre only)",
+            snap,
+        )
+        for s in range(n_src):
+            sx[s], sy[s] = _offsets_after_source_only(locator_bundles[s], phot_size)
+
+    btjd_col = (
+        wcs_table["btjd"].values
+        if "btjd" in wcs_table.columns
+        else np.full(n_epochs, np.nan)
+    )
+    gid_col = (
+        wcs_table["group_id"].values
+        if "group_id" in wcs_table.columns
+        else np.zeros(n_epochs, int)
+    )
+
+    records_cols: list[list[Optional[dict]]] = [
+        [None] * n_epochs for _ in range(n_src)
+    ]
+
+    flux_tasks = []
+    for i, path in enumerate(diff_paths):
+        btjd = float(btjd_col[i]) if i < len(btjd_col) else float(np.nan)
+        gid = int(gid_col[i]) if i < len(gid_col) else -1
+        per_source = tuple(
+            (
+                locator_bundles[s],
+                float(np.asarray(targets[s].target_xy, dtype=np.float64)[i, 0]),
+                float(np.asarray(targets[s].target_xy, dtype=np.float64)[i, 1]),
+                float(sx[s]),
+                float(sy[s]),
+            )
+            for s in range(n_src)
+        )
+        flux_tasks.append(
+            (
+                i,
+                path,
+                btjd,
+                gid,
+                phot_size,
+                poly_order,
+                per_source,
+                str(path) if path else "",
+            )
+        )
+
+    if not parallel:
+        for t in flux_tasks:
+            i, recs = _forced_phot_multi_flux_worker(t)
+            for s, rec in enumerate(recs):
+                records_cols[s][i] = rec
+    else:
+        log.info(
+            "  forced_photometry: multi flux n_jobs=%s (loky), %d epochs, %d sources",
+            n_jobs,
+            n_epochs,
+            n_src,
+        )
+        flux_results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_forced_phot_multi_flux_worker)(t) for t in flux_tasks
+        )
+        flux_results.sort(key=lambda r: r[0])
+        for i, recs in flux_results:
+            for s, rec in enumerate(recs):
+                records_cols[s][i] = rec
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_dfs: List[pd.DataFrame] = []
+    plot_on = getattr(cfg, "pipeline_plots", False)
+    dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+    base_title = (
+        f"Sector {cfg.sector} cam{cfg.camera} ccd{cfg.ccd} · "
+        f"{phot.psf_type.upper()}"
+    )
+
+    for s, spec in enumerate(targets):
+        rec_list = records_cols[s]
+        assert all(r is not None for r in rec_list)
+        lc_df = pd.DataFrame(rec_list)
+        out_path = os.path.join(output_dir, spec.csv_basename)
+        lc_df.to_csv(out_path, index=False)
+        log.info(
+            "Light curve saved to %s  (%d epochs) [%s]",
+            out_path,
+            len(lc_df),
+            spec.tag,
+        )
+
+        if plot_on:
+            parts = [base_title]
+            if spec.plot_source_label:
+                parts.append(str(spec.plot_source_label))
+            if plot_title_suffix:
+                parts.append(str(plot_title_suffix))
+            title = " · ".join(parts)
+            write_lightcurve_diagnostic_plot(
+                lc_df,
+                output_dir,
+                dpi=dpi,
+                title_line=title,
+                png_path=spec.plot_png_path,
+            )
+
+        out_dfs.append(lc_df)
+
+    return out_dfs
+
+
+def run_forced_photometry(
+    diff_paths: list,
+    target_xy: np.ndarray,
+    epsf_r2_smooth: np.ndarray,
+    tile_centers: list,
+    wcs_table: pd.DataFrame,
+    crop_bounds: dict,
+    cfg,
+    phot,
+    output_dir: str,
+    *,
+    ref_frame_index: Optional[int] = None,
+    lightcurve_plot_path: Optional[str] = None,
+    plot_title_suffix: Optional[str] = None,
+    plot_source_label: Optional[str] = None,
+    lightcurve_csv_filename: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Forced PSF photometry on difference-image FITS (SynDiff pipeline).
+
+    Uses the single-target implementation (one FITS read per epoch, cutouts
+    reused for flux). For multiple sources on the same diff list, the pipeline
+    calls :func:`run_forced_photometry_multi`.
+    """
+    return _run_forced_photometry_single(
+        diff_paths,
+        target_xy,
+        epsf_r2_smooth,
+        tile_centers,
+        wcs_table,
+        crop_bounds,
+        cfg,
+        phot,
+        output_dir,
+        ref_frame_index=ref_frame_index,
+        lightcurve_plot_path=lightcurve_plot_path,
+        plot_title_suffix=plot_title_suffix,
+        plot_source_label=plot_source_label,
+        lightcurve_csv_filename=lightcurve_csv_filename,
+    )
