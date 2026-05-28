@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any
 
 from .config import SynDiffConfig
+from .stage_params import validate_stage_for_kind
 from .subtract_expr import parse_subtract_expression
 
 STAGE_KINDS = frozenset(
@@ -123,6 +124,8 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
         if kind not in STAGE_KINDS:
             raise ValueError(f"pipeline[{idx}]: unknown kind {kind!r}")
 
+        validate_stage_for_kind(stage, idx, kind)
+
         for ref in _inputs_refs(stage, idx):
             # ``ffi`` in subtract expressions is virtual: cropped science from manifest paths,
             # not ``ws/ffi/``.
@@ -211,13 +214,19 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
             inp = stage.get("inputs") or {}
             if "diffs" not in inp:
                 raise ValueError(f"pipeline[{idx}] forced_photometry: inputs.diffs required")
-            use_prf = str(stage.get("psf", "")).lower() == "prf"
-            use_epsf = bool(inp.get("epsf"))
-            if use_prf == use_epsf:
-                raise ValueError(
-                    f"pipeline[{idx}] forced_photometry: set exactly one of "
-                    f"'psf: prf' or 'inputs.epsf: <label>'."
-                )
+            pt = str(stage.get("psf_type", "")).strip().lower()
+            if pt == "epsf":
+                if not inp.get("epsf"):
+                    raise ValueError(
+                        f"pipeline[{idx}] forced_photometry: psf_type 'epsf' requires "
+                        f"inputs.epsf workspace label"
+                    )
+            elif pt == "prf":
+                if inp.get("epsf"):
+                    raise ValueError(
+                        f"pipeline[{idx}] forced_photometry: psf_type 'prf' must not set "
+                        f"inputs.epsf"
+                    )
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] forced_photometry: output workspace label required")
 

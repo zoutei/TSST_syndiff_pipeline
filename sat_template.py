@@ -234,7 +234,7 @@ def build_all_group_templates(removed_stars_df: pd.DataFrame,
                                group_epsf_dict: dict,
                                tile_centers: list,
                                crop_bounds: dict,
-                               cfg) -> tuple:
+                               sat) -> tuple:
     """
     Build native and high-resolution templates for every template group.
 
@@ -244,14 +244,14 @@ def build_all_group_templates(removed_stars_df: pd.DataFrame,
     group_epsf_dict  : dict  {group_id: ndarray (n_tiles, over_size²)}
     tile_centers     : list of (cx, cy)
     crop_bounds      : dict
-    cfg              : SynDiffConfig
+    sat              : SatTemplateParams
 
     Returns
     -------
     sat_tmpl_native : dict {group_id: 2D ndarray (ny, nx)}
     sat_tmpl_hr     : dict {group_id: 2D ndarray (ny, nx)}
     """
-    over_size = 2 * cfg.psf_size + 1
+    over_size = 2 * sat.psf_size + 1
     sat_tmpl_native = {}
     sat_tmpl_hr     = {}
 
@@ -259,12 +259,12 @@ def build_all_group_templates(removed_stars_df: pd.DataFrame,
         log.info(f"Building sat templates for group {gid} ...")
         sat_tmpl_native[gid] = build_sat_template(
             removed_stars_df, group_epsf, tile_centers,
-            crop_bounds, os_factor=cfg.epsf_oversample, over_size=over_size,
+            crop_bounds, os_factor=sat.epsf_oversample, over_size=over_size,
         )
         sat_tmpl_hr[gid] = build_sat_template_highres(
             removed_stars_df, group_epsf, tile_centers,
-            crop_bounds, epsf_os=cfg.epsf_oversample,
-            high_res_os=cfg.high_res_os, over_size=over_size,
+            crop_bounds, epsf_os=sat.epsf_oversample,
+            high_res_os=sat.high_res_os, over_size=over_size,
         )
 
     return sat_tmpl_native, sat_tmpl_hr

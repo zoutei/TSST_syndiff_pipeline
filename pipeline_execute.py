@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import re
-from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -53,6 +52,18 @@ from .paths import (
 )
 from .pipeline_context import PipelineInvocationContext
 from .pipeline_validate import validate_pipeline
+from .stage_params import (
+    parse_background_adaptive,
+    parse_background_estimate,
+    parse_background_rough,
+    parse_epsf,
+    parse_forced_photometry,
+    parse_hotpants,
+    parse_sat_template,
+    parse_shared_mask,
+    parse_subtract,
+    parse_wcs_grouping,
+)
 from .subtract_expr import parse_subtract_expression
 
 log = logging.getLogger(__name__)
@@ -479,20 +490,19 @@ def _time_mjd_for_hotpants_rows(wcs_table: pd.DataFrame, hp_rows: list) -> np.nd
     return np.asarray(btjd, dtype=float) + 57000.0
 
 
-def _bkg_vector_path(cfg: SynDiffConfig) -> Optional[str]:
-    p = cfg.bkg_vector_path
+def _norm_bkg_vector_path(p: Optional[str]) -> Optional[str]:
     if p is None or (isinstance(p, str) and not str(p).strip()):
         return None
     return str(p)
 
 
 def _optional_prf_kernel_for_bkg_source_hunt(
-    cfg: SynDiffConfig,
+    sp,
     crop_bounds: Optional[dict],
     ref_ffi_path: Optional[str],
 ) -> Optional[np.ndarray]:
     """PRF stamp for ``par_psf_source_mask`` when spatial TESSreduce background + source hunt."""
-    if not cfg.bkg_source_hunt or not cfg.bkg_tessreduce_spatial_pipeline:
+    if not sp.bkg_source_hunt or not sp.bkg_tessreduce_spatial_pipeline:
         return None
     if crop_bounds is None or not ref_ffi_path:
         raise RuntimeError(
@@ -537,6 +547,7 @@ def _adaptive_smooth_bkg_stack(
     wcs_table: pd.DataFrame,
     hotpants_results: list,
     cfg: SynDiffConfig,
+    adapt,
 ) -> np.ndarray:
     log.info(
         "_adaptive_smooth_bkg_stack: BTJD order for %d hotpants result(s), bkg_stack %s",
@@ -544,21 +555,19 @@ def _adaptive_smooth_bkg_stack(
         getattr(bkg_stack, "shape", None),
     )
     time_btjd = background.btjd_for_hotpants_order(wcs_table, hotpants_results)
-    vpath = cfg.bkg_vector_path or None
-    if vpath == "":
-        vpath = None
+    vpath = _norm_bkg_vector_path(adapt.bkg_vector_path)
     return background.adaptive_smooth_background(
         bkg_stack,
         time_btjd,
         cfg.sector,
         cfg.camera,
         vector_path=vpath,
-        method=cfg.bkg_adaptive_method,
-        savgol_window=cfg.bkg_adaptive_savgol_window,
-        savgol_polyorder=cfg.bkg_adaptive_savgol_polyorder,
-        w_min=cfg.bkg_adaptive_w_min,
-        w_max=cfg.bkg_adaptive_w_max,
-        block_size=cfg.bkg_adaptive_block_size,
+        method=adapt.bkg_adaptive_method,
+        savgol_window=adapt.bkg_adaptive_savgol_window,
+        savgol_polyorder=adapt.bkg_adaptive_savgol_polyorder,
+        w_min=adapt.bkg_adaptive_w_min,
+        w_max=adapt.bkg_adaptive_w_max,
+        block_size=adapt.bkg_adaptive_block_size,
         n_jobs=cfg.n_jobs,
     )
 
@@ -644,6 +653,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
     gaia_df: Optional[pd.DataFrame] = None
     tile_centers = None
     processing_ffi_paths: list = []
+    pipeline_offset_threshold = 0.01
 
     _bw, _bc, _br = _bootstrap_state_skip_wcs_grouping(cfg, out, manifest_path)
     if _bw is not None:
@@ -653,12 +663,14 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
     if _br is not None:
         ref_ffi_path = _br
 
-    for stage in cfg.pipeline:
+    for idx, stage in enumerate(cfg.pipeline):
         kind = stage["kind"]
         log.info("=" * 70)
         log.info("Stage: %s", kind)
 
         if kind == "wcs_grouping":
+            wg = parse_wcs_grouping(stage, idx)
+            pipeline_offset_threshold = wg.offset_threshold
             ffi_leaf = _cfg_ffi_leaf(cfg)
             all_sorted = _sorted_local_ffis(cfg)
             if not all_sorted:
@@ -680,28 +692,29 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             )
             wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
                 wcs_table,
-                window_length=cfg.wcs_drift_savgol_window,
-                polyorder=cfg.wcs_drift_savgol_polyorder,
+                window_length=wg.wcs_drift_savgol_window,
+                polyorder=wg.wcs_drift_savgol_polyorder,
+            )
+            wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
+                wcs_table,
+                sector=cfg.sector,
+                camera=cfg.camera,
+                tessvectors_data_path=_norm_bkg_vector_path(wg.bkg_vector_path),
             )
             wcs_table = wcs_grouping.assign_template_groups(
-                wcs_table, cfg.offset_threshold
+                wcs_table, wg.offset_threshold
             )
             save_frame_manifest(wcs_table, out, manifest_path)
 
             if cfg.ref_ffi_path and os.path.exists(cfg.ref_ffi_path):
                 ref_ffi_path = cfg.ref_ffi_path
             else:
-                dx = pd.to_numeric(wcs_table["delta_x"], errors="coerce")
-                dy = pd.to_numeric(wcs_table["delta_y"], errors="coerce")
-                ok = dx.notna() & dy.notna()
-                if "wcs_ok" in wcs_table.columns:
-                    wok = wcs_table["wcs_ok"]
-                    ok = ok & wok.apply(
-                        lambda x: x is True or str(x).lower() in ("true", "1")
-                    )
-                if not ok.any():
-                    raise RuntimeError("No FFI with usable WCS offsets for ref frame.")
-                ref_ffi_path = str(wcs_table[ok].iloc[0]["path"])
+                ref_ffi_path = wcs_grouping.choose_reference_ffi_path(
+                    wcs_table,
+                    earth_deg_min=cfg.ref_ffi_min_earth_deg,
+                    moon_deg_min=cfg.ref_ffi_min_moon_deg,
+                    max_smoothed_residual=cfg.ref_ffi_max_smoothed_residual,
+                )
             log.info("  Reference FFI: %s", ref_ffi_path)
 
             with fits.open(ref_ffi_path, memmap=True) as hdul:
@@ -725,7 +738,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 cfg.sector,
                 cfg.camera,
                 cfg.ccd,
-                cfg.offset_threshold,
+                wg.offset_threshold,
                 out,
                 crop_bounds=crop_bounds,
             )
@@ -735,9 +748,13 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 wcs_grouping.plot_wcs_drift_and_template_assignment(
                     wcs_table,
                     os.path.join(plot_dir, "wcs_drift_template_debug.png"),
+                    ref_ffi_path=ref_ffi_path,
+                    ref_earth_deg_min=cfg.ref_ffi_min_earth_deg,
+                    ref_moon_deg_min=cfg.ref_ffi_min_moon_deg,
                 )
 
         elif kind == "shared_mask":
+            sm = parse_shared_mask(stage, idx)
             if wcs_table is None or crop_bounds is None or ref_ffi_path is None:
                 raise RuntimeError("shared_mask requires wcs_grouping first.")
             gaia_df = _load_gaia_catalog(cfg, out)
@@ -757,18 +774,18 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 gaia_df=gaia_mask_df,
                 crop_bounds=crop_bounds,
                 straps_csv=cfg.straps_csv,
-                maglim=cfg.gaia_mag_bright,
-                strapsize=cfg.strapsize,
+                maglim=sm.gaia_mag_bright,
+                strapsize=sm.strapsize,
                 output_dir=out,
             )
             ref_stars = masking.select_hotpants_ref_stars(
                 gaia_df=gaia_mask_df,
                 crop_bounds=crop_bounds,
-                mag_min=cfg.ref_mag_min,
-                mag_max=cfg.ref_mag_max,
-                isolation_mag=cfg.ref_isolation_mag,
-                isolation_radius_px=cfg.ref_isolation_px,
-                separation_px=cfg.ref_separation_px,
+                mag_min=sm.ref_mag_min,
+                mag_max=sm.ref_mag_max,
+                isolation_mag=sm.ref_isolation_mag,
+                isolation_radius_px=sm.ref_isolation_px,
+                separation_px=sm.ref_separation_px,
                 output_dir=out,
             )
             pipe_csv = os.path.join(out, "gaia_catalog_pipeline.csv")
@@ -776,6 +793,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             gaia_df = gaia_mask_df.drop(columns=["mag"], errors="ignore")
 
         elif kind == "hotpants":
+            hp = parse_hotpants(stage, idx)
             if wcs_table is None or crop_bounds is None or ref_ffi_path is None:
                 raise RuntimeError(
                     "hotpants requires wcs_table, crop_bounds, and reference FFI metadata "
@@ -794,7 +812,10 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 log.info("  Loaded ref_stars from prior run (%s)", rs_path)
             try:
                 hotpants_runner.ensure_template_paths_from_syndiff_or_group_dirs(
-                    cfg, wcs_table, crop_bounds
+                    cfg,
+                    wcs_table,
+                    crop_bounds,
+                    offset_threshold=pipeline_offset_threshold,
                 )
             except hotpants_runner.SyndiffTemplateDiscoveryError as e:
                 raise RuntimeError(str(e)) from e
@@ -856,6 +877,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 template_path_map={int(k): v for k, v in cfg.template_paths.items()},
                 mask=shared_mask,
                 crop_bounds=crop_bounds,
+                hp=hp,
                 cfg=cfg,
                 output_dir=out,
                 ref_stars_df=ref_stars,
@@ -876,6 +898,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 )
 
         elif kind == "epsf":
+            epsf_p = parse_epsf(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             diff_paths = ordered_diff_paths_for_workspace(
@@ -898,6 +921,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     gaia_df_flux,
                     col_corr_2d,
                     cfg,
+                    epsf_p,
                     ws_out,
                     round_id=1,
                 )
@@ -920,6 +944,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 _save_tile_centers(tile_centers, out)
 
         elif kind == "sat_template":
+            sat_p = parse_sat_template(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             ws_epsf = ctx.workspace(inp["epsf"])
@@ -931,7 +956,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 from .epsf_fitting import _make_tile_grid
 
                 ny, nx = crop_bounds["shape"]
-                tiles = _make_tile_grid(ny, nx, cfg.tile_ny, cfg.tile_nx)
+                tiles = _make_tile_grid(ny, nx, sat_p.tile_ny, sat_p.tile_nx)
                 tile_centers = [
                     (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
                 ]
@@ -943,11 +968,12 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             ws_sat = ctx.workspace(label_out)
             os.makedirs(ws_sat, exist_ok=True)
             sat_native, sat_hr = sat_template.build_all_group_templates(
-                removed_df, group_epsf, tile_centers, crop_bounds, cfg
+                removed_df, group_epsf, tile_centers, crop_bounds, sat_p
             )
             sat_template.save_group_templates(sat_native, sat_hr, ws_sat, round_id=1)
 
         elif kind == "subtract":
+            parse_subtract(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             out_ws = ctx.workspace(label_out)
@@ -1047,6 +1073,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     fits.writeto(out_fp, acc.astype(np.float32), overwrite=True)
 
         elif kind == "background_rough":
+            sp = parse_background_rough(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             diff_dir = ctx.workspace(inp["diffs"])
@@ -1059,13 +1086,13 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             round_id = int(stage.get("round_id", 1))
             stream = bool(stage.get("stream_load_rough", False))
             write_pf = bool(stage.get("write_per_frame_fits", True))
-            incremental_rough_fits = write_pf and not cfg.bkg_tessreduce_spatial_pipeline
+            incremental_rough_fits = write_pf and not sp.bkg_tessreduce_spatial_pipeline
             sh_union_fits = (
                 os.path.join(out, BKG_SOURCE_HUNT_UNION_FITS_BASENAME)
-                if cfg.bkg_source_hunt and cfg.bkg_tessreduce_spatial_pipeline
+                if sp.bkg_source_hunt and sp.bkg_tessreduce_spatial_pipeline
                 else None
             )
-            if stream and cfg.bkg_tessreduce_spatial_pipeline:
+            if stream and sp.bkg_tessreduce_spatial_pipeline:
                 raise RuntimeError(
                     "background_rough: stream_load_rough is incompatible with "
                     "bkg_tessreduce_spatial_pipeline=True (full flux cube required)."
@@ -1085,9 +1112,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     shared_mask,
                     output_dir=out_ws,
                     round_id=round_id,
-                    recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
+                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
-                    interpolate_per_frame=cfg.bkg_interpolate,
+                    interpolate_per_frame=sp.bkg_interpolate,
                     per_frame_fits_dir=out_ws if incremental_rough_fits else None,
                 )
                 hp_results = _hotpants_result_stems_for_ordering(
@@ -1106,35 +1133,35 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 log.info(
                     "  background_rough: FITS load complete; starting rough stack "
                     "(TESSreduce spatial=%s)",
-                    cfg.bkg_tessreduce_spatial_pipeline,
+                    sp.bkg_tessreduce_spatial_pipeline,
                 )
                 prf_k = _optional_prf_kernel_for_bkg_source_hunt(
-                    cfg, crop_bounds, ref_ffi_path
+                    sp, crop_bounds, ref_ffi_path
                 )
                 rough = background.background_loop(
                     hotpants_results=hp_results,
                     mask=shared_mask,
                     output_dir=out_ws,
                     round_id=round_id,
-                    gauss_smooth=cfg.bkg_gauss_smooth,
-                    recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
+                    gauss_smooth=sp.bkg_gauss_smooth,
+                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
-                    tessreduce_spatial=cfg.bkg_tessreduce_spatial_pipeline,
+                    tessreduce_spatial=sp.bkg_tessreduce_spatial_pipeline,
                     time_mjd=(
                         _time_mjd_for_hotpants_rows(wcs_table, hp_results)
-                        if cfg.bkg_tessreduce_spatial_pipeline
+                        if sp.bkg_tessreduce_spatial_pipeline
                         else None
                     ),
                     sector=int(cfg.sector),
                     camera=int(cfg.camera),
-                    vector_path=_bkg_vector_path(cfg),
-                    calc_qe=cfg.bkg_calc_qe,
-                    strap_iso=cfg.bkg_strap_iso,
-                    source_hunt=cfg.bkg_source_hunt,
-                    interpolate=cfg.bkg_interpolate,
-                    rerun_negative=cfg.bkg_rerun_negative,
-                    rerun_diff=cfg.bkg_rerun_diff,
-                    use_error_image=cfg.bkg_use_error_image,
+                    vector_path=_norm_bkg_vector_path(sp.bkg_vector_path),
+                    calc_qe=sp.bkg_calc_qe,
+                    strap_iso=sp.bkg_strap_iso,
+                    source_hunt=sp.bkg_source_hunt,
+                    interpolate=sp.bkg_interpolate,
+                    rerun_negative=sp.bkg_rerun_negative,
+                    rerun_diff=sp.bkg_rerun_diff,
+                    use_error_image=sp.bkg_use_error_image,
                     prf_kernel_2d=prf_k,
                     per_frame_fits_dir=out_ws if incremental_rough_fits else None,
                     source_hunt_union_fits_path=sh_union_fits,
@@ -1176,6 +1203,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             )
 
         elif kind == "background_adaptive":
+            ap = parse_background_adaptive(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             rough_ws = ctx.workspace(inp["rough"])
@@ -1212,7 +1240,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             )
             bkg_arr = np.array(rough, dtype=np.float32, copy=True)
             _add_hotpants_bkg_to_stack_inplace(bkg_arr, hp_order, hp_bkg_dir)
-            temp_smooth = _adaptive_smooth_bkg_stack(bkg_arr, wcs_table, hp_order, cfg)
+            temp_smooth = _adaptive_smooth_bkg_stack(
+                bkg_arr, wcs_table, hp_order, cfg, ap
+            )
             log.info(
                 "  background_adaptive: adaptive smooth returned; writing %s.npz and .npy",
                 ADAPTIVE_BKG_STACK_BASENAME,
@@ -1239,6 +1269,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             )
 
         elif kind == "background_estimate":
+            sp, ap = parse_background_estimate(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             diff_dir = ctx.workspace(inp["diffs"])
@@ -1252,14 +1283,14 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             stream = bool(stage.get("stream_load_rough", False))
             write_pf_est = bool(stage.get("write_per_frame_fits", True))
             incremental_rough_fits_est = (
-                write_pf_est and not cfg.bkg_tessreduce_spatial_pipeline
+                write_pf_est and not sp.bkg_tessreduce_spatial_pipeline
             )
             sh_union_fits = (
                 os.path.join(out, BKG_SOURCE_HUNT_UNION_FITS_BASENAME)
-                if cfg.bkg_source_hunt and cfg.bkg_tessreduce_spatial_pipeline
+                if sp.bkg_source_hunt and sp.bkg_tessreduce_spatial_pipeline
                 else None
             )
-            if stream and cfg.bkg_tessreduce_spatial_pipeline:
+            if stream and sp.bkg_tessreduce_spatial_pipeline:
                 raise RuntimeError(
                     "background_estimate: stream_load_rough is incompatible with "
                     "bkg_tessreduce_spatial_pipeline=True (full flux cube required)."
@@ -1279,9 +1310,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     shared_mask,
                     output_dir=out_ws,
                     round_id=round_id,
-                    recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
+                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
-                    interpolate_per_frame=cfg.bkg_interpolate,
+                    interpolate_per_frame=sp.bkg_interpolate,
                     per_frame_fits_dir=out_ws if incremental_rough_fits_est else None,
                 )
                 hp_results = _hotpants_result_stems_for_ordering(
@@ -1300,35 +1331,35 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 log.info(
                     "  background_estimate: FITS load complete; starting rough stack "
                     "(TESSreduce spatial=%s)",
-                    cfg.bkg_tessreduce_spatial_pipeline,
+                    sp.bkg_tessreduce_spatial_pipeline,
                 )
                 prf_k = _optional_prf_kernel_for_bkg_source_hunt(
-                    cfg, crop_bounds, ref_ffi_path
+                    sp, crop_bounds, ref_ffi_path
                 )
                 rough = background.background_loop(
                     hotpants_results=hp_results,
                     mask=shared_mask,
                     output_dir=out_ws,
                     round_id=round_id,
-                    gauss_smooth=cfg.bkg_gauss_smooth,
-                    recombine_hotpants=cfg.bkg_r1_recombine_hotpants,
+                    gauss_smooth=sp.bkg_gauss_smooth,
+                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
                     n_jobs=cfg.n_jobs,
-                    tessreduce_spatial=cfg.bkg_tessreduce_spatial_pipeline,
+                    tessreduce_spatial=sp.bkg_tessreduce_spatial_pipeline,
                     time_mjd=(
                         _time_mjd_for_hotpants_rows(wcs_table, hp_results)
-                        if cfg.bkg_tessreduce_spatial_pipeline
+                        if sp.bkg_tessreduce_spatial_pipeline
                         else None
                     ),
                     sector=int(cfg.sector),
                     camera=int(cfg.camera),
-                    vector_path=_bkg_vector_path(cfg),
-                    calc_qe=cfg.bkg_calc_qe,
-                    strap_iso=cfg.bkg_strap_iso,
-                    source_hunt=cfg.bkg_source_hunt,
-                    interpolate=cfg.bkg_interpolate,
-                    rerun_negative=cfg.bkg_rerun_negative,
-                    rerun_diff=cfg.bkg_rerun_diff,
-                    use_error_image=cfg.bkg_use_error_image,
+                    vector_path=_norm_bkg_vector_path(sp.bkg_vector_path),
+                    calc_qe=sp.bkg_calc_qe,
+                    strap_iso=sp.bkg_strap_iso,
+                    source_hunt=sp.bkg_source_hunt,
+                    interpolate=sp.bkg_interpolate,
+                    rerun_negative=sp.bkg_rerun_negative,
+                    rerun_diff=sp.bkg_rerun_diff,
+                    use_error_image=sp.bkg_use_error_image,
                     prf_kernel_2d=prf_k,
                     per_frame_fits_dir=out_ws if incremental_rough_fits_est else None,
                     source_hunt_union_fits_path=sh_union_fits,
@@ -1368,7 +1399,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             gc.collect()
             bkg_arr = np.array(rough, dtype=np.float32, copy=True)
             _add_hotpants_bkg_to_stack_inplace(bkg_arr, hp_results, hp_bkg_dir)
-            temp_smooth = _adaptive_smooth_bkg_stack(bkg_arr, wcs_table, hp_results, cfg)
+            temp_smooth = _adaptive_smooth_bkg_stack(
+                bkg_arr, wcs_table, hp_results, cfg, ap
+            )
             log.info(
                 "  background_estimate: adaptive smooth returned; writing %s.npz and .npy",
                 ADAPTIVE_BKG_STACK_BASENAME,
@@ -1395,6 +1428,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             )
 
         elif kind == "forced_photometry":
+            phot_params = parse_forced_photometry(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
             phot_out = ctx.workspace(label_out)
@@ -1424,32 +1458,31 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     ref_ffi_path,
                 )
 
-            use_prf = str(stage.get("psf", "")).lower() == "prf"
-            if use_prf:
-                over_size = 2 * cfg.psf_size + 1
-                n_tiles = cfg.tile_ny * cfg.tile_nx
-                epsf_for_phot = np.zeros((n_tiles, over_size**2))
-            else:
-                epsf_ws = ctx.workspace(inp["epsf"])
-                epsf_for_phot, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
-                if epsf_for_phot.ndim == 3:
-                    epsf_for_phot = np.nanmedian(epsf_for_phot, axis=0)
-
-            # Stage ``psf: prf`` only supplies a dummy zero ePSF array; ``build_psf_kernel``
-            # must see ``psf_type == "prf"`` or it would wrap zeros in EpsfLocator (NaN PSF,
-            # zero flux).
-            cfg_phot = replace(cfg, psf_type="prf") if use_prf else cfg
-
             if tile_centers is None:
                 tile_centers = _load_tile_centers_json(out)
             if tile_centers is None and crop_bounds is not None:
                 from .epsf_fitting import _make_tile_grid
 
                 ny, nx = crop_bounds["shape"]
-                tiles = _make_tile_grid(ny, nx, cfg.tile_ny, cfg.tile_nx)
+                tiles = _make_tile_grid(
+                    ny, nx, phot_params.tile_ny, phot_params.tile_nx
+                )
                 tile_centers = [
                     (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
                 ]
+
+            use_prf = phot_params.psf_type == "prf"
+            if use_prf:
+                over_size = 2 * phot_params.psf_size + 1
+                n_tiles = len(tile_centers) if tile_centers else (
+                    phot_params.tile_ny * phot_params.tile_nx
+                )
+                epsf_for_phot = np.zeros((n_tiles, over_size**2))
+            else:
+                epsf_ws = ctx.workspace(inp["epsf"])
+                epsf_for_phot, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
+                if epsf_for_phot.ndim == 3:
+                    epsf_for_phot = np.nanmedian(epsf_for_phot, axis=0)
 
             extras = list(getattr(cfg, "additional_forced_targets", None) or [])
             sky_targets: list[tuple[float, float, Optional[str], Optional[str], str]] = [
@@ -1472,6 +1505,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     )
                 )
 
+            phot_targets: list[photometry.ForcedPhotTargetSpec] = []
             for ra, dec, lc_name, csv_fname, tag in sky_targets:
                 target_xy = photometry.per_frame_target_crop_xy(
                     wcs_table, ra, dec, crop_bounds
@@ -1483,7 +1517,7 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                         mx,
                         my,
                         crop_bounds,
-                        int(cfg_phot.phot_cutout_size),
+                        int(phot_params.phot_cutout_size),
                         ra=ra,
                         dec=dec,
                         tag=tag,
@@ -1528,21 +1562,29 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 else:
                     lc_plot_path = None
 
-                photometry.run_forced_photometry(
-                    diff_paths=paths_for_phot,
-                    target_xy=target_xy,
-                    epsf_r2_smooth=epsf_for_phot,
-                    tile_centers=tile_centers,
-                    wcs_table=wcs_table,
-                    crop_bounds=crop_bounds,
-                    cfg=cfg_phot,
-                    output_dir=phot_out,
-                    ref_frame_index=ref_idx,
-                    lightcurve_plot_path=lc_plot_path,
-                    plot_title_suffix=label_out,
-                    plot_source_label=lc_name or "primary",
-                    lightcurve_csv_filename=csv_fname,
+                phot_targets.append(
+                    photometry.ForcedPhotTargetSpec(
+                        target_xy=target_xy,
+                        csv_basename=csv_fname or "lightcurve.csv",
+                        plot_source_label=lc_name or "primary",
+                        plot_png_path=lc_plot_path,
+                        tag=tag,
+                    )
                 )
+
+            photometry.run_forced_photometry_multi(
+                diff_paths=paths_for_phot,
+                targets=phot_targets,
+                epsf_r2_smooth=epsf_for_phot,
+                tile_centers=tile_centers,
+                wcs_table=wcs_table,
+                crop_bounds=crop_bounds,
+                cfg=cfg,
+                phot=phot_params,
+                output_dir=phot_out,
+                ref_frame_index=ref_idx,
+                plot_title_suffix=label_out,
+            )
 
         else:
             raise RuntimeError(f"Unhandled stage kind {kind!r}")

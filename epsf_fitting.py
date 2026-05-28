@@ -539,6 +539,7 @@ def _fit_one_tile(image: np.ndarray,
                   col_corr_2d: np.ndarray,
                   r0: int, c0: int, tile_size: int,
                   cfg,
+                  epsf,
                   tglc_ffi, get_psf, fit_psf,
                   diag: Optional[dict] = None) -> np.ndarray:
     """
@@ -549,7 +550,7 @@ def _fit_one_tile(image: np.ndarray,
     1D ndarray of shape (over_size²,) — normalized ePSF coefficients,
     or NaN array if fitting failed.
     """
-    over_size = 2 * cfg.psf_size + 1
+    over_size = 2 * epsf.psf_size + 1
     nan_epsf  = np.full(over_size ** 2, np.nan)
 
     # Extract square tile (TGLC requires height == width)
@@ -560,7 +561,7 @@ def _fit_one_tile(image: np.ndarray,
     # Stars for this tile
     tile_cat = _build_tile_catalog(
         gaia_df, r0, c0, tile_size,
-        cfg.psf_size, cfg.epsf_oversample,
+        epsf.psf_size, epsf.epsf_oversample,
     )
     if len(tile_cat) < 3:
         if diag is not None:
@@ -577,7 +578,7 @@ def _fit_one_tile(image: np.ndarray,
         # Temporarily spoof class to enable 6-DOF background in get_psf
         source.__class__ = tglc_ffi.Source
         A, _star_info, _over_size, _xr, _yr = get_psf(
-            source, factor=cfg.epsf_oversample, psf_size=cfg.psf_size,
+            source, factor=epsf.epsf_oversample, psf_size=epsf.psf_size,
         )
         source.__class__ = CustomSource
         e_psf_full = fit_psf(A, source, _over_size, power=0.8, time=0)
@@ -611,6 +612,7 @@ def fit_epsf_tiled(diff_image: np.ndarray,
                    gaia_df: pd.DataFrame,
                    col_corr_2d: np.ndarray,
                    cfg,
+                   epsf,
                    frame_label: str = "") -> tuple:
     """
     Fit ePSF on one difference image using a tile_ny × tile_nx grid.
@@ -621,7 +623,8 @@ def fit_epsf_tiled(diff_image: np.ndarray,
     gaia_df     : pd.DataFrame with x, y (crop-local), tess_mag,
                   tess_flux_ratio, phot_g/bp/rp columns
     col_corr_2d : 2D ndarray (ny_crop, nx_crop) — column correction
-    cfg         : SynDiffConfig
+    cfg         : SynDiffConfig (``sector`` for TGLC ``CustomSource``)
+    epsf        : EpsfParams — tile grid and PSF stamp geometry
     frame_label : str, optional — basename for logging (e.g. diff FITS name)
 
     Returns
@@ -635,9 +638,9 @@ def fit_epsf_tiled(diff_image: np.ndarray,
     gaia_df = add_tess_flux_ratio(gaia_df)
 
     ny, nx = diff_image.shape
-    tiles = _make_tile_grid(ny, nx, cfg.tile_ny, cfg.tile_nx)
+    tiles = _make_tile_grid(ny, nx, epsf.tile_ny, epsf.tile_nx)
     n_tiles = len(tiles)
-    over_size = 2 * cfg.psf_size + 1
+    over_size = 2 * epsf.psf_size + 1
 
     epsf_tiles   = np.full((n_tiles, over_size ** 2), np.nan)
     tile_centers = []
@@ -656,7 +659,7 @@ def fit_epsf_tiled(diff_image: np.ndarray,
 
         coeffs = _fit_one_tile(
             diff_image, gaia_df, col_corr_2d,
-            r0, c0, tile_size, cfg,
+            r0, c0, tile_size, cfg, epsf,
             tglc_ffi, get_psf, fit_psf,
             diag=diag,
         )
@@ -694,6 +697,7 @@ def fit_epsf_all_frames(diff_paths: list,
                          gaia_df: pd.DataFrame,
                          col_corr_2d: np.ndarray,
                          cfg,
+                         epsf,
                          output_dir: str = None,
                          round_id: int = 1) -> tuple:
     """
@@ -715,8 +719,8 @@ def fit_epsf_all_frames(diff_paths: list,
     ffi_stems   : list of str — ``tess<digits>`` product id per row (axis-0 identity)
     epsf_ok     : list of bool — True if difference image loaded and ePSF fitted
     """
-    over_size = 2 * cfg.psf_size + 1
-    n_tiles   = cfg.tile_ny * cfg.tile_nx
+    over_size = 2 * epsf.psf_size + 1
+    n_tiles   = epsf.tile_ny * epsf.tile_nx
     n_frames  = len(diff_paths)
 
     epsf_stack   = np.full((n_frames, n_tiles, over_size ** 2), np.nan)
@@ -745,7 +749,7 @@ def fit_epsf_all_frames(diff_paths: list,
             continue
 
         tiles_i, centers_i = fit_epsf_tiled(
-            diff_img, gaia_df, col_corr_2d, cfg,
+            diff_img, gaia_df, col_corr_2d, cfg, epsf,
             frame_label=os.path.basename(diff_path),
         )
         epsf_stack[i] = tiles_i
@@ -759,7 +763,7 @@ def fit_epsf_all_frames(diff_paths: list,
     if tile_centers is None:
         # Fallback: compute from grid geometry
         ny, nx = col_corr_2d.shape
-        tiles = _make_tile_grid(ny, nx, cfg.tile_ny, cfg.tile_nx)
+        tiles = _make_tile_grid(ny, nx, epsf.tile_ny, epsf.tile_nx)
         tile_centers = [
             (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
         ]
