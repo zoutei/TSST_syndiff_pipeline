@@ -3,7 +3,7 @@ hotpants_runner.py
 ==================
 Hotpants differencing: FFI (cropped) vs PS1 template, Gaia reference stars.
 
-When ``cfg.n_jobs`` (or ``cfg.hotpants_n_jobs`` if set) is greater than 1,
+When global ``cfg.n_jobs`` (or the stage's ``hotpants_n_jobs`` if set) is greater than 1,
 :func:`hotpants_loop` uses joblib **loky** with a **worker initializer** so the
 shared mask, reference-star coordinates, and template map are installed once per
 process instead of being cloudpickled with every FFI task (only per-frame
@@ -47,6 +47,7 @@ from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
 from joblib import Parallel, delayed
 
+from .stage_params import HotpantsParams
 from .ffi_naming import (
     sanitize_workspace_label,
     tess_product_id_from_ffi_path,
@@ -90,7 +91,7 @@ _HOTPANTS_LOKY_PAYLOAD: Optional[dict[str, Any]] = None
 def _hotpants_loky_initializer(
     mask: np.ndarray,
     ref_stars_xy: np.ndarray,
-    cfg: Any,
+    hp: HotpantsParams,
     template_path_map: dict,
     crop_bounds: dict,
     workspace_dirs: HotpantsWorkspaceDirs,
@@ -102,7 +103,7 @@ def _hotpants_loky_initializer(
     _HOTPANTS_LOKY_PAYLOAD = {
         "mask": mask,
         "ref_stars_xy": ref_stars_xy,
-        "cfg": cfg,
+        "hp": hp,
         "template_path_map": template_path_map,
         "crop_bounds": crop_bounds,
         "workspace_dirs": workspace_dirs,
@@ -131,7 +132,7 @@ def _hotpants_loky_run_task(
         ffi_path=ffi_path,
         product_id=product_id,
         group_id=group_id,
-        cfg=p["cfg"],
+        hp=p["hp"],
         template_path_map=p["template_path_map"],
         mask=p["mask"],
         crop_bounds=p["crop_bounds"],
@@ -194,16 +195,16 @@ def kernel_params_dir(diff_dir: str) -> str:
     return os.path.join(parent, f"{base}_kernel_params")
 
 
-def _kernel_sigma_deg_for_basis(cfg) -> tuple[int, list[float], list[int], int]:
+def _kernel_sigma_deg_for_basis(hp: HotpantsParams) -> tuple[int, list[float], list[int], int]:
     """
     Match :func:`build_hotpants_config`: ``rkernel``, truncated ``sigma_gauss`` /
     ``deg_fixe`` to ``hp_ngauss`` (same convention as ``HotpantsConfig``).
     """
-    sci_fwhm = float(cfg.sci_fwhm)
+    sci_fwhm = float(hp.sci_fwhm)
     rkernel = int(2.5 * sci_fwhm)
-    ngauss = max(1, int(cfg.hp_ngauss))
+    ngauss = max(1, int(hp.hp_ngauss))
     sigma_full = [sci_fwhm / 2.5, sci_fwhm, sci_fwhm * 2]
-    deg_full = [int(d) for d in list(cfg.hp_deg_fixe)]
+    deg_full = [int(d) for d in list(hp.hp_deg_fixe)]
     n = min(ngauss, len(sigma_full), len(deg_full))
     return rkernel, sigma_full[:n], deg_full[:n], ngauss
 
@@ -266,14 +267,14 @@ def _calculate_kernel_basis(
     return basis
 
 
-def write_kernel_reconstruction_npz(cfg, path: str) -> bool:
+def write_kernel_reconstruction_npz(hp: HotpantsParams, path: str) -> bool:
     """
     Write one shared archive: stacked raw kernel ``basis`` (``n_basis``, H, W) from
     :func:`_calculate_kernel_basis`, plus scalars matching the run.
 
     Returns True if the file was written, False if construction failed.
     """
-    rkernel, sigma_gauss, deg_fixe, _ngauss = _kernel_sigma_deg_for_basis(cfg)
+    rkernel, sigma_gauss, deg_fixe, _ngauss = _kernel_sigma_deg_for_basis(hp)
     size = 2 * rkernel + 1
     shape = (size, size)
     try:
@@ -282,23 +283,23 @@ def write_kernel_reconstruction_npz(cfg, path: str) -> bool:
     except Exception as exc:
         log.error("_calculate_kernel_basis failed; skip %s: %s", path, exc)
         return False
-    rss = int(2.5 * float(cfg.sci_fwhm))
+    rss = int(2.5 * float(hp.sci_fwhm))
     meta: dict[str, Any] = {
         "basis": basis,
         "rkernel": np.int32(rkernel),
         "rss": np.int32(rss),
-        "ko": np.int32(cfg.hp_ko),
-        "bgo": np.int32(cfg.hp_bgo),
-        "nstampx": np.int32(cfg.hp_nstampx),
-        "nstampy": np.int32(cfg.hp_nstampy),
-        "nss": np.int32(cfg.hp_nss),
-        "ngauss": np.int32(cfg.hp_ngauss),
+        "ko": np.int32(hp.hp_ko),
+        "bgo": np.int32(hp.hp_bgo),
+        "nstampx": np.int32(hp.hp_nstampx),
+        "nstampy": np.int32(hp.hp_nstampy),
+        "nss": np.int32(hp.hp_nss),
+        "ngauss": np.int32(hp.hp_ngauss),
         "n_basis": np.int32(basis.shape[0]),
-        "sci_fwhm": np.float64(cfg.sci_fwhm),
+        "sci_fwhm": np.float64(hp.sci_fwhm),
         "sigma_gauss": np.asarray(sigma_gauss, dtype=np.float64),
         "deg_fixe": np.asarray(deg_fixe, dtype=np.int32),
-        "hp_normalize": np.array(str(cfg.hp_normalize)),
-        "hp_force_convolve": np.array(str(cfg.hp_force_convolve)),
+        "hp_normalize": np.array(str(hp.hp_normalize)),
+        "hp_force_convolve": np.array(str(hp.hp_force_convolve)),
     }
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     np.savez_compressed(path, **meta)
@@ -361,17 +362,17 @@ def _save_frame_kernel_params_npz(
     stem: str,
     out_dir: str,
     arrays: dict[str, np.ndarray],
-    cfg,
+    hp: HotpantsParams,
 ) -> None:
     """Write ``{stem}.npz`` with fitted parameters plus a small config echo."""
-    rkernel, _sig, _deg, _ = _kernel_sigma_deg_for_basis(cfg)
+    rkernel, _sig, _deg, _ = _kernel_sigma_deg_for_basis(hp)
     extra = {
         "rkernel": np.int32(rkernel),
-        "ko": np.int32(cfg.hp_ko),
-        "bgo": np.int32(cfg.hp_bgo),
-        "nstampx": np.int32(cfg.hp_nstampx),
-        "nstampy": np.int32(cfg.hp_nstampy),
-        "sci_fwhm": np.float64(cfg.sci_fwhm),
+        "ko": np.int32(hp.hp_ko),
+        "bgo": np.int32(hp.hp_bgo),
+        "nstampx": np.int32(hp.hp_nstampx),
+        "nstampy": np.int32(hp.hp_nstampy),
+        "sci_fwhm": np.float64(hp.sci_fwhm),
     }
     if "local_kernel_solution" in arrays:
         extra["n_substamps"] = np.int32(arrays["local_kernel_solution"].shape[0])
@@ -414,7 +415,7 @@ def _get_hotpants_classes():
 
 def build_hotpants_config(
     sci_fwhm: float,
-    cfg,
+    hp: HotpantsParams,
     diff_dir: str,
     convolved_dir: str,
     frame_stem: str,
@@ -432,22 +433,22 @@ def build_hotpants_config(
 
     hp_config = HotpantsConfig(
         rkernel=int(kernel_halfwidth),
-        ko=int(cfg.hp_ko),
-        bgo=int(cfg.hp_bgo),
-        nstampx=int(cfg.hp_nstampx),
-        nstampy=int(cfg.hp_nstampy),
-        nss=int(cfg.hp_nss),
+        ko=int(hp.hp_ko),
+        bgo=int(hp.hp_bgo),
+        nstampx=int(hp.hp_nstampx),
+        nstampy=int(hp.hp_nstampy),
+        nss=int(hp.hp_nss),
         rss=int(substamp_halfwidth),
-        ngauss=int(cfg.hp_ngauss),
-        deg_fixe=[int(d) for d in cfg.hp_deg_fixe],
+        ngauss=int(hp.hp_ngauss),
+        deg_fixe=[int(d) for d in hp.hp_deg_fixe],
         sigma_gauss=[float(sci_fwhm / 2.5), float(sci_fwhm), float(sci_fwhm * 2)],
-        kf_spread_mask1=float(cfg.hp_kf_spread_mask1) if getattr(cfg, 'hp_kf_spread_mask1', None) is not None else 1.0,
-        ks=int(cfg.hp_ks) if getattr(cfg, 'hp_ks', None) is not None else 0,
-        kfm=int(cfg.hp_kfm) if getattr(cfg, 'hp_kfm', None) is not None else 0,
-        fitthresh=float(cfg.hp_fitthresh) if getattr(cfg, 'hp_fitthresh', None) is not None else 500,
-        stat_sig=float(cfg.hp_stat_sig) if getattr(cfg, 'hp_stat_sig', None) is not None else 3.0,
-        force_convolve=str(cfg.hp_force_convolve),
-        normalize=str(cfg.hp_normalize),
+        kf_spread_mask1=float(hp.hp_kf_spread_mask1) if getattr(hp, 'hp_kf_spread_mask1', None) is not None else 1.0,
+        ks=int(hp.hp_ks) if getattr(hp, 'hp_ks', None) is not None else 0,
+        kfm=int(hp.hp_kfm) if getattr(hp, 'hp_kfm', None) is not None else 0,
+        fitthresh=float(hp.hp_fitthresh) if getattr(hp, 'hp_fitthresh', None) is not None else 500,
+        stat_sig=float(hp.hp_stat_sig) if getattr(hp, 'hp_stat_sig', None) is not None else 3.0,
+        force_convolve=str(hp.hp_force_convolve),
+        normalize=str(hp.hp_normalize),
         verbose=0,
         # Diff / noise / mask: written in one multi-extension FITS via Astropy after run_pipeline.
         output_file=None,
@@ -590,7 +591,7 @@ def _process_one_frame(
     ffi_path,
     product_id,
     group_id,
-    cfg,
+    hp: HotpantsParams,
     template_path_map,
     mask,
     crop_bounds,
@@ -653,8 +654,8 @@ def _process_one_frame(
 
     diff_out_path = os.path.join(dirs.diffs, f"{diff_stem}.fits")
     hp_config = build_hotpants_config(
-        sci_fwhm=cfg.sci_fwhm,
-        cfg=cfg,
+        sci_fwhm=hp.sci_fwhm,
+        hp=hp,
         diff_dir=dirs.diffs,
         convolved_dir=dirs.convolved,
         frame_stem=diff_stem,
@@ -694,7 +695,7 @@ def _process_one_frame(
         if k_arrays:
             try:
                 _save_frame_kernel_params_npz(
-                    diff_stem, kernel_params_dir(dirs.diffs), k_arrays, cfg
+                    diff_stem, kernel_params_dir(dirs.diffs), k_arrays, hp
                 )
             except Exception as exc:
                 log.warning("Saving kernel params npz failed for %s: %s", diff_stem, exc)
@@ -712,6 +713,7 @@ def hotpants_loop(
     template_path_map: dict,
     mask: np.ndarray,
     crop_bounds: dict,
+    hp: HotpantsParams,
     cfg,
     output_dir: str,
     ref_stars_df: pd.DataFrame,
@@ -753,7 +755,7 @@ def hotpants_loop(
     recon_path = kernel_reconstruction_npz_path(workspace_dirs.diffs)
     kparams_root = kernel_params_dir(workspace_dirs.diffs)
     os.makedirs(kparams_root, exist_ok=True)
-    write_kernel_reconstruction_npz(cfg, recon_path)
+    write_kernel_reconstruction_npz(hp, recon_path)
 
     ref_stars_xy = ref_stars_df[["x", "y"]].values
     path_to_row = {str(r["path"]): i for i, r in wcs_table.iterrows()}
@@ -775,7 +777,7 @@ def hotpants_loop(
         bkg_i = sci_bkg_stack[i] if (sci_bkg_stack is not None and i < len(sci_bkg_stack)) else None
         tasks.append((ffi_path, product_id, group_id, bkg_i))
 
-    hn = getattr(cfg, "hotpants_n_jobs", None)
+    hn = hp.hotpants_n_jobs
     if hn is None:
         n_workers = max(1, int(cfg.n_jobs or 1))
     else:
@@ -797,7 +799,7 @@ def hotpants_loop(
                 ffi_path=ffi_path,
                 product_id=product_id,
                 group_id=group_id,
-                cfg=cfg,
+                hp=hp,
                 template_path_map=template_path_map,
                 mask=mask,
                 crop_bounds=crop_bounds,
@@ -822,7 +824,7 @@ def hotpants_loop(
             initargs=(
                 mask,
                 ref_stars_xy,
-                cfg,
+                hp,
                 template_path_map,
                 crop_bounds,
                 workspace_dirs,
@@ -1070,6 +1072,8 @@ def ensure_template_paths_from_syndiff_or_group_dirs(
     cfg,
     wcs_table: pd.DataFrame,
     crop_bounds: dict,
+    *,
+    offset_threshold: float = 0.01,
 ) -> None:
     """
     If ``cfg.template_paths`` is empty and ``cfg.template_dir`` is set, fill it from:
@@ -1094,7 +1098,7 @@ def ensure_template_paths_from_syndiff_or_group_dirs(
             sector=cfg.sector,
             camera=cfg.camera,
             ccd=cfg.ccd,
-            offset_threshold=float(cfg.offset_threshold),
+            offset_threshold=float(offset_threshold),
         )
         return
     except SyndiffTemplateDiscoveryError as e:

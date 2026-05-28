@@ -109,9 +109,22 @@ class SynDiffConfig:
     # ── Optional reference FFI ────────────────────────────────────────────────
     ref_ffi_path: Optional[str] = None
     """Absolute path of the FFI to use as WCS reference for pixel-projecting
-    Gaia stars.  If null (default), ``wcs_grouping`` picks the first valid-WCS
-    frame and records it in ``output_dir/cluster_template_job.json`` (or legacy
-    ``ref_ffi_path.txt``)."""
+    Gaia stars.  If null (default), ``wcs_grouping`` chooses a frame using
+    TESSVectors Earth/Moon angle cuts (see ``ref_ffi_min_*``), raw–smooth drift
+    agreement when Savitzky–Golay smoothing ran, and proximity to the median
+    smoothed drift; the path is recorded in ``output_dir/cluster_template_job.json``.
+    Uses optional ``bkg_vector_path`` on the ``wcs_grouping`` pipeline stage for local
+    TESSVectors CSV when set (else HEASARC)."""
+
+    ref_ffi_min_earth_deg: float = 45.0
+    """Minimum Earth–camera angle (degrees) for automatic reference FFI selection."""
+
+    ref_ffi_min_moon_deg: float = 25.0
+    """Minimum Moon–camera angle (degrees) for automatic reference FFI selection."""
+
+    ref_ffi_max_smoothed_residual: float = 0.05
+    """When ``delta_x_raw``/``delta_y_raw`` exist, automatic reference selection
+    prefers frames with hypot(raw−smooth) at most this many pixels."""
 
     # ── Target ────────────────────────────────────────────────────────────────
     target_ra: Optional[float] = None
@@ -156,164 +169,7 @@ class SynDiffConfig:
     y_edge_strip: int = 30
     """Dead rows along the **top** of the FFI only; usable y is ``[0, ny - y_edge_strip)``."""
 
-    # ── Template grouping ─────────────────────────────────────────────────────
-    offset_threshold: float = 0.01
-    """Maximum pixel offset (TESS pixels) before a new template group is needed."""
-
-    wcs_drift_savgol_window: Optional[int] = 11
-    """If not ``None`` and ≥ 3: apply a Savitzky–Golay filter along time-ordered
-    valid frames to ``delta_x``/``delta_y`` before template grouping (must be odd;
-    even values are bumped up). Set to ``None`` to disable."""
-
-    wcs_drift_savgol_polyorder: int = 2
-    """Polynomial order for :func:`wcs_grouping.smooth_wcs_drift_savgol`
-    (must be ``< wcs_drift_savgol_window``)."""
-
-    # ── Hotpants ──────────────────────────────────────────────────────────────
-    sci_fwhm: float = 1.0
-    """Science image FWHM in native TESS pixels. Drives kernel/substamp widths."""
-
-    hp_ko: int = 2
-    hp_bgo: int = 3
-    hp_nstampx: int = 10
-    hp_nstampy: int = 10
-    hp_nss: int = 100
-    hp_ngauss: int = 3
-    hp_deg_fixe: list = field(default_factory=lambda: [6, 4, 2])
-    hp_fitthresh: float = 5.0
-    hp_stat_sig: float = 3.0
-    hp_kf_spread_mask1: float = 0.0
-    hp_ks: float = 3.0
-    hp_kfm: float = 0.75
-    hp_force_convolve: str = "t"
-    hp_normalize: str = "i"
-
-    # ── Masking ───────────────────────────────────────────────────────────────
-    gaia_mag_bright: float = 13.0
-    """Mask all Gaia stars brighter than this magnitude (TESSreduce Cat_mask)."""
-
-    ref_mag_min: float = 13.5
-    """Minimum tess_mag for hotpants reference stars."""
-
-    ref_mag_max: float = 14.5
-    """Maximum tess_mag for hotpants reference stars."""
-
-    ref_isolation_mag: float = 13.5
-    """Reject a reference-star candidate if any star brighter than this falls
-    within ref_isolation_px of it."""
-
-    ref_isolation_px: int = 8
-    """Isolation radius in pixels (see ref_isolation_mag)."""
-
-    ref_separation_px: int = 10
-    """Minimum pixel separation between any two selected reference stars."""
-
-    strapsize: int = 6
-    """Width (pixels) of the strap mask kernel (Strap_mask size parameter)."""
-
-    # ── TGLC ePSF ─────────────────────────────────────────────────────────────
-    tile_nx: int = 4
-    """Number of tiles along the x axis for TGLC ePSF fitting."""
-
-    tile_ny: int = 4
-    """Number of tiles along the y axis."""
-
-    epsf_oversample: int = 2
-    """ePSF oversampling factor.  over_size = 2 * psf_size + 1 (e.g. 23 for psf_size=11)."""
-
-    psf_size: int = 11
-    """Half-size of the ePSF stamp in native pixels (before oversampling).
-    The saturated-star template is also built at this oversampling."""
-
-    # ── Saturated-star template (high-res canvas) ─────────────────────────────
-    high_res_os: int = 9
-    """Oversampling for the high-resolution saturated-star template canvas in
-    ``sat_template`` (block-sum downsampled to native pixels for storage)."""
-
-    # ── Background temporal (AdaptiveBackground) & spatial (TESSreduce-like) ───
-    bkg_vector_path: Optional[str] = None
-    """Directory containing TESSVectors CSV (``TessVectors_SXXX_CY_FFI.csv``).
-    If unset, files are downloaded from HEASARC when background smoothing runs."""
-
-    bkg_adaptive_method: str = "savgol"
-    """Temporal smooth on the rough background cube: ``\"savgol\"`` (Savitzky–Golay
-    along time; default, matches upstream TESSreduce) or ``\"adaptive\"``
-    (adaptive temporal median / ``adaptive_medfilt_3d``)."""
-
-    bkg_adaptive_savgol_window: Optional[int] = None
-    """Savitzky–Golay window length (odd frames) when ``bkg_adaptive_method`` is ``\"savgol\"``.
-    ``None`` lets vendored :class:`adaptive_background.AdaptiveBackground` choose a
-    cadence-based window (~6 h), matching upstream TESSreduce defaults."""
-
-    bkg_adaptive_savgol_polyorder: int = 2
-    """Savitzky–Golay polynomial order when ``bkg_adaptive_method`` is ``\"savgol\"``."""
-
-    bkg_adaptive_w_min: int = 3
-    """Minimum odd temporal window (frames) for adaptive background median filter."""
-
-    bkg_adaptive_w_max: int = 51
-    """Maximum odd temporal window (frames) for adaptive background median filter."""
-
-    bkg_adaptive_block_size: int = 5
-    """Spatial block size inside the adaptive background smoother (TESSreduce default)."""
-
-    bkg_r1_recombine_hotpants: bool = False
-    """If True, round-1 rough background uses ``Smooth_bkg(diff + hotpants_bkg)``
-    before adding ``hotpants_bkg``; if False, uses ``Smooth_bkg(diff)`` (Hotpants
-    background already removed in the diff FITS). Set True when the diff is in a
-    domain where re-adding the polynomial bkg before ``Smooth_bkg`` matches your
-    Hotpants convention."""
-
-    bkg_tessreduce_spatial_pipeline: bool = True
-    """If True, :func:`background.background_loop` stacks Hotpants frames and runs the
-    spatial portion of ``TESSreduce.tessreduce.background()`` (``Smooth_bkg`` passes,
-    optional strap QE, ``fix_background_anomalies``). The rough workspace then holds
-    that cube; ``background_adaptive`` / ``background_estimate`` apply only
-    :class:`adaptive_background.AdaptiveBackground` temporal Savitzky–Golay (no second
-    Hotpants polynomial add). Incompatible with ``stream_load_rough``."""
-
-    bkg_gauss_smooth: float = 2.0
-    """Gaussian sigma for the refined ``Smooth_bkg`` pass when ``rerun_negative`` is True
-    (TESSreduce ``bkg_gauss_sigma`` default)."""
-
-    bkg_calc_qe: bool = True
-    """Strap QE multiplication on the background cube (TESSreduce ``calc_qe``)."""
-
-    bkg_strap_iso: bool = True
-    """If True, valid sky pixels require ``mask == 0`` (TESSreduce ``strap_iso``)."""
-
-    bkg_source_hunt: bool = True
-    """TESSreduce ``source_hunt``: PSF-shaped detection (``par_psf_source_mask`` /
-    StarFinder) on each frame **before** ``Smooth_bkg``, only when
-    ``bkg_tessreduce_spatial_pipeline`` is True. Requires the ``PRF`` package and
-    ``target_ra`` / ``target_dec`` for PRF placement (same as ``psf_type: prf``)."""
-
-    bkg_interpolate: bool = True
-    """Passed to vendored ``Smooth_bkg`` as ``interpolate`` (griddata vs inpaint)."""
-
-    bkg_rerun_negative: bool = False
-    """TESSreduce ``rerun_negative`` oversubtraction mask refinement."""
-
-    bkg_rerun_diff: bool = False
-    """TESSreduce ``rerun_diff`` residual mask refinement."""
-
-    bkg_use_error_image: bool = False
-    """Use per-pixel flux errors for ``rerun_negative`` threshold (needs ``eflux`` cube)."""
-
-    # ── Photometry ────────────────────────────────────────────────────────────
-    psf_type: str = "epsf"
-    """'epsf' — use the fitted empirical ePSF (EpsfLocator).
-    'prf'  — use the official TESS PRF (TESS_PRF from the PRF package)."""
-
-    phot_cutout_size: int = 15
-    """Side length (native pixels) of the photometry cutout stamp."""
-
-    phot_bkg_poly_order: int = 3
-    """Polynomial order for the local background surface fit in create_psf.psf_flux."""
-
-    phot_snap: str = "brightest"
-    """Position-fit strategy: 'brightest' | 'ref' | 'fixed' (TESSreduce-compatible; see photometry)."""
-
+    # ── Diagnostics & workspace ───────────────────────────────────────────────
     pipeline_plots: bool = False
     """If True, write diagnostic figures: after ``wcs_grouping``,
     ``wcs_drift_template_debug.png`` and ``lightcurve_<stage>.png`` under
@@ -345,18 +201,9 @@ class SynDiffConfig:
 
     # ── Parallelism ───────────────────────────────────────────────────────────
     n_jobs: int = 8
-    """Number of parallel workers (joblib **loky**) for :func:`photometry.run_forced_photometry`
-    (cutout load + per-epoch ``psf_flux`` when ``n_jobs`` > 1),
-    :func:`background.background_loop` (per-frame rough ``Smooth_bkg`` when ``n_jobs`` > 1),
-    and sub-tasks inside :func:`adaptive_background.adaptive_medfilt_3d` when
-    ``bkg_adaptive_method`` is ``\"adaptive\"`` (via ``cfg.n_jobs`` passed from
-    :func:`background.adaptive_smooth_background`). For Hotpants only, see
-    ``hotpants_n_jobs`` (defaults to this value when unset). ePSF fitting remains serial over frames."""
-
-    hotpants_n_jobs: Optional[int] = None
-    """If set, overrides ``n_jobs`` for :func:`hotpants_runner.hotpants_loop` only (per-frame
-    differencing). Use ``1`` when peak RAM is tight: each worker holds a full ``HotpantsState``
-    for the crop. When unset, ``n_jobs`` is used."""
+    """Default worker count (joblib **loky**) for stages that read this global value:
+    forced photometry, background stacking / adaptive temporal smoothing, etc.
+    Per-stage overrides (e.g. ``hotpants_n_jobs`` on ``kind: hotpants``) win."""
 
     max_ffis: Optional[int] = None
     """If set (positive int), use at most this many FFIs after **time sort**, skipping any
@@ -497,7 +344,6 @@ def load_config(yaml_path: str) -> SynDiffConfig:
         "median_mask_path",
         "straps_csv",
         "template_dir",
-        "bkg_vector_path",
         "manifest",
     ):
         if filtered.get(key) is None:
@@ -512,7 +358,6 @@ def load_config(yaml_path: str) -> SynDiffConfig:
         "straps_csv",
         "ref_ffi_path",
         "template_dir",
-        "bkg_vector_path",
         "manifest",
     ):
         if key in filtered and filtered[key] is not None:
@@ -532,6 +377,12 @@ def load_config(yaml_path: str) -> SynDiffConfig:
     cfg.additional_forced_targets = normalize_additional_forced_targets(
         cfg.additional_forced_targets
     )
+    # Resolve relative bkg_vector_path on pipeline stages (same base as the YAML file).
+    for st in cfg.pipeline or []:
+        if isinstance(st, dict) and st.get("bkg_vector_path"):
+            st["bkg_vector_path"] = _resolve_config_path(
+                str(st["bkg_vector_path"]), base
+            )
     return cfg
 
 
@@ -566,18 +417,9 @@ def add_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--ffi-dir",    type=str,   default=None, dest="ffi_dir")
     parser.add_argument("--n-jobs",     type=int,   default=None, dest="n_jobs")
     parser.add_argument(
-        "--hotpants-n-jobs",
-        type=int,
-        default=None,
-        dest="hotpants_n_jobs",
-        help="Override n_jobs for the hotpants stage only (default: same as n_jobs).",
-    )
-    parser.add_argument(
         "--max-ffis", type=int, default=None, dest="max_ffis",
         help="Cap number of FFIs (after glob sort); for quick tests.",
     )
-    parser.add_argument("--psf-type",   type=str,   default=None, dest="psf_type",
-                        choices=["epsf", "prf"])
     parser.add_argument(
         "--pipeline-plots",
         action=argparse.BooleanOptionalAction,
@@ -595,8 +437,8 @@ def config_from_args(args: argparse.Namespace) -> SynDiffConfig:
     """
     cfg = load_config(args.config)
     for attr in (
-        "sector", "camera", "ccd", "output_dir", "ffi_dir", "n_jobs", "hotpants_n_jobs", "max_ffis",
-        "psf_type", "pipeline_plots",
+        "sector", "camera", "ccd", "output_dir", "ffi_dir", "n_jobs", "max_ffis",
+        "pipeline_plots",
     ):
         val = getattr(args, attr, None)
         if val is not None:
