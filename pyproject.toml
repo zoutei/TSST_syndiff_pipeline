@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syndiff-pipeline"
+version = "0.1.0"
+description = "SynDiff TESS FFI difference imaging and template-building pipeline"
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+syndiff-template = "syndiff_pipeline.template_runner.cli:main"
+
+[tool.setuptools]
+package-dir = {"syndiff_pipeline" = "."}
+packages = ["syndiff_pipeline", "syndiff_pipeline.template", "syndiff_pipeline.template_runner"]
