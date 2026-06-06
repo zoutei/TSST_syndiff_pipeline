@@ -1,0 +1,44 @@
+# Template pipeline example config.
+# Paths below are placeholders — set to your data roots before running.
+#
+# Submit (detached):
+#   syndiff-template submit \
+#     --targets example/template_runner/targets_example.csv \
+#     --config example/template_runner/config_example.yaml
+
+data_root: /astro/armin/koji/syndiff/data
+ffi_dir: /astro/armin/koji/syndiff/data/tess_ffi
+handoff_root: /astro/armin/koji/syndiff/template_handoffs
+runs_root: /astro/armin/koji/syndiff/template_handoffs/runs
+
+skycell_wcs_csv: /astro/armin/koji/syndiff/data/SkyCells/skycell_wcs.csv
+gaia_credentials: /astro/armin/koji/syndiff/gaia_credentials
+
+stages:
+  wcs_grouping:
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+  mapping:
+    oversampling_factor: 1
+    buffer: 200
+  ps1_download:
+    num_workers: 8
+  ps1_process:
+    remove_saturated_stars: true
+    psf_sigma: 60.0
+  downsample:
+    ignore_mask_bits: [12]
+    oversampling_factor: 1
+
+resources:
+  network:
+    max_concurrent: 3
+  cpu_light:
+    max_concurrent: 2
+  cpu_heavy:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+overrides: {}
