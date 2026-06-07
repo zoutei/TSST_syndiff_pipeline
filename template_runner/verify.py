@@ -5,6 +5,7 @@ from __future__ import annotations
 import glob
 import json
 import logging
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -109,6 +110,26 @@ def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
         / "convolved_results"
         / f"sector_{t.sector:04d}_camera_{t.camera}_ccd_{t.ccd}.zarr"
     )
+
+
+def ps1_process_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
+    """Path to ``ps1_process`` removed-stars CSV (matches ``ps1_process.py``)."""
+    return Path(str(_convolved_zarr_path(resolved)).replace(".zarr", "_removed_stars.csv"))
+
+
+def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
+    """Delete convolved zarr and removed-stars CSV before a force rerun."""
+    removed: list[str] = []
+    for path in (_convolved_zarr_path(resolved), ps1_process_removed_stars_csv_path(resolved)):
+        if path.is_dir():
+            shutil.rmtree(path)
+            removed.append(str(path))
+            log.info("Force rerun: removed directory %s", path)
+        elif path.is_file():
+            path.unlink()
+            removed.append(str(path))
+            log.info("Force rerun: removed file %s", path)
+    return removed
 
 
 def _expected_ps1_skycell_count(resolved: ResolvedTargetConfig) -> int:
