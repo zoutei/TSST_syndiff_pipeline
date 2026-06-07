@@ -23,6 +23,7 @@ from syndiff_pipeline.template.downsample import (
 from syndiff_pipeline.template_runner.handoff import run_wcs_grouping
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig, config_snapshot
 from syndiff_pipeline.template_runner.state import STAGE_NAMES, STAGE_POOL
+from syndiff_pipeline.template_runner.verify import clear_ps1_process_artifacts
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +130,8 @@ def execute_stage(
         return
 
     if stage == "ps1_process":
+        if force_rerun:
+            clear_ps1_process_artifacts(resolved)
         pp = resolved.stages.ps1_process
         result = ps1_process.run_modern_sliding_window_pipeline(
             sector=t.sector,
