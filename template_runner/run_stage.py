@@ -12,6 +12,13 @@ from syndiff_pipeline.template_runner.targets import load_targets
 
 log = logging.getLogger(__name__)
 
+_LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
+
+
+def _configure_logging() -> None:
+    """Attach root logger to current sys.stderr (must run after stdout/stderr redirect)."""
+    logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, force=True)
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run one template pipeline stage")
@@ -20,9 +27,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--targets", required=True)
     parser.add_argument("--target-label", required=True)
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Re-run stage even when output artifacts already exist",
+    )
     args = parser.parse_args(argv)
-
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     cfg = load_runner_config(args.config)
     targets = load_targets(args.targets)
@@ -35,7 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout = tee  # type: ignore[assignment]
         sys.stderr = tee  # type: ignore[assignment]
         try:
-            stages.execute_stage(resolved, args.stage)
+            _configure_logging()
+            stages.execute_stage(resolved, args.stage, force_rerun=args.force_rerun)
         finally:
             sys.stdout = old_out
             sys.stderr = old_err
@@ -46,5 +57,6 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as exc:
+        logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, force=True)
         log.exception("Stage failed: %s", exc)
         raise SystemExit(1) from exc

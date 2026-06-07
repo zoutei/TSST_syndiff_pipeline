@@ -43,8 +43,9 @@ def build_stage_command(
     config_path: str,
     targets_path: str,
     target_label: str,
+    force_rerun: bool = False,
 ) -> List[str]:
-    return [
+    cmd = [
         sys.executable,
         "-m",
         "syndiff_pipeline.template_runner.run_stage",
@@ -59,9 +60,14 @@ def build_stage_command(
         "--target-label",
         target_label,
     ]
+    if force_rerun:
+        cmd.append("--force-rerun")
+    return cmd
 
 
-def execute_stage(resolved: ResolvedTargetConfig, stage: str) -> None:
+def execute_stage(
+    resolved: ResolvedTargetConfig, stage: str, force_rerun: bool = False
+) -> None:
     """Run one template pipeline stage in-process."""
     t = resolved.target
     if stage == "tess_ffi_download":
@@ -79,6 +85,15 @@ def execute_stage(resolved: ResolvedTargetConfig, stage: str) -> None:
             job = json.load(fh)
         ref_ffi = job["reference_ffi_path"]
         mp = resolved.stages.mapping
+        if not mp.skip_download_catalog:
+            gaia_catalog_dir = os.path.join(resolved.data_root, "catalogs")
+            log.info("Downloading Gaia catalog for %s → %s", ref_ffi, gaia_catalog_dir)
+            pancakes.download_gaia_catalog_for_tess_file(
+                tess_file=ref_ffi,
+                output_path=gaia_catalog_dir,
+                gaia_credentials_file=resolved.gaia_credentials,
+                force_download=force_rerun,
+            )
         pancakes.process_tess_image_optimized(
             tess_file=ref_ffi,
             skycell_wcs_csv=resolved.skycell_wcs_csv,

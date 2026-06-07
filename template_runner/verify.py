@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from syndiff_pipeline.download import list_local_ffis, nested_ffi_dir
+from syndiff_pipeline.template.csv_utils import load_csv_data
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.template_runner.state import STAGE_NAMES
 from syndiff_pipeline.template_runner.targets import Target
@@ -83,22 +84,92 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     return VerifyResult("ps1_download", True, "Shared zarr store present", str(zarr_path))
 
 
-def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
+def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
+    """Path to the master skycells CSV (matches ``verify_mapping`` layout)."""
     t = resolved.target
-    zarr_path = (
+    suffix = ""
+    os_factor = resolved.stages.mapping.oversampling_factor
+    mapping_root = Path(resolved.mapping_root)
+    if os_factor > 1:
+        mapping_root = mapping_root / f"oversampling_{os_factor}"
+        suffix = f"_os{os_factor}"
+    return (
+        mapping_root
+        / f"sector_{t.sector:04d}"
+        / f"camera_{t.camera}"
+        / f"ccd_{t.ccd}"
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
+    )
+
+
+def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
+    t = resolved.target
+    return (
         Path(resolved.data_root)
         / "convolved_results"
         / f"sector_{t.sector:04d}_camera_{t.camera}_ccd_{t.ccd}.zarr"
     )
+
+
+def _expected_ps1_skycell_count(resolved: ResolvedTargetConfig) -> int:
+    """Skycells that ``ps1_process`` should write for this target/config."""
+    csv_path = _mapping_csv_path(resolved)
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Master skycells CSV missing: {csv_path}")
+    df = load_csv_data(str(csv_path))
+    if "projection" not in df.columns:
+        raise ValueError(f"Master skycells CSV missing projection column: {csv_path}")
+    projections = sorted(df["projection"].astype(str).unique())
+    limit = resolved.stages.ps1_process.projections_limit
+    if limit:
+        projections = projections[: int(limit)]
+    return int(len(df[df["projection"].astype(str).isin(projections)]))
+
+
+def _count_convolved_data_arrays(zarr_root) -> tuple[int, list[str]]:
+    """Return (non-empty *_data array count, all *_data array names)."""
+    data_keys = [str(k) for k in zarr_root.array_keys() if str(k).endswith("_data")]
+    non_empty = 0
+    for key in data_keys:
+        if int(zarr_root[key].size) > 0:
+            non_empty += 1
+    return non_empty, data_keys
+
+
+def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
+    zarr_path = _convolved_zarr_path(resolved)
     if not zarr_path.exists():
         return VerifyResult("ps1_process", False, "Convolved zarr missing", str(zarr_path))
     try:
         import zarr
 
-        zarr.open(str(zarr_path), mode="r")
+        root = zarr.open(str(zarr_path), mode="r")
+        saved, data_keys = _count_convolved_data_arrays(root)
+        if saved == 0:
+            if data_keys:
+                msg = f"Convolved zarr has {len(data_keys)} *_data arrays but all are empty"
+            else:
+                msg = "Convolved zarr store is empty (no *_data arrays)"
+            return VerifyResult("ps1_process", False, msg, str(zarr_path))
+
+        expected = _expected_ps1_skycell_count(resolved)
+        if saved < expected:
+            return VerifyResult(
+                "ps1_process",
+                False,
+                f"Partial convolved zarr: {saved}/{expected} skycells saved",
+                str(zarr_path),
+            )
+        return VerifyResult(
+            "ps1_process",
+            True,
+            f"Convolved zarr complete ({saved}/{expected} skycells)",
+            str(zarr_path),
+        )
+    except FileNotFoundError as exc:
+        return VerifyResult("ps1_process", False, str(exc), str(zarr_path))
     except Exception as exc:
-        return VerifyResult("ps1_process", False, f"Cannot open convolved zarr: {exc}", str(zarr_path))
-    return VerifyResult("ps1_process", True, "Convolved zarr opens", str(zarr_path))
+        return VerifyResult("ps1_process", False, f"Cannot verify convolved zarr: {exc}", str(zarr_path))
 
 
 def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
