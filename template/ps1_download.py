@@ -455,8 +455,12 @@ def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path
         computation = batched.map(process_batch)
         active_dask_computations.append(computation)
 
-        # Process each batch
-        with ProgressBar():
+        # ProgressBar uses terminal \r updates; skip when stdout is tee'd to a log file.
+        if sys.stdout.isatty():
+            with ProgressBar():
+                results = computation.compute()
+        else:
+            logging.info("Processing %d skycells with Dask (%d workers)...", len(skycells), num_workers)
             results = computation.compute()
 
         logging.info(f"Processed {sum(results)} skycells")

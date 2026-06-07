@@ -378,7 +378,7 @@ def process_single_cell(bundle: dict) -> dict:
 
         from astropy.io import fits as afits
         from astropy.wcs import WCS
-        from band_utils import remove_background
+        from syndiff_pipeline.template.band_utils import remove_background
 
         logger = logging.getLogger(__name__)
         skycell_id = bundle["skycell_id"]
