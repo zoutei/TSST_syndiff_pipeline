@@ -1,0 +1,60 @@
+# Real-data template pipeline config.
+# Paths match the layout used by ../syndiff/run.sh and recipe_2020ghq.yaml.
+#
+# See TESTING.md for how to validate without running full multi-hour stages.
+
+data_root: /astro/armin/koji/syndiff/data
+ffi_dir: /astro/armin/koji/syndiff/data/tess_ffi
+
+# New template-run handoffs + SQLite state (keeps diff-imaging output_dir separate)
+handoff_root: /astro/armin/koji/syndiff/template_handoffs
+runs_root: /astro/armin/koji/syndiff/template_handoffs/runs
+state_db_path: /astro/armin/koji/syndiff/template_handoffs/pipeline_state.sqlite
+
+skycell_wcs_csv: /astro/armin/koji/syndiff/data/SkyCells/skycell_wcs.csv
+gaia_credentials: /home/kshukawa/syndiff/gaia_credentials
+
+stages:
+  wcs_grouping:
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    # pancakes_v2 defaults (run.sh did not pass overrides)
+    oversampling_factor: 1
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  ps1_download:
+    num_workers: 8
+    overwrite: false
+  ps1_process:
+    # run.sh active line: process_ps1.py 23 2 1 --remove-saturated-stars
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+    psf_sigma: 40.0
+    # Set to 1 for smoke tests only (see config_smoke.yaml)
+    projections_limit: null
+  downsample:
+    ignore_mask_bits: [12]
+    oversampling_factor: 1
+    # output under data_root/shifted_downsampled by default
+    output_base: /astro/armin/koji/syndiff/data/shifted_downsampled
+
+resources:
+  network:
+    max_concurrent: 3
+  cpu_light:
+    max_concurrent: 2
+  cpu_heavy:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+# Per-SCC overrides (optional). Example: smoke-limit ps1_process on one SCC.
+overrides:
+  "23/2/1":
+    stages:
+      ps1_process:
+        projections_limit: 1

@@ -21,11 +21,12 @@ stages:
   mapping:
     oversampling_factor: 1
     buffer: 200
+    # Gaia catalog is downloaded from Archive by default; set skip_download_catalog: true to reuse existing CSV.
   ps1_download:
     num_workers: 8
   ps1_process:
     remove_saturated_stars: true
-    psf_sigma: 60.0
+    psf_sigma: 40.0
   downsample:
     ignore_mask_bits: [12]
     oversampling_factor: 1

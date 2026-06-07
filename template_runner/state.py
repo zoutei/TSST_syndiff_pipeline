@@ -43,8 +43,9 @@ STATUS_SUCCESS = "success"
 STATUS_FAILED = "failed"
 STATUS_BLOCKED = "blocked"
 STATUS_SKIPPED = "skipped"
+STATUS_KILLED = "killed"
 
-TERMINAL_STATUSES = frozenset({STATUS_SUCCESS, STATUS_FAILED, STATUS_SKIPPED})
+TERMINAL_STATUSES = frozenset({STATUS_SUCCESS, STATUS_FAILED, STATUS_SKIPPED, STATUS_KILLED})
 
 
 def _utc_now() -> str:
@@ -335,6 +336,20 @@ class PipelineState:
     def mark_queued(self, run_id: str, target_label: str, stage: str) -> None:
         self.update_stage_status(run_id, target_label, stage, STATUS_QUEUED)
 
+    def reset_stages_for_force_rerun(
+        self, run_id: str, target_labels: Sequence[str], stages: Sequence[str]
+    ) -> None:
+        """Reset selected stages to pending so they run again despite existing artifacts."""
+        with self._conn() as conn:
+            for label in target_labels:
+                for stage in stages:
+                    conn.execute(
+                        "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
+                        "exit_code = NULL, error_tail = NULL, pid = NULL, log_path = NULL "
+                        "WHERE run_id = ? AND target_label = ? AND stage = ?",
+                        (STATUS_PENDING, run_id, label, stage),
+                    )
+
     def reset_stage_for_retry(
         self, run_id: str, target_label: str, stage: str, reset_downstream: bool = True
     ) -> None:
@@ -362,6 +377,35 @@ class PipelineState:
                 (run_id, STATUS_RUNNING),
             ).fetchall()
             return [int(r["pid"]) for r in rows if r["pid"]]
+
+    def finalize_run_killed(self, run_id: str) -> dict[str, int]:
+        """Mark active stage rows terminal after a user kill.
+
+        - running -> killed (exit 143)
+        - pending / ready / queued -> blocked
+        """
+        now = _utc_now()
+        counts = {"killed": 0, "blocked": 0}
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE stage_runs
+                SET status = ?, finished_at = ?, exit_code = ?, error_tail = ?, pid = NULL
+                WHERE run_id = ? AND status = ?
+                """,
+                (STATUS_KILLED, now, 143, "Run killed by user", run_id, STATUS_RUNNING),
+            )
+            counts["killed"] = cur.rowcount
+            cur = conn.execute(
+                """
+                UPDATE stage_runs
+                SET status = ?, pid = NULL
+                WHERE run_id = ? AND status IN (?, ?, ?)
+                """,
+                (STATUS_BLOCKED, run_id, STATUS_PENDING, STATUS_READY, STATUS_QUEUED),
+            )
+            counts["blocked"] = cur.rowcount
+        return counts
 
     def mark_skipped_existing(self, run_id: str, target_label: str, stage: str) -> None:
         self.update_stage_status(

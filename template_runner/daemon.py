@@ -39,7 +39,10 @@ def write_pid(pid_path: str | Path, pid: int) -> None:
 def remove_pid_file(pid_path: str | Path) -> None:
     p = Path(pid_path)
     if p.is_file():
-        p.unlink()
+        try:
+            p.unlink()
+        except OSError:
+            pass
 
 
 def spawn_detached_scheduler(
@@ -48,6 +51,7 @@ def spawn_detached_scheduler(
     targets_path: str,
     stages: str | None,
     scheduler_log: str | Path,
+    force_rerun: bool = False,
 ) -> int:
     """Start scheduler in a new session; return child PID."""
     cmd = [
@@ -63,6 +67,8 @@ def spawn_detached_scheduler(
     ]
     if stages:
         cmd.extend(["--stages", stages])
+    if force_rerun:
+        cmd.append("--force-rerun")
     log_path = Path(scheduler_log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = log_path.open("a", encoding="utf-8")
@@ -77,6 +83,17 @@ def spawn_detached_scheduler(
     return proc.pid
 
 
-def terminate_pid(pid: int, sig: int = signal.SIGTERM) -> None:
-    if is_process_alive(pid):
-        os.kill(pid, sig)
+def terminate_process_tree(pid: int, sig: int = signal.SIGTERM) -> None:
+    """Send *sig* to *pid* and its process group (stage subprocesses use new sessions)."""
+    if not is_process_alive(pid):
+        return
+    try:
+        os.killpg(os.getpgid(pid), sig)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+
+
+terminate_pid = terminate_process_tree

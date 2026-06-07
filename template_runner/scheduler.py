@@ -147,6 +147,7 @@ def run_scheduler(
     config_path: str,
     targets_path: str,
     stages_arg: str | None = None,
+    force_rerun: bool = False,
 ) -> int:
     logging.basicConfig(
         level=logging.INFO,
@@ -169,6 +170,7 @@ def run_scheduler(
             "config_path": str(Path(config_path).resolve()),
             "targets_path": str(Path(targets_path).resolve()),
             "stages": active_stages,
+            "force_rerun": force_rerun,
         },
     )
     pid_path = logs.scheduler_pid_path(runs_root, run_id)
@@ -184,7 +186,16 @@ def run_scheduler(
             targets,
             active_stages,
         )
+    elif force_rerun:
+        state.reset_stages_for_force_rerun(
+            run_id, [t.label() for t in targets], active_stages
+        )
+        state.set_run_status(run_id, "running")
+
+    if not force_rerun and run_row is None:
         _skip_if_artifacts_exist(state, run_id, cfg, targets, active_stages)
+    elif force_rerun:
+        log.info("Force rerun: skipping artifact-exists checks for %s", active_stages)
 
     _promote_ready_stages_subset(state, run_id, active_stages, targets, cfg)
 
@@ -247,7 +258,12 @@ def run_scheduler(
                 batch = state.fetch_ready_batch(run_id, pool_name, capacity, active_stages)
                 for row in batch:
                     cmd = stages.build_stage_command(
-                        run_id, row.stage, config_path, targets_path, row.target_label
+                        run_id,
+                        row.stage,
+                        config_path,
+                        targets_path,
+                        row.target_label,
+                        force_rerun=force_rerun,
                     )
                     log.info("Launching %s / %s (%s)", row.target_label, row.stage, pool_name)
                     proc = subprocess.Popen(
@@ -311,8 +327,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", required=True)
     parser.add_argument("--targets", required=True)
     parser.add_argument("--stages", default=None)
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Re-run stages even when output artifacts already exist",
+    )
     args = parser.parse_args(argv)
-    return run_scheduler(args.run_id, args.config, args.targets, args.stages)
+    return run_scheduler(
+        args.run_id,
+        args.config,
+        args.targets,
+        args.stages,
+        force_rerun=args.force_rerun,
+    )
 
 
 if __name__ == "__main__":

@@ -50,6 +50,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         "targets_path": str(Path(args.targets).resolve()),
         "stages": active,
         "detach": True,
+        "force_rerun": bool(args.force_rerun),
     }
     logs.ensure_run_layout(runs_root, run_id, meta)
 
@@ -66,7 +67,12 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     sched_log = logs.scheduler_log_path(runs_root, run_id)
     pid = daemon.spawn_detached_scheduler(
-        run_id, args.config, args.targets, args.stages, sched_log
+        run_id,
+        args.config,
+        args.targets,
+        args.stages,
+        sched_log,
+        force_rerun=bool(args.force_rerun),
     )
     pid_path = logs.scheduler_pid_path(runs_root, run_id)
     daemon.write_pid(pid_path, pid)
@@ -94,9 +100,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         "targets_path": str(Path(args.targets).resolve()),
         "stages": active,
         "detach": False,
+        "force_rerun": bool(args.force_rerun),
     }
     logs.ensure_run_layout(cfg.runs_dir(), run_id, meta)
-    return run_scheduler(run_id, args.config, args.targets, args.stages)
+    return run_scheduler(
+        run_id,
+        args.config,
+        args.targets,
+        args.stages,
+        force_rerun=bool(args.force_rerun),
+    )
 
 
 def cmd_status(args: argparse.Namespace) -> int:
@@ -246,11 +259,20 @@ def cmd_kill(args: argparse.Namespace) -> int:
     pid_path = logs.scheduler_pid_path(cfg.runs_dir(), run_id)
     pid = daemon.read_pid(pid_path)
     if pid:
-        daemon.terminate_pid(pid)
-    for spid in state.running_pids(run_id):
-        daemon.terminate_pid(spid)
+        daemon.terminate_process_tree(pid)
+    stage_pids = state.running_pids(run_id)
+    for spid in stage_pids:
+        daemon.terminate_process_tree(spid)
+    counts = state.finalize_run_killed(run_id)
     state.set_run_status(run_id, "killed")
+    daemon.remove_pid_file(pid_path)
     print(f"Killed run {run_id}")
+    if stage_pids:
+        print(f"  Terminated {len(stage_pids)} stage process(es)")
+    if counts["killed"]:
+        print(f"  Marked {counts['killed']} running stage(s) as killed")
+    if counts["blocked"]:
+        print(f"  Marked {counts['blocked']} pending/ready stage(s) as blocked")
     return 0
 
 
@@ -266,6 +288,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--targets", required=True)
     sp.add_argument("--stages", default=None)
     sp.add_argument("--run-id", default=None)
+    sp.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Re-run stages even when output artifacts already exist",
+    )
     sp.set_defaults(func=cmd_submit)
 
     sp = sub.add_parser("run", help="Foreground run (debug)")
@@ -273,6 +300,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--targets", required=True)
     sp.add_argument("--stages", default=None)
     sp.add_argument("--run-id", default=None)
+    sp.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Re-run stages even when output artifacts already exist",
+    )
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("status", help="Show stage status grid")
