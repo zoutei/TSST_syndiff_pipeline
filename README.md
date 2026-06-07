@@ -7,6 +7,7 @@ TESS Full Frame Image (FFI) difference imaging pipeline for transient detection 
 ## Table of Contents
 
 - [Overview](#overview)
+- [PS1 Template Pipeline (`syndiff-template`)](#ps1-template-pipeline-syndiff-template)
 - [Current Code Status](#current-code-status)
 - [Dependencies](#dependencies)
 - [Installation](#installation)
@@ -53,6 +54,35 @@ SynDiff performs difference imaging on TESS FFIs against PS1 (Pan-STARRS1) templ
 
 ---
 
+## PS1 Template Pipeline (`syndiff-template`)
+
+Before running difference imaging, SynDiff needs **PS1 templates on the TESS pixel grid** (multi-offset `syndiff_template_*.fits` files). The **`syndiff-template`** CLI orchestrates that upstream workflow: FFI download → WCS grouping → skycell mapping → PS1 download → convolution → downsample.
+
+| | Diff imaging (`run_pipeline.py`) | Template building (`syndiff-template`) |
+|---|----------------------------------|----------------------------------------|
+| **Purpose** | Hotpants, ePSF, background, photometry | PS1 templates + handoff JSON |
+| **Config** | Recipe YAML with `pipeline:` list | `config.yaml` + targets CSV |
+| **Execution** | Single-process sequential stages | Multi-target scheduler + SQLite; Condor for `ps1_process` |
+| **Output** | Difference images, light curves | `{data_root}/shifted_downsampled/*.fits` |
+
+**Install** (registers the `syndiff-template` command):
+
+```bash
+pip install -e .
+```
+
+**Quick start**:
+
+```bash
+syndiff-template submit \
+  --config example/template_runner/config_example.yaml \
+  --targets example/template_runner/targets_example.csv
+```
+
+**Documentation**: see **[`docs/template_pipeline.md`](docs/template_pipeline.md)** for the orchestration guide (architecture, configuration, HTCondor, CLI). Stage algorithms are in **[`docs/stages/`](docs/stages/README.md)** (ported from the standalone [`syndiff`](../syndiff/) step READMEs). Example configs live under [`example/template_runner/`](example/template_runner/).
+
+---
+
 ## Current Code Status
 
 > **This project has not been released.** All modules are under active development.
@@ -80,6 +110,7 @@ SynDiff performs difference imaging on TESS FFIs against PS1 (Pan-STARRS1) templ
 | `pipeline_execute.py`    | **Ready** | Config-driven orchestrator (`run_config_pipeline`). Executes pipeline stage kinds in YAML order. Handles state bootstrap when `wcs_grouping` is omitted (resume from existing manifest).                                                                                                                                                                |
 | `run_pipeline.py`        | **Ready** | Main CLI entry point; requires non-empty `pipeline:` and delegates to `pipeline_execute`.                                                                                                                                                                                                           |
 | `plot_pipeline.py`       | **Ready** | Background removal animated GIF (round-1 smooth bkg cube).                                                                                                                                                                                                                                                                                           |
+| `template_runner/`       | **Ready** | `syndiff-template` multi-target scheduler: WCS handoff through downsample; SQLite state; HTCondor for `ps1_process`. See [`docs/template_pipeline.md`](docs/template_pipeline.md).                                                                                                                                                                      |
 
 
 ### External Dependencies (Not Part of This Package)
@@ -724,6 +755,6 @@ SynDiff assumes the following inputs exist before the pipeline runs:
 3. **`background_rough` + `background_adaptive` vs `background_estimate`** — use the split kinds to run rough and adaptive in separate processes or to resume adaptive only (`recipe_a_prf_from_background.yaml`). `background_estimate` with `mode: rough_then_adaptive` remains a one-shot convenience that writes both artifacts into one workspace and strips Hotpants arrays before adaptive.
 4. **No per-stage checkpointing** — each run re-executes every stage in the `pipeline:` list. To skip work, trim the list and use `pipeline_external_workspace_labels` to declare pre-existing workspaces.
 5. **Source extraction / astrometry not included** — SynDiff reads WCS from FFI FITS headers directly. If mission WCS quality is insufficient for drift grouping or PS1 alignment, external astrometric correction is required before `wcs_grouping`.
-6. **PS1 template creation is separate** — the `TSST_Syndiff_Core` package handles pancakes, PS1 download, processing, and multi-offset downsampling. This must be run independently before SynDiff.
-7. **Sequential-only execution** — stages run sequentially within a single process. There is no distributed or DAG-based execution scheduler.
+6. **PS1 template creation** — use **`syndiff-template`** (this repository) for pancakes through downsample, or an external TSST workflow. Templates must exist under `template_dir` before diff imaging.
+7. **Diff-imaging execution is sequential** — `run_pipeline.py` runs stages in one process. Multi-target batching and HTCondor apply to the **template pipeline** only (`syndiff-template`).
 
