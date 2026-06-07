@@ -260,15 +260,28 @@ def cmd_kill(args: argparse.Namespace) -> int:
     pid = daemon.read_pid(pid_path)
     if pid:
         daemon.terminate_process_tree(pid)
-    stage_pids = state.running_pids(run_id)
-    for spid in stage_pids:
-        daemon.terminate_process_tree(spid)
+    running_jobs = state.running_jobs(run_id)
+    condor_removed = 0
+    local_terminated = 0
+    for job in running_jobs:
+        if job.pid is None:
+            continue
+        if cfg.stage_executor(job.stage) == "condor":
+            from syndiff_pipeline.template_runner import condor
+
+            if condor.remove_cluster(job.pid):
+                condor_removed += 1
+        else:
+            daemon.terminate_process_tree(job.pid)
+            local_terminated += 1
     counts = state.finalize_run_killed(run_id)
     state.set_run_status(run_id, "killed")
     daemon.remove_pid_file(pid_path)
     print(f"Killed run {run_id}")
-    if stage_pids:
-        print(f"  Terminated {len(stage_pids)} stage process(es)")
+    if condor_removed:
+        print(f"  Removed {condor_removed} Condor cluster(s)")
+    if local_terminated:
+        print(f"  Terminated {local_terminated} local stage job(s)")
     if counts["killed"]:
         print(f"  Marked {counts['killed']} running stage(s) as killed")
     if counts["blocked"]:

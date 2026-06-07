@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import signal
-import subprocess
 import sys
 import time
 from collections import defaultdict
@@ -16,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Set
 
-from syndiff_pipeline.template_runner import daemon, logs, stages
+from syndiff_pipeline.template_runner import daemon, launcher, logs, stages
 from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
 from syndiff_pipeline.template_runner.state import (
     STATUS_FAILED,
@@ -199,7 +198,7 @@ def run_scheduler(
 
     _promote_ready_stages_subset(state, run_id, active_stages, targets, cfg)
 
-    running: Dict[str, subprocess.Popen] = {}
+    running: Dict[str, launcher.StageJobHandle] = {}
     running_meta: Dict[str, tuple[str, str, str]] = {}
     pool_running: Dict[str, int] = defaultdict(int)
     last_heartbeat = 0.0
@@ -212,8 +211,8 @@ def run_scheduler(
 
             # Reap finished subprocesses
             done_keys: List[str] = []
-            for key, proc in list(running.items()):
-                ret = proc.poll()
+            for key, handle in list(running.items()):
+                ret = handle.poll()
                 if ret is None:
                     continue
                 target_label, stage, pool = running_meta[key]
@@ -265,15 +264,24 @@ def run_scheduler(
                         row.target_label,
                         force_rerun=force_rerun,
                     )
-                    log.info("Launching %s / %s (%s)", row.target_label, row.stage, pool_name)
-                    proc = subprocess.Popen(
+                    executor = cfg.stage_executor(row.stage)
+                    log.info(
+                        "Launching %s / %s (%s, %s)",
+                        row.target_label,
+                        row.stage,
+                        pool_name,
+                        executor,
+                    )
+                    handle, job_id = launcher.launch_stage(
                         cmd,
-                        start_new_session=True,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                        cfg=cfg,
+                        stage=row.stage,
+                        runs_root=runs_root,
+                        run_id=run_id,
+                        target_label=row.target_label,
                     )
                     key = f"{row.target_label}:{row.stage}"
-                    running[key] = proc
+                    running[key] = handle
                     running_meta[key] = (row.target_label, row.stage, pool_name)
                     pool_running[pool_name] += 1
                     log_path = str(
@@ -286,7 +294,7 @@ def run_scheduler(
                         STATUS_RUNNING,
                         started_at=_utc_now(),
                         log_path=log_path,
-                        pid=proc.pid,
+                        pid=job_id,
                     )
 
             _write_summary(state, run_id, runs_root)
@@ -312,9 +320,9 @@ def run_scheduler(
 
             time.sleep(1.0)
     finally:
-        for proc in running.values():
-            if proc.poll() is None:
-                proc.terminate()
+        for handle in running.values():
+            if handle.poll() is None:
+                handle.terminate()
         daemon.remove_pid_file(pid_path)
         _write_summary(state, run_id, runs_root)
 

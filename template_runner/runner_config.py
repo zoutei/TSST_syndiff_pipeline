@@ -48,6 +48,12 @@ class RunnerConfig:
     def runs_dir(self) -> str:
         return self.runs_root or str(Path(self.handoff_root) / "runs")
 
+    def stage_executor(self, stage: str) -> str:
+        """Return launch executor for a stage: 'local' or 'condor'."""
+        if stage == "ps1_process":
+            return self.stages.ps1_process.executor
+        return "local"
+
 
 def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
     raw = raw or {}

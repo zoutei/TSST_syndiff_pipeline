@@ -371,12 +371,15 @@ class PipelineState:
                         )
 
     def running_pids(self, run_id: str) -> List[int]:
+        return [int(r.pid) for r in self.running_jobs(run_id) if r.pid is not None]
+
+    def running_jobs(self, run_id: str) -> List[StageRunRow]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT pid FROM stage_runs WHERE run_id = ? AND status = ? AND pid IS NOT NULL",
+                "SELECT * FROM stage_runs WHERE run_id = ? AND status = ? AND pid IS NOT NULL",
                 (run_id, STATUS_RUNNING),
             ).fetchall()
-            return [int(r["pid"]) for r in rows if r["pid"]]
+            return [StageRunRow(**dict(r)) for r in rows]
 
     def finalize_run_killed(self, run_id: str) -> dict[str, int]:
         """Mark active stage rows terminal after a user kill.
