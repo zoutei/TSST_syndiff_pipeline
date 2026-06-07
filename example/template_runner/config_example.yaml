@@ -27,6 +27,11 @@ stages:
   ps1_process:
     remove_saturated_stars: true
     psf_sigma: 40.0
+    # executor: condor (default) submits ps1_process to the science cluster
+    # condor_request_cpus: 64
+    # condor_request_memory: 500000
+    # condor_requirements: "Memory >= 500000 && LoadAvg < 10"
+    # condor_rank: "-LoadAvg"
   downsample:
     ignore_mask_bits: [12]
     oversampling_factor: 1
@@ -37,7 +42,7 @@ resources:
   cpu_light:
     max_concurrent: 2
   cpu_heavy:
-    max_concurrent: 1
+    max_concurrent: 3
 
 scheduler:
   heartbeat_interval_s: 30.0

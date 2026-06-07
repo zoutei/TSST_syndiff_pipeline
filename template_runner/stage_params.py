@@ -47,6 +47,11 @@ PS1_PROCESS_ALLOWED = frozenset(
         "remove_saturated_stars",
         "catalog_path",
         "bright_star_mag_threshold",
+        "executor",
+        "condor_request_cpus",
+        "condor_request_memory",
+        "condor_requirements",
+        "condor_rank",
     }
 )
 DOWNSAMPLE_ALLOWED = frozenset(
@@ -127,6 +132,11 @@ class Ps1ProcessStageParams:
     remove_saturated_stars: bool = False
     catalog_path: str | None = None
     bright_star_mag_threshold: float = 13.0
+    executor: str = "condor"
+    condor_request_cpus: int = 64
+    condor_request_memory: int = 500_000
+    condor_requirements: str | None = "Memory >= 500000 && LoadAvg < 10"
+    condor_rank: str | None = "-LoadAvg"
 
 
 @dataclass
@@ -169,6 +179,8 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
     validate_stage_keys(pp, PS1_PROCESS_ALLOWED, "ps1_process")
     validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
+    if pp.get("executor", "condor") not in ("local", "condor"):
+        raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),
