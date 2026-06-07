@@ -5,6 +5,7 @@ Function-oriented approach for parsing skycell mapping and padding info.
 """
 
 import logging
+from typing import Optional
 
 import pandas as pd
 
@@ -22,7 +23,7 @@ def load_csv_data(csv_path: str) -> pd.DataFrame:
     """
     try:
         df = pd.read_csv(csv_path)
-        logger.info(f"[CSV] Loaded CSV with {len(df)} rows from {csv_path}")
+        logger.debug(f"[CSV] Loaded CSV with {len(df)} rows from {csv_path}")
         return df
     except Exception as e:
         logger.error(f"[CSV] Failed to load CSV {csv_path}: {e}")
@@ -76,17 +77,23 @@ def get_projection_rows(csv_path: str, projection: str) -> dict[int, list[str]]:
     return rows
 
 
-def get_padding_info(csv_path: str, skycell: str) -> dict[str, list[str]]:
+def get_padding_info(
+    csv_path: str,
+    skycell: str,
+    df: Optional[pd.DataFrame] = None,
+) -> dict[str, list[str]]:
     """Get padding information for a skycell.
 
     Args:
         csv_path: Path to CSV file
         skycell: Skycell name
+        df: Optional pre-loaded CSV DataFrame (avoids re-reading the file)
 
     Returns:
         Dictionary mapping direction to list of padding skycells
     """
-    df = load_csv_data(csv_path)
+    if df is None:
+        df = load_csv_data(csv_path)
     cell_row = df[df["NAME"] == skycell]
 
     if len(cell_row) == 0:
@@ -127,9 +134,11 @@ def get_all_padding_cells(csv_path: str, skycell_list: list[str]) -> dict[str, l
     """
     all_padding = {}
     unique_padding_cells = set()
+    df = load_csv_data(csv_path)
+    logger.info(f"[CSV] Loaded CSV with {len(df)} rows from {csv_path}")
 
     for skycell in skycell_list:
-        padding_info = get_padding_info(csv_path, skycell)
+        padding_info = get_padding_info(csv_path, skycell, df=df)
 
         padding_cells = []
         for direction_cells in padding_info.values():
