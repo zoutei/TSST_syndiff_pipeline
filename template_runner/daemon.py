@@ -121,6 +121,21 @@ def terminate_process_tree(pid: int, sig: int = signal.SIGTERM) -> None:
 terminate_pid = terminate_process_tree
 
 
+def wait_for_process_exit(
+    pid: int,
+    *,
+    timeout_s: float = 10.0,
+    poll_s: float = 0.2,
+) -> bool:
+    """Return True once *pid* is no longer alive (or was never alive)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if not is_process_alive(pid):
+            return True
+        time.sleep(poll_s)
+    return not is_process_alive(pid)
+
+
 def wait_for_daemon(state_db_path: str | Path, *, timeout_s: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout_s
     pid_path = logs.daemon_pid_path(state_db_path)

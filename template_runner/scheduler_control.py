@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -9,12 +10,22 @@ from syndiff_pipeline.template_runner import daemon, logs
 from syndiff_pipeline.template_runner.state import PipelineState
 
 DEFAULT_HEARTBEAT_STALE_S = 120.0
+DEFAULT_STOP_TERM_TIMEOUT_S = 10.0
+DEFAULT_STOP_KILL_WAIT_S = 5.0
 
 
 @dataclass(frozen=True)
 class EnsureDaemonResult:
     spawned: bool
     pid: int | None
+
+
+@dataclass(frozen=True)
+class StopDaemonResult:
+    pid: int | None
+    was_running: bool
+    stopped: bool
+    force_killed: bool
 
 
 def _parse_heartbeat(value: str | None) -> datetime | None:
@@ -100,10 +111,38 @@ def ensure_daemon_running(state_db_path: str) -> EnsureDaemonResult:
     raise RuntimeError(f"Supervisor daemon pid={spawn_pid} failed to start")
 
 
-def stop_daemon(state_db_path: str) -> bool:
+def stop_daemon(
+    state_db_path: str,
+    *,
+    term_timeout_s: float = DEFAULT_STOP_TERM_TIMEOUT_S,
+    kill_wait_s: float = DEFAULT_STOP_KILL_WAIT_S,
+) -> StopDaemonResult:
+    """Stop the supervisor daemon, escalating to SIGKILL if SIGTERM is ignored."""
     pid_path = logs.daemon_pid_path(state_db_path)
     pid = daemon.read_pid(pid_path)
-    if pid and daemon.is_process_alive(pid):
-        daemon.terminate_process_tree(pid)
-        return True
-    return False
+    if not pid or not daemon.is_process_alive(pid):
+        if pid is not None:
+            daemon.remove_pid_file(pid_path)
+        return StopDaemonResult(
+            pid=pid,
+            was_running=False,
+            stopped=True,
+            force_killed=False,
+        )
+
+    daemon.terminate_process_tree(pid, signal.SIGTERM)
+    force_killed = False
+    if not daemon.wait_for_process_exit(pid, timeout_s=term_timeout_s):
+        daemon.terminate_process_tree(pid, signal.SIGKILL)
+        force_killed = True
+        daemon.wait_for_process_exit(pid, timeout_s=kill_wait_s)
+
+    stopped = not daemon.is_process_alive(pid)
+    if stopped:
+        daemon.remove_pid_file(pid_path)
+    return StopDaemonResult(
+        pid=pid,
+        was_running=True,
+        stopped=stopped,
+        force_killed=force_killed,
+    )

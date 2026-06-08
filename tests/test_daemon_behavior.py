@@ -13,6 +13,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_runner import daemon, logs
+from syndiff_pipeline.template_runner.scheduler_control import stop_daemon
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_runner.scheduler import _resolve_external_and_pending_skips, _tick_run
 from syndiff_pipeline.template_runner.stage_params import (
@@ -266,6 +267,88 @@ class TestDaemonFlock(unittest.TestCase):
                 self.assertIsNotNone(fd1)
                 with daemon.daemon_lock(db, blocking=False) as fd2:
                     self.assertIsNone(fd2)
+
+
+class TestStopDaemon(unittest.TestCase):
+    def test_cleans_stale_pid_file_when_not_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            pid_path = logs.daemon_pid_path(db)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("424242", encoding="utf-8")
+            result = stop_daemon(db)
+            self.assertFalse(result.was_running)
+            self.assertTrue(result.stopped)
+            self.assertFalse(result.force_killed)
+            self.assertFalse(pid_path.is_file())
+
+    def test_waits_for_graceful_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            pid_path = logs.daemon_pid_path(db)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("55555", encoding="utf-8")
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                side_effect=[True, False],
+            ) as alive, unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+            ) as term, unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                return_value=True,
+            ) as wait:
+                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+            self.assertTrue(result.was_running)
+            self.assertTrue(result.stopped)
+            self.assertFalse(result.force_killed)
+            term.assert_called_once_with(55555, unittest.mock.ANY)
+            wait.assert_called_once_with(55555, timeout_s=0.1)
+            alive.assert_called()
+            self.assertFalse(pid_path.is_file())
+
+    def test_escalates_to_sigkill_when_term_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            pid_path = logs.daemon_pid_path(db)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("66666", encoding="utf-8")
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                side_effect=[True, False],
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+            ) as term, unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                side_effect=[False, True],
+            ) as wait:
+                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+            self.assertTrue(result.force_killed)
+            self.assertTrue(result.stopped)
+            self.assertEqual(term.call_count, 2)
+            term.assert_any_call(66666, unittest.mock.ANY)
+            self.assertEqual(wait.call_count, 2)
+            self.assertFalse(pid_path.is_file())
+
+    def test_reports_failure_when_process_survives_sigkill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            pid_path = logs.daemon_pid_path(db)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("77777", encoding="utf-8")
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                return_value=True,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                return_value=False,
+            ):
+                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+            self.assertTrue(result.was_running)
+            self.assertFalse(result.stopped)
+            self.assertTrue(result.force_killed)
+            self.assertTrue(pid_path.is_file())
 
 
 class TestRetryAfterCancel(unittest.TestCase):
