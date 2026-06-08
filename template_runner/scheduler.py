@@ -14,7 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Dict, List, Set
 
-from syndiff_pipeline.template_runner import daemon, launcher, logs, stages
+from syndiff_pipeline.template_runner import condor, daemon, launcher, logs, stages
 from syndiff_pipeline.template_runner.run_context import resolve_run_context
 from syndiff_pipeline.template_runner.runner_config import resolve_config
 from syndiff_pipeline.template_runner.state import (
@@ -268,6 +268,16 @@ def run_scheduler(
                     continue
                 batch = state.fetch_ready_batch(run_id, pool_name, capacity, active_stages)
                 for row in batch:
+                    key = f"{row.target_label}:{row.stage}"
+                    if key in running:
+                        continue
+
+                    executor = cfg.stage_executor(row.stage)
+                    if executor == "condor":
+                        existing = state.get_stage_run(run_id, row.target_label, row.stage)
+                        if existing and existing.pid:
+                            condor.remove_cluster(existing.pid)
+
                     cmd = stages.build_stage_command(
                         run_id,
                         row.stage,
@@ -275,7 +285,6 @@ def run_scheduler(
                         row.target_label,
                         force_rerun=force_rerun,
                     )
-                    executor = cfg.stage_executor(row.stage)
                     log.info(
                         "Launching %s / %s (%s, %s)",
                         row.target_label,
@@ -291,7 +300,6 @@ def run_scheduler(
                         run_id=run_id,
                         target_label=row.target_label,
                     )
-                    key = f"{row.target_label}:{row.stage}"
                     running[key] = handle
                     running_meta[key] = (row.target_label, row.stage, pool_name)
                     pool_running[pool_name] += 1
@@ -334,6 +342,8 @@ def run_scheduler(
         for handle in running.values():
             if handle.poll() is None:
                 handle.terminate()
+        condor.sweep_run_condor_clusters(state, cfg, run_id)
+        condor.sweep_run_condor_audit_clusters(runs_root, run_id)
         daemon.remove_pid_file(pid_path)
         _write_summary(state, run_id, runs_root)
 
