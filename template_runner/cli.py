@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from syndiff_pipeline.template_runner import daemon, logs
+from syndiff_pipeline.template_runner import logs
 from syndiff_pipeline.template_runner.run_context import (
     RUNS_ROOT_ENV_VAR,
     RunContext,
@@ -17,7 +18,12 @@ from syndiff_pipeline.template_runner.run_context import (
     runs_root_from_env,
 )
 from syndiff_pipeline.template_runner.runner_config import load_runner_config
-from syndiff_pipeline.template_runner.scheduler_control import ensure_scheduler_running
+from syndiff_pipeline.template_runner.scheduler_control import (
+    daemon_is_alive,
+    daemon_status,
+    ensure_daemon_running,
+    stop_daemon,
+)
 from syndiff_pipeline.template_runner.state import (
     STAGE_NAMES,
     STAGE_SHORT_NAMES,
@@ -106,24 +112,6 @@ def _run_context_from_directory(run_directory: Path, run_id: str) -> RunContext:
     return resolve_run_context(run_dir=run_directory, run_id=run_id)
 
 
-def _ensure_retry_scheduler(
-    ctx: RunContext,
-    state: PipelineState,
-    *,
-    no_respawn: bool,
-) -> None:
-    if state.is_paused(ctx.run_id):
-        state.set_paused(ctx.run_id, False)
-        print(f"Resumed run {ctx.run_id}")
-
-    if no_respawn:
-        return
-
-    result = ensure_scheduler_running(ctx, force_rerun=False)
-    if result.spawned:
-        print(f"Restarted scheduler pid={result.pid}")
-
-
 def cmd_submit(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner import stages
     from syndiff_pipeline.template_runner.targets import load_targets
@@ -146,6 +134,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     state = PipelineState(cfg.state_db_path)
     if state.get_run(run_id) is None:
+        # New run: stages are materialized pending/external and the force_rerun
+        # flag is persisted at creation, before the daemon can schedule it. No
+        # post-hoc execution-state mutation is needed (or safe) here.
         state.create_run(
             run_id,
             str(logs.run_config_path(run_directory)),
@@ -153,18 +144,29 @@ def cmd_submit(args: argparse.Namespace) -> int:
             runs_root,
             targets,
             active,
+            force_rerun=bool(args.force_rerun),
+        )
+    elif args.force_rerun:
+        # Resubmitting force-rerun onto an EXISTING run. The daemon is the sole
+        # owner of execution state and may be actively scheduling this run, so
+        # the CLI must NOT reset stages directly (that races mid-launch). Emit a
+        # force_rerun intent instead; the daemon applies it as the single writer.
+        state.insert_command(
+            "force_rerun",
+            run_id=run_id,
+            args={
+                "target_labels": [t.label() for t in targets],
+                "stages": active,
+            },
         )
 
-    ctx = _run_context_from_directory(run_directory, run_id)
-    sched_log = logs.scheduler_log_path(runs_root, run_id)
-    result = ensure_scheduler_running(ctx, force_rerun=bool(args.force_rerun))
+    result = ensure_daemon_running(cfg.state_db_path)
+    daemon_log = logs.daemon_log_path(cfg.state_db_path)
 
-    print(f"Submitted run_id={run_id} scheduler_pid={result.pid}")
-    print(f"  logs: {sched_log}")
+    print(f"Submitted run_id={run_id} supervisor_pid={result.pid}")
+    print(f"  daemon log: {daemon_log}")
     print(f"Monitor: syndiff-template progress --run-dir {run_directory}")
     print(f"         syndiff-template status --watch --run-dir {run_directory}")
-    print(f"  or:    export {RUNS_ROOT_ENV_VAR}={runs_root}")
-    print(f"         syndiff-template progress --run-id {run_id}")
     return 0
 
 
@@ -200,6 +202,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             runs_root,
             targets,
             active,
+            force_rerun=bool(args.force_rerun),
         )
 
     return run_scheduler(
@@ -215,8 +218,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     state = PipelineState(ctx.cfg.state_db_path)
 
     def _print_once():
+        run = state.get_run(ctx.run_id) or {}
+        print(f"Run {ctx.run_id} status={run.get('status', '?')}")
+        if run.get("status") == "stalled" and run.get("stall_reason"):
+            print(f"  stalled: {run['stall_reason']}")
         rows = state.list_stage_runs(ctx.run_id)
-        print(f"Run {ctx.run_id}")
         by_target: dict[str, list] = {}
         for r in rows:
             by_target.setdefault(r.target_label, []).append(r)
@@ -240,6 +246,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             time.sleep(args.interval)
     else:
         _print_once()
+        if not daemon_is_alive(ctx.cfg.state_db_path):
+            print(
+                "WARNING: supervisor daemon is not alive. "
+                "Start with: syndiff-template daemon start --config "
+                f"{logs.run_config_path(ctx.run_dir)}"
+            )
     return 0
 
 
@@ -249,20 +261,21 @@ def cmd_progress(args: argparse.Namespace) -> int:
     counts = state.count_by_status(ctx.run_id)
     run = state.get_run(ctx.run_id) or {}
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
-    print(f"run_id={ctx.run_id} status={run.get('status', '?')} " + " ".join(parts))
+    line = f"run_id={ctx.run_id} status={run.get('status', '?')} " + " ".join(parts)
+    if run.get("stall_reason"):
+        line += f" stall_reason={run['stall_reason']!r}"
+    print(line)
     return 0
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
     cfg = load_runner_config(args.config)
     state = PipelineState(cfg.state_db_path)
+    alive = daemon_is_alive(cfg.state_db_path)
     for r in state.list_runs(args.limit):
-        pid_path = logs.scheduler_pid_path(cfg.runs_dir(), r["run_id"])
-        pid = daemon.read_pid(pid_path)
-        alive = daemon.is_process_alive(pid) if pid else False
         print(
             f"{r['run_id']}  status={r.get('status')}  "
-            f"started={r.get('started_at')}  scheduler_alive={alive}"
+            f"started={r.get('started_at')}  daemon_alive={alive}"
         )
     return 0
 
@@ -272,13 +285,16 @@ def cmd_active(args: argparse.Namespace) -> int:
     state = PipelineState(cfg.state_db_path)
     found = False
     for r in state.list_runs(50):
-        pid_path = logs.scheduler_pid_path(cfg.runs_dir(), r["run_id"])
-        pid = daemon.read_pid(pid_path)
-        if pid and daemon.is_process_alive(pid):
-            print(f"{r['run_id']}  pid={pid}  status={r.get('status')}")
+        if r.get("status") in ("running", "stalled"):
+            print(f"{r['run_id']}  status={r.get('status')}")
             found = True
     if not found:
-        print("No active scheduler processes.")
+        print("No active runs.")
+    if daemon_is_alive(cfg.state_db_path):
+        st = daemon_status(cfg.state_db_path)
+        print(f"Supervisor pid={st.pid} heartbeat_age_s={st.heartbeat_age_s}")
+    else:
+        print("Supervisor daemon is not alive.")
     return 0
 
 
@@ -297,7 +313,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
     if args.target and args.stage:
         path = logs.target_log_path(ctx.cfg.runs_dir(), ctx.run_id, args.target, args.stage)
     else:
-        path = logs.scheduler_log_path(ctx.cfg.runs_dir(), ctx.run_id)
+        path = logs.daemon_log_path(ctx.cfg.state_db_path)
     if not path.is_file():
         print(f"Log not found: {path}")
         return 1
@@ -311,7 +327,6 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner import stages
-    from syndiff_pipeline.template_runner.state import STAGE_NAMES
     from syndiff_pipeline.template_runner.targets import find_target, load_targets
     from syndiff_pipeline.template_runner.verify import verify_all
 
@@ -336,9 +351,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     results = verify_all(cfg, targets, active)
     rc = 0
     for r in results:
-        mark = "OK" if r.ok else "FAIL"
+        mark = "OK" if r.ok else ("UNKNOWN" if r.unknown else "FAIL")
         print(f"[{mark}] {r.stage}: {r.message} ({r.path})")
-        if not r.ok:
+        if not r.ok and not r.unknown:
             rc = 1
     return rc
 
@@ -348,93 +363,89 @@ def cmd_retry(args: argparse.Namespace) -> int:
 
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
-    no_respawn = bool(getattr(args, "no_respawn_scheduler", False))
 
     if args.scc and args.stage:
         t = find_target_for_run(ctx, state, args.scc)
-        state.reset_stage_for_retry(ctx.run_id, t.label(), args.stage, reset_downstream=True)
-        print(f"Re-queued {args.stage} for {t.label()} in run {ctx.run_id}")
-        _ensure_retry_scheduler(ctx, state, no_respawn=no_respawn)
-        return 0
-
-    if args.scc or args.stage:
+        state.insert_command(
+            "retry",
+            run_id=ctx.run_id,
+            args={
+                "target_label": t.label(),
+                "stage": args.stage,
+                "reset_downstream": True,
+            },
+        )
+        print(f"Queued retry for {args.stage} on {t.label()} in run {ctx.run_id}")
+    elif args.scc or args.stage:
         raise SystemExit(
             "Specify both --scc and --stage for a single retry, "
-            "or omit both to retry all failed stages."
+            "or omit both to retry all failed/canceled stages."
         )
+    else:
+        state.insert_command("retry", run_id=ctx.run_id)
+        print(f"Queued bulk retry for run {ctx.run_id}")
 
-    failed = state.list_failed_stage_runs(ctx.run_id)
-    if not failed:
-        print(f"No failed stages in run {ctx.run_id}")
-        return 0
-
-    for row in failed:
-        state.reset_stage_for_retry(
-            ctx.run_id, row.target_label, row.stage, reset_downstream=True
-        )
-        print(f"Re-queued {row.stage} for {row.target_label}")
-    print(f"Re-queued {len(failed)} failed stage(s) in run {ctx.run_id}")
-    _ensure_retry_scheduler(ctx, state, no_respawn=no_respawn)
+    if not getattr(args, "no_start_daemon", False):
+        ensure_daemon_running(ctx.cfg.state_db_path)
     return 0
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
-    PipelineState(ctx.cfg.state_db_path).set_paused(ctx.run_id, True)
-    print(f"Paused run {ctx.run_id}")
+    PipelineState(ctx.cfg.state_db_path).insert_command("pause", run_id=ctx.run_id)
+    print(f"Queued pause for run {ctx.run_id}")
     return 0
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
-    PipelineState(ctx.cfg.state_db_path).set_paused(ctx.run_id, False)
-    print(f"Resumed run {ctx.run_id}")
+    state = PipelineState(ctx.cfg.state_db_path)
+    state.insert_command("resume", run_id=ctx.run_id)
+    print(f"Queued resume for run {ctx.run_id}")
     return 0
 
 
 def cmd_kill(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
-    pid_path = logs.scheduler_pid_path(ctx.cfg.runs_dir(), ctx.run_id)
-    pid = daemon.read_pid(pid_path)
-    if pid:
-        daemon.terminate_process_tree(pid)
+    state.insert_command("cancel", run_id=ctx.run_id)
     from syndiff_pipeline.template_runner import condor
 
-    running_jobs = state.running_jobs(ctx.run_id)
-    condor_removed = 0
-    local_terminated = 0
-    for job in running_jobs:
-        if job.pid is None:
-            continue
-        if ctx.cfg.stage_executor(job.stage) == "condor":
-            if condor.remove_cluster(job.pid):
-                condor_removed += 1
-        else:
-            daemon.terminate_process_tree(job.pid)
-            local_terminated += 1
-    condor_removed += condor.sweep_run_condor_audit_clusters(ctx.cfg.runs_dir(), ctx.run_id)
-    counts = state.finalize_run_killed(ctx.run_id)
-    state.set_run_status(ctx.run_id, "killed")
-    daemon.remove_pid_file(pid_path)
-    print(f"Killed run {ctx.run_id}")
-    if condor_removed:
-        print(f"  Removed {condor_removed} Condor cluster(s)")
-    if local_terminated:
-        print(f"  Terminated {local_terminated} local stage job(s)")
-    if counts["killed"]:
-        print(f"  Marked {counts['killed']} running stage(s) as killed")
-    if counts["blocked"]:
-        print(f"  Marked {counts['blocked']} pending/ready stage(s) as blocked")
+    condor.sweep_run_condor_audit_clusters(ctx.cfg.runs_dir(), ctx.run_id)
+    print(f"Queued cancel for run {ctx.run_id}")
     return 0
 
 
+def cmd_daemon(args: argparse.Namespace) -> int:
+    cfg = load_runner_config(args.config)
+    db = cfg.state_db_path
+    if args.action == "start":
+        result = ensure_daemon_running(db)
+        print(f"Supervisor pid={result.pid} spawned={result.spawned}")
+        return 0
+    if args.action == "stop":
+        stopped = stop_daemon(db)
+        print("Supervisor stopped." if stopped else "Supervisor was not running.")
+        return 0
+    if args.action == "status":
+        st = daemon_status(db)
+        print(
+            json.dumps(
+                {
+                    "alive": st.alive,
+                    "pid": st.pid,
+                    "heartbeat_age_s": st.heartbeat_age_s,
+                    "lock_held": st.lock_held,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    raise SystemExit(f"Unknown daemon action: {args.action}")
+
+
 def _add_run_scope(sp: argparse.ArgumentParser) -> None:
-    sp.add_argument(
-        "--run-dir",
-        default=None,
-        help="Full run directory path (frozen config/targets)",
-    )
+    sp.add_argument("--run-dir", default=None, help="Full run directory path (frozen config/targets)")
     sp.add_argument(
         "--run-id",
         default=None,
@@ -452,27 +463,19 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     sp = sub.add_parser("submit", help="Submit detached background run")
-    sp.add_argument("--config", required=True, help="Source config.yaml (copied into run directory)")
-    sp.add_argument("--targets", required=True, help="Source targets CSV (copied into run directory)")
+    sp.add_argument("--config", required=True)
+    sp.add_argument("--targets", required=True)
     sp.add_argument("--stages", default=None)
     sp.add_argument("--run-id", default=None)
-    sp.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Re-run stages even when output artifacts already exist",
-    )
+    sp.add_argument("--force-rerun", action="store_true")
     sp.set_defaults(func=cmd_submit)
 
     sp = sub.add_parser("run", help="Foreground run (debug)")
-    sp.add_argument("--config", required=True, help="Source config.yaml (copied into run directory)")
-    sp.add_argument("--targets", required=True, help="Source targets CSV (copied into run directory)")
+    sp.add_argument("--config", required=True)
+    sp.add_argument("--targets", required=True)
     sp.add_argument("--stages", default=None)
     sp.add_argument("--run-id", default=None)
-    sp.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Re-run stages even when output artifacts already exist",
-    )
+    sp.add_argument("--force-rerun", action="store_true")
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("status", help="Show stage status grid")
@@ -490,7 +493,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--limit", type=int, default=20)
     sp.set_defaults(func=cmd_runs)
 
-    sp = sub.add_parser("active", help="Show runs with live schedulers")
+    sp = sub.add_parser("active", help="Show active runs and supervisor")
     sp.add_argument("--config", required=True)
     sp.set_defaults(func=cmd_active)
 
@@ -512,51 +515,41 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_logs, follow=True)
 
     sp = sub.add_parser("verify", help="Verify stage artifacts")
-    sp.add_argument("--run-dir", default=None, help="Full run directory (frozen config/targets)")
-    sp.add_argument(
-        "--run-id",
-        default=None,
-        help=f"Run ID with {RUNS_ROOT_ENV_VAR} or site --config",
-    )
-    sp.add_argument("--config", default=None, help="Pre-run verify: site config path")
-    sp.add_argument("--targets", default=None, help="Pre-run verify: targets CSV")
-    sp.add_argument("--scc", default=None, help="sector,camera,ccd")
+    sp.add_argument("--run-dir", default=None)
+    sp.add_argument("--run-id", default=None)
+    sp.add_argument("--config", default=None)
+    sp.add_argument("--targets", default=None)
+    sp.add_argument("--scc", default=None)
     sp.add_argument("--stages", default=None)
     sp.set_defaults(func=cmd_verify)
 
-    sp = sub.add_parser(
-        "retry",
-        help="Retry failed stage(s); omit --scc/--stage to requeue all failed stages",
-    )
+    sp = sub.add_parser("retry", help="Retry failed/canceled stage(s)")
     _add_run_scope(sp)
+    sp.add_argument("--scc", default=None)
+    sp.add_argument("--stage", default=None)
     sp.add_argument(
-        "--scc",
-        default=None,
-        help="sector,camera,ccd (with --stage for a single retry)",
-    )
-    sp.add_argument(
-        "--stage",
-        default=None,
-        help="Stage name (with --scc for a single retry)",
-    )
-    sp.add_argument(
-        "--no-respawn-scheduler",
+        "--no-start-daemon",
         action="store_true",
-        help="Re-queue only; do not start scheduler if it is not running",
+        help="Queue the intent without ensuring the supervisor daemon is running",
     )
     sp.set_defaults(func=cmd_retry)
 
-    sp = sub.add_parser("pause", help="Pause scheduler dequeuing")
+    sp = sub.add_parser("pause", help="Pause run dequeuing")
     _add_run_scope(sp)
     sp.set_defaults(func=cmd_pause)
 
-    sp = sub.add_parser("resume", help="Resume paused scheduler")
+    sp = sub.add_parser("resume", help="Resume paused run")
     _add_run_scope(sp)
     sp.set_defaults(func=cmd_resume)
 
-    sp = sub.add_parser("kill", help="Kill scheduler and running stages")
+    sp = sub.add_parser("kill", help="Cancel run (intent to supervisor)")
     _add_run_scope(sp)
     sp.set_defaults(func=cmd_kill)
+
+    sp = sub.add_parser("daemon", help="Supervisor daemon control")
+    sp.add_argument("--config", required=True)
+    sp.add_argument("action", choices=["start", "stop", "status"])
+    sp.set_defaults(func=cmd_daemon)
 
     return p
 
