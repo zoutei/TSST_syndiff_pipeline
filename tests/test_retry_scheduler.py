@@ -1,0 +1,168 @@
+"""Tests for retry command intents and daemon ensure."""
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import tempfile
+import unittest
+import unittest.mock
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from syndiff_pipeline.template_runner import logs
+from syndiff_pipeline.template_runner.cli import cmd_retry
+from syndiff_pipeline.template_runner.run_context import RunContext, resolve_run_context
+from syndiff_pipeline.template_runner.scheduler_control import ensure_daemon_running
+from syndiff_pipeline.template_runner.state import (
+    PipelineState,
+    STATUS_FAILED,
+)
+from syndiff_pipeline.template_runner.targets import Target, find_target_for_run
+
+
+def _write_minimal_config(path: Path, *, state_db: str, runs_root: str) -> None:
+    path.write_text(
+        "\n".join(
+            [
+                "data_root: /data",
+                f"handoff_root: {Path(state_db).parent}",
+                f"runs_root: {runs_root}",
+                "state_db_path: " + state_db,
+                "skycell_wcs_csv: skycells.csv",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (path.parent / "skycells.csv").write_text("x", encoding="utf-8")
+
+
+def _write_targets(path: Path, *, enabled: str = "true") -> None:
+    path.write_text(
+        "sector,camera,ccd,target_ra,target_dec,target_name,enabled\n"
+        f"23,1,3,185.0,5.3,2020ftl,{enabled}\n",
+        encoding="utf-8",
+    )
+
+
+def _make_run_context(tmp: Path, *, enabled: str = "true") -> tuple[RunContext, PipelineState]:
+    state_db = tmp / "state.sqlite"
+    runs_root = tmp / "runs"
+    source_cfg = tmp / "site" / "config.yaml"
+    source_cfg.parent.mkdir(parents=True)
+    _write_minimal_config(source_cfg, state_db=str(state_db), runs_root=str(runs_root))
+    targets_csv = tmp / "targets.csv"
+    _write_targets(targets_csv, enabled=enabled)
+
+    run_id = "run_a"
+    run_dir = runs_root / run_id
+    logs.materialize_run_inputs(source_cfg, targets_csv, run_dir)
+    meta = {
+        "run_id": run_id,
+        "stages": ["mapping", "downsample"],
+        "force_rerun": False,
+    }
+    (run_dir / "run_meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    target = Target(
+        sector=23,
+        camera=1,
+        ccd=3,
+        target_ra=185.0,
+        target_dec=5.3,
+        target_name="2020ftl",
+    )
+    state = PipelineState(str(state_db))
+    state.create_run(
+        run_id,
+        str(logs.run_config_path(run_dir)),
+        str(logs.run_targets_path(run_dir)),
+        str(runs_root),
+        [target],
+        ["mapping", "downsample"],
+    )
+    ctx = resolve_run_context(run_dir=run_dir)
+    return ctx, state
+
+
+class TestFindTargetForRun(unittest.TestCase):
+    def test_falls_back_to_db_when_csv_row_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, state = _make_run_context(Path(tmp), enabled="false")
+            t = find_target_for_run(ctx, state, "23,1,3")
+            self.assertEqual(t.label(), "s0023_c1_k3_2020ftl")
+
+
+class TestEnsureDaemonRunning(unittest.TestCase):
+    def test_spawns_when_no_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, _state = _make_run_context(Path(tmp))
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.spawn_detached_daemon",
+                return_value=4242,
+            ) as spawn, unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_daemon",
+                return_value=True,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                return_value=4242,
+            ):
+                result = ensure_daemon_running(ctx.cfg.state_db_path)
+            self.assertTrue(result.spawned)
+            self.assertEqual(result.pid, 4242)
+            spawn.assert_called_once()
+
+    def test_does_not_spawn_when_daemon_alive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, _state = _make_run_context(Path(tmp))
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon_is_alive",
+                return_value=True,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                return_value=99999,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.spawn_detached_daemon",
+            ) as spawn:
+                result = ensure_daemon_running(ctx.cfg.state_db_path)
+            self.assertFalse(result.spawned)
+            self.assertEqual(result.pid, 99999)
+            spawn.assert_not_called()
+
+
+class TestCmdRetry(unittest.TestCase):
+    def test_bulk_retry_inserts_command_and_ensures_daemon(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, state = _make_run_context(Path(tmp))
+            label = "s0023_c1_k3_2020ftl"
+            state.update_stage_status(ctx.run_id, label, "mapping", STATUS_FAILED, exit_code=1)
+
+            args = argparse.Namespace(
+                run_dir=str(ctx.run_dir),
+                run_id=None,
+                config=None,
+                scc=None,
+                stage=None,
+                no_start_daemon=False,
+            )
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.cli._resolve_run_from_args",
+                return_value=ctx,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.cli.ensure_daemon_running",
+            ) as ensure:
+                ensure.return_value.spawned = True
+                ensure.return_value.pid = 7777
+                rc = cmd_retry(args)
+            self.assertEqual(rc, 0)
+            cmds = state.fetch_pending_commands()
+            self.assertEqual(len(cmds), 1)
+            self.assertEqual(cmds[0].kind, "retry")
+            ensure.assert_called_once()
+
+
+if __name__ == "__main__":
+    unittest.main()
