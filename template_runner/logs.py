@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from syndiff_pipeline.template_runner.runner_config import (
     load_and_materialize_runner_config,
@@ -88,19 +87,33 @@ def update_run_meta(cfg_runs_root: str, run_id: str, patch: dict) -> None:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta.update(patch)
     meta["updated_at"] = _utc_now_iso()
-    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    tmp = meta_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    tmp.replace(meta_path)
 
 
 def target_log_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
     return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.log"
 
 
-def scheduler_log_path(cfg_runs_root: str, run_id: str) -> Path:
-    return run_dir(cfg_runs_root, run_id) / "scheduler.log"
+def stage_status_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
+    return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.status.json"
 
 
-def scheduler_pid_path(cfg_runs_root: str, run_id: str) -> Path:
-    return run_dir(cfg_runs_root, run_id) / "scheduler.pid"
+def stage_manifest_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
+    return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.manifest.json"
+
+
+def daemon_lock_path(state_db_path: str | Path) -> Path:
+    return Path(state_db_path).expanduser().resolve().parent / "daemon.lock"
+
+
+def daemon_pid_path(state_db_path: str | Path) -> Path:
+    return Path(state_db_path).expanduser().resolve().parent / "daemon.pid"
+
+
+def daemon_log_path(state_db_path: str | Path) -> Path:
+    return Path(state_db_path).expanduser().resolve().parent / "daemon.log"
 
 
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
@@ -109,6 +122,22 @@ def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
 
 def summary_json_path(cfg_runs_root: str, run_id: str) -> Path:
     return run_dir(cfg_runs_root, run_id) / "summary.json"
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+
+def read_json(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
 
 
 def _format_header(stage: str, snapshot: Dict[str, Any]) -> str:
