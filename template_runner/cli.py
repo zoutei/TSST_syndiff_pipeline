@@ -10,12 +10,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from syndiff_pipeline.template_runner import daemon, logs, stages
-from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
-from syndiff_pipeline.template_runner.scheduler import run_scheduler
-from syndiff_pipeline.template_runner.state import PipelineState, STAGE_NAMES
-from syndiff_pipeline.template_runner.targets import find_target, load_targets
-from syndiff_pipeline.template_runner.verify import verify_all, verify_target
+from syndiff_pipeline.template_runner import daemon, logs
+from syndiff_pipeline.template_runner.runner_config import load_runner_config
+from syndiff_pipeline.template_runner.state import PipelineState
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +34,9 @@ def _resolve_run_id(cfg, run_id: str | None) -> str:
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.template_runner import stages
+    from syndiff_pipeline.template_runner.targets import load_targets
+
     cfg = load_runner_config(args.config)
     targets = load_targets(args.targets)
     active = stages.parse_stage_list(args.stages)
@@ -87,6 +87,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.template_runner import stages
+    from syndiff_pipeline.template_runner.scheduler import run_scheduler
+    from syndiff_pipeline.template_runner.targets import load_targets
+
     if sys.stdout.isatty():
         print("Warning: foreground run blocks until complete; use 'submit' for detached runs.")
     run_id = args.run_id or _default_run_id()
@@ -207,6 +211,11 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.template_runner import stages
+    from syndiff_pipeline.template_runner.state import STAGE_NAMES
+    from syndiff_pipeline.template_runner.targets import find_target, load_targets
+    from syndiff_pipeline.template_runner.verify import verify_all
+
     cfg = load_runner_config(args.config)
     targets = load_targets(args.targets) if args.targets else []
     if args.scc:
@@ -226,6 +235,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.template_runner.targets import find_target, load_targets
+
     cfg = load_runner_config(args.config)
     run_id = _resolve_run_id(cfg, args.run_id)
     targets = load_targets(args.targets)
