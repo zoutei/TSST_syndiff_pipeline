@@ -17,7 +17,12 @@ from syndiff_pipeline.template_runner.run_context import (
     runs_root_from_env,
 )
 from syndiff_pipeline.template_runner.runner_config import load_runner_config
-from syndiff_pipeline.template_runner.state import PipelineState
+from syndiff_pipeline.template_runner.scheduler_control import ensure_scheduler_running
+from syndiff_pipeline.template_runner.state import (
+    STAGE_NAMES,
+    STAGE_SHORT_NAMES,
+    PipelineState,
+)
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +102,28 @@ def _prepare_run_directory(
     return run_directory
 
 
+def _run_context_from_directory(run_directory: Path, run_id: str) -> RunContext:
+    return resolve_run_context(run_dir=run_directory, run_id=run_id)
+
+
+def _ensure_retry_scheduler(
+    ctx: RunContext,
+    state: PipelineState,
+    *,
+    no_respawn: bool,
+) -> None:
+    if state.is_paused(ctx.run_id):
+        state.set_paused(ctx.run_id, False)
+        print(f"Resumed run {ctx.run_id}")
+
+    if no_respawn:
+        return
+
+    result = ensure_scheduler_running(ctx, force_rerun=False)
+    if result.spawned:
+        print(f"Restarted scheduler pid={result.pid}")
+
+
 def cmd_submit(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner import stages
     from syndiff_pipeline.template_runner.targets import load_targets
@@ -128,19 +155,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
             active,
         )
 
+    ctx = _run_context_from_directory(run_directory, run_id)
     sched_log = logs.scheduler_log_path(runs_root, run_id)
-    pid = daemon.spawn_detached_scheduler(
-        run_id,
-        run_directory,
-        args.stages,
-        sched_log,
-        force_rerun=bool(args.force_rerun),
-    )
-    pid_path = logs.scheduler_pid_path(runs_root, run_id)
-    daemon.write_pid(pid_path, pid)
-    logs.update_run_meta(runs_root, run_id, {"scheduler_pid": pid, "detach": True})
+    result = ensure_scheduler_running(ctx, force_rerun=bool(args.force_rerun))
 
-    print(f"Submitted run_id={run_id} scheduler_pid={pid}")
+    print(f"Submitted run_id={run_id} scheduler_pid={result.pid}")
     print(f"  logs: {sched_log}")
     print(f"Monitor: syndiff-template progress --run-dir {run_directory}")
     print(f"         syndiff-template status --watch --run-dir {run_directory}")
@@ -201,8 +220,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         by_target: dict[str, list] = {}
         for r in rows:
             by_target.setdefault(r.target_label, []).append(r)
+        stage_order = {name: i for i, name in enumerate(STAGE_NAMES)}
+
+        def _stage_sort_key(row) -> int:
+            return stage_order.get(row.stage, len(STAGE_NAMES))
+
         for label in sorted(by_target):
-            parts = [f"{r.stage[:4]}:{r.status[:4]}" for r in by_target[label]]
+            rows_for_target = sorted(by_target[label], key=_stage_sort_key)
+            parts = [
+                f"{STAGE_SHORT_NAMES.get(r.stage, r.stage)}:{r.status[:4]}"
+                for r in rows_for_target
+            ]
             print(f"  {label}: {' | '.join(parts)}")
 
     if args.watch:
@@ -316,15 +344,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
-    from syndiff_pipeline.template_runner.targets import find_target
+    from syndiff_pipeline.template_runner.targets import find_target_for_run
 
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
+    no_respawn = bool(getattr(args, "no_respawn_scheduler", False))
 
     if args.scc and args.stage:
-        t = find_target(ctx.targets, args.scc)
+        t = find_target_for_run(ctx, state, args.scc)
         state.reset_stage_for_retry(ctx.run_id, t.label(), args.stage, reset_downstream=True)
         print(f"Re-queued {args.stage} for {t.label()} in run {ctx.run_id}")
+        _ensure_retry_scheduler(ctx, state, no_respawn=no_respawn)
         return 0
 
     if args.scc or args.stage:
@@ -344,6 +374,7 @@ def cmd_retry(args: argparse.Namespace) -> int:
         )
         print(f"Re-queued {row.stage} for {row.target_label}")
     print(f"Re-queued {len(failed)} failed stage(s) in run {ctx.run_id}")
+    _ensure_retry_scheduler(ctx, state, no_respawn=no_respawn)
     return 0
 
 
@@ -368,6 +399,8 @@ def cmd_kill(args: argparse.Namespace) -> int:
     pid = daemon.read_pid(pid_path)
     if pid:
         daemon.terminate_process_tree(pid)
+    from syndiff_pipeline.template_runner import condor
+
     running_jobs = state.running_jobs(ctx.run_id)
     condor_removed = 0
     local_terminated = 0
@@ -375,13 +408,12 @@ def cmd_kill(args: argparse.Namespace) -> int:
         if job.pid is None:
             continue
         if ctx.cfg.stage_executor(job.stage) == "condor":
-            from syndiff_pipeline.template_runner import condor
-
             if condor.remove_cluster(job.pid):
                 condor_removed += 1
         else:
             daemon.terminate_process_tree(job.pid)
             local_terminated += 1
+    condor_removed += condor.sweep_run_condor_audit_clusters(ctx.cfg.runs_dir(), ctx.run_id)
     counts = state.finalize_run_killed(ctx.run_id)
     state.set_run_status(ctx.run_id, "killed")
     daemon.remove_pid_file(pid_path)
@@ -506,6 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage",
         default=None,
         help="Stage name (with --scc for a single retry)",
+    )
+    sp.add_argument(
+        "--no-respawn-scheduler",
+        action="store_true",
+        help="Re-queue only; do not start scheduler if it is not running",
     )
     sp.set_defaults(func=cmd_retry)
 
