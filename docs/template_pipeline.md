@@ -650,7 +650,7 @@ See `example/template_runner/events_example.csv`.
 | `logs` | Print scheduler or stage log (`--target`, `--stage`, `--follow`) |
 | `tail` | Alias for `logs --follow` |
 | `verify` | Check on-disk artifacts (`--scc`, `--stages`) |
-| `retry` | Re-queue failed stage(s); all failed if `--scc`/`--stage` omitted, or one SCC+stage |
+| `retry` | Re-queue failed stage(s); auto-respawn scheduler; `--no-respawn-scheduler` to skip spawn |
 | `pause` | Stop dequeuing new stages (running stages continue) |
 | `resume` | Resume dequeuing |
 | `kill` | Terminate scheduler, Condor clusters, local jobs; mark run killed |
@@ -745,7 +745,16 @@ The scheduler’s shutdown handler also calls `terminate()` on active handles (i
 
 ### Retry
 
-`retry` resets failed `(target, stage)` rows to `ready` and sets downstream stages back to `pending` in SQLite. With only `--run-dir` or `--run-id` (no `--scc`/`--stage`), every stage in `failed` status for that run is requeued. With both `--scc` and `--stage`, only that one stage is retried. When a retried stage succeeds, the scheduler reopens any still-`blocked` downstream stages to `pending`, then promotes them to `ready` as dependencies are satisfied. The scheduler must still be running (or you must submit a new run) to pick up the work.
+`retry` resets failed `(target, stage)` rows to `ready` and sets downstream stages back to `pending` in SQLite. With only `--run-dir` or `--run-id` (no `--scc`/`--stage`), every stage in `failed` status for that run is requeued. With both `--scc` and `--stage`, only that one stage is retried. When a retried stage succeeds, the scheduler reopens any still-`blocked` downstream stages to `pending`, then promotes them to `ready` as dependencies are satisfied.
+
+After re-queuing, `retry` automatically:
+
+- **Unpauses** the run if it was paused (so a live scheduler can dequeue work).
+- **Respawns** the detached scheduler if it is not running (typical after a run finishes `failed` or `success` and the scheduler exited).
+
+Use `--no-respawn-scheduler` to re-queue in SQLite only without starting the scheduler.
+
+Single-target retry resolves SCC from the frozen `targets.csv`, falling back to the run's SQLite `targets` table when the CSV row is missing or `enabled=false`.
 
 ---
 
