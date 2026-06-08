@@ -281,6 +281,28 @@ def create_master_task_list(df: pd.DataFrame, projection: str) -> tuple[dict, li
     return metadata, task_list
 
 
+def expected_convolved_skycells(
+    data_root: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    projections_limit: Optional[int] = None,
+) -> list[str]:
+    """Skycell names ``ps1_process`` should write for the given SCC/config."""
+    csv_path = find_csv_file(data_root, sector, camera, ccd)
+    projections = get_projections_from_csv(csv_path)
+    if projections_limit:
+        projections = projections[: int(projections_limit)]
+    df = load_csv_data(csv_path)
+    skycells: set[str] = set()
+    for projection in projections:
+        _, task_list = create_master_task_list(df, projection)
+        for skycell_id, _projection, _row_id in task_list:
+            skycells.add(skycell_id)
+    return sorted(skycells)
+
+
 # --- NEW Pipeline Worker Functions ---
 
 
@@ -1361,9 +1383,14 @@ def sequential_processor(
     the sliding window state.
 
     Returns:
-        List of all removed-star records accumulated across every projection and row.
+        Tuple of (all_removed_stars, produced_skycells) where ``all_removed_stars``
+        is the flat list of removed-star records accumulated across every
+        projection and row, and ``produced_skycells`` is the sorted list of skycell
+        names actually written to the output store (the saver creates one
+        ``<skycell>_data``/``_mask`` per name).
     """
     all_removed_stars: list[dict] = []
+    produced_skycells: set[str] = set()
 
     for projection in projections:
         logger.info(f"[SequentialProcessor] --- Starting sequential processing for projection: {projection} ---")
@@ -1417,6 +1444,9 @@ def sequential_processor(
 
                 all_removed_stars.extend(row_removed_stars)
 
+                # Track the exact skycells the saver will write for this row.
+                produced_skycells.update(str(name) for name in results_data.keys())
+
                 # Queue the Results
                 processed_bundle = {"projection": projection, "row_id": current_row_id, "results_data": results_data, "results_masks": results_masks}
                 results_queue.put(processed_bundle)
@@ -1436,7 +1466,7 @@ def sequential_processor(
     # Shutdown Signal for the saver
     results_queue.put(None)
 
-    return all_removed_stars
+    return all_removed_stars, sorted(produced_skycells)
 
 
 # --- Main Orchestrator ---
@@ -1648,7 +1678,7 @@ def run_modern_sliding_window_pipeline(
                 task_queue.put(None)
 
             # --- Run Sequential Processor (Stage 3) in Main Thread ---
-            all_removed_stars = sequential_processor(
+            all_removed_stars, produced_skycells = sequential_processor(
                 projections,
                 df,
                 combined_cell_queue,
@@ -1691,7 +1721,26 @@ def run_modern_sliding_window_pipeline(
 
         saver_thread.join()
         logger.info("[Pipeline] Pipeline completed successfully!")
-        return {"status": "success"}
+
+        # Produced inventory: exact skycells written this run plus the planned
+        # (expected) set, so a caller can write a completion manifest without
+        # re-deriving what the pipeline did.
+        try:
+            expected_skycells = expected_convolved_skycells(
+                data_root, sector, camera, ccd, projections_limit=projections_limit
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("[Pipeline] Could not derive expected skycell inventory: %s", exc)
+            expected_skycells = produced_skycells
+        return {
+            "status": "success",
+            "output_path": output_path,
+            "produced_skycells": produced_skycells,
+            "produced_count": len(produced_skycells),
+            "expected_skycells": expected_skycells,
+            "expected_count": len(expected_skycells),
+            "artifacts": [f"{output_path}/{name}_data" for name in produced_skycells],
+        }
 
     except Exception:
         logger.exception("[Pipeline] Unhandled exception — cleaning up child processes")
