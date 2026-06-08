@@ -53,7 +53,7 @@ The runner is designed for **batch operation across many SCCs**:
 - A detached **scheduler** dequeues work subject to resource-pool limits.
 - Progress is tracked in **SQLite** and on disk (logs, summaries).
 - Stages can be run **subset-by-subset** (e.g. only `ps1_process,downsample`) when upstream artifacts already exist.
-- **`ps1_process`** can run on a shared **HTCondor** pool; all other stages run as local subprocesses on the submit host.
+- **`mapping`** and **`ps1_process`** can run on a shared **HTCondor** pool; all other stages run as local subprocesses on the submit host.
 
 ---
 
@@ -79,7 +79,7 @@ This guide covers **orchestration** — how to configure and run `syndiff-templa
 | `process_ps1.py` | `template/ps1_process.py` | `ps1_process` |
 | `multi_offset_downsampling.py` | `template/downsample.py` | `downsample` |
 
-The runner adds capabilities not present in the standalone scripts: **multi-target batching**, **WCS drift grouping** for transients, **artifact verification**, **force-rerun cleanup**, **pause/kill/retry**, and **HTCondor** for `ps1_process`.
+The runner adds capabilities not present in the standalone scripts: **multi-target batching**, **WCS drift grouping** for transients, **artifact verification**, **force-rerun cleanup**, **pause/kill/retry**, and **HTCondor** for `mapping` and `ps1_process`.
 
 If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff-template submit` with `example/template_runner/config_real.yaml` (paths aligned to the same data layout).
 
@@ -124,6 +124,7 @@ flowchart TB
     Launch --> local
     Launch --> condor
     local --> Stages
+    condor --> s3
     condor --> s5
     Stages --> sqlite
 ```
@@ -134,9 +135,9 @@ flowchart TB
 |-------|------------------|---------------|-------|
 | `tess_ffi_download` | local | `network` | MAST / tesscurl downloads |
 | `wcs_grouping` | local | `cpu_light` | Writes per-target handoff under `handoff_root` |
-| `mapping` | local | `cpu_light` | Gaia + skycell mapping (pancakes) |
+| `mapping` | **condor** | `mapping` | Gaia + skycell mapping (pancakes); lighter Condor claim than `ps1_process` |
 | `ps1_download` | local | `network` | Shared Zarr at `{data_root}/ps1_skycells_zarr/` |
-| `ps1_process` | **condor** | `cpu_heavy` | Whole-node jobs; configurable |
+| `ps1_process` | **condor** | `ps1_process` | Whole-node jobs; configurable |
 | `downsample` | local | `cpu_light` | Reads convolved Zarr + mapping |
 
 **Stage dependency graph**
@@ -239,21 +240,40 @@ syndiff-template submit \
   --stages ps1_process,downsample
 ```
 
+On submit, the source config and targets are **copied into the run directory** (`config.yaml`, `targets.csv`) with all config paths normalized to absolute. The scheduler and all stage workers use only those frozen copies.
+
 Example output:
 
 ```text
 Submitted run_id=20260607_210919 scheduler_pid=2692578
   logs: /path/to/runs/20260607_210919/scheduler.log
-Monitor: syndiff-template progress --config ... --run-id 20260607_210919
+Monitor: syndiff-template progress --run-dir /path/to/runs/20260607_210919
 ```
 
 ### 4. Monitor
 
+Use `--run-dir` for run-scoped commands (no config/target paths needed):
+
+```bash
+syndiff-template progress --run-dir /path/to/runs/20260607_210919
+syndiff-template status --watch --run-dir /path/to/runs/20260607_210919
+syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
+  --target s0023_c1_k3_2020ftl --stage ps1_process
+```
+
+Or set the runs root once per shell session and pass `--run-id` for each run you are watching:
+
+```bash
+export SYNDIFF_RUNS_ROOT=/path/to/runs
+syndiff-template progress --run-id 20260607_210919
+syndiff-template status --watch --run-id 20260607_210919
+syndiff-template retry --run-id 20260607_210919
+```
+
+Shorthand (uses site config only to locate `runs_root`):
+
 ```bash
 syndiff-template progress --config my_config.yaml --run-id 20260607_210919
-syndiff-template status --watch --config my_config.yaml --run-id 20260607_210919
-syndiff-template tail --config my_config.yaml --run-id 20260607_210919 \
-  --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
 ### 5. Use templates in SynDiff
@@ -300,15 +320,16 @@ Concurrency is limited per **pool** (not globally):
 | Pool | Stages | Typical limit | Purpose |
 |------|--------|---------------|---------|
 | `network` | `tess_ffi_download`, `ps1_download` | 3 | Throttle MAST / PS1 API |
-| `cpu_light` | `wcs_grouping`, `mapping`, `downsample` | 2 | Moderate CPU / I/O |
-| `cpu_heavy` | `ps1_process` | 1–4 | Heavy convolution (local or Condor slot count) |
+| `cpu_light` | `wcs_grouping`, `downsample` | 2 | Moderate CPU / I/O |
+| `mapping` | `mapping` | 6 | Condor slot count for mapping jobs |
+| `ps1_process` | `ps1_process` | 4 | Condor slot count for PS1 convolution |
 
-Configure under `resources:` in YAML. For Condor, `cpu_heavy.max_concurrent` caps **simultaneous Condor submissions**, not CPUs per job.
+Configure under `resources:` in YAML. For Condor stages, each pool's `max_concurrent` caps **simultaneous Condor submissions** for that stage, not CPUs per job.
 
 ### Local vs HTCondor execution
 
 - **Local**: `subprocess.Popen` with `start_new_session=True` (own process group for clean kill).
-- **Condor**: only `ps1_process` by default (`stages.ps1_process.executor: condor`).
+- **Condor**: `mapping` and `ps1_process` by default (`stages.mapping.executor: condor`, `stages.ps1_process.executor: condor`).
 
 The Condor path:
 
@@ -489,11 +510,13 @@ resources:
     max_concurrent: 3
   cpu_light:
     max_concurrent: 2
-  cpu_heavy:
-    max_concurrent: 3   # max simultaneous ps1_process jobs (Condor or local)
+  mapping:
+    max_concurrent: 6
+  ps1_process:
+    max_concurrent: 4
 ```
 
-Defaults if omitted: `network=3`, `cpu_light=2`, `cpu_heavy=1`.
+Defaults if omitted: `network=3`, `cpu_light=2`, `mapping=6`, `ps1_process=4`.
 
 ### Stage parameters
 
@@ -523,6 +546,11 @@ Unknown keys under `stages.*` raise `ValueError` at load time (strict allow-list
 | `oversampling_factor` | `1` | Sub-pixel oversampling |
 | `overwrite` | `true` | Overwrite mapping FITS |
 | `skip_download_catalog` | `false` | Skip Gaia download if catalog exists |
+| `executor` | `"condor"` | `"condor"` or `"local"` |
+| `condor_request_cpus` | `16` | HTCondor `request_cpus` |
+| `condor_request_memory` | `100000` | HTCondor `request_memory` (MB) |
+| `condor_requirements` | `Memory <= 500000 && LoadAvg < 10` | Machine requirements expression (avoids 512 GB nodes) |
+| `condor_rank` | `-LoadAvg` | Prefer lower load average |
 
 #### `stages.ps1_download`
 
@@ -603,11 +631,16 @@ See `example/template_runner/events_example.csv`.
 
 ## CLI Reference
 
-All commands require `--config PATH` unless noted.
+| Command | `--config` | `--targets` | Run identification |
+|---------|------------|-------------|-------------------|
+| `submit`, `run` | required (source) | required (source) | optional `--run-id` |
+| `status`, `progress`, `logs`, `show`, `pause`, `resume`, `kill`, `retry` | optional (runs_root lookup) | n/a | `--run-dir` or `--run-id` (+ `--config`) |
+| `runs`, `active` | required | n/a | n/a |
+| `verify` | optional | optional | `--run-dir` (frozen copies) or pre-run `--config --targets` |
 
 | Command | Description |
 |---------|-------------|
-| `submit` | Detached scheduler (production) |
+| `submit` | Detached scheduler (production); copies config/targets into run dir |
 | `run` | Foreground scheduler (debugging) |
 | `status` | Per-target stage status grid (`--watch`, `--interval`) |
 | `progress` | Aggregate status counts |
@@ -616,8 +649,8 @@ All commands require `--config PATH` unless noted.
 | `show` | Print `run_meta.json` |
 | `logs` | Print scheduler or stage log (`--target`, `--stage`, `--follow`) |
 | `tail` | Alias for `logs --follow` |
-| `verify` | Check on-disk artifacts (`--targets`, `--scc`, `--stages`) |
-| `retry` | Re-queue one failed stage for one SCC (`--scc`, `--stage`, `--targets`) |
+| `verify` | Check on-disk artifacts (`--scc`, `--stages`) |
+| `retry` | Re-queue failed stage(s); all failed if `--scc`/`--stage` omitted, or one SCC+stage |
 | `pause` | Stop dequeuing new stages (running stages continue) |
 | `resume` | Resume dequeuing |
 | `kill` | Terminate scheduler, Condor clusters, local jobs; mark run killed |
@@ -626,9 +659,11 @@ All commands require `--config PATH` unless noted.
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `--targets PATH` | submit, run, verify, retry | Targets CSV |
+| `--run-dir PATH` | run-scoped commands | Full run directory (frozen `config.yaml` + `targets.csv`) |
+| `SYNDIFF_RUNS_ROOT` | run-scoped commands | Runs root directory; use with `--run-id` (required) |
+| `--targets PATH` | submit, run, verify (pre-run) | Source targets CSV |
 | `--stages LIST` | submit, run, verify | Comma-separated subset (default: all stages) |
-| `--run-id ID` | most | Explicit run (default: latest symlink) |
+| `--run-id ID` | run-scoped commands | Explicit run (default: `latest` symlink when using `--config`) |
 | `--force-rerun` | submit, run | Re-run stages; see [Force Rerun](#force-rerun-behavior) |
 
 ### Examples
@@ -641,16 +676,32 @@ syndiff-template submit --config cfg.yaml --targets targets.csv
 syndiff-template submit --config cfg.yaml --targets targets.csv \
   --stages ps1_process,downsample --force-rerun
 
-# Verify one SCC
+# Monitor (preferred: --run-dir)
+syndiff-template progress --run-dir /path/to/runs/20260607_210919
+
+# Verify one SCC (pre-run)
 syndiff-template verify --config cfg.yaml --targets targets.csv \
   --scc 23,1,3 --stages ps1_process
 
-# Retry mapping after a fix
-syndiff-template retry --config cfg.yaml --targets targets.csv \
-  --run-id 20260607_210919 --scc 23,1,3 --stage mapping
+# Verify using frozen run config
+syndiff-template verify --run-dir /path/to/runs/20260607_210919 --scc 23,1,3
+
+# Retry all failed stages in a run
+syndiff-template retry --run-dir /path/to/runs/20260607_210919
+
+# Retry one SCC/stage after a fix
+syndiff-template retry --run-dir /path/to/runs/20260607_210919 \
+  --scc 23,1,3 --stage mapping
 
 # Kill a run (Condor + local)
-syndiff-template kill --config cfg.yaml --run-id 20260607_210919
+syndiff-template kill --run-dir /path/to/runs/20260607_210919
+```
+
+Global listing still uses site config:
+
+```bash
+syndiff-template runs --config cfg.yaml
+syndiff-template active --config cfg.yaml
 ```
 
 ---
@@ -660,9 +711,10 @@ syndiff-template kill --config cfg.yaml --run-id 20260607_210919
 ### Submit (`submit`)
 
 1. Creates `{runs_root}/{run_id}/` layout and `run_meta.json`.
-2. Inserts run + `(target, stage)` rows in SQLite (`pending`).
-3. Spawns detached scheduler; writes `scheduler.pid`.
-4. Symlinks `{runs_root}/latest` → `run_id`.
+2. Copies source config and targets into the run directory as frozen `config.yaml` and `targets.csv` (paths normalized to absolute). `run_meta.json` records both source paths (provenance) and run-local paths. Re-submit to an existing `run_id` does **not** overwrite frozen copies.
+3. Inserts run + `(target, stage)` rows in SQLite (`pending`).
+4. Spawns detached scheduler with `--run-dir`; writes `scheduler.pid`.
+5. Symlinks `{runs_root}/latest` → `run_id`.
 
 ### Scheduler loop
 
@@ -693,7 +745,7 @@ The scheduler’s shutdown handler also calls `terminate()` on active handles (i
 
 ### Retry
 
-`retry` resets one `(target, stage)` to `ready` and blocks downstream stages in SQLite. The scheduler must still be running (or you must submit a new run) to pick up the work.
+`retry` resets failed `(target, stage)` rows to `ready` and sets downstream stages back to `pending` in SQLite. With only `--run-dir` or `--run-id` (no `--scc`/`--stage`), every stage in `failed` status for that run is requeued. With both `--scc` and `--stage`, only that one stage is retried. When a retried stage succeeds, the scheduler reopens any still-`blocked` downstream stages to `pending`, then promotes them to `ready` as dependencies are satisfied. The scheduler must still be running (or you must submit a new run) to pick up the work.
 
 ---
 
@@ -703,7 +755,9 @@ The scheduler’s shutdown handler also calls `terminate()` on active handles (i
 
 ```text
 {runs_root}/{run_id}/
-  run_meta.json          # submit metadata, config paths, force_rerun flag
+  config.yaml            # frozen run config (absolute paths)
+  targets.csv            # frozen targets from submit time
+  run_meta.json          # submit metadata, source + run-local paths, force_rerun flag
   scheduler.log          # orchestration log
   scheduler.pid          # while scheduler alive
   summary.json           # live status counts
@@ -770,7 +824,7 @@ Adjust the miniforge path in the wrapper if your install location differs.
 
 ### Submit file (generated)
 
-Per job, written to `per_target/{target}/ps1_process.condor.submit`:
+Per job, written to `per_target/{target}/{stage}.condor.submit`:
 
 - `executable = .../condor_wrapper.sh`
 - `arguments = /path/to/python -m syndiff_pipeline.template_runner.run_stage ...`
@@ -778,6 +832,20 @@ Per job, written to `per_target/{target}/ps1_process.condor.submit`:
 - `output`, `error`, `log` → sibling `.condor.*` files
 
 ### Resource sizing (example: STScI science cluster)
+
+Typical `mapping` settings for 128 GB science nodes (excludes 512 GB whole-node machines):
+
+```yaml
+stages:
+  mapping:
+    condor_request_cpus: 16
+    condor_request_memory: 100000
+    condor_requirements: "Memory <= 500000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+resources:
+  mapping:
+    max_concurrent: 6
+```
 
 Typical `ps1_process` settings for 64-core / 512 GB nodes:
 
@@ -789,8 +857,8 @@ stages:
     condor_requirements: "Memory >= 500000 && LoadAvg < 10"
     condor_rank: "-LoadAvg"
 resources:
-  cpu_heavy:
-    max_concurrent: 3
+  ps1_process:
+    max_concurrent: 4
 ```
 
 `ps1_process` auto-scales workers to the allocated machine; partial-node claims are not supported.
@@ -936,7 +1004,8 @@ For maintainers and algorithm reviewers, full step-by-step technical references 
 | `template_runner/condor.py` | Condor submit file + CLI polling |
 | `template_runner/condor_wrapper.sh` | Conda activation on execute nodes |
 | `template_runner/daemon.py` | Detached scheduler spawn + process trees |
-| `template_runner/logs.py` | Log paths and tee helper |
+| `template_runner/logs.py` | Log paths, frozen input materialization, tee helper |
+| `template_runner/run_context.py` | Resolve frozen config/targets from a run directory |
 | `template_runner/targets.py` | CSV target loading |
 | `template_runner/verify.py` | Artifact verification + force-rerun cleanup |
 | `template_runner/handoff.py` | WCS grouping wrapper |

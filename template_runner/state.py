@@ -350,6 +350,15 @@ class PipelineState:
                         (STATUS_PENDING, run_id, label, stage),
                     )
 
+    def list_failed_stage_runs(self, run_id: str) -> List[StageRunRow]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM stage_runs WHERE run_id = ? AND status = ? "
+                "ORDER BY target_label, stage",
+                (run_id, STATUS_FAILED),
+            ).fetchall()
+            return [StageRunRow(**dict(r)) for r in rows]
+
     def reset_stage_for_retry(
         self, run_id: str, target_label: str, stage: str, reset_downstream: bool = True
     ) -> None:
@@ -367,7 +376,7 @@ class PipelineState:
                             "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
                             "exit_code = NULL, error_tail = NULL, pid = NULL "
                             "WHERE run_id = ? AND target_label = ? AND stage = ?",
-                            (STATUS_BLOCKED, run_id, target_label, ds),
+                            (STATUS_PENDING, run_id, target_label, ds),
                         )
 
     def running_pids(self, run_id: str) -> List[int]:

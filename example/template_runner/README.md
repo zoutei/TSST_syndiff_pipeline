@@ -35,8 +35,9 @@ syndiff-template submit \
   --targets targets_example.csv \
   --stages ps1_process,downsample
 
-syndiff-template progress --config config_example.yaml
-syndiff-template status --watch --config config_example.yaml
+# Monitor using the run directory printed by submit (frozen config/targets inside):
+syndiff-template progress --run-dir /path/to/runs/<run_id>
+syndiff-template status --watch --run-dir /path/to/runs/<run_id>
 ```
 
 ## Smoke testing

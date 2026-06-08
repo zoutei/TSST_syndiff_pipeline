@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Optional, Tuple
+
+from syndiff_pipeline.template_runner.runner_config import (
+    load_and_materialize_runner_config,
+    write_runner_config,
+)
 
 
 def _utc_now_iso() -> str:
@@ -21,6 +27,39 @@ def runs_root(cfg_runs_root: str) -> Path:
 
 def run_dir(cfg_runs_root: str, run_id: str) -> Path:
     return runs_root(cfg_runs_root) / run_id
+
+
+def run_config_path(run_directory: str | Path) -> Path:
+    return Path(run_directory).expanduser().resolve() / "config.yaml"
+
+
+def run_targets_path(run_directory: str | Path) -> Path:
+    return Path(run_directory).expanduser().resolve() / "targets.csv"
+
+
+def run_meta_path(run_directory: str | Path) -> Path:
+    return Path(run_directory).expanduser().resolve() / "run_meta.json"
+
+
+def materialize_run_inputs(
+    source_config: str | Path,
+    source_targets: str | Path,
+    run_directory: str | Path,
+) -> Tuple[str, str]:
+    """Copy config and targets into *run_directory*; return absolute run-local paths."""
+    rd = Path(run_directory).expanduser().resolve()
+    rd.mkdir(parents=True, exist_ok=True)
+    cfg_path = run_config_path(rd)
+    targets_path = run_targets_path(rd)
+
+    if not cfg_path.is_file():
+        cfg = load_and_materialize_runner_config(source_config)
+        write_runner_config(cfg, cfg_path)
+    if not targets_path.is_file():
+        src_targets = Path(source_targets).expanduser().resolve()
+        shutil.copy2(src_targets, targets_path)
+
+    return str(cfg_path), str(targets_path)
 
 
 def ensure_run_layout(cfg_runs_root: str, run_id: str, meta: dict) -> Path:

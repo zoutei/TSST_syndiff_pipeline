@@ -7,8 +7,8 @@ import logging
 import sys
 
 from syndiff_pipeline.template_runner import logs, stages
-from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
-from syndiff_pipeline.template_runner.targets import load_targets
+from syndiff_pipeline.template_runner.run_context import resolve_run_context
+from syndiff_pipeline.template_runner.runner_config import resolve_config
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run one template pipeline stage")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--stage", required=True)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--targets", required=True)
+    parser.add_argument("--run-dir", required=True, help="Path to run directory with frozen config")
     parser.add_argument("--target-label", required=True)
     parser.add_argument(
         "--force-rerun",
@@ -34,9 +33,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    cfg = load_runner_config(args.config)
-    targets = load_targets(args.targets)
-    target = next(t for t in targets if t.label() == args.target_label)
+    ctx = resolve_run_context(run_dir=args.run_dir, run_id=args.run_id)
+    cfg = ctx.cfg
+    target = next(t for t in ctx.targets if t.label() == args.target_label)
     resolved = resolve_config(target, cfg)
     snap = stages.stage_snapshot(resolved, args.stage)
 

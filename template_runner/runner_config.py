@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -108,6 +108,112 @@ def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
     if not cfg.state_db_path:
         cfg.state_db_path = str(Path(cfg.handoff_root) / "pipeline_state.sqlite")
     return cfg
+
+
+def _normalize_override_paths(overrides: Dict[str, dict], base_dir: Path) -> Dict[str, dict]:
+    out: Dict[str, dict] = {}
+    for key, spec in (overrides or {}).items():
+        spec = copy.deepcopy(spec or {})
+        if spec.get("data_root"):
+            spec["data_root"] = _resolve_path(base_dir, spec["data_root"])
+        stages = spec.get("stages") or {}
+        for stage_name, stage_cfg in stages.items():
+            if not isinstance(stage_cfg, dict):
+                continue
+            for path_key in (
+                "bkg_vector_path",
+                "local_data_path",
+                "catalog_path",
+                "mapping_dir",
+                "convolved_dir",
+                "output_base",
+            ):
+                if stage_cfg.get(path_key):
+                    stage_cfg[path_key] = _resolve_path(base_dir, stage_cfg[path_key])
+        out[key] = spec
+    return out
+
+
+def runner_config_to_dict(cfg: RunnerConfig) -> dict:
+    """Serialize RunnerConfig to a YAML-ready dict with absolute path fields."""
+    data = asdict(cfg)
+    data["stages"] = {
+        "wcs_grouping": asdict(cfg.stages.wcs_grouping),
+        "mapping": asdict(cfg.stages.mapping),
+        "ps1_download": asdict(cfg.stages.ps1_download),
+        "ps1_process": asdict(cfg.stages.ps1_process),
+        "downsample": asdict(cfg.stages.downsample),
+    }
+    data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
+    data["scheduler"] = {"heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s}
+    data.pop("scheduler_heartbeat_interval_s", None)
+    return data
+
+
+def write_runner_config(cfg: RunnerConfig, yaml_path: str | Path) -> None:
+    path = Path(yaml_path).expanduser().resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        yaml.safe_dump(runner_config_to_dict(cfg), fh, sort_keys=False, default_flow_style=False)
+
+
+def load_and_materialize_runner_config(
+    source_yaml: str | Path, base_dir: Path | None = None
+) -> RunnerConfig:
+    """Load config from *source_yaml* and return a RunnerConfig with absolute paths."""
+    path = Path(source_yaml).expanduser().resolve()
+    base = base_dir or path.parent
+    with path.open(encoding="utf-8") as fh:
+        raw: dict = yaml.safe_load(fh) or {}
+
+    data_root = _resolve_path(base, raw.get("data_root", "")) or ""
+    ffi_dir = _resolve_path(base, raw.get("ffi_dir", "")) or data_root
+    handoff_root = _resolve_path(base, raw.get("handoff_root", "")) or ""
+    runs_root = _resolve_path(base, raw.get("runs_root")) or ""
+    state_db = _resolve_path(base, raw.get("state_db_path")) or ""
+
+    cfg = RunnerConfig(
+        data_root=data_root,
+        ffi_dir=ffi_dir,
+        handoff_root=handoff_root,
+        runs_root=runs_root or "",
+        state_db_path=state_db or "",
+        skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
+        gaia_credentials=_resolve_path(base, raw.get("gaia_credentials")),
+        stages=parse_stage_params(raw.get("stages", {})),
+        resources=_parse_resources(raw.get("resources")),
+        overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
+        scheduler_heartbeat_interval_s=float(raw.get("scheduler", {}).get("heartbeat_interval_s", 30.0)),
+    )
+    if not cfg.data_root:
+        raise ValueError("config.yaml requires data_root")
+    if not cfg.handoff_root:
+        raise ValueError("config.yaml requires handoff_root")
+    if not cfg.skycell_wcs_csv:
+        raise ValueError("config.yaml requires skycell_wcs_csv")
+    if not cfg.state_db_path:
+        cfg.state_db_path = str(Path(cfg.handoff_root) / "pipeline_state.sqlite")
+
+    _resolve_stage_path_fields(cfg, raw.get("stages", {}) or {}, base)
+    return cfg
+
+
+def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Path) -> None:
+    path_keys_by_stage = {
+        "wcs_grouping": ("bkg_vector_path",),
+        "ps1_download": ("local_data_path",),
+        "ps1_process": ("catalog_path",),
+        "downsample": ("mapping_dir", "convolved_dir", "output_base"),
+    }
+    for stage_name, path_keys in path_keys_by_stage.items():
+        stage_obj = getattr(cfg.stages, stage_name)
+        stage_cfg = stages_raw.get(stage_name, {}) or {}
+        for path_key in path_keys:
+            val = stage_cfg.get(path_key)
+            if val is None:
+                val = getattr(stage_obj, path_key, None)
+            if val:
+                setattr(stage_obj, path_key, _resolve_path(base_dir, str(val)))
 
 
 @dataclass

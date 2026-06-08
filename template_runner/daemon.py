@@ -47,8 +47,7 @@ def remove_pid_file(pid_path: str | Path) -> None:
 
 def spawn_detached_scheduler(
     run_id: str,
-    config_path: str,
-    targets_path: str,
+    run_dir: str | Path,
     stages: str | None,
     scheduler_log: str | Path,
     force_rerun: bool = False,
@@ -60,10 +59,8 @@ def spawn_detached_scheduler(
         "syndiff_pipeline.template_runner.scheduler",
         "--run-id",
         run_id,
-        "--config",
-        str(config_path),
-        "--targets",
-        str(targets_path),
+        "--run-dir",
+        str(run_dir),
     ]
     if stages:
         cmd.extend(["--stages", stages])
