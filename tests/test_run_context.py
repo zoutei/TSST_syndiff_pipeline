@@ -134,6 +134,7 @@ class TestBuildStageCommand(unittest.TestCase):
             "mapping",
             "/handoff/runs/run_a",
             "s0023_c1_k3_2020ftl",
+            launch_token="test-token",
         )
         self.assertIn("--run-dir", cmd)
         self.assertIn("/handoff/runs/run_a", cmd)
