@@ -34,6 +34,11 @@ MAPPING_ALLOWED = frozenset(
         "oversampling_factor",
         "overwrite",
         "skip_download_catalog",
+        "executor",
+        "condor_request_cpus",
+        "condor_request_memory",
+        "condor_requirements",
+        "condor_rank",
     }
 )
 PS1_DOWNLOAD_ALLOWED = frozenset(
@@ -113,6 +118,11 @@ class MappingStageParams:
     oversampling_factor: int = 1
     overwrite: bool = True
     skip_download_catalog: bool = False
+    executor: str = "condor"
+    condor_request_cpus: int = 16
+    condor_request_memory: int = 100_000
+    condor_requirements: str | None = "Memory <= 500000 && LoadAvg < 10"
+    condor_rank: str | None = "-LoadAvg"
 
 
 @dataclass
@@ -181,6 +191,8 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
     validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
+    if mp.get("executor", "condor") not in ("local", "condor"):
+        raise ValueError("stages.mapping.executor must be 'local' or 'condor'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),

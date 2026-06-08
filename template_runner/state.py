@@ -29,9 +29,9 @@ STAGE_DEPS: Dict[str, List[str]] = {
 STAGE_POOL: Dict[str, str] = {
     "tess_ffi_download": "network",
     "wcs_grouping": "cpu_light",
-    "mapping": "cpu_light",
+    "mapping": "mapping",
     "ps1_download": "network",
-    "ps1_process": "cpu_heavy",
+    "ps1_process": "ps1_process",
     "downsample": "cpu_light",
 }
 

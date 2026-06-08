@@ -52,6 +52,8 @@ class RunnerConfig:
         """Return launch executor for a stage: 'local' or 'condor'."""
         if stage == "ps1_process":
             return self.stages.ps1_process.executor
+        if stage == "mapping":
+            return self.stages.mapping.executor
         return "local"
 
 
@@ -65,8 +67,10 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out["network"] = ResourcePoolParams(max_concurrent=3)
     if "cpu_light" not in out:
         out["cpu_light"] = ResourcePoolParams(max_concurrent=2)
-    if "cpu_heavy" not in out:
-        out["cpu_heavy"] = ResourcePoolParams(max_concurrent=1)
+    if "mapping" not in out:
+        out["mapping"] = ResourcePoolParams(max_concurrent=6)
+    if "ps1_process" not in out:
+        out["ps1_process"] = ResourcePoolParams(max_concurrent=4)
     return out
 
 
