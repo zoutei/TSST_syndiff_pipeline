@@ -507,7 +507,7 @@ Unknown keys under `stages.*` raise `ValueError` at load time (strict allow-list
 | `wcs_drift_savgol_window` | `11` | Savitzky–Golay window for drift smoothing |
 | `wcs_drift_savgol_polyorder` | `2` | SG polynomial order |
 | `bkg_vector_path` | null | Optional TESSVectors path for Earth/Moon angles |
-| `crop_quadrant` | `"tr"` | Default crop quadrant if bounds not set |
+| `crop_quadrant` | `"full"` | Default crop mode if bounds not set (`full` = entire FFI; `full_science` = usable area only) |
 | `x_min`, `x_max`, `y_min`, `y_max` | null | Explicit crop bounds (pixels) |
 | `x_left_dead`, `x_right_dead` | `44` | Horizontal dead columns |
 | `y_edge_strip` | `30` | Vertical edge strip |

@@ -50,7 +50,7 @@ log = logging.getLogger(__name__)
 
 CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
 
-_VALID_CROP_QUADRANTS = frozenset({"tl", "tr", "bl", "br", "full"})
+_VALID_CROP_QUADRANTS = frozenset({"tl", "tr", "bl", "br", "full", "full_science"})
 
 # WCS header keywords needed to build an astropy WCS
 _WCS_KEYS = [
@@ -988,7 +988,7 @@ def get_crop_bounds(
     x_max=None,
     y_min=None,
     y_max=None,
-    crop_quadrant: str = "tr",
+    crop_quadrant: str = "full",
     x_left_dead: int = 44,
     x_right_dead: int = 44,
     y_edge_strip: int = 30,
@@ -1001,20 +1001,21 @@ def get_crop_bounds(
     the corresponding corner of the **usable** rectangle (dead strips removed);
     then all edges are clamped to valid FFI indices ``[0, nx]`` / ``[0, ny]``.
 
-    **Quadrant mode** — if all four are ``None``: use ``crop_quadrant`` on the
-    usable rectangle. Usable area is
-    ``x ∈ [x_left_dead, nx - x_right_dead)``,
+    **Quadrant mode** — if all four are ``None``: use ``crop_quadrant``.
+    For ``'tl'``/``'tr'``/``'bl'``/``'br'``, subdivide the **usable** rectangle
+    (dead strips removed) using chip midlines ``nx // 2`` and ``ny // 2``.
+    Usable area is ``x ∈ [x_left_dead, nx - x_right_dead)``,
     ``y ∈ [0, ny - y_edge_strip)``.
-    For ``'tl'``/``'tr'``/``'bl'``/``'br'``, subdivide using chip midlines
-    ``nx // 2`` and ``ny // 2`` (same convention as the historical default
-    ``'tr'`` quadrant). ``'full'`` selects the entire usable rectangle.
+    ``'full'`` selects the entire FFI array ``[0, nx) × [0, ny)`` including dead
+    columns/rows. ``'full_science'`` selects the usable rectangle only.
 
     Parameters
     ----------
     ffi_header : astropy.io.fits.Header
     x_min, x_max, y_min, y_max : int or None
     crop_quadrant : str
-        ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` | ``'full'`` (quadrant mode only).
+        ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` | ``'full'`` | ``'full_science'``
+        (quadrant mode only).
     x_left_dead, x_right_dead : int
         Dead columns on left and right (usable x excludes them).
     y_edge_strip : int
@@ -1053,6 +1054,8 @@ def get_crop_bounds(
         yM = int(y_max) if y_max is not None else y_usable_hi
     else:
         if q == "full":
+            xm, xM, ym, yM = 0, nx, 0, ny
+        elif q == "full_science":
             xm, xM, ym, yM = x_usable_lo, x_usable_hi, y_usable_lo, y_usable_hi
         else:
             x_mid = nx // 2
