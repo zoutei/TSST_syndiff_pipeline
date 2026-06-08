@@ -424,9 +424,21 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         print(f"Supervisor pid={result.pid} spawned={result.spawned}")
         return 0
     if args.action == "stop":
-        stopped = stop_daemon(db)
-        print("Supervisor stopped." if stopped else "Supervisor was not running.")
-        return 0
+        result = stop_daemon(db)
+        if not result.was_running:
+            print("Supervisor was not running.")
+            return 0
+        if result.stopped:
+            if result.force_killed:
+                print(f"Supervisor pid={result.pid} stopped (SIGKILL).")
+            else:
+                print(f"Supervisor pid={result.pid} stopped.")
+            return 0
+        print(
+            f"ERROR: Supervisor pid={result.pid} is still running "
+            "(may be stuck in uninterruptible I/O)."
+        )
+        return 1
     if args.action == "status":
         st = daemon_status(db)
         print(
