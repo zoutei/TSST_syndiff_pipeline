@@ -43,7 +43,7 @@ stages:
 
 resources:
   network:
-    max_concurrent: 3
+    max_concurrent: 1
   cpu_light:
     max_concurrent: 2
   cpu_heavy:

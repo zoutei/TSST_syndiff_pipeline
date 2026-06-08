@@ -50,8 +50,8 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid** fo
 
 The runner is designed for **batch operation across many SCCs**:
 
-- A detached **scheduler** dequeues work subject to resource-pool limits.
-- Progress is tracked in **SQLite** and on disk (logs, summaries).
+- A host-level **supervisor daemon** (single owner via flock) dequeues work for all active runs subject to resource-pool limits.
+- Progress is tracked in **SQLite (WAL)** and on disk (logs, summaries, per-stage status/manifest files).
 - Stages can be run **subset-by-subset** (e.g. only `ps1_process,downsample`) when upstream artifacts already exist.
 - **`mapping`** and **`ps1_process`** can run on a shared **HTCondor** pool; all other stages run as local subprocesses on the submit host.
 
@@ -95,10 +95,10 @@ flowchart TB
         control[pause / resume / kill / retry]
     end
 
-    subgraph Scheduler["Scheduler (detached process)"]
+    subgraph Daemon["Supervisor daemon (single host owner)"]
         pools[Resource pools]
-        sqlite[(SQLite state DB)]
-        skip[Artifact skip / verify]
+        sqlite[(SQLite state DB + command intents)]
+        skip[Manifest-first skip / verify]
     end
 
     subgraph Launch["Stage launcher"]
@@ -115,11 +115,11 @@ flowchart TB
         s6[downsample]
     end
 
-    submit --> Scheduler
+    submit --> Daemon
     monitor --> sqlite
-    control --> Scheduler
-    Scheduler --> pools
-    Scheduler --> skip
+    control --> sqlite
+    Daemon --> pools
+    Daemon --> skip
     pools --> Launch
     Launch --> local
     Launch --> condor
@@ -298,7 +298,7 @@ Example: `s0023_c1_k3_2020ftl` for sector 23, camera 1, CCD 3, SN 2020ftl.
 
 ### Runs and stages
 
-A **run** is one scheduler session identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). For each `(target, stage)` pair the scheduler creates a **stage run** row with status:
+A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). Each target materializes the **full 6-stage DAG** in SQLite. Stages selected at submit start `pending`; others start `external` and are resolved once to `skipped` when on-disk artifacts verify complete.
 
 | Status | Meaning |
 |--------|---------|
@@ -307,11 +307,12 @@ A **run** is one scheduler session identified by `run_id` (default: UTC timestam
 | `running` | Stage command launched |
 | `success` | Exit code 0 |
 | `failed` | Non-zero exit; downstream stages blocked |
-| `skipped` | Artifact already on disk (normal submit without `--force-rerun`) |
-| `blocked` | Never started (upstream failure or run killed) |
-| `killed` | Terminated by user `kill` |
+| `skipped` | Artifacts verified complete (no rerun) |
+| `blocked` | Never started (upstream failure) |
+| `canceled` | User kill (retryable) |
+| `external` | Outside `--stages`; verify once then `skipped` |
 
-Run-level status (`runs.status`): `running`, `success`, `failed`, `killed`.
+Run-level status (`runs.status`): `running`, `stalled`, `success`, `failed`, `canceled`. A `stalled` run has no running or launchable work but non-terminal stages remain (see `stall_reason` in `progress`/`status`).
 
 ### Resource pools
 
@@ -640,20 +641,21 @@ See `example/template_runner/events_example.csv`.
 
 | Command | Description |
 |---------|-------------|
-| `submit` | Detached scheduler (production); copies config/targets into run dir |
-| `run` | Foreground scheduler (debugging) |
-| `status` | Per-target stage status grid (`--watch`, `--interval`) |
-| `progress` | Aggregate status counts |
+| `submit` | Insert run rows + ensure supervisor daemon; copies config/targets into run dir |
+| `run` | Foreground inline scheduler loop (debugging) |
+| `daemon start\|stop\|status` | Control the host-level supervisor (`--config`) |
+| `status` | Per-target stage status grid (`--watch`, `--interval`); shows `stalled` + reasons |
+| `progress` | Aggregate status counts (+ `stall_reason` when stalled) |
 | `runs` | List recent runs from SQLite |
-| `active` | Runs whose scheduler PID is still alive |
+| `active` | Active runs + supervisor daemon liveness |
 | `show` | Print `run_meta.json` |
-| `logs` | Print scheduler or stage log (`--target`, `--stage`, `--follow`) |
+| `logs` | Print daemon or stage log (`--target`, `--stage`, `--follow`) |
 | `tail` | Alias for `logs --follow` |
 | `verify` | Check on-disk artifacts (`--scc`, `--stages`) |
-| `retry` | Re-queue failed stage(s); auto-respawn scheduler; `--no-respawn-scheduler` to skip spawn |
-| `pause` | Stop dequeuing new stages (running stages continue) |
-| `resume` | Resume dequeuing |
-| `kill` | Terminate scheduler, Condor clusters, local jobs; mark run killed |
+| `retry` | Insert retry intent; ensures daemon running; `--no-start-daemon` to skip |
+| `pause` | Insert pause intent (daemon stops dequeuing) |
+| `resume` | Insert resume intent |
+| `kill` | Insert cancel intent; daemon terminates workers and marks run `canceled` |
 
 ### Common flags
 
@@ -711,48 +713,26 @@ syndiff-template active --config cfg.yaml
 ### Submit (`submit`)
 
 1. Creates `{runs_root}/{run_id}/` layout and `run_meta.json`.
-2. Copies source config and targets into the run directory as frozen `config.yaml` and `targets.csv` (paths normalized to absolute). `run_meta.json` records both source paths (provenance) and run-local paths. Re-submit to an existing `run_id` does **not** overwrite frozen copies.
-3. Inserts run + `(target, stage)` rows in SQLite (`pending`).
-4. Spawns detached scheduler with `--run-dir`; writes `scheduler.pid`.
+2. Copies source config and targets into the run directory as frozen `config.yaml` and `targets.csv`.
+3. Inserts run + full 6-stage DAG per target in SQLite (`pending` for selected stages, `external` for others).
+4. Ensures the host-level **supervisor daemon** is running (flock-guarded single owner).
 5. Symlinks `{runs_root}/latest` → `run_id`.
 
-### Scheduler loop
+### Supervisor daemon loop
 
-1. **Skip existing artifacts** (unless `--force-rerun`): verified stages → `skipped`.
-2. **Promote** `pending` → `ready` when dependencies satisfied.
-3. **Launch** up to pool capacity; update status → `running`, record `pid`.
-4. **Poll** local PIDs / Condor clusters; on exit → `success` or `failed`.
-5. On failure, **block** downstream stages for that target.
-6. Write `summary.json` / `summary.csv` each iteration.
-7. Exit when no running jobs and no pending/ready work remain.
+One daemon per host schedules **all** active runs. The CLI only inserts **command intents**; the daemon is the sole writer of execution state.
 
-### Pause / resume
+1. **Ingest commands** (`cancel`, `pause`, `resume`, `retry`, `retry_stage`).
+2. **Reconcile** `running` rows from durable `*.status.json`, PID liveness, and Condor poll (wall-clock grace).
+3. **Resolve external/pending skips** once via manifest-first `stage_complete()` (cached in SQLite).
+4. **Promote** `pending`/`blocked` → `ready` using the single `deps_satisfied()` (success/skipped only).
+5. **Atomic claim** `ready` → `running` (launch token + executor/native_id/submit_epoch).
+6. **Detect completion** or **stall** (`running==0`, `launchable==0`, `nonterminal>0`).
+7. Throttled writes of `summary.json` / `summary.csv`.
 
-Pause sets a flag in SQLite; the scheduler sleeps without launching new work. Running stages are not stopped.
+### Pause / resume / kill / retry
 
-### Kill
-
-`kill`:
-
-1. SIGTERM scheduler process tree.
-2. For each `running` stage with a `pid`:
-   - Condor stages → `condor_rm <cluster_id>`
-   - Local stages → terminate process group
-3. Mark running stages `killed` (exit 143); pending/ready → `blocked`.
-4. Set run status `killed`; remove `scheduler.pid`.
-
-The scheduler’s shutdown handler also calls `terminate()` on active handles (including Condor) when it exits on SIGTERM.
-
-### Retry
-
-`retry` resets failed `(target, stage)` rows to `ready` and sets downstream stages back to `pending` in SQLite. With only `--run-dir` or `--run-id` (no `--scc`/`--stage`), every stage in `failed` status for that run is requeued. With both `--scc` and `--stage`, only that one stage is retried. When a retried stage succeeds, the scheduler reopens any still-`blocked` downstream stages to `pending`, then promotes them to `ready` as dependencies are satisfied.
-
-After re-queuing, `retry` automatically:
-
-- **Unpauses** the run if it was paused (so a live scheduler can dequeue work).
-- **Respawns** the detached scheduler if it is not running (typical after a run finishes `failed` or `success` and the scheduler exited).
-
-Use `--no-respawn-scheduler` to re-queue in SQLite only without starting the scheduler.
+These insert rows into the `commands` table; the daemon applies them on the next tick. `kill` marks stages `canceled` and the run `canceled`. `retry` reopens failed/canceled/blocked stages (+ downstream) to `pending`. Use `--no-start-daemon` to queue the intent without ensuring the daemon is running.
 
 Single-target retry resolves SCC from the frozen `targets.csv`, falling back to the run's SQLite `targets` table when the CSV row is missing or `enabled=false`.
 
@@ -767,17 +747,33 @@ Single-target retry resolves SCC from the frozen `targets.csv`, falling back to 
   config.yaml            # frozen run config (absolute paths)
   targets.csv            # frozen targets from submit time
   run_meta.json          # submit metadata, source + run-local paths, force_rerun flag
-  scheduler.log          # orchestration log
-  scheduler.pid          # while scheduler alive
   summary.json           # live status counts
   summary.csv            # flat stage table
   per_target/
     {target_label}/
-      {stage}.log                    # primary stage log (stdout/stderr tee)
-      ps1_process.condor.submit      # Condor only
-      ps1_process.condor.stdout
-      ps1_process.condor.stderr
-      ps1_process.condor.log         # Condor job event log
+      {stage}.log
+      {stage}.status.json   # durable local job state (launch_token, pid, exit)
+      {stage}.manifest.json # completion manifest (config fingerprint, artifact paths)
+```
+
+Host-level supervisor files live next to `state_db_path`:
+
+```text
+{handoff_root}/
+  pipeline_state.sqlite
+  daemon.lock
+  daemon.pid
+  daemon.log
+```
+
+Condor-specific artifacts under `per_target/{target_label}/`:
+
+```text
+      {stage}.condor.submit
+      {stage}.condor.stdout
+      {stage}.condor.stderr
+      {stage}.condor.log
+      {stage}.condor.clusters
 ```
 
 **Primary debugging path**: `{stage}.log` — written by `run_stage.py` on NFS, including on Condor execute nodes.
