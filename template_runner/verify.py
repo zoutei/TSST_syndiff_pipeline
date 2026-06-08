@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
 
-from syndiff_pipeline.download import list_local_ffis, nested_ffi_dir
-from syndiff_pipeline.template.csv_utils import load_csv_data
+from syndiff_pipeline.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
+from syndiff_pipeline.template.csv_utils import get_all_padding_cells, load_csv_data
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.template_runner.state import STAGE_NAMES
 from syndiff_pipeline.template_runner.targets import Target
@@ -30,10 +30,45 @@ class VerifyResult:
 def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     t = resolved.target
     ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
-    files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
-    if files:
-        return VerifyResult("tess_ffi_download", True, f"{len(files)} FFI files", ffi_leaf)
-    return VerifyResult("tess_ffi_download", False, "No FFI files found", ffi_leaf)
+    expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf)
+    if expected is None:
+        files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
+        if not files:
+            return VerifyResult(
+                "tess_ffi_download",
+                False,
+                "No FFI files found and tesscurl manifest unavailable",
+                ffi_leaf,
+            )
+        return VerifyResult(
+            "tess_ffi_download",
+            False,
+            f"Cannot verify completeness ({len(files)} local files; tesscurl manifest unavailable)",
+            ffi_leaf,
+        )
+    if not expected:
+        return VerifyResult(
+            "tess_ffi_download",
+            False,
+            "tesscurl manifest has no FFIs for this SCC",
+            ffi_leaf,
+        )
+
+    existing = {Path(p).name for p in list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)}
+    missing = [bn for bn in expected if bn not in existing]
+    if missing:
+        return VerifyResult(
+            "tess_ffi_download",
+            False,
+            f"Partial FFI download: {len(existing)}/{len(expected)} files ({len(missing)} missing)",
+            ffi_leaf,
+        )
+    return VerifyResult(
+        "tess_ffi_download",
+        True,
+        f"All {len(expected)} FFI files present",
+        ffi_leaf,
+    )
 
 
 def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
@@ -70,19 +105,102 @@ def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
     return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_path))
 
 
+_PS1_DOWNLOAD_BANDS = ("r", "i", "z", "y")
+
+
+def _ps1_download_expected_array_names() -> list[str]:
+    names: list[str] = []
+    for band in _PS1_DOWNLOAD_BANDS:
+        names.extend([band, f"{band}_mask", f"{band}_wt"])
+    return names
+
+
+def _projection_from_skycell_name(skycell_name: str) -> str | None:
+    try:
+        return skycell_name.split(".")[1]
+    except (IndexError, AttributeError):
+        return None
+
+
+def _expected_ps1_download_skycells(resolved: ResolvedTargetConfig) -> list[str]:
+    csv_path = _mapping_csv_path(resolved)
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"Master skycells CSV missing: {csv_path}")
+    df = load_csv_data(str(csv_path))
+    if "NAME" not in df.columns:
+        raise ValueError(f"Master skycells CSV missing NAME column: {csv_path}")
+
+    unique_skycells = sorted(df["NAME"].astype(str).unique())
+    try:
+        padding_map = get_all_padding_cells(str(csv_path), list(unique_skycells))
+        padding_cells: set[str] = set()
+        for cells in padding_map.values():
+            padding_cells.update(cells)
+        unique_skycells = sorted(set(unique_skycells) | padding_cells)
+    except Exception as exc:
+        log.warning("Could not load padding skycells for %s: %s", csv_path, exc)
+    return unique_skycells
+
+
+def _ps1_download_array_complete(group, array_name: str) -> bool:
+    if array_name not in group:
+        return False
+    array = group[array_name]
+    if array.shape == (0,) or array.size == 0:
+        return False
+    try:
+        _ = array[0:1, 0:1]
+    except Exception:
+        return False
+    return True
+
+
+def _ps1_download_skycell_complete(root, skycell_name: str) -> bool:
+    projection_id = _projection_from_skycell_name(skycell_name)
+    if not projection_id or projection_id not in root or skycell_name not in root[projection_id]:
+        return False
+    group = root[projection_id][skycell_name]
+    return all(_ps1_download_array_complete(group, name) for name in _ps1_download_expected_array_names())
+
+
 def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+    try:
+        expected_skycells = _expected_ps1_download_skycells(resolved)
+    except FileNotFoundError as exc:
+        return VerifyResult("ps1_download", False, str(exc), str(zarr_path))
+    except ValueError as exc:
+        return VerifyResult("ps1_download", False, str(exc), str(zarr_path))
+
     if not zarr_path.exists():
-        return VerifyResult("ps1_download", False, "Shared zarr store missing", str(zarr_path))
+        return VerifyResult(
+            "ps1_download",
+            False,
+            f"Shared zarr store missing (0/{len(expected_skycells)} skycells)",
+            str(zarr_path),
+        )
     try:
         import zarr
 
         root = zarr.open(str(zarr_path), mode="r")
-        if len(list(root.groups())) == 0 and len(root.array_keys()) == 0:
-            return VerifyResult("ps1_download", False, "Zarr store empty", str(zarr_path))
+        complete = sum(
+            1 for skycell in expected_skycells if _ps1_download_skycell_complete(root, skycell)
+        )
+        if complete < len(expected_skycells):
+            return VerifyResult(
+                "ps1_download",
+                False,
+                f"Partial PS1 zarr: {complete}/{len(expected_skycells)} skycells complete",
+                str(zarr_path),
+            )
+        return VerifyResult(
+            "ps1_download",
+            True,
+            f"PS1 zarr complete ({complete}/{len(expected_skycells)} skycells)",
+            str(zarr_path),
+        )
     except Exception as exc:
-        return VerifyResult("ps1_download", False, f"Cannot open zarr: {exc}", str(zarr_path))
-    return VerifyResult("ps1_download", True, "Shared zarr store present", str(zarr_path))
+        return VerifyResult("ps1_download", False, f"Cannot verify PS1 zarr: {exc}", str(zarr_path))
 
 
 def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
