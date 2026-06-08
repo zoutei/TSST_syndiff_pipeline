@@ -272,6 +272,12 @@ def run_scheduler(
                     if key in running:
                         continue
 
+                    if not state.deps_satisfied(run_id, row.target_label, row.stage):
+                        state.update_stage_status(
+                            run_id, row.target_label, row.stage, STATUS_PENDING
+                        )
+                        continue
+
                     executor = cfg.stage_executor(row.stage)
                     if executor == "condor":
                         existing = state.get_stage_run(run_id, row.target_label, row.stage)

@@ -246,6 +246,26 @@ def load_zarr_metadata(sector: int, camera: int, ccd: int, convolved_data_path: 
     return zarr_path
 
 
+def _count_non_empty_convolved_data_arrays(zarr_path: Path) -> tuple[int, list[str]]:
+    """Return (non-empty *_data array count, all *_data array names) in a convolved zarr."""
+    root = zarr.open(str(zarr_path), mode="r")
+    data_keys = [str(k) for k in root.array_keys() if str(k).endswith("_data")]
+    non_empty = sum(1 for key in data_keys if int(root[key].size) > 0)
+    return non_empty, data_keys
+
+
+def require_convolved_zarr_data(zarr_path: Path) -> None:
+    """Raise if the convolved zarr store has no usable PS1 skycell arrays."""
+    saved, data_keys = _count_non_empty_convolved_data_arrays(zarr_path)
+    if saved > 0:
+        return
+    if data_keys:
+        raise RuntimeError(
+            f"Convolved zarr has {len(data_keys)} *_data arrays but all are empty: {zarr_path}"
+        )
+    raise RuntimeError(f"Convolved zarr store is empty (no *_data arrays): {zarr_path}")
+
+
 def load_zarr_data_for_skycell(skycell_name: str, zarr_store) -> tuple[np.ndarray, np.ndarray]:
     """
     Load PS1 convolved image and mask data from Zarr store for a specific skycell.
@@ -725,6 +745,7 @@ def main(
     # Load Zarr metadata once for efficient access
     print("Loading Zarr metadata...")
     zarr_path = load_zarr_metadata(sector, camera, ccd, CONVOLVED_DATA_PATH)
+    require_convolved_zarr_data(zarr_path)
     # print(f"Found {len(zarr_metadata['cells'])} cells in Zarr store")
 
     # Precompute shifts for all offsets
@@ -850,12 +871,7 @@ def main(
                     combined_results[offset_idx, 1, out_y, out_x] = combined_counts[i, offset_idx]
                     combined_results[offset_idx, 2, out_y, out_x] = combined_mask_counts[i, offset_idx]
     else:
-        # Create empty ROI-sized results if no data
-        roi_h = y_max - y_min
-        roi_w = x_max - x_min
-        out_h = roi_h * oversampling_factor
-        out_w = roi_w * oversampling_factor
-        combined_results = np.zeros((len(offsets), 3, out_h, out_w), dtype=np.float32)
+        raise RuntimeError("No PS1 convolved data loaded for any skycell")
 
     # Save outputs as FITS files
     print("Saving outputs...")
