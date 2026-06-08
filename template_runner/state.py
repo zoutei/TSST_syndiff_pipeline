@@ -386,7 +386,7 @@ class PipelineState:
                 "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
                 "exit_code = NULL, error_tail = NULL, pid = NULL "
                 "WHERE run_id = ? AND target_label = ? AND stage = ?",
-                (STATUS_READY, run_id, target_label, stage),
+                (STATUS_PENDING, run_id, target_label, stage),
             )
             if reset_downstream:
                 for ds in STAGE_NAMES:
