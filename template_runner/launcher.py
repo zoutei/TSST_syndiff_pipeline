@@ -31,9 +31,10 @@ class LocalJobHandle:
 @dataclass
 class CondorJobHandle:
     cluster_id: int
+    submitted_at: float
 
     def poll(self) -> int | None:
-        return condor.poll_cluster(self.cluster_id)
+        return condor.poll_cluster(self.cluster_id, submitted_at=self.submitted_at)
 
     def terminate(self) -> None:
         condor.remove_cluster(self.cluster_id)
@@ -66,7 +67,7 @@ def launch_stage(
     """Launch a stage locally or on Condor; return (handle, job_id for SQLite pid)."""
     if cfg.stage_executor(stage) == "condor":
         resources = _condor_resources(cfg, stage)
-        cluster_id = condor.submit_job(
+        cluster_id, submitted_at = condor.submit_job(
             cmd,
             runs_root,
             run_id,
@@ -74,7 +75,7 @@ def launch_stage(
             stage,
             resources=resources,
         )
-        return CondorJobHandle(cluster_id), cluster_id
+        return CondorJobHandle(cluster_id, submitted_at), cluster_id
 
     proc = subprocess.Popen(
         cmd,

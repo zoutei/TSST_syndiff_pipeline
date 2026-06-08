@@ -6,6 +6,7 @@ import logging
 import re
 import shlex
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Sequence
@@ -17,6 +18,11 @@ _WRAPPER = Path(__file__).resolve().parent / "condor_wrapper.sh"
 # condor_q JobStatus: 4=completed, 3=removed
 _JOB_COMPLETED = 4
 _JOB_REMOVED = 3
+
+# Grace period after submit before treating missing queue/history as failure.
+_POLL_GRACE_SECONDS = 120.0
+
+_submission_times: dict[int, float] = {}
 
 
 @dataclass(frozen=True)
@@ -31,6 +37,10 @@ def wrapper_path() -> Path:
     return _WRAPPER
 
 
+def poll_grace_seconds() -> float:
+    return _POLL_GRACE_SECONDS
+
+
 def condor_artifact_paths(
     runs_root: str, run_id: str, target_label: str, stage: str
 ) -> dict[str, Path]:
@@ -41,6 +51,7 @@ def condor_artifact_paths(
         "stderr": base / f"{stage}.condor.stderr",
         "log": base / f"{stage}.condor.log",
         "submit": base / f"{stage}.condor.submit",
+        "clusters": base / f"{stage}.condor.clusters",
     }
 
 
@@ -61,6 +72,12 @@ def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.Comple
 
 def _format_arguments(cmd: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in cmd)
+
+
+def _record_cluster_submission(artifacts: dict[str, Path], cluster_id: int) -> None:
+    clusters_path = artifacts["clusters"]
+    with clusters_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{cluster_id}\n")
 
 
 def write_submit_file(
@@ -102,8 +119,8 @@ def submit_job(
     target_label: str,
     stage: str,
     resources: CondorResourceRequest | None = None,
-) -> int:
-    """Submit one stage command to Condor; return the cluster id."""
+) -> tuple[int, float]:
+    """Submit one stage command to Condor; return (cluster id, submitted_at monotonic)."""
     resources = resources or CondorResourceRequest()
     artifacts = condor_artifact_paths(runs_root, run_id, target_label, stage)
     write_submit_file(artifacts["submit"], cmd, artifacts, resources)
@@ -112,6 +129,9 @@ def submit_job(
     if not match:
         raise RuntimeError(f"Could not parse condor_submit output: {proc.stdout.strip()}")
     cluster_id = int(match.group(1))
+    submitted_at = time.monotonic()
+    _submission_times[cluster_id] = submitted_at
+    _record_cluster_submission(artifacts, cluster_id)
     log.info(
         "Submitted Condor cluster %s for %s / %s (cpus=%s mem=%sMB req=%r rank=%r)",
         cluster_id,
@@ -122,7 +142,7 @@ def submit_job(
         resources.requirements,
         resources.rank,
     )
-    return cluster_id
+    return cluster_id, submitted_at
 
 
 def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
@@ -167,12 +187,15 @@ def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
     return status, exit_code
 
 
-def poll_cluster(cluster_id: int) -> int | None:
+def poll_cluster(cluster_id: int, *, submitted_at: float | None = None) -> int | None:
     """Return None while running; otherwise the job exit code."""
     status, exit_code = _query_queue(cluster_id)
     if status is None:
         status, exit_code = _query_history(cluster_id)
     if status is None:
+        ts = submitted_at if submitted_at is not None else _submission_times.get(cluster_id)
+        if ts is not None and time.monotonic() - ts < _POLL_GRACE_SECONDS:
+            return None
         log.warning("Condor cluster %s not found in queue or history", cluster_id)
         return 1
     if status == _JOB_COMPLETED:
@@ -187,7 +210,46 @@ def remove_cluster(cluster_id: int) -> bool:
     proc = _run_condor(["condor_rm", str(cluster_id)], check=False)
     if proc.returncode == 0:
         log.info("Removed Condor cluster %s", cluster_id)
+        _submission_times.pop(cluster_id, None)
         return True
     msg = (proc.stderr or proc.stdout or "").strip()
     log.warning("condor_rm %s failed (exit %s): %s", cluster_id, proc.returncode, msg)
     return False
+
+
+def sweep_run_condor_clusters(state, cfg, run_id: str) -> int:
+    """condor_rm every Condor pid recorded as running for this run."""
+    removed = 0
+    for job in state.running_jobs(run_id):
+        if job.pid is None:
+            continue
+        if cfg.stage_executor(job.stage) != "condor":
+            continue
+        if remove_cluster(job.pid):
+            removed += 1
+    return removed
+
+
+def sweep_run_condor_audit_clusters(runs_root: str, run_id: str) -> int:
+    """condor_rm cluster ids listed in per-stage audit files that are still active."""
+    removed = 0
+    base = Path(runs_root) / run_id / "per_target"
+    if not base.is_dir():
+        return 0
+    for clusters_path in base.rglob("*.condor.clusters"):
+        for line in clusters_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                cluster_id = int(line)
+            except ValueError:
+                continue
+            status, _ = _query_queue(cluster_id)
+            if status is None:
+                continue
+            if status in (_JOB_COMPLETED, _JOB_REMOVED):
+                continue
+            if remove_cluster(cluster_id):
+                removed += 1
+    return removed
