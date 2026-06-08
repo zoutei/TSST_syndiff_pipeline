@@ -552,7 +552,7 @@ def save_fits_outputs(
     tess_header: fits.Header,
     roi_bounds: tuple[int, int, int, int] | None = None,
     oversampling_factor: int = 1,
-):
+) -> list[str]:
     """
     Save the results as FITS files.
 
@@ -565,6 +565,9 @@ def save_fits_outputs(
         offsets: Array of (dx, dy) pairs
         tess_header: Header from TESS file to use as a base
         save_extensions: Whether to save data, count and mask as HDU extensions
+
+    Returns:
+        List of written FITS file paths (one per offset), in offset order.
     """
     # Create syndiff header based on TESS header
     syndiff_header = create_syndiff_header(tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
@@ -576,6 +579,7 @@ def save_fits_outputs(
     # offset_df = pd.DataFrame(offsets, columns=['dx', 'dy'])
     # offset_df.to_csv(output_dir / "offsets.csv", index=False)
 
+    written_paths: list[str] = []
     # Save each offset result as a FITS file
     for idx, (dx, dy) in enumerate(offsets):
         # Update header with offset information
@@ -603,6 +607,9 @@ def save_fits_outputs(
 
         output_filename = output_dir / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}_dx{dx:.3f}_dy{dy:.3f}.fits"
         hdu_list.writeto(output_filename, overwrite=True)
+        written_paths.append(str(output_filename))
+
+    return written_paths
 
 
 def main(
@@ -622,7 +629,7 @@ def main(
     oversampling_factor: int = 1,
     reference_ffi_basename_expected: str | None = None,
     cluster_job_json_path: str | None = None,
-) -> Path:
+) -> dict:
     # Resolve base paths (allow overrides)
     data_root = Path(data_root)
     if mapping_dir is None:
@@ -875,7 +882,7 @@ def main(
 
     # Save outputs as FITS files
     print("Saving outputs...")
-    save_fits_outputs(output_dir=OUTPUT_DIR, sector=sector, camera=camera, ccd=ccd, results=combined_results, offsets=offsets, tess_header=tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
+    written_paths = save_fits_outputs(output_dir=OUTPUT_DIR, sector=sector, camera=camera, ccd=ccd, results=combined_results, offsets=offsets, tess_header=tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
 
     # Record processing time
     total_time = time.time() - start_time
@@ -891,7 +898,12 @@ def main(
     for dx, dy in offsets:
         print(f"  dx={dx:.3f}, dy={dy:.3f}")
     print(f"Results saved to: {OUTPUT_DIR}")
-    return OUTPUT_DIR
+    return {
+        "output_dir": str(OUTPUT_DIR),
+        "artifacts": written_paths,
+        "expected_count": len(offsets),
+        "produced_count": len(written_paths),
+    }
 
 
 if __name__ == "__main__":
@@ -995,7 +1007,7 @@ if __name__ == "__main__":
     # Set mask bits to ignore (0-indexed)
     ignore_mask_bits = [12]
 
-    output_run_dir = main(
+    main_result = main(
         sector=sector,
         camera=camera,
         ccd=ccd,
@@ -1013,6 +1025,7 @@ if __name__ == "__main__":
         reference_ffi_basename_expected=reference_ffi_basename_expected,
         cluster_job_json_path=cluster_job_json_path,
     )
+    output_run_dir = Path(main_result["output_dir"])
 
     # Crop-local Gaia CSV for PS1 removed stars (cluster job only; default ON).
     if (

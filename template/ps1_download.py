@@ -64,6 +64,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -73,7 +75,7 @@ import pandas as pd
 import requests
 import zarr
 from astropy.io import fits
-from dask.diagnostics import ProgressBar
+from dask.diagnostics import Callback, ProgressBar
 from filelock import FileLock
 
 from syndiff_pipeline.template import csv_utils
@@ -86,6 +88,117 @@ active_executors = []
 active_dask_computations = []
 
 logger = logging.getLogger(__name__)
+
+_PS1_BANDS = ("r", "i", "z", "y")
+_ARRAYS_PER_SKYCELL = len(_PS1_BANDS) * 3
+
+
+def expected_array_names() -> list[str]:
+    names: list[str] = []
+    for band in _PS1_BANDS:
+        names.extend([band, f"{band}_mask", f"{band}_wt"])
+    return names
+
+
+class SkycellProgress:
+    """Thread-safe counter for skycell start/finish progress lines."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self._lock = threading.Lock()
+        self._started = 0
+        self._finished = 0
+
+    def mark_started(self) -> tuple[int, int]:
+        with self._lock:
+            self._started += 1
+            return self._started, self.total
+
+    def mark_finished(self) -> tuple[int, int]:
+        with self._lock:
+            self._finished += 1
+            return self._finished, self.total
+
+
+class LogProgressCallback(Callback):
+    """Log aggregate Dask progress when stdout is not a TTY (pipeline log files)."""
+
+    def __init__(self, total: int) -> None:
+        self.total = total
+        self.completed = 0
+        self._start_time = time.monotonic()
+
+    def _posttask(self, key, result, dsk, state, id):  # noqa: ARG002
+        self.completed += 1
+        elapsed = time.monotonic() - self._start_time
+        logging.info(
+            "Dask progress: %d/%d skycells finished (elapsed %.0fs)",
+            self.completed,
+            self.total,
+            elapsed,
+        )
+
+
+def _array_complete_unlocked(
+    root: zarr.Group,
+    projection_id: str,
+    skycell_name: str,
+    array_name: str,
+) -> bool:
+    """Check array completeness; caller must hold *lock_file*."""
+    if projection_id not in root or skycell_name not in root[projection_id]:
+        return False
+    if array_name not in root[projection_id][skycell_name]:
+        return False
+
+    array = root[projection_id][skycell_name][array_name]
+    if array.shape == (0,) or array.size == 0:
+        return False
+
+    try:
+        _ = array[0:1, 0:1]
+        return True
+    except Exception:
+        logging.warning(
+            "Found corrupted array %s for %s, will re-download",
+            array_name,
+            skycell_name,
+        )
+        return False
+
+
+def skycell_array_status(
+    root: zarr.Group,
+    projection_id: str,
+    skycell_name: str,
+    lock_file: Path,
+    overwrite: bool = False,
+) -> dict[str, bool]:
+    """Return completion status for all expected arrays under one lock."""
+    if overwrite:
+        return {name: False for name in expected_array_names()}
+
+    try:
+        with FileLock(lock_file):
+            return {
+                array_name: _array_complete_unlocked(root, projection_id, skycell_name, array_name)
+                for array_name in expected_array_names()
+            }
+    except Exception:
+        return {name: False for name in expected_array_names()}
+
+
+def count_complete_arrays(
+    root: zarr.Group,
+    projection_id: str,
+    skycell_name: str,
+    lock_file: Path,
+    overwrite: bool = False,
+) -> int:
+    return sum(
+        1 for complete in skycell_array_status(root, projection_id, skycell_name, lock_file, overwrite).values() if complete
+    )
+
 
 def signal_handler(signum, frame):
     """
@@ -113,12 +226,10 @@ def signal_handler(signum, frame):
             logging.warning(f"Error cancelling Dask computation: {e}")
 
     logging.info("Graceful shutdown initiated. Exiting...")
-    sys.exit(0)
-
-
-# Register signal handlers
-signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
+    # 128+signal is the conventional exit code for signal termination (e.g. 143
+    # for SIGTERM). Exit 0 would make Condor and the scheduler treat a kill as
+    # success when this module is imported by unrelated stages (e.g. mapping).
+    raise SystemExit(128 + signum)
 
 
 def get_projection_from_name(skycell_name: str) -> Optional[str]:
@@ -174,7 +285,14 @@ def load_local_fits_file(skycell_name_parts: list, band: str, data_type: str, lo
         return None
 
 
-def download_and_process_band(skycell_name_parts: list, band: str, data_type: str, use_local_files: bool = False, local_data_path: Optional[Path] = None) -> Optional[dict[str, Any]]:
+def download_and_process_band(
+    skycell_name_parts: list,
+    band: str,
+    data_type: str,
+    use_local_files: bool = False,
+    local_data_path: Optional[Path] = None,
+    skycell_name: str = "",
+) -> Optional[dict[str, Any]]:
     """
     Downloads a single FITS file (.fz) and processes it directly in memory,
     avoiding temporary disk I/O operations for better performance.
@@ -185,6 +303,8 @@ def download_and_process_band(skycell_name_parts: list, band: str, data_type: st
     if use_local_files and local_data_path:
         local_result = load_local_fits_file(skycell_name_parts, band, data_type, local_data_path)
         if local_result is not None:
+            if skycell_name:
+                logging.info("Downloaded and converted %s %s %s", skycell_name, band, data_type)
             return local_result
         # If local file not found, fall back to downloading
         logging.info(f"Local file not found for {skycell_name_parts[1]}.{skycell_name_parts[2]} {band}_{data_type}, downloading...")
@@ -215,6 +335,7 @@ def download_and_process_band(skycell_name_parts: list, band: str, data_type: st
                 else:  # image or weight
                     data = hdu.data.astype(np.float32)
                 header = hdu.header.tostring()
+                logging.info("Downloaded and converted %s %s %s", skycell_name, band, data_type)
                 return {"data": data, "header": header}
         except Exception as fits_error:
             # If direct decompression fails, fall back to funpack (should be rare)
@@ -240,6 +361,7 @@ def download_and_process_band(skycell_name_parts: list, band: str, data_type: st
                     else:  # image or weight
                         data = hdu.data.astype(np.float32)
                     header = hdu.header.tostring()
+                    logging.info("Downloaded and converted %s %s %s", skycell_name, band, data_type)
                     return {"data": data, "header": header}
 
     except (requests.exceptions.RequestException, subprocess.CalledProcessError, FileNotFoundError) as e:
@@ -272,33 +394,28 @@ def store_data_in_zarr(root: zarr.Group, projection_id: str, skycell_name: str, 
     Stores data for a single band/mask/weight in the zarr store.
     Uses filelock for thread-safe operations.
     """
-    with FileLock(lock_file):
-        # Check if projection group exists, create if not
-        if projection_id not in root:
-            root.create_group(projection_id)
-
-        # Check if skycell group exists, create if not
-        if skycell_name not in root[projection_id]:
-            root[projection_id].create_group(skycell_name)
-
-    # Define chunks based on data shape
     chunks = (min(1024, data.shape[0]), min(1024, data.shape[1]))
-
-    # Create array with appropriate settings for Zarr v3
     compressor = {"name": "zstd", "configuration": {"level": 3}}
     fill_value = 0 if "mask" in array_name else np.nan
 
-    # Store data in zarr array with thread-safe locking
     with FileLock(lock_file):
-        # Remove the old array if it exists
+        if projection_id not in root:
+            root.create_group(projection_id)
+        if skycell_name not in root[projection_id]:
+            root[projection_id].create_group(skycell_name)
         if array_name in root[projection_id][skycell_name]:
             del root[projection_id][skycell_name][array_name]
 
-        # Create the array directly
-        array = root[projection_id][skycell_name].create_array(name=array_name, data=data, chunks=chunks, compressors=[compressor], fill_value=fill_value)
-
-        # Store header at the array level, not skycell level
+        array = root[projection_id][skycell_name].create_array(
+            name=array_name,
+            data=data,
+            chunks=chunks,
+            compressors=[compressor],
+            fill_value=fill_value,
+        )
         array.attrs["header"] = header
+
+    logging.info("Stored %s %s in zarr", skycell_name, array_name)
 
 
 def is_array_complete(root: zarr.Group, projection_id: str, skycell_name: str, array_name: str, lock_file: Path, overwrite: bool = False) -> bool:
@@ -306,36 +423,29 @@ def is_array_complete(root: zarr.Group, projection_id: str, skycell_name: str, a
     Check if an array is complete and not corrupted.
     This helps detect arrays that were interrupted during writing.
     """
-    # If overwrite requested, treat arrays as incomplete so they will be re-downloaded
     if overwrite:
         return False
 
     try:
         with FileLock(lock_file):
-            if projection_id not in root or skycell_name not in root[projection_id] or array_name not in root[projection_id][skycell_name]:
-                return False
-
-            # Try to access the array data to verify it's not corrupted
-            array = root[projection_id][skycell_name][array_name]
-
-            # Check if array has expected properties
-            if array.shape == (0,) or array.size == 0:
-                return False
-
-            # Try to read a small portion to verify it's accessible
-            try:
-                _ = array[0:1, 0:1]  # Read a small corner
-                return True
-            except Exception:
-                # Array exists but is corrupted/unreadable
-                logging.warning(f"Found corrupted array {array_name} for {skycell_name}, will re-download")
-                return False
-
+            return _array_complete_unlocked(root, projection_id, skycell_name, array_name)
     except Exception:
         return False
 
 
-def process_skycell_band(root: zarr.Group, skycell_name: str, skycell_name_parts: list, band: str, data_type: str, projection_id: str, lock_file: Path, use_local_files: bool = False, local_data_path: Optional[Path] = None, overwrite: bool = False) -> bool:
+def process_skycell_band(
+    root: zarr.Group,
+    skycell_name: str,
+    skycell_name_parts: list,
+    band: str,
+    data_type: str,
+    projection_id: str,
+    lock_file: Path,
+    use_local_files: bool = False,
+    local_data_path: Optional[Path] = None,
+    overwrite: bool = False,
+    skip_if_complete: bool = True,
+) -> bool:
     """
     Process a single band/data_type for a skycell and store it in the zarr store.
     """
@@ -349,13 +459,21 @@ def process_skycell_band(root: zarr.Group, skycell_name: str, skycell_name_parts
         logging.error(f"Unknown data_type: {data_type}")
         return False
 
-    # Check if this array already exists and is complete
-    if is_array_complete(root, projection_id, skycell_name, array_name, lock_file, overwrite=overwrite):
+    if skip_if_complete and is_array_complete(
+        root, projection_id, skycell_name, array_name, lock_file, overwrite=overwrite
+    ):
         logging.debug(f"Skipping existing complete {array_name} for {skycell_name}")
         return True
 
     # Download and process the band data
-    result = download_and_process_band(skycell_name_parts, band, data_type, use_local_files, local_data_path)
+    result = download_and_process_band(
+        skycell_name_parts,
+        band,
+        data_type,
+        use_local_files,
+        local_data_path,
+        skycell_name=skycell_name,
+    )
     if result:
         # Store data in zarr
         store_data_in_zarr(root=root, projection_id=projection_id, skycell_name=skycell_name, band=band, data=result["data"], header=result["header"], array_name=array_name, lock_file=lock_file)
@@ -364,7 +482,15 @@ def process_skycell_band(root: zarr.Group, skycell_name: str, skycell_name_parts
     return False
 
 
-def download_and_store_skycell(root: zarr.Group, skycell_name: str, lock_file: Path, use_local_files: bool = False, local_data_path: Optional[Path] = None, overwrite: bool = False) -> None:
+def download_and_store_skycell(
+    root: zarr.Group,
+    skycell_name: str,
+    lock_file: Path,
+    use_local_files: bool = False,
+    local_data_path: Optional[Path] = None,
+    overwrite: bool = False,
+    progress: Optional[SkycellProgress] = None,
+) -> None:
     """
     Manages the download and storage of a single skycell into the
     single Zarr store. Uses filelock for thread-safe operations.
@@ -374,96 +500,168 @@ def download_and_store_skycell(root: zarr.Group, skycell_name: str, lock_file: P
         logging.warning(f"Could not parse projection from skycell name: {skycell_name}")
         return
 
-    # Check if this skycell already has all its data complete in the store
-    bands = ["r", "i", "z", "y"]
-    expected_arrays = []
-    for band in bands:
-        expected_arrays.extend([band, f"{band}_mask", f"{band}_wt"])
+    bands = list(_PS1_BANDS)
+    expected_arrays = expected_array_names()
+    array_status = skycell_array_status(root, projection_id, skycell_name, lock_file, overwrite=overwrite)
+    complete_count = sum(1 for complete in array_status.values() if complete)
 
-    # Check if all arrays are complete (unless overwrite requested)
-    all_complete = True
-    for array_name in expected_arrays:
-        if not is_array_complete(root, projection_id, skycell_name, array_name, lock_file, overwrite=overwrite):
-            all_complete = False
-            break
-
-    if all_complete:
-        logging.info(f"Skipping fully processed skycell: {skycell_name}")
+    if complete_count == len(expected_arrays):
+        logging.info(
+            "Skipping skycell %s (%d/%d arrays complete in zarr)",
+            skycell_name,
+            complete_count,
+            len(expected_arrays),
+        )
+        if progress is not None:
+            finished, total = progress.mark_finished()
+            logging.info("Finished skycell %s (%d/%d)", skycell_name, finished, total)
         return
 
-    logging.info(f"Processing skycell: {skycell_name}")
+    if progress is not None:
+        started, total = progress.mark_started()
+        logging.info(
+            "Processing skycell %s (%d/%d; %d/%d arrays already in zarr)",
+            skycell_name,
+            started,
+            total,
+            complete_count,
+            len(expected_arrays),
+        )
+    else:
+        logging.info(
+            "Processing skycell %s (%d/%d arrays already in zarr)",
+            skycell_name,
+            complete_count,
+            len(expected_arrays),
+        )
     skycell_name_parts = skycell_name.split(".")
-
-    # Process each band and its mask and weight
+    pending_tasks: list[tuple[str, str, str]] = []
     for band in bands:
-        # Check if shutdown was requested
+        for data_type, array_name in (
+            ("image", band),
+            ("mask", f"{band}_mask"),
+            ("weight", f"{band}_wt"),
+        ):
+            if not array_status.get(array_name, False):
+                pending_tasks.append((band, data_type, array_name))
+
+    for band in bands:
+        band_tasks = [(b, dt, an) for b, dt, an in pending_tasks if b == band]
+        if not band_tasks:
+            continue
         if shutdown_requested:
             logging.info("Shutdown requested, stopping skycell processing")
             return
-        # Process in parallel using thread pool to speed up download
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-            # Register executor for shutdown handling
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(band_tasks))) as executor:
             active_executors.append(executor)
 
             try:
-                # Submit tasks for image, mask, and weight
-                img_future = executor.submit(process_skycell_band, root, skycell_name, skycell_name_parts, band, "image", projection_id, lock_file, use_local_files, local_data_path, overwrite)
-                mask_future = executor.submit(process_skycell_band, root, skycell_name, skycell_name_parts, band, "mask", projection_id, lock_file, use_local_files, local_data_path, overwrite)
-                wt_future = executor.submit(process_skycell_band, root, skycell_name, skycell_name_parts, band, "weight", projection_id, lock_file, use_local_files, local_data_path, overwrite)
-
-                # Wait for all tasks to complete
-                img_success = img_future.result()
-                mask_success = mask_future.result()
-                wt_success = wt_future.result()
-
-                if not img_success:
-                    logging.warning(f"Failed to process {band} image for {skycell_name}")
-                if not mask_success:
-                    logging.warning(f"Failed to process {band} mask for {skycell_name}")
-                if not wt_success:
-                    logging.warning(f"Failed to process {band} weight for {skycell_name}")
+                futures = {
+                    executor.submit(
+                        process_skycell_band,
+                        root,
+                        skycell_name,
+                        skycell_name_parts,
+                        task_band,
+                        data_type,
+                        projection_id,
+                        lock_file,
+                        use_local_files,
+                        local_data_path,
+                        overwrite,
+                        False,
+                    ): (task_band, data_type)
+                    for task_band, data_type, _array_name in band_tasks
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    task_band, data_type = futures[future]
+                    try:
+                        success = future.result()
+                    except Exception as exc:
+                        logging.warning(
+                            "Failed to process %s %s for %s: %s",
+                            task_band,
+                            data_type,
+                            skycell_name,
+                            exc,
+                        )
+                        continue
+                    if not success:
+                        logging.warning(
+                            "Failed to process %s %s for %s",
+                            task_band,
+                            data_type,
+                            skycell_name,
+                        )
 
             finally:
                 # Remove executor from active list
                 if executor in active_executors:
                     active_executors.remove(executor)
 
+    if progress is not None:
+        finished, total = progress.mark_finished()
+        logging.info("Finished skycell %s (%d/%d)", skycell_name, finished, total)
+
+
+def _process_one_skycell(
+    skycell_name: str,
+    root: zarr.Group,
+    lock_file: Path,
+    progress: SkycellProgress,
+    use_local_files: bool,
+    local_data_path: Optional[Path],
+    overwrite: bool,
+) -> int:
+    if shutdown_requested:
+        logging.info("Shutdown requested, stopping skycell processing")
+        return 0
+    download_and_store_skycell(
+        root,
+        skycell_name,
+        lock_file,
+        use_local_files=use_local_files,
+        local_data_path=local_data_path,
+        overwrite=overwrite,
+        progress=progress,
+    )
+    return 1
+
 
 def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path, batch_size: int = 10, num_workers: int = 8, use_local_files: bool = False, local_data_path: Optional[Path] = None, overwrite: bool = False):
     """
-    Process skycells using Dask for distributed processing.
-    This provides better scalability than joblib.
+    Process skycells using Dask for parallel orchestration (threaded scheduler).
     """
+    progress = SkycellProgress(len(skycells))
+    computation = None
     try:
-        # Create a Dask bag from the list of skycells
-        skycells_bag = db.from_sequence(skycells, npartitions=num_workers)
+        skycells_bag = db.from_sequence(skycells)
 
-        # Create a function to process a batch of skycells
-        def process_batch(batch):
-            for skycell_name in batch:
-                # Check if shutdown was requested
-                if shutdown_requested:
-                    logging.info("Shutdown requested, stopping batch processing")
-                    return 0
-                download_and_store_skycell(root, skycell_name, lock_file, use_local_files, local_data_path, overwrite)
-            return len(batch)
+        def process_skycell(skycell_name: str) -> int:
+            return _process_one_skycell(
+                skycell_name,
+                root,
+                lock_file,
+                progress,
+                use_local_files,
+                local_data_path,
+                overwrite,
+            )
 
-        # Group skycells into batches
-        batched = skycells_bag.map_partitions(lambda partition: [partition])
-
-        # Register the computation for cancellation
-        computation = batched.map(process_batch)
+        computation = skycells_bag.map(process_skycell)
         active_dask_computations.append(computation)
 
-        # ProgressBar uses terminal \r updates; skip when stdout is tee'd to a log file.
+        compute_kwargs = {"scheduler": "threads", "num_workers": num_workers}
         if sys.stdout.isatty():
             with ProgressBar():
-                results = computation.compute()
+                results = computation.compute(**compute_kwargs)
         else:
             logging.info("Processing %d skycells with Dask (%d workers)...", len(skycells), num_workers)
-            results = computation.compute()
+            with LogProgressCallback(total=len(skycells)):
+                results = computation.compute(**compute_kwargs)
 
-        logging.info(f"Processed {sum(results)} skycells")
+        logging.info("Processed %d skycells", sum(results))
 
     except KeyboardInterrupt:
         logging.info("Dask computation interrupted by user")
@@ -597,7 +795,34 @@ def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_
 
     logging.info("Download and Zarr storage process completed.")
 
-    return {"status": "completed", "message": "Successfully processed all skycells", "skycells_found": len(skycells_df), "unique_images": len(unique_ps1_images), "zarr_path": str(zarr_output_file)}
+    # Produced inventory: skycells whose full set of 12 arrays is complete in the
+    # store, plus their zarr group paths. Lets a caller write a completion manifest
+    # reflecting exactly what is present without re-deriving it. Best-effort: never
+    # fail the stage over an inventory scan.
+    produced_skycells: list[str] = []
+    produced_paths: list[str] = []
+    try:
+        for skycell_name in unique_ps1_images:
+            projection_id = get_projection_from_name(skycell_name)
+            if not projection_id:
+                continue
+            if count_complete_arrays(root, projection_id, skycell_name, lock_file) == _ARRAYS_PER_SKYCELL:
+                produced_skycells.append(skycell_name)
+                produced_paths.append(str(zarr_output_file / projection_id / skycell_name))
+    except Exception as exc:  # pragma: no cover - defensive
+        logging.warning("Could not build produced skycell inventory: %s", exc)
+
+    return {
+        "status": "completed",
+        "message": "Successfully processed all skycells",
+        "skycells_found": len(skycells_df),
+        "unique_images": len(unique_ps1_images),
+        "zarr_path": str(zarr_output_file),
+        "produced_skycells": produced_skycells,
+        "produced_count": len(produced_skycells),
+        "expected_count": len(unique_ps1_images),
+        "artifacts": produced_paths,
+    }
 
 
 def main():
