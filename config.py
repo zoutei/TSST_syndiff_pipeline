@@ -157,8 +157,8 @@ class SynDiffConfig:
     y_max: Optional[int] = None
     """Top row of the crop, exclusive. Same explicit-mode rules as ``x_min``."""
 
-    crop_quadrant: str = "tr"
-    """When **none** of ``x_min``/``x_max``/``y_min``/``y_max`` are set: ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` subdivide the usable area (dead strips removed) using chip midlines ``nx//2``, ``ny//2``; ``'full'`` uses the whole usable rectangle."""
+    crop_quadrant: str = "full"
+    """When **none** of ``x_min``/``x_max``/``y_min``/``y_max`` are set: ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` subdivide the usable area (dead strips removed) using chip midlines ``nx//2``, ``ny//2``; ``'full'`` uses the entire FFI array including dead columns/rows; ``'full_science'`` uses the usable rectangle only."""
 
     x_left_dead: int = 44
     """Dead columns on the left edge of the FFI (usable x starts here)."""

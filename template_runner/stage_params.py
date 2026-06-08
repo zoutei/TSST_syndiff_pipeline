@@ -90,7 +90,7 @@ class WcsGroupingStageParams:
     wcs_drift_savgol_window: int | None = 11
     wcs_drift_savgol_polyorder: int = 2
     bkg_vector_path: str | None = None
-    crop_quadrant: str = "tr"
+    crop_quadrant: str = "full"
     x_min: int | None = None
     x_max: int | None = None
     y_min: int | None = None
