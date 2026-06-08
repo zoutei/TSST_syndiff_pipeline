@@ -133,13 +133,38 @@ def load_targets(path: str | Path) -> List[Target]:
     )
 
 
-def find_target(targets: Iterable[Target], scc: str) -> Target:
-    """Find target by ``sector,camera,ccd`` or ``sector/camera/ccd`` key."""
+def parse_scc(scc: str) -> tuple[int, int, int]:
+    """Parse ``sector,camera,ccd`` or ``sector/camera/ccd``."""
     parts = re.split(r"[,/]", scc.strip())
     if len(parts) != 3:
         raise ValueError(f"Expected SCC as S,C,K got {scc!r}")
-    sector, camera, ccd = (int(p) for p in parts)
+    return int(parts[0]), int(parts[1]), int(parts[2])
+
+
+def find_target(targets: Iterable[Target], scc: str) -> Target:
+    """Find target by ``sector,camera,ccd`` or ``sector/camera/ccd`` key."""
+    sector, camera, ccd = parse_scc(scc)
     for t in targets:
         if t.sector == sector and t.camera == camera and t.ccd == ccd:
             return t
     raise KeyError(f"No target for SCC {sector}/{camera}/{ccd}")
+
+
+def find_target_for_run(ctx, state, scc: str) -> Target:
+    """Resolve SCC from frozen targets CSV, falling back to run DB rows."""
+    try:
+        return find_target(ctx.targets, scc)
+    except KeyError:
+        sector, camera, ccd = parse_scc(scc)
+        row = state.get_run_target(ctx.run_id, sector, camera, ccd)
+        if row is None:
+            raise KeyError(f"No target for SCC {sector}/{camera}/{ccd}") from None
+        return Target(
+            sector=int(row["sector"]),
+            camera=int(row["camera"]),
+            ccd=int(row["ccd"]),
+            target_ra=0.0,
+            target_dec=0.0,
+            target_name=str(row["target_name"]),
+            enabled=bool(row.get("enabled", True)),
+        )
