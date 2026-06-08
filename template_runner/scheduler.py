@@ -12,12 +12,13 @@ import sys
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Dict, List, Set
 
 from syndiff_pipeline.template_runner import daemon, launcher, logs, stages
-from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
+from syndiff_pipeline.template_runner.run_context import resolve_run_context
+from syndiff_pipeline.template_runner.runner_config import resolve_config
 from syndiff_pipeline.template_runner.state import (
+    STATUS_BLOCKED,
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_READY,
@@ -29,7 +30,6 @@ from syndiff_pipeline.template_runner.state import (
     STAGE_POOL,
     _utc_now,
 )
-from syndiff_pipeline.template_runner.targets import load_targets
 from syndiff_pipeline.template_runner.verify import verify_stage
 
 log = logging.getLogger(__name__)
@@ -132,10 +132,20 @@ def _promote_ready_stages_subset(
         label = t.label()
         for stage in active_stages:
             row = state.get_stage_run(run_id, label, stage)
-            if row is None or row.status != STATUS_PENDING:
+            if row is None:
                 continue
             deps = STAGE_DEPS.get(stage, [])
-            if all(_dep_satisfied(state, run_id, label, d, active_stages, resolved) for d in deps):
+            deps_ok = all(
+                _dep_satisfied(state, run_id, label, d, active_stages, resolved) for d in deps
+            )
+            if not deps_ok:
+                continue
+            if row.status == STATUS_BLOCKED:
+                state.update_stage_status(run_id, label, stage, STATUS_PENDING)
+                row_status = STATUS_PENDING
+            else:
+                row_status = row.status
+            if row_status == STATUS_PENDING:
                 state.update_stage_status(run_id, label, stage, STATUS_READY)
                 promoted += 1
     return promoted
@@ -143,8 +153,7 @@ def _promote_ready_stages_subset(
 
 def run_scheduler(
     run_id: str,
-    config_path: str,
-    targets_path: str,
+    run_dir: str,
     stages_arg: str | None = None,
     force_rerun: bool = False,
 ) -> int:
@@ -155,8 +164,11 @@ def run_scheduler(
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    cfg = load_runner_config(config_path)
-    targets = load_targets(targets_path)
+    ctx = resolve_run_context(run_dir=run_dir, run_id=run_id)
+    cfg = ctx.cfg
+    targets = ctx.targets
+    config_path = str(logs.run_config_path(ctx.run_dir))
+    targets_path = str(logs.run_targets_path(ctx.run_dir))
     active_stages = stages.parse_stage_list(stages_arg)
     state = PipelineState(cfg.state_db_path)
     runs_root = cfg.runs_dir()
@@ -166,8 +178,8 @@ def run_scheduler(
         run_id,
         {
             "run_id": run_id,
-            "config_path": str(Path(config_path).resolve()),
-            "targets_path": str(Path(targets_path).resolve()),
+            "config_path": config_path,
+            "targets_path": targets_path,
             "stages": active_stages,
             "force_rerun": force_rerun,
         },
@@ -179,8 +191,8 @@ def run_scheduler(
     if run_row is None:
         state.create_run(
             run_id,
-            str(Path(config_path).resolve()),
-            str(Path(targets_path).resolve()),
+            config_path,
+            targets_path,
             runs_root,
             targets,
             active_stages,
@@ -259,8 +271,7 @@ def run_scheduler(
                     cmd = stages.build_stage_command(
                         run_id,
                         row.stage,
-                        config_path,
-                        targets_path,
+                        str(ctx.run_dir),
                         row.target_label,
                         force_rerun=force_rerun,
                     )
@@ -332,8 +343,7 @@ def run_scheduler(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Template pipeline scheduler")
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--config", required=True)
-    parser.add_argument("--targets", required=True)
+    parser.add_argument("--run-dir", required=True, help="Path to run directory with frozen config")
     parser.add_argument("--stages", default=None)
     parser.add_argument(
         "--force-rerun",
@@ -343,8 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     return run_scheduler(
         args.run_id,
-        args.config,
-        args.targets,
+        args.run_dir,
         args.stages,
         force_rerun=args.force_rerun,
     )

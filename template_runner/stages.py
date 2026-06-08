@@ -41,8 +41,7 @@ def parse_stage_list(stages_arg: str | None) -> List[str]:
 def build_stage_command(
     run_id: str,
     stage: str,
-    config_path: str,
-    targets_path: str,
+    run_dir: str,
     target_label: str,
     force_rerun: bool = False,
 ) -> List[str]:
@@ -54,10 +53,8 @@ def build_stage_command(
         run_id,
         "--stage",
         stage,
-        "--config",
-        str(config_path),
-        "--targets",
-        str(targets_path),
+        "--run-dir",
+        str(run_dir),
         "--target-label",
         target_label,
     ]
