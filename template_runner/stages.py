@@ -43,6 +43,8 @@ def build_stage_command(
     stage: str,
     run_dir: str,
     target_label: str,
+    *,
+    launch_token: str,
     force_rerun: bool = False,
 ) -> List[str]:
     cmd = [
@@ -57,16 +59,33 @@ def build_stage_command(
         str(run_dir),
         "--target-label",
         target_label,
+        "--launch-token",
+        launch_token,
     ]
     if force_rerun:
         cmd.append("--force-rerun")
     return cmd
 
 
+def _manifest_from_result(result: dict) -> tuple[int, int, list[str]] | None:
+    """Extract manifest fields from a stage result dict, if present."""
+    if not isinstance(result, dict):
+        return None
+    if "expected_count" not in result or "produced_count" not in result:
+        return None
+    artifacts = [str(p) for p in (result.get("artifacts") or [])]
+    return int(result["expected_count"]), int(result["produced_count"]), artifacts
+
+
 def execute_stage(
     resolved: ResolvedTargetConfig, stage: str, force_rerun: bool = False
-) -> None:
-    """Run one template pipeline stage in-process."""
+) -> tuple[int, int, list[str]] | None:
+    """Run one template pipeline stage in-process.
+
+    Returns manifest fields ``(expected_count, produced_count, artifacts)`` when
+    the stage provides them; otherwise ``None`` (caller may use
+    ``verify.collect_stage_artifacts`` after success).
+    """
     t = resolved.target
     if stage == "tess_ffi_download":
         out_dir = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
@@ -124,7 +143,7 @@ def execute_stage(
         )
         if result.get("status") != "completed":
             raise RuntimeError(f"PS1 download failed: {result.get('message', result)}")
-        return
+        return _manifest_from_result(result)
 
     if stage == "ps1_process":
         if force_rerun:
@@ -144,7 +163,7 @@ def execute_stage(
         )
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(result["error"])
-        return
+        return _manifest_from_result(result)
 
     if stage == "downsample":
         job_path = str(Path(resolved.handoff_dir) / "cluster_template_job.json")
@@ -157,7 +176,7 @@ def execute_stage(
             offsets = offsets_from_cluster_job_payload(payload)
             roi = roi_tuple_from_cluster_job_payload(payload)
         x_min, y_min, x_max, y_max = roi
-        run_downsample(
+        result = run_downsample(
             sector=t.sector,
             camera=t.camera,
             ccd=t.ccd,
@@ -175,7 +194,7 @@ def execute_stage(
             reference_ffi_basename_expected=payload.get("reference_ffi_basename"),
             cluster_job_json_path=job_path,
         )
-        return
+        return _manifest_from_result(result)
 
     raise ValueError(f"Unknown stage: {stage!r}")
 
