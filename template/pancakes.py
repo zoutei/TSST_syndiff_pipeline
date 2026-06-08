@@ -1346,6 +1346,18 @@ def analyze_single_skycell_padding(skycell_name, mapping_array, ps1_wcs, skycell
     return padding_info
 
 
+def _padding_value_for_csv(key: str, value) -> str:
+    """Coerce padding metadata to CSV-safe strings (pandas StringDtype rejects bools)."""
+    if key == "special_padding_flags" or isinstance(value, (list, tuple, np.ndarray)):
+        seq = list(value) if isinstance(value, np.ndarray) else list(value)
+        return str(seq)
+    if isinstance(value, bool):
+        return str(value)
+    if value is None:
+        return ""
+    return value
+
+
 def update_skycells_with_padding_info(selected_skycells, padding_results):
     """
     Update selected_skycells dataframe with padding information collected from worker threads.
@@ -1359,11 +1371,30 @@ def update_skycells_with_padding_info(selected_skycells, padding_results):
     """
 
     # Initialize new columns for padding information
-    padding_columns = ["pad_skycell_top", "pad_skycell_right", "pad_skycell_top_right", "pad_skycell_bottom", "pad_skycell_left", "pad_skycell_bottom_left", "pad_skycell_bottom_right", "pad_skycell_top_left", "special_padding_needed", "edge_pixels_used", "good_side_fail"]
+    padding_columns = [
+        "pad_skycell_top",
+        "pad_skycell_right",
+        "pad_skycell_top_right",
+        "pad_skycell_bottom",
+        "pad_skycell_left",
+        "pad_skycell_bottom_left",
+        "pad_skycell_bottom_right",
+        "pad_skycell_top_left",
+        "special_padding_needed",
+        "edge_pixels_used",
+        "good_side_fail",
+        "special_padding_flags",
+    ]
+    bool_padding_columns = {"special_padding_needed", "edge_pixels_used", "good_side_fail"}
 
     for col in padding_columns:
         if col not in selected_skycells.columns:
-            selected_skycells[col] = ""
+            if col == "special_padding_flags":
+                selected_skycells[col] = str([False] * 8)
+            elif col in bool_padding_columns:
+                selected_skycells[col] = "False"
+            else:
+                selected_skycells[col] = ""
 
     # Parse projection, cell, y, x for all skycells if not already done
     if "projection" not in selected_skycells.columns:
@@ -1380,11 +1411,9 @@ def update_skycells_with_padding_info(selected_skycells, padding_results):
 
             # Update dataframe with padding information
             for key, value in padding_info.items():
-                if key == "special_padding_flags":
-                    # Store as string representation for CSV compatibility
-                    selected_skycells.at[idx, "special_padding_flags"] = str(value)
-                else:
-                    selected_skycells.at[idx, key] = value
+                if key not in selected_skycells.columns:
+                    continue
+                selected_skycells.at[idx, key] = _padding_value_for_csv(key, value)
 
     return selected_skycells
 

@@ -39,6 +39,21 @@ class CondorJobHandle:
         condor.remove_cluster(self.cluster_id)
 
 
+def _condor_resources(cfg: RunnerConfig, stage: str) -> condor.CondorResourceRequest:
+    if stage == "mapping":
+        params = cfg.stages.mapping
+    elif stage == "ps1_process":
+        params = cfg.stages.ps1_process
+    else:
+        raise ValueError(f"No Condor resource profile for stage {stage!r}")
+    return condor.CondorResourceRequest(
+        request_cpus=params.condor_request_cpus,
+        request_memory_mb=params.condor_request_memory,
+        requirements=params.condor_requirements,
+        rank=params.condor_rank,
+    )
+
+
 def launch_stage(
     cmd: List[str],
     *,
@@ -50,13 +65,7 @@ def launch_stage(
 ) -> tuple[StageJobHandle, int]:
     """Launch a stage locally or on Condor; return (handle, job_id for SQLite pid)."""
     if cfg.stage_executor(stage) == "condor":
-        pp = cfg.stages.ps1_process
-        resources = condor.CondorResourceRequest(
-            request_cpus=pp.condor_request_cpus,
-            request_memory_mb=pp.condor_request_memory,
-            requirements=pp.condor_requirements,
-            rank=pp.condor_rank,
-        )
+        resources = _condor_resources(cfg, stage)
         cluster_id = condor.submit_job(
             cmd,
             runs_root,
