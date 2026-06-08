@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -159,6 +160,12 @@ def stage_log(cfg_runs_root: str, run_id: str, target_label: str, stage: str, sn
 
                 def flush(self) -> None:
                     fh.flush()
+
+                def isatty(self) -> bool:
+                    return False
+
+                def fileno(self) -> int:
+                    return sys.stdout.fileno()
 
             yield Tee()
     except Exception as exc:
