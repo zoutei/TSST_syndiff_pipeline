@@ -18,12 +18,21 @@ STAGE_NAMES = (
     "downsample",
 )
 
+STAGE_SHORT_NAMES: Dict[str, str] = {
+    "tess_ffi_download": "tess_dl",
+    "wcs_grouping": "wcs",
+    "mapping": "map",
+    "ps1_download": "ps1_dl",
+    "ps1_process": "ps1_pr",
+    "downsample": "down",
+}
+
 STAGE_DEPS: Dict[str, List[str]] = {
     "wcs_grouping": ["tess_ffi_download"],
     "mapping": ["wcs_grouping"],
     "ps1_download": ["mapping"],
     "ps1_process": ["ps1_download"],
-    "downsample": ["wcs_grouping", "ps1_process"],
+    "downsample": ["mapping", "ps1_process"],
 }
 
 STAGE_POOL: Dict[str, str] = {
@@ -349,6 +358,16 @@ class PipelineState:
                         "WHERE run_id = ? AND target_label = ? AND stage = ?",
                         (STATUS_PENDING, run_id, label, stage),
                     )
+
+    def get_run_target(
+        self, run_id: str, sector: int, camera: int, ccd: int
+    ) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM targets WHERE run_id = ? AND sector = ? AND camera = ? AND ccd = ?",
+                (run_id, sector, camera, ccd),
+            ).fetchone()
+            return dict(row) if row else None
 
     def list_failed_stage_runs(self, run_id: str) -> List[StageRunRow]:
         with self._conn() as conn:
