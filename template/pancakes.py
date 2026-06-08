@@ -813,6 +813,28 @@ def create_tess_pixel_coordinates(data_shape, oversampling_factor=1):
     return tpix_coord_input, ravelled_index
 
 
+def normalize_ra_degrees(ra) -> np.ndarray:
+    """Wrap right ascension (degrees) to [0, 360)."""
+    return np.mod(np.asarray(ra, dtype=np.float64), 360.0)
+
+
+def moc_ra_shift_degrees(ref_ra: float) -> float:
+    """Return degrees to add so ref_ra lands near 180, away from the 0/360 seam."""
+    return 180.0 - float(normalize_ra_degrees(np.array([ref_ra]))[0])
+
+
+def shift_ras_for_moc(ra, shift_deg: float) -> np.ndarray:
+    """Apply a uniform RA shift and wrap to [0, 360) for MOC libraries."""
+    return normalize_ra_degrees(np.asarray(ra, dtype=np.float64) + shift_deg)
+
+
+def shift_polygon_ras_for_moc(vertices: np.ndarray, shift_deg: float) -> np.ndarray:
+    """Shift polygon vertex RAs into [0, 360) for MOC libraries."""
+    out = np.array(vertices, dtype=np.float64, copy=True)
+    out[:, :, 0] = shift_ras_for_moc(out[:, :, 0], shift_deg)
+    return out
+
+
 def find_relevant_skycells(skycell_wcs_df, tess_wcs, data_shape, tess_buffer=150):
     """
     Find skycells that overlap with TESS image using MOC filtering.
@@ -843,10 +865,16 @@ def find_relevant_skycells(skycell_wcs_df, tess_wcs, data_shape, tess_buffer=150
         0,
     )
 
-    tess_ffi_skycoord = SkyCoord(ra=tess_ffi_corner[:, 0] * u.deg, dec=tess_ffi_corner[:, 1] * u.deg, frame="icrs")
+    footprint_ra = normalize_ra_degrees(tess_ffi_corner[:, 0])
+    ra_shift = moc_ra_shift_degrees(float(np.median(footprint_ra)))
+    footprint_ra = shift_ras_for_moc(footprint_ra, ra_shift)
+    tess_ffi_skycoord = SkyCoord(
+        ra=footprint_ra * u.deg, dec=tess_ffi_corner[:, 1] * u.deg, frame="icrs"
+    )
 
     tess_ffi_moc = MOC.from_polygon_skycoord(tess_ffi_skycoord, complement=False, max_depth=21)
-    sc_mask = tess_ffi_moc.contains_lonlat(skycell_wcs_df["RA"].values * u.degree, skycell_wcs_df["DEC"].values * u.degree)
+    skycell_ra = shift_ras_for_moc(skycell_wcs_df["RA"].values, ra_shift)
+    sc_mask = tess_ffi_moc.contains_lonlat(skycell_ra * u.degree, skycell_wcs_df["DEC"].values * u.degree)
 
     return skycell_wcs_df[sc_mask].reset_index(drop=True)
 
@@ -884,6 +912,9 @@ def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, comp
         complete_wcs_skycells[["projection", "y", "x", "cell"]] = cols[["projection", "y", "x", "cell"]]
 
     enc_sc_vertices = calculate_radec_corners_shift(complete_wcs_skycells, edge_buffer_large, edge_buffer_small, buffer)
+    ref_ra = float(np.median(normalize_ra_degrees(enc_sc_vertices[:, :, 0])))
+    ra_shift = moc_ra_shift_degrees(ref_ra)
+    enc_sc_vertices = shift_polygon_ras_for_moc(enc_sc_vertices, ra_shift)
     # enc_sc_vertices_noedge = calculate_radec_corners_shift(complete_wcs_skycells, edge_buffer_large, buffer)
 
     # Get TESS pixel RA/Dec coordinates
@@ -891,6 +922,7 @@ def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, comp
     _y_tess = tpix_coord_input[:, 0]
     print(f"  Converting {len(_x_tess)} coordinates to RA/Dec...")
     _ra_tess, _dec_tess = tess_wcs.all_pix2world(_x_tess, _y_tess, 0)
+    _ra_tess = shift_ras_for_moc(_ra_tess, ra_shift)
     print(f"  RA/Dec conversion complete. Running MOC filtering...")
 
     # Use MOC filtering for efficient polygon-point matching
