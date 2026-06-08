@@ -158,6 +158,48 @@ def parse_tesscurl_script(text: str) -> List[Tuple[str, str]]:
     return pairs
 
 
+def tesscurl_script_path(output_dir: str, sector: int) -> str:
+    """Path where a tesscurl sector manifest is cached under ``output_dir``."""
+    return os.path.join(output_dir, f"tesscurl_sector_{sector}_ffic.sh")
+
+
+def load_tesscurl_script_text(sector: int, output_dir: str | None = None) -> str | None:
+    """Load tesscurl manifest text from a cached script or MAST."""
+    if output_dir:
+        cached = tesscurl_script_path(output_dir, sector)
+        if os.path.isfile(cached):
+            try:
+                return Path(cached).read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                log.warning("Could not read cached tesscurl script %s: %s", cached, exc)
+
+    script_url = TESSCURL_SCRIPT_URL.format(sector=sector)
+    try:
+        script_bytes = _fetch_bytes(script_url, _DOWNLOAD_TIMEOUT_SCRIPT_S)
+    except (HTTPError, URLError) as exc:
+        log.debug("Could not fetch tesscurl script for sector %s: %s", sector, exc)
+        return None
+    return script_bytes.decode("utf-8", errors="replace")
+
+
+def expected_ffi_basenames(
+    sector: int, camera: int, ccd: int, output_dir: str | None = None
+) -> list[str] | None:
+    """Return sorted expected FFI basenames from the tesscurl manifest.
+
+    Returns ``None`` when the manifest cannot be loaded.
+    """
+    script_text = load_tesscurl_script_text(sector, output_dir)
+    if script_text is None:
+        return None
+    pairs = parse_tesscurl_script(script_text)
+    return sorted(
+        bn
+        for bn, _ in pairs
+        if _ffic_product_basename_matches(bn, sector, camera, ccd)
+    )
+
+
 def _stream_url_to_file(url: str, dest_path: str, timeout: float) -> None:
     """Stream ``url`` to ``dest_path`` (atomic replace on success)."""
     req = Request(url, headers={"User-Agent": _USER_AGENT})
@@ -203,7 +245,7 @@ def _download_ffis_via_tesscurl(
         return []
 
     script_text = script_bytes.decode("utf-8", errors="replace")
-    script_path = os.path.join(output_dir, f"tesscurl_sector_{sector}_ffic.sh")
+    script_path = tesscurl_script_path(output_dir, sector)
     try:
         with open(script_path, "w", encoding="utf-8") as fh:
             fh.write(script_text)
@@ -211,11 +253,13 @@ def _download_ffis_via_tesscurl(
         log.warning("Could not save tesscurl script to %s: %s", script_path, e)
 
     pairs = parse_tesscurl_script(script_text)
-    filtered = [
-        (bn, url)
-        for bn, url in pairs
+    url_by_basename = {bn: url for bn, url in pairs}
+    expected_basenames = sorted(
+        bn
+        for bn in url_by_basename
         if _ffic_product_basename_matches(bn, sector, camera, ccd)
-    ]
+    )
+    filtered = [(bn, url_by_basename[bn]) for bn in expected_basenames]
     n_drop = len(pairs) - len(filtered)
     if n_drop and pairs:
         log.debug(
