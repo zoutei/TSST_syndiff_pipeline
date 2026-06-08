@@ -41,8 +41,10 @@ resources:
     max_concurrent: 3
   cpu_light:
     max_concurrent: 2
-  cpu_heavy:
-    max_concurrent: 3
+  mapping:
+    max_concurrent: 6
+  ps1_process:
+    max_concurrent: 4
 
 scheduler:
   heartbeat_interval_s: 30.0
