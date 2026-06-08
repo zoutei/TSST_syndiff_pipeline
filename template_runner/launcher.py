@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import List, Protocol
 
@@ -31,13 +32,22 @@ class LocalJobHandle:
 @dataclass
 class CondorJobHandle:
     cluster_id: int
-    submitted_at: float
+    submit_epoch: float
 
     def poll(self) -> int | None:
-        return condor.poll_cluster(self.cluster_id, submitted_at=self.submitted_at)
+        return condor.poll_cluster(self.cluster_id, submitted_at=self.submit_epoch)
 
     def terminate(self) -> None:
         condor.remove_cluster(self.cluster_id)
+
+
+@dataclass(frozen=True)
+class LaunchDescriptor:
+    executor: str
+    native_id: int
+    launch_token: str
+    submit_epoch: float | None = None
+    handle: StageJobHandle | None = None
 
 
 def _condor_resources(cfg: RunnerConfig, stage: str) -> condor.CondorResourceRequest:
@@ -63,11 +73,12 @@ def launch_stage(
     runs_root: str,
     run_id: str,
     target_label: str,
-) -> tuple[StageJobHandle, int]:
-    """Launch a stage locally or on Condor; return (handle, job_id for SQLite pid)."""
+    launch_token: str,
+) -> LaunchDescriptor:
+    """Launch a stage locally or on Condor; return durable descriptor."""
     if cfg.stage_executor(stage) == "condor":
         resources = _condor_resources(cfg, stage)
-        cluster_id, submitted_at = condor.submit_job(
+        cluster_id, submit_epoch = condor.submit_job(
             cmd,
             runs_root,
             run_id,
@@ -75,7 +86,14 @@ def launch_stage(
             stage,
             resources=resources,
         )
-        return CondorJobHandle(cluster_id, submitted_at), cluster_id
+        handle: StageJobHandle = CondorJobHandle(cluster_id, submit_epoch)
+        return LaunchDescriptor(
+            executor="condor",
+            native_id=cluster_id,
+            launch_token=launch_token,
+            submit_epoch=submit_epoch,
+            handle=handle,
+        )
 
     proc = subprocess.Popen(
         cmd,
@@ -83,4 +101,10 @@ def launch_stage(
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    return LocalJobHandle(proc), proc.pid
+    return LaunchDescriptor(
+        executor="local",
+        native_id=proc.pid,
+        launch_token=launch_token,
+        submit_epoch=time.time(),
+        handle=LocalJobHandle(proc),
+    )

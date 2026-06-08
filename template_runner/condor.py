@@ -9,17 +9,15 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence
+from typing import Sequence
 
 log = logging.getLogger(__name__)
 
 _WRAPPER = Path(__file__).resolve().parent / "condor_wrapper.sh"
 
-# condor_q JobStatus: 4=completed, 3=removed
 _JOB_COMPLETED = 4
 _JOB_REMOVED = 3
 
-# Grace period after submit before treating missing queue/history as failure.
 _POLL_GRACE_SECONDS = 120.0
 
 _submission_times: dict[int, float] = {}
@@ -102,11 +100,11 @@ def write_submit_file(
         lines.append(f"rank = {resources.rank}")
     lines.extend(
         [
-        f"output = {artifacts['stdout']}",
-        f"error = {artifacts['stderr']}",
-        f"log = {artifacts['log']}",
-        "queue 1",
-        "",
+            f"output = {artifacts['stdout']}",
+            f"error = {artifacts['stderr']}",
+            f"log = {artifacts['log']}",
+            "queue 1",
+            "",
         ]
     )
     submit_path.write_text("\n".join(lines), encoding="utf-8")
@@ -120,7 +118,7 @@ def submit_job(
     stage: str,
     resources: CondorResourceRequest | None = None,
 ) -> tuple[int, float]:
-    """Submit one stage command to Condor; return (cluster id, submitted_at monotonic)."""
+    """Submit one stage command to Condor; return (cluster id, wall-clock submit epoch)."""
     resources = resources or CondorResourceRequest()
     artifacts = condor_artifact_paths(runs_root, run_id, target_label, stage)
     write_submit_file(artifacts["submit"], cmd, artifacts, resources)
@@ -129,8 +127,8 @@ def submit_job(
     if not match:
         raise RuntimeError(f"Could not parse condor_submit output: {proc.stdout.strip()}")
     cluster_id = int(match.group(1))
-    submitted_at = time.monotonic()
-    _submission_times[cluster_id] = submitted_at
+    submit_epoch = time.time()
+    _submission_times[cluster_id] = submit_epoch
     _record_cluster_submission(artifacts, cluster_id)
     log.info(
         "Submitted Condor cluster %s for %s / %s (cpus=%s mem=%sMB req=%r rank=%r)",
@@ -142,11 +140,10 @@ def submit_job(
         resources.requirements,
         resources.rank,
     )
-    return cluster_id, submitted_at
+    return cluster_id, submit_epoch
 
 
 def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
-    """Return (job_status, exit_code) from condor_q, or (None, None) if not in queue."""
     proc = _run_condor(
         ["condor_q", str(cluster_id), "-af", "JobStatus", "ExitCode"],
         check=False,
@@ -168,7 +165,6 @@ def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
 
 
 def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
-    """Return (job_status, exit_code) from condor_history."""
     proc = _run_condor(
         ["condor_history", str(cluster_id), "-af", "JobStatus", "ExitCode"],
         check=False,
@@ -188,25 +184,31 @@ def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
 
 
 def poll_cluster(cluster_id: int, *, submitted_at: float | None = None) -> int | None:
-    """Return None while running; otherwise the job exit code."""
+    """Return None while running; otherwise the job exit code.
+
+    *submitted_at* must be wall-clock epoch seconds (stored in DB), not monotonic.
+    """
     status, exit_code = _query_queue(cluster_id)
     if status is None:
         status, exit_code = _query_history(cluster_id)
     if status is None:
         ts = submitted_at if submitted_at is not None else _submission_times.get(cluster_id)
-        if ts is not None and time.monotonic() - ts < _POLL_GRACE_SECONDS:
+        if ts is not None and time.time() - ts < _POLL_GRACE_SECONDS:
             return None
         log.warning("Condor cluster %s not found in queue or history", cluster_id)
         return 1
     if status == _JOB_COMPLETED:
         return exit_code if exit_code is not None else 0
     if status == _JOB_REMOVED:
-        return exit_code if exit_code is not None else 143
+        # condor_rm on a running job often records ExitCode 0 when the worker
+        # handled SIGTERM cleanly; treat that as canceled (143), not success.
+        if exit_code in (None, 0):
+            return 143
+        return exit_code
     return None
 
 
 def remove_cluster(cluster_id: int) -> bool:
-    """Remove a Condor cluster; return True if condor_rm succeeded."""
     proc = _run_condor(["condor_rm", str(cluster_id)], check=False)
     if proc.returncode == 0:
         log.info("Removed Condor cluster %s", cluster_id)
@@ -218,20 +220,20 @@ def remove_cluster(cluster_id: int) -> bool:
 
 
 def sweep_run_condor_clusters(state, cfg, run_id: str) -> int:
-    """condor_rm every Condor pid recorded as running for this run."""
     removed = 0
     for job in state.running_jobs(run_id):
-        if job.pid is None:
+        cluster_id = job.native_id
+        if cluster_id is None:
             continue
-        if cfg.stage_executor(job.stage) != "condor":
+        executor = job.executor or cfg.stage_executor(job.stage)
+        if executor != "condor":
             continue
-        if remove_cluster(job.pid):
+        if remove_cluster(int(cluster_id)):
             removed += 1
     return removed
 
 
 def sweep_run_condor_audit_clusters(runs_root: str, run_id: str) -> int:
-    """condor_rm cluster ids listed in per-stage audit files that are still active."""
     removed = 0
     base = Path(runs_root) / run_id / "per_target"
     if not base.is_dir():
