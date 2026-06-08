@@ -1149,15 +1149,22 @@ def _evict_band_cache_for_step(
     next_row_id: Optional[int],
     row_padding_map: dict,
 ) -> None:
-    """Decrement use counts for cells consumed in this row step and evict exhausted entries."""
+    """Decrement use counts for cells consumed in this row step and evict exhausted entries.
+
+    Note: ``next_row_id`` is retained in the signature for call-site symmetry but is
+    intentionally not used for regular-cell decrements (see comment below).
+    """
     cells_to_decrement: set = set()
 
-    # Regular cells assembled this step (current row and next row)
+    # Regular cells assembled this step. Only count current_row membership:
+    # every row is the "current row" in exactly one step, so each regular cell
+    # is decremented exactly once over the projection's lifetime, matching the
+    # +1 dual-role budget granted in run_modern_sliding_window_pipeline. Counting
+    # next_row too would decrement dual-role cells twice (a row is visited once as
+    # "next" and once as "current"), evicting them one use early and starving
+    # later cross-projection padding steps (which then fall back to ManualLoader).
     for cell_name, _ in metadata["rows"].get(current_row_id, []):
         cells_to_decrement.add(cell_name)
-    if next_row_id is not None:
-        for cell_name, _ in metadata["rows"].get(next_row_id, []):
-            cells_to_decrement.add(cell_name)
 
     # Padding source cells consumed in this step
     cells_to_decrement.update(row_padding_map.get((str(projection), current_row_id), set()))
