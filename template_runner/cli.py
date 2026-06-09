@@ -11,13 +11,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from syndiff_pipeline.template_runner import logs
-from syndiff_pipeline.template_runner.run_context import (
-    RUNS_ROOT_ENV_VAR,
-    RunContext,
-    resolve_run_context,
-    runs_root_from_env,
+from syndiff_pipeline.template_runner.run_context import RunContext, resolve_run_context
+from syndiff_pipeline.template_runner.deployment import (
+    deployment_path_for_config,
+    load_handoff_root_from_deployment,
 )
 from syndiff_pipeline.template_runner.runner_config import load_runner_config
+from syndiff_pipeline.template_runner.workspace import (
+    discover_alive_handoff_roots,
+    record_deployment_path,
+    runs_root as handoff_runs_root,
+    state_db_path,
+)
 from syndiff_pipeline.template_runner.scheduler_control import (
     daemon_is_alive,
     daemon_is_wedged,
@@ -54,7 +59,7 @@ def _print_discord_bot_status(config_path: str | Path, result) -> None:
     if not result.enabled:
         return
     cfg = load_runner_config(config_path)
-    bot_log = logs.discord_bot_log_path(cfg.state_db_path)
+    bot_log = logs.discord_bot_log_path(cfg.handoff_root)
     if result.pid:
         print(f"Discord bot pid={result.pid} spawned={result.spawned}")
         print(f"  bot log: {bot_log}")
@@ -82,6 +87,37 @@ def _resolve_run_id(cfg, run_id: str | None) -> str:
     raise SystemExit("No run_id specified and no runs found.")
 
 
+def _resolve_latest_run_id_from_handoff(handoff: str | Path) -> str:
+    root = handoff_runs_root(handoff)
+    latest = root / "latest"
+    if latest.is_symlink():
+        return latest.readlink().name
+    runs = sorted(p for p in root.glob("*") if p.is_dir() and p.name != "latest")
+    if runs:
+        return runs[-1].name
+    raise SystemExit("No runs found in workspace.")
+
+
+def _resolve_handoff_from_args(args: argparse.Namespace) -> str:
+    deployment = getattr(args, "deployment", None)
+    if deployment:
+        path = Path(deployment).expanduser().resolve()
+        handoff = load_handoff_root_from_deployment(path)
+        record_deployment_path(handoff, path)
+        return str(handoff)
+
+    discovered = discover_alive_handoff_roots()
+    if len(discovered) == 1:
+        return str(discovered[0])
+    if len(discovered) > 1:
+        lines = "\n".join(f"  {p}" for p in discovered)
+        raise SystemExit(f"Multiple supervisors running; pass --deployment:\n{lines}")
+    raise SystemExit(
+        "No supervisor found. Start with: syndiff-template submit --config ... "
+        "or syndiff-template daemon start --deployment ..."
+    )
+
+
 def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
     if getattr(args, "run_dir", None):
         return resolve_run_context(
@@ -90,22 +126,42 @@ def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
         )
 
     run_id = getattr(args, "run_id", None)
-    env_runs_root = runs_root_from_env()
-    if env_runs_root is not None:
-        if not run_id:
-            raise SystemExit(
-                f"--run-id is required when {RUNS_ROOT_ENV_VAR} is set ({env_runs_root})."
-            )
-        return resolve_run_context(run_id=run_id, runs_root=str(env_runs_root))
+    if not run_id:
+        raise SystemExit("Specify --run-dir, or --run-id with --deployment/--config.")
 
-    if not getattr(args, "config", None):
-        raise SystemExit(
-            f"Specify --run-dir, set {RUNS_ROOT_ENV_VAR} with --run-id, "
-            "or --config (with optional --run-id)."
+    deployment = getattr(args, "deployment", None)
+    if deployment:
+        handoff = load_handoff_root_from_deployment(deployment)
+        return resolve_run_context(
+            run_id=run_id,
+            runs_root=str(handoff_runs_root(handoff)),
         )
-    cfg = load_runner_config(args.config)
-    run_id = _resolve_run_id(cfg, run_id)
-    return resolve_run_context(run_id=run_id, runs_root=cfg.runs_dir())
+
+    config_path = getattr(args, "config", None)
+    if config_path:
+        cfg = load_runner_config(config_path)
+        return resolve_run_context(run_id=run_id, runs_root=cfg.runs_dir())
+
+    handoff = _resolve_handoff_from_args(args)
+    return resolve_run_context(run_id=run_id, runs_root=str(handoff_runs_root(handoff)))
+
+
+def _resolve_run_ids_for_monitoring(
+    state: PipelineState,
+    handoff: str,
+    *,
+    run_id: str | None = None,
+) -> list[str]:
+    if run_id:
+        return [run_id]
+    active = state.active_runs()
+    if active:
+        return [row["run_id"] for row in active]
+    return [_resolve_latest_run_id_from_handoff(handoff)]
+
+
+def _monitoring_mode(args: argparse.Namespace) -> bool:
+    return not getattr(args, "run_dir", None) and not getattr(args, "run_id", None)
 
 
 def _prepare_run_directory(
@@ -204,9 +260,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
             },
         )
 
-    result = ensure_daemon_running(cfg.state_db_path)
+    record_deployment_path(
+        cfg.handoff_root,
+        deployment_path_for_config(args.config, cfg.deployment_file),
+    )
+    result = ensure_daemon_running(cfg.handoff_root)
     bot_result = _ensure_discord_bot(args.config)
-    daemon_log = logs.daemon_log_path(cfg.state_db_path)
+    daemon_log = logs.daemon_log_path(cfg.handoff_root)
 
     if created_new_run and cfg.notifications.enabled:
         from syndiff_pipeline.template_runner.notifications import send_run_started_notification
@@ -219,15 +279,17 @@ def cmd_submit(args: argparse.Namespace) -> int:
             run_dir=run_directory,
             target_labels=[t.label() for t in targets if t.enabled],
             stages=active,
-            state_db_path=cfg.state_db_path,
+            handoff_root=cfg.handoff_root,
+            deployment_file=cfg.deployment_file,
             force_rerun=bool(args.force_rerun),
         )
 
     print(f"Submitted run_id={run_id} supervisor_pid={result.pid}")
     print(f"  daemon log: {daemon_log}")
     _print_discord_bot_status(args.config, bot_result)
-    print(f"Monitor: syndiff-template progress --run-dir {run_directory}")
-    print(f"         syndiff-template status --watch --run-dir {run_directory}")
+    print("Monitor: syndiff-template progress")
+    print("         syndiff-template status --watch")
+    print(f"         syndiff-template progress --run-id {run_id}")
     return 0
 
 
@@ -274,60 +336,134 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
 
-def cmd_status(args: argparse.Namespace) -> int:
-    ctx = _resolve_run_from_args(args)
-    state = PipelineState(ctx.cfg.state_db_path)
+def _print_status_for_run(
+    state: PipelineState,
+    *,
+    run_id: str,
+    handoff_root: str,
+    multi_run: bool,
+) -> None:
     from syndiff_pipeline.template_runner.run_report import format_status_grid
     from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
 
-    def _print_once():
-        run = state.get_run(ctx.run_id) or {}
-        print(f"Run {ctx.run_id} status={run.get('status', '?')}")
-        in_flight = read_verify_in_flight(ctx.cfg.state_db_path, ctx.run_id)
-        if in_flight:
-            print(f"  verify_in_flight={in_flight}")
-        if run.get("status") == "stalled" and run.get("stall_reason"):
-            print(f"  stalled: {run['stall_reason']}")
-        for line in format_status_grid(state, ctx.run_id):
-            print(line)
+    if multi_run:
+        print(f"=== run {run_id} ===")
+    run = state.get_run(run_id) or {}
+    print(f"Run {run_id} status={run.get('status', '?')}")
+    in_flight = read_verify_in_flight(handoff_root, run_id)
+    if in_flight:
+        print(f"  verify_in_flight={in_flight}")
+    if run.get("status") == "stalled" and run.get("stall_reason"):
+        print(f"  stalled: {run['stall_reason']}")
+    for line in format_status_grid(state, run_id):
+        print(line)
 
-    if args.watch:
-        while True:
-            print("\033[2J\033[H", end="")
+
+def cmd_status(args: argparse.Namespace) -> int:
+    if _monitoring_mode(args):
+        handoff = _resolve_handoff_from_args(args)
+        state = PipelineState(str(state_db_path(handoff)))
+        run_ids = _resolve_run_ids_for_monitoring(
+            state, handoff, run_id=getattr(args, "run_id", None)
+        )
+
+        def _print_once():
+            multi = len(run_ids) > 1
+            for run_id in run_ids:
+                _print_status_for_run(
+                    state,
+                    run_id=run_id,
+                    handoff_root=handoff,
+                    multi_run=multi,
+                )
+
+        if args.watch:
+            while True:
+                print("\033[2J\033[H", end="")
+                _print_once()
+                time.sleep(args.interval)
+        else:
             _print_once()
-            time.sleep(args.interval)
-    else:
-        _print_once()
-        if not daemon_is_alive(ctx.cfg.state_db_path):
+            if not daemon_is_alive(handoff):
+                print(
+                    "WARNING: supervisor daemon is not alive. "
+                    "Start with: syndiff-template submit --config ... "
+                    "or syndiff-template daemon start --deployment ..."
+                )
+        return 0
+
+    ctx = _resolve_run_from_args(args)
+    state = PipelineState(ctx.cfg.state_db_path)
+    _print_status_for_run(
+        state,
+        run_id=ctx.run_id,
+        handoff_root=ctx.cfg.handoff_root,
+        multi_run=False,
+    )
+    if not args.watch:
+        if not daemon_is_alive(ctx.cfg.handoff_root):
+            source = (ctx.meta or {}).get("source_config_path")
+            hint = source or logs.run_config_path(ctx.run_dir)
             print(
                 "WARNING: supervisor daemon is not alive. "
-                "Start with: syndiff-template daemon start --config "
-                f"{logs.run_config_path(ctx.run_dir)}"
+                f"Start with: syndiff-template daemon start --deployment ... "
+                f"(site config: {hint})"
             )
-    return 0
+        return 0
+
+    while True:
+        print("\033[2J\033[H", end="")
+        _print_status_for_run(
+            state,
+            run_id=ctx.run_id,
+            handoff_root=ctx.cfg.handoff_root,
+            multi_run=False,
+        )
+        time.sleep(args.interval)
 
 
 def cmd_progress(args: argparse.Namespace) -> int:
-    ctx = _resolve_run_from_args(args)
-    state = PipelineState(ctx.cfg.state_db_path)
     from syndiff_pipeline.template_runner.run_report import format_progress_lines
 
+    if _monitoring_mode(args):
+        handoff = _resolve_handoff_from_args(args)
+        state = PipelineState(str(state_db_path(handoff)))
+        run_ids = _resolve_run_ids_for_monitoring(
+            state, handoff, run_id=getattr(args, "run_id", None)
+        )
+        multi = len(run_ids) > 1
+        for run_id in run_ids:
+            if multi:
+                print(f"=== run {run_id} ===")
+            run = state.get_run(run_id) or {}
+            runs_root = run.get("runs_root") or str(handoff_runs_root(handoff))
+            for line in format_progress_lines(
+                state,
+                run_id,
+                runs_root,
+                handoff_root=handoff,
+                include_running_detail=not getattr(args, "no_detail", False),
+            ):
+                print(line)
+        return 0
+
+    ctx = _resolve_run_from_args(args)
+    state = PipelineState(ctx.cfg.state_db_path)
     for line in format_progress_lines(
         state,
         ctx.run_id,
         ctx.cfg.runs_dir(),
-        state_db_path=ctx.cfg.state_db_path,
+        handoff_root=ctx.cfg.handoff_root,
         include_running_detail=not getattr(args, "no_detail", False),
     ):
         print(line)
-
     return 0
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
-    cfg = load_runner_config(args.config)
-    state = PipelineState(cfg.state_db_path)
-    alive = daemon_is_alive(cfg.state_db_path)
+    handoff = _resolve_handoff_from_args(args)
+    state = PipelineState(str(state_db_path(handoff)))
+    alive = daemon_is_alive(handoff)
     for r in state.list_runs(args.limit):
         print(
             f"{r['run_id']}  status={r.get('status')}  "
@@ -350,7 +486,7 @@ def cmd_notify_test(args: argparse.Namespace) -> int:
                 state,
                 ctx.run_id,
                 ctx.cfg.runs_dir(),
-                state_db_path=ctx.cfg.state_db_path,
+                handoff_root=ctx.cfg.handoff_root,
             )
         )
         return 0
@@ -363,8 +499,8 @@ def cmd_notify_test(args: argparse.Namespace) -> int:
 
 
 def cmd_active(args: argparse.Namespace) -> int:
-    cfg = load_runner_config(args.config)
-    state = PipelineState(cfg.state_db_path)
+    handoff = _resolve_handoff_from_args(args)
+    state = PipelineState(str(state_db_path(handoff)))
     found = False
     for r in state.list_runs(50):
         if r.get("status") in ("running", "stalled"):
@@ -372,8 +508,8 @@ def cmd_active(args: argparse.Namespace) -> int:
             found = True
     if not found:
         print("No active runs.")
-    if daemon_is_alive(cfg.state_db_path):
-        st = daemon_status(cfg.state_db_path)
+    if daemon_is_alive(handoff):
+        st = daemon_status(handoff)
         print(f"Supervisor pid={st.pid} heartbeat_age_s={st.heartbeat_age_s}")
     else:
         print("Supervisor daemon is not alive.")
@@ -395,7 +531,7 @@ def cmd_logs(args: argparse.Namespace) -> int:
     if args.target and args.stage:
         path = logs.target_log_path(ctx.cfg.runs_dir(), ctx.run_id, args.target, args.stage)
     else:
-        path = logs.daemon_log_path(ctx.cfg.state_db_path)
+        path = logs.daemon_log_path(ctx.cfg.handoff_root)
     if not path.is_file():
         print(f"Log not found: {path}")
         return 1
@@ -414,16 +550,14 @@ def cmd_verify(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner.verify import persist_completion_manifests, verify_stage
 
     run_id: str | None = None
-    if args.run_dir or runs_root_from_env() is not None:
+    if args.run_dir:
         ctx = _resolve_run_from_args(args)
         cfg = ctx.cfg
         targets = ctx.targets
         run_id = ctx.run_id
     else:
         if not args.config:
-            raise SystemExit(
-                f"Specify --run-dir, {RUNS_ROOT_ENV_VAR} with --run-id, or --config for verify."
-            )
+            raise SystemExit("Specify --run-dir or --config for verify.")
         cfg = load_runner_config(args.config)
         if not args.targets:
             raise SystemExit("--targets required for pre-run verify.")
@@ -477,15 +611,13 @@ def cmd_reconcile_manifests(args: argparse.Namespace) -> int:
         write_manifest,
     )
 
-    if args.run_dir or runs_root_from_env() is not None:
+    if args.run_dir:
         ctx = _resolve_run_from_args(args)
         cfg = ctx.cfg
         targets = ctx.targets
     else:
         if not args.config:
-            raise SystemExit(
-                f"Specify --run-dir, {RUNS_ROOT_ENV_VAR} with --run-id, or --config."
-            )
+            raise SystemExit("Specify --run-dir or --config.")
         cfg = load_runner_config(args.config)
         if not args.targets:
             raise SystemExit("--targets required for reconcile-manifests.")
@@ -554,7 +686,7 @@ def cmd_retry(args: argparse.Namespace) -> int:
         print(f"Queued bulk retry for run {ctx.run_id}")
 
     if not getattr(args, "no_start_daemon", False):
-        ensure_daemon_running(ctx.cfg.state_db_path)
+        ensure_daemon_running(ctx.cfg.handoff_root)
         bot_config = _discord_bot_config_path(args, ctx)
         if bot_config is not None:
             _ensure_discord_bot(bot_config)
@@ -595,19 +727,29 @@ def cmd_discord_bot(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
-    cfg = load_runner_config(args.config)
-    db = cfg.state_db_path
+    from syndiff_pipeline.template_runner.discord_bot_control import (
+        discord_bot_status_for_handoff,
+        ensure_discord_bot_for_handoff_root,
+    )
+
+    handoff = _resolve_handoff_from_args(args)
     if args.action == "start":
-        result = ensure_daemon_running(db)
-        bot_result = _ensure_discord_bot(args.config)
+        result = ensure_daemon_running(handoff)
+        bot_result = ensure_discord_bot_for_handoff_root(handoff)
         print(f"Supervisor pid={result.pid} spawned={result.spawned}")
-        _print_discord_bot_status(args.config, bot_result)
+        if bot_result is not None:
+            if bot_result.enabled and bot_result.pid:
+                print(f"Discord bot pid={bot_result.pid} spawned={bot_result.spawned}")
+            elif bot_result.skipped_reason:
+                print(f"WARNING: Discord bot not running: {bot_result.skipped_reason}")
+        else:
+            print("Discord bot not started (no recorded site config; submit a run first)")
         return 0
     if args.action == "stop":
         from syndiff_pipeline.template_runner.discord_bot_control import stop_discord_bot
 
-        result = stop_daemon(db)
-        bot_stopped = stop_discord_bot(db)
+        result = stop_daemon(handoff)
+        bot_stopped = stop_discord_bot(handoff)
         if not result.was_running:
             if bot_stopped:
                 print("Supervisor was not running. Discord bot stopped.")
@@ -628,24 +770,23 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         )
         return 1
     if args.action == "status":
-        from syndiff_pipeline.template_runner.discord_bot_control import discord_bot_status
-
-        st = daemon_status(db)
-        bot = discord_bot_status(args.config)
+        st = daemon_status(handoff)
+        bot = discord_bot_status_for_handoff(handoff)
+        bot_payload = {
+            "enabled": bot.enabled,
+            "alive": bot.alive,
+            "pid": bot.pid,
+            "skipped_reason": bot.skipped_reason,
+        }
         print(
             json.dumps(
                 {
                     "alive": st.alive,
-                    "wedged": daemon_is_wedged(db),
+                    "wedged": daemon_is_wedged(handoff),
                     "pid": st.pid,
                     "heartbeat_age_s": st.heartbeat_age_s,
                     "lock_held": st.lock_held,
-                    "discord_bot": {
-                        "enabled": bot.enabled,
-                        "alive": bot.alive,
-                        "pid": bot.pid,
-                        "skipped_reason": bot.skipped_reason,
-                    },
+                    "discord_bot": bot_payload,
                 },
                 indent=2,
             )
@@ -654,17 +795,30 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     raise SystemExit(f"Unknown daemon action: {args.action}")
 
 
+def _add_workspace_scope(sp: argparse.ArgumentParser) -> None:
+    sp.add_argument(
+        "--deployment",
+        default=None,
+        help="Path to deployment.yaml (optional; auto-discovers one live supervisor)",
+    )
+
+
 def _add_run_scope(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--run-dir", default=None, help="Full run directory path (frozen config/targets)")
     sp.add_argument(
         "--run-id",
         default=None,
-        help=f"Run ID under {RUNS_ROOT_ENV_VAR} or site --config runs_root",
+        help="Run ID under workspace runs/ (required for run control commands)",
+    )
+    sp.add_argument(
+        "--deployment",
+        default=None,
+        help="Path to deployment.yaml (with --run-id; optional if one supervisor is running)",
     )
     sp.add_argument(
         "--config",
         default=None,
-        help="Site config for runs_root lookup when --run-dir is omitted",
+        help="Site config.yaml (alternative to --deployment with --run-id)",
     )
 
 
@@ -688,13 +842,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--force-rerun", action="store_true")
     sp.set_defaults(func=cmd_run)
 
-    sp = sub.add_parser("status", help="Show stage status grid")
+    sp = sub.add_parser("status", help="Show stage status grid (all active runs by default)")
     _add_run_scope(sp)
     sp.add_argument("--watch", action="store_true")
     sp.add_argument("--interval", type=float, default=10.0)
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("progress", help="Summary counts and running-task detail")
+    sp = sub.add_parser("progress", help="Summary counts and running-task detail (all active by default)")
     _add_run_scope(sp)
     sp.add_argument(
         "--no-detail",
@@ -704,12 +858,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_progress)
 
     sp = sub.add_parser("runs", help="List recent runs")
-    sp.add_argument("--config", required=True)
+    _add_workspace_scope(sp)
     sp.add_argument("--limit", type=int, default=20)
     sp.set_defaults(func=cmd_runs)
 
     sp = sub.add_parser("active", help="Show active runs and supervisor")
-    sp.add_argument("--config", required=True)
+    _add_workspace_scope(sp)
     sp.set_defaults(func=cmd_active)
 
     sp = sub.add_parser("show", help="Show run metadata JSON")
@@ -779,7 +933,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(func=cmd_kill)
 
     sp = sub.add_parser("daemon", help="Supervisor daemon control")
-    sp.add_argument("--config", required=True)
+    _add_workspace_scope(sp)
     sp.add_argument("action", choices=["start", "stop", "status"])
     sp.set_defaults(func=cmd_daemon)
 

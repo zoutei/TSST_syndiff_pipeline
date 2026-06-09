@@ -179,7 +179,9 @@ class TestRunStarted(unittest.TestCase):
 class TestStatusReply(unittest.TestCase):
     def test_resolve_run_ids_prefers_token(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("run_a", "/c", "/t", str(tmp), [target], ["mapping"])
@@ -190,7 +192,9 @@ class TestStatusReply(unittest.TestCase):
 
     def test_resolve_run_ids_active_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("run_a", "/c", "/t", str(tmp), [target], ["mapping"])
@@ -198,20 +202,35 @@ class TestStatusReply(unittest.TestCase):
             ids = resolve_run_ids_for_status_request(state, "status?")
             self.assertEqual(ids, ["run_a"])
 
+    def test_resolve_run_ids_returns_all_active(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            for name in ("run_a", "run_b", "run_c", "run_d", "run_e"):
+                state.create_run(name, "/c", "/t", str(tmp), [target], ["mapping"])
+                state.set_run_status(name, "running")
+            ids = resolve_run_ids_for_status_request(state, "status?")
+            self.assertEqual(ids, ["run_a", "run_b", "run_c", "run_d", "run_e"])
+
     def test_format_status_reply_includes_progress(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(tmp), [target], ["mapping"])
             state.set_run_status("r1", "running")
-            text = format_status_reply_message(state, ["r1"], str(tmp), state_db_path=str(db))
+            text = format_status_reply_message(state, ["r1"], str(tmp), handoff_root=str(handoff))
             self.assertIn("run_id=r1", text)
             self.assertIn("status (", text)
 
     def test_format_status_reply_splits_runs_instead_of_truncating(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             targets = [
                 Target(i, 1, 1, 200.0 + i, 50.0, f"t{i:04d}")
@@ -231,7 +250,7 @@ class TestStatusReply(unittest.TestCase):
                 state,
                 ["batch_no5", "s0020_c3_k3_2020ut_hdr_20260609_141441"],
                 str(tmp),
-                state_db_path=str(db),
+                handoff_root=str(handoff),
             )
             self.assertGreater(len(messages), 1)
             joined = "\n\n".join(messages)
@@ -267,7 +286,9 @@ class TestRunReport(unittest.TestCase):
 
     def test_format_status_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             self._seed_run(state, "run_a")
             lines = format_status_grid(state, "run_a")
@@ -276,7 +297,9 @@ class TestRunReport(unittest.TestCase):
 
     def test_format_progress_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             self._seed_run(state, "run_a")
             state.set_run_status("run_a", "running")
@@ -285,7 +308,9 @@ class TestRunReport(unittest.TestCase):
 
     def test_format_run_report_truncates_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             self._seed_run(state, "run_a")
             text = format_run_report(
@@ -300,7 +325,9 @@ class TestRunReport(unittest.TestCase):
 
     def test_format_run_report_messages_splits_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = Path(tmp) / "state.sqlite"
+            handoff = Path(tmp)
+
+            db = Path(tmp) / "pipeline_state.sqlite"
             state = PipelineState(db)
             targets = [
                 Target(i, 1, 1, 200.0 + i, 50.0, f"t{i:04d}")
@@ -333,7 +360,13 @@ class TestPreview(unittest.TestCase):
     def test_format_preview_includes_test_prefix(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            db = base / "state.sqlite"
+
+            handoff = base
+
+            handoff = base
+
+
+            db = base / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
