@@ -483,7 +483,8 @@ def _blocking_depth(stage: str, memo: dict[str, int] | None = None) -> int:
 def _verify_outcome_still_applicable(state: PipelineState, key: VerifyTaskKey) -> bool:
     """True if a verify result may still be applied to SQLite for *key*."""
     run = state.get_run(key.run_id) or {}
-    if run.get("force_rerun"):
+    if run.get("force_rerun") and key.stage in set(state.get_active_stages(key.run_id)):
+        # Selected stages are being force-rerun; do not artifact-skip them.
         return False
     row = state.get_stage_run(key.run_id, key.target_label, key.stage)
     if row is None or row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
@@ -546,8 +547,7 @@ def _iter_verify_candidates(
     force_rerun: bool,
 ) -> list[tuple]:
     """Collect uncached pending/external stages eligible for verification."""
-    if force_rerun:
-        return []
+    active_stages = set(state.get_active_stages(run_id))
     cfg = ctx.cfg
     runs_root = cfg.runs_dir()
     candidates: list[tuple] = []
@@ -563,6 +563,8 @@ def _iter_verify_candidates(
         resolved = resolve_config(target, cfg)
         for row in rows:
             if row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
+                continue
+            if force_rerun and row.stage in active_stages:
                 continue
             if row.stage == "ps1_download":
                 if resolved.stages.ps1_process.ps1_source == "stream":
@@ -1216,10 +1218,7 @@ def run_scheduler(
             force_rerun=force_rerun,
         )
     elif force_rerun:
-        state.reset_stages_for_force_rerun(
-            run_id, [t.label() for t in ctx.targets], active
-        )
-        state.set_run_status(run_id, "running")
+        state.apply_force_rerun(run_id, [t.label() for t in ctx.targets], active)
 
     state.set_run_status(run_id, "running")
     while True:

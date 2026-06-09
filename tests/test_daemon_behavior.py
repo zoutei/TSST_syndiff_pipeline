@@ -283,6 +283,82 @@ class TestSkipIntegration(unittest.TestCase):
                 state.get_stage_run(run_id, label, "mapping").status, STATUS_SKIPPED
             )
 
+    def test_force_rerun_verifies_external_prereqs_for_partial_run(self):
+        target = Target(20, 3, 3, 210.219333, 81.846589, "2020ut")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path,
+                [target],
+                active_stages=["wcs_grouping", "downsample"],
+                force_rerun=True,
+            )
+            label = target.label()
+
+            def complete(_resolved, stage, **_kwargs):
+                return stage in (
+                    "tess_ffi_download",
+                    "mapping",
+                    "ps1_download",
+                    "ps1_process",
+                )
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                side_effect=complete,
+            ):
+                skipped = _resolve_external_and_pending_skips(
+                    state, run_id, ctx, force_rerun=True, block=True
+                )
+            shutdown_verify_worker(wait=True)
+
+            self.assertGreaterEqual(skipped, 1)
+            for stage in ("tess_ffi_download", "mapping", "ps1_download", "ps1_process"):
+                self.assertEqual(
+                    state.get_stage_run(run_id, label, stage).status,
+                    STATUS_SKIPPED,
+                )
+            for stage in ("wcs_grouping", "downsample"):
+                self.assertEqual(
+                    state.get_stage_run(run_id, label, stage).status,
+                    STATUS_PENDING,
+                )
+            self.assertTrue(state.deps_satisfied(run_id, label, "wcs_grouping"))
+            self.assertTrue(state.deps_satisfied(run_id, label, "downsample"))
+
+    def test_force_rerun_promotes_active_stages_when_prereqs_skipped(self):
+        target = Target(20, 3, 3, 210.219333, 81.846589, "2020ut")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path,
+                [target],
+                active_stages=["wcs_grouping", "downsample"],
+                force_rerun=True,
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "mapping", "ps1_download", "ps1_process"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            promoted = state.promote_stages(run_id)
+            self.assertGreaterEqual(promoted, 1)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "wcs_grouping").status,
+                STATUS_READY,
+            )
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "downsample").status,
+                STATUS_PENDING,
+            )
+
+            state.update_stage_status(run_id, label, "wcs_grouping", STATUS_SUCCESS, exit_code=0)
+            state.promote_stages(run_id)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "downsample").status,
+                STATUS_READY,
+            )
+
 
 def _minimal_run_setup(
     tmp_path: Path,
@@ -290,6 +366,7 @@ def _minimal_run_setup(
     *,
     active_stages: list[str],
     run_id: str = "run_a",
+    force_rerun: bool = False,
 ):
     """Create run directory, state DB, and RunContext for scheduler tests."""
     runs_root = tmp_path / "runs"
@@ -324,6 +401,7 @@ def _minimal_run_setup(
         str(runs_root),
         targets,
         active_stages,
+        force_rerun=force_rerun,
     )
     from syndiff_pipeline.template_runner.run_context import resolve_run_context
 
