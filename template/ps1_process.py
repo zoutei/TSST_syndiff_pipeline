@@ -299,7 +299,10 @@ def expected_convolved_skycells(
     for projection in projections:
         _, task_list = create_master_task_list(df, projection)
         for skycell_id, _projection, _row_id in task_list:
-            skycells.add(skycell_id)
+            # ``skycell_id`` is a ``(name, index)`` tuple; the stored Zarr arrays
+            # are keyed by the name alone (e.g. ``skycell.1921.020_data``).
+            name = skycell_id[0] if isinstance(skycell_id, (tuple, list)) else skycell_id
+            skycells.add(name)
     return sorted(skycells)
 
 
