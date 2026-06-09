@@ -77,6 +77,16 @@ RUN_SUCCESS = "success"
 RUN_FAILED = "failed"
 RUN_CANCELED = "canceled"
 ACTIVE_RUN_STATUSES = frozenset({RUN_RUNNING, RUN_STALLED})
+TERMINAL_RUN_STATUSES = frozenset({RUN_SUCCESS, RUN_FAILED, RUN_CANCELED})
+
+
+def derive_run_final_status(counts: Dict[str, int]) -> str:
+    """Map terminal stage counts to a run-level outcome."""
+    if counts.get(STATUS_CANCELED, 0) > 0:
+        return RUN_CANCELED
+    if counts.get(STATUS_FAILED, 0) > 0:
+        return RUN_FAILED
+    return RUN_SUCCESS
 
 # Command kinds (CLI -> daemon intents).
 CMD_CANCEL = "cancel"

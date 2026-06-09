@@ -38,13 +38,17 @@ from syndiff_pipeline.template_runner.stage_params import (
 )
 from syndiff_pipeline.template_runner.state import (
     PipelineState,
+    RUN_CANCELED,
+    RUN_SUCCESS,
     STATUS_CANCELED,
     STATUS_EXTERNAL,
+    STATUS_FAILED,
     STATUS_PENDING,
     STATUS_READY,
     STATUS_RUNNING,
     STATUS_SKIPPED,
     STATUS_SUCCESS,
+    derive_run_final_status,
 )
 from syndiff_pipeline.template_runner.targets import Target
 from syndiff_pipeline.template_runner.verify import (
@@ -857,6 +861,45 @@ class TestStopDaemon(unittest.TestCase):
             self.assertFalse(result.stopped)
             self.assertTrue(result.force_killed)
             self.assertTrue(pid_path.is_file())
+
+
+class TestRunFinalStatus(unittest.TestCase):
+    def test_derive_run_final_status_canceled_beats_success(self):
+        counts = {STATUS_SKIPPED: 1, STATUS_CANCELED: 5}
+        self.assertEqual(derive_run_final_status(counts), RUN_CANCELED)
+
+    def test_derive_run_final_status_failed_without_cancel(self):
+        from syndiff_pipeline.template_runner.state import RUN_FAILED
+
+        counts = {STATUS_SUCCESS: 2, STATUS_FAILED: 1}
+        self.assertEqual(derive_run_final_status(counts), RUN_FAILED)
+
+    def test_derive_run_final_status_all_success_or_skipped(self):
+        counts = {STATUS_SUCCESS: 3, STATUS_SKIPPED: 2}
+        self.assertEqual(derive_run_final_status(counts), RUN_SUCCESS)
+
+    def test_tick_run_does_not_mark_canceled_run_success(self):
+        target = Target(20, 3, 3, 221.33, 38.73, "2020ghq")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path,
+                [target],
+                active_stages=["tess_ffi_download", "wcs_grouping", "mapping"],
+            )
+            label = target.label()
+            state.update_stage_status(
+                run_id, label, "tess_ffi_download", STATUS_SKIPPED, exit_code=0
+            )
+            state.update_stage_status(run_id, label, "wcs_grouping", STATUS_RUNNING)
+            state.apply_cancel_run(run_id)
+            self.assertEqual((state.get_run(run_id) or {}).get("status"), RUN_CANCELED)
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                return_value={},
+            ):
+                _tick_run(state, run_id, ctx)
+            self.assertEqual((state.get_run(run_id) or {}).get("status"), RUN_CANCELED)
 
 
 class TestRetryAfterCancel(unittest.TestCase):
