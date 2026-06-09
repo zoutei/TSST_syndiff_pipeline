@@ -563,10 +563,17 @@ def _downsample_expected_basenames(resolved: ResolvedTargetConfig) -> tuple[list
     base = Path(ds.output_base or resolved.template_output_base)
     basenames = [
         f"syndiff_template_s{t.sector:04d}_{t.camera}_{t.ccd}{roi_part}{os_part}"
-        f"_dx{float(dx):.3f}_dy{float(dy):.3f}.fits"
+        f"_dx{float(dx):.3f}_dy{float(dy):.3f}.fits.gz"
         for dx, dy in offsets
     ]
     return basenames, base
+
+
+def _downsample_fits_filename_candidates(basename: str) -> list[str]:
+    """Canonical ``.fits.gz`` basename plus legacy uncompressed ``.fits``."""
+    if basename.endswith(".fits.gz"):
+        return [basename, basename[:-3]]
+    return [basename]
 
 
 def _find_downsample_fits(base: Path, t, basename: str) -> str | None:
@@ -577,9 +584,12 @@ def _find_downsample_fits(base: Path, t, basename: str) -> str | None:
     nonzero, so we glob across matching dirs and match on the authoritative
     filename rather than reconstructing the exact directory name.
     """
-    pattern = f"sector{t.sector:04d}_camera{t.camera}_ccd{t.ccd}*/{basename}"
-    matches = sorted(base.glob(pattern))
-    return str(matches[0]) if matches else None
+    for bn in _downsample_fits_filename_candidates(basename):
+        pattern = f"sector{t.sector:04d}_camera{t.camera}_ccd{t.ccd}*/{bn}"
+        matches = sorted(base.glob(pattern))
+        if matches:
+            return str(matches[0])
+    return None
 
 
 def expected_downsample_fits_paths(resolved: ResolvedTargetConfig) -> list[Path]:

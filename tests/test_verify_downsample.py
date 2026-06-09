@@ -72,7 +72,7 @@ def _write_cluster_job(handoff_dir: Path, offsets: list[tuple[float, float]]) ->
 
 
 def _offset_fits_name(dx: float, dy: float) -> str:
-    return f"syndiff_template_s0022_3_3_dx{dx:.3f}_dy{dy:.3f}.fits"
+    return f"syndiff_template_s0022_3_3_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
 
 
 def _out_dir(resolved: ResolvedTargetConfig) -> Path:
@@ -127,6 +127,24 @@ class TestVerifyDownsampleSingleOffset(unittest.TestCase):
 
             # Only the [0, 0] offset FITS is required for single_offset.
             (out_dir / _offset_fits_name(0.0, 0.0)).write_bytes(b"fits")
+            result = verify_downsample(resolved)
+            self.assertTrue(result.ok)
+            self.assertIn("All 1 offset FITS present", result.message)
+
+
+class TestVerifyDownsampleLegacyFits(unittest.TestCase):
+    def test_uncompressed_fits_still_verifies(self):
+        offsets = [(0.0, 0.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=False)
+            _write_cluster_job(Path(resolved.handoff_dir), offsets)
+            out_dir = _out_dir(resolved)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            legacy_name = "syndiff_template_s0022_3_3_dx0.000_dy0.000.fits"
+            (out_dir / legacy_name).write_bytes(b"fits")
+
             result = verify_downsample(resolved)
             self.assertTrue(result.ok)
             self.assertIn("All 1 offset FITS present", result.message)

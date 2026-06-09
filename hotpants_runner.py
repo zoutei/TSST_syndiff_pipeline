@@ -872,7 +872,7 @@ _SYNDIFF_TEMPLATE_RE = re.compile(
     r"^syndiff_template_s(?P<sector>\d+)_(?P<camera>\d+)_(?P<ccd>\d+)"
     r"(?P<roi>_x(?P<x0>\d+)-(?P<x1>\d+)_y(?P<y0>\d+)-(?P<y1>\d+))?"
     r"(?:_os\d+)?"
-    r"_dx(?P<dx>[+-]?\d*\.?\d+)_dy(?P<dy>[+-]?\d*\.?\d+)\.fits$",
+    r"_dx(?P<dx>[+-]?\d*\.?\d+)_dy(?P<dy>[+-]?\d*\.?\d+)\.fits(?:\.gz)?$",
     re.IGNORECASE,
 )
 
@@ -990,7 +990,8 @@ def verify_syndiff_templates(
 
     parsed_files: list[ParsedSyndiffTemplate] = []
     for name in sorted(os.listdir(root)):
-        if not name.lower().endswith(".fits"):
+        lower = name.lower()
+        if not (lower.endswith(".fits.gz") or lower.endswith(".fits")):
             continue
         full = root / name
         if not full.is_file():
