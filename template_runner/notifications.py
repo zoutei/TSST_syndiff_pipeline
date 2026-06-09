@@ -10,7 +10,7 @@ import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 import yaml
 
@@ -33,6 +33,7 @@ _WEBHOOK_TIMEOUT_S = 5.0
 
 @dataclass(frozen=True)
 class NotificationEvents:
+    run_started: bool = True
     run_completed: bool = True
     run_failed: bool = True
     run_canceled: bool = True
@@ -46,16 +47,24 @@ class NotificationEvents:
 
 
 @dataclass(frozen=True)
+class DiscordBotConfig:
+    enabled: bool = False
+    channel_id: str = ""
+
+
+@dataclass(frozen=True)
 class NotificationConfig:
     enabled: bool = False
     secrets_file: str = "secrets.yaml"
     events: NotificationEvents = field(default_factory=NotificationEvents)
+    bot: DiscordBotConfig = field(default_factory=DiscordBotConfig)
 
 
 def parse_notification_config(raw: dict | None) -> NotificationConfig:
     raw = raw or {}
     events_raw = raw.get("events") or {}
     events = NotificationEvents(
+        run_started=bool(events_raw.get("run_started", True)),
         run_completed=bool(events_raw.get("run_completed", True)),
         run_failed=bool(events_raw.get("run_failed", True)),
         run_canceled=bool(events_raw.get("run_canceled", True)),
@@ -67,26 +76,45 @@ def parse_notification_config(raw: dict | None) -> NotificationConfig:
         stage_died=bool(events_raw.get("stage_died", True)),
         daemon_unhealthy=bool(events_raw.get("daemon_unhealthy", True)),
     )
+    bot_raw = raw.get("bot") or {}
+    bot = DiscordBotConfig(
+        enabled=bool(bot_raw.get("enabled", False)),
+        channel_id=str(bot_raw.get("channel_id", "")).strip(),
+    )
     return NotificationConfig(
         enabled=bool(raw.get("enabled", False)),
         secrets_file=str(raw.get("secrets_file", "secrets.yaml")),
         events=events,
+        bot=bot,
     )
 
 
-def load_webhook_url(config_path: str | Path, secrets_file: str) -> str | None:
+def _load_secrets(config_path: str | Path, secrets_file: str) -> dict:
     path = Path(config_path).expanduser().resolve()
     secrets_path = path.parent / secrets_file
-    if secrets_path.is_file():
-        try:
-            with secrets_path.open(encoding="utf-8") as fh:
-                raw = yaml.safe_load(fh) or {}
-            file_url = str(raw.get("discord_webhook_url", "")).strip()
-            if file_url:
-                return file_url
-        except OSError:
-            log.warning("Failed to read secrets file %s", secrets_path, exc_info=True)
-    return None
+    if not secrets_path.is_file():
+        return {}
+    try:
+        with secrets_path.open(encoding="utf-8") as fh:
+            return yaml.safe_load(fh) or {}
+    except OSError:
+        log.warning("Failed to read secrets file %s", secrets_path, exc_info=True)
+        return {}
+
+
+def load_webhook_url(config_path: str | Path, secrets_file: str) -> str | None:
+    file_url = str(_load_secrets(config_path, secrets_file).get("discord_webhook_url", "")).strip()
+    return file_url or None
+
+
+def load_bot_token(config_path: str | Path, secrets_file: str) -> str | None:
+    token = str(_load_secrets(config_path, secrets_file).get("discord_bot_token", "")).strip()
+    return token or None
+
+
+def load_channel_id(config_path: str | Path, secrets_file: str) -> str | None:
+    channel_id = str(_load_secrets(config_path, secrets_file).get("discord_channel_id", "")).strip()
+    return channel_id or None
 
 
 def resolve_webhook_url(
@@ -103,6 +131,41 @@ def resolve_webhook_url(
             return url
     env_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
     return env_url or None
+
+
+def resolve_bot_token(
+    *,
+    config_path: str | Path,
+    secrets_file: str,
+    source_config_path: str | Path | None = None,
+) -> str | None:
+    for candidate in (config_path, source_config_path):
+        if not candidate:
+            continue
+        token = load_bot_token(candidate, secrets_file)
+        if token:
+            return token
+    env_token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+    return env_token or None
+
+
+def resolve_channel_id(
+    *,
+    config_path: str | Path,
+    secrets_file: str,
+    config_channel_id: str = "",
+    source_config_path: str | Path | None = None,
+) -> str | None:
+    if config_channel_id.strip():
+        return config_channel_id.strip()
+    for candidate in (config_path, source_config_path):
+        if not candidate:
+            continue
+        channel_id = load_channel_id(candidate, secrets_file)
+        if channel_id:
+            return channel_id
+    env_channel = os.environ.get("DISCORD_CHANNEL_ID", "").strip()
+    return env_channel or None
 
 
 def post_discord_webhook(url: str, content: str) -> None:
@@ -170,6 +233,26 @@ class Notifier:
             post_discord_webhook(url, content)
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             log.warning("Discord notification failed for %s: %s", event_key, exc)
+
+    def notify_run_started(
+        self,
+        run_id: str,
+        *,
+        run_dir: str | Path,
+        target_labels: list[str],
+        stages: list[str],
+        force_rerun: bool = False,
+    ) -> None:
+        if not self._cfg.events.run_started:
+            return
+        body = format_run_started_message(
+            run_id,
+            run_dir=run_dir,
+            target_labels=target_labels,
+            stages=stages,
+            force_rerun=force_rerun,
+        )
+        self._send(run_id, "run:started", body)
 
     def notify_run_completed(
         self,
@@ -271,6 +354,95 @@ class Notifier:
         self._send("", f"daemon:unhealthy:{_utc_header()}", header)
 
 
+def format_run_started_message(
+    run_id: str,
+    *,
+    run_dir: str | Path,
+    target_labels: Sequence[str],
+    stages: Sequence[str],
+    force_rerun: bool = False,
+) -> str:
+    """Short submit-time announcement (not progress/status grid)."""
+    enabled_count = len(target_labels)
+    preview = ", ".join(target_labels[:5])
+    if len(target_labels) > 5:
+        preview += f", … (+{len(target_labels) - 5} more)"
+    stage_text = ", ".join(stages)
+    lines = [
+        f"[{run_id}] run_started ({_utc_header()})",
+        f"targets: {enabled_count} ({preview})" if preview else f"targets: {enabled_count}",
+        f"stages: {stage_text}",
+    ]
+    if force_rerun:
+        lines.append("force_rerun: true")
+    run_path = Path(run_dir).expanduser().resolve()
+    lines.extend(
+        [
+            f"run_dir: {run_path}",
+            "",
+            "Reply in Discord for live progress/status, or:",
+            f"  syndiff-template progress --run-dir {run_path}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def resolve_run_ids_for_status_request(
+    state: PipelineState,
+    message_text: str,
+    *,
+    limit: int = 3,
+) -> list[str]:
+    """Pick run_id(s) to report for an on-demand Discord status request."""
+    text = message_text.strip()
+    known = {row["run_id"] for row in state.list_runs(200)}
+    if text:
+        for token in text.replace(",", " ").split():
+            cleaned = token.strip("`\"'")
+            if cleaned in known:
+                return [cleaned]
+    active = state.active_runs()
+    if active:
+        return [row["run_id"] for row in active[:limit]]
+    recent = state.list_runs(1)
+    if recent:
+        return [recent[0]["run_id"]]
+    return []
+
+
+def format_status_reply_message(
+    state: PipelineState,
+    run_ids: Sequence[str],
+    runs_root: str,
+    *,
+    state_db_path: str | None = None,
+) -> str:
+    """On-demand progress + status grid (same shape as event notifications)."""
+    if not run_ids:
+        return "No pipeline runs found."
+    chunks: list[str] = []
+    for run_id in run_ids:
+        run = state.get_run(run_id)
+        if run is None:
+            chunks.append(f"Unknown run_id: {run_id}")
+            continue
+        root = run.get("runs_root") or runs_root
+        header = f"[{run_id}] status ({_utc_header()})"
+        chunks.append(
+            format_run_report(
+                state,
+                run_id,
+                root,
+                state_db_path=state_db_path,
+                header=header,
+            )
+        )
+    text = "\n\n".join(chunks)
+    if len(text) > _DISCORD_MAX_CONTENT:
+        return text[: _DISCORD_MAX_CONTENT - 20] + "\n… (truncated)"
+    return text
+
+
 def format_preview_message(
     state: PipelineState,
     run_id: str,
@@ -323,6 +495,34 @@ def send_preview_notification(
     )
     post_discord_webhook(url, message)
     return message
+
+
+def send_run_started_notification(
+    state: PipelineState,
+    cfg: NotificationConfig,
+    *,
+    config_path: str | Path,
+    run_id: str,
+    run_dir: str | Path,
+    target_labels: list[str],
+    stages: list[str],
+    state_db_path: str,
+    force_rerun: bool = False,
+) -> None:
+    """Post run_started via webhook when notifications are enabled."""
+    notifier = Notifier(
+        state,
+        cfg,
+        config_path=config_path,
+        state_db_path=state_db_path,
+    )
+    notifier.notify_run_started(
+        run_id,
+        run_dir=run_dir,
+        target_labels=target_labels,
+        stages=stages,
+        force_rerun=force_rerun,
+    )
 
 
 def notifier_for_context(state: PipelineState, ctx) -> Notifier | None:

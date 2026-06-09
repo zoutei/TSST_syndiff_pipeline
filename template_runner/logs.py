@@ -142,11 +142,20 @@ def daemon_heartbeat_file(state_db_path: str | Path) -> Path:
     return Path(tempfile.gettempdir()) / "syndiff-daemon" / f"{key}.heartbeat"
 
 
+def discord_bot_pid_path(state_db_path: str | Path) -> Path:
+    return Path(state_db_path).expanduser().resolve().parent / "discord_bot.pid"
+
+
+def discord_bot_log_path(state_db_path: str | Path) -> Path:
+    return Path(state_db_path).expanduser().resolve().parent / "discord_bot.log"
+
+
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
     return run_dir(cfg_runs_root, run_id) / "summary.csv"
 
 
 def summary_json_path(cfg_runs_root: str, run_id: str) -> Path:
+    return run_dir(cfg_runs_root, run_id) / "summary.json"
     return run_dir(cfg_runs_root, run_id) / "summary.json"
 
 

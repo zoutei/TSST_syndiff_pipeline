@@ -1,0 +1,192 @@
+"""Discord bot process lifecycle (started/stopped with the supervisor daemon)."""
+
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+
+from syndiff_pipeline.template_runner import daemon, logs
+from syndiff_pipeline.template_runner.notifications import resolve_bot_token, resolve_channel_id
+from syndiff_pipeline.template_runner.runner_config import load_runner_config
+
+log = logging.getLogger(__name__)
+
+DEFAULT_START_WAIT_S = 5.0
+
+
+@dataclass(frozen=True)
+class EnsureDiscordBotResult:
+    enabled: bool
+    spawned: bool
+    pid: int | None
+    skipped_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class DiscordBotStatus:
+    enabled: bool
+    alive: bool
+    pid: int | None
+    skipped_reason: str | None = None
+
+
+def _bot_configured(config_path: Path, cfg) -> tuple[bool, str | None]:
+    if not cfg.notifications.bot.enabled:
+        return False, "disabled"
+    notif = cfg.notifications
+    if not resolve_bot_token(config_path=config_path, secrets_file=notif.secrets_file):
+        return False, "no bot token configured"
+    if not resolve_channel_id(
+        config_path=config_path,
+        secrets_file=notif.secrets_file,
+        config_channel_id=notif.bot.channel_id,
+    ):
+        return False, "no channel id configured"
+    try:
+        import discord  # noqa: F401
+    except ImportError:
+        return False, "discord.py not installed"
+    return True, None
+
+
+def discord_bot_is_alive(state_db_path: str | Path) -> bool:
+    pid = daemon.read_pid(logs.discord_bot_pid_path(state_db_path))
+    return bool(pid and daemon.is_process_alive(pid))
+
+
+def discord_bot_status(config_path: str | Path) -> DiscordBotStatus:
+    path = Path(config_path).expanduser().resolve()
+    cfg = load_runner_config(path)
+    configured, reason = _bot_configured(path, cfg)
+    if not configured:
+        return DiscordBotStatus(
+            enabled=cfg.notifications.bot.enabled,
+            alive=False,
+            pid=None,
+            skipped_reason=reason,
+        )
+    pid = daemon.read_pid(logs.discord_bot_pid_path(cfg.state_db_path))
+    alive = bool(pid and daemon.is_process_alive(pid))
+    return DiscordBotStatus(enabled=True, alive=alive, pid=pid if alive else None)
+
+
+def spawn_detached_discord_bot(
+    config_path: str | Path,
+    state_db_path: str | Path,
+    bot_log: str | Path,
+) -> int:
+    cmd = [
+        sys.executable,
+        "-m",
+        "syndiff_pipeline.template_runner.discord_bot",
+        "--config",
+        str(config_path),
+        "--state-db",
+        str(state_db_path),
+        "--detached",
+    ]
+    log_path = Path(bot_log)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = log_path.open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+    log_fh.close()
+    return proc.pid
+
+
+def wait_for_discord_bot(
+    state_db_path: str | Path,
+    *,
+    timeout_s: float = DEFAULT_START_WAIT_S,
+) -> bool:
+    deadline = time.monotonic() + timeout_s
+    pid_path = logs.discord_bot_pid_path(state_db_path)
+    while time.monotonic() < deadline:
+        pid = daemon.read_pid(pid_path)
+        if pid and daemon.is_process_alive(pid):
+            return True
+        time.sleep(0.2)
+    return discord_bot_is_alive(state_db_path)
+
+
+def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResult:
+    """Start detached Discord bot when enabled and configured."""
+    path = Path(config_path).expanduser().resolve()
+    cfg = load_runner_config(path)
+    if not cfg.notifications.bot.enabled:
+        return EnsureDiscordBotResult(enabled=False, spawned=False, pid=None)
+
+    configured, reason = _bot_configured(path, cfg)
+    if not configured:
+        log.warning("Discord bot not started: %s", reason)
+        return EnsureDiscordBotResult(
+            enabled=True,
+            spawned=False,
+            pid=None,
+            skipped_reason=reason,
+        )
+
+    state_db_path = cfg.state_db_path
+    pid_path = logs.discord_bot_pid_path(state_db_path)
+    pid = daemon.read_pid(pid_path)
+    if pid and daemon.is_process_alive(pid):
+        return EnsureDiscordBotResult(enabled=True, spawned=False, pid=pid)
+
+    if pid is not None:
+        daemon.remove_pid_file(pid_path)
+
+    bot_log = logs.discord_bot_log_path(state_db_path)
+    spawn_pid = spawn_detached_discord_bot(path, state_db_path, bot_log)
+    if wait_for_discord_bot(state_db_path):
+        owner_pid = daemon.read_pid(pid_path) or spawn_pid
+        spawned = owner_pid == spawn_pid
+        return EnsureDiscordBotResult(enabled=True, spawned=spawned, pid=owner_pid)
+
+    if discord_bot_is_alive(state_db_path):
+        owner_pid = daemon.read_pid(pid_path)
+        return EnsureDiscordBotResult(enabled=True, spawned=False, pid=owner_pid)
+
+    log.warning("Discord bot pid=%s failed to start (see %s)", spawn_pid, bot_log)
+    return EnsureDiscordBotResult(
+        enabled=True,
+        spawned=False,
+        pid=None,
+        skipped_reason=f"failed to start (see {bot_log})",
+    )
+
+
+def stop_discord_bot(
+    state_db_path: str | Path,
+    *,
+    term_timeout_s: float = 10.0,
+    kill_wait_s: float = 5.0,
+) -> bool:
+    """Stop the Discord bot if running. Returns True when no live bot remains."""
+    pid_path = logs.discord_bot_pid_path(state_db_path)
+    pid = daemon.read_pid(pid_path)
+    if not pid or not daemon.is_process_alive(pid):
+        if pid is not None:
+            daemon.remove_pid_file(pid_path)
+        return True
+
+    daemon.terminate_process_tree(pid, signal.SIGTERM)
+    if not daemon.wait_for_process_exit(pid, timeout_s=term_timeout_s):
+        daemon.terminate_process_tree(pid, signal.SIGKILL)
+        daemon.wait_for_process_exit(pid, timeout_s=kill_wait_s)
+
+    stopped = not daemon.is_process_alive(pid)
+    if stopped:
+        daemon.remove_pid_file(pid_path)
+    return stopped

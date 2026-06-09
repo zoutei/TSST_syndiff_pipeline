@@ -17,11 +17,18 @@ from syndiff_pipeline.template_runner.notifications import (
     NotificationEvents,
     Notifier,
     format_preview_message,
+    format_run_started_message,
+    format_status_reply_message,
+    load_bot_token,
     load_webhook_url,
     parse_notification_config,
     post_discord_webhook,
+    resolve_bot_token,
+    resolve_channel_id,
+    resolve_run_ids_for_status_request,
     resolve_webhook_url,
     send_preview_notification,
+    send_run_started_notification,
 )
 from syndiff_pipeline.template_runner.run_report import (
     format_progress_lines,
@@ -43,6 +50,8 @@ class TestNotificationConfig(unittest.TestCase):
         cfg = parse_notification_config({})
         self.assertFalse(cfg.enabled)
         self.assertTrue(cfg.events.stage_completed)
+        self.assertTrue(cfg.events.run_started)
+        self.assertFalse(cfg.bot.enabled)
 
     def test_load_webhook_from_secrets_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -70,6 +79,124 @@ class TestNotificationConfig(unittest.TestCase):
                 source_config_path=source / "config.yaml",
             )
             self.assertEqual(url, "https://example.com/from-source")
+
+    def test_resolve_bot_token_and_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "secrets.yaml").write_text(
+                "discord_bot_token: bot-token\n"
+                "discord_channel_id: '999'\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(load_bot_token(base / "config.yaml", "secrets.yaml"), "bot-token")
+            self.assertEqual(
+                resolve_channel_id(
+                    config_path=base / "config.yaml",
+                    secrets_file="secrets.yaml",
+                    config_channel_id="111",
+                ),
+                "111",
+            )
+            self.assertEqual(
+                resolve_channel_id(
+                    config_path=base / "config.yaml",
+                    secrets_file="secrets.yaml",
+                ),
+                "999",
+            )
+            self.assertEqual(
+                resolve_bot_token(
+                    config_path=base / "config.yaml",
+                    secrets_file="secrets.yaml",
+                ),
+                "bot-token",
+            )
+
+
+class TestRunStarted(unittest.TestCase):
+    def test_format_run_started_message(self):
+        text = format_run_started_message(
+            "batch_a",
+            run_dir="/runs/batch_a",
+            target_labels=["s0020_c3_k3_2020ghq", "s0021_c1_k2_sn"],
+            stages=["ps1_download", "downsample"],
+        )
+        self.assertIn("run_started", text)
+        self.assertIn("targets: 2", text)
+        self.assertIn("ps1_download", text)
+        self.assertNotIn("run_id=batch_a status=", text)
+
+    def test_send_run_started_uses_dedup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            db = base / "state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
+            cfg_path = base / "config.yaml"
+            (base / "secrets.yaml").write_text(
+                "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
+            )
+            cfg = NotificationConfig(enabled=True, secrets_file="secrets.yaml")
+            with mock.patch(
+                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+            ) as post:
+                send_run_started_notification(
+                    state,
+                    cfg,
+                    config_path=cfg_path,
+                    run_id="r1",
+                    run_dir=base / "runs" / "r1",
+                    target_labels=[target.label()],
+                    stages=["mapping"],
+                    state_db_path=str(db),
+                )
+                send_run_started_notification(
+                    state,
+                    cfg,
+                    config_path=cfg_path,
+                    run_id="r1",
+                    run_dir=base / "runs" / "r1",
+                    target_labels=[target.label()],
+                    stages=["mapping"],
+                    state_db_path=str(db),
+                )
+                self.assertEqual(post.call_count, 1)
+                self.assertIn("run_started", post.call_args[0][1])
+
+
+class TestStatusReply(unittest.TestCase):
+    def test_resolve_run_ids_prefers_token(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run("run_a", "/c", "/t", str(tmp), [target], ["mapping"])
+            state.create_run("run_b", "/c", "/t", str(tmp), [target], ["mapping"])
+            state.set_run_status("run_a", "running")
+            ids = resolve_run_ids_for_status_request(state, "please show run_b")
+            self.assertEqual(ids, ["run_b"])
+
+    def test_resolve_run_ids_active_runs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run("run_a", "/c", "/t", str(tmp), [target], ["mapping"])
+            state.set_run_status("run_a", "running")
+            ids = resolve_run_ids_for_status_request(state, "status?")
+            self.assertEqual(ids, ["run_a"])
+
+    def test_format_status_reply_includes_progress(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run("r1", "/c", "/t", str(tmp), [target], ["mapping"])
+            state.set_run_status("r1", "running")
+            text = format_status_reply_message(state, ["r1"], str(tmp), state_db_path=str(db))
+            self.assertIn("run_id=r1", text)
+            self.assertIn("status (", text)
 
 
 class TestRunReport(unittest.TestCase):
