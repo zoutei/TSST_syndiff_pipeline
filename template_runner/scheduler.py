@@ -88,6 +88,28 @@ _SHUTDOWN_VERIFY_DRAIN_S = 5.0
 # jobs from durable status files) can take over.
 _HEARTBEAT_FATAL_AFTER_S = 90.0
 
+# Re-check the Discord bot periodically so a crash between submits does not
+# leave on-demand status replies offline until the next job submission.
+_DISCORD_BOT_CHECK_INTERVAL_S = 60.0
+
+
+def _maybe_ensure_discord_bot(state_db_path: str) -> None:
+    from syndiff_pipeline.template_runner.discord_bot_control import (
+        ensure_discord_bot_for_state_db,
+    )
+
+    try:
+        result = ensure_discord_bot_for_state_db(state_db_path)
+    except Exception:
+        log.warning("Discord bot health check failed", exc_info=True)
+        return
+    if result is None:
+        return
+    if result.spawned and result.pid:
+        log.info("Restarted Discord bot pid=%s", result.pid)
+    elif result.skipped_reason:
+        log.warning("Discord bot not running: %s", result.skipped_reason)
+
 
 def _age_seconds(iso_ts: str | None) -> float:
     """Age in seconds of an ISO-8601 timestamp; +inf if missing/unparseable."""
@@ -1126,9 +1148,16 @@ def run_supervisor_daemon(state_db_path: str) -> int:
             daemon=True,
         )
         heartbeat_thread.start()
+        _maybe_ensure_discord_bot(state_db_path)
 
+        last_discord_bot_check = time.monotonic()
         try:
             while not _shutdown:
+                now = time.monotonic()
+                if now - last_discord_bot_check >= _DISCORD_BOT_CHECK_INTERVAL_S:
+                    last_discord_bot_check = now
+                    _maybe_ensure_discord_bot(state_db_path)
+
                 _apply_commands(state)
 
                 for run in state.list_active_runs():

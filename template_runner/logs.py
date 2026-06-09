@@ -150,6 +150,11 @@ def discord_bot_log_path(state_db_path: str | Path) -> Path:
     return Path(state_db_path).expanduser().resolve().parent / "discord_bot.log"
 
 
+def discord_bot_site_config_path(state_db_path: str | Path) -> Path:
+    """Persisted site config used to (re)start the Discord bot."""
+    return Path(state_db_path).expanduser().resolve().parent / "discord_bot_config.path"
+
+
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
     return run_dir(cfg_runs_root, run_id) / "summary.csv"
 

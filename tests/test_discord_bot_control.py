@@ -13,9 +13,11 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.template_runner.discord_bot_control import (
     EnsureDiscordBotResult,
+    ensure_discord_bot_for_state_db,
     ensure_discord_bot_running,
     stop_discord_bot,
 )
+from syndiff_pipeline.template_runner import logs
 
 
 class TestDiscordBotControl(unittest.TestCase):
@@ -66,6 +68,41 @@ class TestDiscordBotControl(unittest.TestCase):
             self.assertTrue(result.enabled)
             self.assertTrue(result.spawned)
             self.assertEqual(result.pid, 4242)
+
+    def test_records_site_config_and_restarts_from_state_db(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg_path = base / "config.yaml"
+            db = base / "state.sqlite"
+            cfg_path.write_text(
+                "data_root: /\nhandoff_root: /\nskycell_wcs_csv: /\n"
+                f"state_db_path: {db}\n"
+                "notifications:\n  enabled: true\n  bot:\n    enabled: true\n",
+                encoding="utf-8",
+            )
+            (base / "secrets.yaml").write_text(
+                "discord_bot_token: token\n"
+                "discord_channel_id: '123'\n",
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "syndiff_pipeline.template_runner.discord_bot_control.spawn_detached_discord_bot",
+                return_value=4242,
+            ), mock.patch(
+                "syndiff_pipeline.template_runner.discord_bot_control.wait_for_discord_bot",
+                return_value=True,
+            ), mock.patch(
+                "syndiff_pipeline.template_runner.discord_bot_control.discord_bot_is_alive",
+                side_effect=[False, True],
+            ), mock.patch(
+                "syndiff_pipeline.template_runner.discord_bot_control.daemon.read_pid",
+                return_value=4242,
+            ):
+                ensure_discord_bot_running(cfg_path)
+                result = ensure_discord_bot_for_state_db(db)
+            self.assertTrue(logs.discord_bot_site_config_path(db).is_file())
+            self.assertIsNotNone(result)
+            self.assertTrue(result.spawned)
 
     def test_stop_removes_stale_pid_file(self):
         with tempfile.TemporaryDirectory() as tmp:
