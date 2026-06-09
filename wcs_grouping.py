@@ -218,8 +218,9 @@ def build_wcs_table(ffi_paths: list, target_ra: float,
                     target_dec: float) -> pd.DataFrame:
     """
     For each FFI, build a WCS and compute the pixel position of the science
-    target.  The pixel drift (delta_x, delta_y) is measured relative to the
-    first valid frame.
+    target.  Initial ``delta_x``/``delta_y`` are measured relative to the first
+    valid frame; :func:`reanchor_wcs_drift_to_reference` re-bases them to the
+    chosen reference FFI before template grouping.
 
     Parameters
     ----------
@@ -529,11 +530,13 @@ def choose_reference_ffi_path(
     return first
 
 
-def _ref_ffi_btjd(wcs_table: pd.DataFrame, ref_ffi_path: Optional[str]) -> float:
-    """BTJD of the manifest row matching ``ref_ffi_path``, or NaN."""
-    if not ref_ffi_path or ref_ffi_path.strip() == "" or "btjd" not in wcs_table.columns:
-        return float("nan")
+def _row_index_for_path(wcs_table: pd.DataFrame, ref_ffi_path: str) -> Optional[int]:
+    """Return row index matching ``ref_ffi_path``, or ``None``."""
+    if not ref_ffi_path or not str(ref_ffi_path).strip():
+        return None
     path_col = "path" if "path" in wcs_table.columns else "filename"
+    if path_col not in wcs_table.columns:
+        return None
     try:
         ref_r = Path(ref_ffi_path).resolve()
     except Exception:
@@ -551,12 +554,112 @@ def _ref_ffi_btjd(wcs_table: pd.DataFrame, ref_ffi_path: Optional[str]) -> float
         except Exception:
             match = os.path.abspath(os.path.expanduser(ps)) == ref_abs
         if match:
-            t = wcs_table.iloc[i].get("btjd")
-            try:
-                return float(t)
-            except (TypeError, ValueError):
-                return float("nan")
-    return float("nan")
+            return i
+    return None
+
+
+def reanchor_wcs_drift_to_reference(
+    wcs_table: pd.DataFrame, ref_ffi_path: str
+) -> pd.DataFrame:
+    """
+    Re-base drifts to the SG-smoothed reference origin.
+
+    When Savitzky–Golay raw columns exist, subtract the reference row's
+    **smoothed** offsets from both the smoothed and raw columns. This keeps the
+    debug plot in one coordinate frame so the raw points show their residuals
+    around the SG-smoothed reference origin. Otherwise recompute
+    ``delta_x``/``delta_y`` from ``x_pix``/``y_pix`` relative to the reference
+    row.
+    """
+    idx = _row_index_for_path(wcs_table, ref_ffi_path)
+    if idx is None:
+        raise ValueError(f"Reference FFI not found in WCS table: {ref_ffi_path!r}")
+    ref_row = wcs_table.iloc[idx]
+    if not bool(ref_row.get("wcs_ok", False)):
+        raise ValueError(f"Reference FFI has invalid WCS: {ref_ffi_path!r}")
+
+    df = wcs_table.copy()
+    ok = df["wcs_ok"] & df["delta_x"].notna() & df["delta_y"].notna()
+    has_raw = {"delta_x_raw", "delta_y_raw"}.issubset(df.columns)
+
+    if has_raw:
+        ref_dx = float(ref_row["delta_x"])
+        ref_dy = float(ref_row["delta_y"])
+        if not all(np.isfinite(v) for v in (ref_dx, ref_dy)):
+            raise ValueError(
+                f"Reference FFI has non-finite drift values: {ref_ffi_path!r}"
+            )
+        df.loc[ok, "delta_x_raw"] = df.loc[ok, "delta_x_raw"].astype(float) - ref_dx
+        df.loc[ok, "delta_y_raw"] = df.loc[ok, "delta_y_raw"].astype(float) - ref_dy
+        df.loc[ok, "delta_x"] = df.loc[ok, "delta_x"].astype(float) - ref_dx
+        df.loc[ok, "delta_y"] = df.loc[ok, "delta_y"].astype(float) - ref_dy
+    else:
+        x_ref = float(ref_row["x_pix"])
+        y_ref = float(ref_row["y_pix"])
+        if not (np.isfinite(x_ref) and np.isfinite(y_ref)):
+            raise ValueError(
+                f"Reference FFI has non-finite target pixel position: {ref_ffi_path!r}"
+            )
+        pix_ok = ok & df["x_pix"].notna() & df["y_pix"].notna()
+        df.loc[pix_ok, "delta_x"] = df.loc[pix_ok, "x_pix"].astype(float) - x_ref
+        df.loc[pix_ok, "delta_y"] = df.loc[pix_ok, "y_pix"].astype(float) - y_ref
+
+    df.loc[~ok, "delta_x"] = np.nan
+    df.loc[~ok, "delta_y"] = np.nan
+    if has_raw:
+        df.loc[~ok, "delta_x_raw"] = np.nan
+        df.loc[~ok, "delta_y_raw"] = np.nan
+
+    log.info(
+        "WCS drift re-anchored to SG-smoothed reference FFI origin: %s",
+        ref_ffi_path,
+    )
+    return df
+
+
+def finalize_wcs_table_with_reference_anchor(
+    wcs_table: pd.DataFrame,
+    *,
+    offset_threshold: float,
+    ref_ffi_path: Optional[str] = None,
+    ref_earth_deg_min: float = 45.0,
+    ref_moon_deg_min: float = 25.0,
+    ref_max_smoothed_residual: float = 0.05,
+) -> tuple[pd.DataFrame, str]:
+    """
+    Pick (or accept) a reference FFI, re-anchor drifts to it, and assign
+    template groups.
+
+    Expects *wcs_table* to already have a Savitzky–Golay smooth (for reference
+    selection and grouping) and optional TESSVectors columns from
+    :func:`attach_tessvector_earth_moon_angles`.
+    """
+    if ref_ffi_path and os.path.exists(ref_ffi_path):
+        chosen_ref = ref_ffi_path
+    else:
+        chosen_ref = choose_reference_ffi_path(
+            wcs_table,
+            earth_deg_min=ref_earth_deg_min,
+            moon_deg_min=ref_moon_deg_min,
+            max_smoothed_residual=ref_max_smoothed_residual,
+        )
+    wcs_table = reanchor_wcs_drift_to_reference(wcs_table, chosen_ref)
+    wcs_table = assign_template_groups(wcs_table, offset_threshold)
+    return wcs_table, chosen_ref
+
+
+def _ref_ffi_btjd(wcs_table: pd.DataFrame, ref_ffi_path: Optional[str]) -> float:
+    """BTJD of the manifest row matching ``ref_ffi_path``, or NaN."""
+    if not ref_ffi_path or ref_ffi_path.strip() == "" or "btjd" not in wcs_table.columns:
+        return float("nan")
+    idx = _row_index_for_path(wcs_table, ref_ffi_path)
+    if idx is None:
+        return float("nan")
+    t = wcs_table.iloc[idx].get("btjd")
+    try:
+        return float(t)
+    except (TypeError, ValueError):
+        return float("nan")
 
 
 def summarize_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
@@ -711,14 +814,20 @@ def plot_wcs_drift_and_template_assignment(
     ref_ffi_path: Optional[str] = None,
     ref_earth_deg_min: float = 45.0,
     ref_moon_deg_min: float = 25.0,
+    sector: Optional[int] = None,
+    camera: Optional[int] = None,
+    ccd: Optional[int] = None,
+    target_name: Optional[str] = None,
 ) -> Optional[str]:
     """
     Four stacked panels: ``delta_x``, ``delta_y``, ``group_id``, and Earth/Moon
     camera angles (TESSVectors) vs time.
 
-    When ``delta_x_raw`` / ``delta_y_raw`` are present (after Savitzky–Golay smoothing),
-    the first two panels overlay **original** scatter points and a **smoothed** polyline
-    in time order. Optional ``ref_ffi_path`` draws a vertical reference line on all
+    ``delta_x``/``delta_y`` are expected to be reference-FFI-relative (see
+    :func:`reanchor_wcs_drift_to_reference`). When ``delta_x_raw`` /
+    ``delta_y_raw`` are present (after Savitzky–Golay smoothing), the first two
+    panels overlay **original** scatter points and a **smoothed** polyline in
+    time order. Optional ``ref_ffi_path`` draws a vertical reference line on all
     panels at that FFI's ``btjd``.
     """
     need = {"delta_x", "delta_y", "group_id"}
@@ -902,14 +1011,19 @@ def plot_wcs_drift_and_template_assignment(
         ax0.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
     ax3.set_xlabel(f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col)
-    sub = (
-        "; drift: original (hollow) vs Savitzky–Golay smoothed (line)"
-        if has_raw
-        else ""
-    )
-    fig.suptitle(
-        f"WCS drift, template groups, and Earth/Moon angles vs time{sub}"
-    )
+    if (
+        sector is not None
+        and camera is not None
+        and ccd is not None
+        and target_name
+    ):
+        title = (
+            f"Sector {sector}, Camera {camera}, CCD {ccd}, {target_name} — "
+            "WCS Drift, Template Groups"
+        )
+    else:
+        title = "WCS Drift, Template Groups"
+    fig.suptitle(title)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)) or ".", exist_ok=True)
     fig.savefig(output_path, dpi=150)

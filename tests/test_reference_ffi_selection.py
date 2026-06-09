@@ -18,6 +18,7 @@ from wcs_grouping import (
     attach_tessvector_earth_moon_angles,
     choose_reference_ffi_path,
     plot_wcs_drift_and_template_assignment,
+    reanchor_wcs_drift_to_reference,
 )
 
 
@@ -96,6 +97,53 @@ MidTime,Earth_Camera_Angle,Moon_Camera_Angle
             self.assertAlmostEqual(float(out["moon_deg"].iloc[0]), 30.0, places=5)
 
 
+class TestReanchorWcsDrift(unittest.TestCase):
+    def test_reanchor_sets_reference_row_to_zero(self):
+        df = pd.DataFrame(
+            {
+                "path": ["/ffi/a.fits", "/ffi/b.fits", "/ffi/c.fits"],
+                "wcs_ok": [True, True, True],
+                "x_pix": [100.0, 100.12, 100.25],
+                "y_pix": [200.0, 200.05, 200.02],
+                "delta_x": [0.0, 0.12, 0.25],
+                "delta_y": [0.0, 0.05, 0.02],
+                "delta_x_raw": [0.0, 0.12, 0.25],
+                "delta_y_raw": [0.0, 0.05, 0.02],
+                "btjd": [100.0, 101.0, 102.0],
+            }
+        )
+        out = reanchor_wcs_drift_to_reference(df, "/ffi/b.fits")
+        self.assertAlmostEqual(float(out.loc[1, "delta_x"]), 0.0, places=9)
+        self.assertAlmostEqual(float(out.loc[1, "delta_y"]), 0.0, places=9)
+        self.assertAlmostEqual(float(out.loc[0, "delta_x"]), -0.12, places=9)
+        self.assertAlmostEqual(float(out.loc[2, "delta_x"]), 0.13, places=9)
+        self.assertAlmostEqual(float(out.loc[1, "delta_x_raw"]), 0.0, places=9)
+        self.assertAlmostEqual(float(out.loc[1, "delta_y_raw"]), 0.0, places=9)
+        self.assertTrue({"delta_x_raw", "delta_y_raw"}.issubset(out.columns))
+
+    def test_reanchor_uses_smoothed_ref_offset_when_raw_differs(self):
+        df = pd.DataFrame(
+            {
+                "path": ["/ffi/a.fits", "/ffi/b.fits", "/ffi/c.fits"],
+                "wcs_ok": [True, True, True],
+                "x_pix": [100.0, 100.12, 100.25],
+                "y_pix": [200.0, 200.05, 200.02],
+                "delta_x": [0.0, 0.10, 0.22],
+                "delta_y": [0.0, 0.04, 0.01],
+                "delta_x_raw": [0.0, 0.12, 0.25],
+                "delta_y_raw": [0.0, 0.05, 0.02],
+                "btjd": [100.0, 101.0, 102.0],
+            }
+        )
+        out = reanchor_wcs_drift_to_reference(df, "/ffi/b.fits")
+        self.assertAlmostEqual(float(out.loc[1, "delta_x"]), 0.0, places=9)
+        self.assertAlmostEqual(float(out.loc[0, "delta_x"]), -0.10, places=9)
+        self.assertAlmostEqual(float(out.loc[2, "delta_x"]), 0.12, places=9)
+        self.assertAlmostEqual(float(out.loc[1, "delta_x_raw"]), 0.02, places=9)
+        self.assertAlmostEqual(float(out.loc[0, "delta_x_raw"]), -0.10, places=9)
+        self.assertAlmostEqual(float(out.loc[2, "delta_x_raw"]), 0.15, places=9)
+
+
 class TestDriftPlot(unittest.TestCase):
     def test_plot_writes_with_four_panels(self):
         df = pd.DataFrame(
@@ -120,6 +168,10 @@ class TestDriftPlot(unittest.TestCase):
                 ref_ffi_path="/b.fits",
                 ref_earth_deg_min=45.0,
                 ref_moon_deg_min=25.0,
+                sector=20,
+                camera=3,
+                ccd=3,
+                target_name="2020ut",
             )
             self.assertEqual(r, outp)
             self.assertTrue(os.path.isfile(outp))

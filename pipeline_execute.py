@@ -701,20 +701,19 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 camera=cfg.camera,
                 tessvectors_data_path=_norm_bkg_vector_path(wg.bkg_vector_path),
             )
-            wcs_table = wcs_grouping.assign_template_groups(
-                wcs_table, wg.offset_threshold
+            wcs_table, ref_ffi_path = wcs_grouping.finalize_wcs_table_with_reference_anchor(
+                wcs_table,
+                offset_threshold=wg.offset_threshold,
+                ref_ffi_path=(
+                    cfg.ref_ffi_path
+                    if cfg.ref_ffi_path and os.path.exists(cfg.ref_ffi_path)
+                    else None
+                ),
+                ref_earth_deg_min=cfg.ref_ffi_min_earth_deg,
+                ref_moon_deg_min=cfg.ref_ffi_min_moon_deg,
+                ref_max_smoothed_residual=cfg.ref_ffi_max_smoothed_residual,
             )
             save_frame_manifest(wcs_table, out, manifest_path)
-
-            if cfg.ref_ffi_path and os.path.exists(cfg.ref_ffi_path):
-                ref_ffi_path = cfg.ref_ffi_path
-            else:
-                ref_ffi_path = wcs_grouping.choose_reference_ffi_path(
-                    wcs_table,
-                    earth_deg_min=cfg.ref_ffi_min_earth_deg,
-                    moon_deg_min=cfg.ref_ffi_min_moon_deg,
-                    max_smoothed_residual=cfg.ref_ffi_max_smoothed_residual,
-                )
             log.info("  Reference FFI: %s", ref_ffi_path)
 
             with fits.open(ref_ffi_path, memmap=True) as hdul:
@@ -751,6 +750,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     ref_ffi_path=ref_ffi_path,
                     ref_earth_deg_min=cfg.ref_ffi_min_earth_deg,
                     ref_moon_deg_min=cfg.ref_ffi_min_moon_deg,
+                    sector=cfg.sector,
+                    camera=cfg.camera,
+                    ccd=cfg.ccd,
                 )
 
         elif kind == "shared_mask":

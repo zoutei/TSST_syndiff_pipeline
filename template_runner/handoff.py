@@ -68,16 +68,15 @@ def run_wcs_grouping(
         camera=t.camera,
         tessvectors_data_path=_norm_bkg_vector_path(wg.bkg_vector_path),
     )
-    wcs_table = wcs_grouping.assign_template_groups(wcs_table, wg.offset_threshold)
+    wcs_table, chosen_ref = wcs_grouping.finalize_wcs_table_with_reference_anchor(
+        wcs_table,
+        offset_threshold=wg.offset_threshold,
+        ref_ffi_path=ref_ffi_path,
+    )
+    log.info("Reference FFI: %s", chosen_ref)
 
     manifest_path = os.path.join(handoff_dir, "syndiff_ffi_frames.csv")
     wcs_table.to_csv(manifest_path, index=False)
-
-    if ref_ffi_path and os.path.exists(ref_ffi_path):
-        chosen_ref = ref_ffi_path
-    else:
-        chosen_ref = wcs_grouping.choose_reference_ffi_path(wcs_table)
-    log.info("Reference FFI: %s", chosen_ref)
 
     with fits.open(chosen_ref, memmap=True) as hdul:
         ref_header = hdul[1].header
@@ -108,5 +107,9 @@ def run_wcs_grouping(
         wcs_table,
         os.path.join(handoff_dir, wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME),
         ref_ffi_path=chosen_ref,
+        sector=t.sector,
+        camera=t.camera,
+        ccd=t.ccd,
+        target_name=t.target_name,
     )
     return out_path
