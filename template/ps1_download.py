@@ -60,12 +60,14 @@ import argparse
 import concurrent.futures
 import io
 import logging
+import queue
 import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
@@ -86,6 +88,10 @@ from syndiff_pipeline.template import csv_utils
 shutdown_requested = False
 active_executors = []
 active_dask_computations = []
+active_writers: list["ZarrWriter"] = []
+
+_WRITE_QUEUE_MAXSIZE = 4
+_WRITE_SENTINEL = object()
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +104,23 @@ def expected_array_names() -> list[str]:
     for band in _PS1_BANDS:
         names.extend([band, f"{band}_mask", f"{band}_wt"])
     return names
+
+
+@dataclass
+class ArrayWriteItem:
+    projection_id: str
+    skycell_name: str
+    array_name: str
+    band: str
+    data: np.ndarray
+    header: str
+
+
+@dataclass
+class _WriteBatch:
+    items: list[ArrayWriteItem]
+    done: threading.Event = field(default_factory=threading.Event)
+    written: bool = False
 
 
 class SkycellProgress:
@@ -224,6 +247,13 @@ def signal_handler(signum, frame):
             computation.cancel()
         except Exception as e:
             logging.warning(f"Error cancelling Dask computation: {e}")
+
+    for writer in active_writers:
+        try:
+            logging.info("Closing Zarr writer...")
+            writer.close(drain=False)
+        except Exception as e:
+            logging.warning(f"Error closing Zarr writer: {e}")
 
     logging.info("Graceful shutdown initiated. Exiting...")
     # 128+signal is the conventional exit code for signal termination (e.g. 143
@@ -389,33 +419,150 @@ def initialize_zarr_store(zarr_path: Path) -> zarr.Group:
     return root
 
 
-def store_data_in_zarr(root: zarr.Group, projection_id: str, skycell_name: str, band: str, data: np.ndarray, header: str, array_name: str, lock_file: Path) -> None:
-    """
-    Stores data for a single band/mask/weight in the zarr store.
-    Uses filelock for thread-safe operations.
-    """
-    chunks = (min(1024, data.shape[0]), min(1024, data.shape[1]))
-    compressor = {"name": "zstd", "configuration": {"level": 3}}
-    fill_value = 0 if "mask" in array_name else np.nan
+def _store_arrays_unlocked(
+    root: zarr.Group,
+    projection_id: str,
+    skycell_name: str,
+    items: list[ArrayWriteItem],
+) -> None:
+    """Write multiple arrays; caller must hold *lock_file*."""
+    if projection_id not in root:
+        root.create_group(projection_id)
+    if skycell_name not in root[projection_id]:
+        root[projection_id].create_group(skycell_name)
 
-    with FileLock(lock_file):
-        if projection_id not in root:
-            root.create_group(projection_id)
-        if skycell_name not in root[projection_id]:
-            root[projection_id].create_group(skycell_name)
-        if array_name in root[projection_id][skycell_name]:
-            del root[projection_id][skycell_name][array_name]
+    skycell_group = root[projection_id][skycell_name]
+    for item in items:
+        chunks = (min(1024, item.data.shape[0]), min(1024, item.data.shape[1]))
+        compressor = {"name": "zstd", "configuration": {"level": 3}}
+        fill_value = 0 if "mask" in item.array_name else np.nan
 
-        array = root[projection_id][skycell_name].create_array(
-            name=array_name,
-            data=data,
+        if item.array_name in skycell_group:
+            del skycell_group[item.array_name]
+
+        array = skycell_group.create_array(
+            name=item.array_name,
+            data=item.data,
             chunks=chunks,
             compressors=[compressor],
             fill_value=fill_value,
         )
-        array.attrs["header"] = header
+        array.attrs["header"] = item.header
 
+
+def store_skycell_batch(
+    root: zarr.Group,
+    projection_id: str,
+    skycell_name: str,
+    items: list[ArrayWriteItem],
+    lock_file: Path,
+) -> None:
+    """Persist all *items* for one skycell under a single file lock."""
+    if not items:
+        return
+
+    with FileLock(lock_file):
+        _store_arrays_unlocked(root, projection_id, skycell_name, items)
+
+    logging.info("Stored %d arrays for %s in zarr", len(items), skycell_name)
+
+
+def store_data_in_zarr(
+    root: zarr.Group,
+    projection_id: str,
+    skycell_name: str,
+    band: str,
+    data: np.ndarray,
+    header: str,
+    array_name: str,
+    lock_file: Path,
+) -> None:
+    """Stores data for a single band/mask/weight in the zarr store."""
+    store_skycell_batch(
+        root,
+        projection_id,
+        skycell_name,
+        [
+            ArrayWriteItem(
+                projection_id=projection_id,
+                skycell_name=skycell_name,
+                array_name=array_name,
+                band=band,
+                data=data,
+                header=header,
+            )
+        ],
+        lock_file,
+    )
     logging.info("Stored %s %s in zarr", skycell_name, array_name)
+
+
+class ZarrWriter:
+    """Background consumer that serializes batched Zarr writes under one lock."""
+
+    def __init__(self, root: zarr.Group, lock_file: Path) -> None:
+        self._root = root
+        self._lock_file = lock_file
+        self._queue: queue.Queue[_WriteBatch | object] = queue.Queue(maxsize=_WRITE_QUEUE_MAXSIZE)
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="ZarrWriter", daemon=True)
+        self._thread.start()
+
+    def submit_batch(self, items: list[ArrayWriteItem]) -> bool:
+        """Enqueue a skycell batch and block until the writer persists it."""
+        if not items:
+            return True
+        if shutdown_requested or self._closed:
+            return False
+
+        batch = _WriteBatch(items=items)
+        self._queue.put(batch)
+        batch.done.wait()
+        return batch.written
+
+    def close(self, drain: bool = True) -> None:
+        if self._closed:
+            return
+        self._closed = True
+
+        if not drain:
+            while True:
+                try:
+                    pending = self._queue.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is not _WRITE_SENTINEL:
+                    pending.written = False
+                    pending.done.set()
+
+        self._queue.put(_WRITE_SENTINEL)
+        self._thread.join()
+
+    def _run(self) -> None:
+        while True:
+            batch = self._queue.get()
+            if batch is _WRITE_SENTINEL:
+                break
+
+            first = batch.items[0]
+            try:
+                store_skycell_batch(
+                    self._root,
+                    first.projection_id,
+                    first.skycell_name,
+                    batch.items,
+                    self._lock_file,
+                )
+                batch.written = True
+            except Exception as exc:
+                logging.error(
+                    "Failed to write batch for %s: %s",
+                    first.skycell_name,
+                    exc,
+                )
+                batch.written = False
+            finally:
+                batch.done.set()
 
 
 def is_array_complete(root: zarr.Group, projection_id: str, skycell_name: str, array_name: str, lock_file: Path, overwrite: bool = False) -> bool:
@@ -486,6 +633,7 @@ def download_and_store_skycell(
     root: zarr.Group,
     skycell_name: str,
     lock_file: Path,
+    writer: ZarrWriter,
     use_local_files: bool = False,
     local_data_path: Optional[Path] = None,
     overwrite: bool = False,
@@ -493,7 +641,7 @@ def download_and_store_skycell(
 ) -> None:
     """
     Manages the download and storage of a single skycell into the
-    single Zarr store. Uses filelock for thread-safe operations.
+    single Zarr store. Downloads run in parallel; writes go through *writer*.
     """
     projection_id = get_projection_from_name(skycell_name)
     if not projection_id:
@@ -534,6 +682,7 @@ def download_and_store_skycell(
             complete_count,
             len(expected_arrays),
         )
+
     skycell_name_parts = skycell_name.split(".")
     pending_tasks: list[tuple[str, str, str]] = []
     for band in bands:
@@ -545,60 +694,73 @@ def download_and_store_skycell(
             if not array_status.get(array_name, False):
                 pending_tasks.append((band, data_type, array_name))
 
-    for band in bands:
-        band_tasks = [(b, dt, an) for b, dt, an in pending_tasks if b == band]
-        if not band_tasks:
-            continue
-        if shutdown_requested:
-            logging.info("Shutdown requested, stopping skycell processing")
-            return
+    if not pending_tasks:
+        if progress is not None:
+            finished, total = progress.mark_finished()
+            logging.info("Finished skycell %s (%d/%d)", skycell_name, finished, total)
+        return
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(3, len(band_tasks))) as executor:
-            active_executors.append(executor)
+    if shutdown_requested:
+        logging.info("Shutdown requested, stopping skycell processing")
+        return
 
-            try:
-                futures = {
-                    executor.submit(
-                        process_skycell_band,
-                        root,
-                        skycell_name,
-                        skycell_name_parts,
+    def _download_one(task_band: str, data_type: str, array_name: str) -> Optional[ArrayWriteItem]:
+        result = download_and_process_band(
+            skycell_name_parts,
+            task_band,
+            data_type,
+            use_local_files,
+            local_data_path,
+            skycell_name=skycell_name,
+        )
+        if result is None:
+            return None
+        return ArrayWriteItem(
+            projection_id=projection_id,
+            skycell_name=skycell_name,
+            array_name=array_name,
+            band=task_band,
+            data=result["data"],
+            header=result["header"],
+        )
+
+    items: list[ArrayWriteItem] = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(12, len(pending_tasks))) as executor:
+        active_executors.append(executor)
+        try:
+            futures = {
+                executor.submit(_download_one, task_band, data_type, array_name): (task_band, data_type)
+                for task_band, data_type, array_name in pending_tasks
+            }
+            for future in concurrent.futures.as_completed(futures):
+                task_band, data_type = futures[future]
+                try:
+                    item = future.result()
+                except Exception as exc:
+                    logging.warning(
+                        "Failed to process %s %s for %s: %s",
                         task_band,
                         data_type,
-                        projection_id,
-                        lock_file,
-                        use_local_files,
-                        local_data_path,
-                        overwrite,
-                        False,
-                    ): (task_band, data_type)
-                    for task_band, data_type, _array_name in band_tasks
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    task_band, data_type = futures[future]
-                    try:
-                        success = future.result()
-                    except Exception as exc:
-                        logging.warning(
-                            "Failed to process %s %s for %s: %s",
-                            task_band,
-                            data_type,
-                            skycell_name,
-                            exc,
-                        )
-                        continue
-                    if not success:
-                        logging.warning(
-                            "Failed to process %s %s for %s",
-                            task_band,
-                            data_type,
-                            skycell_name,
-                        )
+                        skycell_name,
+                        exc,
+                    )
+                    continue
+                if item is None:
+                    logging.warning(
+                        "Failed to process %s %s for %s",
+                        task_band,
+                        data_type,
+                        skycell_name,
+                    )
+                else:
+                    items.append(item)
+        finally:
+            if executor in active_executors:
+                active_executors.remove(executor)
 
-            finally:
-                # Remove executor from active list
-                if executor in active_executors:
-                    active_executors.remove(executor)
+    if items:
+        if not writer.submit_batch(items):
+            logging.warning("Batch write skipped for %s (shutdown)", skycell_name)
 
     if progress is not None:
         finished, total = progress.mark_finished()
@@ -610,6 +772,7 @@ def _process_one_skycell(
     root: zarr.Group,
     lock_file: Path,
     progress: SkycellProgress,
+    writer: ZarrWriter,
     use_local_files: bool,
     local_data_path: Optional[Path],
     overwrite: bool,
@@ -621,6 +784,7 @@ def _process_one_skycell(
         root,
         skycell_name,
         lock_file,
+        writer,
         use_local_files=use_local_files,
         local_data_path=local_data_path,
         overwrite=overwrite,
@@ -635,6 +799,8 @@ def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path
     """
     progress = SkycellProgress(len(skycells))
     computation = None
+    writer = ZarrWriter(root, lock_file)
+    active_writers.append(writer)
     try:
         skycells_bag = db.from_sequence(skycells)
 
@@ -644,6 +810,7 @@ def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path
                 root,
                 lock_file,
                 progress,
+                writer,
                 use_local_files,
                 local_data_path,
                 overwrite,
@@ -667,7 +834,9 @@ def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path
         logging.info("Dask computation interrupted by user")
         return
     finally:
-        # Remove computation from active list
+        writer.close()
+        if writer in active_writers:
+            active_writers.remove(writer)
         if "computation" in locals() and computation in active_dask_computations:
             active_dask_computations.remove(computation)
 
