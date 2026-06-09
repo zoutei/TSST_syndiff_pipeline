@@ -275,6 +275,54 @@ class TestDaemonIsAlive(unittest.TestCase):
                     )
                 self.assertFalse(daemon_is_alive(db))
 
+    def test_fresh_local_heartbeat_overrides_stale_db_heartbeat(self):
+        """A busy daemon (fresh local heartbeat) must read as alive / not wedged,
+        even when the NFS DB heartbeat is stale or unwritable. This is the core
+        of the wedge fix: liveness comes from the host-local file, not the DB."""
+        from syndiff_pipeline.template_runner.scheduler import _write_local_heartbeat
+        from syndiff_pipeline.template_runner.scheduler_control import daemon_is_wedged
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            state = PipelineState(db)
+            state.update_supervisor_heartbeat(4321)
+            # Make the DB heartbeat ancient (simulating a wedged/slow NFS write).
+            with state._conn() as conn:
+                conn.execute(
+                    "UPDATE daemon SET last_heartbeat = ? WHERE id = 1",
+                    ("2020-01-01T00:00:00+00:00",),
+                )
+            # Heartbeat thread keeps the LOCAL file fresh.
+            _write_local_heartbeat(db)
+            self.addCleanup(
+                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+            )
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                return_value=4321,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                return_value=True,
+            ):
+                self.assertTrue(daemon_is_alive(db))
+                self.assertFalse(daemon_is_wedged(db))
+
+    def test_alive_pid_with_no_heartbeat_is_wedged(self):
+        """A live pid with no fresh heartbeat anywhere is the true wedge case."""
+        from syndiff_pipeline.template_runner.scheduler_control import daemon_is_wedged
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            PipelineState(db)  # creates schema, no heartbeat row
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                return_value=4321,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                return_value=True,
+            ):
+                self.assertTrue(daemon_is_wedged(db))
+
 
 if __name__ == "__main__":
     unittest.main()

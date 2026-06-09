@@ -264,6 +264,167 @@ class TestSkipIntegration(unittest.TestCase):
             )
 
 
+def _minimal_run_setup(
+    tmp_path: Path,
+    targets: list[Target],
+    *,
+    active_stages: list[str],
+    run_id: str = "run_a",
+):
+    """Create run directory, state DB, and RunContext for scheduler tests."""
+    runs_root = tmp_path / "runs"
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "per_target").mkdir()
+    cfg_path = run_dir / "config.yaml"
+    cfg_path.write_text(
+        "\n".join(
+            [
+                f"data_root: {tmp_path / 'data'}",
+                f"handoff_root: {tmp_path}",
+                f"runs_root: {runs_root}",
+                f"state_db_path: {tmp_path / 'state.sqlite'}",
+                "skycell_wcs_csv: x.csv",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    header = "sector,camera,ccd,target_ra,target_dec,target_name,enabled\n"
+    rows = [
+        f"{t.sector},{t.camera},{t.ccd},{t.target_ra},{t.target_dec},{t.target_name},true"
+        for t in targets
+    ]
+    (run_dir / "targets.csv").write_text(header + "\n".join(rows), encoding="utf-8")
+    (run_dir / "run_meta.json").write_text(json.dumps({"run_id": run_id}), encoding="utf-8")
+    state = PipelineState(str(tmp_path / "state.sqlite"))
+    state.create_run(
+        run_id,
+        str(cfg_path),
+        str(run_dir / "targets.csv"),
+        str(runs_root),
+        targets,
+        active_stages,
+    )
+    from syndiff_pipeline.template_runner.run_context import resolve_run_context
+
+    ctx = resolve_run_context(run_dir=run_dir)
+    return state, ctx, run_id, runs_root
+
+
+def _write_mapping_stable_manifest(tmp_path: Path, target: Target, runs_root: Path) -> None:
+    """Write a valid stable mapping manifest plus on-disk CSV for *target*."""
+    from syndiff_pipeline.template_runner.runner_config import resolve_config
+
+    cfg_path = runs_root / "run_a" / "config.yaml"
+    from syndiff_pipeline.template_runner.runner_config import load_runner_config
+
+    cfg = load_runner_config(cfg_path)
+    resolved = resolve_config(target, cfg)
+    csv_path = (
+        Path(resolved.mapping_root)
+        / f"sector_{target.sector:04d}"
+        / f"camera_{target.camera}"
+        / f"ccd_{target.ccd}"
+        / f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}_master_skycells_list.csv"
+    )
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text("NAME,projection\nskycell.0001.0001,0001\n", encoding="utf-8")
+    stable_path = logs.stable_stage_manifest_path(
+        str(runs_root), target.label(), "mapping"
+    )
+    write_manifest(stable_path, resolved, "mapping", [str(csv_path)], 1, 1)
+
+
+class TestSkipBeforePromote(unittest.TestCase):
+    def test_promotion_blocked_until_skip_checked(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            state = PipelineState(str(Path(tmp) / "state.sqlite"))
+            stages = [
+                "tess_ffi_download",
+                "wcs_grouping",
+                "mapping",
+                "ps1_download",
+                "ps1_process",
+                "downsample",
+            ]
+            state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status("run_a", label, stage, STATUS_SKIPPED, exit_code=0)
+
+            promoted = state.promote_stages("run_a")
+
+            self.assertEqual(promoted, 0)
+            self.assertEqual(
+                state.get_stage_run("run_a", label, "mapping").status, STATUS_PENDING
+            )
+
+    def test_pending_skip_then_promote_same_tick(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.stage_complete",
+                return_value=False,
+            ):
+                _resolve_external_and_pending_skips(state, run_id, ctx, force_rerun=False)
+
+            self.assertTrue(state.external_checked(run_id, label, "mapping"))
+            promoted = state.promote_stages(run_id)
+            self.assertEqual(promoted, 1)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_READY
+            )
+
+    def test_mapping_skipped_before_launch_multi_target(self):
+        targets = [
+            Target(22, 3, 3, 228.0, 52.0, "2020dgc"),
+            Target(23, 1, 3, 185.0, 5.3, "2020ftl"),
+            Target(40, 1, 1, 292.6, 35.7, "2021udg"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, runs_root = _minimal_run_setup(
+                tmp_path,
+                targets,
+                active_stages=["tess_ffi_download", "wcs_grouping", "mapping"],
+            )
+            for target in targets:
+                label = target.label()
+                _write_mapping_stable_manifest(tmp_path, target, runs_root)
+                for stage in ("tess_ffi_download", "wcs_grouping"):
+                    state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                    state.cache_external_check(run_id, label, stage, complete=True)
+
+            launch_mock = unittest.mock.Mock()
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler._VERIFY_BUDGET_PER_TICK",
+                2,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                return_value={},
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                launch_mock,
+            ):
+                _tick_run(state, run_id, ctx)
+                _tick_run(state, run_id, ctx)
+
+            launch_mock.assert_not_called()
+            for target in targets:
+                row = state.get_stage_run(run_id, target.label(), "mapping")
+                self.assertEqual(row.status, STATUS_SKIPPED)
+
+
 class TestStallDetection(unittest.TestCase):
     def test_stalled_when_no_running_or_launchable(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")

@@ -20,6 +20,7 @@ from syndiff_pipeline.template_runner.run_context import (
 from syndiff_pipeline.template_runner.runner_config import load_runner_config
 from syndiff_pipeline.template_runner.scheduler_control import (
     daemon_is_alive,
+    daemon_is_wedged,
     daemon_status,
     ensure_daemon_running,
     stop_daemon,
@@ -531,6 +532,7 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             json.dumps(
                 {
                     "alive": st.alive,
+                    "wedged": daemon_is_wedged(db),
                     "pid": st.pid,
                     "heartbeat_age_s": st.heartbeat_age_s,
                     "lock_held": st.lock_held,

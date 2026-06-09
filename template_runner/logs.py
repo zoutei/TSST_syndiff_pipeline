@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
+import tempfile
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -125,6 +127,19 @@ def daemon_pid_path(state_db_path: str | Path) -> Path:
 
 def daemon_log_path(state_db_path: str | Path) -> Path:
     return Path(state_db_path).expanduser().resolve().parent / "daemon.log"
+
+
+def daemon_heartbeat_file(state_db_path: str | Path) -> Path:
+    """Host-LOCAL heartbeat file (never on NFS).
+
+    The supervisor's liveness signal must not depend on the same NFS/DB volume
+    it may be blocked on. We key the file by a hash of the resolved state-db
+    path so distinct pipelines on one host do not collide. Liveness is already
+    host-local (pid checks use ``os.kill``), so a local temp path is correct.
+    """
+    resolved = str(Path(state_db_path).expanduser().resolve())
+    key = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / "syndiff-daemon" / f"{key}.heartbeat"
 
 
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:

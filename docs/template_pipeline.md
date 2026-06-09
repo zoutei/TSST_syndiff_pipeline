@@ -840,6 +840,15 @@ Manifests are written in two places:
   (lets a *fresh* run skip re-scanning an already-complete output). The supervisor
   self-heals this file whenever it confirms a stage complete on disk.
 
+**Skip-verify before promote:** A selected stage in `pending` is not promoted to
+`ready` (and therefore not launched) until the supervisor has run at least one
+`stage_complete()` check for that stage in the current run. Each tick performs up
+to 16 such checks; stages that are not checked yet stay `pending` until a later
+tick. If the check finds complete outputs (manifest-first, then on-disk fallback),
+the stage is marked `skipped`; if not, it is cached as incomplete and may then
+promote to `ready`. This prevents downstream stages from launching before stable
+manifests are consulted when upstream skip checks consume the per-tick budget.
+
 ### `reconcile-manifests` (backfill)
 
 For data produced before manifests existed (e.g. existing `/astro` Zarr stores),

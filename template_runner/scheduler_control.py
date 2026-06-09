@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import signal
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -37,7 +38,31 @@ def _parse_heartbeat(value: str | None) -> datetime | None:
         return None
 
 
-def daemon_heartbeat_age_s(state_db_path: str) -> float | None:
+def _local_heartbeat_age_s(state_db_path: str) -> float | None:
+    """Age of the host-local heartbeat file, or None if missing/unreadable.
+
+    This is the authoritative liveness signal: it lives on local disk and so is
+    independent of the (possibly wedged or full) NFS state DB. Reading it never
+    opens the SQLite database, keeping ``status``/``start``/``stop`` responsive
+    even when NFS is degraded.
+    """
+    path = logs.daemon_heartbeat_file(state_db_path)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    try:
+        written = float(text)
+    except ValueError:
+        # Fall back to mtime if the contents are unparseable.
+        try:
+            written = path.stat().st_mtime
+        except OSError:
+            return None
+    return max(0.0, time.time() - written)
+
+
+def _db_heartbeat_age_s(state_db_path: str) -> float | None:
     state = PipelineState(state_db_path)
     row = state.get_supervisor_status()
     if not row:
@@ -48,6 +73,15 @@ def daemon_heartbeat_age_s(state_db_path: str) -> float | None:
     if heartbeat.tzinfo is None:
         heartbeat = heartbeat.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - heartbeat).total_seconds()
+
+
+def daemon_heartbeat_age_s(state_db_path: str) -> float | None:
+    local = _local_heartbeat_age_s(state_db_path)
+    if local is not None:
+        return local
+    # No local heartbeat (e.g. daemon never ran on this host): fall back to the
+    # DB heartbeat for cross-host visibility.
+    return _db_heartbeat_age_s(state_db_path)
 
 
 def daemon_is_alive(
@@ -65,6 +99,26 @@ def daemon_is_alive(
     if age is not None and age <= stale_after_s:
         return True
     return False
+
+
+def daemon_is_wedged(
+    state_db_path: str,
+    *,
+    stale_after_s: float = DEFAULT_HEARTBEAT_STALE_S,
+) -> bool:
+    """True when a supervisor process exists but its heartbeat is stale.
+
+    With a background heartbeat thread writing a host-LOCAL file, a merely-busy
+    supervisor (slow NFS verification on the main thread) still emits fresh
+    heartbeats and is NOT wedged. A stale heartbeat despite a live pid therefore
+    means the process is truly hung (e.g. uninterruptible NFS I/O) and should be
+    force-replaced rather than left holding the lock while looking dead.
+    """
+    pid = daemon.read_pid(logs.daemon_pid_path(state_db_path))
+    if not pid or not daemon.is_process_alive(pid):
+        return False
+    age = daemon_heartbeat_age_s(state_db_path)
+    return age is None or age > stale_after_s
 
 
 def daemon_status(state_db_path: str) -> daemon.DaemonStatus:
@@ -94,6 +148,13 @@ def ensure_daemon_running(state_db_path: str) -> EnsureDaemonResult:
     if daemon_is_alive(state_db_path):
         pid = daemon.read_pid(logs.daemon_pid_path(state_db_path))
         return EnsureDaemonResult(spawned=False, pid=pid)
+
+    # A live pid with a stale heartbeat is a truly-hung owner. Force-replace it
+    # so a fresh supervisor can take over (reconcile recovers in-flight jobs
+    # from durable status files), instead of refusing to start because the lock
+    # is held. This is the automatic recovery for the "wedged" failure mode.
+    if daemon_is_wedged(state_db_path):
+        stop_daemon(state_db_path)
 
     daemon_log = logs.daemon_log_path(state_db_path)
     spawn_pid = daemon.spawn_detached_daemon(state_db_path, daemon_log)
