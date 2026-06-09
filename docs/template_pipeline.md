@@ -24,6 +24,15 @@ For difference imaging, Hotpants, ePSF, and forced photometry, see the [main REA
 - [Configuration Reference](#configuration-reference)
 - [Targets CSV Formats](#targets-csv-formats)
 - [CLI Reference](#cli-reference)
+  - [How commands find your run](#how-commands-find-your-run)
+  - [Command index](#command-index)
+  - [Submit and run](#submit-and-run)
+  - [Monitor a run](#monitor-a-run)
+  - [Workspace commands](#workspace-commands)
+  - [Run control](#run-control)
+  - [Verification and manifests](#verification-and-manifests)
+  - [Daemon and Discord](#daemon-and-discord)
+  - [Common flags cheat sheet](#common-flags-cheat-sheet)
 - [Run Lifecycle](#run-lifecycle)
 - [Logging and Artifacts](#logging-and-artifacts)
 - [Verification](#verification)
@@ -81,7 +90,7 @@ This guide covers **orchestration** — how to configure and run `syndiff-templa
 
 The runner adds capabilities not present in the standalone scripts: **multi-target batching**, **WCS drift grouping** for transients, **artifact verification**, **force-rerun cleanup**, **pause/kill/retry**, and **HTCondor** for `mapping` and `ps1_process`.
 
-If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff-template submit` with `example/template_runner/config_real.yaml` (paths aligned to the same data layout).
+If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff-template submit` with `example/template_runner/config.yaml` and `deployment.yaml` beside it (paths in deployment.yaml; stages in config).
 
 ---
 
@@ -204,17 +213,21 @@ syndiff-template --help
 Copy and edit the examples under `example/template_runner/`:
 
 ```bash
-cp example/template_runner/config_example.yaml my_config.yaml
+cp example/template_runner/config.yaml my_config.yaml
+cp example/template_runner/deployment.yaml.example deployment.yaml
 cp example/template_runner/targets_example.csv my_targets.csv
 ```
 
-Set at minimum:
+**Site config** (`my_config.yaml`): stages, resource pools, notifications only — no filesystem paths.
 
-- `data_root` — science data tree (FFIs, mapping, Zarr, templates).
-- `ffi_dir` — TESS FFI directory (often `{data_root}/tess_ffi`).
-- `handoff_root` — per-target WCS handoffs and pipeline metadata.
-- `skycell_wcs_csv` — PS1 skycell WCS table (SkyCells list).
-- `gaia_credentials` — Gaia archive credentials file (for mapping).
+**Deployment** (`deployment.yaml`, gitignored, beside config): set at minimum:
+
+- `handoff_root` — per-target WCS handoffs, SQLite state, run metadata, daemon files.
+- `data_root` — science data tree (FFIs, mapping caches, Zarr, templates).
+- `gaia_username` / `gaia_password` — Gaia TAP+ credentials for mapping (optional for anonymous TAP).
+- Discord keys when notifications are enabled.
+
+Bundled `resources/skycell_wcs.csv` is resolved automatically (no config key).
 
 See [Configuration Reference](#configuration-reference).
 
@@ -245,17 +258,26 @@ On submit, the source config and targets are **copied into the run directory** (
 Example output:
 
 ```text
-Submitted run_id=20260607_210919 scheduler_pid=2692578
-  logs: /path/to/runs/20260607_210919/scheduler.log
-Monitor: syndiff-template progress --run-dir /path/to/runs/20260607_210919
+Submitted run_id=20260607_210919 supervisor_pid=2692578
+  daemon log: /path/to/template_handoffs/daemon.log
+Monitor: syndiff-template progress
+         syndiff-template status --watch
+         syndiff-template progress --run-id 20260607_210919
 ```
 
 ### 4. Monitor
 
-Use `--run-dir` for run-scoped commands (no config/target paths needed):
+Simplest — no flags (auto-discovers the supervisor; shows all **active** runs, or latest if none):
 
 ```bash
-syndiff-template progress --run-dir /path/to/runs/20260607_210919
+syndiff-template progress
+syndiff-template status --watch
+```
+
+One run by id or portable run directory:
+
+```bash
+syndiff-template progress --run-id batch_no5
 syndiff-template status --watch --run-dir /path/to/runs/20260607_210919
 syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
@@ -271,19 +293,12 @@ syndiff-template notify test --config my_config.yaml --run-id batch_no4
 
 See [Discord notifications](#discord-notifications).
 
-Or set the runs root once per shell session and pass `--run-id` for each run you are watching:
-
-```bash
-export SYNDIFF_RUNS_ROOT=/path/to/runs
-syndiff-template progress --run-id 20260607_210919
-syndiff-template status --watch --run-id 20260607_210919
-syndiff-template retry --run-id 20260607_210919
-```
-
 Shorthand (uses site config only to locate `runs_root`):
 
 ```bash
 syndiff-template progress --config my_config.yaml --run-id 20260607_210919
+syndiff-template status --watch --config my_config.yaml --run-id 20260607_210919
+syndiff-template retry --config my_config.yaml --run-id 20260607_210919
 ```
 
 ### 5. Use templates in SynDiff
@@ -293,6 +308,20 @@ Downsampled FITS appear under `{data_root}/shifted_downsampled/` (or `stages.dow
 ---
 
 ## Concepts
+
+### Configuration layout
+
+Three layers — no environment variables:
+
+| Layer | File | Purpose |
+|-------|------|---------|
+| Site policy | `config.yaml` | Stages, pools, notifications, per-SCC overrides |
+| Deployment | `deployment.yaml` (beside config, gitignored; paths + credentials) | `handoff_root`, `data_root`, Gaia + Discord |
+| Bundled | `resources/skycell_wcs.csv` | PS1 SkyCells WCS (auto-resolved) |
+
+On **submit**, resolved paths are frozen into `{handoff_root}/runs/<run_id>/config.yaml`. Workers and run-scoped CLI commands read that file — they do not need `deployment.yaml` unless reloading credentials (e.g. Gaia for mapping uses `source_config_path` from `run_meta.json`).
+
+**Workspace** = one `handoff_root` → one SQLite DB (`pipeline_state.sqlite`), one supervisor daemon, one `runs/` tree.
 
 ### Targets
 
@@ -377,6 +406,7 @@ Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` using the share
 |------|-------------|
 | `syndiff_ffi_frames.csv` | Per-FFI WCS drift, template group IDs |
 | `cluster_template_job.json` | Reference FFI, crop bounds, offsets for downsample |
+| `wcs_drift_template_debug.png` | WCS drift, template groups, and Earth/Moon angles vs time |
 
 **Verification**: valid `cluster_template_job.json` with existing `reference_ffi_path`.
 
@@ -490,24 +520,41 @@ sector{SSSS}_camera{C}_ccd{K}[_x..._y...][_os{N}]/
 
 ## Configuration Reference
 
-Configuration is YAML loaded by `template_runner/runner_config.py`. Paths may be absolute or relative to the **config file’s directory**.
+Configuration is split into three layers:
 
-### Top-level keys
+| Layer | File | Contains |
+|-------|------|----------|
+| Site policy | `config.yaml` | `stages`, `resources`, `notifications`, `overrides` |
+| Deployment | `deployment.yaml` (gitignored, beside config) | `handoff_root`, `data_root`, Gaia + Discord credentials |
+| Bundled assets | `resources/skycell_wcs.csv` in the repo | PS1 SkyCells WCS table (auto-resolved) |
+
+Loaded by `template_runner/runner_config.py`. On submit, a **frozen** run `config.yaml` embeds resolved absolute paths so workers do not re-read deployment.yaml.
+
+### Site config keys (`config.yaml`)
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `data_root` | yes | Root for mapping, Zarr, convolved results, default template output |
-| `ffi_dir` | no | TESS FFI root (defaults to `data_root`) |
-| `handoff_root` | yes | Per-target WCS handoffs (`{handoff_root}/{target_label}/`) |
-| `runs_root` | no | Run logs and summaries (default: `{handoff_root}/runs`) |
-| `state_db_path` | no | SQLite DB (default: `{handoff_root}/pipeline_state.sqlite`) |
-| `skycell_wcs_csv` | yes | PS1 SkyCells WCS CSV |
-| `gaia_credentials` | no | Gaia archive credentials (mapping) |
+| `deployment_file` | no | Filename of the gitignored deployment overlay beside config (default: `deployment.yaml`) |
 | `stages` | no | Per-stage parameters (see below) |
 | `resources` | no | Pool concurrency limits |
 | `scheduler` | no | Scheduler tuning |
 | `notifications` | no | Discord webhook alerts (see below) |
 | `overrides` | no | Per-SCC parameter overrides |
+
+### Deployment file keys (`deployment.yaml`)
+
+`deployment.yaml` is the gitignored deployment overlay beside `config.yaml`: machine-specific paths (`handoff_root`, `data_root`) and credentials (Gaia, Discord).
+
+| Key | Required | Description |
+|-----|----------|-------------|
+| `handoff_root` | yes | Workspace root: handoffs, `{handoff_root}/pipeline_state.sqlite`, `{handoff_root}/runs/` |
+| `data_root` | yes | Science data tree (FFIs, mapping, Zarr, catalogs) |
+| `ffi_dir` | no | Override TESS FFI root (default: `{data_root}/tess_ffi`) |
+| `gaia_username` / `gaia_password` | no | Gaia TAP+ credentials for mapping |
+| `discord_webhook_url` | no | Incoming webhook for notifications |
+| `discord_bot_token` / `discord_channel_id` | no | On-demand status bot |
+
+Derived paths (not in config): `state_db_path` = `{handoff_root}/pipeline_state.sqlite`, `runs_root` = `{handoff_root}/runs`, `mapping_root` = `{data_root}/skycell_pixel_mapping`, etc.
 
 ### Scheduler
 
@@ -518,12 +565,13 @@ scheduler:
 
 ### Discord notifications
 
-Optional alerts to a Discord channel via incoming webhook. The webhook URL lives in a **gitignored** `secrets.yaml` beside your site config (copy from `secrets.yaml.example`); frozen run directories do not need their own copy — the daemon falls back to `source_config_path` from `run_meta.json`.
+Optional alerts to a Discord channel via incoming webhook. The webhook URL lives in a **gitignored** `deployment.yaml` beside your site config (copy from `deployment.yaml.example`); frozen run directories do not need their own copy — the daemon falls back to `source_config_path` from `run_meta.json`.
 
 ```yaml
+deployment_file: deployment.yaml
+
 notifications:
   enabled: true
-  secrets_file: secrets.yaml
   events:
     run_started: true
     run_completed: true
@@ -538,18 +586,20 @@ notifications:
     daemon_unhealthy: true
   bot:
     enabled: true
-    # channel_id: "123456789012345678"  # optional if set in secrets.yaml
+    # channel_id: "123456789012345678"  # optional if set in deployment.yaml
 ```
 
-`secrets.yaml` (not committed):
+`deployment.yaml` (not committed; copy from `deployment.yaml.example`):
 
 ```yaml
+handoff_root: /path/to/template_handoffs
+data_root: /path/to/syndiff/data
+gaia_username: ...
+gaia_password: ...
 discord_webhook_url: https://discord.com/api/webhooks/...
 discord_bot_token: your-bot-token
 discord_channel_id: "123456789012345678"
 ```
-
-Alternatively set `DISCORD_WEBHOOK_URL`, `DISCORD_BOT_TOKEN`, or `DISCORD_CHANNEL_ID` in the environment.
 
 **Events** (supervisor daemon or submit, deduplicated in SQLite `notification_events`):
 
@@ -569,12 +619,12 @@ Event notifications (except `run_started`) include the same **progress** summary
 **On-demand status via Discord bot** (requires `discord.py`):
 
 1. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), enable **Message Content Intent**, invite it to your server with send/read permissions.
-2. Set `notifications.bot.enabled: true` and configure the channel ID (config or `secrets.yaml`).
+2. Set `notifications.bot.enabled: true` and configure the channel ID (config or `deployment.yaml`).
 3. Install `discord.py`, then start the supervisor — the bot starts automatically when enabled:
 
 ```bash
 pip install 'discord.py>=2.3'   # or: pip install -e '.[discord]'
-syndiff-template daemon start --config my_config.yaml
+syndiff-template daemon start --deployment example/template_runner/deployment.yaml
 ```
 
 `submit` also ensures the bot is running. `daemon stop` stops both the supervisor and the bot. Check both with `daemon status`. For foreground debugging only:
@@ -721,84 +771,374 @@ See `example/template_runner/events_example.csv`.
 
 ## CLI Reference
 
-| Command | `--config` | `--targets` | Run identification |
-|---------|------------|-------------|-------------------|
-| `submit`, `run` | required (source) | required (source) | optional `--run-id` |
-| `status`, `progress`, `logs`, `show`, `pause`, `resume`, `kill`, `retry`, `notify test` | optional (runs_root lookup) | n/a | `--run-dir` or `--run-id` (+ `--config`) |
-| `runs`, `active` | required | n/a | n/a |
-| `verify` | optional | optional | `--run-dir` (frozen copies) or pre-run `--config --targets` |
+Run `syndiff-template --help` or `syndiff-template <command> --help` for the built-in argparse summary. This section explains **what each command does**, **which flags it needs**, and **typical workflows**.
 
-| Command | Description |
-|---------|-------------|
-| `submit` | Insert run rows + ensure supervisor daemon; copies config/targets into run dir |
-| `run` | Foreground inline scheduler loop (debugging) |
-| `daemon start\|stop\|status` | Control the host-level supervisor (`--config`) |
-| `status` | Per-target stage status grid (`--watch`, `--interval`); shows `stalled` + reasons |
-| `progress` | Aggregate status counts (+ `stall_reason` when stalled) |
-| `runs` | List recent runs from SQLite |
-| `active` | Active runs + supervisor daemon liveness |
-| `show` | Print `run_meta.json` |
-| `logs` | Print daemon or stage log (`--target`, `--stage`, `--follow`) |
-| `tail` | Alias for `logs --follow` |
-| `verify` | Check on-disk artifacts (`--scc`, `--stages`) |
-| `reconcile-manifests` | Backfill stable cross-run completion manifests for already-complete outputs (`--scc`, `--stages`, `--quiet`) |
-| `retry` | Insert retry intent; ensures daemon running; `--no-start-daemon` to skip |
-| `pause` | Insert pause intent (daemon stops dequeuing) |
-| `resume` | Insert resume intent |
-| `kill` | Insert cancel intent; daemon terminates workers and marks run `canceled` |
-| `notify test` | Send read-only Discord preview (`progress` + `status` grid); `--dry-run` prints locally |
-| `discord bot` | Run Discord bot in foreground (normally started by `daemon start`) |
+### How commands find your run
 
-### Common flags
+Commands fall into three scopes:
+
+| Scope | What you pass | When to use |
+|-------|---------------|-------------|
+| **Site** | `--config path/to/config.yaml` (+ `--targets` for submit/verify) | Starting work, reading `handoff_root` from `deployment.yaml` beside config |
+| **Workspace** | `--deployment path/to/deployment.yaml` (optional; auto-discovers one live supervisor) | Daemon control, listing runs, default monitoring |
+| **Run** | `--run-dir /path/to/runs/<run_id>` **or** `--run-id ID` (+ optional `--deployment`) | One specific run; run control (`retry`, `kill`, …) |
+
+**`progress` / `status` with no flags** auto-discover the workspace and show **all active runs** (fallback: latest run if none active).
+
+**`deployment.yaml` is workspace scope.** The supervisor only needs `handoff_root`; it can run many pipeline runs concurrently.
+
+**Recommend `--run-id` on submit** (e.g. `batch_no5`) so runs are easy to target with `--run-id` later. Not required — timestamps are auto-generated if omitted.
+
+**`--run-dir`** is portable: the run directory is self-contained (frozen config, targets, logs) and needs no deployment file on the monitoring host.
+
+**No environment variables** for configuration — paths and credentials come from `deployment.yaml`, site `config.yaml`, CLI flags, and bundled `resources/`.
+
+### Command index
+
+| Command | Scope | Purpose |
+|---------|-------|---------|
+| [`submit`](#submit) | site | Queue a detached multi-target run; start daemon if needed |
+| [`run`](#run) | site | Foreground single-run loop (debug only) |
+| [`verify`](#verify) | site or run | Check on-disk stage artifacts |
+| [`reconcile-manifests`](#reconcile-manifests) | site or run | Backfill cross-run completion manifests |
+| [`progress`](#progress) | workspace / run | All active runs by default; zero flags OK |
+| [`status`](#status) | workspace / run | Per-target grid for all active runs; zero flags OK |
+| [`logs`](#logs) / [`tail`](#tail) | run or workspace | Print or follow daemon/stage logs |
+| [`show`](#show) | run | Print `run_meta.json` |
+| [`retry`](#retry) | run | Re-queue failed/canceled stages |
+| [`pause`](#pause) | run | Stop dequeuing new stages |
+| [`resume`](#resume) | run | Resume a paused run |
+| [`kill`](#kill) | run | Cancel run and terminate workers |
+| [`runs`](#runs) | workspace | List recent runs from SQLite |
+| [`active`](#active) | workspace | Show running/stalled runs + daemon health |
+| [`daemon`](#daemon) | workspace | Start/stop/status supervisor daemon |
+| [`notify test`](#notify-test) | run | Send Discord preview (or `--dry-run`) |
+| [`discord bot`](#discord-bot) | site | Run status-reply bot in foreground |
+
+---
+
+### Submit and run
+
+#### `submit`
+
+**Purpose**: Production entry point. Creates a run directory, registers the run in SQLite, ensures the supervisor daemon is running, and returns immediately.
+
+```bash
+syndiff-template submit \
+  --config my_config.yaml \
+  --targets my_targets.csv \
+  [--stages mapping,ps1_process,downsample] \
+  [--run-id batch_no5] \
+  [--force-rerun]
+```
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `--config` | yes | Site policy YAML (stages, pools, notifications) |
+| `--targets` | yes | Targets CSV (sector, camera, ccd, coordinates, enabled) |
+| `--stages` | no | Comma-separated subset; default: all six stages |
+| `--run-id` | no | Run name; default: UTC timestamp `YYYYMMDD_HHMMSS` |
+| `--force-rerun` | no | Re-run selected stages even when artifacts exist; see [Force Rerun](#force-rerun-behavior) |
+
+**What happens**:
+
+1. Loads `deployment.yaml` beside `--config` for `handoff_root`, `data_root`, credentials.
+2. Materializes frozen `config.yaml` + `targets.csv` into `{handoff_root}/runs/<run_id>/`.
+3. Inserts run + per-target stage rows in `{handoff_root}/pipeline_state.sqlite`.
+4. Starts the supervisor daemon (if not already alive for this `handoff_root`).
+5. Optionally starts the Discord bot when `notifications.bot.enabled: true`.
+6. Updates `{handoff_root}/runs/latest` → `<run_id>`.
+
+**Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically):
+
+```bash
+syndiff-template submit \
+  --config example/template_runner/config_real_skycell_stream.yaml \
+  --targets example/template_runner/targets_example.csv \
+  --stages mapping,ps1_process,downsample \
+  --run-id batch_stream_01
+```
+
+#### `run`
+
+**Purpose**: Run one target batch in the **foreground** (blocks until the run finishes). Same config/targets as `submit`, but no daemon — useful for debugging scheduler logic on a laptop.
+
+```bash
+syndiff-template run --config my_config.yaml --targets my_targets.csv [--stages ...] [--run-id ...] [--force-rerun]
+```
+
+Warning is printed when stdout is a TTY. For long production jobs, use `submit` instead.
+
+---
+
+### Monitor runs
+
+**Default (no flags)**: all active runs in the auto-discovered workspace (latest run if none active). Pin with `--deployment` when multiple supervisors exist.
+
+#### `progress`
+
+**Purpose**: One-line aggregate counts (`pending=`, `running=`, `success=`, …) plus optional per-task detail parsed from stage logs.
+
+```bash
+syndiff-template progress
+syndiff-template progress --deployment example/template_runner/deployment.yaml
+syndiff-template progress --run-id batch_no5
+syndiff-template progress --run-dir /path/to/handoffs/runs/batch_no5
+syndiff-template progress --no-detail   # summary only (for scripts)
+```
+
+Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows` or `down: 45/84` from `downsample.progress.json`.
+
+#### `status`
+
+**Purpose**: Per-target stage grid (`tess_dl:pend | map:run | ps1_dl:succ | …`). Abbreviations match `STAGE_SHORT_NAMES` in the scheduler.
+
+```bash
+syndiff-template status
+syndiff-template status --watch --interval 15   # refresh every 15s
+syndiff-template status --run-id batch_no5
+syndiff-template status --run-dir /path/to/runs/batch_no5
+```
+
+When not `--watch`, prints a warning if the supervisor daemon is not alive (with a suggested `daemon start` command).
+
+Shows `stalled` reason and `verify_in_flight` counts when applicable.
+
+#### `show`
+
+**Purpose**: Dump `run_meta.json` (submit time, `source_config_path`, stages list, `force_rerun` flag).
+
+```bash
+syndiff-template show --run-dir /path/to/runs/batch_no5
+```
+
+#### `logs` / `tail`
+
+**Purpose**: Print logs. Without `--target`/`--stage`, prints the **daemon log** at `{handoff_root}/daemon.log`. With both, prints the stage worker log.
+
+```bash
+# Daemon log (whole workspace)
+syndiff-template logs --run-dir /path/to/runs/batch_no5
+
+# Stage log (one target + stage)
+syndiff-template logs --run-dir ... \
+  --target s0023_c1_k3_2020ftl --stage ps1_process
+
+# Follow (like tail -f)
+syndiff-template tail --run-dir ... --target s0023_c1_k3_2020ftl --stage ps1_process
+syndiff-template logs --run-dir ... --target ... --stage ... --follow
+```
+
+Stage logs live at `per_target/<target_label>/<stage>.log` inside the run directory.
+
+---
+
+### Workspace commands
+
+These operate on the **handoff workspace** (one SQLite DB per `handoff_root`). Pass `--config` (same site config as submit).
+
+#### `runs`
+
+**Purpose**: List recent runs from SQLite with status and daemon liveness.
+
+```bash
+syndiff-template runs --config my_config.yaml
+syndiff-template runs --config my_config.yaml --limit 50
+```
+
+#### `active`
+
+**Purpose**: Runs with status `running` or `stalled`, plus supervisor PID and heartbeat age.
+
+```bash
+syndiff-template active --config my_config.yaml
+syndiff-template active --config my_config.yaml
+```
+
+---
+
+### Run control
+
+All insert **command intents** into SQLite; the supervisor daemon is the sole writer of stage execution state. Commands return immediately.
+
+#### `retry`
+
+**Purpose**: Re-queue failed or canceled stages.
+
+```bash
+# Retry everything failed/canceled in the run
+syndiff-template retry --run-dir /path/to/runs/batch_no5
+
+# Retry one SCC + stage (resets downstream deps)
+syndiff-template retry --run-dir ... --scc 23,1,3 --stage mapping
+
+# Queue intent without waking daemon (e.g. maintenance window)
+syndiff-template retry --run-dir ... --no-start-daemon
+```
+
+By default, `retry` also calls `ensure_daemon_running` for the run's `handoff_root`.
+
+#### `pause`
+
+**Purpose**: Stop launching new stages for this run (in-flight workers continue until done).
+
+```bash
+syndiff-template pause --run-dir /path/to/runs/batch_no5
+```
+
+#### `resume`
+
+**Purpose**: Clear pause and resume dequeuing.
+
+```bash
+syndiff-template resume --run-dir /path/to/runs/batch_no5
+```
+
+#### `kill`
+
+**Purpose**: Cancel the run — daemon terminates local subprocesses, sweeps Condor clusters, marks run `canceled`.
+
+```bash
+syndiff-template kill --run-dir /path/to/runs/batch_no5
+```
+
+---
+
+### Verification and manifests
+
+#### `verify`
+
+**Purpose**: Read-only check of **on-disk artifacts** (not SQLite state). Use before submit to confirm prerequisites, or after a partial run to debug one SCC.
+
+**Pre-run** (site config + targets):
+
+```bash
+syndiff-template verify \
+  --config my_config.yaml \
+  --targets my_targets.csv \
+  [--stages mapping,ps1_download] \
+  [--scc 23,1,3]
+```
+
+**Post-run** (frozen run config inside run dir):
+
+```bash
+syndiff-template verify --run-dir /path/to/runs/batch_no5 --scc 23,1,3 --stages ps1_process
+```
+
+Output: `[OK]`, `[FAIL]`, or `[UNKNOWN]` per target/stage with message and path.
+
+#### `reconcile-manifests`
+
+**Purpose**: One-shot backfill of **stable** completion manifests under `{runs_root}/.manifests/` for data that already exists on disk. Future runs skip expensive re-verification when manifests match.
+
+```bash
+syndiff-template reconcile-manifests --config my_config.yaml --targets my_targets.csv
+syndiff-template reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
+```
+
+---
+
+### Daemon and Discord
+
+**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running` and start the Discord bot when enabled. The supervisor stays up across runs so later submits reuse it. Use `daemon stop` only when you intentionally want the workspace supervisor down (maintenance, host idle, debugging).
+
+#### `daemon`
+
+**Purpose**: Control the host-level supervisor (one process per `handoff_root`, flock-guarded). Optional for normal workflow — prefer `submit`.
+
+```bash
+# Start (Discord bot uses site config recorded from a prior submit)
+syndiff-template daemon start --deployment example/template_runner/deployment.yaml
+syndiff-template daemon start   # auto-discover when one supervisor expected
+
+# Stop supervisor + Discord bot
+syndiff-template daemon stop --deployment ...
+
+# JSON status: alive, wedged, pid, heartbeat_age_s, discord_bot
+syndiff-template daemon status
+```
+
+| Action | Notes |
+|--------|-------|
+| `start` | Starts supervisor + Discord bot (when enabled in config/deployment.yaml) |
+| `stop` | Stops supervisor and Discord bot |
+| `status` | JSON: supervisor liveness + Discord bot state |
+
+Daemon files on disk:
+
+```text
+{handoff_root}/daemon.pid
+{handoff_root}/daemon.log
+{handoff_root}/daemon.lock
+{handoff_root}/pipeline_state.sqlite
+```
+
+#### `notify test`
+
+**Purpose**: Send a read-only Discord message (progress + status grid) without recording `notification_events` dedup rows.
+
+```bash
+syndiff-template notify test --run-dir /path/to/runs/batch_no5
+syndiff-template notify test --config my_config.yaml --run-id batch_no5 --dry-run
+syndiff-template notify test --run-dir ... -v   # print message after sending
+```
+
+Requires `discord_webhook_url` in `deployment.yaml` and `notifications.enabled: true`.
+
+#### `discord bot`
+
+**Purpose**: Run the on-demand status-reply bot in the **foreground** (normally started detached by `daemon start` or `submit`).
+
+```bash
+syndiff-template discord bot --config my_config.yaml
+```
+
+Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channel_id`), and `discord.py` installed.
+
+---
+
+### Common flags cheat sheet
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `--run-dir PATH` | run-scoped commands | Full run directory (frozen `config.yaml` + `targets.csv`) |
-| `SYNDIFF_RUNS_ROOT` | run-scoped commands | Runs root directory; use with `--run-id` (required) |
-| `--targets PATH` | submit, run, verify (pre-run) | Source targets CSV |
-| `--stages LIST` | submit, run, verify | Comma-separated subset (default: all stages) |
-| `--run-id ID` | run-scoped commands | Explicit run (default: `latest` symlink when using `--config`) |
-| `--force-rerun` | submit, run | Re-run stages; see [Force Rerun](#force-rerun-behavior) |
+| `--config PATH` | site | Site `config.yaml` for `submit` / `verify`; loads deployment beside config |
+| `--deployment PATH` | workspace | `deployment.yaml`; optional when one supervisor is auto-discovered |
+| `--run-dir PATH` | run-scoped | `{handoff_root}/runs/<run_id>` with frozen config |
+| `--run-id ID` | run-scoped | One run; with `--deployment` or auto-discovered workspace |
+| `--targets PATH` | `submit`, `run`, `verify`, `reconcile-manifests` | Targets CSV |
+| `--stages LIST` | `submit`, `run`, `verify`, `reconcile-manifests` | Comma-separated; default: all stages |
+| `--scc S,C,C` | `verify`, `retry`, `reconcile-manifests` | Filter to one sector/camera/ccd |
+| `--force-rerun` | `submit`, `run` | Ignore existing artifacts for selected stages |
+| `--watch` / `--interval` | `status` | Live refresh |
+| `--no-detail` | `progress` | Summary line only |
+| `--no-start-daemon` | `retry` | Queue intent without starting daemon |
+| `--dry-run` / `-v` | `notify test` | Local preview / verbose |
 
-### Examples
-
-```bash
-# Full pipeline, detached
-syndiff-template submit --config cfg.yaml --targets targets.csv
-
-# Re-process PS1 convolution + downsample from scratch
-syndiff-template submit --config cfg.yaml --targets targets.csv \
-  --stages ps1_process,downsample --force-rerun
-
-# Monitor (preferred: --run-dir)
-syndiff-template progress --run-dir /path/to/runs/20260607_210919
-
-# Verify one SCC (pre-run)
-syndiff-template verify --config cfg.yaml --targets targets.csv \
-  --scc 23,1,3 --stages ps1_process
-
-# Verify using frozen run config
-syndiff-template verify --run-dir /path/to/runs/20260607_210919 --scc 23,1,3
-
-# Backfill stable manifests for already-complete data (one-shot)
-syndiff-template reconcile-manifests --config cfg.yaml --targets targets.csv
-
-# Retry all failed stages in a run
-syndiff-template retry --run-dir /path/to/runs/20260607_210919
-
-# Retry one SCC/stage after a fix
-syndiff-template retry --run-dir /path/to/runs/20260607_210919 \
-  --scc 23,1,3 --stage mapping
-
-# Kill a run (Condor + local)
-syndiff-template kill --run-dir /path/to/runs/20260607_210919
-```
-
-Global listing still uses site config:
+### End-to-end example
 
 ```bash
-syndiff-template runs --config cfg.yaml
-syndiff-template active --config cfg.yaml
+mamba activate syndiff
+cd example/template_runner
+cp deployment.yaml.example deployment.yaml
+# Edit deployment.yaml: handoff_root, data_root, optional Gaia + Discord
+
+syndiff-template verify --config config.yaml --targets targets_example.csv
+
+syndiff-template submit \
+  --config config.yaml \
+  --targets targets_example.csv \
+  --stages ps1_process,downsample \
+  --run-id smoke_01
+
+syndiff-template progress
+syndiff-template status --watch
+syndiff-template progress --run-id smoke_01
+syndiff-template tail --run-dir /astro/.../template_handoffs/runs/smoke_01 \
+  --target s0023_c1_k3_2020ftl --stage ps1_process
+
+syndiff-template active
+syndiff-template daemon status
 ```
 
 ---
@@ -867,7 +1207,7 @@ scheduler:
     {stage}.manifest.json   # stable cross-run completion manifest (backfilled by reconcile-manifests)
 ```
 
-Host-level supervisor files live next to `state_db_path`:
+Host-level supervisor files live under `handoff_root`:
 
 ```text
 {handoff_root}/
@@ -1187,8 +1527,9 @@ For maintainers and algorithm reviewers, full step-by-step technical references 
 
 | File | Purpose |
 |------|---------|
-| `example/template_runner/config_example.yaml` | Annotated starter config |
-| `example/template_runner/config_real.yaml` | Production-style STScI cluster config |
+| `example/template_runner/config.yaml` | Site policy (stages, pools, notifications) |
+| `example/template_runner/deployment.yaml.example` | Deployment paths + credentials template |
+| `resources/skycell_wcs.csv` | Bundled PS1 SkyCells WCS table |
 | `example/template_runner/targets_example.csv` | Normalized multi-target CSV |
 | `example/template_runner/events_example.csv` | SN catalog format |
 | `example/template_runner/README.md` | Quick-start pointer |

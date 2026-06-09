@@ -61,27 +61,91 @@ Before running difference imaging, SynDiff needs **PS1 templates on the TESS pix
 | | Diff imaging (`run_pipeline.py`) | Template building (`syndiff-template`) |
 |---|----------------------------------|----------------------------------------|
 | **Purpose** | Hotpants, ePSF, background, photometry | PS1 templates + handoff JSON |
-| **Config** | Recipe YAML with `pipeline:` list | `config.yaml` + targets CSV |
+| **Config** | Recipe YAML with `pipeline:` list | `config.yaml` (policy) + `deployment.yaml` (paths) + targets CSV |
 | **Execution** | Single-process sequential stages | Multi-target scheduler + SQLite; Condor for `ps1_process` |
 | **Output** | Difference images, light curves | `{data_root}/shifted_downsampled/*.fits` |
 
-**Install** (registers the `syndiff-template` command):
+### Install
 
 ```bash
-pip install -e .
+pip install -e .    # registers the syndiff-template command
 ```
 
-**Quick start**:
+### Setup (first time)
+
+Configuration is split into two files beside each other:
+
+| File | Git | Contains |
+|------|-----|----------|
+| `config.yaml` | committed | `stages`, `resources`, `notifications`, `overrides` — no paths |
+| `deployment.yaml` | **gitignored** | `handoff_root`, `data_root`, Gaia + Discord credentials |
 
 ```bash
-syndiff-template submit \
-  --config example/template_runner/config_example.yaml \
+cd example/template_runner
+cp deployment.yaml.example deployment.yaml
+# Edit deployment.yaml: handoff_root, data_root, optional gaia_username/password, Discord keys
+```
+
+The PS1 SkyCells WCS table ships in `resources/skycell_wcs.csv` (no config entry).
+
+### Configuration and run identity
+
+| Concept | What it is | When you need it |
+|---------|------------|------------------|
+| **`config.yaml`** | Site policy: stages, resource pools, notifications | `submit`, `verify` (starting work) |
+| **`deployment.yaml`** | Machine paths (`handoff_root`, `data_root`) + credentials | Identifies the **workspace** the supervisor uses |
+| **`--run-id`** | Name for one pipeline run under `{handoff_root}/runs/` | **Recommended on every submit** (e.g. `--run-id batch_no5`) so runs are easy to find |
+| **`--run-dir`** | Full path to `runs/<run_id>/` (frozen config + logs inside) | Portable monitoring from another host; optional if you use deployment + run-id |
+
+The supervisor daemon only needs `handoff_root` from `deployment.yaml`. It can run **many** runs at once; `progress` / `status` show **all active runs** by default.
+
+### Quick start
+
+```bash
+mamba activate syndiff
+
+syndiff-template verify \
+  --config example/template_runner/config.yaml \
   --targets example/template_runner/targets_example.csv
+
+syndiff-template submit \
+  --config example/template_runner/config.yaml \
+  --targets example/template_runner/targets_example.csv \
+  --run-id batch_no5 \
+  --stages ps1_process,downsample
+
+# Simplest monitoring — no flags (auto-finds the running supervisor)
+syndiff-template progress
+syndiff-template status --watch
+
+# One specific run
+syndiff-template progress --run-id batch_no5
+
+# Pin workspace explicitly
+syndiff-template progress --deployment example/template_runner/deployment.yaml
 ```
 
-**Discord alerts** (optional): copy `example/template_runner/secrets.yaml.example` to `secrets.yaml` (gitignored), set `notifications.enabled: true` in config. Webhooks push run/stage events; a optional bot replies to channel messages with live progress. See [Discord notifications](docs/template_pipeline.md#discord-notifications) in the pipeline guide.
+### Command overview
 
-**Documentation**: see **[`docs/template_pipeline.md`](docs/template_pipeline.md)** for the orchestration guide (architecture, configuration, HTCondor, CLI). Stage algorithms are in **[`docs/stages/`](docs/stages/README.md)** (ported from the standalone [`syndiff`](../syndiff/) step READMEs). Example configs live under [`example/template_runner/`](example/template_runner/).
+| Command | What it does |
+|---------|----------------|
+| `submit` | Queue a detached run; materialize frozen config; start supervisor daemon |
+| `run` | Foreground run (debug only) |
+| `progress` | All active runs by default (or latest if none active); zero flags OK |
+| `status` | Per-target stage grid for all active runs (`--watch` to refresh) |
+| `logs` / `tail` | Daemon log or `per_target/<label>/<stage>.log` |
+| `retry` / `pause` / `resume` / `kill` | Control a run via supervisor intents (`--run-id` or `--run-dir` required) |
+| `verify` | Check on-disk artifacts (pre-run or post-run) |
+| `runs` / `active` | List runs or show active runs + daemon health (zero flags OK) |
+| `daemon start\|stop\|status` | Supervisor lifecycle (`--deployment` optional; auto-discovers one daemon) |
+| `notify test` | Send Discord preview without dedup side effects |
+| `discord bot` | Foreground status-reply bot |
+
+**Workspace commands** (`progress`, `status`, `active`, `runs`, `daemon`) use optional `--deployment`, or auto-discover when exactly one supervisor is running. **Run control** requires `--run-id` (with optional `--deployment`) or `--run-dir`. Full reference: **[`docs/template_pipeline.md` → CLI Reference](docs/template_pipeline.md#cli-reference)**.
+
+**Discord** (optional): set `notifications.enabled: true` in config and webhook/bot keys in `deployment.yaml`. The supervisor posts run/stage events; the bot replies to channel messages with live progress. See [Discord notifications](docs/template_pipeline.md#discord-notifications).
+
+**Further reading**: [`docs/template_pipeline.md`](docs/template_pipeline.md) (architecture, HTCondor, troubleshooting), [`docs/stages/`](docs/stages/README.md) (stage algorithms), [`example/template_runner/`](example/template_runner/) (example configs).
 
 ---
 
