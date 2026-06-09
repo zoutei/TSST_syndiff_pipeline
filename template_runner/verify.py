@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -287,25 +288,57 @@ def _expected_ps1_download_skycells(resolved: ResolvedTargetConfig) -> list[str]
     return unique_skycells
 
 
-def _ps1_download_array_complete(group, array_name: str) -> bool:
-    if array_name not in group:
-        return False
-    array = group[array_name]
-    if array.shape == (0,) or array.size == 0:
-        return False
+_ZARR_META_NAMES = frozenset({".zarray", ".zattrs", ".zgroup", ".zmetadata", "zarr.json"})
+
+
+def _zarr_array_has_chunks(array_dir: Path) -> bool:
+    """True if a Zarr array directory contains at least one materialized chunk.
+
+    Metadata-only and decompression-free: we never open the array or read a
+    chunk's bytes. This is the fast on-disk proxy for the writer's
+    ``ps1_download._array_complete_unlocked`` check (which exists + non-empty +
+    one readable chunk). Supports the v3 layout (chunks under ``c/``) and the v2
+    layout (chunk keys directly under the array dir alongside ``.zarray``).
+
+    Reading a chunk's compressed bytes is what made verification take ~30 min on
+    NFS; a directory listing is orders of magnitude cheaper.
+    """
+    # Fast path (Zarr v3): a single scandir of the chunk root. We avoid an extra
+    # is_dir() stat because NFS metadata latency dominates this hot loop.
     try:
-        _ = array[0:1, 0:1]
-    except Exception:
+        with os.scandir(array_dir / "c") as it:
+            return any(True for _ in it)
+    except FileNotFoundError:
+        pass  # No v3 chunk root; fall through to the v2 layout probe.
+    except NotADirectoryError:
         return False
-    return True
+    except OSError:
+        return False
+    # Zarr v2 fallback: any non-metadata entry under the array dir is a chunk key.
+    try:
+        with os.scandir(array_dir) as it:
+            return any(entry.name not in _ZARR_META_NAMES for entry in it)
+    except OSError:
+        return False
 
 
-def _ps1_download_skycell_complete(root, skycell_name: str) -> bool:
+def _ps1_download_skycell_complete(zarr_path: Path, skycell_name: str) -> bool:
+    """All expected PS1 arrays for *skycell_name* exist with chunks on disk.
+
+    Mirrors ``ps1_download.skycell_array_status`` / ``expected_array_names``: the
+    skycell is complete iff every band, mask, and weight array is present and has
+    at least one chunk written. Pure filesystem metadata, no Zarr open.
+    """
     projection_id = _projection_from_skycell_name(skycell_name)
-    if not projection_id or projection_id not in root or skycell_name not in root[projection_id]:
+    if not projection_id:
         return False
-    group = root[projection_id][skycell_name]
-    return all(_ps1_download_array_complete(group, name) for name in _ps1_download_expected_array_names())
+    skycell_dir = zarr_path / projection_id / skycell_name
+    if not skycell_dir.is_dir():
+        return False
+    return all(
+        _zarr_array_has_chunks(skycell_dir / name)
+        for name in _ps1_download_expected_array_names()
+    )
 
 
 def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
@@ -324,28 +357,31 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
             f"Shared zarr store missing (0/{len(expected_skycells)} skycells)",
             str(zarr_path),
         )
-    try:
-        import zarr
-
-        root = zarr.open(str(zarr_path), mode="r")
-        complete = sum(
-            1 for skycell in expected_skycells if _ps1_download_skycell_complete(root, skycell)
-        )
-        if complete < len(expected_skycells):
-            return VerifyResult(
-                "ps1_download",
-                False,
-                f"Partial PS1 zarr: {complete}/{len(expected_skycells)} skycells complete",
-                str(zarr_path),
-            )
+    started = time.monotonic()
+    complete = sum(
+        1 for skycell in expected_skycells if _ps1_download_skycell_complete(zarr_path, skycell)
+    )
+    elapsed = time.monotonic() - started
+    log.info(
+        "verify_ps1_download: %d/%d skycells complete in %.2fs (%s)",
+        complete,
+        len(expected_skycells),
+        elapsed,
+        zarr_path,
+    )
+    if complete < len(expected_skycells):
         return VerifyResult(
             "ps1_download",
-            True,
-            f"PS1 zarr complete ({complete}/{len(expected_skycells)} skycells)",
+            False,
+            f"Partial PS1 zarr: {complete}/{len(expected_skycells)} skycells complete",
             str(zarr_path),
         )
-    except Exception as exc:
-        return VerifyResult("ps1_download", False, f"Cannot verify PS1 zarr: {exc}", str(zarr_path))
+    return VerifyResult(
+        "ps1_download",
+        True,
+        f"PS1 zarr complete ({complete}/{len(expected_skycells)} skycells)",
+        str(zarr_path),
+    )
 
 
 def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
@@ -392,16 +428,30 @@ def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
     return removed
 
 
+def _skycell_name(entry) -> str:
+    """Normalize a skycell identifier to its plain name.
+
+    ``expected_convolved_skycells`` (and the underlying task list) may yield a
+    ``(name, index)`` tuple; the stored Zarr arrays are keyed by the name alone,
+    so we always compare on the name. Defensive even though the source now
+    returns strings.
+    """
+    if isinstance(entry, (tuple, list)) and entry:
+        return str(entry[0])
+    return str(entry)
+
+
 def expected_ps1_process_skycells(resolved: ResolvedTargetConfig) -> list[str]:
     t = resolved.target
     try:
-        return expected_convolved_skycells(
+        names = expected_convolved_skycells(
             resolved.data_root,
             t.sector,
             t.camera,
             t.ccd,
             projections_limit=resolved.stages.ps1_process.projections_limit,
         )
+        return sorted({_skycell_name(n) for n in names})
     except Exception as exc:
         log.debug("Falling back to CSV row skycell list for ps1_process verify: %s", exc)
         csv_path = _mapping_csv_path(resolved)
@@ -416,19 +466,30 @@ def expected_ps1_process_skycells(resolved: ResolvedTargetConfig) -> list[str]:
         return sorted(set(names))
 
 
-def _count_convolved_data_arrays(zarr_root, expected_names: list[str]) -> tuple[int, list[str]]:
+def _count_convolved_data_arrays(zarr_path: Path, expected_names: list[str]) -> tuple[int, list[str]]:
+    """(saved, missing) over expected skycells using metadata-only scandir.
+
+    A skycell is "saved" iff its ``<name>_data`` array exists with at least one
+    materialized chunk. No Zarr open and no chunk decompression, so this stays
+    fast on NFS even for stores with thousands of arrays.
+    """
     missing: list[str] = []
     saved = 0
     for name in expected_names:
-        key = f"{name}_data"
-        if key not in zarr_root:
+        if _zarr_array_has_chunks(zarr_path / f"{name}_data"):
+            saved += 1
+        else:
             missing.append(name)
-            continue
-        if int(zarr_root[key].size) <= 0:
-            missing.append(name)
-            continue
-        saved += 1
     return saved, missing
+
+
+def _store_has_any_data_array(zarr_path: Path) -> bool:
+    """True if the convolved store contains any ``*_data`` array directory."""
+    try:
+        with os.scandir(zarr_path) as it:
+            return any(entry.name.endswith("_data") for entry in it)
+    except OSError:
+        return False
 
 
 def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
@@ -441,27 +502,28 @@ def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
         return VerifyResult("ps1_process", False, str(exc), str(zarr_path))
     if not expected:
         return VerifyResult("ps1_process", False, "No expected skycells from mapping CSV", str(zarr_path))
-    try:
-        import zarr
 
-        root = zarr.open(str(zarr_path), mode="r")
-    except Exception as exc:
-        return VerifyResult("ps1_process", False, f"Cannot verify convolved zarr: {exc}", str(zarr_path))
+    started = time.monotonic()
+    saved, missing = _count_convolved_data_arrays(zarr_path, expected)
+    elapsed = time.monotonic() - started
+    log.info(
+        "verify_ps1_process: %d/%d skycells saved in %.2fs (%s)",
+        saved,
+        len(expected),
+        elapsed,
+        zarr_path,
+    )
 
-    # Detect an empty/all-empty store up front so the message is explicit.
-    all_data_keys = [str(k) for k in root.array_keys() if str(k).endswith("_data")]
-    non_empty_total = sum(1 for k in all_data_keys if int(root[k].size) > 0)
-    if non_empty_total == 0:
-        if all_data_keys:
+    if saved == 0:
+        if _store_has_any_data_array(zarr_path):
             msg = (
-                f"Convolved zarr has {len(all_data_keys)} *_data arrays but all are empty: "
-                f"0/{len(expected)} skycells saved"
+                f"Convolved zarr has *_data arrays but none cover expected skycells "
+                f"(or all empty): 0/{len(expected)} skycells saved"
             )
         else:
             msg = f"Convolved zarr store is empty (no *_data arrays): 0/{len(expected)} skycells saved"
         return VerifyResult("ps1_process", False, msg, str(zarr_path))
 
-    saved, missing = _count_convolved_data_arrays(root, expected)
     if saved < len(expected):
         return VerifyResult(
             "ps1_process",
@@ -591,17 +653,21 @@ def stage_complete(
     resolved: ResolvedTargetConfig,
     stage: str,
     manifest_path: str | None = None,
+    stable_manifest_path: str | None = None,
 ) -> bool:
     """Return True if the stage outputs are complete.
 
-    Manifest-first: when *manifest_path* points to a valid manifest (well-formed,
-    schema version ok, config fingerprint matches, and every listed artifact still
-    exists on disk), the stage is complete. Otherwise fall back to the hardened
-    on-disk check ``verify_stage(resolved, stage).ok``. An ``unknown`` on-disk
-    result is treated conservatively (not complete).
+    Manifest-first: when *manifest_path* (per-run) or *stable_manifest_path*
+    (cross-run) points to a valid manifest (well-formed, schema version ok,
+    config fingerprint matches, and every listed artifact still exists on disk),
+    the stage is complete. Otherwise fall back to the hardened on-disk check
+    ``verify_stage(resolved, stage).ok``. An ``unknown`` on-disk result is treated
+    conservatively (not complete).
     """
-    if manifest_path is not None:
-        manifest = read_manifest(manifest_path)
+    for candidate in (manifest_path, stable_manifest_path):
+        if candidate is None:
+            continue
+        manifest = read_manifest(candidate)
         if manifest is not None and manifest_valid(manifest, resolved, stage):
             return True
     result = verify_stage(resolved, stage)
@@ -619,14 +685,10 @@ def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple
     if stage == "ps1_process":
         expected = expected_ps1_process_skycells(resolved)
         zarr_path = _convolved_zarr_path(resolved)
-        try:
-            import zarr
-
-            root = zarr.open(str(zarr_path), mode="r")
-            saved, _missing = _count_convolved_data_arrays(root, expected)
-            return len(expected), saved, [str(zarr_path)]
-        except Exception:
+        if not zarr_path.exists():
             return len(expected), 0, [str(zarr_path)]
+        saved, _missing = _count_convolved_data_arrays(zarr_path, expected)
+        return len(expected), saved, [str(zarr_path)]
     if stage == "mapping":
         csv_path = _mapping_csv_path(resolved)
         ok = csv_path.is_file()
@@ -652,6 +714,24 @@ def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple
     result = verify_stage(resolved, stage)
     path = result.path or ""
     return 1, int(result.ok), [path] if path else []
+
+
+def persist_completion_manifests(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    manifest_paths: list[str | Path],
+) -> list[str]:
+    """Write completion manifests for a stage already verified complete on disk.
+
+    The caller supplies explicit manifest paths (per-run, stable, etc.) so this
+    module stays decoupled from run-directory layout.
+    """
+    expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
+    written: list[str] = []
+    for manifest_path in manifest_paths:
+        write_manifest(manifest_path, resolved, stage, artifacts, expected, produced)
+        written.append(str(manifest_path))
+    return written
 
 
 def verify_target(resolved: ResolvedTargetConfig, stages: Optional[List[str]] = None) -> List[VerifyResult]:

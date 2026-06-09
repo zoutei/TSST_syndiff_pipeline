@@ -4,6 +4,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import zarr
@@ -87,7 +88,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             )
             zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
             root = zarr.open(str(zarr_path), mode="w")
-            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")
+            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
             result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path))
             self.assertFalse(result.ok)
@@ -107,10 +108,46 @@ class TestVerifyPs1Process(unittest.TestCase):
             )
             zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
             root = zarr.open(str(zarr_path), mode="w")
-            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")
-            root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")
+            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
+            root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
             result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path))
+            self.assertTrue(result.ok)
+            self.assertIn("2/2", result.message)
+
+    def test_arrays_without_chunks_are_not_saved(self):
+        # An array directory that exists with a positive shape but no materialized
+        # chunk must count as NOT saved (catches interrupted/empty writes).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
+            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            root = zarr.open(str(zarr_path), mode="w")
+            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")
+
+            result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path))
+            self.assertFalse(result.ok)
+            self.assertIn("0/1", result.message)
+
+    def test_tuple_skycell_ids_are_normalized(self):
+        # Regression: expected_convolved_skycells yields (name, index) tuples;
+        # verification must compare on the name alone, otherwise a complete store
+        # is mis-reported as 0/N and the stage is needlessly re-run.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
+            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            root = zarr.open(str(zarr_path), mode="w")
+            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
+            root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify.expected_convolved_skycells",
+                return_value=[("skycell.1520.080", 0), ("skycell.1520.081", 1)],
+            ):
+                result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path))
             self.assertTrue(result.ok)
             self.assertIn("2/2", result.message)
 
@@ -128,8 +165,8 @@ class TestVerifyPs1Process(unittest.TestCase):
             )
             zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
             root = zarr.open(str(zarr_path), mode="w")
-            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")
-            root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")
+            root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
+            root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
             result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path, projections_limit=1))
             self.assertTrue(result.ok)

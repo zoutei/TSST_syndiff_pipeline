@@ -87,10 +87,13 @@ def _write_complete_ps1_skycell(root, skycell_name: str) -> None:
     if projection_id not in root:
         root.create_group(projection_id)
     group = root[projection_id].create_group(skycell_name)
+    # Write actual chunk data: the fast verifier treats an array as complete only
+    # when at least one chunk is materialized on disk (mirrors the real download,
+    # which always writes pixel data).
     for band in ("r", "i", "z", "y"):
-        group.create_array(band, shape=(4, 4), dtype="f4")
-        group.create_array(f"{band}_mask", shape=(4, 4), dtype="u1")
-        group.create_array(f"{band}_wt", shape=(4, 4), dtype="f4")
+        group.create_array(band, shape=(4, 4), dtype="f4")[:] = 1.0
+        group.create_array(f"{band}_mask", shape=(4, 4), dtype="u1")[:] = 1
+        group.create_array(f"{band}_wt", shape=(4, 4), dtype="f4")[:] = 1.0
 
 
 class TestVerifyTessFfiDownload(unittest.TestCase):
@@ -230,6 +233,34 @@ class TestVerifyPs1Download(unittest.TestCase):
             result = verify_ps1_download(resolved)
             self.assertTrue(result.ok)
             self.assertIn("2/2", result.message)
+
+    def test_skycell_missing_weight_arrays_is_incomplete(self):
+        # Mirrors real older projections (e.g. 1347/1348) that have band + mask
+        # arrays but no *_wt: ps1_process consumes weights, so the writer's
+        # 12-array definition treats these as incomplete and the verifier must
+        # agree (rather than falsely passing them).
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            csv_path = (
+                tmp
+                / "skycell_pixel_mapping"
+                / "sector_0022"
+                / "camera_3"
+                / "ccd_3"
+                / "tess_s0022_3_3_master_skycells_list.csv"
+            )
+            _write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
+            resolved = _resolved(tmp, csv_path)
+            zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+            root = zarr.open(str(zarr_path), mode="w")
+            group = root.create_group("1520").create_group("skycell.1520.080")
+            for band in ("r", "i", "z", "y"):
+                group.create_array(band, shape=(4, 4), dtype="f4")[:] = 1.0
+                group.create_array(f"{band}_mask", shape=(4, 4), dtype="u1")[:] = 1
+
+            result = verify_ps1_download(resolved)
+            self.assertFalse(result.ok)
+            self.assertIn("0/1", result.message)
 
 
 if __name__ == "__main__":
