@@ -39,7 +39,7 @@ STAGE_DEPS: Dict[str, List[str]] = {
     "mapping": ["wcs_grouping"],
     "ps1_download": ["mapping"],
     "ps1_process": ["ps1_download"],
-    "downsample": ["mapping", "ps1_process"],
+    "downsample": ["wcs_grouping", "mapping", "ps1_process"],
 }
 
 SKIP_REASON_STREAM = "stream_mode"
@@ -338,6 +338,8 @@ class PipelineState:
         self, run_id: str, target_stages: Dict[str, object] | None = None
     ) -> int:
         promoted = 0
+        run = self.get_run(run_id) or {}
+        active_stages = set(self.get_active_stages(run_id))
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT target_label, stage, status FROM stage_runs WHERE run_id = ?",
@@ -357,10 +359,16 @@ class PipelineState:
                         (STATUS_PENDING, run_id, target_label, stage),
                     )
                     status = STATUS_PENDING
+                may_promote_without_verify = bool(
+                    run.get("force_rerun") and stage in active_stages
+                )
                 if (
                     status == STATUS_PENDING
                     and self.deps_satisfied(run_id, target_label, stage, stages=stages)
-                    and self.external_checked(run_id, target_label, stage)
+                    and (
+                        self.external_checked(run_id, target_label, stage)
+                        or may_promote_without_verify
+                    )
                 ):
                     conn.execute(
                         "UPDATE stage_runs SET status = ? "

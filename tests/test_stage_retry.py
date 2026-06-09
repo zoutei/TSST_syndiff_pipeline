@@ -159,6 +159,7 @@ class TestStageRetry(unittest.TestCase):
                 ["ps1_process", "downsample"],
             )
             label = target.label()
+            state.update_stage_status("run_a", label, "wcs_grouping", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status("run_a", label, "mapping", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_process", STATUS_SUCCESS, exit_code=0)
             self.assertTrue(state.deps_satisfied("run_a", label, "downsample"))
