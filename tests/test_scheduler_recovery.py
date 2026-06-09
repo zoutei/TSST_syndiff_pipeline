@@ -455,8 +455,8 @@ class TestSchedulerReconcile(unittest.TestCase):
 class TestDaemonIsAlive(unittest.TestCase):
     def test_stale_supervisor_heartbeat_is_not_alive(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            state = PipelineState(db)
+            handoff = tmp
+            state = PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))
             state.update_supervisor_heartbeat(12345)
             with unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
@@ -470,7 +470,7 @@ class TestDaemonIsAlive(unittest.TestCase):
                         "UPDATE daemon SET last_heartbeat = ? WHERE id = 1",
                         ("2020-01-01T00:00:00+00:00",),
                     )
-                self.assertFalse(daemon_is_alive(db))
+                self.assertFalse(daemon_is_alive(handoff))
 
     def test_fresh_local_heartbeat_overrides_stale_db_heartbeat(self):
         """A busy daemon (fresh local heartbeat) must read as alive / not wedged,
@@ -480,8 +480,8 @@ class TestDaemonIsAlive(unittest.TestCase):
         from syndiff_pipeline.template_runner.scheduler_control import daemon_is_wedged
 
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            state = PipelineState(db)
+            handoff = tmp
+            state = PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))
             state.update_supervisor_heartbeat(4321)
             # Make the DB heartbeat ancient (simulating a wedged/slow NFS write).
             with state._conn() as conn:
@@ -490,9 +490,9 @@ class TestDaemonIsAlive(unittest.TestCase):
                     ("2020-01-01T00:00:00+00:00",),
                 )
             # Heartbeat thread keeps the LOCAL file fresh.
-            _write_local_heartbeat(db)
+            _write_local_heartbeat(handoff)
             self.addCleanup(
-                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+                lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
             with unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
@@ -501,16 +501,16 @@ class TestDaemonIsAlive(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
                 return_value=True,
             ):
-                self.assertTrue(daemon_is_alive(db))
-                self.assertFalse(daemon_is_wedged(db))
+                self.assertTrue(daemon_is_alive(handoff))
+                self.assertFalse(daemon_is_wedged(handoff))
 
     def test_alive_pid_with_no_heartbeat_is_wedged(self):
         """A live pid with no fresh heartbeat anywhere is the true wedge case."""
         from syndiff_pipeline.template_runner.scheduler_control import daemon_is_wedged
 
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            PipelineState(db)  # creates schema, no heartbeat row
+            handoff = tmp
+            PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))  # creates schema, no heartbeat row
             with unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
                 return_value=4321,
@@ -518,23 +518,23 @@ class TestDaemonIsAlive(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
                 return_value=True,
             ):
-                self.assertTrue(daemon_is_wedged(db))
+                self.assertTrue(daemon_is_wedged(handoff))
 
     def test_fresh_local_heartbeat_without_live_pid_is_not_alive(self):
         """Ghost liveness after kill: local heartbeat fresh but pid gone."""
         from syndiff_pipeline.template_runner.scheduler import _write_local_heartbeat
 
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            _write_local_heartbeat(db)
+            handoff = tmp
+            _write_local_heartbeat(handoff)
             self.addCleanup(
-                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+                lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
             with unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
                 return_value=None,
             ):
-                self.assertFalse(daemon_is_alive(db))
+                self.assertFalse(daemon_is_alive(handoff))
 
 
 if __name__ == "__main__":

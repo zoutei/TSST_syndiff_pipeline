@@ -274,7 +274,7 @@ class Notifier:
             self._state,
             run_id,
             runs_root,
-            state_db_path=self._state_db_path,
+            handoff_root=self._handoff_root,
             header=header,
         )
         self._send(run_id, f"run:{outcome}", body)
@@ -287,7 +287,7 @@ class Notifier:
             self._state,
             run_id,
             runs_root,
-            state_db_path=self._state_db_path,
+            handoff_root=self._handoff_root,
             header=header,
         )
         self._send(run_id, f"run:stalled:{_utc_header()}", body)
@@ -306,7 +306,7 @@ class Notifier:
             self._state,
             run_id,
             runs_root,
-            state_db_path=self._state_db_path,
+            handoff_root=self._handoff_root,
             header=header,
         )
         self._send(run_id, "run:canceled", body)
@@ -342,7 +342,7 @@ class Notifier:
                 self._state,
                 run_id,
                 runs_root,
-                state_db_path=self._state_db_path,
+                handoff_root=self._handoff_root,
                 include_running_detail=True,
             )
         )
@@ -419,7 +419,7 @@ def format_status_reply_messages(
     run_ids: Sequence[str],
     runs_root: str,
     *,
-    state_db_path: str | None = None,
+    handoff_root: str | None = None,
 ) -> list[str]:
     """On-demand progress + status grid; one or more Discord-sized messages."""
     if not run_ids:
@@ -437,7 +437,7 @@ def format_status_reply_messages(
                 state,
                 run_id,
                 root,
-                state_db_path=state_db_path,
+                handoff_root=handoff_root,
                 header=header,
             )
         )
@@ -449,7 +449,7 @@ def format_status_reply_message(
     run_ids: Sequence[str],
     runs_root: str,
     *,
-    state_db_path: str | None = None,
+    handoff_root: str | None = None,
 ) -> str:
     """Single-string status reply (joins all parts; prefer format_status_reply_messages)."""
     return "\n\n".join(
@@ -457,7 +457,7 @@ def format_status_reply_message(
             state,
             run_ids,
             runs_root,
-            state_db_path=state_db_path,
+            handoff_root=handoff_root,
         )
     )
 
@@ -467,7 +467,7 @@ def format_preview_message(
     run_id: str,
     runs_root: str,
     *,
-    state_db_path: str | None = None,
+    handoff_root: str | None = None,
     event_label: str = "notification preview",
 ) -> str:
     """Read-only snapshot: progress summary + status grid (same shape as daemon alerts)."""
@@ -476,7 +476,7 @@ def format_preview_message(
         state,
         run_id,
         runs_root,
-        state_db_path=state_db_path,
+        handoff_root=handoff_root,
         header=header,
     )
 

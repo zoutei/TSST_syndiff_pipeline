@@ -14,19 +14,21 @@ import time
 from pathlib import Path
 
 
-def _daemon_local_dir(state_db_path: str | Path) -> Path:
-    resolved = str(Path(state_db_path).expanduser().resolve())
+def _daemon_local_dir(handoff_root: str | Path) -> Path:
+    from syndiff_pipeline.template_runner.workspace import state_db_path
+
+    resolved = str(state_db_path(handoff_root))
     key = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / "syndiff-daemon" / key
 
 
-def verify_in_flight_path(state_db_path: str | Path) -> Path:
-    return _daemon_local_dir(state_db_path) / "verify_in_flight.json"
+def verify_in_flight_path(handoff_root: str | Path) -> Path:
+    return _daemon_local_dir(handoff_root) / "verify_in_flight.json"
 
 
-def write_verify_in_flight(state_db_path: str | Path, counts: dict[str, int]) -> None:
+def write_verify_in_flight(handoff_root: str | Path, counts: dict[str, int]) -> None:
     """Persist per-run in-flight verify counts (daemon writer)."""
-    path = verify_in_flight_path(state_db_path)
+    path = verify_in_flight_path(handoff_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"updated_at": time.time(), "by_run": dict(counts)}
     tmp = path.with_suffix(".json.tmp")
@@ -35,10 +37,10 @@ def write_verify_in_flight(state_db_path: str | Path, counts: dict[str, int]) ->
 
 
 def read_verify_in_flight(
-    state_db_path: str | Path, run_id: str | None = None
+    handoff_root: str | Path, run_id: str | None = None
 ) -> int:
     """Return in-flight verify count for *run_id*, or total if *run_id* is None."""
-    path = verify_in_flight_path(state_db_path)
+    path = verify_in_flight_path(handoff_root)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError, TypeError):
@@ -51,5 +53,5 @@ def read_verify_in_flight(
     return int(by_run.get(run_id, 0))
 
 
-def clear_verify_in_flight(state_db_path: str | Path) -> None:
-    verify_in_flight_path(state_db_path).unlink(missing_ok=True)
+def clear_verify_in_flight(handoff_root: str | Path) -> None:
+    verify_in_flight_path(handoff_root).unlink(missing_ok=True)

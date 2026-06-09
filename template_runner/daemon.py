@@ -60,9 +60,9 @@ def remove_pid_file(pid_path: str | Path) -> None:
 
 
 @contextmanager
-def daemon_lock(state_db_path: str | Path, *, blocking: bool = False) -> Iterator[int | None]:
+def daemon_lock(handoff_root: str | Path, *, blocking: bool = False) -> Iterator[int | None]:
     """Exclusive flock on the daemon lock file. Yields fd when acquired, else None."""
-    lock_path = logs.daemon_lock_path(state_db_path)
+    lock_path = logs.daemon_lock_path(handoff_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)
     flags = fcntl.LOCK_EX
@@ -83,14 +83,14 @@ def daemon_lock(state_db_path: str | Path, *, blocking: bool = False) -> Iterato
             os.close(fd)
 
 
-def spawn_detached_daemon(state_db_path: str | Path, daemon_log: str | Path) -> int:
+def spawn_detached_daemon(handoff_root: str | Path, daemon_log: str | Path) -> int:
     cmd = [
         sys.executable,
         "-m",
         "syndiff_pipeline.template_runner.scheduler",
         "--daemon",
-        "--state-db",
-        str(state_db_path),
+        "--handoff-root",
+        str(handoff_root),
     ]
     log_path = Path(daemon_log)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -136,9 +136,9 @@ def wait_for_process_exit(
     return not is_process_alive(pid)
 
 
-def wait_for_daemon(state_db_path: str | Path, *, timeout_s: float = 10.0) -> bool:
+def wait_for_daemon(handoff_root: str | Path, *, timeout_s: float = 10.0) -> bool:
     deadline = time.monotonic() + timeout_s
-    pid_path = logs.daemon_pid_path(state_db_path)
+    pid_path = logs.daemon_pid_path(handoff_root)
     while time.monotonic() < deadline:
         pid = read_pid(pid_path)
         if pid and is_process_alive(pid):

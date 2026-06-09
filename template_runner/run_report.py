@@ -21,7 +21,7 @@ def format_progress_lines(
     run_id: str,
     runs_root: str,
     *,
-    state_db_path: str | None = None,
+    handoff_root: str | None = None,
     include_running_detail: bool = True,
 ) -> list[str]:
     from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
@@ -30,8 +30,8 @@ def format_progress_lines(
     run = state.get_run(run_id) or {}
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
     line = f"run_id={run_id} status={run.get('status', '?')} " + " ".join(parts)
-    if state_db_path:
-        in_flight = read_verify_in_flight(state_db_path, run_id)
+    if handoff_root:
+        in_flight = read_verify_in_flight(handoff_root, run_id)
         if in_flight:
             line += f" verify_in_flight={in_flight}"
     if run.get("stall_reason"):
@@ -109,7 +109,7 @@ def format_run_report(
     run_id: str,
     runs_root: str,
     *,
-    state_db_path: str | None = None,
+    handoff_root: str | None = None,
     header: str,
     include_status_grid: bool = True,
     max_chars: int = 1900,
@@ -121,7 +121,7 @@ def format_run_report(
             state,
             run_id,
             runs_root,
-            state_db_path=state_db_path,
+            handoff_root=handoff_root,
             include_running_detail=True,
         )
     )
@@ -145,7 +145,7 @@ def format_run_report_messages(
     run_id: str,
     runs_root: str,
     *,
-    state_db_path: str | None = None,
+    handoff_root: str | None = None,
     header: str,
     include_status_grid: bool = True,
     max_chars: int = 1900,
@@ -157,7 +157,7 @@ def format_run_report_messages(
             state,
             run_id,
             runs_root,
-            state_db_path=state_db_path,
+            handoff_root=handoff_root,
             include_running_detail=True,
         )
     )

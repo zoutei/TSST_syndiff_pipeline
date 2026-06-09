@@ -69,7 +69,6 @@ def _resolved(tmp: Path) -> ResolvedTargetConfig:
         ffi_dir=str(tmp / "data" / "tess_ffi"),
         handoff_dir=str(tmp / "handoff" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
-        gaia_credentials=None,
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),
             mapping=MappingStageParams(oversampling_factor=1),
@@ -324,7 +323,7 @@ class TestSkipIntegration(unittest.TestCase):
                     STATUS_PENDING,
                 )
             self.assertTrue(state.deps_satisfied(run_id, label, "wcs_grouping"))
-            self.assertTrue(state.deps_satisfied(run_id, label, "downsample"))
+            self.assertFalse(state.deps_satisfied(run_id, label, "downsample"))
 
     def test_force_rerun_promotes_active_stages_when_prereqs_skipped(self):
         target = Target(20, 3, 3, 210.219333, 81.846589, "2020ut")
@@ -853,21 +852,21 @@ class TestApplyNoMainThreadCollect(unittest.TestCase):
 class TestDaemonFlock(unittest.TestCase):
     def test_second_nonblocking_lock_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            with daemon.daemon_lock(db, blocking=True) as fd1:
+            handoff = tmp
+            with daemon.daemon_lock(handoff, blocking=True) as fd1:
                 self.assertIsNotNone(fd1)
-                with daemon.daemon_lock(db, blocking=False) as fd2:
+                with daemon.daemon_lock(handoff, blocking=False) as fd2:
                     self.assertIsNone(fd2)
 
 
 class TestStopDaemon(unittest.TestCase):
     def test_cleans_stale_pid_file_when_not_running(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            pid_path = logs.daemon_pid_path(db)
+            handoff = tmp
+            pid_path = logs.daemon_pid_path(handoff)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("424242", encoding="utf-8")
-            result = stop_daemon(db)
+            result = stop_daemon(handoff)
             self.assertFalse(result.was_running)
             self.assertTrue(result.stopped)
             self.assertFalse(result.force_killed)
@@ -875,8 +874,8 @@ class TestStopDaemon(unittest.TestCase):
 
     def test_waits_for_graceful_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            pid_path = logs.daemon_pid_path(db)
+            handoff = tmp
+            pid_path = logs.daemon_pid_path(handoff)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("55555", encoding="utf-8")
             with unittest.mock.patch(
@@ -888,7 +887,7 @@ class TestStopDaemon(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
                 return_value=True,
             ) as wait:
-                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+                result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
             self.assertTrue(result.was_running)
             self.assertTrue(result.stopped)
             self.assertFalse(result.force_killed)
@@ -899,8 +898,8 @@ class TestStopDaemon(unittest.TestCase):
 
     def test_escalates_to_sigkill_when_term_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            pid_path = logs.daemon_pid_path(db)
+            handoff = tmp
+            pid_path = logs.daemon_pid_path(handoff)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("66666", encoding="utf-8")
             with unittest.mock.patch(
@@ -912,7 +911,7 @@ class TestStopDaemon(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
                 side_effect=[False, True],
             ) as wait:
-                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+                result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
             self.assertTrue(result.force_killed)
             self.assertTrue(result.stopped)
             self.assertEqual(term.call_count, 2)
@@ -922,8 +921,8 @@ class TestStopDaemon(unittest.TestCase):
 
     def test_reports_failure_when_process_survives_sigkill(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            pid_path = logs.daemon_pid_path(db)
+            handoff = tmp
+            pid_path = logs.daemon_pid_path(handoff)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("77777", encoding="utf-8")
             with unittest.mock.patch(
@@ -935,7 +934,7 @@ class TestStopDaemon(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
                 return_value=False,
             ):
-                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+                result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
             self.assertTrue(result.was_running)
             self.assertFalse(result.stopped)
             self.assertTrue(result.force_killed)
@@ -944,15 +943,15 @@ class TestStopDaemon(unittest.TestCase):
     def test_clears_liveness_after_sigkill_stop(self):
         """After stop (including SIGKILL), alive must be false immediately."""
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            pid_path = logs.daemon_pid_path(db)
+            handoff = tmp
+            pid_path = logs.daemon_pid_path(handoff)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("88888", encoding="utf-8")
-            state = PipelineState(db)
+            state = PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))
             state.update_supervisor_heartbeat(88888)
-            _write_local_heartbeat(db)
+            _write_local_heartbeat(handoff)
             self.addCleanup(
-                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+                lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
             with unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
@@ -963,28 +962,28 @@ class TestStopDaemon(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
                 side_effect=[False, True],
             ):
-                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+                result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
             self.assertTrue(result.stopped)
             self.assertTrue(result.force_killed)
-            self.assertFalse(logs.daemon_heartbeat_file(db).is_file())
+            self.assertFalse(logs.daemon_heartbeat_file(handoff).is_file())
             self.assertIsNone(state.get_supervisor_status())
-            self.assertFalse(daemon_is_alive(db))
+            self.assertFalse(daemon_is_alive(handoff))
 
     def test_clears_stale_liveness_when_pid_not_running(self):
         with tempfile.TemporaryDirectory() as tmp:
-            db = str(Path(tmp) / "state.sqlite")
-            pid_path = logs.daemon_pid_path(db)
+            handoff = tmp
+            pid_path = logs.daemon_pid_path(handoff)
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("424242", encoding="utf-8")
-            state = PipelineState(db)
+            state = PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))
             state.update_supervisor_heartbeat(424242)
-            _write_local_heartbeat(db)
+            _write_local_heartbeat(handoff)
             self.addCleanup(
-                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+                lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
-            result = stop_daemon(db)
+            result = stop_daemon(handoff)
             self.assertFalse(result.was_running)
-            self.assertFalse(daemon_is_alive(db))
+            self.assertFalse(daemon_is_alive(handoff))
             self.assertIsNone(state.get_supervisor_status())
 
 

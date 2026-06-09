@@ -55,8 +55,8 @@ def _bot_configured(config_path: Path, cfg) -> tuple[bool, str | None]:
     return True, None
 
 
-def discord_bot_is_alive(state_db_path: str | Path) -> bool:
-    pid = daemon.read_pid(logs.discord_bot_pid_path(state_db_path))
+def discord_bot_is_alive(handoff_root: str | Path) -> bool:
+    pid = daemon.read_pid(logs.discord_bot_pid_path(handoff_root))
     return bool(pid and daemon.is_process_alive(pid))
 
 
@@ -71,14 +71,28 @@ def discord_bot_status(config_path: str | Path) -> DiscordBotStatus:
             pid=None,
             skipped_reason=reason,
         )
-    pid = daemon.read_pid(logs.discord_bot_pid_path(cfg.state_db_path))
+    pid = daemon.read_pid(logs.discord_bot_pid_path(cfg.handoff_root))
     alive = bool(pid and daemon.is_process_alive(pid))
     return DiscordBotStatus(enabled=True, alive=alive, pid=pid if alive else None)
 
 
+def discord_bot_status_for_handoff(handoff_root: str | Path) -> DiscordBotStatus:
+    """Report Discord bot status using the site config recorded under *handoff_root*."""
+    config_path = _load_recorded_site_config(handoff_root)
+    if config_path is not None:
+        return discord_bot_status(config_path)
+    pid = daemon.read_pid(logs.discord_bot_pid_path(handoff_root))
+    alive = bool(pid and daemon.is_process_alive(pid))
+    return DiscordBotStatus(
+        enabled=False,
+        alive=alive,
+        pid=pid if alive else None,
+        skipped_reason=None if alive else "no recorded site config",
+    )
+
+
 def spawn_detached_discord_bot(
     config_path: str | Path,
-    state_db_path: str | Path,
     bot_log: str | Path,
 ) -> int:
     cmd = [
@@ -87,8 +101,6 @@ def spawn_detached_discord_bot(
         "syndiff_pipeline.template_runner.discord_bot",
         "--config",
         str(config_path),
-        "--state-db",
-        str(state_db_path),
         "--detached",
     ]
     log_path = Path(bot_log)
@@ -107,28 +119,28 @@ def spawn_detached_discord_bot(
 
 
 def wait_for_discord_bot(
-    state_db_path: str | Path,
+    handoff_root: str | Path,
     *,
     timeout_s: float = DEFAULT_START_WAIT_S,
 ) -> bool:
     deadline = time.monotonic() + timeout_s
-    pid_path = logs.discord_bot_pid_path(state_db_path)
+    pid_path = logs.discord_bot_pid_path(handoff_root)
     while time.monotonic() < deadline:
         pid = daemon.read_pid(pid_path)
         if pid and daemon.is_process_alive(pid):
             return True
         time.sleep(0.2)
-    return discord_bot_is_alive(state_db_path)
+    return discord_bot_is_alive(handoff_root)
 
 
-def _record_site_config(state_db_path: str | Path, config_path: Path) -> None:
-    record_path = logs.discord_bot_site_config_path(state_db_path)
+def _record_site_config(handoff_root: str | Path, config_path: Path) -> None:
+    record_path = logs.discord_bot_site_config_path(handoff_root)
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_text(str(config_path), encoding="utf-8")
 
 
-def _load_recorded_site_config(state_db_path: str | Path) -> Path | None:
-    record_path = logs.discord_bot_site_config_path(state_db_path)
+def _load_recorded_site_config(handoff_root: str | Path) -> Path | None:
+    record_path = logs.discord_bot_site_config_path(handoff_root)
     if not record_path.is_file():
         return None
     text = record_path.read_text(encoding="utf-8").strip()
@@ -155,9 +167,9 @@ def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResul
             skipped_reason=reason,
         )
 
-    state_db_path = cfg.state_db_path
-    _record_site_config(state_db_path, path)
-    pid_path = logs.discord_bot_pid_path(state_db_path)
+    handoff_root = cfg.handoff_root
+    _record_site_config(handoff_root, path)
+    pid_path = logs.discord_bot_pid_path(handoff_root)
     pid = daemon.read_pid(pid_path)
     if pid and daemon.is_process_alive(pid):
         return EnsureDiscordBotResult(enabled=True, spawned=False, pid=pid)
@@ -165,14 +177,14 @@ def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResul
     if pid is not None:
         daemon.remove_pid_file(pid_path)
 
-    bot_log = logs.discord_bot_log_path(state_db_path)
-    spawn_pid = spawn_detached_discord_bot(path, state_db_path, bot_log)
-    if wait_for_discord_bot(state_db_path):
+    bot_log = logs.discord_bot_log_path(handoff_root)
+    spawn_pid = spawn_detached_discord_bot(path, bot_log)
+    if wait_for_discord_bot(handoff_root):
         owner_pid = daemon.read_pid(pid_path) or spawn_pid
         spawned = owner_pid == spawn_pid
         return EnsureDiscordBotResult(enabled=True, spawned=spawned, pid=owner_pid)
 
-    if discord_bot_is_alive(state_db_path):
+    if discord_bot_is_alive(handoff_root):
         owner_pid = daemon.read_pid(pid_path)
         return EnsureDiscordBotResult(enabled=True, spawned=False, pid=owner_pid)
 
