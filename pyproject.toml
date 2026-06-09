@@ -18,3 +18,8 @@ syndiff-template = "syndiff_pipeline.template_runner.cli:main"
 [tool.setuptools]
 package-dir = {"syndiff_pipeline" = "."}
 packages = ["syndiff_pipeline", "syndiff_pipeline.template", "syndiff_pipeline.template_runner"]
+
+[tool.pyright]
+executionEnvironments = [
+  { root = ".", extraPaths = [".."], pythonVersion = "3.10" }
+]
