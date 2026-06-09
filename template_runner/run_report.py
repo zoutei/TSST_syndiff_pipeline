@@ -114,6 +114,7 @@ def format_run_report(
     include_status_grid: bool = True,
     max_chars: int = 1900,
 ) -> str:
+    """Single-string report; may omit trailing grid rows when over *max_chars*."""
     body_lines = [header, ""]
     body_lines.extend(
         format_progress_lines(
@@ -128,7 +129,9 @@ def format_run_report(
         body_lines.append("")
         grid = format_status_grid(state, run_id)
         if grid:
-            body_lines.extend(_truncate_grid(grid, max_chars=max_chars - _line_chars(body_lines)))
+            body_lines.extend(
+                _truncate_grid(grid, max_chars=max_chars - len("\n".join(body_lines)) - 1)
+            )
         else:
             body_lines.append("  (no stage rows)")
     text = "\n".join(body_lines)
@@ -137,8 +140,87 @@ def format_run_report(
     return text
 
 
+def format_run_report_messages(
+    state: PipelineState,
+    run_id: str,
+    runs_root: str,
+    *,
+    state_db_path: str | None = None,
+    header: str,
+    include_status_grid: bool = True,
+    max_chars: int = 1900,
+) -> list[str]:
+    """Discord-sized chunks; splits across messages instead of truncating."""
+    body_lines = [header, ""]
+    body_lines.extend(
+        format_progress_lines(
+            state,
+            run_id,
+            runs_root,
+            state_db_path=state_db_path,
+            include_running_detail=True,
+        )
+    )
+    progress_text = "\n".join(body_lines)
+
+    if not include_status_grid:
+        return _pack_lines(body_lines, max_chars=max_chars)
+
+    grid = format_status_grid(state, run_id)
+    if not grid:
+        body_lines.append("  (no stage rows)")
+        return _pack_lines(body_lines, max_chars=max_chars)
+
+    combined_lines = body_lines + [""] + grid
+    if len("\n".join(combined_lines)) <= max_chars:
+        return ["\n".join(combined_lines)]
+
+    messages = _pack_lines(body_lines, max_chars=max_chars)
+    messages.extend(
+        _pack_lines([_continuation_header(header), ""] + grid, max_chars=max_chars)
+    )
+    return messages
+
+
+def _continuation_header(header: str) -> str:
+    first = header.split("\n", 1)[0]
+    if "]" in first:
+        return f"{first[: first.index(']') + 1]} status grid (continued)"
+    return "(continued)"
+
+
 def _line_chars(lines: list[str]) -> int:
     return sum(len(line) + 1 for line in lines)
+
+
+def _pack_lines(lines: list[str], *, max_chars: int) -> list[str]:
+    if max_chars <= 0:
+        return []
+    messages: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for line in lines:
+        need = len(line) + (1 if current else 0)
+        if current and current_len + need > max_chars:
+            messages.append("\n".join(current))
+            current = [line]
+            current_len = len(line)
+        elif need > max_chars:
+            if current:
+                messages.append("\n".join(current))
+                current = []
+                current_len = 0
+            start = 0
+            while start < len(line):
+                end = min(start + max_chars, len(line))
+                messages.append(line[start:end])
+                start = end
+        else:
+            current.append(line)
+            current_len += need
+    if current:
+        messages.append("\n".join(current))
+    return messages
 
 
 def _truncate_grid(grid: list[str], *, max_chars: int) -> list[str]:

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from syndiff_pipeline.template_runner import daemon, logs
 from syndiff_pipeline.template_runner.notifications import (
-    format_status_reply_message,
+    format_status_reply_messages,
     resolve_bot_token,
     resolve_channel_id,
     resolve_run_ids_for_status_request,
@@ -70,9 +70,9 @@ class PipelineDiscordBot:
             secrets_file=notif.secrets_file,
         )
 
-    def _build_status_reply(self, message_text: str) -> str:
+    def _build_status_reply(self, message_text: str) -> list[str]:
         run_ids = resolve_run_ids_for_status_request(self._state, message_text)
-        return format_status_reply_message(
+        return format_status_reply_messages(
             self._state,
             run_ids,
             self._cfg.runs_dir(),
@@ -152,16 +152,21 @@ class PipelineDiscordBot:
                 getattr(message.channel, "name", message.channel.id),
             )
             try:
-                reply = await asyncio.to_thread(self._build_status_reply, message.content)
+                replies = await asyncio.to_thread(self._build_status_reply, message.content)
             except Exception:
                 log.exception("Failed to build status reply")
-                reply = "Failed to read pipeline status (see bot logs)."
+                replies = ["Failed to read pipeline status (see bot logs)."]
             try:
-                await message.reply(reply, mention_author=False)
+                for index, reply in enumerate(replies):
+                    if index == 0:
+                        await message.reply(reply, mention_author=False)
+                    else:
+                        await message.channel.send(reply)
             except Exception:
                 log.exception("Failed to send Discord reply")
                 try:
-                    await message.channel.send(reply)
+                    for reply in replies:
+                        await message.channel.send(reply)
                 except Exception:
                     log.exception("Failed to send Discord reply via channel.send")
 

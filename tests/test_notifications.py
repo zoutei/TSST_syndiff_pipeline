@@ -13,12 +13,14 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_runner.notifications import (
+    _DISCORD_MAX_CONTENT,
     NotificationConfig,
     NotificationEvents,
     Notifier,
     format_preview_message,
     format_run_started_message,
     format_status_reply_message,
+    format_status_reply_messages,
     load_bot_token,
     load_webhook_url,
     parse_notification_config,
@@ -33,6 +35,7 @@ from syndiff_pipeline.template_runner.notifications import (
 from syndiff_pipeline.template_runner.run_report import (
     format_progress_lines,
     format_run_report,
+    format_run_report_messages,
     format_status_grid,
 )
 from syndiff_pipeline.template_runner.state import (
@@ -198,6 +201,37 @@ class TestStatusReply(unittest.TestCase):
             self.assertIn("run_id=r1", text)
             self.assertIn("status (", text)
 
+    def test_format_status_reply_splits_runs_instead_of_truncating(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            targets = [
+                Target(i, 1, 1, 200.0 + i, 50.0, f"t{i:04d}")
+                for i in range(30)
+            ]
+            for run_id in ("batch_no5", "s0020_c3_k3_2020ut_hdr_20260609_141441"):
+                state.create_run(
+                    run_id,
+                    "/c",
+                    "/t",
+                    str(tmp),
+                    targets,
+                    list(STAGE_NAMES),
+                )
+                state.set_run_status(run_id, "running")
+            messages = format_status_reply_messages(
+                state,
+                ["batch_no5", "s0020_c3_k3_2020ut_hdr_20260609_141441"],
+                str(tmp),
+                state_db_path=str(db),
+            )
+            self.assertGreater(len(messages), 1)
+            joined = "\n\n".join(messages)
+            self.assertNotIn("truncated", joined)
+            self.assertIn("s0020_c3_k3_2020ut_hdr_20260609_141441", joined)
+            for message in messages:
+                self.assertLessEqual(len(message), _DISCORD_MAX_CONTENT)
+
 
 class TestRunReport(unittest.TestCase):
     def _seed_run(self, state: PipelineState, run_id: str) -> None:
@@ -255,6 +289,36 @@ class TestRunReport(unittest.TestCase):
             )
             self.assertIn("[run_a] test", text)
             self.assertLessEqual(len(text), 120)
+
+    def test_format_run_report_messages_splits_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            targets = [
+                Target(i, 1, 1, 200.0 + i, 50.0, f"t{i:04d}")
+                for i in range(25)
+            ]
+            state.create_run(
+                "run_big",
+                "/c",
+                "/t",
+                str(tmp),
+                targets,
+                list(STAGE_NAMES),
+            )
+            state.set_run_status("run_big", "running")
+            messages = format_run_report_messages(
+                state,
+                "run_big",
+                str(tmp),
+                header="[run_big] status (test)",
+                max_chars=500,
+            )
+            self.assertGreater(len(messages), 1)
+            self.assertIn("status grid (continued)", messages[1])
+            for message in messages:
+                self.assertLessEqual(len(message), 500)
+            self.assertNotIn("truncated", "\n\n".join(messages))
 
 
 class TestPreview(unittest.TestCase):
