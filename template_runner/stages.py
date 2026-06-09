@@ -197,6 +197,7 @@ def execute_stage(
             oversampling_factor=ds.oversampling_factor,
             reference_ffi_basename_expected=payload.get("reference_ffi_basename"),
             cluster_job_json_path=job_path,
+            allow_reference_ffi_mismatch=ds.allow_reference_ffi_mismatch,
             progress_path=progress_path,
         )
         return _manifest_from_result(result)

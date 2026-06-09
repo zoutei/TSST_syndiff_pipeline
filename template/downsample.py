@@ -672,6 +672,7 @@ def main(
     oversampling_factor: int = 1,
     reference_ffi_basename_expected: str | None = None,
     cluster_job_json_path: str | None = None,
+    allow_reference_ffi_mismatch: bool = False,
     progress_path: str | Path | None = None,
 ) -> dict:
     # Resolve base paths (allow overrides)
@@ -725,12 +726,16 @@ def main(
         json_note = f" ({cluster_job_json_path})" if cluster_job_json_path else ""
         if not actual_bn or expected_bn != actual_bn:
             actual_display = repr(actual_bn) if actual_bn else "(missing)"
-            raise ValueError(
+            msg = (
                 "Reference FFI basename from cluster job JSON does not match master mapping TESS_FFI. "
                 f"expected_basename={expected_bn!r} (from job JSON{json_note}), "
                 f"mapping TESS_FFI basename={actual_display} "
                 f"(mapping file: {REG_MASTER_FILES_PATH})"
             )
+            if allow_reference_ffi_mismatch:
+                warnings.warn(f"{msg} Continuing because allow_reference_ffi_mismatch=True.", UserWarning, stacklevel=1)
+            else:
+                raise ValueError(msg)
 
     if oversampling_factor < 1:
         raise ValueError("oversampling_factor must be >= 1")

@@ -67,6 +67,7 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "convolved_dir",
         "output_base",
         "single_offset",
+        "allow_reference_ffi_mismatch",
     }
 )
 
@@ -157,6 +158,7 @@ class DownsampleStageParams:
     convolved_dir: str | None = None
     output_base: str | None = None
     single_offset: bool = False
+    allow_reference_ffi_mismatch: bool = False
 
     def __post_init__(self):
         if self.ignore_mask_bits is None:
