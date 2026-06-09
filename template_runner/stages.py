@@ -204,6 +204,8 @@ def execute_stage(
             cluster_job_json_path=job_path,
             allow_reference_ffi_mismatch=ds.allow_reference_ffi_mismatch,
             progress_path=progress_path,
+            n_jobs=ds.n_jobs,
+            skycells_per_batch=ds.skycells_per_batch,
         )
         return _manifest_from_result(result)
 

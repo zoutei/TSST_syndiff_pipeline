@@ -530,17 +530,36 @@ def process_skycell_batch(
     return indices, sums, counts, mask_counts
 
 
-def create_syndiff_header(tess_header, roi_bounds: tuple[int, int, int, int] | None = None, oversampling_factor: int = 1):
+def create_syndiff_header(
+    tess_header,
+    roi_bounds: tuple[int, int, int, int] | None = None,
+    oversampling_factor: int = 1,
+    sector: int | None = None,
+):
     """
     Create a header for the syndiff output based on the TESS header.
     """
-    # First, copy specific keywords
-    keys_to_copy = ["TELESCOP", "INSTRUME", "CAMERA", "CCD"]
+    # Instrument provenance keywords (SECTOR before CAMERA/CCD).
     syndiff_header = fits.Header()
-
-    for key in keys_to_copy:
+    for key in ("TELESCOP", "INSTRUME"):
         if key in tess_header:
             syndiff_header.set(key, tess_header[key], tess_header.comments[key])
+
+    if sector is not None:
+        syndiff_header.set("SECTOR", sector, "TESS sector")
+    elif "SECTOR" in tess_header:
+        syndiff_header.set("SECTOR", tess_header["SECTOR"], tess_header.comments["SECTOR"])
+
+    for key in ("CAMERA", "CCD"):
+        if key in tess_header:
+            syndiff_header.set(key, tess_header[key], tess_header.comments[key])
+
+    if "TESS_FFI" in tess_header:
+        syndiff_header.set(
+            "TESS_REFERENCE_FFI",
+            tess_header["TESS_FFI"],
+            "TESS reference FFI filename",
+        )
 
     # Set PS1 date information
     syndiff_header.set("MJD-OBS", "55197.00000", "TSTART of PS1")
@@ -613,7 +632,12 @@ def save_fits_outputs(
         List of written FITS file paths (one per offset), in offset order.
     """
     # Create syndiff header based on TESS header
-    syndiff_header = create_syndiff_header(tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
+    syndiff_header = create_syndiff_header(
+        tess_header,
+        roi_bounds=roi_bounds,
+        oversampling_factor=oversampling_factor,
+        sector=sector,
+    )
 
     # Create output directory if it doesn't exist
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -674,6 +698,8 @@ def main(
     cluster_job_json_path: str | None = None,
     allow_reference_ffi_mismatch: bool = False,
     progress_path: str | Path | None = None,
+    n_jobs: int = 16,
+    skycells_per_batch: int = 20,
 ) -> dict:
     # Resolve base paths (allow overrides)
     data_root = Path(data_root)
@@ -701,9 +727,10 @@ def main(
     REG_MASTER_FILES_PATH = str(mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz")
     OUTPUT_DIR = output_base / f"sector{sector:04d}_camera{camera}_ccd{ccd}"
 
-    # Processing parameters - adjusted for better memory efficiency
-    N_JOBS = 16  # Reduced number of parallel jobs to lower memory pressure
-    SKYCELLS_PER_BATCH = 20  # Adjusted for memory usage
+    # Processing parameters - lower n_jobs / skycells_per_batch for full-FFI runs
+    N_JOBS = max(1, int(n_jobs))
+    SKYCELLS_PER_BATCH = max(1, int(skycells_per_batch))
+    print(f"Parallel workers: n_jobs={N_JOBS}, skycells_per_batch={SKYCELLS_PER_BATCH}")
 
     # Load TESS data and WCS
     print("Loading TESS data and WCS...")
