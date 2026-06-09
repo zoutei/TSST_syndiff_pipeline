@@ -44,12 +44,13 @@ STAGE_DEPS: Dict[str, List[str]] = {
 
 STAGE_POOL: Dict[str, str] = {
     "tess_ffi_download": "network",
-    "wcs_grouping": "cpu_light",
     "mapping": "mapping",
     "ps1_download": "network",
     "ps1_process": "ps1_process",
     "downsample": "cpu_light",
 }
+# wcs_grouping is intentionally unpooled: it is very fast and should not
+# compete with downsample for the cpu_light concurrency limit.
 
 # Stage statuses (single, explicit state machine).
 STATUS_PENDING = "pending"
@@ -348,6 +349,23 @@ class PipelineState:
                 LIMIT ?
                 """,
                 (run_id, STATUS_READY, *stages_in_pool, limit),
+            ).fetchall()
+            return [StageRunRow(**dict(r)) for r in rows]
+
+    def fetch_ready_unpooled(self, run_id: str) -> List[StageRunRow]:
+        """Ready stages with no resource pool (e.g. wcs_grouping)."""
+        unpooled = [s for s in STAGE_NAMES if s not in STAGE_POOL]
+        if not unpooled:
+            return []
+        placeholders = ",".join("?" for _ in unpooled)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM stage_runs
+                WHERE run_id = ? AND status = ? AND stage IN ({placeholders})
+                ORDER BY target_label, stage
+                """,
+                (run_id, STATUS_READY, *unpooled),
             ).fetchall()
             return [StageRunRow(**dict(r)) for r in rows]
 
