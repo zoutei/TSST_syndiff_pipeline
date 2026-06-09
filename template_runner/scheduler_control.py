@@ -84,6 +84,22 @@ def daemon_heartbeat_age_s(state_db_path: str) -> float | None:
     return _db_heartbeat_age_s(state_db_path)
 
 
+def _local_heartbeat_exists(state_db_path: str) -> bool:
+    return logs.daemon_heartbeat_file(state_db_path).is_file()
+
+
+def _clear_daemon_liveness(state_db_path: str) -> None:
+    """Drop liveness artifacts after an intentional supervisor stop."""
+    try:
+        logs.daemon_heartbeat_file(state_db_path).unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        PipelineState(state_db_path).clear_supervisor()
+    except OSError:
+        pass
+
+
 def daemon_is_alive(
     state_db_path: str,
     *,
@@ -95,7 +111,13 @@ def daemon_is_alive(
         age = daemon_heartbeat_age_s(state_db_path)
         if age is None or age <= stale_after_s:
             return True
-    age = daemon_heartbeat_age_s(state_db_path)
+    # A host-local heartbeat file means this machine owns (or owned) the
+    # supervisor. Without a live pid, stale heartbeats must not read as alive
+    # (e.g. after SIGKILL before cleanup, or between stop and heartbeat expiry).
+    if _local_heartbeat_exists(state_db_path):
+        return False
+    # Cross-host status: no local heartbeat here; trust a fresh DB heartbeat.
+    age = _db_heartbeat_age_s(state_db_path)
     if age is not None and age <= stale_after_s:
         return True
     return False
@@ -184,6 +206,7 @@ def stop_daemon(
     if not pid or not daemon.is_process_alive(pid):
         if pid is not None:
             daemon.remove_pid_file(pid_path)
+        _clear_daemon_liveness(state_db_path)
         return StopDaemonResult(
             pid=pid,
             was_running=False,
@@ -201,6 +224,7 @@ def stop_daemon(
     stopped = not daemon.is_process_alive(pid)
     if stopped:
         daemon.remove_pid_file(pid_path)
+        _clear_daemon_liveness(state_db_path)
     return StopDaemonResult(
         pid=pid,
         was_running=True,

@@ -13,7 +13,8 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_runner import daemon, logs
-from syndiff_pipeline.template_runner.scheduler_control import stop_daemon
+from syndiff_pipeline.template_runner.scheduler import _write_local_heartbeat
+from syndiff_pipeline.template_runner.scheduler_control import daemon_is_alive, stop_daemon
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_runner.scheduler import (
     _apply_verify_outcome,
@@ -861,6 +862,52 @@ class TestStopDaemon(unittest.TestCase):
             self.assertFalse(result.stopped)
             self.assertTrue(result.force_killed)
             self.assertTrue(pid_path.is_file())
+
+    def test_clears_liveness_after_sigkill_stop(self):
+        """After stop (including SIGKILL), alive must be false immediately."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            pid_path = logs.daemon_pid_path(db)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("88888", encoding="utf-8")
+            state = PipelineState(db)
+            state.update_supervisor_heartbeat(88888)
+            _write_local_heartbeat(db)
+            self.addCleanup(
+                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+            )
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                side_effect=[True, False],
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                side_effect=[False, True],
+            ):
+                result = stop_daemon(db, term_timeout_s=0.1, kill_wait_s=0.1)
+            self.assertTrue(result.stopped)
+            self.assertTrue(result.force_killed)
+            self.assertFalse(logs.daemon_heartbeat_file(db).is_file())
+            self.assertIsNone(state.get_supervisor_status())
+            self.assertFalse(daemon_is_alive(db))
+
+    def test_clears_stale_liveness_when_pid_not_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            pid_path = logs.daemon_pid_path(db)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text("424242", encoding="utf-8")
+            state = PipelineState(db)
+            state.update_supervisor_heartbeat(424242)
+            _write_local_heartbeat(db)
+            self.addCleanup(
+                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+            )
+            result = stop_daemon(db)
+            self.assertFalse(result.was_running)
+            self.assertFalse(daemon_is_alive(db))
+            self.assertIsNone(state.get_supervisor_status())
 
 
 class TestRunFinalStatus(unittest.TestCase):

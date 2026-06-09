@@ -323,6 +323,22 @@ class TestDaemonIsAlive(unittest.TestCase):
             ):
                 self.assertTrue(daemon_is_wedged(db))
 
+    def test_fresh_local_heartbeat_without_live_pid_is_not_alive(self):
+        """Ghost liveness after kill: local heartbeat fresh but pid gone."""
+        from syndiff_pipeline.template_runner.scheduler import _write_local_heartbeat
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            _write_local_heartbeat(db)
+            self.addCleanup(
+                lambda: logs.daemon_heartbeat_file(db).unlink(missing_ok=True)
+            )
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                return_value=None,
+            ):
+                self.assertFalse(daemon_is_alive(db))
+
 
 if __name__ == "__main__":
     unittest.main()
