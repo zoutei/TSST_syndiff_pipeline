@@ -18,6 +18,7 @@ from syndiff_pipeline.template_runner import condor, daemon, launcher, logs, sta
 from syndiff_pipeline.template_runner.run_context import resolve_run_context
 from syndiff_pipeline.template_runner.runner_config import resolve_config
 from syndiff_pipeline.template_runner.state import (
+    RUN_CANCELED,
     STATUS_BLOCKED,
     STATUS_CANCELED,
     STATUS_EXTERNAL,
@@ -29,8 +30,10 @@ from syndiff_pipeline.template_runner.state import (
     STATUS_SUCCESS,
     STAGE_DEPS,
     STAGE_POOL,
+    TERMINAL_RUN_STATUSES,
     PipelineState,
     _utc_now,
+    derive_run_final_status,
     downstream_stages,
 )
 from syndiff_pipeline.template_runner.verify import check_manifests_only
@@ -814,10 +817,21 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     )
     nonterminal = sum(counts.get(s, 0) for s in NONTERMINAL_STATUSES)
 
+    prev_status = run.get("status")
+
     if nonterminal == 0:
-        final = "success" if counts.get(STATUS_FAILED, 0) == 0 else "failed"
+        final = derive_run_final_status(counts)
+        prev_terminal = prev_status in TERMINAL_RUN_STATUSES
         state.set_run_status(run_id, final)
-        log.info("Run %s complete: %s", run_id, final)
+        if not prev_terminal:
+            log.info("Run %s complete: %s", run_id, final)
+        elif final != prev_status:
+            log.info(
+                "Run %s terminal status corrected: %s -> %s",
+                run_id,
+                prev_status,
+                final,
+            )
         _write_summary(state, run_id, runs_root)
         return
 
@@ -828,7 +842,7 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         reason_text = "; ".join(reasons[:8])
         state.set_run_status(run_id, "stalled", stall_reason=reason_text)
         log.warning("Run %s stalled: %s", run_id, reason_text)
-    elif run.get("status") == "stalled" and (running > 0 or launchable > 0):
+    elif prev_status == "stalled" and (running > 0 or launchable > 0):
         state.set_run_status(run_id, "running")
 
     _write_summary(state, run_id, runs_root)
