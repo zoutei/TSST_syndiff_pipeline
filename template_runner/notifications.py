@@ -397,8 +397,6 @@ def format_run_started_message(
 def resolve_run_ids_for_status_request(
     state: PipelineState,
     message_text: str,
-    *,
-    limit: int = 3,
 ) -> list[str]:
     """Pick run_id(s) to report for an on-demand Discord status request."""
     text = message_text.strip()
@@ -410,7 +408,7 @@ def resolve_run_ids_for_status_request(
                 return [cleaned]
     active = state.active_runs()
     if active:
-        return [row["run_id"] for row in active[:limit]]
+        return [row["run_id"] for row in active]
     recent = state.list_runs(1)
     if recent:
         return [recent[0]["run_id"]]
