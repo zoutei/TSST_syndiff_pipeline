@@ -261,7 +261,7 @@ syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
-`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
+`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
 
 Or set the runs root once per shell session and pass `--run-id` for each run you are watching:
 
