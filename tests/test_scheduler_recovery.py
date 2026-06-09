@@ -14,7 +14,12 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_runner import logs
-from syndiff_pipeline.template_runner.scheduler import reconcile_running_stages
+from syndiff_pipeline.template_runner.launcher import LaunchDescriptor
+from syndiff_pipeline.template_runner.scheduler import (
+    _LOCAL_START_GRACE_S,
+    _try_launch_ready_row,
+    reconcile_running_stages,
+)
 from syndiff_pipeline.template_runner.scheduler_control import daemon_is_alive
 from syndiff_pipeline.template_runner.state import (
     PipelineState,
@@ -253,6 +258,198 @@ class TestSchedulerReconcile(unittest.TestCase):
             self.assertEqual(counts["failed"], 1)
             self.assertEqual(row.status, STATUS_CANCELED)
             self.assertEqual(row.exit_code, 143)
+
+    def test_reconcile_grace_when_alive_with_stale_status_token(self):
+        """Alive child with a previous launch's token in status.json must not requeue."""
+        target = self._target()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                state, run_dir = _minimal_run(tmp_path, target, ["ps1_download"])
+                label = target.label()
+                runs_root = str(tmp_path / "runs")
+                stale_token = state.new_launch_token()
+                current_token = state.new_launch_token()
+                state.update_stage_status("run_a", label, "ps1_download", STATUS_READY)
+                state.try_atomic_claim(
+                    "run_a",
+                    label,
+                    "ps1_download",
+                    launch_token=current_token,
+                    executor="local",
+                    native_id=proc.pid,
+                    log_path=str(
+                        logs.target_log_path(runs_root, "run_a", label, "ps1_download")
+                    ),
+                )
+                logs.write_json_atomic(
+                    logs.stage_status_path(runs_root, "run_a", label, "ps1_download"),
+                    {
+                        "launch_token": stale_token,
+                        "pid": proc.pid,
+                        "state": "running",
+                    },
+                )
+                from syndiff_pipeline.template_runner.run_context import resolve_run_context
+
+                ctx = resolve_run_context(run_dir=run_dir)
+                counts = reconcile_running_stages(state, "run_a", ctx)
+                row = state.get_stage_run("run_a", label, "ps1_download")
+                self.assertEqual(counts["still_running"], 1)
+                self.assertEqual(counts["requeued"], 0)
+                self.assertEqual(row.status, STATUS_RUNNING)
+                self.assertEqual(row.launch_token, current_token)
+        finally:
+            proc.kill()
+
+    def test_reconcile_requeues_stale_token_after_grace_and_terminates(self):
+        target = self._target()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                state, run_dir = _minimal_run(tmp_path, target, ["ps1_download"])
+                label = target.label()
+                runs_root = str(tmp_path / "runs")
+                stale_token = state.new_launch_token()
+                current_token = state.new_launch_token()
+                state.update_stage_status("run_a", label, "ps1_download", STATUS_READY)
+                state.try_atomic_claim(
+                    "run_a",
+                    label,
+                    "ps1_download",
+                    launch_token=current_token,
+                    executor="local",
+                    native_id=proc.pid,
+                    log_path=str(
+                        logs.target_log_path(runs_root, "run_a", label, "ps1_download")
+                    ),
+                )
+                logs.write_json_atomic(
+                    logs.stage_status_path(runs_root, "run_a", label, "ps1_download"),
+                    {
+                        "launch_token": stale_token,
+                        "pid": proc.pid,
+                        "state": "running",
+                    },
+                )
+                from syndiff_pipeline.template_runner.run_context import resolve_run_context
+
+                ctx = resolve_run_context(run_dir=run_dir)
+                with unittest.mock.patch(
+                    "syndiff_pipeline.template_runner.scheduler._age_seconds",
+                    return_value=_LOCAL_START_GRACE_S + 1,
+                ), unittest.mock.patch(
+                    "syndiff_pipeline.template_runner.scheduler._terminate_job",
+                ) as mock_terminate:
+                    counts = reconcile_running_stages(state, "run_a", ctx)
+                row = state.get_stage_run("run_a", label, "ps1_download")
+                self.assertEqual(counts["requeued"], 1)
+                self.assertEqual(row.status, STATUS_READY)
+                mock_terminate.assert_called_once()
+        finally:
+            proc.kill()
+
+    def test_reconcile_stale_token_does_not_duplicate_on_tick(self):
+        target = self._target()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                state, run_dir = _minimal_run(tmp_path, target, ["ps1_download"])
+                label = target.label()
+                runs_root = str(tmp_path / "runs")
+                stale_token = state.new_launch_token()
+                current_token = state.new_launch_token()
+                state.update_stage_status("run_a", label, "ps1_download", STATUS_READY)
+                state.try_atomic_claim(
+                    "run_a",
+                    label,
+                    "ps1_download",
+                    launch_token=current_token,
+                    executor="local",
+                    native_id=proc.pid,
+                    log_path=str(
+                        logs.target_log_path(runs_root, "run_a", label, "ps1_download")
+                    ),
+                )
+                logs.write_json_atomic(
+                    logs.stage_status_path(runs_root, "run_a", label, "ps1_download"),
+                    {
+                        "launch_token": stale_token,
+                        "pid": proc.pid,
+                        "state": "running",
+                    },
+                )
+                from syndiff_pipeline.template_runner.run_context import resolve_run_context
+
+                ctx = resolve_run_context(run_dir=run_dir)
+                for _ in range(2):
+                    counts = reconcile_running_stages(state, "run_a", ctx)
+                    self.assertEqual(counts["requeued"], 0)
+                    self.assertEqual(counts["still_running"], 1)
+                row = state.get_stage_run("run_a", label, "ps1_download")
+                self.assertEqual(row.status, STATUS_RUNNING)
+                self.assertEqual(row.launch_token, current_token)
+        finally:
+            proc.kill()
+
+    def test_launch_clears_stale_status_file(self):
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, run_dir = _minimal_run(tmp_path, target, ["mapping", "ps1_download"])
+            label = target.label()
+            runs_root = str(tmp_path / "runs")
+            state.update_stage_status(
+                "run_a", label, "mapping", STATUS_SUCCESS, exit_code=0
+            )
+            state.cache_external_check("run_a", label, "ps1_download", complete=True)
+            state.update_stage_status("run_a", label, "ps1_download", STATUS_READY)
+            status_path = logs.stage_status_path(runs_root, "run_a", label, "ps1_download")
+            logs.write_json_atomic(
+                status_path,
+                {"launch_token": "old-token", "pid": 1, "state": "running"},
+            )
+            row = state.get_stage_run("run_a", label, "ps1_download")
+            from syndiff_pipeline.template_runner.run_context import resolve_run_context
+
+            ctx = resolve_run_context(run_dir=run_dir)
+            seen_at_launch: list[bool] = []
+
+            def fake_launch(*args, **kwargs):
+                seen_at_launch.append(status_path.is_file())
+                return LaunchDescriptor(
+                    executor="local",
+                    native_id=424242,
+                    launch_token=kwargs["launch_token"],
+                    submit_epoch=1.0,
+                )
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                side_effect=fake_launch,
+            ):
+                launched = _try_launch_ready_row(
+                    state,
+                    "run_a",
+                    ctx,
+                    row,
+                    pool_label="network",
+                    force_rerun=False,
+                    active_stages=["ps1_download"],
+                    targets_by_label={label: target},
+                    runs_root=runs_root,
+                )
+            self.assertTrue(launched)
+            self.assertEqual(seen_at_launch, [False])
 
 
 class TestDaemonIsAlive(unittest.TestCase):
