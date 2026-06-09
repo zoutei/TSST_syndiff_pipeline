@@ -59,16 +59,50 @@ _PHASE_LINES = (
 )
 
 
-def _tail_text(log_path: Path, *, tail_bytes: int = 65536) -> str:
+_TAIL_CHUNK_BYTES = 65536
+_MAX_TAIL_SCAN_BYTES = 4 * 1024 * 1024
+
+
+def _read_tail_bytes(log_path: Path, nbytes: int) -> str:
     try:
         size = log_path.stat().st_size
         with log_path.open("rb") as fh:
-            if size > tail_bytes:
-                fh.seek(size - tail_bytes)
+            fh.seek(max(0, size - nbytes))
             data = fh.read()
         return data.decode("utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _tail_text(log_path: Path, *, tail_bytes: int = _TAIL_CHUNK_BYTES) -> str:
+    return _read_tail_bytes(log_path, tail_bytes)
+
+
+def _scan_tail_text(
+    log_path: Path,
+    parser,
+    *,
+    chunk_bytes: int = _TAIL_CHUNK_BYTES,
+    max_scan_bytes: int = _MAX_TAIL_SCAN_BYTES,
+) -> StageProgress | None:
+    """Expand the read window backward from EOF until *parser* finds progress."""
+    try:
+        size = log_path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+
+    scan = min(chunk_bytes, size)
+    limit = min(max_scan_bytes, size)
+    while True:
+        result = parser(_read_tail_bytes(log_path, scan))
+        if result is not None:
+            return result
+        if scan >= limit:
+            break
+        scan = min(scan + chunk_bytes, limit)
+    return None
 
 
 def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
@@ -244,7 +278,8 @@ def read_log_progress(
     log_path: Path | str,
     stage: str,
     *,
-    tail_bytes: int = 65536,
+    tail_bytes: int = _TAIL_CHUNK_BYTES,
+    max_scan_bytes: int = _MAX_TAIL_SCAN_BYTES,
     started_at: str | None = None,
 ) -> StageProgress | None:
     """Return log-derived progress for *stage*, or None if unavailable."""
@@ -259,17 +294,19 @@ def read_log_progress(
             return _elapsed_progress(started_at)
         return None
 
-    text = _tail_text(path, tail_bytes=tail_bytes)
-    if not text.strip():
-        if stage == "wcs_grouping":
-            return _elapsed_progress(started_at)
-        return None
-
     parser = _PARSERS.get(stage)
     if parser is None:
+        text = _tail_text(path, tail_bytes=tail_bytes)
+        if not text.strip():
+            return None
         return _elapsed_progress(started_at)
 
-    result = parser(text)
+    result = _scan_tail_text(
+        path,
+        parser,
+        chunk_bytes=tail_bytes,
+        max_scan_bytes=max_scan_bytes,
+    )
     if result is not None:
         return result
     if stage == "wcs_grouping":

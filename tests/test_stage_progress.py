@@ -207,6 +207,18 @@ class TestReadLogProgress(unittest.TestCase):
         prog = read_log_progress(path, "ps1_download", tail_bytes=4096)
         self.assertEqual(prog.text, "999/1000")
 
+    def test_ps1_process_scans_past_verbose_tail(self):
+        noise_line = "INFO [Gather] waiting for cell bundle\n"
+        trailing_noise = noise_line * 4000
+        progress_line = "INFO [Pipeline] Progress: projection 3/19 row 5/10\n"
+        path = self._write_log(
+            "ps1_pr.log",
+            (noise_line * 2000) + progress_line + trailing_noise,
+        )
+        prog = read_log_progress(path, "ps1_process", tail_bytes=65536)
+        self.assertIsNotNone(prog)
+        self.assertEqual(prog.text, "3/19 projections 5/10 rows")
+
 
 class TestCmdProgressDetail(unittest.TestCase):
     def test_prints_running_detail(self):
