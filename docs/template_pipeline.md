@@ -652,6 +652,7 @@ See `example/template_runner/events_example.csv`.
 | `logs` | Print daemon or stage log (`--target`, `--stage`, `--follow`) |
 | `tail` | Alias for `logs --follow` |
 | `verify` | Check on-disk artifacts (`--scc`, `--stages`) |
+| `reconcile-manifests` | Backfill stable cross-run completion manifests for already-complete outputs (`--scc`, `--stages`, `--quiet`) |
 | `retry` | Insert retry intent; ensures daemon running; `--no-start-daemon` to skip |
 | `pause` | Insert pause intent (daemon stops dequeuing) |
 | `resume` | Insert resume intent |
@@ -687,6 +688,9 @@ syndiff-template verify --config cfg.yaml --targets targets.csv \
 
 # Verify using frozen run config
 syndiff-template verify --run-dir /path/to/runs/20260607_210919 --scc 23,1,3
+
+# Backfill stable manifests for already-complete data (one-shot)
+syndiff-template reconcile-manifests --config cfg.yaml --targets targets.csv
 
 # Retry all failed stages in a run
 syndiff-template retry --run-dir /path/to/runs/20260607_210919
@@ -753,7 +757,11 @@ Single-target retry resolves SCC from the frozen `targets.csv`, falling back to 
     {target_label}/
       {stage}.log
       {stage}.status.json   # durable local job state (launch_token, pid, exit)
-      {stage}.manifest.json # completion manifest (config fingerprint, artifact paths)
+      {stage}.manifest.json # per-run completion manifest (config fingerprint, artifact paths)
+
+{runs_root}/.manifests/
+  {target_label}/
+    {stage}.manifest.json   # stable cross-run completion manifest (backfilled by reconcile-manifests)
 ```
 
 Host-level supervisor files live next to `state_db_path`:
@@ -794,16 +802,58 @@ Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL
 
 | Stage | Check |
 |-------|-------|
-| `tess_ffi_download` | FFI files exist |
+| `tess_ffi_download` | All FFI basenames from the tesscurl manifest present (tri-state `unknown` when the manifest is unavailable) |
 | `wcs_grouping` | Valid `cluster_template_job.json` |
 | `mapping` | Master skycells CSV |
-| `ps1_download` | Non-empty `ps1_skycells.zarr` |
-| `ps1_process` | Convolved Zarr complete (counts `*_data` arrays vs mapping) |
-| `downsample` | `syndiff_template_*.fits` present |
+| `ps1_download` | Every expected skycell has all 12 arrays (`{band}`, `{band}_mask`, `{band}_wt` for r/i/z/y) with materialized chunks |
+| `ps1_process` | Each expected skycell's `{skycell}_data` array has materialized chunks |
+| `downsample` | All per-offset `syndiff_template_*.fits` present (one per offset) |
 
 Partial convolved Zarr (interrupted run) reports e.g. `Partial convolved zarr: 3/120 skycells saved`.
 
 Use verify before subset runs to confirm upstream stages are satisfied off-run.
+
+### Fast, metadata-only Zarr verification
+
+The Zarr verifiers (`ps1_download`, `ps1_process`) are **filesystem-metadata only**:
+they never call `zarr.open` and never decompress a chunk. A Zarr array counts as
+present when its chunk root (`{array}/c/` for Zarr v3) contains at least one
+materialized chunk. This mirrors the download writer's completeness definition
+(`ps1_download.skycell_array_status`) while avoiding the per-skycell chunk reads
+that previously made verification take ~30 min on NFS — it now completes in
+seconds. A one-line timing log (`verify_ps1_download: N/M skycells complete in Xs`)
+is emitted for visibility.
+
+### Completion manifests
+
+On success a stage writes a JSON **completion manifest** (`schema_version`,
+`stage`, `expected_count`, `produced_count`, `artifacts`, `config_fingerprint`,
+`completed_at`). `stage_complete()` is **manifest-first**: a manifest is honored
+only when its schema and config fingerprint match the current config and every
+listed artifact still exists, otherwise it falls back to the on-disk verifier.
+
+Manifests are written in two places:
+
+- **Per-run**: `{runs_root}/{run_id}/per_target/{label}/{stage}.manifest.json`
+  (avoids re-verifying within a run).
+- **Stable / cross-run**: `{runs_root}/.manifests/{label}/{stage}.manifest.json`
+  (lets a *fresh* run skip re-scanning an already-complete output). The supervisor
+  self-heals this file whenever it confirms a stage complete on disk.
+
+### `reconcile-manifests` (backfill)
+
+For data produced before manifests existed (e.g. existing `/astro` Zarr stores),
+run a one-shot backfill to write stable manifests for everything already complete:
+
+```bash
+syndiff-template reconcile-manifests --config cfg.yaml --targets targets.csv
+# or against a frozen run:  --run-dir /path/to/runs/<run_id>
+# scope with --scc S/C/D and --stages ps1_download,ps1_process
+```
+
+It scans outputs read-only via the fast verifiers and writes a stable manifest for
+each complete stage. After a backfill, future runs read one small JSON instead of
+re-scanning the store.
 
 ---
 

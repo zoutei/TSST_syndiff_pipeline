@@ -36,8 +36,10 @@ from syndiff_pipeline.template_runner.state import (
 )
 from syndiff_pipeline.template_runner.targets import Target
 from syndiff_pipeline.template_runner.verify import (
+    persist_completion_manifests,
     stage_complete,
     stage_config_fingerprint,
+    verify_mapping,
     write_manifest,
 )
 
@@ -143,6 +145,65 @@ class TestManifestFirstVerify(unittest.TestCase):
             self.assertNotEqual(
                 stage_config_fingerprint(resolved, "mapping"),
                 "stale",
+            )
+
+    def test_stable_manifest_used_across_runs(self):
+        # A stable (cross-run) manifest must satisfy stage_complete even when no
+        # per-run manifest exists, so a fresh run skips re-scanning the output.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            resolved = _resolved(tmp_path)
+            artifact = tmp_path / "artifact.fits"
+            artifact.write_text("x", encoding="utf-8")
+            stable_path = logs.stable_stage_manifest_path(
+                str(tmp_path), resolved.target.label(), "mapping"
+            )
+            write_manifest(stable_path, resolved, "mapping", [str(artifact)], 1, 1)
+            # No per-run manifest passed; stable path alone should mark complete.
+            self.assertTrue(
+                stage_complete(
+                    resolved, "mapping", stable_manifest_path=str(stable_path)
+                )
+            )
+            # If the recorded artifact disappears, the manifest is invalidated.
+            artifact.unlink()
+            self.assertFalse(
+                stage_complete(
+                    resolved, "mapping", stable_manifest_path=str(stable_path)
+                )
+            )
+
+    def test_persist_completion_manifests_after_verify(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            resolved = _resolved(tmp_path)
+            csv_path = (
+                Path(resolved.mapping_root)
+                / "sector_0022"
+                / "camera_3"
+                / "ccd_3"
+                / "tess_s0022_3_3_master_skycells_list.csv"
+            )
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
+            csv_path.write_text("NAME,projection\nskycell.0001.0001,0001\n", encoding="utf-8")
+
+            result = verify_mapping(resolved)
+            self.assertTrue(result.ok)
+
+            label = resolved.target.label()
+            stable_path = logs.stable_stage_manifest_path(str(tmp_path), label, "mapping")
+            per_run_path = logs.stage_manifest_path(str(tmp_path), "run_a", label, "mapping")
+            written = persist_completion_manifests(
+                resolved, "mapping", [per_run_path, stable_path]
+            )
+            self.assertEqual(written, [str(per_run_path), str(stable_path)])
+            self.assertTrue(
+                stage_complete(
+                    resolved,
+                    "mapping",
+                    manifest_path=str(per_run_path),
+                    stable_manifest_path=str(stable_path),
+                )
             )
 
 

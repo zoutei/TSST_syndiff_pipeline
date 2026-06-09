@@ -101,16 +101,22 @@ def main(argv: list[str] | None = None) -> int:
                 if manifest is None:
                     manifest = collect_stage_artifacts(resolved, args.stage)
                 expected_count, produced_count, artifacts = manifest
-                write_manifest(
+                for manifest_dest in (
                     logs.stage_manifest_path(
                         runs_root, args.run_id, args.target_label, args.stage
                     ),
-                    resolved,
-                    args.stage,
-                    artifacts,
-                    expected_count,
-                    produced_count,
-                )
+                    logs.stable_stage_manifest_path(
+                        runs_root, args.target_label, args.stage
+                    ),
+                ):
+                    write_manifest(
+                        manifest_dest,
+                        resolved,
+                        args.stage,
+                        artifacts,
+                        expected_count,
+                        produced_count,
+                    )
             finally:
                 sys.stdout = old_out
                 sys.stderr = old_err
