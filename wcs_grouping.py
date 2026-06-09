@@ -49,6 +49,7 @@ warnings.filterwarnings("ignore", category=AstropyWarning)
 log = logging.getLogger(__name__)
 
 CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
+WCS_DRIFT_TEMPLATE_DEBUG_FILENAME = "wcs_drift_template_debug.png"
 
 _VALID_CROP_QUADRANTS = frozenset({"tl", "tr", "bl", "br", "full", "full_science"})
 

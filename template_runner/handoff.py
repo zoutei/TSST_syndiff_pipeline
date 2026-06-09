@@ -104,4 +104,9 @@ def run_wcs_grouping(
         handoff_dir,
         crop_bounds=crop_bounds,
     )
+    wcs_grouping.plot_wcs_drift_and_template_assignment(
+        wcs_table,
+        os.path.join(handoff_dir, wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME),
+        ref_ffi_path=chosen_ref,
+    )
     return out_path
