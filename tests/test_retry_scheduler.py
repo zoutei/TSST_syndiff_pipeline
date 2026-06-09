@@ -22,22 +22,7 @@ from syndiff_pipeline.template_runner.state import (
     STATUS_FAILED,
 )
 from syndiff_pipeline.template_runner.targets import Target, find_target_for_run
-
-
-def _write_minimal_config(path: Path, *, state_db: str, runs_root: str) -> None:
-    path.write_text(
-        "\n".join(
-            [
-                "data_root: /data",
-                f"handoff_root: {Path(state_db).parent}",
-                f"runs_root: {runs_root}",
-                "state_db_path: " + state_db,
-                "skycell_wcs_csv: skycells.csv",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (path.parent / "skycells.csv").write_text("x", encoding="utf-8")
+from tests.site_config import write_site_config
 
 
 def _write_targets(path: Path, *, enabled: str = "true") -> None:
@@ -49,11 +34,16 @@ def _write_targets(path: Path, *, enabled: str = "true") -> None:
 
 
 def _make_run_context(tmp: Path, *, enabled: str = "true") -> tuple[RunContext, PipelineState]:
-    state_db = tmp / "state.sqlite"
-    runs_root = tmp / "runs"
+    handoff = tmp / "handoff"
+    data = tmp / "data"
+    runs_root = handoff / "runs"
+    state_db = handoff / "pipeline_state.sqlite"
     source_cfg = tmp / "site" / "config.yaml"
-    source_cfg.parent.mkdir(parents=True)
-    _write_minimal_config(source_cfg, state_db=str(state_db), runs_root=str(runs_root))
+    write_site_config(
+        source_cfg,
+        handoff_root=str(handoff),
+        data_root=str(data),
+    )
     targets_csv = tmp / "targets.csv"
     _write_targets(targets_csv, enabled=enabled)
 
@@ -110,7 +100,7 @@ class TestEnsureDaemonRunning(unittest.TestCase):
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
                 return_value=4242,
             ):
-                result = ensure_daemon_running(ctx.cfg.state_db_path)
+                result = ensure_daemon_running(ctx.cfg.handoff_root)
             self.assertTrue(result.spawned)
             self.assertEqual(result.pid, 4242)
             spawn.assert_called_once()
@@ -127,7 +117,7 @@ class TestEnsureDaemonRunning(unittest.TestCase):
             ), unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler_control.daemon.spawn_detached_daemon",
             ) as spawn:
-                result = ensure_daemon_running(ctx.cfg.state_db_path)
+                result = ensure_daemon_running(ctx.cfg.handoff_root)
             self.assertFalse(result.spawned)
             self.assertEqual(result.pid, 99999)
             spawn.assert_not_called()
@@ -138,30 +128,24 @@ class TestCmdRetry(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx, state = _make_run_context(Path(tmp))
             label = "s0023_c1_k3_2020ftl"
-            state.update_stage_status(ctx.run_id, label, "mapping", STATUS_FAILED, exit_code=1)
-
+            state.update_stage_status(ctx.run_id, label, "mapping", STATUS_FAILED)
             args = argparse.Namespace(
                 run_dir=str(ctx.run_dir),
-                run_id=None,
+                run_id=ctx.run_id,
                 config=None,
                 scc=None,
                 stage=None,
                 no_start_daemon=False,
             )
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.cli._resolve_run_from_args",
-                return_value=ctx,
-            ), unittest.mock.patch(
                 "syndiff_pipeline.template_runner.cli.ensure_daemon_running",
             ) as ensure:
-                ensure.return_value.spawned = True
-                ensure.return_value.pid = 7777
                 rc = cmd_retry(args)
             self.assertEqual(rc, 0)
             cmds = state.fetch_pending_commands()
             self.assertEqual(len(cmds), 1)
             self.assertEqual(cmds[0].kind, "retry")
-            ensure.assert_called_once()
+            ensure.assert_called_once_with(ctx.cfg.handoff_root)
 
 
 if __name__ == "__main__":

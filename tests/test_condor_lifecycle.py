@@ -171,7 +171,7 @@ class TestCondorGraceAcrossRestart(unittest.TestCase):
 
 class TestStageDeps(unittest.TestCase):
     def test_downsample_requires_mapping(self):
-        self.assertEqual(STAGE_DEPS["downsample"], ["mapping", "ps1_process"])
+        self.assertEqual(STAGE_DEPS["downsample"], ["wcs_grouping", "mapping", "ps1_process"])
 
 
 class TestRaNormalization(unittest.TestCase):

@@ -42,7 +42,6 @@ def _resolved(tmp: Path, csv_path: Path, zarr_path: Path, projections_limit: int
         ffi_dir=str(tmp / "ffi"),
         handoff_dir=str(tmp / "handoff" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
-        gaia_credentials=None,
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),
             mapping=MappingStageParams(oversampling_factor=1),

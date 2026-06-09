@@ -130,9 +130,9 @@ def _handle_signal(signum, frame):
     _shutdown = True
 
 
-def _write_local_heartbeat(state_db_path: str) -> None:
+def _write_local_heartbeat(handoff_root: str) -> None:
     """Write the host-local heartbeat file (NFS-independent liveness signal)."""
-    path = logs.daemon_heartbeat_file(state_db_path)
+    path = logs.daemon_heartbeat_file(handoff_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(str(time.time()), encoding="utf-8")
@@ -140,7 +140,7 @@ def _write_local_heartbeat(state_db_path: str) -> None:
 
 
 def _supervisor_heartbeat_loop(
-    state: PipelineState, state_db_path: str, pid: int, interval_s: float
+    state: PipelineState, handoff_root: str, pid: int, interval_s: float
 ) -> None:
     """Keep liveness fresh while the main loop is busy launching stages.
 
@@ -155,7 +155,7 @@ def _supervisor_heartbeat_loop(
         if _shutdown:
             break
         try:
-            _write_local_heartbeat(state_db_path)
+            _write_local_heartbeat(handoff_root)
             last_local_ok = time.monotonic()
         except Exception:
             log.exception("Failed to write local heartbeat file")
@@ -1115,7 +1115,7 @@ def _apply_commands(state: PipelineState) -> None:
             state.mark_command_processed(cmd.id)
 
 
-def run_supervisor_daemon(state_db_path: str) -> int:
+def run_supervisor_daemon(handoff_root: str) -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [supervisor] %(message)s",
@@ -1184,7 +1184,7 @@ def run_supervisor_daemon(state_db_path: str) -> int:
                     )
                     for run in state.list_active_runs()
                 }
-                write_verify_in_flight(state_db_path, counts)
+                write_verify_in_flight(handoff_root, counts)
 
                 # Interruptible idle: wake early on shutdown instead of sleeping
                 # through a SIGTERM.
@@ -1265,7 +1265,11 @@ def run_scheduler(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Template pipeline supervisor")
     parser.add_argument("--daemon", action="store_true", help="Run global supervisor daemon")
-    parser.add_argument("--state-db", default=None, help="SQLite state DB path (daemon mode)")
+    parser.add_argument(
+        "--handoff-root",
+        default=None,
+        help="Handoff workspace root (daemon mode; state DB is derived)",
+    )
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--run-dir", default=None, help="Path to run directory with frozen config")
     parser.add_argument("--stages", default=None)
@@ -1273,9 +1277,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.daemon:
-        if not args.state_db:
-            raise SystemExit("--state-db required for --daemon")
-        return run_supervisor_daemon(args.state_db)
+        if not args.handoff_root:
+            raise SystemExit("--handoff-root required for --daemon")
+        return run_supervisor_daemon(args.handoff_root)
 
     if not args.run_id or not args.run_dir:
         raise SystemExit("--run-id and --run-dir required without --daemon")

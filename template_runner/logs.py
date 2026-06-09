@@ -117,19 +117,25 @@ def stable_stage_manifest_path(cfg_runs_root: str, target_label: str, stage: str
     return runs_root(cfg_runs_root) / ".manifests" / target_label / f"{stage}.manifest.json"
 
 
-def daemon_lock_path(state_db_path: str | Path) -> Path:
-    return Path(state_db_path).expanduser().resolve().parent / "daemon.lock"
+def _handoff_dir(handoff_root: str | Path) -> Path:
+    from syndiff_pipeline.template_runner.workspace import normalize_handoff_root
+
+    return normalize_handoff_root(handoff_root)
 
 
-def daemon_pid_path(state_db_path: str | Path) -> Path:
-    return Path(state_db_path).expanduser().resolve().parent / "daemon.pid"
+def daemon_lock_path(handoff_root: str | Path) -> Path:
+    return _handoff_dir(handoff_root) / "daemon.lock"
 
 
-def daemon_log_path(state_db_path: str | Path) -> Path:
-    return Path(state_db_path).expanduser().resolve().parent / "daemon.log"
+def daemon_pid_path(handoff_root: str | Path) -> Path:
+    return _handoff_dir(handoff_root) / "daemon.pid"
 
 
-def daemon_heartbeat_file(state_db_path: str | Path) -> Path:
+def daemon_log_path(handoff_root: str | Path) -> Path:
+    return _handoff_dir(handoff_root) / "daemon.log"
+
+
+def daemon_heartbeat_file(handoff_root: str | Path) -> Path:
     """Host-LOCAL heartbeat file (never on NFS).
 
     The supervisor's liveness signal must not depend on the same NFS/DB volume
@@ -137,22 +143,29 @@ def daemon_heartbeat_file(state_db_path: str | Path) -> Path:
     path so distinct pipelines on one host do not collide. Liveness is already
     host-local (pid checks use ``os.kill``), so a local temp path is correct.
     """
-    resolved = str(Path(state_db_path).expanduser().resolve())
+    from syndiff_pipeline.template_runner.workspace import state_db_path
+
+    resolved = str(state_db_path(handoff_root))
     key = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / "syndiff-daemon" / f"{key}.heartbeat"
 
 
-def discord_bot_pid_path(state_db_path: str | Path) -> Path:
-    return Path(state_db_path).expanduser().resolve().parent / "discord_bot.pid"
+def discord_bot_pid_path(handoff_root: str | Path) -> Path:
+    return _handoff_dir(handoff_root) / "discord_bot.pid"
 
 
-def discord_bot_log_path(state_db_path: str | Path) -> Path:
-    return Path(state_db_path).expanduser().resolve().parent / "discord_bot.log"
+def discord_bot_log_path(handoff_root: str | Path) -> Path:
+    return _handoff_dir(handoff_root) / "discord_bot.log"
 
 
-def discord_bot_site_config_path(state_db_path: str | Path) -> Path:
+def discord_bot_site_config_path(handoff_root: str | Path) -> Path:
     """Persisted site config used to (re)start the Discord bot."""
-    return Path(state_db_path).expanduser().resolve().parent / "discord_bot_config.path"
+    return _handoff_dir(handoff_root) / "discord_bot_config.path"
+
+
+def workspace_deployment_path(handoff_root: str | Path) -> Path:
+    """Persisted deployment.yaml path for this workspace."""
+    return _handoff_dir(handoff_root) / "workspace_deployment.path"
 
 
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
@@ -160,7 +173,6 @@ def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
 
 
 def summary_json_path(cfg_runs_root: str, run_id: str) -> Path:
-    return run_dir(cfg_runs_root, run_id) / "summary.json"
     return run_dir(cfg_runs_root, run_id) / "summary.json"
 
 

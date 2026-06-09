@@ -45,7 +45,6 @@ class TestStreamSkipAtCreate(unittest.TestCase):
                 ffi_dir="/data",
                 handoff_root=str(Path(tmp) / "handoffs"),
                 runs_root=str(Path(tmp) / "runs"),
-                state_db_path=str(db),
                 skycell_wcs_csv="/wcs.csv",
                 stages=parse_stage_params({"ps1_process": {"ps1_source": "stream"}}),
             )

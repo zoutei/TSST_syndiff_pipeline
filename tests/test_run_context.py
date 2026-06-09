@@ -4,7 +4,6 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-import unittest.mock
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -12,27 +11,9 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_runner import logs, stages
-from syndiff_pipeline.template_runner.run_context import (
-    RUNS_ROOT_ENV_VAR,
-    resolve_run_context,
-    runs_root_from_env,
-)
+from syndiff_pipeline.template_runner.run_context import resolve_run_context
 from syndiff_pipeline.template_runner.runner_config import load_runner_config
-
-
-def _write_minimal_config(path: Path, *, data_root: str = "/data") -> None:
-    path.write_text(
-        "\n".join(
-            [
-                f"data_root: {data_root}",
-                "handoff_root: /handoff",
-                "runs_root: /handoff/runs",
-                "skycell_wcs_csv: skycells.csv",
-            ]
-        ),
-        encoding="utf-8",
-    )
-    (path.parent / "skycells.csv").write_text("x", encoding="utf-8")
+from tests.site_config import write_site_config
 
 
 def _write_targets(path: Path) -> None:
@@ -47,10 +28,14 @@ class TestMaterializeRunInputs(unittest.TestCase):
     def test_relative_paths_normalized_to_absolute(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
+            handoff = tmp_path / "handoff"
+            data = tmp_path / "data"
             source_cfg = tmp_path / "site" / "config.yaml"
-            source_cfg.parent.mkdir(parents=True)
-            _write_minimal_config(source_cfg, data_root="relative_data")
-            (source_cfg.parent / "relative_data").mkdir()
+            write_site_config(
+                source_cfg,
+                handoff_root=str(handoff),
+                data_root=str(data),
+            )
             targets = tmp_path / "targets.csv"
             _write_targets(targets)
 
@@ -66,53 +51,38 @@ class TestMaterializeRunInputs(unittest.TestCase):
     def test_existing_frozen_copy_not_overwritten(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
+            handoff = tmp_path / "handoff"
+            data = tmp_path / "data"
             source_cfg = tmp_path / "config.yaml"
-            _write_minimal_config(source_cfg)
+            write_site_config(
+                source_cfg,
+                handoff_root=str(handoff),
+                data_root=str(data),
+            )
             targets = tmp_path / "targets.csv"
             _write_targets(targets)
             run_dir = tmp_path / "run_a"
             logs.materialize_run_inputs(source_cfg, targets, run_dir)
 
             frozen_cfg = run_dir / "config.yaml"
-            frozen_cfg.write_text("data_root: /frozen\n", encoding="utf-8")
+            frozen_cfg.write_text("data_root: /frozen\nhandoff_root: /frozen\n", encoding="utf-8")
 
             cfg_path, _ = logs.materialize_run_inputs(source_cfg, targets, run_dir)
             self.assertIn("/frozen", Path(cfg_path).read_text(encoding="utf-8"))
-
-
-class TestRunsRootFromEnv(unittest.TestCase):
-    def test_returns_none_when_unset(self):
-        with unittest.mock.patch.dict("os.environ", {}, clear=True):
-            self.assertIsNone(runs_root_from_env())
-
-    def test_reads_syndiff_runs_root(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with unittest.mock.patch.dict("os.environ", {RUNS_ROOT_ENV_VAR: tmp}):
-                self.assertEqual(runs_root_from_env(), Path(tmp).resolve())
-
-    def test_resolve_with_env_and_run_id(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            source_cfg = tmp_path / "config.yaml"
-            _write_minimal_config(source_cfg)
-            targets = tmp_path / "targets.csv"
-            _write_targets(targets)
-            runs_root = tmp_path / "runs"
-            run_dir = runs_root / "run_a"
-            logs.materialize_run_inputs(source_cfg, targets, run_dir)
-
-            with unittest.mock.patch.dict("os.environ", {RUNS_ROOT_ENV_VAR: str(runs_root)}):
-                ctx = resolve_run_context(run_id="run_a", runs_root=str(runs_root))
-            self.assertEqual(ctx.run_id, "run_a")
-            self.assertEqual(ctx.run_dir, run_dir.resolve())
 
 
 class TestResolveRunContext(unittest.TestCase):
     def test_resolve_from_run_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
+            handoff = tmp_path / "handoff"
+            data = tmp_path / "data"
             source_cfg = tmp_path / "config.yaml"
-            _write_minimal_config(source_cfg)
+            write_site_config(
+                source_cfg,
+                handoff_root=str(handoff),
+                data_root=str(data),
+            )
             targets = tmp_path / "targets.csv"
             _write_targets(targets)
             run_dir = tmp_path / "run_a"
@@ -125,6 +95,27 @@ class TestResolveRunContext(unittest.TestCase):
             self.assertEqual(ctx.run_id, "run_a")
             self.assertEqual(len(ctx.targets), 1)
             self.assertEqual(ctx.targets[0].target_name, "2020ftl")
+
+    def test_resolve_with_config_and_run_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            handoff = tmp_path / "handoff"
+            data = tmp_path / "data"
+            runs_root = handoff / "runs"
+            source_cfg = tmp_path / "config.yaml"
+            write_site_config(
+                source_cfg,
+                handoff_root=str(handoff),
+                data_root=str(data),
+            )
+            targets = tmp_path / "targets.csv"
+            _write_targets(targets)
+            run_dir = runs_root / "run_a"
+            logs.materialize_run_inputs(source_cfg, targets, run_dir)
+
+            ctx = resolve_run_context(run_id="run_a", runs_root=str(runs_root))
+            self.assertEqual(ctx.run_id, "run_a")
+            self.assertEqual(ctx.run_dir, run_dir.resolve())
 
 
 class TestBuildStageCommand(unittest.TestCase):

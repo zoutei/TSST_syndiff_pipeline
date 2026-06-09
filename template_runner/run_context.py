@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List
@@ -11,8 +10,6 @@ from typing import List
 from syndiff_pipeline.template_runner import logs
 from syndiff_pipeline.template_runner.runner_config import RunnerConfig, load_runner_config
 from syndiff_pipeline.template_runner.targets import Target, load_targets
-
-RUNS_ROOT_ENV_VAR = "SYNDIFF_RUNS_ROOT"
 
 
 @dataclass
@@ -22,14 +19,6 @@ class RunContext:
     cfg: RunnerConfig
     targets: List[Target]
     meta: dict
-
-
-def runs_root_from_env() -> Path | None:
-    """Return runs root from ``SYNDIFF_RUNS_ROOT`` if set."""
-    raw = os.environ.get(RUNS_ROOT_ENV_VAR, "").strip()
-    if not raw:
-        return None
-    return Path(raw).expanduser().resolve()
 
 
 def _load_meta(run_directory: Path) -> dict:
@@ -61,8 +50,7 @@ def resolve_run_context(
         rd = logs.run_dir(runs_root, run_id)
     else:
         raise SystemExit(
-            f"Specify --run-dir, or set {RUNS_ROOT_ENV_VAR} with --run-id, "
-            "or --config (with optional --run-id)."
+            "Specify --run-dir, or --config with --run-id."
         )
 
     if not rd.is_dir():
