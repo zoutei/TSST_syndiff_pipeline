@@ -434,7 +434,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
 
-def _process_padding_job(job, state, config, metadata, master_wcs, master_wcs_next, zarr_path, current_df, current_reqs, next_reqs, write_lock, band_cache=None, remove_saturated_stars=False):
+def _process_padding_job(job, state, config, metadata, master_wcs, master_wcs_next, ingest_config, current_df, current_reqs, next_reqs, write_lock, band_cache=None, remove_saturated_stars=False):
     """Helper to process a single padding job."""
     try:
         start_time = time.time()
@@ -453,18 +453,20 @@ def _process_padding_job(job, state, config, metadata, master_wcs, master_wcs_ne
         else:
             # Cache miss fallback: full processing identical to regular cells
             logger.warning(
-                f"[CrossPadding] Cache miss for {job.skycell_name} — falling back to live zarr load. "
+                f"[CrossPadding] Cache miss for {job.skycell_name} — falling back to live ingest. "
                 f"This means the JIT dispatch or wait did not complete in time."
             )
-            import zarr
             try:
-                store = zarr.open(zarr_path, mode="r")
-                bands, masks, weights, headers, headers_weight = load_skycell_bands_masks_and_headers(store, source_proj, source_skycell_id)
+                from syndiff_pipeline.template.ps1_process import _load_skycell_raw_bands
+
+                bands, masks, weights, headers, headers_weight = _load_skycell_raw_bands(
+                    job.skycell_name, source_proj, ingest_config
+                )
             except Exception as e:
-                logger.error(f"Failed to open/load from zarr store at {zarr_path}: {e}")
+                logger.error(f"Failed to ingest padding data for {job.skycell_name}: {e}")
                 return False
 
-            if bands is None:
+            if not bands:
                 logger.warning(f"Failed to load padding data for {job.skycell_name}")
                 return False
 
@@ -542,7 +544,7 @@ def _process_padding_job(job, state, config, metadata, master_wcs, master_wcs_ne
         return False
 
 
-def apply_cross_projection_padding(state, config, metadata: dict, current_row_id: int, next_row_id: Optional[int], zarr_path: str, csv_path: str, band_cache: dict = None, remove_saturated_stars: bool = False):
+def apply_cross_projection_padding(state, config, metadata: dict, current_row_id: int, next_row_id: Optional[int], ingest_config: dict, csv_path: str, band_cache: dict = None, remove_saturated_stars: bool = False):
     """
     Main entry point for applying cross-projection padding.
     Parallelized version. Accepts optional band_cache to skip zarr load + band
@@ -593,7 +595,7 @@ def apply_cross_projection_padding(state, config, metadata: dict, current_row_id
         for job in jobs:
             future = executor.submit(
                 _process_padding_job, job, state, config, metadata,
-                master_wcs, master_wcs_next, zarr_path, current_df,
+                master_wcs, master_wcs_next, ingest_config, current_df,
                 current_reqs, next_reqs, write_lock, band_cache, remove_saturated_stars,
             )
             futures.append(future)

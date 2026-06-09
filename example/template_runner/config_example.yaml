@@ -25,6 +25,8 @@ stages:
   ps1_download:
     num_workers: 8
   ps1_process:
+    ps1_source: zarr
+    num_ingest_workers: 16
     remove_saturated_stars: true
     psf_sigma: 40.0
     # executor: condor (default) submits ps1_process to the science cluster

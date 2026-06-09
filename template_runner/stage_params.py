@@ -48,6 +48,8 @@ PS1_PROCESS_ALLOWED = frozenset(
     {
         "projections_limit",
         "psf_sigma",
+        "ps1_source",
+        "num_ingest_workers",
         "enable_saturation_correction",
         "remove_saturated_stars",
         "catalog_path",
@@ -139,6 +141,8 @@ class Ps1DownloadStageParams:
 class Ps1ProcessStageParams:
     projections_limit: int | None = None
     psf_sigma: float = 60.0
+    ps1_source: str = "zarr"
+    num_ingest_workers: int = 16
     enable_saturation_correction: bool = True
     remove_saturated_stars: bool = False
     catalog_path: str | None = None
@@ -193,6 +197,9 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
     validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
+    ps1_source = pp.get("ps1_source", "zarr")
+    if ps1_source not in ("zarr", "stream"):
+        raise ValueError("stages.ps1_process.ps1_source must be 'zarr' or 'stream'")
     if mp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.mapping.executor must be 'local' or 'condor'")
     return TemplateStageParams(

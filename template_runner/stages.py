@@ -153,6 +153,7 @@ def execute_stage(
         if force_rerun:
             clear_ps1_process_artifacts(resolved)
         pp = resolved.stages.ps1_process
+        pd = resolved.stages.ps1_download
         result = ps1_process.run_modern_sliding_window_pipeline(
             sector=t.sector,
             camera=t.camera,
@@ -160,6 +161,10 @@ def execute_stage(
             data_root=resolved.data_root,
             projections_limit=pp.projections_limit,
             psf_sigma=pp.psf_sigma,
+            ps1_source=pp.ps1_source,
+            num_ingest_workers=pp.num_ingest_workers,
+            use_local_files=pd.use_local_files,
+            local_data_path=pd.local_data_path,
             enable_saturation_correction=pp.enable_saturation_correction,
             remove_saturated_stars=pp.remove_saturated_stars,
             catalog_path=pp.catalog_path,
