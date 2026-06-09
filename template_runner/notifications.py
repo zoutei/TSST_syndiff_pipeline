@@ -17,6 +17,7 @@ import yaml
 from syndiff_pipeline.template_runner.run_report import (
     format_progress_lines,
     format_run_report,
+    format_run_report_messages,
     format_target_status_line,
 )
 from syndiff_pipeline.template_runner.state import STAGE_SHORT_NAMES
@@ -169,7 +170,7 @@ def resolve_channel_id(
 
 
 def post_discord_webhook(url: str, content: str) -> None:
-    payload = json.dumps({"content": content[:_DISCORD_MAX_CONTENT]}).encode("utf-8")
+    payload = json.dumps({"content": content[: _DISCORD_MAX_CONTENT]}).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
@@ -220,7 +221,7 @@ class Notifier:
             )
         return self._webhook_url or None
 
-    def _send(self, run_id: str, event_key: str, content: str) -> None:
+    def _send(self, run_id: str, event_key: str, content: str | Sequence[str]) -> None:
         if not self._cfg.enabled:
             return
         url = self._webhook()
@@ -229,10 +230,13 @@ class Notifier:
             return
         if not self._state.try_record_notification(run_id, event_key):
             return
-        try:
-            post_discord_webhook(url, content)
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            log.warning("Discord notification failed for %s: %s", event_key, exc)
+        parts = [content] if isinstance(content, str) else list(content)
+        for part in parts:
+            try:
+                post_discord_webhook(url, part)
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                log.warning("Discord notification failed for %s: %s", event_key, exc)
+                return
 
     def notify_run_started(
         self,
@@ -266,7 +270,7 @@ class Notifier:
         if outcome == "failed" and not self._cfg.events.run_failed:
             return
         header = f"[{run_id}] run_{outcome} ({_utc_header()})"
-        body = format_run_report(
+        body = format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -279,7 +283,7 @@ class Notifier:
         if not self._cfg.events.run_stalled:
             return
         header = f"[{run_id}] run_stalled ({_utc_header()})\nstall_reason={stall_reason!r}"
-        body = format_run_report(
+        body = format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -298,7 +302,7 @@ class Notifier:
         if not self._cfg.events.run_canceled:
             return
         header = f"[{run_id}] run_canceled ({_utc_header()})"
-        body = format_run_report(
+        body = format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -410,26 +414,26 @@ def resolve_run_ids_for_status_request(
     return []
 
 
-def format_status_reply_message(
+def format_status_reply_messages(
     state: PipelineState,
     run_ids: Sequence[str],
     runs_root: str,
     *,
     state_db_path: str | None = None,
-) -> str:
-    """On-demand progress + status grid (same shape as event notifications)."""
+) -> list[str]:
+    """On-demand progress + status grid; one or more Discord-sized messages."""
     if not run_ids:
-        return "No pipeline runs found."
-    chunks: list[str] = []
+        return ["No pipeline runs found."]
+    messages: list[str] = []
     for run_id in run_ids:
         run = state.get_run(run_id)
         if run is None:
-            chunks.append(f"Unknown run_id: {run_id}")
+            messages.append(f"Unknown run_id: {run_id}")
             continue
         root = run.get("runs_root") or runs_root
         header = f"[{run_id}] status ({_utc_header()})"
-        chunks.append(
-            format_run_report(
+        messages.extend(
+            format_run_report_messages(
                 state,
                 run_id,
                 root,
@@ -437,10 +441,25 @@ def format_status_reply_message(
                 header=header,
             )
         )
-    text = "\n\n".join(chunks)
-    if len(text) > _DISCORD_MAX_CONTENT:
-        return text[: _DISCORD_MAX_CONTENT - 20] + "\n… (truncated)"
-    return text
+    return messages
+
+
+def format_status_reply_message(
+    state: PipelineState,
+    run_ids: Sequence[str],
+    runs_root: str,
+    *,
+    state_db_path: str | None = None,
+) -> str:
+    """Single-string status reply (joins all parts; prefer format_status_reply_messages)."""
+    return "\n\n".join(
+        format_status_reply_messages(
+            state,
+            run_ids,
+            runs_root,
+            state_db_path=state_db_path,
+        )
+    )
 
 
 def format_preview_message(
@@ -486,15 +505,16 @@ def send_preview_notification(
             f"No Discord webhook URL found (check {cfg.secrets_file} beside config or "
             "DISCORD_WEBHOOK_URL)"
         )
-    message = format_preview_message(
+    messages = format_run_report_messages(
         state,
         ctx.run_id,
         ctx.cfg.runs_dir(),
         state_db_path=ctx.cfg.state_db_path,
-        event_label=event_label,
+        header=f"[TEST] [{ctx.run_id}] {event_label} ({_utc_header()})",
     )
-    post_discord_webhook(url, message)
-    return message
+    for message in messages:
+        post_discord_webhook(url, message)
+    return "\n\n".join(messages)
 
 
 def send_run_started_notification(
