@@ -1156,6 +1156,59 @@ def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, o
     os.system(compress_cmd)
 
 
+def master_skycells_csv_paths(output_path, sector, camera_id, ccd_id, oversampling_factor=1):
+    """Return (partial_csv_path, final_csv_path) for mapping stage outputs."""
+    if oversampling_factor > 1:
+        file_stem = (
+            f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list_os{oversampling_factor}"
+        )
+        base_path = os.path.join(
+            output_path,
+            f"oversampling_{oversampling_factor}",
+            f"sector_{sector:04d}",
+            f"camera_{camera_id}",
+            f"ccd_{ccd_id}",
+        )
+    else:
+        file_stem = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list"
+        base_path = os.path.join(
+            output_path,
+            f"sector_{sector:04d}",
+            f"camera_{camera_id}",
+            f"ccd_{ccd_id}",
+        )
+    return (
+        os.path.join(base_path, f"{file_stem}.partial.csv"),
+        os.path.join(base_path, f"{file_stem}.csv"),
+    )
+
+
+def prepare_mapping_csv_workspace(
+    output_path, sector, camera_id, ccd_id, overwrite=True, oversampling_factor=1
+):
+    """Remove stale mapping CSV artifacts before starting a new run."""
+    partial_csv, final_csv = master_skycells_csv_paths(
+        output_path, sector, camera_id, ccd_id, oversampling_factor
+    )
+    os.makedirs(os.path.dirname(partial_csv), exist_ok=True)
+    if os.path.isfile(partial_csv):
+        os.remove(partial_csv)
+    if overwrite and os.path.isfile(final_csv):
+        os.remove(final_csv)
+
+
+def finalize_master_skycells_csv(output_path, sector, camera_id, ccd_id, oversampling_factor=1):
+    """Publish the completed master skycells CSV by renaming the partial file."""
+    partial_csv, final_csv = master_skycells_csv_paths(
+        output_path, sector, camera_id, ccd_id, oversampling_factor
+    )
+    if not os.path.isfile(partial_csv):
+        raise FileNotFoundError(f"Partial master skycells CSV missing: {partial_csv}")
+    os.replace(partial_csv, final_csv)
+    print(f"Master skycell CSV saved to: {final_csv}")
+    return final_csv
+
+
 def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_name, tess_header, data_shape, output_path, sector, camera_id, ccd_id, overwrite=True, oversampling_factor=1):
     """
     Save master TESS-to-skycell mapping file.
@@ -1175,20 +1228,16 @@ def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_na
     # Create filename with oversampling suffix if needed
     if oversampling_factor > 1:
         file_name = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_pixels2skycells_os{oversampling_factor}.fits"
-        file_name_csv = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list_os{oversampling_factor}.csv"
-    else:
-        file_name = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_pixels2skycells.fits"
-        file_name_csv = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list.csv"
-
-    # Create output path with oversampling subdirectory if needed
-    if oversampling_factor > 1:
         base_path = os.path.join(output_path, f"oversampling_{oversampling_factor}", f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
     else:
+        file_name = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_pixels2skycells.fits"
         base_path = os.path.join(output_path, f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
-    
-    file_path_csv = os.path.join(base_path, file_name_csv)
-    os.makedirs(os.path.dirname(file_path_csv), exist_ok=True)
-    selected_skycells.to_csv(file_path_csv)
+
+    partial_csv, _final_csv = master_skycells_csv_paths(
+        output_path, sector, camera_id, ccd_id, oversampling_factor
+    )
+    os.makedirs(os.path.dirname(partial_csv), exist_ok=True)
+    selected_skycells.to_csv(partial_csv)
 
     # Create header
     master_header = create_master_fits_header(tess_header, ffi_file_name)
@@ -1463,20 +1512,12 @@ def save_updated_skycell_csv(selected_skycells, output_path, sector, camera_id, 
         ccd_id (int): TESS CCD identifier
         oversampling_factor (int): Oversampling factor (default: 1)
     """
-    # Start with the selected_skycells dataframe (only processed skycells)
-    # Save updated CSV (only processed skycells)
-    if oversampling_factor > 1:
-        file_name_csv = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list_os{oversampling_factor}.csv"
-        base_path = os.path.join(output_path, f"oversampling_{oversampling_factor}", f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
-    else:
-        file_name_csv = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list.csv"
-        base_path = os.path.join(output_path, f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
-    
-    file_path_csv = os.path.join(base_path, file_name_csv)
-    os.makedirs(os.path.dirname(file_path_csv), exist_ok=True)
-
-    selected_skycells.to_csv(file_path_csv, index=False)
-    print(f"Updated skycell CSV saved to: {file_path_csv}")
+    partial_csv, _final_csv = master_skycells_csv_paths(
+        output_path, sector, camera_id, ccd_id, oversampling_factor
+    )
+    os.makedirs(os.path.dirname(partial_csv), exist_ok=True)
+    selected_skycells.to_csv(partial_csv, index=False)
+    print(f"Updated partial skycell CSV saved to: {partial_csv}")
 
 
 # ============================================================================
@@ -1806,6 +1847,9 @@ def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_di
     # Load data
     print("Loading TESS image and skycell database...")
     data_shape, tess_wcs, ra_center, dec_center, tess_header, sector, camera_id, ccd_id = load_tess_image(tess_file)
+    prepare_mapping_csv_workspace(
+        output_path, sector, camera_id, ccd_id, overwrite, oversampling_factor
+    )
 
     skycell_wcs_df = pd.read_csv(skycell_wcs_csv)
 
@@ -1894,6 +1938,10 @@ def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_di
 
         # Save updated CSV with padding information
         save_updated_skycell_csv(selected_skycells, output_path, sector, camera_id, ccd_id, oversampling_factor)
+
+    finalize_master_skycells_csv(
+        output_path, sector, camera_id, ccd_id, oversampling_factor
+    )
 
     total_time = time.time() - start_time
 
