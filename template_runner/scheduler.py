@@ -31,13 +31,21 @@ from syndiff_pipeline.template_runner.state import (
     STAGE_POOL,
     PipelineState,
     _utc_now,
+    downstream_stages,
 )
-from syndiff_pipeline.template_runner.verify import (
-    collect_stage_artifacts,
-    manifest_valid,
-    read_manifest,
-    stage_complete,
-    write_manifest,
+from syndiff_pipeline.template_runner.verify import check_manifests_only
+from syndiff_pipeline.template_runner.verify_status import (
+    clear_verify_in_flight,
+    write_verify_in_flight,
+)
+from syndiff_pipeline.template_runner.verify_worker import (
+    BackfillTask,
+    VerifyOutcome,
+    VerifyTask,
+    VerifyTaskKey,
+    init_verify_worker,
+    shutdown_verify_worker,
+    try_get_verify_worker,
 )
 
 log = logging.getLogger(__name__)
@@ -64,12 +72,8 @@ _LOCAL_START_GRACE_S = 300.0
 # staleness threshold used by the lifecycle layer (DEFAULT_HEARTBEAT_STALE_S).
 _HEARTBEAT_INTERVAL_S = 15.0
 
-# Max fresh on-disk completeness checks performed per run per tick. Verification
-# walks NFS and parses skycell-mapping CSVs, so an unbounded pass can take many
-# minutes and starve command/shutdown handling. The remainder is verified on
-# subsequent ticks; correctness is unaffected (a not-yet-verified stage simply
-# is not skipped this tick).
-_VERIFY_BUDGET_PER_TICK = 16
+# On SIGTERM, drain in-flight verify results briefly before dropping them.
+_SHUTDOWN_VERIFY_DRAIN_S = 5.0
 
 # If the host-local heartbeat file cannot be written for this long, something is
 # badly wrong locally. Rather than linger as a zombie that holds the lock but
@@ -109,7 +113,7 @@ def _write_local_heartbeat(state_db_path: str) -> None:
 def _supervisor_heartbeat_loop(
     state: PipelineState, state_db_path: str, pid: int, interval_s: float
 ) -> None:
-    """Keep liveness fresh while the main loop is blocked in long NFS work.
+    """Keep liveness fresh while the main loop is busy launching stages.
 
     The host-local heartbeat file is the authoritative liveness signal because
     it does not depend on the (possibly wedged or full) NFS state DB. The DB
@@ -357,21 +361,225 @@ def reconcile_running_stages(
     return counts
 
 
-def _ensure_stable_manifest(resolved, stage: str, stable_path: str) -> None:
-    """Write a cross-run completion manifest if a valid one is not already present.
+def _blocking_depth(stage: str, memo: dict[str, int] | None = None) -> int:
+    memo = memo if memo is not None else {}
+    if stage in memo:
+        return memo[stage]
+    deps = STAGE_DEPS.get(stage, [])
+    if not deps:
+        memo[stage] = 0
+        return 0
+    depth = max(_blocking_depth(dep, memo) for dep in deps) + 1
+    memo[stage] = depth
+    return depth
 
-    Called when a stage is confirmed complete (on disk or via a per-run
-    manifest). Best-effort: any failure is logged and ignored so manifest
-    bookkeeping never blocks scheduling.
-    """
-    existing = read_manifest(stable_path)
-    if existing is not None and manifest_valid(existing, resolved, stage):
-        return
-    try:
-        expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
-        write_manifest(stable_path, resolved, stage, artifacts, expected, produced)
-    except Exception as exc:  # noqa: BLE001 - manifest write must never be fatal
-        log.debug("Could not write stable manifest %s for %s: %s", stable_path, stage, exc)
+
+def _verify_outcome_still_applicable(state: PipelineState, key: VerifyTaskKey) -> bool:
+    """True if a verify result may still be applied to SQLite for *key*."""
+    run = state.get_run(key.run_id) or {}
+    if run.get("force_rerun"):
+        return False
+    row = state.get_stage_run(key.run_id, key.target_label, key.stage)
+    if row is None or row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
+        return False
+    if state.external_checked(key.run_id, key.target_label, key.stage):
+        return False
+    return True
+
+
+def _verify_worker():
+    return try_get_verify_worker()
+
+
+def _cancel_verify_run(run_id: str) -> None:
+    worker = _verify_worker()
+    if worker is not None:
+        worker.cancel_run(run_id)
+
+
+def _cancel_verify_keys(keys: list[VerifyTaskKey]) -> None:
+    worker = _verify_worker()
+    if worker is not None:
+        worker.cancel_keys(keys)
+
+
+def _apply_verify_outcome(state: PipelineState, outcome: VerifyOutcome) -> int:
+    """Persist one verify result; return 1 if the stage was skipped."""
+    key = outcome.key
+    if not _verify_outcome_still_applicable(state, key):
+        return 0
+    if outcome.error:
+        state.cache_external_check(
+            key.run_id, key.target_label, key.stage, complete=False
+        )
+        return 0
+    if outcome.complete:
+        state.mark_skipped(key.run_id, key.target_label, key.stage)
+        state.cache_external_check(
+            key.run_id,
+            key.target_label,
+            key.stage,
+            complete=True,
+            path=outcome.stable_path,
+        )
+        return 1
+    state.cache_external_check(
+        key.run_id, key.target_label, key.stage, complete=False
+    )
+    return 0
+
+
+def _iter_verify_candidates(
+    state: PipelineState,
+    run_id: str,
+    ctx,
+    *,
+    force_rerun: bool,
+) -> list[tuple]:
+    """Collect uncached pending/external stages eligible for verification."""
+    if force_rerun:
+        return []
+    cfg = ctx.cfg
+    runs_root = cfg.runs_dir()
+    candidates: list[tuple] = []
+    rows_by_label: dict[str, list] = defaultdict(list)
+    for row in state.list_stage_runs(run_id):
+        rows_by_label[row.target_label].append(row)
+
+    for target in ctx.targets:
+        label = target.label()
+        rows = rows_by_label.get(label)
+        if not rows:
+            continue
+        resolved = resolve_config(target, cfg)
+        for row in rows:
+            if row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
+                continue
+            if state.external_checked(run_id, label, row.stage):
+                continue
+            if row.status == STATUS_PENDING and not state.deps_satisfied(
+                run_id, label, row.stage
+            ):
+                continue
+            manifest_path = str(
+                logs.stage_manifest_path(runs_root, run_id, label, row.stage)
+            )
+            stable_path = str(
+                logs.stable_stage_manifest_path(runs_root, label, row.stage)
+            )
+            candidates.append(
+                (
+                    VerifyTaskKey(run_id, label, row.stage),
+                    row.status,
+                    resolved,
+                    manifest_path,
+                    stable_path,
+                )
+            )
+
+    def _sort_key(item: tuple) -> tuple:
+        key, status, _resolved, _mp, _sp = item
+        return (
+            0 if status == STATUS_PENDING else 1,
+            -_blocking_depth(key.stage),
+            key.target_label,
+            key.stage,
+        )
+
+    candidates.sort(key=_sort_key)
+    return candidates
+
+
+def _run_verify_pass(
+    state: PipelineState,
+    run_id: str,
+    ctx,
+    *,
+    force_rerun: bool,
+    budget: int,
+    block: bool,
+    block_timeout_s: float = 0.0,
+) -> int:
+    """Manifest fast path on main thread; full verify in background pool."""
+    worker = init_verify_worker(ctx.cfg.verify_max_workers)
+    apply = lambda outcome: _apply_verify_outcome(state, outcome)
+    max_in_flight = ctx.cfg.verify_max_workers
+    budget_left = budget
+    total = 0
+
+    while budget_left > 0:
+        worker.drain(apply, run_id=run_id, block=False)
+        tasks: list[VerifyTask] = []
+        backfills: list[BackfillTask] = []
+        for key, _status, resolved, manifest_path, stable_path in _iter_verify_candidates(
+            state, run_id, ctx, force_rerun=force_rerun
+        ):
+            if budget_left <= 0:
+                break
+            manifest_hit = check_manifests_only(
+                resolved,
+                key.stage,
+                manifest_path=manifest_path,
+                stable_manifest_path=stable_path,
+            )
+            if manifest_hit is True:
+                budget_left -= 1
+                if check_manifests_only(
+                    resolved, key.stage, stable_manifest_path=stable_path
+                ) is not True:
+                    backfills.append(
+                        BackfillTask(
+                            manifest_path=manifest_path,
+                            stable_path=stable_path,
+                        )
+                    )
+                outcome = VerifyOutcome(
+                    key=key,
+                    complete=True,
+                    stable_path=stable_path,
+                    resolved=resolved,
+                )
+                total += apply(outcome)
+                continue
+            if worker.is_in_flight(key):
+                continue
+            if worker.in_flight_count(run_id) + len(tasks) >= max_in_flight:
+                continue
+            budget_left -= 1
+            tasks.append(
+                VerifyTask(
+                    key=key,
+                    manifest_path=manifest_path,
+                    stable_path=stable_path,
+                    resolved=resolved,
+                )
+            )
+
+        if not tasks and not backfills:
+            if worker.in_flight_count(run_id) == 0:
+                break
+            if not block:
+                break
+            total += worker.drain(
+                apply,
+                run_id=run_id,
+                block=True,
+                block_timeout_s=block_timeout_s,
+            )
+            continue
+
+        worker.schedule_backfill(backfills)
+        worker.schedule(tasks)
+        total += worker.drain(
+            apply,
+            run_id=run_id,
+            block=block,
+            block_timeout_s=block_timeout_s,
+        )
+        if not block:
+            break
+
+    return total
 
 
 def _resolve_external_and_pending_skips(
@@ -380,71 +588,51 @@ def _resolve_external_and_pending_skips(
     ctx,
     *,
     force_rerun: bool,
-    budget: int = _VERIFY_BUDGET_PER_TICK,
+    budget: int | None = None,
+    block: bool = True,
 ) -> int:
-    if force_rerun:
-        return 0
-    skipped = 0
-    remaining = budget
-    cfg = ctx.cfg
-    runs_root = cfg.runs_dir()
-    rows_by_label: dict[str, list] = defaultdict(list)
-    for row in state.list_stage_runs(run_id):
-        rows_by_label[row.target_label].append(row)
+    """Schedule artifact verification and optionally wait for it to finish."""
+    if budget is None:
+        budget = ctx.cfg.verify_budget_per_tick
+    return _run_verify_pass(
+        state,
+        run_id,
+        ctx,
+        force_rerun=force_rerun,
+        budget=budget,
+        block=block,
+    )
 
-    for target in ctx.targets:
-        if remaining <= 0:
-            break
-        label = target.label()
-        rows = rows_by_label.get(label)
-        if not rows:
-            continue
-        resolved = resolve_config(target, cfg)
-        for row in rows:
-            if remaining <= 0:
-                # Budget exhausted: leave the rest for the next tick so the
-                # supervisor stays responsive to commands/shutdown.
-                break
-            if row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
-                continue
-            # Cached completeness result -> never re-verify (kills the per-tick
-            # NFS verify storm), regardless of complete/incomplete outcome.
-            if state.external_checked(run_id, label, row.stage):
-                continue
-            # Only verify a pending stage once its deps are satisfied (about to
-            # run). Pending stages with unmet deps must not trigger disk checks.
-            if row.status == STATUS_PENDING and not state.deps_satisfied(
-                run_id, label, row.stage
-            ):
-                continue
-            # This row will incur a real on-disk verification: spend budget.
-            remaining -= 1
-            manifest_path = str(
-                logs.stage_manifest_path(runs_root, run_id, label, row.stage)
-            )
-            stable_path = str(
-                logs.stable_stage_manifest_path(runs_root, label, row.stage)
-            )
-            complete = stage_complete(
-                resolved,
-                row.stage,
-                manifest_path=manifest_path,
-                stable_manifest_path=stable_path,
-            )
-            if complete:
-                # Self-healing backfill: persist a cross-run manifest so the next
-                # run skips re-scanning this already-complete output entirely.
-                _ensure_stable_manifest(resolved, row.stage, stable_path)
-                state.mark_skipped(run_id, label, row.stage)
-                state.cache_external_check(
-                    run_id, label, row.stage, complete=True, path=stable_path
-                )
-                skipped += 1
-            else:
-                # Not complete: cache the negative result so promote_stages can
-                # proceed (pending) or we stop re-verifying every tick (external).
-                state.cache_external_check(run_id, label, row.stage, complete=False)
-    return skipped
+
+def _schedule_external_and_pending_skips(
+    state: PipelineState,
+    run_id: str,
+    ctx,
+    *,
+    force_rerun: bool,
+    budget: int | None = None,
+) -> None:
+    """Non-blocking verify scheduling for the supervisor main loop."""
+    if budget is None:
+        budget = ctx.cfg.verify_budget_per_tick
+    _run_verify_pass(
+        state,
+        run_id,
+        ctx,
+        force_rerun=force_rerun,
+        budget=budget,
+        block=False,
+    )
+
+
+def _cancel_verify_for_retry(
+    run_id: str, target_label: str, stage: str, *, reset_downstream: bool
+) -> None:
+    stages = [stage] + (
+        downstream_stages(stage) if reset_downstream else []
+    )
+    keys = [VerifyTaskKey(run_id, target_label, s) for s in stages]
+    _cancel_verify_keys(keys)
 
 
 def _global_pool_running(state: PipelineState) -> dict[str, int]:
@@ -500,7 +688,13 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
 
     force_rerun = bool(run.get("force_rerun"))
     reconcile_running_stages(state, run_id, ctx)
-    _resolve_external_and_pending_skips(state, run_id, ctx, force_rerun=force_rerun)
+    _schedule_external_and_pending_skips(
+        state,
+        run_id,
+        ctx,
+        force_rerun=force_rerun,
+        budget=ctx.cfg.verify_budget_per_tick,
+    )
     state.promote_stages(run_id)
 
     cfg = ctx.cfg
@@ -606,7 +800,9 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         _write_summary(state, run_id, runs_root)
         return
 
-    if running == 0 and launchable == 0 and nonterminal > 0:
+    worker = _verify_worker()
+    verify_in_flight = worker.in_flight_count(run_id) if worker else 0
+    if running == 0 and launchable == 0 and nonterminal > 0 and verify_in_flight == 0:
         reasons = _stall_reasons(state, run_id, ctx)
         reason_text = "; ".join(reasons[:8])
         state.set_run_status(run_id, "stalled", stall_reason=reason_text)
@@ -640,6 +836,7 @@ def _apply_commands(state: PipelineState) -> None:
                 # Terminate live workers BEFORE marking rows canceled so a
                 # killed run never leaves orphaned processes/clusters running.
                 _terminate_run_jobs(state, cmd.run_id)
+                _cancel_verify_run(cmd.run_id)
                 state.apply_cancel_run(cmd.run_id)
             elif cmd.kind == "pause" and cmd.run_id:
                 state.set_paused(cmd.run_id, True)
@@ -654,14 +851,22 @@ def _apply_commands(state: PipelineState) -> None:
                     )
                     if row and row.status == STATUS_RUNNING:
                         _terminate_job(row)
+                    reset_downstream = bool(args.get("reset_downstream", True))
                     state.apply_retry_stage(
                         cmd.run_id,
                         args["target_label"],
                         args["stage"],
-                        reset_downstream=bool(args.get("reset_downstream", True)),
+                        reset_downstream=reset_downstream,
+                    )
+                    _cancel_verify_for_retry(
+                        cmd.run_id,
+                        args["target_label"],
+                        args["stage"],
+                        reset_downstream=reset_downstream,
                     )
                 else:
                     state.apply_retry_run(cmd.run_id)
+                    _cancel_verify_run(cmd.run_id)
             elif cmd.kind == "force_rerun" and cmd.run_id:
                 labels = args.get("target_labels") or []
                 stages_arg = args.get("stages") or []
@@ -673,6 +878,7 @@ def _apply_commands(state: PipelineState) -> None:
                         if row and row.status == STATUS_RUNNING:
                             _terminate_job(row)
                 state.apply_force_rerun(cmd.run_id, labels, stages_arg)
+                _cancel_verify_run(cmd.run_id)
             else:
                 log.warning("Unknown or incomplete command id=%s kind=%s", cmd.id, cmd.kind)
         finally:
@@ -734,6 +940,15 @@ def run_supervisor_daemon(state_db_path: str) -> int:
                         # down scheduling for every other active run.
                         log.exception("Error while processing run %s", run_id)
 
+                worker = _verify_worker()
+                counts = {
+                    run["run_id"]: (
+                        worker.in_flight_count(run["run_id"]) if worker else 0
+                    )
+                    for run in state.list_active_runs()
+                }
+                write_verify_in_flight(state_db_path, counts)
+
                 # Interruptible idle: wake early on shutdown instead of sleeping
                 # through a SIGTERM.
                 for _ in range(10):
@@ -741,10 +956,28 @@ def run_supervisor_daemon(state_db_path: str) -> int:
                         break
                     time.sleep(0.1)
         finally:
+            worker = _verify_worker()
+            if worker is not None:
+                if _shutdown:
+                    try:
+                        apply = lambda outcome: _apply_verify_outcome(state, outcome)
+                        worker.drain(
+                            apply,
+                            block=True,
+                            block_timeout_s=_SHUTDOWN_VERIFY_DRAIN_S,
+                        )
+                        worker.drain(apply, block=False)
+                    except Exception:
+                        log.exception("Error draining verify worker on shutdown")
+                shutdown_verify_worker(wait=_shutdown)
             state.clear_supervisor()
             daemon.remove_pid_file(pid_path)
             try:
                 logs.daemon_heartbeat_file(state_db_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                clear_verify_in_flight(state_db_path)
             except OSError:
                 pass
     return 0

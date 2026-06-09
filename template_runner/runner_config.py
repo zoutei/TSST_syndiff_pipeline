@@ -44,6 +44,8 @@ class RunnerConfig:
     resources: Dict[str, ResourcePoolParams] = field(default_factory=dict)
     overrides: Dict[str, dict] = field(default_factory=dict)
     scheduler_heartbeat_interval_s: float = 30.0
+    verify_max_workers: int = 1
+    verify_budget_per_tick: int = 16
 
     def runs_dir(self) -> str:
         return self.runs_root or str(Path(self.handoff_root) / "runs")
@@ -97,7 +99,13 @@ def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
         stages=parse_stage_params(raw.get("stages", {})),
         resources=_parse_resources(raw.get("resources")),
         overrides=dict(raw.get("overrides", {}) or {}),
-        scheduler_heartbeat_interval_s=float(raw.get("scheduler", {}).get("heartbeat_interval_s", 30.0)),
+        scheduler_heartbeat_interval_s=float(
+            raw.get("scheduler", {}).get("heartbeat_interval_s", 30.0)
+        ),
+        verify_max_workers=int(raw.get("scheduler", {}).get("verify_max_workers", 1)),
+        verify_budget_per_tick=int(
+            raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
+        ),
     )
     if not cfg.data_root:
         raise ValueError("config.yaml requires data_root")
