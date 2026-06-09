@@ -1,0 +1,17 @@
+# Copy to deployment.yaml (gitignored) next to config.yaml.
+#
+# Deployment paths (machine-specific)
+handoff_root: /astro/armin/koji/syndiff/template_handoffs
+data_root: /astro/armin/koji/syndiff/data
+
+# Optional override only for non-standard layouts:
+# ffi_dir: /other/path/tess_ffi
+
+# Gaia TAP+ credentials (mapping stage)
+gaia_username: ""
+gaia_password: ""
+
+# Discord notifications
+discord_webhook_url: ""
+discord_bot_token: ""
+discord_channel_id: ""
