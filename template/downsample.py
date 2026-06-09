@@ -605,7 +605,7 @@ def save_fits_outputs(
                 roi_part = f"_x{rx0}-{rx1}_y{ry0}-{ry1}"
         os_part = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
 
-        output_filename = output_dir / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}_dx{dx:.3f}_dy{dy:.3f}.fits"
+        output_filename = output_dir / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
         hdu_list.writeto(output_filename, overwrite=True)
         written_paths.append(str(output_filename))
 
