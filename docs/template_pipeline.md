@@ -263,6 +263,14 @@ syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
 
 `progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `down: 45/84` for downsample skycell-weighted progress from `per_target/<label>/downsample.progress.json`). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
 
+**Discord alerts** (optional): when `notifications.enabled: true` in config, the supervisor posts to a webhook on run/stage events. Messages include the same **progress** summary and **status** grid as the CLI. Preview without changing pipeline state:
+
+```bash
+syndiff-template notify test --config my_config.yaml --run-id batch_no4
+```
+
+See [Discord notifications](#discord-notifications).
+
 Or set the runs root once per shell session and pass `--run-id` for each run you are watching:
 
 ```bash
@@ -498,6 +506,7 @@ Configuration is YAML loaded by `template_runner/runner_config.py`. Paths may be
 | `stages` | no | Per-stage parameters (see below) |
 | `resources` | no | Pool concurrency limits |
 | `scheduler` | no | Scheduler tuning |
+| `notifications` | no | Discord webhook alerts (see below) |
 | `overrides` | no | Per-SCC parameter overrides |
 
 ### Scheduler
@@ -505,6 +514,56 @@ Configuration is YAML loaded by `template_runner/runner_config.py`. Paths may be
 ```yaml
 scheduler:
   heartbeat_interval_s: 30.0
+```
+
+### Discord notifications
+
+Optional alerts to a Discord channel via incoming webhook. The webhook URL lives in a **gitignored** `secrets.yaml` beside your site config (copy from `secrets.yaml.example`); frozen run directories do not need their own copy — the daemon falls back to `source_config_path` from `run_meta.json`.
+
+```yaml
+notifications:
+  enabled: true
+  secrets_file: secrets.yaml
+  events:
+    run_completed: true
+    run_failed: true
+    run_canceled: true
+    run_stalled: true
+    run_resumed: true
+    stage_failed: true
+    stage_completed: true
+    stage_canceled: true
+    stage_died: true
+    daemon_unhealthy: true
+```
+
+`secrets.yaml` (not committed):
+
+```yaml
+discord_webhook_url: https://discord.com/api/webhooks/...
+```
+
+Alternatively set `DISCORD_WEBHOOK_URL` in the environment.
+
+**Events** (supervisor daemon, deduplicated in SQLite `notification_events`):
+
+| Event | When |
+|-------|------|
+| `run_completed` / `run_failed` | All stages terminal |
+| `run_canceled` | `syndiff-template kill` (whole run canceled) |
+| `run_stalled` / `run_resumed` | Scheduler stall detection / recovery |
+| `stage_completed` / `stage_failed` | Worker exits 0 / nonzero |
+| `stage_canceled` | Worker SIGTERM (`kill`) or exit 143 |
+| `stage_died` | Process lost without exit record (requeued to `ready`) |
+| `daemon_unhealthy` | Supervisor wedged while runs are active |
+
+Message body matches CLI output: `progress` summary (counts + running log fractions) plus truncated `status` per-target grid. Large batches can be noisy when `stage_completed: true` — disable per event if needed.
+
+**Test** (read-only; does not write `notification_events` or change run state):
+
+```bash
+syndiff-template notify test --config my_config.yaml --run-id batch_no4
+syndiff-template notify test --run-dir /path/to/runs/batch_no4 --dry-run   # print locally
 ```
 
 ### Resource pools
@@ -639,7 +698,7 @@ See `example/template_runner/events_example.csv`.
 | Command | `--config` | `--targets` | Run identification |
 |---------|------------|-------------|-------------------|
 | `submit`, `run` | required (source) | required (source) | optional `--run-id` |
-| `status`, `progress`, `logs`, `show`, `pause`, `resume`, `kill`, `retry` | optional (runs_root lookup) | n/a | `--run-dir` or `--run-id` (+ `--config`) |
+| `status`, `progress`, `logs`, `show`, `pause`, `resume`, `kill`, `retry`, `notify test` | optional (runs_root lookup) | n/a | `--run-dir` or `--run-id` (+ `--config`) |
 | `runs`, `active` | required | n/a | n/a |
 | `verify` | optional | optional | `--run-dir` (frozen copies) or pre-run `--config --targets` |
 
@@ -661,6 +720,7 @@ See `example/template_runner/events_example.csv`.
 | `pause` | Insert pause intent (daemon stops dequeuing) |
 | `resume` | Insert resume intent |
 | `kill` | Insert cancel intent; daemon terminates workers and marks run `canceled` |
+| `notify test` | Send read-only Discord preview (`progress` + `status` grid); `--dry-run` prints locally |
 
 ### Common flags
 

@@ -10,6 +10,10 @@ from typing import Any, Dict, Optional
 
 import yaml
 
+from syndiff_pipeline.template_runner.notifications import (
+    NotificationConfig,
+    parse_notification_config,
+)
 from syndiff_pipeline.template_runner.stage_params import (
     ResourcePoolParams,
     TemplateStageParams,
@@ -46,6 +50,7 @@ class RunnerConfig:
     scheduler_heartbeat_interval_s: float = 30.0
     verify_max_workers: int = 1
     verify_budget_per_tick: int = 16
+    notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     def runs_dir(self) -> str:
         return self.runs_root or str(Path(self.handoff_root) / "runs")
@@ -106,6 +111,7 @@ def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
         verify_budget_per_tick=int(
             raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
         ),
+        notifications=parse_notification_config(raw.get("notifications")),
     )
     if not cfg.data_root:
         raise ValueError("config.yaml requires data_root")
@@ -155,6 +161,22 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
     data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
     data["scheduler"] = {"heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s}
     data.pop("scheduler_heartbeat_interval_s", None)
+    data["notifications"] = {
+        "enabled": cfg.notifications.enabled,
+        "secrets_file": cfg.notifications.secrets_file,
+        "events": {
+            "run_completed": cfg.notifications.events.run_completed,
+            "run_failed": cfg.notifications.events.run_failed,
+            "run_canceled": cfg.notifications.events.run_canceled,
+            "run_stalled": cfg.notifications.events.run_stalled,
+            "run_resumed": cfg.notifications.events.run_resumed,
+            "stage_failed": cfg.notifications.events.stage_failed,
+            "stage_completed": cfg.notifications.events.stage_completed,
+            "stage_canceled": cfg.notifications.events.stage_canceled,
+            "stage_died": cfg.notifications.events.stage_died,
+            "daemon_unhealthy": cfg.notifications.events.daemon_unhealthy,
+        },
+    }
     return data
 
 
@@ -192,6 +214,7 @@ def load_and_materialize_runner_config(
         resources=_parse_resources(raw.get("resources")),
         overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
         scheduler_heartbeat_interval_s=float(raw.get("scheduler", {}).get("heartbeat_interval_s", 30.0)),
+        notifications=parse_notification_config(raw.get("notifications")),
     )
     if not cfg.data_root:
         raise ValueError("config.yaml requires data_root")

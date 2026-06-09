@@ -243,6 +243,12 @@ class PipelineState:
                     started_at TEXT,
                     last_heartbeat TEXT
                 );
+                CREATE TABLE IF NOT EXISTS notification_events (
+                    run_id TEXT NOT NULL,
+                    event_key TEXT NOT NULL,
+                    sent_at TEXT,
+                    PRIMARY KEY (run_id, event_key)
+                );
                 """
             )
             self._ensure_column(conn, "runs", "stall_reason", "TEXT")
@@ -663,6 +669,16 @@ class PipelineState:
                 (run_id,),
             ).fetchall()
             return {r["status"]: r["n"] for r in rows}
+
+    def try_record_notification(self, run_id: str, event_key: str) -> bool:
+        """Record a notification event; return True only on first insert."""
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO notification_events (run_id, event_key, sent_at) "
+                "VALUES (?, ?, ?)",
+                (run_id, event_key, _utc_now()),
+            )
+            return cur.rowcount > 0
 
     # ------------------------------------------------------------------
     # Dependency resolution (SINGLE source of truth)

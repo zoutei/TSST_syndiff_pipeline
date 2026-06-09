@@ -16,6 +16,7 @@ These files configure the **`syndiff-template`** CLI, which builds PS1 templates
 |------|-------------|
 | [`config_example.yaml`](config_example.yaml) | Starter config with placeholder paths and comments |
 | [`config_real.yaml`](config_real.yaml) | Production-style config (STScI cluster paths, Condor settings) |
+| [`secrets.yaml.example`](secrets.yaml.example) | Template for gitignored `secrets.yaml` (Discord webhook URL) |
 | [`targets_example.csv`](targets_example.csv) | Normalized targets (sector, camera, ccd, coordinates, enabled flag) |
 | [`events_example.csv`](events_example.csv) | Supernova catalog format with `tess_coverage` tokens |
 
@@ -38,6 +39,10 @@ syndiff-template submit \
 # Monitor using the run directory printed by submit (frozen config/targets inside):
 syndiff-template progress --run-dir /path/to/runs/<run_id>
 syndiff-template status --watch --run-dir /path/to/runs/<run_id>
+
+# Optional Discord preview (read-only; requires secrets.yaml + notifications.enabled):
+cp secrets.yaml.example secrets.yaml   # edit discord_webhook_url
+syndiff-template notify test --config config_example.yaml --run-id <run_id>
 ```
 
 ## Smoke testing
