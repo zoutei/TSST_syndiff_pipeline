@@ -1542,26 +1542,15 @@ def resolve_gaia_credentials_path(cli_path=None):
     """
     Resolve path to Gaia TAP+ credentials file (username line 1, password line 2).
 
-    Precedence: explicit ``cli_path`` > ``GAIA_CREDENTIALS_FILE`` env >
-    ``gaia_credentials`` next to this module, if that file exists.
-    Returns None for anonymous TAP access when nothing resolves.
+    Returns None for anonymous TAP access when no explicit path is given.
 
-    Raises FileNotFoundError if an explicit path (CLI or env) was given but missing.
+    Raises FileNotFoundError if an explicit path was given but missing.
     """
     if cli_path is not None and str(cli_path).strip():
         p = Path(os.path.expanduser(str(cli_path).strip())).resolve()
         if not p.is_file():
             raise FileNotFoundError(f"Gaia credentials file not found: {p}")
         return str(p)
-    env = os.environ.get("GAIA_CREDENTIALS_FILE")
-    if env and str(env).strip():
-        p = Path(os.path.expanduser(str(env).strip())).resolve()
-        if not p.is_file():
-            raise FileNotFoundError(f"GAIA_CREDENTIALS_FILE not found: {p}")
-        return str(p)
-    default = Path(__file__).resolve().parent / "gaia_credentials"
-    if default.is_file():
-        return str(default)
     return None
 
 
@@ -2002,7 +1991,7 @@ if __name__ == "__main__":
         default=None,
         metavar="PATH",
         help="Gaia Archive credentials file (line 1: username, line 2: password). "
-        "Overrides GAIA_CREDENTIALS_FILE. If unset, uses env then gaia_credentials next to this script if present.",
+        "Path to Gaia TAP+ credentials file (username line 1, password line 2).",
     )
 
     # Overwrite default preserved (default True). Provide flags to explicitly enable/disable.

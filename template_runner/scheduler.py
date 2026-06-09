@@ -93,13 +93,13 @@ _HEARTBEAT_FATAL_AFTER_S = 90.0
 _DISCORD_BOT_CHECK_INTERVAL_S = 60.0
 
 
-def _maybe_ensure_discord_bot(state_db_path: str) -> None:
+def _maybe_ensure_discord_bot(handoff_root: str) -> None:
     from syndiff_pipeline.template_runner.discord_bot_control import (
-        ensure_discord_bot_for_state_db,
+        ensure_discord_bot_for_handoff_root,
     )
 
     try:
-        result = ensure_discord_bot_for_state_db(state_db_path)
+        result = ensure_discord_bot_for_handoff_root(handoff_root)
     except Exception:
         log.warning("Discord bot health check failed", exc_info=True)
         return
@@ -1126,29 +1126,32 @@ def run_supervisor_daemon(handoff_root: str) -> int:
     global _lock_fd
     # Non-blocking exclusive lock: a second daemon must fail to acquire and exit,
     # not block forever waiting for the incumbent owner.
-    with daemon.daemon_lock(state_db_path, blocking=False) as fd:
+    from syndiff_pipeline.template_runner.workspace import state_db_path
+
+    db_path = str(state_db_path(handoff_root))
+    with daemon.daemon_lock(handoff_root, blocking=False) as fd:
         if fd is None:
             log.info("Another supervisor already owns the lock; exiting.")
             return 0
         _lock_fd = fd
 
-        pid_path = logs.daemon_pid_path(state_db_path)
+        pid_path = logs.daemon_pid_path(handoff_root)
         pid = os.getpid()
         daemon.write_pid(pid_path, pid)
-        state = PipelineState(state_db_path)
+        state = PipelineState(db_path)
         # Establish liveness immediately (local file is authoritative) before
         # the first — potentially slow — scheduling pass begins.
-        _write_local_heartbeat(state_db_path)
+        _write_local_heartbeat(handoff_root)
         state.update_supervisor_heartbeat(pid)
 
         heartbeat_thread = threading.Thread(
             target=_supervisor_heartbeat_loop,
-            args=(state, state_db_path, pid, _HEARTBEAT_INTERVAL_S),
+            args=(state, handoff_root, pid, _HEARTBEAT_INTERVAL_S),
             name="supervisor-heartbeat",
             daemon=True,
         )
         heartbeat_thread.start()
-        _maybe_ensure_discord_bot(state_db_path)
+        _maybe_ensure_discord_bot(handoff_root)
 
         last_discord_bot_check = time.monotonic()
         try:
@@ -1156,7 +1159,7 @@ def run_supervisor_daemon(handoff_root: str) -> int:
                 now = time.monotonic()
                 if now - last_discord_bot_check >= _DISCORD_BOT_CHECK_INTERVAL_S:
                     last_discord_bot_check = now
-                    _maybe_ensure_discord_bot(state_db_path)
+                    _maybe_ensure_discord_bot(handoff_root)
 
                 _apply_commands(state)
 

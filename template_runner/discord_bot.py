@@ -62,12 +62,12 @@ class PipelineDiscordBot:
         notif = cfg.notifications
         self._channel_id = resolve_channel_id(
             config_path=self._config_path,
-            secrets_file=notif.secrets_file,
+            deployment_file=cfg.deployment_file,
             config_channel_id=notif.bot.channel_id,
         )
         self._token = resolve_bot_token(
             config_path=self._config_path,
-            secrets_file=notif.secrets_file,
+            deployment_file=cfg.deployment_file,
         )
 
     def _build_status_reply(self, message_text: str) -> list[str]:
@@ -76,7 +76,7 @@ class PipelineDiscordBot:
             self._state,
             run_ids,
             self._cfg.runs_dir(),
-            state_db_path=self._cfg.state_db_path,
+            handoff_root=self._cfg.handoff_root,
         )
 
     def run(self) -> None:
@@ -84,12 +84,12 @@ class PipelineDiscordBot:
         if not self._token:
             raise SystemExit(
                 f"No Discord bot token found (set discord_bot_token in "
-                f"{self._cfg.notifications.secrets_file} beside config or DISCORD_BOT_TOKEN)"
+                f"{self._cfg.deployment_file} beside config)"
             )
         if not self._channel_id:
             raise SystemExit(
                 "No Discord channel configured. Set notifications.bot.channel_id in config "
-                "or discord_channel_id in secrets.yaml / DISCORD_CHANNEL_ID."
+                "or discord_channel_id in deployment.yaml."
             )
 
         intents = discord.Intents.default()
@@ -125,7 +125,7 @@ class PipelineDiscordBot:
                 log.error(
                     "Cannot access configured channel_id=%s (%s). "
                     "Will reply in any channel the bot can read. "
-                    "Fix discord_channel_id in secrets.yaml: right-click the target "
+                    "Fix discord_channel_id in deployment.yaml: right-click the target "
                     "channel in Discord → Copy Channel ID (Developer Mode on). "
                     "Ensure the bot is invited to the server with View/Send permissions.",
                     channel_id,
@@ -178,7 +178,6 @@ def run_discord_bot(
     config_path: str | Path,
     *,
     detached: bool = False,
-    state_db_path: str | Path | None = None,
 ) -> None:
     path = Path(config_path).expanduser().resolve()
     cfg = load_runner_config(path)
@@ -186,8 +185,7 @@ def run_discord_bot(
         raise SystemExit(
             "Discord bot is disabled. Set notifications.bot.enabled: true in config."
         )
-    db_path = state_db_path or cfg.state_db_path
-    pid_path = logs.discord_bot_pid_path(db_path)
+    pid_path = logs.discord_bot_pid_path(cfg.handoff_root)
     if detached:
         daemon.write_pid(pid_path, os.getpid())
         try:
@@ -202,22 +200,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SynDiff pipeline Discord bot")
     parser.add_argument("--config", required=True, help="Site config.yaml path")
     parser.add_argument(
-        "--state-db",
-        default=None,
-        help="State DB path (for pid file location when running detached)",
-    )
-    parser.add_argument(
         "--detached",
         action="store_true",
         help="Run as background worker (writes pid file; used by daemon start)",
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_discord_bot(
-        args.config,
-        detached=args.detached,
-        state_db_path=args.state_db,
-    )
+    run_discord_bot(args.config, detached=args.detached)
     return 0
 
 

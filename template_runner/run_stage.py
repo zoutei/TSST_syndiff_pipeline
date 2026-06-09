@@ -73,7 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     ctx = resolve_run_context(run_dir=args.run_dir, run_id=args.run_id)
     cfg = ctx.cfg
     target = next(t for t in ctx.targets if t.label() == args.target_label)
-    resolved = resolve_config(target, cfg)
+    source_config = (ctx.meta or {}).get("source_config_path") or str(
+        logs.run_config_path(ctx.run_dir)
+    )
+    resolved = resolve_config(target, cfg, config_path=source_config)
     snap = stages.stage_snapshot(resolved, args.stage)
     runs_root = cfg.runs_dir()
 

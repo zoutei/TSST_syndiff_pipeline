@@ -56,13 +56,13 @@ class TestNotificationConfig(unittest.TestCase):
         self.assertTrue(cfg.events.run_started)
         self.assertFalse(cfg.bot.enabled)
 
-    def test_load_webhook_from_secrets_file(self):
+    def test_load_webhook_from_deployment_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            (base / "secrets.yaml").write_text(
+            (base / "deployment.yaml").write_text(
                 "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
             )
-            url = load_webhook_url(base / "config.yaml", "secrets.yaml")
+            url = load_webhook_url(base / "config.yaml", "deployment.yaml")
             self.assertEqual(url, "https://example.com/hook")
 
     def test_resolve_webhook_falls_back_to_source_config(self):
@@ -72,13 +72,13 @@ class TestNotificationConfig(unittest.TestCase):
             run = base / "runs" / "run_a"
             source.mkdir(parents=True)
             run.mkdir(parents=True)
-            (source / "secrets.yaml").write_text(
+            (source / "deployment.yaml").write_text(
                 "discord_webhook_url: https://example.com/from-source\n",
                 encoding="utf-8",
             )
             url = resolve_webhook_url(
                 config_path=run / "config.yaml",
-                secrets_file="secrets.yaml",
+                deployment_file="deployment.yaml",
                 source_config_path=source / "config.yaml",
             )
             self.assertEqual(url, "https://example.com/from-source")
@@ -86,16 +86,16 @@ class TestNotificationConfig(unittest.TestCase):
     def test_resolve_bot_token_and_channel(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            (base / "secrets.yaml").write_text(
+            (base / "deployment.yaml").write_text(
                 "discord_bot_token: bot-token\n"
                 "discord_channel_id: '999'\n",
                 encoding="utf-8",
             )
-            self.assertEqual(load_bot_token(base / "config.yaml", "secrets.yaml"), "bot-token")
+            self.assertEqual(load_bot_token(base / "config.yaml", "deployment.yaml"), "bot-token")
             self.assertEqual(
                 resolve_channel_id(
                     config_path=base / "config.yaml",
-                    secrets_file="secrets.yaml",
+                    deployment_file="deployment.yaml",
                     config_channel_id="111",
                 ),
                 "111",
@@ -103,14 +103,14 @@ class TestNotificationConfig(unittest.TestCase):
             self.assertEqual(
                 resolve_channel_id(
                     config_path=base / "config.yaml",
-                    secrets_file="secrets.yaml",
+                    deployment_file="deployment.yaml",
                 ),
                 "999",
             )
             self.assertEqual(
                 resolve_bot_token(
                     config_path=base / "config.yaml",
-                    secrets_file="secrets.yaml",
+                    deployment_file="deployment.yaml",
                 ),
                 "bot-token",
             )
@@ -132,15 +132,21 @@ class TestRunStarted(unittest.TestCase):
     def test_send_run_started_uses_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            db = base / "state.sqlite"
+
+            handoff = base
+
+            handoff = base
+
+
+            db = base / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
             cfg_path = base / "config.yaml"
-            (base / "secrets.yaml").write_text(
+            (base / "deployment.yaml").write_text(
                 "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
             )
-            cfg = NotificationConfig(enabled=True, secrets_file="secrets.yaml")
+            cfg = NotificationConfig(enabled=True)
             with mock.patch(
                 "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
             ) as post:
@@ -152,7 +158,8 @@ class TestRunStarted(unittest.TestCase):
                     run_dir=base / "runs" / "r1",
                     target_labels=[target.label()],
                     stages=["mapping"],
-                    state_db_path=str(db),
+                    handoff_root=str(handoff),
+                    deployment_file="deployment.yaml",
                 )
                 send_run_started_notification(
                     state,
@@ -162,7 +169,8 @@ class TestRunStarted(unittest.TestCase):
                     run_dir=base / "runs" / "r1",
                     target_labels=[target.label()],
                     stages=["mapping"],
-                    state_db_path=str(db),
+                    handoff_root=str(handoff),
+                    deployment_file="deployment.yaml",
                 )
                 self.assertEqual(post.call_count, 1)
                 self.assertIn("run_started", post.call_args[0][1])
@@ -337,13 +345,19 @@ class TestPreview(unittest.TestCase):
     def test_send_preview_skips_dedup_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            db = base / "state.sqlite"
+
+            handoff = base
+
+            handoff = base
+
+
+            db = base / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
             cfg_path = base / "config.yaml"
             cfg_path.write_text("data_root: /\n", encoding="utf-8")
-            (base / "secrets.yaml").write_text(
+            (base / "deployment.yaml").write_text(
                 "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
             )
             ctx = mock.Mock()
@@ -351,8 +365,9 @@ class TestPreview(unittest.TestCase):
             ctx.run_dir = base
             ctx.meta = {"source_config_path": str(cfg_path)}
             ctx.cfg.runs_dir.return_value = str(base)
-            ctx.cfg.state_db_path = str(db)
+            ctx.cfg.handoff_root = str(handoff)
             ctx.cfg.notifications = NotificationConfig(enabled=True)
+            ctx.cfg.deployment_file = "deployment.yaml"
 
             with mock.patch(
                 "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
@@ -369,20 +384,31 @@ class TestNotifier(unittest.TestCase):
     def test_stage_canceled_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            db = base / "state.sqlite"
+
+            handoff = base
+
+            handoff = base
+
+
+            db = base / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
             cfg_path = base / "config.yaml"
-            (base / "secrets.yaml").write_text(
+            (base / "deployment.yaml").write_text(
                 "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
             )
             cfg = NotificationConfig(
                 enabled=True,
-                secrets_file="secrets.yaml",
                 events=NotificationEvents(stage_canceled=True),
             )
-            notifier = Notifier(state, cfg, config_path=cfg_path, state_db_path=str(db))
+            notifier = Notifier(
+                state,
+                cfg,
+                config_path=cfg_path,
+                handoff_root=str(handoff),
+                deployment_file="deployment.yaml",
+            )
             with mock.patch(
                 "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
             ) as post:
@@ -401,21 +427,32 @@ class TestNotifier(unittest.TestCase):
     def test_dedup_prevents_second_post(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
-            db = base / "state.sqlite"
+
+            handoff = base
+
+            handoff = base
+
+
+            db = base / "pipeline_state.sqlite"
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
             cfg_path = base / "config.yaml"
             cfg_path.write_text("data_root: /\n", encoding="utf-8")
-            (base / "secrets.yaml").write_text(
+            (base / "deployment.yaml").write_text(
                 "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
             )
             cfg = NotificationConfig(
                 enabled=True,
-                secrets_file="secrets.yaml",
                 events=NotificationEvents(stage_completed=True),
             )
-            notifier = Notifier(state, cfg, config_path=cfg_path, state_db_path=str(db))
+            notifier = Notifier(
+                state,
+                cfg,
+                config_path=cfg_path,
+                handoff_root=str(handoff),
+                deployment_file="deployment.yaml",
+            )
 
             with mock.patch(
                 "syndiff_pipeline.template_runner.notifications.post_discord_webhook"

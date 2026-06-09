@@ -40,11 +40,11 @@ def _bot_configured(config_path: Path, cfg) -> tuple[bool, str | None]:
     if not cfg.notifications.bot.enabled:
         return False, "disabled"
     notif = cfg.notifications
-    if not resolve_bot_token(config_path=config_path, secrets_file=notif.secrets_file):
+    if not resolve_bot_token(config_path=config_path, deployment_file=cfg.deployment_file):
         return False, "no bot token configured"
     if not resolve_channel_id(
         config_path=config_path,
-        secrets_file=notif.secrets_file,
+        deployment_file=cfg.deployment_file,
         config_channel_id=notif.bot.channel_id,
     ):
         return False, "no channel id configured"
@@ -197,26 +197,30 @@ def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResul
     )
 
 
-def ensure_discord_bot_for_state_db(state_db_path: str | Path) -> EnsureDiscordBotResult | None:
+def ensure_discord_bot_for_handoff_root(
+    handoff_root: str | Path,
+) -> EnsureDiscordBotResult | None:
     """Restart the Discord bot when a recorded site config exists and it is not alive."""
-    config_path = _load_recorded_site_config(state_db_path)
+    config_path = _load_recorded_site_config(handoff_root)
     if config_path is None:
         return None
-    if discord_bot_is_alive(state_db_path):
-        return EnsureDiscordBotResult(enabled=True, spawned=False, pid=daemon.read_pid(
-            logs.discord_bot_pid_path(state_db_path)
-        ))
+    if discord_bot_is_alive(handoff_root):
+        return EnsureDiscordBotResult(
+            enabled=True,
+            spawned=False,
+            pid=daemon.read_pid(logs.discord_bot_pid_path(handoff_root)),
+        )
     return ensure_discord_bot_running(config_path)
 
 
 def stop_discord_bot(
-    state_db_path: str | Path,
+    handoff_root: str | Path,
     *,
     term_timeout_s: float = 10.0,
     kill_wait_s: float = 5.0,
 ) -> bool:
     """Stop the Discord bot if running. Returns True when no live bot remains."""
-    pid_path = logs.discord_bot_pid_path(state_db_path)
+    pid_path = logs.discord_bot_pid_path(handoff_root)
     pid = daemon.read_pid(pid_path)
     if not pid or not daemon.is_process_alive(pid):
         if pid is not None:
