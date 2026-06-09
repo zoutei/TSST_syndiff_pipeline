@@ -56,7 +56,6 @@ class DiscordBotConfig:
 @dataclass(frozen=True)
 class NotificationConfig:
     enabled: bool = False
-    secrets_file: str = "secrets.yaml"
     events: NotificationEvents = field(default_factory=NotificationEvents)
     bot: DiscordBotConfig = field(default_factory=DiscordBotConfig)
 
@@ -84,76 +83,79 @@ def parse_notification_config(raw: dict | None) -> NotificationConfig:
     )
     return NotificationConfig(
         enabled=bool(raw.get("enabled", False)),
-        secrets_file=str(raw.get("secrets_file", "secrets.yaml")),
         events=events,
         bot=bot,
     )
 
 
-def _load_secrets(config_path: str | Path, secrets_file: str) -> dict:
+def _load_deployment(config_path: str | Path, deployment_file: str) -> dict:
     path = Path(config_path).expanduser().resolve()
-    secrets_path = path.parent / secrets_file
-    if not secrets_path.is_file():
+    deployment_path = path.parent / deployment_file
+    if not deployment_path.is_file():
         return {}
     try:
-        with secrets_path.open(encoding="utf-8") as fh:
+        with deployment_path.open(encoding="utf-8") as fh:
             return yaml.safe_load(fh) or {}
     except OSError:
-        log.warning("Failed to read secrets file %s", secrets_path, exc_info=True)
+        log.warning("Failed to read deployment file %s", deployment_path, exc_info=True)
         return {}
 
 
-def load_webhook_url(config_path: str | Path, secrets_file: str) -> str | None:
-    file_url = str(_load_secrets(config_path, secrets_file).get("discord_webhook_url", "")).strip()
+def load_webhook_url(config_path: str | Path, deployment_file: str) -> str | None:
+    file_url = str(
+        _load_deployment(config_path, deployment_file).get("discord_webhook_url", "")
+    ).strip()
     return file_url or None
 
 
-def load_bot_token(config_path: str | Path, secrets_file: str) -> str | None:
-    token = str(_load_secrets(config_path, secrets_file).get("discord_bot_token", "")).strip()
+def load_bot_token(config_path: str | Path, deployment_file: str) -> str | None:
+    token = str(
+        _load_deployment(config_path, deployment_file).get("discord_bot_token", "")
+    ).strip()
     return token or None
 
 
-def load_channel_id(config_path: str | Path, secrets_file: str) -> str | None:
-    channel_id = str(_load_secrets(config_path, secrets_file).get("discord_channel_id", "")).strip()
+def load_channel_id(config_path: str | Path, deployment_file: str) -> str | None:
+    channel_id = str(
+        _load_deployment(config_path, deployment_file).get("discord_channel_id", "")
+    ).strip()
     return channel_id or None
 
 
 def resolve_webhook_url(
     *,
     config_path: str | Path,
-    secrets_file: str,
+    deployment_file: str,
     source_config_path: str | Path | None = None,
 ) -> str | None:
     for candidate in (config_path, source_config_path):
         if not candidate:
             continue
-        url = load_webhook_url(candidate, secrets_file)
+        url = load_webhook_url(candidate, deployment_file)
         if url:
             return url
-    env_url = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-    return env_url or None
+    return None
 
 
 def resolve_bot_token(
     *,
     config_path: str | Path,
-    secrets_file: str,
+    deployment_file: str,
     source_config_path: str | Path | None = None,
 ) -> str | None:
     for candidate in (config_path, source_config_path):
         if not candidate:
             continue
-        token = load_bot_token(candidate, secrets_file)
+        token = load_bot_token(candidate, deployment_file)
         if token:
             return token
-    env_token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
-    return env_token or None
+    return None
 
 
 def resolve_channel_id(
     *,
     config_path: str | Path,
-    secrets_file: str,
+    deployment_file: str,
     config_channel_id: str = "",
     source_config_path: str | Path | None = None,
 ) -> str | None:
@@ -162,11 +164,10 @@ def resolve_channel_id(
     for candidate in (config_path, source_config_path):
         if not candidate:
             continue
-        channel_id = load_channel_id(candidate, secrets_file)
+        channel_id = load_channel_id(candidate, deployment_file)
         if channel_id:
             return channel_id
-    env_channel = os.environ.get("DISCORD_CHANNEL_ID", "").strip()
-    return env_channel or None
+    return None
 
 
 def post_discord_webhook(url: str, content: str) -> None:
@@ -195,18 +196,20 @@ class Notifier:
         cfg: NotificationConfig,
         *,
         config_path: str | Path,
-        state_db_path: str,
+        handoff_root: str,
+        deployment_file: str = "deployment.yaml",
         source_config_path: str | Path | None = None,
     ):
         self._state = state
         self._cfg = cfg
         self._config_path = Path(config_path)
+        self._deployment_file = deployment_file
         self._source_config_path = (
             Path(source_config_path).expanduser().resolve()
             if source_config_path
             else None
         )
-        self._state_db_path = state_db_path
+        self._handoff_root = handoff_root
         self._webhook_url: str | None = None
 
     def _webhook(self) -> str | None:
@@ -214,7 +217,7 @@ class Notifier:
             self._webhook_url = (
                 resolve_webhook_url(
                     config_path=self._config_path,
-                    secrets_file=self._cfg.secrets_file,
+                    deployment_file=self._deployment_file,
                     source_config_path=self._source_config_path,
                 )
                 or ""
@@ -495,21 +498,22 @@ def send_preview_notification(
 
     config_path = logs.run_config_path(ctx.run_dir)
     source_config_path = (ctx.meta or {}).get("source_config_path")
+    deployment_file = getattr(ctx.cfg, "deployment_file", "deployment.yaml")
     url = resolve_webhook_url(
         config_path=config_path,
-        secrets_file=cfg.secrets_file,
+        deployment_file=deployment_file,
         source_config_path=source_config_path,
     )
     if not url:
         raise SystemExit(
-            f"No Discord webhook URL found (check {cfg.secrets_file} beside config or "
-            "DISCORD_WEBHOOK_URL)"
+            f"No Discord webhook URL found (set discord_webhook_url in {deployment_file} "
+            "beside config)"
         )
     messages = format_run_report_messages(
         state,
         ctx.run_id,
         ctx.cfg.runs_dir(),
-        state_db_path=ctx.cfg.state_db_path,
+        handoff_root=ctx.cfg.handoff_root,
         header=f"[TEST] [{ctx.run_id}] {event_label} ({_utc_header()})",
     )
     for message in messages:
@@ -526,7 +530,8 @@ def send_run_started_notification(
     run_dir: str | Path,
     target_labels: list[str],
     stages: list[str],
-    state_db_path: str,
+    handoff_root: str,
+    deployment_file: str = "deployment.yaml",
     force_rerun: bool = False,
 ) -> None:
     """Post run_started via webhook when notifications are enabled."""
@@ -534,7 +539,8 @@ def send_run_started_notification(
         state,
         cfg,
         config_path=config_path,
-        state_db_path=state_db_path,
+        handoff_root=handoff_root,
+        deployment_file=deployment_file,
     )
     notifier.notify_run_started(
         run_id,
@@ -557,6 +563,7 @@ def notifier_for_context(state: PipelineState, ctx) -> Notifier | None:
         state,
         cfg,
         config_path=config_path,
-        state_db_path=ctx.cfg.state_db_path,
+        handoff_root=ctx.cfg.handoff_root,
+        deployment_file=getattr(ctx.cfg, "deployment_file", "deployment.yaml"),
         source_config_path=source_config_path,
     )

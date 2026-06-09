@@ -2,28 +2,21 @@
 
 from __future__ import annotations
 
-import glob
 import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import List, Sequence
+from typing import List
 
-import numpy as np
-
-from syndiff_pipeline.download import download_ffis, nested_ffi_dir
-from syndiff_pipeline.template import pancakes, ps1_download, ps1_process
-from syndiff_pipeline.template.downsample import (
-    load_cluster_template_job_payload,
-    main as run_downsample,
-    offsets_from_cluster_job_payload,
-    roi_tuple_from_cluster_job_payload,
-)
-from syndiff_pipeline.template_runner.handoff import run_wcs_grouping
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig, config_snapshot
+from syndiff_pipeline.template_runner.deployment import (
+    deployment_path_for_config,
+    gaia_credentials_file,
+    load_deployment,
+)
+from syndiff_pipeline.template_runner.runner_config import parse_deployment_file
 from syndiff_pipeline.template_runner.state import STAGE_NAMES, STAGE_POOL
-from syndiff_pipeline.template_runner.verify import clear_ps1_process_artifacts
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +58,43 @@ def build_stage_command(
     if force_rerun:
         cmd.append("--force-rerun")
     return cmd
+
+
+def _deployment_file_for_site(site_config_path: str) -> str:
+    import yaml
+
+    with Path(site_config_path).open(encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    return parse_deployment_file(raw)
+
+
+def _download_gaia_catalog(
+    *,
+    site_config_path: str | None,
+    tess_file: str,
+    output_path: str,
+    force_download: bool,
+) -> None:
+    from syndiff_pipeline.template import pancakes
+
+    if not site_config_path:
+        pancakes.download_gaia_catalog_for_tess_file(
+            tess_file=tess_file,
+            output_path=output_path,
+            gaia_credentials_file=None,
+            force_download=force_download,
+        )
+        return
+    deployment_file = _deployment_file_for_site(site_config_path)
+    deployment = load_deployment(site_config_path, deployment_file)
+    deployment_path = deployment_path_for_config(site_config_path, deployment_file)
+    with gaia_credentials_file(deployment, deployment_path=deployment_path) as creds_path:
+        pancakes.download_gaia_catalog_for_tess_file(
+            tess_file=tess_file,
+            output_path=output_path,
+            gaia_credentials_file=creds_path,
+            force_download=force_download,
+        )
 
 
 def _manifest_from_result(result: dict) -> tuple[int, int, list[str]] | None:
@@ -109,10 +139,10 @@ def execute_stage(
         if not mp.skip_download_catalog:
             gaia_catalog_dir = os.path.join(resolved.data_root, "catalogs")
             log.info("Downloading Gaia catalog for %s → %s", ref_ffi, gaia_catalog_dir)
-            pancakes.download_gaia_catalog_for_tess_file(
+            _download_gaia_catalog(
+                site_config_path=resolved.config_path or None,
                 tess_file=ref_ffi,
                 output_path=gaia_catalog_dir,
-                gaia_credentials_file=resolved.gaia_credentials,
                 force_download=force_rerun,
             )
         pancakes.process_tess_image_optimized(
