@@ -275,6 +275,32 @@ def cmd_runs(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_notify_test(args: argparse.Namespace) -> int:
+    ctx = _resolve_run_from_args(args)
+    state = PipelineState(ctx.cfg.state_db_path)
+    from syndiff_pipeline.template_runner.notifications import (
+        format_preview_message,
+        send_preview_notification,
+    )
+
+    if getattr(args, "dry_run", False):
+        print(
+            format_preview_message(
+                state,
+                ctx.run_id,
+                ctx.cfg.runs_dir(),
+                state_db_path=ctx.cfg.state_db_path,
+            )
+        )
+        return 0
+
+    message = send_preview_notification(state, ctx)
+    print(f"Sent test notification to Discord for run {ctx.run_id}.")
+    if getattr(args, "verbose", False):
+        print(message)
+    return 0
+
+
 def cmd_active(args: argparse.Namespace) -> int:
     cfg = load_runner_config(args.config)
     state = PipelineState(cfg.state_db_path)
@@ -666,6 +692,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--config", required=True)
     sp.add_argument("action", choices=["start", "stop", "status"])
     sp.set_defaults(func=cmd_daemon)
+
+    sp = sub.add_parser("notify", help="Discord notification utilities")
+    notify_sub = sp.add_subparsers(dest="notify_action", required=True)
+
+    sp_test = notify_sub.add_parser(
+        "test",
+        help="Send a read-only preview (progress + status grid) to Discord",
+    )
+    _add_run_scope(sp_test)
+    sp_test.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the message locally instead of posting to Discord",
+    )
+    sp_test.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Print the message after sending",
+    )
+    sp_test.set_defaults(func=cmd_notify_test)
 
     return p
 

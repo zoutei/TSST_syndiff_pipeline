@@ -41,6 +41,7 @@ from syndiff_pipeline.template_runner.verify_status import (
     clear_verify_in_flight,
     write_verify_in_flight,
 )
+from syndiff_pipeline.template_runner.notifications import notifier_for_context
 from syndiff_pipeline.template_runner.verify_worker import (
     BackfillTask,
     VerifyOutcome,
@@ -214,6 +215,56 @@ def _effective_exit_code(exit_code: int, log_path: str) -> int:
     return exit_code
 
 
+def _notify_stage_outcome(
+    state: PipelineState,
+    run_id: str,
+    *,
+    target_label: str,
+    stage: str,
+    outcome: str,
+    runs_root: str,
+    finished_at: str,
+    error_tail: str | None = None,
+) -> None:
+    ctx = _load_run_context(state, run_id)
+    if ctx is None:
+        return
+    notifier = notifier_for_context(state, ctx)
+    if notifier is None:
+        return
+    notifier.notify_stage_outcome(
+        run_id,
+        runs_root,
+        target_label=target_label,
+        stage=stage,
+        outcome=outcome,
+        finished_at=finished_at,
+        error_tail=error_tail,
+    )
+
+
+def _notify_run_canceled(state: PipelineState, run_id: str, running_before) -> None:
+    ctx = _load_run_context(state, run_id)
+    if ctx is None:
+        return
+    notifier = notifier_for_context(state, ctx)
+    if notifier is None:
+        return
+    runs_root = ctx.cfg.runs_dir()
+    finished_at = _utc_now()
+    for job in running_before:
+        notifier.notify_stage_outcome(
+            run_id,
+            runs_root,
+            target_label=job.target_label,
+            stage=job.stage,
+            outcome="canceled",
+            finished_at=finished_at,
+            error_tail="Canceled by user",
+        )
+    notifier.notify_run_canceled(run_id, runs_root)
+
+
 def _finalize_stage(
     state: PipelineState,
     run_id: str,
@@ -227,26 +278,47 @@ def _finalize_stage(
     log_path = log_path or str(logs.target_log_path(runs_root, run_id, target_label, stage))
     exit_code = _effective_exit_code(exit_code, log_path)
     error_tail = logs.read_log_tail(log_path, 20) if exit_code != 0 else ""
+    finished_at = _utc_now()
     if exit_code == 0:
         state.update_stage_status(
             run_id,
             target_label,
             stage,
             STATUS_SUCCESS,
-            finished_at=_utc_now(),
+            finished_at=finished_at,
             exit_code=0,
             log_path=log_path,
         )
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=target_label,
+            stage=stage,
+            outcome="success",
+            runs_root=runs_root,
+            finished_at=finished_at,
+        )
     elif exit_code == 143:
+        cancel_reason = error_tail or "Canceled (SIGTERM)"
         state.update_stage_status(
             run_id,
             target_label,
             stage,
             STATUS_CANCELED,
-            finished_at=_utc_now(),
+            finished_at=finished_at,
             exit_code=exit_code,
             log_path=log_path,
-            error_tail=error_tail or "Canceled (SIGTERM)",
+            error_tail=cancel_reason,
+        )
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=target_label,
+            stage=stage,
+            outcome="canceled",
+            runs_root=runs_root,
+            finished_at=finished_at,
+            error_tail=cancel_reason,
         )
     else:
         state.update_stage_status(
@@ -254,12 +326,22 @@ def _finalize_stage(
             target_label,
             stage,
             STATUS_FAILED,
-            finished_at=_utc_now(),
+            finished_at=finished_at,
             exit_code=exit_code,
             log_path=log_path,
             error_tail=error_tail,
         )
         state.block_downstream(run_id, target_label, stage)
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=target_label,
+            stage=stage,
+            outcome="failed",
+            runs_root=runs_root,
+            finished_at=finished_at,
+            error_tail=error_tail,
+        )
     state.clear_launch_fields(run_id, target_label, stage)
 
 
@@ -283,11 +365,22 @@ def reconcile_running_stages(
                 # Claimed but the cluster id was never recorded (daemon died
                 # between claim and submit). Requeue once past the grace window.
                 if _age_seconds(job.claimed_at) >= _LOCAL_START_GRACE_S:
+                    died_reason = "Condor stage claimed but never submitted; requeued"
                     state.requeue_running_stage(
                         run_id,
                         job.target_label,
                         job.stage,
-                        error_tail="Condor stage claimed but never submitted; requeued",
+                        error_tail=died_reason,
+                    )
+                    _notify_stage_outcome(
+                        state,
+                        run_id,
+                        target_label=job.target_label,
+                        stage=job.stage,
+                        outcome="died",
+                        runs_root=runs_root,
+                        finished_at=_utc_now(),
+                        error_tail=died_reason,
                     )
                     counts["requeued"] += 1
                 else:
@@ -353,11 +446,22 @@ def reconcile_running_stages(
             continue
 
         # Dead without an exit record, or stale/mismatched token: requeue to ready.
+        died_reason = "Local stage lost or stale; requeued"
         state.requeue_running_stage(
             run_id,
             job.target_label,
             job.stage,
-            error_tail="Local stage lost or stale; requeued",
+            error_tail=died_reason,
+        )
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=job.target_label,
+            stage=job.stage,
+            outcome="died",
+            runs_root=runs_root,
+            finished_at=_utc_now(),
+            error_tail=died_reason,
         )
         counts["requeued"] += 1
 
@@ -818,6 +922,7 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     nonterminal = sum(counts.get(s, 0) for s in NONTERMINAL_STATUSES)
 
     prev_status = run.get("status")
+    notifier = notifier_for_context(state, ctx)
 
     if nonterminal == 0:
         final = derive_run_final_status(counts)
@@ -825,6 +930,10 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         state.set_run_status(run_id, final)
         if not prev_terminal:
             log.info("Run %s complete: %s", run_id, final)
+            # Canceled runs already received notify_run_canceled when the intent
+            # was applied; do not also emit run_completed(success).
+            if notifier is not None and final != RUN_CANCELED:
+                notifier.notify_run_completed(run_id, runs_root, outcome=final)
         elif final != prev_status:
             log.info(
                 "Run %s terminal status corrected: %s -> %s",
@@ -842,8 +951,12 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         reason_text = "; ".join(reasons[:8])
         state.set_run_status(run_id, "stalled", stall_reason=reason_text)
         log.warning("Run %s stalled: %s", run_id, reason_text)
+        if notifier is not None and prev_status != "stalled":
+            notifier.notify_run_stalled(run_id, runs_root, stall_reason=reason_text)
     elif prev_status == "stalled" and (running > 0 or launchable > 0):
         state.set_run_status(run_id, "running")
+        if notifier is not None:
+            notifier.notify_run_resumed(run_id)
 
     _write_summary(state, run_id, runs_root)
 
@@ -870,9 +983,11 @@ def _apply_commands(state: PipelineState) -> None:
             if cmd.kind == "cancel" and cmd.run_id:
                 # Terminate live workers BEFORE marking rows canceled so a
                 # killed run never leaves orphaned processes/clusters running.
+                running_before = state.running_stage_runs(cmd.run_id)
                 _terminate_run_jobs(state, cmd.run_id)
                 _cancel_verify_run(cmd.run_id)
                 state.apply_cancel_run(cmd.run_id)
+                _notify_run_canceled(state, cmd.run_id, running_before)
             elif cmd.kind == "pause" and cmd.run_id:
                 state.set_paused(cmd.run_id, True)
             elif cmd.kind == "resume" and cmd.run_id:

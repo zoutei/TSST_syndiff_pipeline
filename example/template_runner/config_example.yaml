@@ -49,4 +49,20 @@ resources:
 scheduler:
   heartbeat_interval_s: 30.0
 
+# Discord alerts (webhook URL in gitignored secrets.yaml beside this file)
+notifications:
+  enabled: false
+  secrets_file: secrets.yaml
+  events:
+    run_completed: true
+    run_failed: true
+    run_canceled: true
+    run_stalled: true
+    run_resumed: true
+    stage_failed: true
+    stage_completed: true
+    stage_canceled: true
+    stage_died: true
+    daemon_unhealthy: true
+
 overrides: {}

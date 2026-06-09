@@ -79,6 +79,8 @@ syndiff-template submit \
   --targets example/template_runner/targets_example.csv
 ```
 
+**Discord alerts** (optional): copy `example/template_runner/secrets.yaml.example` to `secrets.yaml` (gitignored), set `notifications.enabled: true` in config, then preview with `syndiff-template notify test --config … --run-id …`. See [Discord notifications](docs/template_pipeline.md#discord-notifications) in the pipeline guide.
+
 **Documentation**: see **[`docs/template_pipeline.md`](docs/template_pipeline.md)** for the orchestration guide (architecture, configuration, HTCondor, CLI). Stage algorithms are in **[`docs/stages/`](docs/stages/README.md)** (ported from the standalone [`syndiff`](../syndiff/) step READMEs). Example configs live under [`example/template_runner/`](example/template_runner/).
 
 ---
