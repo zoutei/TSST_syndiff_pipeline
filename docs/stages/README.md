@@ -27,7 +27,7 @@ There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the Sy
 
 1. Select FFIs where the transient has valid WCS
 2. Smooth pixel drift and assign template offset groups
-3. Write `cluster_template_job.json` and `syndiff_ffi_frames.csv` under `{handoff_root}/{target_label}/`
+3. Write `cluster_template_job.json`, `wcs_drift_template_debug.png`, and `syndiff_ffi_frames.csv` under `{handoff_root}/{target_label}/`
 
 Downsample reads crop bounds and offset list from `cluster_template_job.json`.
 
