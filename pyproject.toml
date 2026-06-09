@@ -9,6 +9,9 @@ description = "SynDiff TESS FFI difference imaging and template-building pipelin
 readme = "README.md"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+discord = ["discord.py>=2.3"]
+
 [project.scripts]
 syndiff-template = "syndiff_pipeline.template_runner.cli:main"
 

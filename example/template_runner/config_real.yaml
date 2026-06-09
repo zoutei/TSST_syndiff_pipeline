@@ -58,6 +58,7 @@ notifications:
   enabled: true
   secrets_file: secrets.yaml
   events:
+    run_started: true
     run_completed: true
     run_failed: true
     run_canceled: true
@@ -68,6 +69,8 @@ notifications:
     stage_canceled: true
     stage_died: true
     daemon_unhealthy: true
+  bot:
+    enabled: true
 
 # Per-SCC overrides (optional). Example: smoke-limit ps1_process on one SCC.
 overrides:

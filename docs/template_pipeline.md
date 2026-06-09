@@ -525,6 +525,7 @@ notifications:
   enabled: true
   secrets_file: secrets.yaml
   events:
+    run_started: true
     run_completed: true
     run_failed: true
     run_canceled: true
@@ -535,20 +536,26 @@ notifications:
     stage_canceled: true
     stage_died: true
     daemon_unhealthy: true
+  bot:
+    enabled: true
+    # channel_id: "123456789012345678"  # optional if set in secrets.yaml
 ```
 
 `secrets.yaml` (not committed):
 
 ```yaml
 discord_webhook_url: https://discord.com/api/webhooks/...
+discord_bot_token: your-bot-token
+discord_channel_id: "123456789012345678"
 ```
 
-Alternatively set `DISCORD_WEBHOOK_URL` in the environment.
+Alternatively set `DISCORD_WEBHOOK_URL`, `DISCORD_BOT_TOKEN`, or `DISCORD_CHANNEL_ID` in the environment.
 
-**Events** (supervisor daemon, deduplicated in SQLite `notification_events`):
+**Events** (supervisor daemon or submit, deduplicated in SQLite `notification_events`):
 
 | Event | When |
 |-------|------|
+| `run_started` | New `syndiff-template submit` (short summary, not progress grid) |
 | `run_completed` / `run_failed` | All stages terminal |
 | `run_canceled` | `syndiff-template kill` (whole run canceled) |
 | `run_stalled` / `run_resumed` | Scheduler stall detection / recovery |
@@ -557,7 +564,26 @@ Alternatively set `DISCORD_WEBHOOK_URL` in the environment.
 | `stage_died` | Process lost without exit record (requeued to `ready`) |
 | `daemon_unhealthy` | Supervisor wedged while runs are active |
 
-Message body matches CLI output: `progress` summary (counts + running log fractions) plus truncated `status` per-target grid. Large batches can be noisy when `stage_completed: true` — disable per event if needed.
+Event notifications (except `run_started`) include the same **progress** summary and **status** grid as the CLI. `run_started` posts target/stage counts and monitor commands only.
+
+**On-demand status via Discord bot** (requires `discord.py`):
+
+1. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), enable **Message Content Intent**, invite it to your server with send/read permissions.
+2. Set `notifications.bot.enabled: true` and configure the channel ID (config or `secrets.yaml`).
+3. Install `discord.py`, then start the supervisor — the bot starts automatically when enabled:
+
+```bash
+pip install 'discord.py>=2.3'   # or: pip install -e '.[discord]'
+syndiff-template daemon start --config my_config.yaml
+```
+
+`submit` also ensures the bot is running. `daemon stop` stops both the supervisor and the bot. Check both with `daemon status`. For foreground debugging only:
+
+```bash
+syndiff-template discord bot --config my_config.yaml
+```
+
+Any message you post in the configured channel gets a reply with live `progress` + `status` (same format as event alerts). Include a `run_id` in the message to query a specific run; otherwise the bot reports all active runs (or the most recent run if none are active).
 
 **Test** (read-only; does not write `notification_events` or change run state):
 
@@ -721,6 +747,7 @@ See `example/template_runner/events_example.csv`.
 | `resume` | Insert resume intent |
 | `kill` | Insert cancel intent; daemon terminates workers and marks run `canceled` |
 | `notify test` | Send read-only Discord preview (`progress` + `status` grid); `--dry-run` prints locally |
+| `discord bot` | Run Discord bot in foreground (normally started by `daemon start`) |
 
 ### Common flags
 

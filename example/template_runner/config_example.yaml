@@ -54,6 +54,7 @@ notifications:
   enabled: false
   secrets_file: secrets.yaml
   events:
+    run_started: true
     run_completed: true
     run_failed: true
     run_canceled: true
@@ -64,5 +65,8 @@ notifications:
     stage_canceled: true
     stage_died: true
     daemon_unhealthy: true
+  bot:
+    enabled: false
+    # channel_id: "123456789012345678"  # or set discord_channel_id in secrets.yaml
 
 overrides: {}

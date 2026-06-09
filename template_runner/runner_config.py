@@ -165,6 +165,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "enabled": cfg.notifications.enabled,
         "secrets_file": cfg.notifications.secrets_file,
         "events": {
+            "run_started": cfg.notifications.events.run_started,
             "run_completed": cfg.notifications.events.run_completed,
             "run_failed": cfg.notifications.events.run_failed,
             "run_canceled": cfg.notifications.events.run_canceled,
@@ -175,6 +176,10 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
             "stage_canceled": cfg.notifications.events.stage_canceled,
             "stage_died": cfg.notifications.events.stage_died,
             "daemon_unhealthy": cfg.notifications.events.daemon_unhealthy,
+        },
+        "bot": {
+            "enabled": cfg.notifications.bot.enabled,
+            "channel_id": cfg.notifications.bot.channel_id,
         },
     }
     return data

@@ -33,6 +33,34 @@ from syndiff_pipeline.template_runner.state import (
 log = logging.getLogger(__name__)
 
 
+def _discord_bot_config_path(args: argparse.Namespace, ctx: RunContext | None = None) -> Path | None:
+    if getattr(args, "config", None):
+        return Path(args.config).expanduser().resolve()
+    if ctx is not None:
+        source = (ctx.meta or {}).get("source_config_path")
+        if source:
+            return Path(source).expanduser().resolve()
+        return logs.run_config_path(ctx.run_dir)
+    return None
+
+
+def _ensure_discord_bot(config_path: str | Path):
+    from syndiff_pipeline.template_runner.discord_bot_control import ensure_discord_bot_running
+
+    return ensure_discord_bot_running(config_path)
+
+
+def _print_discord_bot_status(config_path: str | Path, result) -> None:
+    if not result.enabled:
+        return
+    if result.pid:
+        bot_log = logs.discord_bot_log_path(load_runner_config(config_path).state_db_path)
+        print(f"Discord bot pid={result.pid} spawned={result.spawned}")
+        print(f"  bot log: {bot_log}")
+    elif result.skipped_reason:
+        print(f"Discord bot not running: {result.skipped_reason}")
+
+
 def _default_run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
@@ -133,6 +161,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
     )
 
     state = PipelineState(cfg.state_db_path)
+    created_new_run = False
     if state.get_run(run_id) is None:
         # New run: stages are materialized pending/external and the force_rerun
         # flag is persisted at creation, before the daemon can schedule it. No
@@ -146,6 +175,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
             active,
             force_rerun=bool(args.force_rerun),
         )
+        created_new_run = True
     elif args.force_rerun:
         # Resubmitting force-rerun onto an EXISTING run. The daemon is the sole
         # owner of execution state and may be actively scheduling this run, so
@@ -161,10 +191,27 @@ def cmd_submit(args: argparse.Namespace) -> int:
         )
 
     result = ensure_daemon_running(cfg.state_db_path)
+    bot_result = _ensure_discord_bot(args.config)
     daemon_log = logs.daemon_log_path(cfg.state_db_path)
+
+    if created_new_run and cfg.notifications.enabled:
+        from syndiff_pipeline.template_runner.notifications import send_run_started_notification
+
+        send_run_started_notification(
+            state,
+            cfg.notifications,
+            config_path=args.config,
+            run_id=run_id,
+            run_dir=run_directory,
+            target_labels=[t.label() for t in targets if t.enabled],
+            stages=active,
+            state_db_path=cfg.state_db_path,
+            force_rerun=bool(args.force_rerun),
+        )
 
     print(f"Submitted run_id={run_id} supervisor_pid={result.pid}")
     print(f"  daemon log: {daemon_log}")
+    _print_discord_bot_status(args.config, bot_result)
     print(f"Monitor: syndiff-template progress --run-dir {run_directory}")
     print(f"         syndiff-template status --watch --run-dir {run_directory}")
     return 0
@@ -494,6 +541,9 @@ def cmd_retry(args: argparse.Namespace) -> int:
 
     if not getattr(args, "no_start_daemon", False):
         ensure_daemon_running(ctx.cfg.state_db_path)
+        bot_config = _discord_bot_config_path(args, ctx)
+        if bot_config is not None:
+            _ensure_discord_bot(bot_config)
     return 0
 
 
@@ -523,23 +573,40 @@ def cmd_kill(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_discord_bot(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.template_runner.discord_bot import run_discord_bot
+
+    run_discord_bot(args.config)
+    return 0
+
+
 def cmd_daemon(args: argparse.Namespace) -> int:
     cfg = load_runner_config(args.config)
     db = cfg.state_db_path
     if args.action == "start":
         result = ensure_daemon_running(db)
+        bot_result = _ensure_discord_bot(args.config)
         print(f"Supervisor pid={result.pid} spawned={result.spawned}")
+        _print_discord_bot_status(args.config, bot_result)
         return 0
     if args.action == "stop":
+        from syndiff_pipeline.template_runner.discord_bot_control import stop_discord_bot
+
         result = stop_daemon(db)
+        bot_stopped = stop_discord_bot(db)
         if not result.was_running:
-            print("Supervisor was not running.")
+            if bot_stopped:
+                print("Supervisor was not running. Discord bot stopped.")
+            else:
+                print("Supervisor was not running.")
             return 0
         if result.stopped:
             if result.force_killed:
                 print(f"Supervisor pid={result.pid} stopped (SIGKILL).")
             else:
                 print(f"Supervisor pid={result.pid} stopped.")
+            if not bot_stopped:
+                print("WARNING: Discord bot did not stop cleanly.")
             return 0
         print(
             f"ERROR: Supervisor pid={result.pid} is still running "
@@ -547,7 +614,10 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         )
         return 1
     if args.action == "status":
+        from syndiff_pipeline.template_runner.discord_bot_control import discord_bot_status
+
         st = daemon_status(db)
+        bot = discord_bot_status(args.config)
         print(
             json.dumps(
                 {
@@ -556,6 +626,12 @@ def cmd_daemon(args: argparse.Namespace) -> int:
                     "pid": st.pid,
                     "heartbeat_age_s": st.heartbeat_age_s,
                     "lock_held": st.lock_held,
+                    "discord_bot": {
+                        "enabled": bot.enabled,
+                        "alive": bot.alive,
+                        "pid": bot.pid,
+                        "skipped_reason": bot.skipped_reason,
+                    },
                 },
                 indent=2,
             )
@@ -713,6 +789,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the message after sending",
     )
     sp_test.set_defaults(func=cmd_notify_test)
+
+    sp = sub.add_parser("discord", help="Discord bot utilities")
+    discord_sub = sp.add_subparsers(dest="discord_action", required=True)
+    sp_bot = discord_sub.add_parser(
+        "bot",
+        help="Run bot that replies to channel messages with progress + status",
+    )
+    sp_bot.add_argument("--config", required=True)
+    sp_bot.set_defaults(func=cmd_discord_bot)
 
     return p
 

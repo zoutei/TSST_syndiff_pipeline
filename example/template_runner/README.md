@@ -40,8 +40,9 @@ syndiff-template submit \
 syndiff-template progress --run-dir /path/to/runs/<run_id>
 syndiff-template status --watch --run-dir /path/to/runs/<run_id>
 
-# Optional Discord preview (read-only; requires secrets.yaml + notifications.enabled):
-cp secrets.yaml.example secrets.yaml   # edit discord_webhook_url
+# Optional Discord (requires secrets.yaml + notifications.enabled):
+cp secrets.yaml.example secrets.yaml   # webhook URL + bot token + channel ID
+syndiff-template daemon start --config config_example.yaml   # starts supervisor + bot
 syndiff-template notify test --config config_example.yaml --run-id <run_id>
 ```
 
