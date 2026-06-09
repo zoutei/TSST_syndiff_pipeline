@@ -13,16 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-import numpy as np
-
-from syndiff_pipeline.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
-from syndiff_pipeline.template.csv_utils import get_all_padding_cells, load_csv_data
-from syndiff_pipeline.template.downsample import (
-    load_cluster_template_job_payload,
-    offsets_from_cluster_job_payload,
-    roi_tuple_from_cluster_job_payload,
-)
-from syndiff_pipeline.template.ps1_process import expected_convolved_skycells
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.template_runner.state import STAGE_NAMES
 from syndiff_pipeline.template_runner.targets import Target
@@ -233,6 +223,8 @@ def write_stable_manifest(
 
 
 def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
+    from syndiff_pipeline.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
+
     t = resolved.target
     ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
     expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf)
@@ -330,6 +322,8 @@ def _projection_from_skycell_name(skycell_name: str) -> str | None:
 
 
 def _expected_ps1_download_skycells(resolved: ResolvedTargetConfig) -> list[str]:
+    from syndiff_pipeline.template.csv_utils import get_all_padding_cells, load_csv_data
+
     csv_path = _mapping_csv_path(resolved)
     if not csv_path.is_file():
         raise FileNotFoundError(f"Master skycells CSV missing: {csv_path}")
@@ -503,6 +497,9 @@ def _skycell_name(entry) -> str:
 
 
 def expected_ps1_process_skycells(resolved: ResolvedTargetConfig) -> list[str]:
+    from syndiff_pipeline.template.csv_utils import load_csv_data
+    from syndiff_pipeline.template.ps1_process import expected_convolved_skycells
+
     t = resolved.target
     try:
         names = expected_convolved_skycells(
@@ -606,6 +603,14 @@ def _downsample_expected_basenames(resolved: ResolvedTargetConfig) -> tuple[list
     output base dir. Honors ``single_offset`` (a single ``[0, 0]`` offset) and the
     ROI/oversampling filename tags. Raises on a missing/invalid cluster job JSON.
     """
+    import numpy as np
+
+    from syndiff_pipeline.template.downsample import (
+        load_cluster_template_job_payload,
+        offsets_from_cluster_job_payload,
+        roi_tuple_from_cluster_job_payload,
+    )
+
     t = resolved.target
     ds = resolved.stages.downsample
     job_path = Path(resolved.handoff_dir) / "cluster_template_job.json"
@@ -765,9 +770,18 @@ def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple
         ok = csv_path.is_file()
         return 1, int(ok), [str(csv_path)] if ok else []
     if stage == "wcs_grouping":
-        job_path = Path(resolved.handoff_dir) / "cluster_template_job.json"
+        from syndiff_pipeline.wcs_grouping import (
+            CLUSTER_TEMPLATE_JOB_FILENAME,
+            WCS_DRIFT_TEMPLATE_DEBUG_FILENAME,
+        )
+
+        job_path = Path(resolved.handoff_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
+        plot_path = Path(resolved.handoff_dir) / WCS_DRIFT_TEMPLATE_DEBUG_FILENAME
         ok = job_path.is_file()
-        return 1, int(ok), [str(job_path)] if ok else []
+        artifacts = [str(job_path)] if ok else []
+        if plot_path.is_file():
+            artifacts.append(str(plot_path))
+        return 1, int(ok), artifacts
     if stage == "ps1_download":
         expected = _expected_ps1_download_skycells(resolved)
         zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
@@ -777,6 +791,8 @@ def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple
             produced = len(expected)
         return len(expected), produced, [str(zarr_path)]
     if stage == "tess_ffi_download":
+        from syndiff_pipeline.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
+
         t = resolved.target
         ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
         expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf) or []

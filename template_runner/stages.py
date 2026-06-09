@@ -122,15 +122,21 @@ def execute_stage(
     """
     t = resolved.target
     if stage == "tess_ffi_download":
+        from syndiff_pipeline.download import download_ffis, nested_ffi_dir
+
         out_dir = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
         download_ffis(sector=t.sector, camera=t.camera, ccd=t.ccd, output_dir=out_dir)
         return
 
     if stage == "wcs_grouping":
+        from syndiff_pipeline.template_runner.handoff import run_wcs_grouping
+
         run_wcs_grouping(resolved)
         return
 
     if stage == "mapping":
+        from syndiff_pipeline.template import pancakes
+
         job_path = Path(resolved.handoff_dir) / "cluster_template_job.json"
         with job_path.open(encoding="utf-8") as fh:
             job = json.load(fh)
@@ -163,6 +169,8 @@ def execute_stage(
         return
 
     if stage == "ps1_download":
+        from syndiff_pipeline.template import ps1_download
+
         pd = resolved.stages.ps1_download
         result = ps1_download.download_and_store_ps1_data(
             sector=t.sector,
@@ -180,6 +188,9 @@ def execute_stage(
         return _manifest_from_result(result)
 
     if stage == "ps1_process":
+        from syndiff_pipeline.template import ps1_process
+        from syndiff_pipeline.template_runner.verify import clear_ps1_process_artifacts
+
         if force_rerun:
             clear_ps1_process_artifacts(resolved)
         pp = resolved.stages.ps1_process
@@ -205,6 +216,15 @@ def execute_stage(
         return _manifest_from_result(result)
 
     if stage == "downsample":
+        import numpy as np
+
+        from syndiff_pipeline.template.downsample import (
+            load_cluster_template_job_payload,
+            main as run_downsample,
+            offsets_from_cluster_job_payload,
+            roi_tuple_from_cluster_job_payload,
+        )
+
         job_path = str(Path(resolved.handoff_dir) / "cluster_template_job.json")
         payload = load_cluster_template_job_payload(job_path)
         ds = resolved.stages.downsample

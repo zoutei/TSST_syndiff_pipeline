@@ -12,7 +12,7 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import List
+from typing import TYPE_CHECKING, List
 
 from syndiff_pipeline.template_runner import condor, daemon, launcher, logs, stages
 from syndiff_pipeline.template_runner.run_context import resolve_run_context
@@ -39,21 +39,18 @@ from syndiff_pipeline.template_runner.state import (
     downstream_stages,
     effective_stage_deps,
 )
-from syndiff_pipeline.template_runner.verify import check_manifests_only
 from syndiff_pipeline.template_runner.verify_status import (
     clear_verify_in_flight,
     write_verify_in_flight,
 )
-from syndiff_pipeline.template_runner.notifications import notifier_for_context
-from syndiff_pipeline.template_runner.verify_worker import (
-    BackfillTask,
-    VerifyOutcome,
-    VerifyTask,
-    VerifyTaskKey,
-    init_verify_worker,
-    shutdown_verify_worker,
-    try_get_verify_worker,
-)
+
+if TYPE_CHECKING:
+    from syndiff_pipeline.template_runner.verify_worker import (
+        BackfillTask,
+        VerifyOutcome,
+        VerifyTask,
+        VerifyTaskKey,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -254,6 +251,8 @@ def _notify_stage_outcome(
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
+    from syndiff_pipeline.template_runner.notifications import notifier_for_context
+
     notifier = notifier_for_context(state, ctx)
     if notifier is None:
         return
@@ -272,6 +271,8 @@ def _notify_run_canceled(state: PipelineState, run_id: str, running_before) -> N
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
+    from syndiff_pipeline.template_runner.notifications import notifier_for_context
+
     notifier = notifier_for_context(state, ctx)
     if notifier is None:
         return
@@ -517,6 +518,8 @@ def _verify_outcome_still_applicable(state: PipelineState, key: VerifyTaskKey) -
 
 
 def _verify_worker():
+    from syndiff_pipeline.template_runner.verify_worker import try_get_verify_worker
+
     return try_get_verify_worker()
 
 
@@ -569,6 +572,8 @@ def _iter_verify_candidates(
     force_rerun: bool,
 ) -> list[tuple]:
     """Collect uncached pending/external stages eligible for verification."""
+    from syndiff_pipeline.template_runner.verify_worker import VerifyTaskKey
+
     active_stages = set(state.get_active_stages(run_id))
     cfg = ctx.cfg
     runs_root = cfg.runs_dir()
@@ -639,6 +644,14 @@ def _run_verify_pass(
     block_timeout_s: float = 0.0,
 ) -> int:
     """Manifest fast path on main thread; full verify in background pool."""
+    from syndiff_pipeline.template_runner.verify import check_manifests_only
+    from syndiff_pipeline.template_runner.verify_worker import (
+        BackfillTask,
+        VerifyOutcome,
+        VerifyTask,
+        init_verify_worker,
+    )
+
     worker = init_verify_worker(ctx.cfg.verify_max_workers)
     apply = lambda outcome: _apply_verify_outcome(state, outcome)
     max_in_flight = ctx.cfg.verify_max_workers
@@ -766,6 +779,8 @@ def _schedule_external_and_pending_skips(
 def _cancel_verify_for_retry(
     run_id: str, target_label: str, stage: str, *, reset_downstream: bool
 ) -> None:
+    from syndiff_pipeline.template_runner.verify_worker import VerifyTaskKey
+
     stages = [stage] + (
         downstream_stages(stage) if reset_downstream else []
     )
@@ -971,6 +986,8 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     nonterminal = sum(counts.get(s, 0) for s in NONTERMINAL_STATUSES)
 
     prev_status = run.get("status")
+    from syndiff_pipeline.template_runner.notifications import notifier_for_context
+
     notifier = notifier_for_context(state, ctx)
 
     if nonterminal == 0:
@@ -1209,15 +1226,17 @@ def run_supervisor_daemon(handoff_root: str) -> int:
                         worker.drain(apply, block=False)
                     except Exception:
                         log.exception("Error draining verify worker on shutdown")
+                from syndiff_pipeline.template_runner.verify_worker import shutdown_verify_worker
+
                 shutdown_verify_worker(wait=_shutdown)
             state.clear_supervisor()
             daemon.remove_pid_file(pid_path)
             try:
-                logs.daemon_heartbeat_file(state_db_path).unlink(missing_ok=True)
+                logs.daemon_heartbeat_file(handoff_root).unlink(missing_ok=True)
             except OSError:
                 pass
             try:
-                clear_verify_in_flight(state_db_path)
+                clear_verify_in_flight(handoff_root)
             except OSError:
                 pass
     return 0
