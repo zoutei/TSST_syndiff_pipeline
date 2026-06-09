@@ -115,6 +115,50 @@ class TestReadLogProgress(unittest.TestCase):
         prog = read_log_progress(path, "downsample")
         self.assertEqual(prog.text, "~14/84")
 
+    def test_downsample_sidecar_skycell_progress(self):
+        log_path = self._write_log("downsample.log", "Processing 84 skycells in 12 batches...\n")
+        sidecar = log_path.parent / "downsample.progress.json"
+        sidecar.write_text(
+            '{"total_skycells": 84, "skycells_done": 45, "phase": "parallel_batches"}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "downsample")
+        self.assertEqual(prog.text, "45/84")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_downsample_sidecar_combining_phase(self):
+        log_path = self._write_log("downsample.log", "Combining results...\n")
+        sidecar = log_path.parent / "downsample.progress.json"
+        sidecar.write_text(
+            '{"total_skycells": 84, "skycells_done": 84, "phase": "combining"}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "downsample")
+        self.assertEqual(prog.text, "combining")
+        self.assertEqual(prog.kind, "phase")
+
+    def test_downsample_sidecar_precomputing_shifts_zero_done(self):
+        log_path = self._write_log("downsample.log", "Precomputing shifts for all offsets...\n")
+        sidecar = log_path.parent / "downsample.progress.json"
+        sidecar.write_text(
+            '{"phase": "precomputing_shifts", "offsets_done": 0, "offsets_total": 10}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "downsample")
+        self.assertEqual(prog.text, "shifts 0/10")
+        self.assertEqual(prog.kind, "phase")
+
+    def test_downsample_sidecar_precomputing_shifts(self):
+        log_path = self._write_log("downsample.log", "Precomputing shifts for all offsets...\n")
+        sidecar = log_path.parent / "downsample.progress.json"
+        sidecar.write_text(
+            '{"phase": "precomputing_shifts", "offsets_done": 3, "offsets_total": 10}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "downsample")
+        self.assertEqual(prog.text, "shifts 3/10")
+        self.assertEqual(prog.kind, "phase")
+
     def test_downsample_combining_phase(self):
         path = self._write_log(
             "down.log",

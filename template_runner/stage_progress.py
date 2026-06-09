@@ -133,6 +133,34 @@ def _parse_ps1_process(text: str) -> StageProgress | None:
     return _phase_from_text(text)
 
 
+def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
+    from syndiff_pipeline.template.downsample_progress import progress_path_for_log, read_progress
+
+    data = read_progress(progress_path_for_log(log_path))
+    if not data:
+        return None
+
+    phase = data.get("phase")
+    if phase in ("combining", "saving"):
+        return StageProgress(str(phase), "phase")
+    if phase == "precomputing_shifts":
+        offsets_done = data.get("offsets_done")
+        offsets_total = data.get("offsets_total")
+        if offsets_done is not None and offsets_total is not None:
+            return StageProgress(f"shifts {offsets_done}/{offsets_total}", "phase")
+        return StageProgress("precomputing_shifts", "phase")
+    if phase == "complete":
+        total = int(data.get("total_skycells", 0))
+        if total > 0:
+            return StageProgress(f"{total}/{total}", "fraction")
+
+    total = int(data.get("total_skycells", 0))
+    done = int(data.get("skycells_done", 0))
+    if total > 0:
+        return StageProgress(f"{done}/{total}", "fraction")
+    return None
+
+
 def _parse_downsample(text: str) -> StageProgress | None:
     skycells_match = _last_match(_RE_DOWN_SKYCELLS, text)
     batches_match = _last_match(_RE_DOWN_BATCHES, text)
@@ -221,6 +249,11 @@ def read_log_progress(
 ) -> StageProgress | None:
     """Return log-derived progress for *stage*, or None if unavailable."""
     path = Path(log_path)
+    if stage == "downsample":
+        sidecar_prog = _parse_downsample_sidecar(path)
+        if sidecar_prog is not None:
+            return sidecar_prog
+
     if not path.is_file():
         if stage == "wcs_grouping":
             return _elapsed_progress(started_at)
