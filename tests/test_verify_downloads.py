@@ -158,7 +158,7 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
             tmp = Path(tmpdir)
             resolved = _resolved(tmp)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify.expected_ffi_basenames",
+                "syndiff_pipeline.download.expected_ffi_basenames",
                 return_value=None,
             ):
                 result = verify_tess_ffi_download(resolved)

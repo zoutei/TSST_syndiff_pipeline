@@ -143,7 +143,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify.expected_convolved_skycells",
+                "syndiff_pipeline.template.ps1_process.expected_convolved_skycells",
                 return_value=[("skycell.1520.080", 0), ("skycell.1520.081", 1)],
             ):
                 result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path))

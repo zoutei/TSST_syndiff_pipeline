@@ -105,6 +105,9 @@ class TestVerifyStatus(unittest.TestCase):
 
 
 class TestVerifyWorkerLifecycle(unittest.TestCase):
+    def setUp(self):
+        reset_verify_worker_for_tests()
+
     def tearDown(self):
         reset_verify_worker_for_tests()
 
