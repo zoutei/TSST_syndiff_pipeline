@@ -150,7 +150,10 @@ class PipelineState:
     def _conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path, timeout=60)
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
+        # journal_mode is persisted in the DB header (set once in _init_schema);
+        # re-issuing it on every connect is redundant and, over NFS, expensive
+        # and fragile (it re-checks the -shm/-wal files). Only the per-connection
+        # pragmas below must be set each time.
         conn.execute("PRAGMA busy_timeout=60000")
         conn.execute("PRAGMA synchronous=NORMAL")
         try:
@@ -161,6 +164,9 @@ class PipelineState:
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
+            # Set the durable journal mode exactly once. WAL persists in the
+            # header, so later connections inherit it without re-issuing.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -315,8 +321,10 @@ class PipelineState:
                         (STATUS_PENDING, run_id, target_label, stage),
                     )
                     status = STATUS_PENDING
-                if status == STATUS_PENDING and self.deps_satisfied(
-                    run_id, target_label, stage
+                if (
+                    status == STATUS_PENDING
+                    and self.deps_satisfied(run_id, target_label, stage)
+                    and self.external_checked(run_id, target_label, stage)
                 ):
                     conn.execute(
                         "UPDATE stage_runs SET status = ? "

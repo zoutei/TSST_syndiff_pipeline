@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import signal
+import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -59,6 +60,23 @@ NONTERMINAL_STATUSES = frozenset(
 # can delay the first status write by many seconds, so keep this generous.
 _LOCAL_START_GRACE_S = 300.0
 
+# Cadence of the background heartbeat thread. It must be well under the
+# staleness threshold used by the lifecycle layer (DEFAULT_HEARTBEAT_STALE_S).
+_HEARTBEAT_INTERVAL_S = 15.0
+
+# Max fresh on-disk completeness checks performed per run per tick. Verification
+# walks NFS and parses skycell-mapping CSVs, so an unbounded pass can take many
+# minutes and starve command/shutdown handling. The remainder is verified on
+# subsequent ticks; correctness is unaffected (a not-yet-verified stage simply
+# is not skipped this tick).
+_VERIFY_BUDGET_PER_TICK = 16
+
+# If the host-local heartbeat file cannot be written for this long, something is
+# badly wrong locally. Rather than linger as a zombie that holds the lock but
+# looks dead, the supervisor exits so a fresh one (which reconciles in-flight
+# jobs from durable status files) can take over.
+_HEARTBEAT_FATAL_AFTER_S = 90.0
+
 
 def _age_seconds(iso_ts: str | None) -> float:
     """Age in seconds of an ISO-8601 timestamp; +inf if missing/unparseable."""
@@ -77,6 +95,50 @@ def _handle_signal(signum, frame):
     global _shutdown
     log.warning("Received signal %s — shutting down supervisor gracefully", signum)
     _shutdown = True
+
+
+def _write_local_heartbeat(state_db_path: str) -> None:
+    """Write the host-local heartbeat file (NFS-independent liveness signal)."""
+    path = logs.daemon_heartbeat_file(state_db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(str(time.time()), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _supervisor_heartbeat_loop(
+    state: PipelineState, state_db_path: str, pid: int, interval_s: float
+) -> None:
+    """Keep liveness fresh while the main loop is blocked in long NFS work.
+
+    The host-local heartbeat file is the authoritative liveness signal because
+    it does not depend on the (possibly wedged or full) NFS state DB. The DB
+    heartbeat is updated best-effort, for cross-tool visibility only.
+    """
+    global _shutdown
+    last_local_ok = time.monotonic()
+    while not _shutdown:
+        time.sleep(interval_s)
+        if _shutdown:
+            break
+        try:
+            _write_local_heartbeat(state_db_path)
+            last_local_ok = time.monotonic()
+        except Exception:
+            log.exception("Failed to write local heartbeat file")
+            if time.monotonic() - last_local_ok > _HEARTBEAT_FATAL_AFTER_S:
+                log.error(
+                    "Local heartbeat unwritable for >%ss — exiting so a fresh "
+                    "supervisor can take over",
+                    _HEARTBEAT_FATAL_AFTER_S,
+                )
+                _shutdown = True
+                break
+        try:
+            state.update_supervisor_heartbeat(pid)
+        except Exception:
+            # DB heartbeat is best-effort; the local file is authoritative.
+            log.warning("Failed to update DB heartbeat (best-effort)", exc_info=True)
 
 
 def _write_summary(state: PipelineState, run_id: str, runs_root: str) -> None:
@@ -318,10 +380,12 @@ def _resolve_external_and_pending_skips(
     ctx,
     *,
     force_rerun: bool,
+    budget: int = _VERIFY_BUDGET_PER_TICK,
 ) -> int:
     if force_rerun:
         return 0
     skipped = 0
+    remaining = budget
     cfg = ctx.cfg
     runs_root = cfg.runs_dir()
     rows_by_label: dict[str, list] = defaultdict(list)
@@ -329,12 +393,18 @@ def _resolve_external_and_pending_skips(
         rows_by_label[row.target_label].append(row)
 
     for target in ctx.targets:
+        if remaining <= 0:
+            break
         label = target.label()
         rows = rows_by_label.get(label)
         if not rows:
             continue
         resolved = resolve_config(target, cfg)
         for row in rows:
+            if remaining <= 0:
+                # Budget exhausted: leave the rest for the next tick so the
+                # supervisor stays responsive to commands/shutdown.
+                break
             if row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
                 continue
             # Cached completeness result -> never re-verify (kills the per-tick
@@ -347,6 +417,8 @@ def _resolve_external_and_pending_skips(
                 run_id, label, row.stage
             ):
                 continue
+            # This row will incur a real on-disk verification: spend budget.
+            remaining -= 1
             manifest_path = str(
                 logs.stage_manifest_path(runs_root, run_id, label, row.stage)
             )
@@ -368,10 +440,9 @@ def _resolve_external_and_pending_skips(
                     run_id, label, row.stage, complete=True, path=stable_path
                 )
                 skipped += 1
-            elif row.status == STATUS_EXTERNAL:
-                # An external (out-of-selection) stage that is not present on
-                # disk will never be produced in this run: cache the negative
-                # result so it is not re-verified every tick.
+            else:
+                # Not complete: cache the negative result so promote_stages can
+                # proceed (pending) or we stop re-verifying every tick (external).
                 state.cache_external_check(run_id, label, row.stage, complete=False)
     return skipped
 
@@ -626,31 +697,56 @@ def run_supervisor_daemon(state_db_path: str) -> int:
         _lock_fd = fd
 
         pid_path = logs.daemon_pid_path(state_db_path)
-        daemon.write_pid(pid_path, os.getpid())
+        pid = os.getpid()
+        daemon.write_pid(pid_path, pid)
         state = PipelineState(state_db_path)
-        state.update_supervisor_heartbeat(os.getpid())
+        # Establish liveness immediately (local file is authoritative) before
+        # the first — potentially slow — scheduling pass begins.
+        _write_local_heartbeat(state_db_path)
+        state.update_supervisor_heartbeat(pid)
+
+        heartbeat_thread = threading.Thread(
+            target=_supervisor_heartbeat_loop,
+            args=(state, state_db_path, pid, _HEARTBEAT_INTERVAL_S),
+            name="supervisor-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
 
         try:
             while not _shutdown:
-                state.update_supervisor_heartbeat(os.getpid())
                 _apply_commands(state)
 
                 for run in state.list_active_runs():
+                    if _shutdown:
+                        break
                     run_id = run["run_id"]
                     try:
                         ctx = _load_run_context(state, run_id)
                         if ctx is None:
                             continue
                         _tick_run(state, run_id, ctx)
+                        # Honor cancel/pause/stop intents promptly even when a
+                        # large active-run set makes a full pass slow.
+                        _apply_commands(state)
                     except Exception:
                         # Isolate per-run failures so one bad run cannot take
                         # down scheduling for every other active run.
                         log.exception("Error while processing run %s", run_id)
 
-                time.sleep(1.0)
+                # Interruptible idle: wake early on shutdown instead of sleeping
+                # through a SIGTERM.
+                for _ in range(10):
+                    if _shutdown:
+                        break
+                    time.sleep(0.1)
         finally:
             state.clear_supervisor()
             daemon.remove_pid_file(pid_path)
+            try:
+                logs.daemon_heartbeat_file(state_db_path).unlink(missing_ok=True)
+            except OSError:
+                pass
     return 0
 
 
