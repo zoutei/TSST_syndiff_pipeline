@@ -639,7 +639,9 @@ def _global_pool_running(state: PipelineState) -> dict[str, int]:
     """Running stage count per pool across ALL runs (global capacity)."""
     pool_running: dict[str, int] = defaultdict(int)
     for job in state.running_stage_runs(None):
-        pool_running[STAGE_POOL.get(job.stage, "?")] += 1
+        pool = STAGE_POOL.get(job.stage)
+        if pool:
+            pool_running[pool] += 1
     return pool_running
 
 
@@ -672,13 +674,92 @@ def _stall_reasons(state: PipelineState, run_id: str, ctx) -> List[str]:
             reasons.append(f"{label}/{stage}: pending promotion or artifact verify")
             continue
         if row.status == STATUS_READY:
-            pool = STAGE_POOL.get(stage, "?")
-            cap = cfg.resources.get(pool)
-            if cap and pool_running[pool] >= cap.max_concurrent:
-                reasons.append(f"{label}/{stage}: pool {pool} saturated")
+            pool = STAGE_POOL.get(stage)
+            if pool:
+                cap = cfg.resources.get(pool)
+                if cap and pool_running[pool] >= cap.max_concurrent:
+                    reasons.append(f"{label}/{stage}: pool {pool} saturated")
+                else:
+                    reasons.append(f"{label}/{stage}: ready but not claimed")
             else:
                 reasons.append(f"{label}/{stage}: ready but not claimed")
     return reasons
+
+
+def _try_launch_ready_row(
+    state: PipelineState,
+    run_id: str,
+    ctx,
+    row,
+    *,
+    pool_label: str,
+    force_rerun: bool,
+    active_stages: list[str],
+    targets_by_label: dict,
+    runs_root: str,
+) -> bool:
+    """Claim and launch one ready stage row. Returns True if launched."""
+    if row.stage not in active_stages:
+        return False
+    if not state.deps_satisfied(run_id, row.target_label, row.stage):
+        state.update_stage_status(run_id, row.target_label, row.stage, STATUS_PENDING)
+        return False
+
+    target = targets_by_label.get(row.target_label)
+    if target is None:
+        return False
+
+    cfg = ctx.cfg
+    executor = cfg.stage_executor(row.stage)
+    if executor == "condor" and row.native_id:
+        condor.remove_cluster(int(row.native_id))
+
+    launch_token = state.new_launch_token()
+    if not state.claim_ready(run_id, row.target_label, row.stage, launch_token):
+        return False
+
+    cmd = stages.build_stage_command(
+        run_id,
+        row.stage,
+        str(ctx.run_dir),
+        row.target_label,
+        launch_token=launch_token,
+        force_rerun=force_rerun,
+    )
+    log_path = str(logs.target_log_path(runs_root, run_id, row.target_label, row.stage))
+    try:
+        descriptor = launcher.launch_stage(
+            cmd,
+            cfg=cfg,
+            stage=row.stage,
+            runs_root=runs_root,
+            run_id=run_id,
+            target_label=row.target_label,
+            launch_token=launch_token,
+        )
+    except Exception:
+        log.exception("Launch failed for %s / %s; requeuing", row.target_label, row.stage)
+        state.requeue_to_ready(run_id, row.target_label, row.stage, error_tail="Launch failed")
+        return False
+
+    state.set_launch_descriptor(
+        run_id,
+        row.target_label,
+        row.stage,
+        executor=descriptor.executor,
+        native_id=descriptor.native_id,
+        submit_epoch=descriptor.submit_epoch,
+        log_path=log_path,
+    )
+    log.info(
+        "Launched %s / %s (%s, %s, token=%s)",
+        row.target_label,
+        row.stage,
+        pool_label,
+        descriptor.executor,
+        launch_token[:8],
+    )
+    return True
 
 
 def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
@@ -705,83 +786,23 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     # Pool capacity is enforced GLOBALLY across all active runs.
     pool_running = _global_pool_running(state)
 
+    launch_kwargs = dict(
+        force_rerun=force_rerun,
+        active_stages=active_stages,
+        targets_by_label=targets_by_label,
+        runs_root=runs_root,
+    )
+    for row in state.fetch_ready_unpooled(run_id):
+        _try_launch_ready_row(state, run_id, ctx, row, pool_label="unpooled", **launch_kwargs)
+
     for pool_name, pool_cfg in cfg.resources.items():
         capacity = _pool_capacity(pool_running, pool_name, pool_cfg)
         if capacity <= 0:
             continue
         batch = state.fetch_ready_batch(run_id, pool_name, capacity)
         for row in batch:
-            if row.stage not in active_stages:
-                continue
-            if not state.deps_satisfied(run_id, row.target_label, row.stage):
-                state.update_stage_status(
-                    run_id, row.target_label, row.stage, STATUS_PENDING
-                )
-                continue
-
-            target = targets_by_label.get(row.target_label)
-            if target is None:
-                continue
-
-            executor = cfg.stage_executor(row.stage)
-            # Clean up any stale Condor cluster recorded for a prior attempt
-            # before we relaunch (best-effort; orphans also swept via audit files).
-            if executor == "condor" and row.native_id:
-                condor.remove_cluster(int(row.native_id))
-
-            # Reserve the slot atomically BEFORE launching. A crash between
-            # launch and claim could otherwise orphan a process that gets
-            # relaunched on restart (the row would still be 'ready').
-            launch_token = state.new_launch_token()
-            if not state.claim_ready(run_id, row.target_label, row.stage, launch_token):
-                continue
-
-            cmd = stages.build_stage_command(
-                run_id,
-                row.stage,
-                str(ctx.run_dir),
-                row.target_label,
-                launch_token=launch_token,
-                force_rerun=force_rerun,
-            )
-            log_path = str(
-                logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
-            )
-            try:
-                descriptor = launcher.launch_stage(
-                    cmd,
-                    cfg=cfg,
-                    stage=row.stage,
-                    runs_root=runs_root,
-                    run_id=run_id,
-                    target_label=row.target_label,
-                    launch_token=launch_token,
-                )
-            except Exception:
-                log.exception(
-                    "Launch failed for %s / %s; requeuing", row.target_label, row.stage
-                )
-                state.requeue_to_ready(
-                    run_id, row.target_label, row.stage, error_tail="Launch failed"
-                )
-                continue
-
-            state.set_launch_descriptor(
-                run_id,
-                row.target_label,
-                row.stage,
-                executor=descriptor.executor,
-                native_id=descriptor.native_id,
-                submit_epoch=descriptor.submit_epoch,
-                log_path=log_path,
-            )
-            log.info(
-                "Launched %s / %s (%s, %s, token=%s)",
-                row.target_label,
-                row.stage,
-                pool_name,
-                descriptor.executor,
-                launch_token[:8],
+            _try_launch_ready_row(
+                state, run_id, ctx, row, pool_label=pool_name, **launch_kwargs
             )
 
     counts = state.count_by_status(run_id)
