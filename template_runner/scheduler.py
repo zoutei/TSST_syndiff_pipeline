@@ -31,7 +31,13 @@ from syndiff_pipeline.template_runner.state import (
     PipelineState,
     _utc_now,
 )
-from syndiff_pipeline.template_runner.verify import stage_complete
+from syndiff_pipeline.template_runner.verify import (
+    collect_stage_artifacts,
+    manifest_valid,
+    read_manifest,
+    stage_complete,
+    write_manifest,
+)
 
 log = logging.getLogger(__name__)
 
@@ -289,6 +295,23 @@ def reconcile_running_stages(
     return counts
 
 
+def _ensure_stable_manifest(resolved, stage: str, stable_path: str) -> None:
+    """Write a cross-run completion manifest if a valid one is not already present.
+
+    Called when a stage is confirmed complete (on disk or via a per-run
+    manifest). Best-effort: any failure is logged and ignored so manifest
+    bookkeeping never blocks scheduling.
+    """
+    existing = read_manifest(stable_path)
+    if existing is not None and manifest_valid(existing, resolved, stage):
+        return
+    try:
+        expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
+        write_manifest(stable_path, resolved, stage, artifacts, expected, produced)
+    except Exception as exc:  # noqa: BLE001 - manifest write must never be fatal
+        log.debug("Could not write stable manifest %s for %s: %s", stable_path, stage, exc)
+
+
 def _resolve_external_and_pending_skips(
     state: PipelineState,
     run_id: str,
@@ -327,11 +350,22 @@ def _resolve_external_and_pending_skips(
             manifest_path = str(
                 logs.stage_manifest_path(runs_root, run_id, label, row.stage)
             )
-            complete = stage_complete(resolved, row.stage, manifest_path=manifest_path)
+            stable_path = str(
+                logs.stable_stage_manifest_path(runs_root, label, row.stage)
+            )
+            complete = stage_complete(
+                resolved,
+                row.stage,
+                manifest_path=manifest_path,
+                stable_manifest_path=stable_path,
+            )
             if complete:
+                # Self-healing backfill: persist a cross-run manifest so the next
+                # run skips re-scanning this already-complete output entirely.
+                _ensure_stable_manifest(resolved, row.stage, stable_path)
                 state.mark_skipped(run_id, label, row.stage)
                 state.cache_external_check(
-                    run_id, label, row.stage, complete=True, path=manifest_path
+                    run_id, label, row.stage, complete=True, path=stable_path
                 )
                 skipped += 1
             elif row.status == STATUS_EXTERNAL:

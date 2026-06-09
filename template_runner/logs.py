@@ -104,6 +104,17 @@ def stage_manifest_path(cfg_runs_root: str, run_id: str, target_label: str, stag
     return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.manifest.json"
 
 
+def stable_stage_manifest_path(cfg_runs_root: str, target_label: str, stage: str) -> Path:
+    """Cross-run completion manifest, keyed only by target + stage (not run_id).
+
+    Completion is a property of the output data, not of any single run, so a
+    stable manifest lets a fresh run skip re-scanning a large already-complete
+    store. ``verify.manifest_valid`` still guards staleness via the config
+    fingerprint and on-disk artifact existence.
+    """
+    return runs_root(cfg_runs_root) / ".manifests" / target_label / f"{stage}.manifest.json"
+
+
 def daemon_lock_path(state_db_path: str | Path) -> Path:
     return Path(state_db_path).expanduser().resolve().parent / "daemon.lock"
 

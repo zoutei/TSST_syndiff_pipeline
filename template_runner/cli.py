@@ -327,13 +327,16 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 def cmd_verify(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner import stages
+    from syndiff_pipeline.template_runner.runner_config import resolve_config
     from syndiff_pipeline.template_runner.targets import find_target, load_targets
-    from syndiff_pipeline.template_runner.verify import verify_all
+    from syndiff_pipeline.template_runner.verify import persist_completion_manifests, verify_stage
 
+    run_id: str | None = None
     if args.run_dir or runs_root_from_env() is not None:
         ctx = _resolve_run_from_args(args)
         cfg = ctx.cfg
         targets = ctx.targets
+        run_id = ctx.run_id
     else:
         if not args.config:
             raise SystemExit(
@@ -343,19 +346,102 @@ def cmd_verify(args: argparse.Namespace) -> int:
         if not args.targets:
             raise SystemExit("--targets required for pre-run verify.")
         targets = load_targets(args.targets)
+        if args.run_id:
+            run_id = args.run_id
 
     if args.scc:
         t = find_target(targets, args.scc)
         targets = [t]
     active = stages.parse_stage_list(args.stages) if args.stages else list(STAGE_NAMES)
-    results = verify_all(cfg, targets, active)
+    runs_root = cfg.runs_dir()
     rc = 0
-    for r in results:
-        mark = "OK" if r.ok else ("UNKNOWN" if r.unknown else "FAIL")
-        print(f"[{mark}] {r.stage}: {r.message} ({r.path})")
-        if not r.ok and not r.unknown:
-            rc = 1
+    for target in targets:
+        label = target.label()
+        resolved = resolve_config(target, cfg)
+        for stage in active:
+            result = verify_stage(resolved, stage)
+            mark = "OK" if result.ok else ("UNKNOWN" if result.unknown else "FAIL")
+            print(f"[{mark}] {label}/{stage}: {result.message} ({result.path})")
+            if result.ok:
+                manifest_paths = [logs.stable_stage_manifest_path(runs_root, label, stage)]
+                if run_id:
+                    manifest_paths.insert(
+                        0,
+                        logs.stage_manifest_path(runs_root, run_id, label, stage),
+                    )
+                try:
+                    written = persist_completion_manifests(resolved, stage, manifest_paths)
+                    print(f"[MANIFEST] {label}/{stage} -> {', '.join(written)}")
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[WARN] {label}/{stage}: manifest write failed: {exc}")
+            elif not result.unknown:
+                rc = 1
     return rc
+
+
+def cmd_reconcile_manifests(args: argparse.Namespace) -> int:
+    """Backfill cross-run completion manifests for already-complete targets.
+
+    Scans existing outputs read-only (via the fast on-disk verifiers) and writes
+    a stable manifest for every stage that is already complete. Future runs then
+    skip the on-disk scan entirely for those stages.
+    """
+    from syndiff_pipeline.template_runner import stages as stages_mod
+    from syndiff_pipeline.template_runner.runner_config import resolve_config
+    from syndiff_pipeline.template_runner.targets import find_target, load_targets
+    from syndiff_pipeline.template_runner.verify import (
+        collect_stage_artifacts,
+        stage_complete,
+        write_manifest,
+    )
+
+    if args.run_dir or runs_root_from_env() is not None:
+        ctx = _resolve_run_from_args(args)
+        cfg = ctx.cfg
+        targets = ctx.targets
+    else:
+        if not args.config:
+            raise SystemExit(
+                f"Specify --run-dir, {RUNS_ROOT_ENV_VAR} with --run-id, or --config."
+            )
+        cfg = load_runner_config(args.config)
+        if not args.targets:
+            raise SystemExit("--targets required for reconcile-manifests.")
+        targets = load_targets(args.targets)
+
+    if args.scc:
+        targets = [find_target(targets, args.scc)]
+    active = stages_mod.parse_stage_list(args.stages) if args.stages else list(STAGE_NAMES)
+    runs_root = cfg.runs_dir()
+
+    written = 0
+    skipped = 0
+    for target in targets:
+        label = target.label()
+        resolved = resolve_config(target, cfg)
+        for stage in active:
+            stable_path = str(logs.stable_stage_manifest_path(runs_root, label, stage))
+            try:
+                complete = stage_complete(resolved, stage)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[ERR]   {label}/{stage}: {exc}")
+                continue
+            if not complete:
+                skipped += 1
+                if not args.quiet:
+                    print(f"[SKIP]  {label}/{stage} not complete")
+                continue
+            try:
+                expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
+                write_manifest(stable_path, resolved, stage, artifacts, expected, produced)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[ERR]   {label}/{stage}: manifest write failed: {exc}")
+                continue
+            written += 1
+            print(f"[WROTE] {label}/{stage} ({produced}/{expected}) -> {stable_path}")
+
+    print(f"reconcile-manifests: wrote {written} manifest(s), {skipped} stage(s) not complete")
+    return 0
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
@@ -534,6 +620,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--scc", default=None)
     sp.add_argument("--stages", default=None)
     sp.set_defaults(func=cmd_verify)
+
+    sp = sub.add_parser(
+        "reconcile-manifests",
+        help="Backfill cross-run completion manifests for already-complete targets",
+    )
+    sp.add_argument("--run-dir", default=None)
+    sp.add_argument("--run-id", default=None)
+    sp.add_argument("--config", default=None)
+    sp.add_argument("--targets", default=None)
+    sp.add_argument("--scc", default=None)
+    sp.add_argument("--stages", default=None)
+    sp.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Only print stages where a manifest was written",
+    )
+    sp.set_defaults(func=cmd_reconcile_manifests)
 
     sp = sub.add_parser("retry", help="Retry failed/canceled stage(s)")
     _add_run_scope(sp)
