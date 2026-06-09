@@ -261,6 +261,8 @@ syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
+`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
+
 Or set the runs root once per shell session and pass `--run-id` for each run you are watching:
 
 ```bash
@@ -728,7 +730,7 @@ One daemon per host schedules **all** active runs. The CLI only inserts **comman
 
 1. **Ingest commands** (`cancel`, `pause`, `resume`, `retry`, `retry_stage`).
 2. **Reconcile** `running` rows from durable `*.status.json`, PID liveness, and Condor poll (wall-clock grace).
-3. **Resolve external/pending skips** once via manifest-first `stage_complete()` (cached in SQLite).
+3. **Resolve external/pending skips** (cached in SQLite): manifest-only fast path on the main thread when stable manifests exist; otherwise schedule full on-disk `stage_complete()` checks on a small background thread pool (budget per tick, default 16). The main loop never blocks on NFS-heavy verification.
 4. **Promote** `pending`/`blocked` → `ready` using the single `deps_satisfied()` (success/skipped only).
 5. **Atomic claim** `ready` → `running` (launch token + executor/native_id/submit_epoch).
 6. **Detect completion** or **stall** (`running==0`, `launchable==0`, `nonterminal>0`).
@@ -739,6 +741,18 @@ One daemon per host schedules **all** active runs. The CLI only inserts **comman
 These insert rows into the `commands` table; the daemon applies them on the next tick. `kill` marks stages `canceled` and the run `canceled`. `retry` reopens failed/canceled/blocked stages (+ downstream) to `pending`. Use `--no-start-daemon` to queue the intent without ensuring the daemon is running.
 
 Single-target retry resolves SCC from the frozen `targets.csv`, falling back to the run's SQLite `targets` table when the CSV row is missing or `enabled=false`.
+
+Before large batches on NFS-backed data, run `reconcile-manifests` for targets that already have on-disk outputs. That backfills stable manifests under `{runs_root}/.manifests/` so the supervisor can skip stages via a fast manifest read instead of full padding/Zarr scans.
+
+Optional scheduler knobs (in `config.yaml` under `scheduler:`):
+
+```yaml
+scheduler:
+  verify_max_workers: 1
+  verify_budget_per_tick: 16
+```
+
+`status` and `progress` show `verify_in_flight=N` when background artifact checks are running (read from a host-local counter file written by the daemon each tick; the CLI does not import the heavy verify stack).
 
 ---
 

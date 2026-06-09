@@ -15,7 +15,19 @@ if str(_ROOT) not in sys.path:
 from syndiff_pipeline.template_runner import daemon, logs
 from syndiff_pipeline.template_runner.scheduler_control import stop_daemon
 from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
-from syndiff_pipeline.template_runner.scheduler import _resolve_external_and_pending_skips, _tick_run
+from syndiff_pipeline.template_runner.scheduler import (
+    _apply_verify_outcome,
+    _cancel_verify_for_retry,
+    _resolve_external_and_pending_skips,
+    _run_verify_pass,
+    _tick_run,
+)
+from syndiff_pipeline.template_runner.verify_worker import (
+    VerifyTaskKey,
+    get_verify_worker,
+    reset_verify_worker_for_tests,
+    shutdown_verify_worker,
+)
 from syndiff_pipeline.template_runner.stage_params import (
     DownsampleStageParams,
     MappingStageParams,
@@ -208,6 +220,9 @@ class TestManifestFirstVerify(unittest.TestCase):
 
 
 class TestSkipIntegration(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
     def test_external_stage_marked_skipped_when_complete(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
@@ -252,7 +267,7 @@ class TestSkipIntegration(unittest.TestCase):
             row = state.get_stage_run(run_id, label, "mapping")
             self.assertEqual(row.status, STATUS_EXTERNAL)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.stage_complete",
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
                 return_value=True,
             ):
                 skipped = _resolve_external_and_pending_skips(
@@ -311,14 +326,21 @@ def _minimal_run_setup(
     return state, ctx, run_id, runs_root
 
 
-def _write_mapping_stable_manifest(tmp_path: Path, target: Target, runs_root: Path) -> None:
-    """Write a valid stable mapping manifest plus on-disk CSV for *target*."""
-    from syndiff_pipeline.template_runner.runner_config import resolve_config
+def _write_mapping_csv_and_manifest(
+    tmp_path: Path,
+    target: Target,
+    manifest_path: Path,
+    *,
+    runs_root: Path | None = None,
+) -> None:
+    """Write mapping CSV plus a valid manifest at *manifest_path*."""
+    from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
 
-    cfg_path = runs_root / "run_a" / "config.yaml"
-    from syndiff_pipeline.template_runner.runner_config import load_runner_config
-
-    cfg = load_runner_config(cfg_path)
+    if runs_root is not None:
+        cfg_path = runs_root / "run_a" / "config.yaml"
+        cfg = load_runner_config(cfg_path)
+    else:
+        cfg = load_runner_config(tmp_path / "config.yaml")
     resolved = resolve_config(target, cfg)
     csv_path = (
         Path(resolved.mapping_root)
@@ -329,13 +351,23 @@ def _write_mapping_stable_manifest(tmp_path: Path, target: Target, runs_root: Pa
     )
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     csv_path.write_text("NAME,projection\nskycell.0001.0001,0001\n", encoding="utf-8")
+    write_manifest(manifest_path, resolved, "mapping", [str(csv_path)], 1, 1)
+
+
+def _write_mapping_stable_manifest(tmp_path: Path, target: Target, runs_root: Path) -> None:
+    """Write a valid stable mapping manifest plus on-disk CSV for *target*."""
     stable_path = logs.stable_stage_manifest_path(
         str(runs_root), target.label(), "mapping"
     )
-    write_manifest(stable_path, resolved, "mapping", [str(csv_path)], 1, 1)
+    _write_mapping_csv_and_manifest(
+        tmp_path, target, stable_path, runs_root=runs_root
+    )
 
 
 class TestSkipBeforePromote(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
     def test_promotion_blocked_until_skip_checked(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,7 +405,7 @@ class TestSkipBeforePromote(unittest.TestCase):
                 state.cache_external_check(run_id, label, stage, complete=True)
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.stage_complete",
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
                 return_value=False,
             ):
                 _resolve_external_and_pending_skips(state, run_id, ctx, force_rerun=False)
@@ -405,19 +437,23 @@ class TestSkipBeforePromote(unittest.TestCase):
                     state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                     state.cache_external_check(run_id, label, stage, complete=True)
 
+            ctx.cfg.verify_budget_per_tick = 2
             launch_mock = unittest.mock.Mock()
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler._VERIFY_BUDGET_PER_TICK",
-                2,
-            ), unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
                 launch_mock,
             ):
-                _tick_run(state, run_id, ctx)
-                _tick_run(state, run_id, ctx)
+                for _ in range(5):
+                    _tick_run(state, run_id, ctx)
+                    if all(
+                        state.get_stage_run(run_id, t.label(), "mapping").status
+                        == STATUS_SKIPPED
+                        for t in targets
+                    ):
+                        break
 
             launch_mock.assert_not_called()
             for target in targets:
@@ -469,8 +505,8 @@ class TestStallDetection(unittest.TestCase):
 
             ctx = resolve_run_context(run_dir=run_dir)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler._resolve_external_and_pending_skips",
-                return_value=0,
+                "syndiff_pipeline.template_runner.scheduler._schedule_external_and_pending_skips",
+                return_value=None,
             ), unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
                 return_value={},
@@ -479,6 +515,256 @@ class TestStallDetection(unittest.TestCase):
             run = state.get_run(run_id)
             self.assertEqual(run["status"], "stalled")
             self.assertIn("waiting on", run["stall_reason"])
+
+
+class TestAsyncVerify(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
+    def test_tick_does_not_block_on_slow_verify(self):
+        import time
+
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            def slow_complete(*_args, **_kwargs):
+                time.sleep(1.5)
+                return False
+
+            reconcile_calls: list[int] = []
+
+            def track_reconcile(*_args, **_kwargs):
+                reconcile_calls.append(1)
+                return {}
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                side_effect=slow_complete,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                side_effect=track_reconcile,
+            ):
+                started = time.monotonic()
+                _tick_run(state, run_id, ctx)
+                elapsed = time.monotonic() - started
+
+            self.assertEqual(reconcile_calls, [1])
+            self.assertLess(elapsed, 1.0)
+            from syndiff_pipeline.template_runner.verify_worker import get_verify_worker
+
+            self.assertGreaterEqual(get_verify_worker().in_flight_count(run_id), 1)
+
+
+class TestVerifyApplyGuards(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
+    def test_stale_apply_rejected_after_retry(self):
+        import time
+
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            def slow_complete(*_args, **_kwargs):
+                time.sleep(0.8)
+                return True
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                side_effect=slow_complete,
+            ):
+                _run_verify_pass(
+                    state, run_id, ctx, force_rerun=False, budget=16, block=False
+                )
+                state.reset_stage_for_retry(run_id, label, "mapping", reset_downstream=False)
+                _cancel_verify_for_retry(
+                    run_id, label, "mapping", reset_downstream=False
+                )
+                get_verify_worker().drain(
+                    lambda outcome: _apply_verify_outcome(state, outcome),
+                    run_id=run_id,
+                    block=True,
+                    block_timeout_s=3.0,
+                )
+
+            row = state.get_stage_run(run_id, label, "mapping")
+            self.assertEqual(row.status, STATUS_PENDING)
+            self.assertFalse(state.external_checked(run_id, label, "mapping"))
+
+    def test_force_rerun_cancels_in_flight_verify(self):
+        import time
+
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            def slow_complete(*_args, **_kwargs):
+                time.sleep(0.8)
+                return True
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                side_effect=slow_complete,
+            ):
+                _run_verify_pass(
+                    state, run_id, ctx, force_rerun=False, budget=16, block=False
+                )
+                state.apply_force_rerun(run_id, [label], ["mapping"])
+                get_verify_worker().cancel_run(run_id)
+                get_verify_worker().drain(
+                    lambda outcome: _apply_verify_outcome(state, outcome),
+                    run_id=run_id,
+                    block=True,
+                    block_timeout_s=3.0,
+                )
+
+            row = state.get_stage_run(run_id, label, "mapping")
+            self.assertEqual(row.status, STATUS_PENDING)
+
+
+class TestPerRunManifestBackfill(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
+    def test_fast_path_backfills_stable_manifest_from_per_run(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            run_manifest = logs.stage_manifest_path(
+                str(runs_root), run_id, label, "mapping"
+            )
+            _write_mapping_csv_and_manifest(
+                tmp_path, target, run_manifest, runs_root=runs_root
+            )
+            stable_path = logs.stable_stage_manifest_path(
+                str(runs_root), label, "mapping"
+            )
+            self.assertFalse(stable_path.is_file())
+
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            _resolve_external_and_pending_skips(
+                state, run_id, ctx, force_rerun=False, block=True
+            )
+            shutdown_verify_worker(wait=True)
+
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_SKIPPED
+            )
+            self.assertTrue(stable_path.is_file())
+
+
+class TestManifestFastPath(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
+    def test_stable_manifest_skips_without_thread_pool(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            _write_mapping_stable_manifest(tmp_path, target, runs_root)
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+            for row in state.list_stage_runs(run_id):
+                if row.target_label == label and row.stage != "mapping":
+                    state.cache_external_check(
+                        run_id, label, row.stage, complete=False
+                    )
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+            ) as complete_mock:
+                _resolve_external_and_pending_skips(
+                    state, run_id, ctx, force_rerun=False
+                )
+                mapping_calls = [
+                    c
+                    for c in complete_mock.call_args_list
+                    if len(c.args) >= 2 and c.args[1] == "mapping"
+                ]
+                self.assertEqual(mapping_calls, [])
+
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_SKIPPED
+            )
+
+
+class TestApplyNoMainThreadCollect(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
+    def test_apply_does_not_collect_artifacts_on_main_thread(self):
+        import threading
+
+        from syndiff_pipeline.template_runner import verify as verify_mod
+
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            main_tid = threading.get_ident()
+            real_collect = verify_mod.collect_stage_artifacts
+
+            def guard_collect(*args, **kwargs):
+                if threading.get_ident() == main_tid:
+                    raise AssertionError("collect_stage_artifacts on main thread")
+                return real_collect(*args, **kwargs)
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                return_value=True,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify.collect_stage_artifacts",
+                side_effect=guard_collect,
+            ):
+                _resolve_external_and_pending_skips(
+                    state, run_id, ctx, force_rerun=False, block=True
+                )
+
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_SKIPPED
+            )
 
 
 class TestDaemonFlock(unittest.TestCase):

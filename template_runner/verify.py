@@ -171,6 +171,67 @@ stage_config_fingerprint = config_fingerprint
 read_stage_manifest = read_manifest
 
 
+def check_manifests_only(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    *,
+    manifest_path: str | Path | None = None,
+    stable_manifest_path: str | Path | None = None,
+) -> bool | None:
+    """Fast manifest check without on-disk artifact scanning.
+
+    Returns ``True`` when a valid manifest proves completeness, ``False`` when
+    manifests exist but do not prove completeness, and ``None`` when no
+    manifest was found (full verify required).
+    """
+    saw_manifest = False
+    for candidate in (manifest_path, stable_manifest_path):
+        if candidate is None:
+            continue
+        manifest = read_manifest(candidate)
+        if manifest is None:
+            continue
+        saw_manifest = True
+        if manifest_valid(manifest, resolved, stage):
+            return True
+    if saw_manifest:
+        return False
+    return None
+
+
+def copy_manifest_to_stable(
+    source_manifest_path: str | Path,
+    stable_manifest_path: str | Path,
+) -> bool:
+    """Atomically copy a per-run manifest to the stable cross-run path."""
+    manifest = read_manifest(source_manifest_path)
+    if manifest is None:
+        return False
+    dest = Path(stable_manifest_path)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f"{dest.name}.tmp.{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, sort_keys=True)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, dest)
+    return True
+
+
+def write_stable_manifest(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    stable_manifest_path: str | Path,
+) -> None:
+    """Collect artifacts and write the stable under-runs-root manifest."""
+    stable_path = Path(stable_manifest_path)
+    existing = read_manifest(stable_path)
+    if existing is not None and manifest_valid(existing, resolved, stage):
+        return
+    expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
+    write_manifest(stable_path, resolved, stage, artifacts, expected, produced)
+
+
 def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     t = resolved.target
     ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)

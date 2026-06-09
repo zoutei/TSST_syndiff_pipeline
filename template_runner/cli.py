@@ -217,10 +217,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
+    from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
 
     def _print_once():
         run = state.get_run(ctx.run_id) or {}
         print(f"Run {ctx.run_id} status={run.get('status', '?')}")
+        in_flight = read_verify_in_flight(ctx.cfg.state_db_path, ctx.run_id)
+        if in_flight:
+            print(f"  verify_in_flight={in_flight}")
         if run.get("status") == "stalled" and run.get("stall_reason"):
             print(f"  stalled: {run['stall_reason']}")
         rows = state.list_stage_runs(ctx.run_id)
@@ -259,10 +263,15 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_progress(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
+    from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
+
     counts = state.count_by_status(ctx.run_id)
     run = state.get_run(ctx.run_id) or {}
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
     line = f"run_id={ctx.run_id} status={run.get('status', '?')} " + " ".join(parts)
+    in_flight = read_verify_in_flight(ctx.cfg.state_db_path, ctx.run_id)
+    if in_flight:
+        line += f" verify_in_flight={in_flight}"
     if run.get("stall_reason"):
         line += f" stall_reason={run['stall_reason']!r}"
     print(line)
