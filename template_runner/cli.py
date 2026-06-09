@@ -53,12 +53,17 @@ def _ensure_discord_bot(config_path: str | Path):
 def _print_discord_bot_status(config_path: str | Path, result) -> None:
     if not result.enabled:
         return
+    cfg = load_runner_config(config_path)
+    bot_log = logs.discord_bot_log_path(cfg.state_db_path)
     if result.pid:
-        bot_log = logs.discord_bot_log_path(load_runner_config(config_path).state_db_path)
         print(f"Discord bot pid={result.pid} spawned={result.spawned}")
         print(f"  bot log: {bot_log}")
     elif result.skipped_reason:
-        print(f"Discord bot not running: {result.skipped_reason}")
+        print(f"WARNING: Discord bot not running: {result.skipped_reason}")
+        print(f"  bot log: {bot_log}")
+    else:
+        print("WARNING: Discord bot not running (unknown reason)")
+        print(f"  bot log: {bot_log}")
 
 
 def _default_run_id() -> str:

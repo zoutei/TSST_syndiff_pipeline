@@ -121,6 +121,23 @@ def wait_for_discord_bot(
     return discord_bot_is_alive(state_db_path)
 
 
+def _record_site_config(state_db_path: str | Path, config_path: Path) -> None:
+    record_path = logs.discord_bot_site_config_path(state_db_path)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(str(config_path), encoding="utf-8")
+
+
+def _load_recorded_site_config(state_db_path: str | Path) -> Path | None:
+    record_path = logs.discord_bot_site_config_path(state_db_path)
+    if not record_path.is_file():
+        return None
+    text = record_path.read_text(encoding="utf-8").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    return path if path.is_file() else None
+
+
 def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResult:
     """Start detached Discord bot when enabled and configured."""
     path = Path(config_path).expanduser().resolve()
@@ -139,6 +156,7 @@ def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResul
         )
 
     state_db_path = cfg.state_db_path
+    _record_site_config(state_db_path, path)
     pid_path = logs.discord_bot_pid_path(state_db_path)
     pid = daemon.read_pid(pid_path)
     if pid and daemon.is_process_alive(pid):
@@ -165,6 +183,18 @@ def ensure_discord_bot_running(config_path: str | Path) -> EnsureDiscordBotResul
         pid=None,
         skipped_reason=f"failed to start (see {bot_log})",
     )
+
+
+def ensure_discord_bot_for_state_db(state_db_path: str | Path) -> EnsureDiscordBotResult | None:
+    """Restart the Discord bot when a recorded site config exists and it is not alive."""
+    config_path = _load_recorded_site_config(state_db_path)
+    if config_path is None:
+        return None
+    if discord_bot_is_alive(state_db_path):
+        return EnsureDiscordBotResult(enabled=True, spawned=False, pid=daemon.read_pid(
+            logs.discord_bot_pid_path(state_db_path)
+        ))
+    return ensure_discord_bot_running(config_path)
 
 
 def stop_discord_bot(
