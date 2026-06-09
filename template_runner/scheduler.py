@@ -19,6 +19,8 @@ from syndiff_pipeline.template_runner.run_context import resolve_run_context
 from syndiff_pipeline.template_runner.runner_config import resolve_config
 from syndiff_pipeline.template_runner.state import (
     RUN_CANCELED,
+    SKIP_REASON_ARTIFACTS,
+    SKIP_REASON_STREAM,
     STATUS_BLOCKED,
     STATUS_CANCELED,
     STATUS_EXTERNAL,
@@ -35,6 +37,7 @@ from syndiff_pipeline.template_runner.state import (
     _utc_now,
     derive_run_final_status,
     downstream_stages,
+    effective_stage_deps,
 )
 from syndiff_pipeline.template_runner.verify import check_manifests_only
 from syndiff_pipeline.template_runner.verify_status import (
@@ -518,6 +521,9 @@ def _apply_verify_outcome(state: PipelineState, outcome: VerifyOutcome) -> int:
         return 0
     if outcome.complete:
         state.mark_skipped(key.run_id, key.target_label, key.stage)
+        state.cache_skip_reason(
+            key.run_id, key.target_label, key.stage, SKIP_REASON_ARTIFACTS
+        )
         state.cache_external_check(
             key.run_id,
             key.target_label,
@@ -558,10 +564,15 @@ def _iter_verify_candidates(
         for row in rows:
             if row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
                 continue
+            if row.stage == "ps1_download":
+                if resolved.stages.ps1_process.ps1_source == "stream":
+                    continue
+                if state.get_skip_reason(run_id, label, "ps1_download") == SKIP_REASON_STREAM:
+                    continue
             if state.external_checked(run_id, label, row.stage):
                 continue
             if row.status == STATUS_PENDING and not state.deps_satisfied(
-                run_id, label, row.stage
+                run_id, label, row.stage, stages=resolved.stages
             ):
                 continue
             manifest_path = str(
@@ -765,9 +776,11 @@ def _stall_reasons(state: PipelineState, run_id: str, ctx) -> List[str]:
         if row.status == STATUS_BLOCKED:
             reasons.append(f"{label}/{stage}: blocked by upstream failure")
             continue
-        if not state.deps_satisfied(run_id, label, stage):
+        target = next((t for t in ctx.targets if t.label() == label), None)
+        stages = resolve_config(target, cfg).stages if target is not None else None
+        if not state.deps_satisfied(run_id, label, stage, stages=stages):
             missing = []
-            for dep in STAGE_DEPS.get(stage, []):
+            for dep in effective_stage_deps(stage, stages):
                 dep_row = state.get_stage_run(run_id, label, dep)
                 if dep_row is None or dep_row.status not in (STATUS_SUCCESS, STATUS_SKIPPED):
                     missing.append(f"{dep}={dep_row.status if dep_row else 'missing'}")
@@ -804,15 +817,16 @@ def _try_launch_ready_row(
     """Claim and launch one ready stage row. Returns True if launched."""
     if row.stage not in active_stages:
         return False
-    if not state.deps_satisfied(run_id, row.target_label, row.stage):
-        state.update_stage_status(run_id, row.target_label, row.stage, STATUS_PENDING)
-        return False
-
     target = targets_by_label.get(row.target_label)
     if target is None:
         return False
 
     cfg = ctx.cfg
+    target_stages = resolve_config(target, cfg).stages
+    if not state.deps_satisfied(run_id, row.target_label, row.stage, stages=target_stages):
+        state.update_stage_status(run_id, row.target_label, row.stage, STATUS_PENDING)
+        return False
+
     executor = cfg.stage_executor(row.stage)
     if executor == "condor" and row.native_id:
         condor.remove_cluster(int(row.native_id))
@@ -884,11 +898,15 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         force_rerun=force_rerun,
         budget=ctx.cfg.verify_budget_per_tick,
     )
-    state.promote_stages(run_id)
+    targets_by_label = {t.label(): t for t in ctx.targets}
+    target_stages_map = {
+        label: resolve_config(target, ctx.cfg).stages
+        for label, target in targets_by_label.items()
+    }
+    state.promote_stages(run_id, target_stages_map)
 
     cfg = ctx.cfg
     runs_root = cfg.runs_dir()
-    targets_by_label = {t.label(): t for t in ctx.targets}
     active_stages = state.get_active_stages(run_id)
 
     # Pool capacity is enforced GLOBALLY across all active runs.
@@ -918,7 +936,13 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     launchable = sum(
         1
         for row in state.list_stage_runs(run_id)
-        if row.status == STATUS_READY and state.deps_satisfied(run_id, row.target_label, row.stage)
+        if row.status == STATUS_READY
+        and state.deps_satisfied(
+            run_id,
+            row.target_label,
+            row.stage,
+            stages=target_stages_map.get(row.target_label),
+        )
     )
     nonterminal = sum(counts.get(s, 0) for s in NONTERMINAL_STATUSES)
 

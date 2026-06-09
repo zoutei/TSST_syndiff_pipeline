@@ -399,6 +399,86 @@ def download_and_process_band(
         return None
 
 
+def _skycell_name_parts(skycell_id: str) -> tuple[list[str], str, str]:
+    """Return (name_parts, projection, skycell_name) for a skycell identifier."""
+    if skycell_id.startswith("skycell."):
+        parts = skycell_id.split(".")
+        if len(parts) != 3:
+            raise ValueError(f"Invalid skycell id: {skycell_id}")
+        return parts, parts[1], skycell_id
+    parts = ["skycell", skycell_id.split(".")[0], skycell_id.split(".")[-1]]
+    return parts, parts[1], f"skycell.{parts[1]}.{parts[2]}"
+
+
+def fetch_skycell_bands_masks_and_headers(
+    skycell_id: str,
+    *,
+    use_local_files: bool = False,
+    local_data_path: Optional[Path] = None,
+    max_workers: int = 12,
+) -> tuple[dict, dict, dict, dict, dict]:
+    """Download/decompress a skycell in memory (no Zarr write).
+
+    Returns the same tuple shape as ``zarr_utils.load_skycell_bands_masks_and_headers``.
+    """
+    skycell_name_parts, _projection, skycell_name = _skycell_name_parts(skycell_id)
+    local_path = Path(local_data_path) if local_data_path else None
+
+    pending_tasks: list[tuple[str, str, str]] = []
+    for band in _PS1_BANDS:
+        pending_tasks.append((band, "image", band))
+        pending_tasks.append((band, "mask", f"{band}_mask"))
+        pending_tasks.append((band, "weight", f"{band}_wt"))
+
+    bands_data: dict = {}
+    masks_data: dict = {}
+    weights_data: dict = {}
+    headers_data: dict = {}
+    headers_weight_data: dict = {}
+
+    def _fetch_one(task_band: str, data_type: str, _array_name: str) -> Optional[tuple[str, str, str, np.ndarray, str]]:
+        result = download_and_process_band(
+            skycell_name_parts,
+            task_band,
+            data_type,
+            use_local_files,
+            local_path,
+            skycell_name=skycell_name,
+        )
+        if result is None:
+            return None
+        return task_band, data_type, _array_name, result["data"], result["header"]
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(pending_tasks))) as executor:
+        futures = {
+            executor.submit(_fetch_one, task_band, data_type, array_name): (task_band, data_type, array_name)
+            for task_band, data_type, array_name in pending_tasks
+        }
+        for future in concurrent.futures.as_completed(futures):
+            task_band, data_type, array_name = futures[future]
+            try:
+                row = future.result()
+            except Exception as exc:
+                logging.warning("Failed to fetch %s %s for %s: %s", task_band, data_type, skycell_name, exc)
+                continue
+            if row is None:
+                logging.warning("Missing %s %s for %s", task_band, data_type, skycell_name)
+                continue
+            band, dtype, _name, data, header = row
+            if dtype == "image":
+                bands_data[band] = data
+                headers_data[band] = header
+            elif dtype == "mask":
+                masks_data[band] = data
+            else:
+                weights_data[band] = data
+                headers_weight_data[band] = header
+
+    if not bands_data:
+        logging.warning("No band image data fetched for %s", skycell_name)
+    return bands_data, masks_data, weights_data, headers_data, headers_weight_data
+
+
 def initialize_zarr_store(zarr_path: Path) -> zarr.Group:
     """
     Initializes a single Zarr store for all projections and skycells.

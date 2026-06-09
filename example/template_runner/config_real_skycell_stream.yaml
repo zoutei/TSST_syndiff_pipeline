@@ -1,5 +1,12 @@
-# Real-data template pipeline config.
-# Paths match the layout used by ../syndiff/run.sh and recipe_2020ghq.yaml.
+# Real-data config with PS1 stream ingest (no shared ps1_skycells.zarr).
+#
+# Same paths as config_real.yaml, but ps1_process downloads skycells on the fly
+# and discards raw per-filter data. ps1_download is skipped (shows ps1_dl:n/a).
+#
+# Submit example:
+#   syndiff-template submit --config config_real_skycell_stream.yaml \
+#     --targets targets_example.csv --run-id batch_no5 \
+#     --stages mapping,ps1_process,downsample
 #
 # See TESTING.md for how to validate without running full multi-hour stages.
 
@@ -30,7 +37,8 @@ stages:
     overwrite: false
   ps1_process:
     # run.sh active line: process_ps1.py 23 2 1 --remove-saturated-stars
-    # ps1_source: zarr (default) — requires ps1_download stage; see config_real_skycell_stream.yaml
+    ps1_source: stream
+    num_ingest_workers: 16
     remove_saturated_stars: true
     enable_saturation_correction: false
     psf_sigma: 40.0

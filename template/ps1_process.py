@@ -41,6 +41,7 @@ from syndiff_pipeline.template.band_utils import compute_tess_mag, process_skyce
 from syndiff_pipeline.template.correct_saturation import apply_saturation_to_row
 from syndiff_pipeline.template.cross_projection_padding import apply_cross_projection_padding, identify_all_padding_sources
 from syndiff_pipeline.template.csv_utils import find_csv_file, get_projections_from_csv, load_csv_data
+from syndiff_pipeline.template.ps1_download import fetch_skycell_bands_masks_and_headers
 from syndiff_pipeline.template.zarr_utils import load_skycell_bands_masks_and_headers
 
 
@@ -472,8 +473,23 @@ def process_single_cell(bundle: dict) -> dict:
         return None
 
 
-def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_saturated_stars: bool = False, band_cache: dict = None):
-    """Stage 1: Reads raw cell data from Zarr based on tasks."""
+def ingest_worker(
+    task_queue: Queue,
+    raw_cell_queue: Queue,
+    *,
+    ps1_source: str = "zarr",
+    zarr_store=None,
+    use_local_files: bool = False,
+    local_data_path: str | None = None,
+    remove_saturated_stars: bool = False,
+    band_cache: dict | None = None,
+):
+    """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode)."""
+    from pathlib import Path
+
+    ingest_label = "Ingest" if ps1_source == "stream" else "Reader"
+    local_path = Path(local_data_path) if local_data_path else None
+
     while True:
         task = task_queue.get()
         if task is None:
@@ -485,7 +501,6 @@ def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_s
             skycell_id, projection, row_id, x_coord = task
             task_type = "regular"
 
-        # For regular tasks, check band_cache before hitting zarr
         if task_type == "regular" and band_cache is not None and skycell_id in band_cache:
             raw_bundle = {
                 "skycell_id": skycell_id,
@@ -495,13 +510,22 @@ def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_s
                 "task_type": "regular_cache_hit",
             }
             raw_cell_queue.put(raw_bundle)
-            logger.info(f"[Reader] Cache hit for {skycell_id}, skipping zarr load")
+            logger.info(f"[{ingest_label}] Cache hit for {skycell_id}, skipping load")
             continue
 
         try:
-            bands, masks, weights, headers, headers_weight = zarr_utils.load_skycell_bands_masks_and_headers(zarr_store, projection, skycell_id)
+            if ps1_source == "stream":
+                bands, masks, weights, headers, headers_weight = fetch_skycell_bands_masks_and_headers(
+                    skycell_id,
+                    use_local_files=use_local_files,
+                    local_data_path=local_path,
+                )
+            else:
+                bands, masks, weights, headers, headers_weight = zarr_utils.load_skycell_bands_masks_and_headers(
+                    zarr_store, projection, skycell_id
+                )
             if not bands:
-                logger.warning(f"[Reader] No band data for {skycell_id}, skipping.")
+                logger.warning(f"[{ingest_label}] No band data for {skycell_id}, skipping.")
                 continue
             raw_bundle = {
                 "skycell_id": skycell_id,
@@ -517,9 +541,49 @@ def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_s
                 "remove_saturated_stars": remove_saturated_stars,
             }
             raw_cell_queue.put(raw_bundle)
-            logger.info(f"[Reader] Loaded {skycell_id} (type={task_type})")
+            verb = "Fetched" if ps1_source == "stream" else "Loaded"
+            logger.info(f"[{ingest_label}] {verb} {skycell_id} (type={task_type})")
         except Exception as e:
-            logger.error(f"[Reader] Failed to load {skycell_id}: {e}", exc_info=True)
+            logger.error(f"[{ingest_label}] Failed to load {skycell_id}: {e}", exc_info=True)
+
+
+def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_saturated_stars: bool = False, band_cache: dict = None):
+    """Backward-compatible alias for zarr-mode ingest."""
+    ingest_worker(
+        task_queue,
+        raw_cell_queue,
+        ps1_source="zarr",
+        zarr_store=zarr_store,
+        remove_saturated_stars=remove_saturated_stars,
+        band_cache=band_cache,
+    )
+
+
+def _load_skycell_raw_bands(
+    skycell_name: str,
+    projection: str,
+    ingest_config: dict,
+) -> tuple[dict, dict, dict, dict, dict]:
+    """Load raw bands/masks/weights using zarr or stream ingest."""
+    from pathlib import Path
+
+    ps1_source = ingest_config.get("ps1_source", "zarr")
+    if ps1_source == "stream":
+        return fetch_skycell_bands_masks_and_headers(
+            skycell_name,
+            use_local_files=ingest_config.get("use_local_files", False),
+            local_data_path=Path(ingest_config["local_data_path"])
+            if ingest_config.get("local_data_path")
+            else None,
+        )
+
+    zarr_path = ingest_config.get("zarr_path")
+    zarr_store = zarr.open(zarr_path, mode="r")
+    try:
+        return load_skycell_bands_masks_and_headers(zarr_store, projection, skycell_name)
+    except Exception:
+        short_id = skycell_name.split(".")[-1]
+        return load_skycell_bands_masks_and_headers(zarr_store, projection, short_id)
 
 
 def band_combiner_worker(raw_cell_queue: _thread_queue.Queue, combined_raw_queue: _thread_queue.Queue):
@@ -844,7 +908,7 @@ def assemble_row_from_bundles(target_array: np.ndarray, cell_bundles: list[dict]
 def _manually_process_cell(
     skycell_name: str,
     projection: str,
-    zarr_path: str,
+    ingest_config: dict,
     remove_saturated_stars: bool = False,
     gaia_catalog: Optional[pd.DataFrame] = None,
     bright_star_mag_threshold: float = 13.0,
@@ -864,16 +928,9 @@ def _manually_process_cell(
     manual_start = time.time()
     logger.info(f"[ManualLoader] Starting {skycell_name} (proj={projection})")
     try:
-        zarr_store = zarr.open(zarr_path, mode="r")
-        try:
-            bands, masks, weights, headers, headers_weight = load_skycell_bands_masks_and_headers(
-                zarr_store, projection, skycell_name
-            )
-        except Exception:
-            short_id = skycell_name.split(".")[-1]
-            bands, masks, weights, headers, headers_weight = load_skycell_bands_masks_and_headers(
-                zarr_store, projection, short_id
-            )
+        bands, masks, weights, headers, headers_weight = _load_skycell_raw_bands(
+            skycell_name, projection, ingest_config
+        )
 
         if not bands:
             logger.error(f"[ManualLoader] No band data found for {skycell_name}")
@@ -934,7 +991,7 @@ def _gather_cells_for_row(
     metadata: dict,
     combined_cell_queue: Queue,
     cell_buffer: dict,
-    zarr_path: str,
+    ingest_config: dict,
     remove_saturated_stars: bool = False,
     gaia_catalog: Optional[pd.DataFrame] = None,
     bright_star_mag_threshold: float = 13.0,
@@ -1044,7 +1101,7 @@ def _gather_cells_for_row(
         logger.warning(f"[Gather] {len(missing_cell_names)} cells still missing after sweep. Manual load: {missing_cell_names}")
         for cell_name in missing_cell_names:
             result = _manually_process_cell(
-                cell_name, projection, zarr_path, remove_saturated_stars,
+                cell_name, projection, ingest_config, remove_saturated_stars,
                 gaia_catalog, bright_star_mag_threshold,
             )
             if result is not None:
@@ -1066,7 +1123,7 @@ def _gather_cells_for_row(
 def _wait_for_padding_cells(
     needed: set,
     band_cache: dict,
-    zarr_path: str,
+    ingest_config: dict,
     remove_saturated_stars: bool = False,
     timeout: float = 180.0,
     combined_cell_queue: Queue = None,
@@ -1154,7 +1211,7 @@ def _wait_for_padding_cells(
             logger.error(f"[PaddingGather] Cannot derive projection from name: {skycell_name}, skipping")
             continue
         result = _manually_process_cell(
-            skycell_name, source_proj, zarr_path, remove_saturated_stars,
+            skycell_name, source_proj, ingest_config, remove_saturated_stars,
             gaia_catalog, bright_star_mag_threshold,
         )
         if result is not None:
@@ -1212,7 +1269,7 @@ def process_row_step_from_queue(
     combined_cell_queue: Queue,
     cell_buffer: dict,
     psf_sigma: float,
-    zarr_path: str,
+    ingest_config: dict,
     projection: str,
     catalog: Optional[pd.DataFrame] = None,
     enable_saturation_correction: bool = True,
@@ -1247,7 +1304,7 @@ def process_row_step_from_queue(
             metadata,
             combined_cell_queue,
             cell_buffer,
-            zarr_path,
+            ingest_config,
             remove_saturated_stars,
             gaia_catalog=catalog,
             bright_star_mag_threshold=bright_star_mag_threshold,
@@ -1276,7 +1333,7 @@ def process_row_step_from_queue(
             metadata,
             combined_cell_queue,
             cell_buffer,
-            zarr_path,
+            ingest_config,
             remove_saturated_stars,
             gaia_catalog=catalog,
             bright_star_mag_threshold=bright_star_mag_threshold,
@@ -1317,7 +1374,7 @@ def process_row_step_from_queue(
         # them concurrently. If any don't arrive in time, manually load+process them.
         if needed_padding_cells and band_cache is not None:
             _wait_for_padding_cells(
-                needed_padding_cells, band_cache, zarr_path,
+                needed_padding_cells, band_cache, ingest_config,
                 remove_saturated_stars=remove_saturated_stars,
                 combined_cell_queue=combined_cell_queue,
                 cell_buffer=cell_buffer,
@@ -1332,7 +1389,7 @@ def process_row_step_from_queue(
             pipeline_paused_event.set()
         try:
             apply_cross_projection_padding(
-                state, config, metadata, current_row_id, next_row_id, zarr_path, csv_path,
+                state, config, metadata, current_row_id, next_row_id, ingest_config, csv_path,
                 band_cache=band_cache,
                 remove_saturated_stars=remove_saturated_stars,
             )
@@ -1368,7 +1425,7 @@ def sequential_processor(
     combined_cell_queue: Queue,
     results_queue: Queue,
     psf_sigma: float,
-    zarr_path: str,
+    ingest_config: dict,
     cell_buffer: dict,
     catalog: Optional[pd.DataFrame] = None,
     enable_saturation_correction: bool = True,
@@ -1439,7 +1496,7 @@ def sequential_processor(
                     combined_cell_queue,
                     cell_buffer,
                     psf_sigma,
-                    zarr_path,
+                    ingest_config,
                     projection,
                     catalog,
                     enable_saturation_correction,
@@ -1501,6 +1558,10 @@ def run_modern_sliding_window_pipeline(
     data_root: str = "data",
     projections_limit: Optional[int] = None,
     psf_sigma: float = 60.0,
+    ps1_source: str = "zarr",
+    num_ingest_workers: int = 16,
+    use_local_files: bool = False,
+    local_data_path: str | None = None,
     enable_saturation_correction: bool = True,
     remove_saturated_stars: bool = False,
     catalog_path: Optional[str] = None,
@@ -1511,8 +1572,17 @@ def run_modern_sliding_window_pipeline(
     _child_processes.clear()
     signal.signal(signal.SIGINT, shutdown_handler)
 
-    logger.info(f"[Pipeline] Starting pipeline for sector {sector}, camera {camera}, ccd {ccd}")
+    logger.info(
+        f"[Pipeline] Starting pipeline for sector {sector}, camera {camera}, ccd {ccd} "
+        f"(ps1_source={ps1_source})"
+    )
     zarr_path = f"{data_root}/ps1_skycells_zarr/ps1_skycells.zarr"
+    ingest_config = {
+        "ps1_source": ps1_source,
+        "zarr_path": zarr_path,
+        "use_local_files": use_local_files,
+        "local_data_path": local_data_path,
+    }
     output_path = f"{data_root}/convolved_results/sector_{sector:04d}_camera_{camera}_ccd_{ccd}.zarr"
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
@@ -1546,8 +1616,10 @@ def run_modern_sliding_window_pipeline(
             catalog = None
 
     # --- Setup ---
-    zarr_store = zarr.open(zarr_path, mode="r")
-    num_readers = 2
+    zarr_store = None
+    if ps1_source == "zarr":
+        zarr_store = zarr.open(zarr_path, mode="r")
+    num_ingest_workers = max(1, int(num_ingest_workers))
     num_band_combiners = 4
 
     # Scale source-extractor subprocess count to available memory.
@@ -1561,7 +1633,7 @@ def run_modern_sliding_window_pipeline(
         mem_limit = max(2, int(available_gb // 4))
         num_source_extractors = max(2, min(ncpus // 2, mem_limit))
         logger.info(
-            f"[Pipeline] Workers: readers={num_readers}, band_combiners={num_band_combiners}, "
+            f"[Pipeline] Workers: ingest={num_ingest_workers}, band_combiners={num_band_combiners}, "
             f"source_extractors={num_source_extractors} "
             f"(available RAM: {available_gb:.1f} GB, cpus: {ncpus})"
         )
@@ -1570,7 +1642,7 @@ def run_modern_sliding_window_pipeline(
         logger.info(f"[Pipeline] Using {num_source_extractors} source extractors (psutil unavailable)")
 
     task_queue = _thread_queue.Queue()
-    raw_cell_queue = _thread_queue.Queue(maxsize=6)
+    raw_cell_queue = _thread_queue.Queue(maxsize=max(6, num_ingest_workers * 2))
     combined_raw_queue = _thread_queue.Queue(maxsize=12)
     combined_cell_queue = _thread_queue.Queue(maxsize=30)
     # results_queue was previously a multiprocessing.Queue (crossing a process boundary
@@ -1648,9 +1720,19 @@ def run_modern_sliding_window_pipeline(
     process_coordinator_thread.start()
 
     try:
-        with ThreadPoolExecutor(max_workers=num_readers) as reader_executor:
-            for _ in range(num_readers):
-                reader_executor.submit(reader_worker, task_queue, raw_cell_queue, zarr_store, remove_saturated_stars, band_cache)
+        with ThreadPoolExecutor(max_workers=num_ingest_workers) as ingest_executor:
+            for _ in range(num_ingest_workers):
+                ingest_executor.submit(
+                    ingest_worker,
+                    task_queue,
+                    raw_cell_queue,
+                    ps1_source=ps1_source,
+                    zarr_store=zarr_store,
+                    use_local_files=use_local_files,
+                    local_data_path=local_data_path,
+                    remove_saturated_stars=remove_saturated_stars,
+                    band_cache=band_cache,
+                )
 
             # --- Build Interleaved Task List ---
             logger.info(f"[Pipeline] Building interleaved task list for {len(projections)} projections.")
@@ -1700,7 +1782,7 @@ def run_modern_sliding_window_pipeline(
                 f"Sending reader shutdown signals now."
             )
 
-            for _ in range(num_readers):
+            for _ in range(num_ingest_workers):
                 task_queue.put(None)
 
             # --- Run Sequential Processor (Stage 3) in Main Thread ---
@@ -1710,7 +1792,7 @@ def run_modern_sliding_window_pipeline(
                 combined_cell_queue,
                 results_queue,
                 psf_sigma,
-                zarr_path,
+                ingest_config,
                 cell_buffer,
                 catalog,
                 enable_saturation_correction,

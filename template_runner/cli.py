@@ -175,6 +175,15 @@ def cmd_submit(args: argparse.Namespace) -> int:
             active,
             force_rerun=bool(args.force_rerun),
         )
+        if cfg.stages.ps1_process.ps1_source == "stream":
+            if "ps1_download" in active:
+                print(
+                    "Note: ps1_download ignored for this run (ps1_source=stream); "
+                    "download happens inside ps1_process."
+                )
+            skipped = state.apply_ps1_stream_download_skips(run_id, targets, cfg)
+            if skipped:
+                print(f"Marked ps1_download n/a (stream_mode) for {skipped} target(s).")
         created_new_run = True
     elif args.force_rerun:
         # Resubmitting force-rerun onto an EXISTING run. The daemon is the sole

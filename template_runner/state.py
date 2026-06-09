@@ -42,6 +42,9 @@ STAGE_DEPS: Dict[str, List[str]] = {
     "downsample": ["mapping", "ps1_process"],
 }
 
+SKIP_REASON_STREAM = "stream_mode"
+SKIP_REASON_ARTIFACTS = "artifacts_verified"
+
 STAGE_POOL: Dict[str, str] = {
     "tess_ffi_download": "network",
     "mapping": "mapping",
@@ -134,6 +137,17 @@ class CommandRow:
             return json.loads(self.args_json)
         except json.JSONDecodeError:
             return {}
+
+
+def effective_stage_deps(stage: str, stages=None) -> List[str]:
+    """Return dependency list for *stage*, honoring ps1_source=stream overrides."""
+    if (
+        stage == "ps1_process"
+        and stages is not None
+        and getattr(getattr(stages, "ps1_process", None), "ps1_source", "zarr") == "stream"
+    ):
+        return ["mapping"]
+    return list(STAGE_DEPS.get(stage, []))
 
 
 def downstream_stages(stage: str) -> List[str]:
@@ -320,7 +334,9 @@ class PipelineState:
         )
         return True
 
-    def promote_stages(self, run_id: str) -> int:
+    def promote_stages(
+        self, run_id: str, target_stages: Dict[str, object] | None = None
+    ) -> int:
         promoted = 0
         with self._conn() as conn:
             rows = conn.execute(
@@ -331,7 +347,10 @@ class PipelineState:
                 target_label = row["target_label"]
                 stage = row["stage"]
                 status = row["status"]
-                if status == STATUS_BLOCKED and self.deps_satisfied(run_id, target_label, stage):
+                stages = (target_stages or {}).get(target_label)
+                if status == STATUS_BLOCKED and self.deps_satisfied(
+                    run_id, target_label, stage, stages=stages
+                ):
                     conn.execute(
                         "UPDATE stage_runs SET status = ? "
                         "WHERE run_id = ? AND target_label = ? AND stage = ?",
@@ -340,7 +359,7 @@ class PipelineState:
                     status = STATUS_PENDING
                 if (
                     status == STATUS_PENDING
-                    and self.deps_satisfied(run_id, target_label, stage)
+                    and self.deps_satisfied(run_id, target_label, stage, stages=stages)
                     and self.external_checked(run_id, target_label, stage)
                 ):
                     conn.execute(
@@ -544,6 +563,26 @@ class PipelineState:
                         (run_id, t.label(), stage, status),
                     )
 
+    def apply_ps1_stream_download_skips(self, run_id: str, targets: Sequence, cfg) -> int:
+        """Pre-skip ps1_download when ps1_process.ps1_source is stream."""
+        from syndiff_pipeline.template_runner.runner_config import resolve_config
+
+        count = 0
+        for t in targets:
+            if not getattr(t, "enabled", True):
+                continue
+            resolved = resolve_config(t, cfg)
+            if resolved.stages.ps1_process.ps1_source != "stream":
+                continue
+            label = t.label()
+            row = self.get_stage_run(run_id, label, "ps1_download")
+            if row is None or row.status in TERMINAL_STATUSES:
+                continue
+            self.mark_skipped(run_id, label, "ps1_download")
+            self.cache_skip_reason(run_id, label, "ps1_download", SKIP_REASON_STREAM)
+            count += 1
+        return count
+
     def get_run(self, run_id: str) -> dict | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
@@ -683,9 +722,16 @@ class PipelineState:
     # ------------------------------------------------------------------
     # Dependency resolution (SINGLE source of truth)
     # ------------------------------------------------------------------
-    def deps_satisfied(self, run_id: str, target_label: str, stage: str) -> bool:
-        """True iff every ``STAGE_DEPS[stage]`` row is success/skipped."""
-        deps = STAGE_DEPS.get(stage, [])
+    def deps_satisfied(
+        self,
+        run_id: str,
+        target_label: str,
+        stage: str,
+        *,
+        stages=None,
+    ) -> bool:
+        """True iff every effective dependency row is success/skipped."""
+        deps = effective_stage_deps(stage, stages)
         if not deps:
             return True
         placeholders = ",".join("?" for _ in deps)
@@ -699,10 +745,16 @@ class PipelineState:
         return all(status_map.get(d) in SATISFIED_STATUSES for d in deps)
 
     @staticmethod
-    def unmet_deps(stage: str, status_map: Dict[tuple[str, str], str], target_label: str) -> List[str]:
+    def unmet_deps(
+        stage: str,
+        status_map: Dict[tuple[str, str], str],
+        target_label: str,
+        *,
+        stages=None,
+    ) -> List[str]:
         """Deps of *stage* not yet success/skipped, given a (label,stage)->status map."""
         out: List[str] = []
-        for dep in STAGE_DEPS.get(stage, []):
+        for dep in effective_stage_deps(stage, stages):
             if status_map.get((target_label, dep)) not in SATISFIED_STATUSES:
                 out.append(dep)
         return out
@@ -807,10 +859,12 @@ class PipelineState:
         self, run_id: str, target_label: str, stage: str, reset_downstream: bool = True
     ) -> int:
         """Reopen *stage* (+downstream) to pending; clear external caches so they re-verify."""
-        stages = [stage] + (downstream_stages(stage) if reset_downstream else [])
+        stages_to_reset = [stage] + (downstream_stages(stage) if reset_downstream else [])
+        if self.get_skip_reason(run_id, target_label, "ps1_download") == SKIP_REASON_STREAM:
+            stages_to_reset = [s for s in stages_to_reset if s != "ps1_download"]
         count = 0
         with self._conn() as conn:
-            for s in stages:
+            for s in stages_to_reset:
                 cur = conn.execute(
                     "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
                     "exit_code = NULL, error_tail = NULL, native_id = NULL, launch_token = NULL, "
@@ -887,6 +941,24 @@ class PipelineState:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (run_id, target_label, stage, "external_check", "1" if complete else "0", _utc_now()),
             )
+
+    def cache_skip_reason(self, run_id: str, target_label: str, stage: str, reason: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO artifacts "
+                "(run_id, target_label, stage, artifact_type, path, verified_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (run_id, target_label, stage, "skip_reason", reason, _utc_now()),
+            )
+
+    def get_skip_reason(self, run_id: str, target_label: str, stage: str) -> str | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT path FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
+                "AND artifact_type = ?",
+                (run_id, target_label, stage, "skip_reason"),
+            ).fetchone()
+            return row["path"] if row else None
 
     def list_unchecked_external_stages(self, run_id: str) -> List[StageRunRow]:
         with self._conn() as conn:

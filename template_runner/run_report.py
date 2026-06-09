@@ -5,7 +5,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from syndiff_pipeline.template_runner.stage_progress import read_log_progress
-from syndiff_pipeline.template_runner.state import STAGE_NAMES, STAGE_SHORT_NAMES
+from syndiff_pipeline.template_runner.state import (
+    SKIP_REASON_STREAM,
+    STAGE_NAMES,
+    STAGE_SHORT_NAMES,
+    STATUS_SKIPPED,
+)
 
 if TYPE_CHECKING:
     from syndiff_pipeline.template_runner.state import PipelineState
@@ -70,11 +75,20 @@ def format_status_grid(state: PipelineState, run_id: str) -> list[str]:
     for label in sorted(by_target):
         rows_for_target = sorted(by_target[label], key=_stage_sort_key)
         parts = [
-            f"{STAGE_SHORT_NAMES.get(r.stage, r.stage)}:{r.status[:4]}"
+            _format_stage_status_short(state, run_id, r)
             for r in rows_for_target
         ]
         lines.append(f"  {label}: {' | '.join(parts)}")
     return lines
+
+
+def _format_stage_status_short(state: PipelineState, run_id: str, row) -> str:
+    short = STAGE_SHORT_NAMES.get(row.stage, row.stage)
+    if row.status == STATUS_SKIPPED:
+        reason = state.get_skip_reason(run_id, row.target_label, row.stage)
+        if reason == SKIP_REASON_STREAM:
+            return f"{short}:n/a"
+    return f"{short}:{row.status[:4]}"
 
 
 def format_target_status_line(state: PipelineState, run_id: str, target_label: str) -> str | None:
@@ -84,7 +98,7 @@ def format_target_status_line(state: PipelineState, run_id: str, target_label: s
     stage_order = {name: i for i, name in enumerate(STAGE_NAMES)}
     rows_for_target = sorted(rows, key=lambda r: stage_order.get(r.stage, len(STAGE_NAMES)))
     parts = [
-        f"{STAGE_SHORT_NAMES.get(r.stage, r.stage)}:{r.status[:4]}"
+        _format_stage_status_short(state, run_id, r)
         for r in rows_for_target
     ]
     return f"  {target_label}: {' | '.join(parts)}"
