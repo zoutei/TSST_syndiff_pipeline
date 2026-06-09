@@ -39,6 +39,11 @@ from tqdm import tqdm
 
 # Import from existing script
 from syndiff_pipeline.template.compute_ps1_skycell_shifts import RELEVANT_WCS_KEYS, build_ps1_wcs, compute_ps1_shift_for_skycell, load_tess_wcs
+from syndiff_pipeline.template.downsample_progress import (
+    init_progress as init_downsample_progress,
+    mark_skycell_done as mark_downsample_skycell_done,
+    set_progress_phase as set_downsample_progress_phase,
+)
 
 
 def load_cluster_template_job_payload(path: str | Path) -> dict:
@@ -293,7 +298,12 @@ def load_zarr_data_for_skycell(skycell_name: str, zarr_store) -> tuple[np.ndarra
     return np.array(image_data).astype(np.float32), np.array(mask_data).astype(np.uint32)
 
 
-def precompute_shifts_for_offsets(tess_wcs: WCS, skycell_df: pd.DataFrame, offsets: np.ndarray) -> dict[tuple[float, float], pd.DataFrame]:
+def precompute_shifts_for_offsets(
+    tess_wcs: WCS,
+    skycell_df: pd.DataFrame,
+    offsets: np.ndarray,
+    progress_path: str | Path | None = None,
+) -> dict[tuple[float, float], pd.DataFrame]:
     """
     Precompute all PS1 shifts for each offset pair and skycell
 
@@ -301,8 +311,16 @@ def precompute_shifts_for_offsets(tess_wcs: WCS, skycell_df: pd.DataFrame, offse
         Dictionary mapping (dx, dy) to DataFrame with NAME, shift_x, shift_y
     """
     shift_results = {}
+    offsets_total = len(offsets)
+    if progress_path is not None:
+        set_downsample_progress_phase(
+            progress_path,
+            "precomputing_shifts",
+            offsets_done=0,
+            offsets_total=offsets_total,
+        )
 
-    for dx, dy in tqdm(offsets, desc="Computing shifts"):
+    for offset_idx, (dx, dy) in enumerate(tqdm(offsets, desc="Computing shifts")):
         shift_x_list = []
         shift_y_list = []
 
@@ -331,11 +349,30 @@ def precompute_shifts_for_offsets(tess_wcs: WCS, skycell_df: pd.DataFrame, offse
         )
 
         shift_results[(dx, dy)] = shift_df
+        if progress_path is not None:
+            set_downsample_progress_phase(
+                progress_path,
+                "precomputing_shifts",
+                offsets_done=offset_idx + 1,
+                offsets_total=offsets_total,
+            )
 
     return shift_results
 
 
-def process_skycell_batch(batch_idx: int, reg_files: list[str], skycell_names: list[str], offsets: np.ndarray, shifts_dict: dict[tuple[float, float], pd.DataFrame], base_tess_shape: tuple[int, int], zarr_path: Path, roi_bounds: tuple[int, int, int, int], oversampling_factor: int = 1, ignore_mask_bits: list[int] = []) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def process_skycell_batch(
+    batch_idx: int,
+    reg_files: list[str],
+    skycell_names: list[str],
+    offsets: np.ndarray,
+    shifts_dict: dict[tuple[float, float], pd.DataFrame],
+    base_tess_shape: tuple[int, int],
+    zarr_path: Path,
+    roi_bounds: tuple[int, int, int, int],
+    oversampling_factor: int = 1,
+    ignore_mask_bits: list[int] | None = None,
+    progress_path: str | Path | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Process a batch of skycells using sparse arrays for memory efficiency
 
@@ -355,6 +392,9 @@ def process_skycell_batch(batch_idx: int, reg_files: list[str], skycell_names: l
     all_sums = []
     all_counts = []
     all_mask_counts = []
+
+    if ignore_mask_bits is None:
+        ignore_mask_bits = []
 
     # Create mask for ignoring specific bits
     ignore_mask = 0
@@ -468,6 +508,9 @@ def process_skycell_batch(batch_idx: int, reg_files: list[str], skycell_names: l
 
         except Exception as e:
             print(f"Error processing registration for skycell {skycell_name}: {e}")
+        finally:
+            if progress_path is not None:
+                mark_downsample_skycell_done(progress_path, batch_idx)
 
     print(f"Completed batch {batch_idx + 1}")
 
@@ -629,6 +672,7 @@ def main(
     oversampling_factor: int = 1,
     reference_ffi_basename_expected: str | None = None,
     cluster_job_json_path: str | None = None,
+    progress_path: str | Path | None = None,
 ) -> dict:
     # Resolve base paths (allow overrides)
     data_root = Path(data_root)
@@ -757,7 +801,11 @@ def main(
 
     # Precompute shifts for all offsets
     print("Precomputing shifts for all offsets...")
-    shifts_dict = precompute_shifts_for_offsets(tess_wcs, skycell_df, offsets)
+    if progress_path is not None:
+        set_downsample_progress_phase(progress_path, "precomputing_shifts")
+    shifts_dict = precompute_shifts_for_offsets(
+        tess_wcs, skycell_df, offsets, progress_path=progress_path
+    )
 
     # Get registration files
     print("Getting registration files...")
@@ -782,6 +830,11 @@ def main(
         reg_batches = []
         name_batches = []
 
+    total_skycells = len(reg_files)
+    if progress_path is not None and num_batches > 0:
+        batch_sizes = [len(batch) for batch in reg_batches]
+        init_downsample_progress(progress_path, total_skycells, batch_sizes)
+
     # Process batches in parallel
     results = Parallel(n_jobs=N_JOBS)(
         delayed(process_skycell_batch)(
@@ -795,11 +848,16 @@ def main(
             roi_bounds,
             oversampling_factor=oversampling_factor,
             ignore_mask_bits=ignore_mask_bits,
+            progress_path=progress_path,
         )
         for i, (reg_batch, name_batch) in enumerate(zip(reg_batches, name_batches))
     )
 
     # Combine results using the sparse array approach
+    if progress_path is not None and total_skycells > 0:
+        set_downsample_progress_phase(
+            progress_path, "combining", total_skycells=total_skycells
+        )
     print("Combining results...")
     all_indices = []
     all_sums = []
@@ -881,6 +939,10 @@ def main(
         raise RuntimeError("No PS1 convolved data loaded for any skycell")
 
     # Save outputs as FITS files
+    if progress_path is not None and total_skycells > 0:
+        set_downsample_progress_phase(
+            progress_path, "saving", total_skycells=total_skycells
+        )
     print("Saving outputs...")
     written_paths = save_fits_outputs(output_dir=OUTPUT_DIR, sector=sector, camera=camera, ccd=ccd, results=combined_results, offsets=offsets, tess_header=tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
 
@@ -898,6 +960,10 @@ def main(
     for dx, dy in offsets:
         print(f"  dx={dx:.3f}, dy={dy:.3f}")
     print(f"Results saved to: {OUTPUT_DIR}")
+    if progress_path is not None and total_skycells > 0:
+        set_downsample_progress_phase(
+            progress_path, "complete", total_skycells=total_skycells
+        )
     return {
         "output_dir": str(OUTPUT_DIR),
         "artifacts": written_paths,

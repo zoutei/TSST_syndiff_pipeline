@@ -16,6 +16,7 @@ import sys
 from syndiff_pipeline.template_runner import logs, stages
 from syndiff_pipeline.template_runner.run_context import resolve_run_context
 from syndiff_pipeline.template_runner.runner_config import resolve_config
+from syndiff_pipeline.template.downsample_progress import progress_path_for_log
 from syndiff_pipeline.template_runner.verify import collect_stage_artifacts, write_manifest
 
 log = logging.getLogger(__name__)
@@ -96,7 +97,18 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 _configure_logging()
                 manifest = stages.execute_stage(
-                    resolved, args.stage, force_rerun=args.force_rerun
+                    resolved,
+                    args.stage,
+                    force_rerun=args.force_rerun,
+                    progress_path=str(
+                        progress_path_for_log(
+                            logs.target_log_path(
+                                runs_root, args.run_id, args.target_label, args.stage
+                            )
+                        )
+                    )
+                    if args.stage == "downsample"
+                    else None,
                 )
                 if manifest is None:
                     manifest = collect_stage_artifacts(resolved, args.stage)

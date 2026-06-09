@@ -78,7 +78,11 @@ def _manifest_from_result(result: dict) -> tuple[int, int, list[str]] | None:
 
 
 def execute_stage(
-    resolved: ResolvedTargetConfig, stage: str, force_rerun: bool = False
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    force_rerun: bool = False,
+    *,
+    progress_path: str | None = None,
 ) -> tuple[int, int, list[str]] | None:
     """Run one template pipeline stage in-process.
 
@@ -193,6 +197,7 @@ def execute_stage(
             oversampling_factor=ds.oversampling_factor,
             reference_ffi_basename_expected=payload.get("reference_ffi_basename"),
             cluster_job_json_path=job_path,
+            progress_path=progress_path,
         )
         return _manifest_from_result(result)
 
