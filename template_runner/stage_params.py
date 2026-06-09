@@ -70,6 +70,8 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "output_base",
         "single_offset",
         "allow_reference_ffi_mismatch",
+        "n_jobs",
+        "skycells_per_batch",
     }
 )
 
@@ -163,6 +165,8 @@ class DownsampleStageParams:
     output_base: str | None = None
     single_offset: bool = False
     allow_reference_ffi_mismatch: bool = False
+    n_jobs: int = 16
+    skycells_per_batch: int = 20
 
     def __post_init__(self):
         if self.ignore_mask_bits is None:
