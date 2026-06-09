@@ -440,28 +440,24 @@ def reconcile_running_stages(
             counts["still_running"] += 1
             continue
 
-        if alive and status_doc is None and _age_seconds(job.claimed_at) < _LOCAL_START_GRACE_S:
-            # Freshly claimed: the child has not written its status file yet.
+        if (
+            alive
+            and not token_ok
+            and _age_seconds(job.claimed_at) < _LOCAL_START_GRACE_S
+        ):
+            # Child alive but status file missing or still has a previous launch's
+            # token (common on NFS right after relaunch). Trust DB native_id.
             counts["still_running"] += 1
             continue
 
-        # Dead without an exit record, or stale/mismatched token: requeue to ready.
-        died_reason = "Local stage lost or stale; requeued"
-        state.requeue_running_stage(
-            run_id,
-            job.target_label,
-            job.stage,
-            error_tail=died_reason,
-        )
-        _notify_stage_outcome(
+        # Dead without an exit record, or stale/mismatched token past grace: requeue.
+        _requeue_local_stage(
             state,
             run_id,
-            target_label=job.target_label,
-            stage=job.stage,
-            outcome="died",
+            job,
             runs_root=runs_root,
-            finished_at=_utc_now(),
-            error_tail=died_reason,
+            reason="Local stage lost or stale; requeued",
+            terminate_if_alive=alive,
         )
         counts["requeued"] += 1
 
@@ -825,6 +821,11 @@ def _try_launch_ready_row(
     if not state.claim_ready(run_id, row.target_label, row.stage, launch_token):
         return False
 
+    if cfg.stage_executor(row.stage) == "local":
+        logs.stage_status_path(
+            runs_root, run_id, row.target_label, row.stage
+        ).unlink(missing_ok=True)
+
     cmd = stages.build_stage_command(
         run_id,
         row.stage,
@@ -959,6 +960,37 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
             notifier.notify_run_resumed(run_id)
 
     _write_summary(state, run_id, runs_root)
+
+
+def _requeue_local_stage(
+    state: PipelineState,
+    run_id: str,
+    job,
+    *,
+    runs_root: str,
+    reason: str,
+    terminate_if_alive: bool,
+) -> None:
+    """Requeue a local running stage, terminating a live worker first."""
+    if terminate_if_alive and job.native_id is not None:
+        _terminate_job(job)
+    log.info("Requeued %s / %s: %s", job.target_label, job.stage, reason)
+    state.requeue_running_stage(
+        run_id,
+        job.target_label,
+        job.stage,
+        error_tail=reason,
+    )
+    _notify_stage_outcome(
+        state,
+        run_id,
+        target_label=job.target_label,
+        stage=job.stage,
+        outcome="died",
+        runs_root=runs_root,
+        finished_at=_utc_now(),
+        error_tail=reason,
+    )
 
 
 def _terminate_job(job) -> None:
