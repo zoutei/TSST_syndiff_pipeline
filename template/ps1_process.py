@@ -1394,8 +1394,10 @@ def sequential_processor(
     """
     all_removed_stars: list[dict] = []
     produced_skycells: set[str] = set()
+    last_progress_log = time.monotonic()
+    total_projections = len(projections)
 
-    for projection in projections:
+    for proj_idx, projection in enumerate(projections):
         logger.info(f"[SequentialProcessor] --- Starting sequential processing for projection: {projection} ---")
         try:
             metadata = extract_projection_metadata(df, projection)
@@ -1412,6 +1414,11 @@ def sequential_processor(
                 except Empty:
                     break
             continue
+
+        logger.info(
+            f"[Pipeline] Progress: projection {proj_idx}/{total_projections} "
+            f"row 0/{len(row_ids)}"
+        )
 
         # Inner Loop: Process each row
         for i, current_row_id in enumerate(row_ids):
@@ -1450,6 +1457,14 @@ def sequential_processor(
                 # Track the exact skycells the saver will write for this row.
                 produced_skycells.update(str(name) for name in results_data.keys())
 
+                now = time.monotonic()
+                if now - last_progress_log >= 30.0:
+                    logger.info(
+                        f"[Pipeline] Progress: projection {proj_idx}/{total_projections} "
+                        f"row {i + 1}/{len(row_ids)}"
+                    )
+                    last_progress_log = now
+
                 # Queue the Results
                 processed_bundle = {"projection": projection, "row_id": current_row_id, "results_data": results_data, "results_masks": results_masks}
                 results_queue.put(processed_bundle)
@@ -1465,6 +1480,10 @@ def sequential_processor(
                 break
 
         logger.info(f"[SequentialProcessor] --- Finished sequential processing for projection: {projection} ---")
+        logger.info(
+            f"[Pipeline] Progress: projection {proj_idx + 1}/{total_projections} "
+            f"row {len(row_ids)}/{len(row_ids)}"
+        )
 
     # Shutdown Signal for the saver
     results_queue.put(None)
@@ -1503,6 +1522,10 @@ def run_modern_sliding_window_pipeline(
         if projections_limit:
             projections = projections[:projections_limit]
         df = load_csv_data(csv_path)
+        expected_skycells = expected_convolved_skycells(
+            data_root, sector, camera, ccd, projections_limit=projections_limit
+        )
+        logger.info(f"[Pipeline] Processing {len(projections)} projections")
     except Exception as e:
         logger.error(f"[Pipeline] Failed to load configuration: {e}")
         return {"error": str(e)}

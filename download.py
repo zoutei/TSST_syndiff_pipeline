@@ -32,6 +32,7 @@ import glob
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import List, Tuple
 from urllib.error import HTTPError, URLError
@@ -297,6 +298,7 @@ def _download_ffis_via_tesscurl(
     if filtered:
         log.info("Downloading %s FITS file(s) to %s ...", len(filtered), output_dir)
         n_ok, n_err = 0, 0
+        last_progress_log = time.monotonic()
         for i in _progress_iterate(len(filtered), desc="FFI download"):
             bn, url = filtered[i]
             local_path = os.path.join(output_dir, bn)
@@ -306,6 +308,10 @@ def _download_ffis_via_tesscurl(
             except (HTTPError, URLError, OSError) as e:
                 n_err += 1
                 log.warning("File %s: %s", bn, e)
+            now = time.monotonic()
+            if (i + 1) % 10 == 0 or now - last_progress_log >= 30.0:
+                log.info("FFI download progress: %d/%d", i + 1, len(filtered))
+                last_progress_log = now
         log.info("Download finished (%s ok, %s errors).", n_ok, n_err)
         if n_err:
             log.warning("Some downloads failed; re-run with --overwrite or check network.")
@@ -435,6 +441,7 @@ def _download_ffis_via_astroquery(
     if len(ffic_products) > 0:
         log.info("Downloading %s FITS files to %s ...", len(ffic_products), output_dir)
         n_ok, n_err = 0, 0
+        last_progress_log = time.monotonic()
         for i in _progress_iterate(len(ffic_products), desc="FFI download"):
             row = ffic_products[i]
             local_path = os.path.join(
@@ -451,6 +458,10 @@ def _download_ffis_via_astroquery(
             else:
                 n_err += 1
                 log.warning("File %s: %s %s", row["productFilename"], status, msg or "")
+            now = time.monotonic()
+            if (i + 1) % 10 == 0 or now - last_progress_log >= 30.0:
+                log.info("FFI download progress: %d/%d", i + 1, len(ffic_products))
+                last_progress_log = now
         log.info("Download finished (%s ok, %s errors).", n_ok, n_err)
         if n_err:
             log.warning("Some downloads failed; re-run with --overwrite or check network.")

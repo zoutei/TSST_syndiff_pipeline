@@ -27,7 +27,6 @@ from syndiff_pipeline.template_runner.scheduler_control import (
 )
 from syndiff_pipeline.template_runner.state import (
     STAGE_NAMES,
-    STAGE_SHORT_NAMES,
     PipelineState,
 )
 
@@ -217,6 +216,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
+    from syndiff_pipeline.template_runner.run_report import format_status_grid
     from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
 
     def _print_once():
@@ -227,22 +227,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"  verify_in_flight={in_flight}")
         if run.get("status") == "stalled" and run.get("stall_reason"):
             print(f"  stalled: {run['stall_reason']}")
-        rows = state.list_stage_runs(ctx.run_id)
-        by_target: dict[str, list] = {}
-        for r in rows:
-            by_target.setdefault(r.target_label, []).append(r)
-        stage_order = {name: i for i, name in enumerate(STAGE_NAMES)}
-
-        def _stage_sort_key(row) -> int:
-            return stage_order.get(row.stage, len(STAGE_NAMES))
-
-        for label in sorted(by_target):
-            rows_for_target = sorted(by_target[label], key=_stage_sort_key)
-            parts = [
-                f"{STAGE_SHORT_NAMES.get(r.stage, r.stage)}:{r.status[:4]}"
-                for r in rows_for_target
-            ]
-            print(f"  {label}: {' | '.join(parts)}")
+        for line in format_status_grid(state, ctx.run_id):
+            print(line)
 
     if args.watch:
         while True:
@@ -263,18 +249,17 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_progress(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
-    from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
+    from syndiff_pipeline.template_runner.run_report import format_progress_lines
 
-    counts = state.count_by_status(ctx.run_id)
-    run = state.get_run(ctx.run_id) or {}
-    parts = [f"{k}={v}" for k, v in sorted(counts.items())]
-    line = f"run_id={ctx.run_id} status={run.get('status', '?')} " + " ".join(parts)
-    in_flight = read_verify_in_flight(ctx.cfg.state_db_path, ctx.run_id)
-    if in_flight:
-        line += f" verify_in_flight={in_flight}"
-    if run.get("stall_reason"):
-        line += f" stall_reason={run['stall_reason']!r}"
-    print(line)
+    for line in format_progress_lines(
+        state,
+        ctx.run_id,
+        ctx.cfg.runs_dir(),
+        state_db_path=ctx.cfg.state_db_path,
+        include_running_detail=not getattr(args, "no_detail", False),
+    ):
+        print(line)
+
     return 0
 
 
@@ -593,8 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--interval", type=float, default=10.0)
     sp.set_defaults(func=cmd_status)
 
-    sp = sub.add_parser("progress", help="Summary counts")
+    sp = sub.add_parser("progress", help="Summary counts and running-task detail")
     _add_run_scope(sp)
+    sp.add_argument(
+        "--no-detail",
+        action="store_true",
+        help="Print summary counts only (omit running-task log progress)",
+    )
     sp.set_defaults(func=cmd_progress)
 
     sp = sub.add_parser("runs", help="List recent runs")
