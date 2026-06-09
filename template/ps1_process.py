@@ -1638,7 +1638,7 @@ def run_modern_sliding_window_pipeline(
             f"(available RAM: {available_gb:.1f} GB, cpus: {ncpus})"
         )
     except ImportError:
-        num_source_extractors = int(os.environ.get("SYNDIFF_NUM_WORKERS", "8"))
+        num_source_extractors = 8
         logger.info(f"[Pipeline] Using {num_source_extractors} source extractors (psutil unavailable)")
 
     task_queue = _thread_queue.Queue()
