@@ -4,5 +4,5 @@ __pycache__/
 *.egg-info/
 example/output/
 scripts/
-secrets.yaml
-**/secrets.yaml
+deployment.yaml
+**/deployment.yaml

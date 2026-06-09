@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -14,12 +15,24 @@ from syndiff_pipeline.template_runner.notifications import (
     NotificationConfig,
     parse_notification_config,
 )
+from syndiff_pipeline.template_runner.resources import skycell_wcs_csv
+from syndiff_pipeline.template_runner.deployment import (
+    deployment_path_for_config,
+    load_deployment,
+    require_deployment_path,
+    warn_legacy_config_paths,
+)
 from syndiff_pipeline.template_runner.stage_params import (
     ResourcePoolParams,
     TemplateStageParams,
     parse_stage_params,
 )
 from syndiff_pipeline.template_runner.targets import Target
+from syndiff_pipeline.template_runner.workspace import (
+    normalize_handoff_root,
+    runs_root as handoff_runs_root,
+    state_db_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -27,23 +40,34 @@ log = logging.getLogger(__name__)
 def _resolve_path(base_dir: Path, value: str | None) -> str | None:
     if value is None or str(value).strip() == "":
         return None
-    import os
-
     p = Path(os.path.expanduser(str(value)))
     if not p.is_absolute():
         p = (base_dir / p).resolve()
     return str(p)
 
 
+def parse_deployment_file(raw: dict) -> str:
+    explicit = str(raw.get("deployment_file", "")).strip()
+    if explicit:
+        return explicit
+    legacy = str((raw.get("notifications") or {}).get("secrets_file", "")).strip()
+    if legacy:
+        log.warning(
+            "notifications.secrets_file is deprecated; use top-level deployment_file instead"
+        )
+        return legacy
+    return "deployment.yaml"
+
+
 @dataclass
 class RunnerConfig:
+    deployment_file: str = "deployment.yaml"
     data_root: str = ""
     ffi_dir: str = ""
     handoff_root: str = ""
     runs_root: str = ""
     state_db_path: str = ""
     skycell_wcs_csv: str = ""
-    gaia_credentials: str | None = None
     stages: TemplateStageParams = field(default_factory=lambda: parse_stage_params({}))
     resources: Dict[str, ResourcePoolParams] = field(default_factory=dict)
     overrides: Dict[str, dict] = field(default_factory=dict)
@@ -53,7 +77,7 @@ class RunnerConfig:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     def runs_dir(self) -> str:
-        return self.runs_root or str(Path(self.handoff_root) / "runs")
+        return self.runs_root or str(handoff_runs_root(self.handoff_root))
 
     def stage_executor(self, stage: str) -> str:
         """Return launch executor for a stage: 'local' or 'condor'."""
@@ -81,26 +105,42 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
     return out
 
 
-def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
-    path = Path(yaml_path).expanduser().resolve()
-    base_dir = path.parent
-    with path.open(encoding="utf-8") as fh:
-        raw: dict = yaml.safe_load(fh) or {}
+def _paths_from_deployment(
+    deployment: dict, *, deployment_path: Path
+) -> tuple[str, str, str, str, str, str]:
+    handoff = require_deployment_path(deployment, "handoff_root", deployment_path=deployment_path)
+    data = require_deployment_path(deployment, "data_root", deployment_path=deployment_path)
+    ffi_override = str(deployment.get("ffi_dir", "")).strip()
+    ffi_dir = (
+        str(Path(ffi_override).expanduser().resolve())
+        if ffi_override
+        else str(Path(data) / "tess_ffi")
+    )
+    handoff_path = normalize_handoff_root(handoff)
+    db = str(state_db_path(handoff_path))
+    runs = str(handoff_runs_root(handoff_path))
+    wcs = str(skycell_wcs_csv())
+    return handoff, data, ffi_dir, db, runs, wcs
 
-    data_root = _resolve_path(base_dir, raw.get("data_root", "")) or ""
-    ffi_dir = _resolve_path(base_dir, raw.get("ffi_dir", "")) or data_root
-    handoff_root = _resolve_path(base_dir, raw.get("handoff_root", "")) or ""
-    runs_root = _resolve_path(base_dir, raw.get("runs_root")) or ""
-    state_db = _resolve_path(base_dir, raw.get("state_db_path")) or ""
 
-    cfg = RunnerConfig(
-        data_root=data_root,
+def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> RunnerConfig:
+    warn_legacy_config_paths(raw, config_path=config_path)
+    deployment_file = parse_deployment_file(raw)
+    notifications = parse_notification_config(raw.get("notifications"))
+    deployment_path = deployment_path_for_config(config_path, deployment_file)
+    deployment = load_deployment(config_path, deployment_file)
+    handoff, data, ffi_dir, db, runs, wcs = _paths_from_deployment(
+        deployment, deployment_path=deployment_path
+    )
+
+    return RunnerConfig(
+        deployment_file=deployment_file,
+        data_root=data,
         ffi_dir=ffi_dir,
-        handoff_root=handoff_root,
-        runs_root=runs_root or "",
-        state_db_path=state_db or "",
-        skycell_wcs_csv=_resolve_path(base_dir, raw.get("skycell_wcs_csv", "")) or "",
-        gaia_credentials=_resolve_path(base_dir, raw.get("gaia_credentials")),
+        handoff_root=handoff,
+        runs_root=runs,
+        state_db_path=db,
+        skycell_wcs_csv=wcs,
         stages=parse_stage_params(raw.get("stages", {})),
         resources=_parse_resources(raw.get("resources")),
         overrides=dict(raw.get("overrides", {}) or {}),
@@ -111,17 +151,31 @@ def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
         verify_budget_per_tick=int(
             raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
         ),
-        notifications=parse_notification_config(raw.get("notifications")),
+        notifications=notifications,
     )
-    if not cfg.data_root:
-        raise ValueError("config.yaml requires data_root")
-    if not cfg.handoff_root:
-        raise ValueError("config.yaml requires handoff_root")
-    if not cfg.skycell_wcs_csv:
-        raise ValueError("config.yaml requires skycell_wcs_csv")
-    if not cfg.state_db_path:
-        cfg.state_db_path = str(Path(cfg.handoff_root) / "pipeline_state.sqlite")
-    return cfg
+
+
+def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
+    path = Path(yaml_path).expanduser().resolve()
+    with path.open(encoding="utf-8") as fh:
+        raw: dict = yaml.safe_load(fh) or {}
+    if _is_materialized_config(raw):
+        return load_and_materialize_runner_config(path)
+    return _build_runner_config(raw, config_path=path, base_dir=path.parent)
+
+
+def resolve_handoff_root(config_path: str | Path) -> Path:
+    """Resolve handoff workspace from site deployment file."""
+    cfg_path = Path(config_path).expanduser().resolve()
+    with cfg_path.open(encoding="utf-8") as fh:
+        raw: dict = yaml.safe_load(fh) or {}
+    deployment_file = parse_deployment_file(raw)
+    deployment_path = deployment_path_for_config(cfg_path, deployment_file)
+    deployment = load_deployment(cfg_path, deployment_file)
+    handoff = require_deployment_path(
+        deployment, "handoff_root", deployment_path=deployment_path
+    )
+    return normalize_handoff_root(handoff)
 
 
 def _normalize_override_paths(overrides: Dict[str, dict], base_dir: Path) -> Dict[str, dict]:
@@ -159,11 +213,17 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "downsample": asdict(cfg.stages.downsample),
     }
     data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
-    data["scheduler"] = {"heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s}
+    data["scheduler"] = {
+        "heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s,
+        "verify_max_workers": cfg.verify_max_workers,
+        "verify_budget_per_tick": cfg.verify_budget_per_tick,
+    }
     data.pop("scheduler_heartbeat_interval_s", None)
+    data.pop("verify_max_workers", None)
+    data.pop("verify_budget_per_tick", None)
+    data["deployment_file"] = cfg.deployment_file
     data["notifications"] = {
         "enabled": cfg.notifications.enabled,
-        "secrets_file": cfg.notifications.secrets_file,
         "events": {
             "run_started": cfg.notifications.events.run_started,
             "run_completed": cfg.notifications.events.run_completed,
@@ -201,37 +261,45 @@ def load_and_materialize_runner_config(
     with path.open(encoding="utf-8") as fh:
         raw: dict = yaml.safe_load(fh) or {}
 
-    data_root = _resolve_path(base, raw.get("data_root", "")) or ""
-    ffi_dir = _resolve_path(base, raw.get("ffi_dir", "")) or data_root
-    handoff_root = _resolve_path(base, raw.get("handoff_root", "")) or ""
-    runs_root = _resolve_path(base, raw.get("runs_root")) or ""
-    state_db = _resolve_path(base, raw.get("state_db_path")) or ""
-
-    cfg = RunnerConfig(
-        data_root=data_root,
-        ffi_dir=ffi_dir,
-        handoff_root=handoff_root,
-        runs_root=runs_root or "",
-        state_db_path=state_db or "",
-        skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
-        gaia_credentials=_resolve_path(base, raw.get("gaia_credentials")),
-        stages=parse_stage_params(raw.get("stages", {})),
-        resources=_parse_resources(raw.get("resources")),
-        overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
-        scheduler_heartbeat_interval_s=float(raw.get("scheduler", {}).get("heartbeat_interval_s", 30.0)),
-        notifications=parse_notification_config(raw.get("notifications")),
-    )
-    if not cfg.data_root:
-        raise ValueError("config.yaml requires data_root")
-    if not cfg.handoff_root:
-        raise ValueError("config.yaml requires handoff_root")
-    if not cfg.skycell_wcs_csv:
-        raise ValueError("config.yaml requires skycell_wcs_csv")
-    if not cfg.state_db_path:
-        cfg.state_db_path = str(Path(cfg.handoff_root) / "pipeline_state.sqlite")
+    if _is_materialized_config(raw):
+        cfg = RunnerConfig(
+            deployment_file=str(raw.get("deployment_file", "deployment.yaml")),
+            data_root=_resolve_path(base, raw.get("data_root", "")) or "",
+            ffi_dir=_resolve_path(base, raw.get("ffi_dir", "")) or "",
+            handoff_root=_resolve_path(base, raw.get("handoff_root", "")) or "",
+            runs_root=_resolve_path(base, raw.get("runs_root")) or "",
+            state_db_path=_resolve_path(base, raw.get("state_db_path")) or "",
+            skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
+            stages=parse_stage_params(raw.get("stages", {})),
+            resources=_parse_resources(raw.get("resources")),
+            overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
+            scheduler_heartbeat_interval_s=float(
+                raw.get("scheduler", {}).get("heartbeat_interval_s", 30.0)
+            ),
+            verify_max_workers=int(raw.get("scheduler", {}).get("verify_max_workers", 1)),
+            verify_budget_per_tick=int(
+                raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
+            ),
+            notifications=parse_notification_config(raw.get("notifications")),
+        )
+        if not cfg.ffi_dir and cfg.data_root:
+            cfg.ffi_dir = str(Path(cfg.data_root) / "tess_ffi")
+        if not cfg.state_db_path and cfg.handoff_root:
+            cfg.state_db_path = str(state_db_path(cfg.handoff_root))
+        if not cfg.runs_root and cfg.handoff_root:
+            cfg.runs_root = str(handoff_runs_root(cfg.handoff_root))
+        if not cfg.skycell_wcs_csv:
+            cfg.skycell_wcs_csv = str(skycell_wcs_csv())
+    else:
+        cfg = _build_runner_config(raw, config_path=path, base_dir=base)
 
     _resolve_stage_path_fields(cfg, raw.get("stages", {}) or {}, base)
     return cfg
+
+
+def _is_materialized_config(raw: dict) -> bool:
+    """Frozen run configs embed resolved paths; site configs use deployment.yaml instead."""
+    return bool(str(raw.get("handoff_root", "")).strip() and str(raw.get("data_root", "")).strip())
 
 
 def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Path) -> None:
@@ -259,11 +327,11 @@ class ResolvedTargetConfig:
     ffi_dir: str
     handoff_dir: str
     skycell_wcs_csv: str
-    gaia_credentials: str | None
     stages: TemplateStageParams
     mapping_root: str
     zarr_dir: str
     template_output_base: str
+    config_path: str = ""
 
 
 def _deep_merge_dict(base: dict, override: dict) -> dict:
@@ -276,7 +344,12 @@ def _deep_merge_dict(base: dict, override: dict) -> dict:
     return out
 
 
-def resolve_config(target: Target, cfg: RunnerConfig) -> ResolvedTargetConfig:
+def resolve_config(
+    target: Target,
+    cfg: RunnerConfig,
+    *,
+    config_path: str | Path | None = None,
+) -> ResolvedTargetConfig:
     merged_stages_raw: dict = {
         "wcs_grouping": cfg.stages.wcs_grouping.__dict__,
         "mapping": cfg.stages.mapping.__dict__,
@@ -305,11 +378,11 @@ def resolve_config(target: Target, cfg: RunnerConfig) -> ResolvedTargetConfig:
         ffi_dir=cfg.ffi_dir,
         handoff_dir=handoff_dir,
         skycell_wcs_csv=cfg.skycell_wcs_csv,
-        gaia_credentials=cfg.gaia_credentials,
         stages=parse_stage_params(merged_stages_raw),
         mapping_root=mapping_root,
         zarr_dir=zarr_dir,
         template_output_base=template_output_base,
+        config_path=str(config_path) if config_path else "",
     )
 
 
