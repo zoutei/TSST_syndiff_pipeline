@@ -860,7 +860,7 @@ syndiff-template submit \
 2. Materializes frozen `config.yaml` + `targets.csv` into `{handoff_root}/runs/<run_id>/`.
 3. Inserts run + per-target stage rows in `{handoff_root}/pipeline_state.sqlite`.
 4. Starts the supervisor daemon (if not already alive for this `handoff_root`).
-5. Optionally starts the Discord bot when `notifications.bot.enabled: true`.
+5. Starts the Discord bot when enabled: on supervisor startup if a new supervisor was spawned, otherwise immediately from `submit` (one bot per workspace, flock-guarded).
 6. Updates `{handoff_root}/runs/latest` → `<run_id>`.
 
 **Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically):
@@ -1055,7 +1055,7 @@ syndiff-template reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
 
 ### Daemon and Discord
 
-**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running` and start the Discord bot when enabled. The supervisor stays up across runs so later submits reuse it. Use `daemon stop` only when you intentionally want the workspace supervisor down (maintenance, host idle, debugging).
+**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running`. The Discord bot is started once per workspace: by the supervisor on its startup, or by the CLI when the supervisor was already running. There is no periodic bot health poll. Use `daemon stop` only when you intentionally want the workspace supervisor down (maintenance, host idle, debugging).
 
 #### `daemon`
 
@@ -1075,17 +1075,21 @@ syndiff-template daemon status
 
 | Action | Notes |
 |--------|-------|
-| `start` | Starts supervisor + Discord bot (when enabled in config/deployment.yaml) |
-| `stop` | Stops supervisor and Discord bot |
+| `start` | Starts supervisor; ensures Discord bot when supervisor was already running, otherwise bot starts with new supervisor |
+| `stop` | Stops supervisor and all Discord bots for this workspace |
 | `status` | JSON: supervisor liveness + Discord bot state |
 
-Daemon files on disk:
+Daemon and bot files on disk:
 
 ```text
 {handoff_root}/daemon.pid
 {handoff_root}/daemon.log
 {handoff_root}/daemon.lock
 {handoff_root}/pipeline_state.sqlite
+{handoff_root}/discord_bot.pid
+{handoff_root}/discord_bot.lock
+{handoff_root}/discord_bot.log
+{handoff_root}/discord_bot_config.path
 ```
 
 #### `notify test`
