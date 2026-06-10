@@ -17,6 +17,7 @@ from syndiff_pipeline.template_runner import logs
 from syndiff_pipeline.template_runner.cli import cmd_retry
 from syndiff_pipeline.template_runner.run_context import RunContext, resolve_run_context
 from syndiff_pipeline.template_runner.scheduler_control import ensure_daemon_running
+from syndiff_pipeline.template_runner.workspace import record_deployment_path
 from syndiff_pipeline.template_runner.state import (
     PipelineState,
     STATUS_FAILED,
@@ -75,6 +76,9 @@ def _make_run_context(tmp: Path, *, enabled: str = "true") -> tuple[RunContext, 
         ["mapping", "downsample"],
     )
     ctx = resolve_run_context(run_dir=run_dir)
+    deploy_path = tmp / "site" / "deployment.yaml"
+    if deploy_path.is_file():
+        record_deployment_path(handoff, deploy_path)
     return ctx, state
 
 
@@ -145,7 +149,9 @@ class TestCmdRetry(unittest.TestCase):
             cmds = state.fetch_pending_commands()
             self.assertEqual(len(cmds), 1)
             self.assertEqual(cmds[0].kind, "retry")
-            ensure.assert_called_once_with(ctx.cfg.handoff_root)
+            ensure.assert_called_once()
+            self.assertEqual(ensure.call_args.args[0], ctx.cfg.handoff_root)
+            self.assertIsNotNone(ensure.call_args.kwargs.get("deployment_path"))
 
 
 if __name__ == "__main__":

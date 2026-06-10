@@ -6,10 +6,14 @@ import signal
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 from syndiff_pipeline.template_runner import daemon, logs
 from syndiff_pipeline.template_runner.state import PipelineState
-from syndiff_pipeline.template_runner.workspace import state_db_path
+from syndiff_pipeline.template_runner.workspace import (
+    load_recorded_deployment_path,
+    state_db_path,
+)
 
 DEFAULT_HEARTBEAT_STALE_S = 120.0
 DEFAULT_STOP_TERM_TIMEOUT_S = 10.0
@@ -137,7 +141,26 @@ def daemon_status(handoff_root: str) -> daemon.DaemonStatus:
     )
 
 
-def ensure_daemon_running(handoff_root: str) -> EnsureDaemonResult:
+def _resolve_deployment_for_spawn(
+    handoff_root: str,
+    deployment_path: str | Path | None,
+) -> Path:
+    if deployment_path is not None:
+        return Path(deployment_path).expanduser().resolve()
+    recorded = load_recorded_deployment_path(handoff_root)
+    if recorded is not None:
+        return recorded
+    raise RuntimeError(
+        "Cannot spawn supervisor: no deployment.yaml recorded for this workspace. "
+        "Submit a run first or use: syndiff-template daemon start --deployment PATH"
+    )
+
+
+def ensure_daemon_running(
+    handoff_root: str,
+    *,
+    deployment_path: str | Path | None = None,
+) -> EnsureDaemonResult:
     """Start detached supervisor daemon if not alive (flock-guarded by the daemon)."""
     if daemon_is_alive(handoff_root):
         pid = daemon.read_pid(logs.daemon_pid_path(handoff_root))
@@ -146,8 +169,9 @@ def ensure_daemon_running(handoff_root: str) -> EnsureDaemonResult:
     if daemon_is_wedged(handoff_root):
         stop_daemon(handoff_root)
 
+    deploy_path = _resolve_deployment_for_spawn(handoff_root, deployment_path)
     daemon_log = logs.daemon_log_path(handoff_root)
-    spawn_pid = daemon.spawn_detached_daemon(handoff_root, daemon_log)
+    spawn_pid = daemon.spawn_detached_daemon(deploy_path, daemon_log)
     if daemon.wait_for_daemon(handoff_root):
         owner_pid = daemon.read_pid(logs.daemon_pid_path(handoff_root))
         spawned = owner_pid == spawn_pid
