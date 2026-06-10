@@ -19,7 +19,11 @@ stages:
     overwrite: false
   ps1_process:
     # run.sh active line: process_ps1.py 23 2 1 --remove-saturated-stars
-    # ps1_source: zarr (default) — requires ps1_download stage; see config_real_skycell_stream.yaml
+    ps1_source: zarr  # default: read shared Zarr from ps1_download
+    # Stream mode (no shared ps1_skycells.zarr): set ps1_source: stream and
+    # num_ingest_workers below; ps1_download is skipped (shows ps1_dl:n/a).
+    #   ps1_source: stream
+    #   num_ingest_workers: 16
     remove_saturated_stars: true
     enable_saturation_correction: false
     psf_sigma: 40.0

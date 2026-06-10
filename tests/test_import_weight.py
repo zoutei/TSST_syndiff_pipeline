@@ -17,7 +17,7 @@ class TestSchedulerImportWeight(unittest.TestCase):
                 (
                     "import time\n"
                     "t = time.perf_counter()\n"
-                    "import syndiff_pipeline.template_runner.scheduler\n"
+                    "import syndiff_pipeline.template_creation.orchestration.scheduler\n"
                     "print(time.perf_counter() - t)\n"
                 ),
             ],

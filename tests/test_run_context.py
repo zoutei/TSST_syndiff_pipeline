@@ -10,9 +10,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner import logs, stages
-from syndiff_pipeline.template_runner.run_context import resolve_run_context
-from syndiff_pipeline.template_runner.runner_config import load_runner_config
+from syndiff_pipeline.template_creation.orchestration import dispatch, logs
+from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
 from tests.site_config import write_site_config
 
 
@@ -120,7 +120,7 @@ class TestResolveRunContext(unittest.TestCase):
 
 class TestBuildStageCommand(unittest.TestCase):
     def test_uses_run_dir_not_config_paths(self):
-        cmd = stages.build_stage_command(
+        cmd = dispatch.build_stage_command(
             "run_a",
             "mapping",
             "/handoff/runs/run_a",

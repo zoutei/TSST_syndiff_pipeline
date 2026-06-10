@@ -11,8 +11,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
-from syndiff_pipeline.template_runner.stage_params import (
+from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
+from syndiff_pipeline.template_creation.orchestration.stage_params import (
     DownsampleStageParams,
     MappingStageParams,
     Ps1DownloadStageParams,
@@ -20,8 +20,8 @@ from syndiff_pipeline.template_runner.stage_params import (
     TemplateStageParams,
     WcsGroupingStageParams,
 )
-from syndiff_pipeline.template_runner.targets import Target
-from syndiff_pipeline.template_runner.verify import verify_downsample
+from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.template_creation.orchestration.verify import verify_downsample
 
 
 def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:

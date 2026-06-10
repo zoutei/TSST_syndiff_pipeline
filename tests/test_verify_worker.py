@@ -13,9 +13,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner import logs
-from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
-from syndiff_pipeline.template_runner.scheduler import (
+from syndiff_pipeline.template_creation.orchestration import logs
+from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config, resolve_config
+from syndiff_pipeline.template_creation.orchestration.scheduler import (
     _apply_commands,
     _apply_verify_outcome,
     _iter_verify_candidates,
@@ -23,28 +23,28 @@ from syndiff_pipeline.template_runner.scheduler import (
     _tick_run,
     _verify_backlog,
 )
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration.state import (
     PipelineState,
     STATUS_EXTERNAL,
     STATUS_PENDING,
     STATUS_READY,
     STATUS_SKIPPED,
 )
-from syndiff_pipeline.template_runner.targets import Target
-from syndiff_pipeline.template_runner.verify import (
+from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.template_creation.orchestration.verify import (
     copy_manifest_to_stable,
     manifest_valid,
     read_manifest,
     write_manifest,
 )
-from syndiff_pipeline.template_runner.verify_status import (
+from syndiff_pipeline.template_creation.orchestration.verify_status import (
     clear_verify_in_flight,
     read_verify_in_flight,
     read_verify_pending,
     read_verify_run_status,
     write_verify_in_flight,
 )
-from syndiff_pipeline.template_runner.verify_worker import (
+from syndiff_pipeline.template_creation.orchestration.verify_worker import (
     get_verify_worker,
     reset_verify_worker_for_tests,
     shutdown_verify_worker,
@@ -137,7 +137,7 @@ class TestVerifyWorkerLifecycle(unittest.TestCase):
         self.assertIsNone(try_get_verify_worker())
 
     def test_cancel_paths_do_not_create_worker(self):
-        from syndiff_pipeline.template_runner.scheduler import _cancel_verify_run
+        from syndiff_pipeline.template_creation.orchestration.scheduler import _cancel_verify_run
 
         _cancel_verify_run("run_x")
         self.assertIsNone(try_get_verify_worker())
@@ -171,7 +171,7 @@ class TestVerifyScheduling(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -231,7 +231,7 @@ class TestVerifyScheduling(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -284,7 +284,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return True
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -324,13 +324,13 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
             ):
                 _tick_run(state, run_id, ctx)
                 run = state.get_run(run_id)
@@ -356,12 +356,12 @@ class TestVerifyCommandIntegration(unittest.TestCase):
             self.assertEqual(in_flight, 0)
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler._run_verify_pass",
+                "syndiff_pipeline.template_creation.orchestration.scheduler._run_verify_pass",
                 return_value=0,
             ):
                 _tick_run(state, run_id, ctx)
@@ -386,13 +386,13 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
             ):
                 _tick_run(state, run_id, ctx)
                 run = state.get_run(run_id)

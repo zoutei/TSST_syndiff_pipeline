@@ -10,7 +10,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.discord_bot import _channel_matches
+from syndiff_pipeline.template_creation.orchestration.discord_bot import _channel_matches
 
 
 class TestChannelMatches(unittest.TestCase):

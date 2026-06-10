@@ -11,10 +11,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner import daemon
-from syndiff_pipeline.template_runner.discord_bot_control import spawn_detached_discord_bot
-from syndiff_pipeline.template_runner.scheduler_control import ensure_daemon_running
-from syndiff_pipeline.template_runner.workspace import record_deployment_path
+from syndiff_pipeline.template_creation.orchestration import daemon
+from syndiff_pipeline.template_creation.orchestration.discord_bot_control import spawn_detached_discord_bot
+from syndiff_pipeline.template_creation.orchestration.scheduler_control import ensure_daemon_running
+from syndiff_pipeline.template_creation.orchestration.workspace import record_deployment_path
 from tests.site_config import write_site_deployment
 
 
@@ -26,7 +26,7 @@ class TestSpawnDeploymentArgv(unittest.TestCase):
             handoff = base / "handoff"
             write_site_deployment(base, handoff_root=str(handoff), data_root=str(base / "data"))
             with mock.patch(
-                "syndiff_pipeline.template_runner.daemon.subprocess.Popen",
+                "syndiff_pipeline.template_creation.orchestration.daemon.subprocess.Popen",
             ) as popen:
                 popen.return_value.pid = 1234
                 pid = daemon.spawn_detached_daemon(deploy, base / "daemon.log")
@@ -43,7 +43,7 @@ class TestSpawnDeploymentArgv(unittest.TestCase):
             handoff = base / "handoff"
             write_site_deployment(base, handoff_root=str(handoff), data_root=str(base / "data"))
             with mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.subprocess.Popen",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.subprocess.Popen",
             ) as popen:
                 popen.return_value.pid = 5678
                 pid = spawn_detached_discord_bot(deploy, base / "bot.log")
@@ -58,10 +58,10 @@ class TestSpawnDeploymentArgv(unittest.TestCase):
             handoff = Path(tmp) / "handoff"
             handoff.mkdir()
             with mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon_is_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon_is_alive",
                 return_value=False,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon_is_wedged",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon_is_wedged",
                 return_value=False,
             ):
                 with self.assertRaises(RuntimeError) as ctx:
@@ -77,19 +77,19 @@ class TestSpawnDeploymentArgv(unittest.TestCase):
             write_site_deployment(base, handoff_root=str(handoff), data_root=str(base / "data"))
             record_deployment_path(handoff, deploy)
             with mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon_is_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon_is_alive",
                 return_value=False,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon_is_wedged",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon_is_wedged",
                 return_value=False,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.spawn_detached_daemon",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.spawn_detached_daemon",
                 return_value=4242,
             ) as spawn, mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_daemon",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_daemon",
                 return_value=True,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
                 return_value=4242,
             ):
                 result = ensure_daemon_running(str(handoff))

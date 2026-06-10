@@ -13,8 +13,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
-from syndiff_pipeline.template_runner.stage_params import (
+from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
+from syndiff_pipeline.template_creation.orchestration.stage_params import (
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
@@ -22,8 +22,8 @@ from syndiff_pipeline.template_runner.stage_params import (
     WcsGroupingStageParams,
     DownsampleStageParams,
 )
-from syndiff_pipeline.template_runner.targets import Target
-from syndiff_pipeline.template_runner.verify import verify_ps1_process
+from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.template_creation.orchestration.verify import verify_ps1_process
 
 
 def _resolved(tmp: Path, csv_path: Path, zarr_path: Path, projections_limit: int | None = None):
@@ -143,7 +143,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template.ps1_process.expected_convolved_skycells",
+                "syndiff_pipeline.template_creation.processing.ps1_process.expected_convolved_skycells",
                 return_value=[("skycell.1520.080", 0), ("skycell.1520.081", 1)],
             ):
                 result = verify_ps1_process(_resolved(tmp, csv_path, zarr_path))

@@ -12,7 +12,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.notifications import (
+from syndiff_pipeline.template_creation.orchestration.notifications import (
     _DISCORD_MAX_CONTENT,
     NotificationConfig,
     NotificationEvents,
@@ -32,20 +32,20 @@ from syndiff_pipeline.template_runner.notifications import (
     send_preview_notification,
     send_run_started_notification,
 )
-from syndiff_pipeline.template_runner.run_report import (
+from syndiff_pipeline.template_creation.orchestration.run_report import (
     format_progress_lines,
     format_run_report,
     format_run_report_messages,
     format_status_grid,
 )
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration.state import (
     STAGE_NAMES,
     PipelineState,
     STATUS_PENDING,
     STATUS_RUNNING,
     STATUS_SUCCESS,
 )
-from syndiff_pipeline.template_runner.targets import Target
+from syndiff_pipeline.template_creation.orchestration.targets import Target
 
 
 class TestNotificationConfig(unittest.TestCase):
@@ -148,7 +148,7 @@ class TestRunStarted(unittest.TestCase):
             )
             cfg = NotificationConfig(enabled=True)
             with mock.patch(
-                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
             ) as post:
                 send_run_started_notification(
                     state,
@@ -421,7 +421,7 @@ class TestPreview(unittest.TestCase):
             ctx.cfg.deployment_file = "deployment.yaml"
 
             with mock.patch(
-                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
             ) as post:
                 send_preview_notification(state, ctx)
                 send_preview_notification(state, ctx)
@@ -456,7 +456,7 @@ class TestNotifier(unittest.TestCase):
                 deployment_file="deployment.yaml",
             )
             with mock.patch(
-                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
             ) as post:
                 notifier.notify_run_retried(
                     "r1",
@@ -499,7 +499,7 @@ class TestNotifier(unittest.TestCase):
                 deployment_file="deployment.yaml",
             )
             with mock.patch(
-                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
             ) as post:
                 notifier.notify_stage_outcome(
                     "r1",
@@ -556,7 +556,7 @@ class TestNotifier(unittest.TestCase):
                 deployment_file="deployment.yaml",
             )
             with mock.patch(
-                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
             ) as post:
                 notifier.notify_stage_outcome(
                     "run_big",
@@ -604,7 +604,7 @@ class TestNotifier(unittest.TestCase):
             )
 
             with mock.patch(
-                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
             ) as post:
                 label = target.label()
                 notifier.notify_stage_outcome(

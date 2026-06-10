@@ -9,7 +9,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from stage_params import (
+from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     parse_background_rough,
     parse_forced_photometry,
     parse_hotpants,

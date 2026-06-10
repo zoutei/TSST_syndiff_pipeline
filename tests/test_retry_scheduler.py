@@ -13,16 +13,16 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner import logs
-from syndiff_pipeline.template_runner.cli import cmd_retry
-from syndiff_pipeline.template_runner.run_context import RunContext, resolve_run_context
-from syndiff_pipeline.template_runner.scheduler_control import ensure_daemon_running
-from syndiff_pipeline.template_runner.workspace import record_deployment_path
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration import logs
+from syndiff_pipeline.template_creation.orchestration.cli import cmd_retry
+from syndiff_pipeline.template_creation.orchestration.run_context import RunContext, resolve_run_context
+from syndiff_pipeline.template_creation.orchestration.scheduler_control import ensure_daemon_running
+from syndiff_pipeline.template_creation.orchestration.workspace import record_deployment_path
+from syndiff_pipeline.template_creation.orchestration.state import (
     PipelineState,
     STATUS_FAILED,
 )
-from syndiff_pipeline.template_runner.targets import Target, find_target_for_run
+from syndiff_pipeline.template_creation.orchestration.targets import Target, find_target_for_run
 from tests.site_config import write_site_config
 
 
@@ -95,13 +95,13 @@ class TestEnsureDaemonRunning(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx, _state = _make_run_context(Path(tmp))
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.spawn_detached_daemon",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.spawn_detached_daemon",
                 return_value=4242,
             ) as spawn, unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_daemon",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_daemon",
                 return_value=True,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
                 return_value=4242,
             ):
                 result = ensure_daemon_running(ctx.cfg.handoff_root)
@@ -113,13 +113,13 @@ class TestEnsureDaemonRunning(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx, _state = _make_run_context(Path(tmp))
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon_is_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon_is_alive",
                 return_value=True,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.read_pid",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
                 return_value=99999,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.spawn_detached_daemon",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.spawn_detached_daemon",
             ) as spawn:
                 result = ensure_daemon_running(ctx.cfg.handoff_root)
             self.assertFalse(result.spawned)
@@ -142,7 +142,7 @@ class TestCmdRetry(unittest.TestCase):
                 no_start_daemon=False,
             )
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.cli.ensure_daemon_running",
+                "syndiff_pipeline.template_creation.orchestration.cli.ensure_daemon_running",
             ) as ensure:
                 rc = cmd_retry(args)
             self.assertEqual(rc, 0)

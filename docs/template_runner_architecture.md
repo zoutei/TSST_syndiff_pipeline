@@ -412,7 +412,7 @@ For local launches, any previous `*.status.json` is deleted before spawn so stal
 ### Command built (`stages.build_stage_command`)
 
 ```text
-python -m syndiff_pipeline.template_runner.run_stage \
+python -m syndiff_pipeline.template_creation.orchestration.run_stage \
   --run-id … --stage … --run-dir … --target-label … --launch-token … [--force-rerun]
 ```
 

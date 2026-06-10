@@ -23,7 +23,7 @@ Key points:
 
 ## WCS grouping (runner-only)
 
-There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the SynDiff template runner. It uses `syndiff_pipeline.wcs_grouping` via `template_runner/handoff.py` to:
+There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the SynDiff template runner. It uses `syndiff_pipeline.common.wcs_grouping` via `template_runner/handoff.py` to:
 
 1. Select FFIs where the transient has valid WCS
 2. Smooth pixel drift and assign template offset groups

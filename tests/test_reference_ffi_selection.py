@@ -14,7 +14,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from wcs_grouping import (
+from syndiff_pipeline.common.wcs_grouping import (
     attach_tessvector_earth_moon_angles,
     choose_reference_ffi_path,
     plot_wcs_drift_and_template_assignment,

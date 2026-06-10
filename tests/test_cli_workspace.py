@@ -13,9 +13,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner import cli
-from syndiff_pipeline.template_runner.state import PipelineState
-from syndiff_pipeline.template_runner.targets import Target
+from syndiff_pipeline.template_creation.orchestration import cli
+from syndiff_pipeline.template_creation.orchestration.state import PipelineState
+from syndiff_pipeline.template_creation.orchestration.targets import Target
 
 
 class TestWorkspaceMonitoring(unittest.TestCase):

@@ -13,13 +13,18 @@ requires-python = ">=3.10"
 discord = ["discord.py>=2.3"]
 
 [project.scripts]
-syndiff-template = "syndiff_pipeline.template_runner.cli:main"
+syndiff-template = "syndiff_pipeline.template_creation.orchestration.cli:main"
+syndiff-run = "syndiff_pipeline.difference_imaging.orchestration.cli:main"
 
-[tool.setuptools]
-package-dir = {"syndiff_pipeline" = "."}
-packages = ["syndiff_pipeline", "syndiff_pipeline.template", "syndiff_pipeline.template_runner"]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["syndiff_pipeline*"]
+
+[tool.setuptools.package-data]
+"syndiff_pipeline.template_creation.orchestration" = ["condor_wrapper.sh"]
+"syndiff_pipeline.resources" = ["skycell_wcs.csv", "README.md"]
 
 [tool.pyright]
 executionEnvironments = [
-  { root = ".", extraPaths = [".."], pythonVersion = "3.10" }
+  { root = "syndiff_pipeline", extraPaths = [".."], pythonVersion = "3.10" }
 ]

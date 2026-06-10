@@ -10,7 +10,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template.downsample_progress import (
+from syndiff_pipeline.template_creation.processing.downsample_progress import (
     init_progress,
     mark_skycell_done,
     progress_path_for_log,

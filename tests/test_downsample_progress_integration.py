@@ -14,15 +14,15 @@ if str(_ROOT) not in sys.path:
 
 import numpy as np
 
-from syndiff_pipeline.template.downsample import process_skycell_batch
-from syndiff_pipeline.template.downsample_progress import (
+from syndiff_pipeline.template_creation.processing.downsample import process_skycell_batch
+from syndiff_pipeline.template_creation.processing.downsample_progress import (
     init_progress,
     mark_skycell_done,
     progress_path_for_log,
     read_progress,
     set_progress_phase,
 )
-from syndiff_pipeline.template_runner.stage_progress import read_log_progress
+from syndiff_pipeline.template_creation.orchestration.stage_progress import read_log_progress
 
 
 def _worker_mark(path_str: str, batch_idx: int, count: int) -> None:
@@ -125,8 +125,8 @@ class TestDownsampleProgressIntegration(unittest.TestCase):
             {"NAME": ["a", "b"], "shift_x": [0, 0], "shift_y": [0, 0]}
         )}
 
-        with mock.patch("syndiff_pipeline.template.downsample.fits.open") as mock_open, mock.patch(
-            "syndiff_pipeline.template.downsample.zarr.open"
+        with mock.patch("syndiff_pipeline.template_creation.processing.downsample.fits.open") as mock_open, mock.patch(
+            "syndiff_pipeline.template_creation.processing.downsample.zarr.open"
         ) as mock_zarr:
             mock_open.side_effect = OSError("registration read failed")
             mock_zarr.return_value = {}
