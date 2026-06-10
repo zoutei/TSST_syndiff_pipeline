@@ -51,6 +51,50 @@ class TestForceRerun(unittest.TestCase):
             self.assertEqual(row.status, STATUS_PENDING)
             self.assertIsNone(row.exit_code)
 
+    def test_apply_force_rerun_updates_selected_stages(self):
+        target = Target(
+            sector=23,
+            camera=1,
+            ccd=3,
+            target_ra=185.0,
+            target_dec=5.3,
+            target_name="2020ftl",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(str(db))
+            state.create_run(
+                "run_a",
+                "/cfg.yaml",
+                "/targets.csv",
+                tmp,
+                [target],
+                ["wcs_grouping"],
+            )
+            label = target.label()
+            state.apply_not_selected_skips(
+                "run_a",
+                [target],
+                RunnerConfig(data_root=str(Path(tmp) / "data")),
+            )
+            self.assertEqual(
+                state.get_skip_reason("run_a", label, "downsample"),
+                "not_selected",
+            )
+            state.apply_force_rerun(
+                "run_a",
+                [label],
+                ["wcs_grouping", "downsample"],
+            )
+            self.assertEqual(
+                state.get_active_stages("run_a"),
+                ["wcs_grouping", "downsample"],
+            )
+            down = state.get_stage_run("run_a", label, "downsample")
+            self.assertIsNotNone(down)
+            assert down is not None
+            self.assertEqual(down.status, STATUS_PENDING)
+
     def test_clear_ps1_process_artifacts(self):
         target = Target(
             sector=15,

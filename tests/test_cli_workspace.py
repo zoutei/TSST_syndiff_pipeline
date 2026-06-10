@@ -68,5 +68,78 @@ class TestWorkspaceMonitoring(unittest.TestCase):
             self.assertIn("run_old", buf.getvalue())
 
 
+class TestSubmitRunIdPolicy(unittest.TestCase):
+    def test_submit_rejects_duplicate_run_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir()
+            db = handoff / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run(
+                "batch_a",
+                "/c",
+                "/t",
+                str(handoff / "runs"),
+                [target],
+                ["wcs_grouping"],
+            )
+
+            cfg_path = Path(tmp) / "config.yaml"
+            cfg_path.write_text(
+                "\n".join(
+                    [
+                        f"handoff_root: {handoff}",
+                        f"data_root: {handoff / 'data'}",
+                        "deployment_file: deployment.yaml",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (Path(tmp) / "deployment.yaml").write_text(
+                f"handoff_root: {handoff}\ndata_root: {handoff / 'data'}\n",
+                encoding="utf-8",
+            )
+            targets_path = Path(tmp) / "targets.csv"
+            targets_path.write_text(
+                "sector,camera,ccd,target_ra,target_dec,target_name,enabled\n"
+                "22,3,3,228.0,52.0,2020dgc,true\n",
+                encoding="utf-8",
+            )
+
+            args = cli.build_parser().parse_args(
+                [
+                    "submit",
+                    "--config",
+                    str(cfg_path),
+                    "--targets",
+                    str(targets_path),
+                    "--run-id",
+                    "batch_a",
+                    "--stages",
+                    "wcs_grouping",
+                ]
+            )
+            with mock.patch.object(
+                cli, "load_runner_config", return_value=mock.Mock(
+                    handoff_root=str(handoff),
+                    runs_dir=lambda: str(handoff / "runs"),
+                    state_db_path=str(db),
+                    deployment_file="deployment.yaml",
+                    stages=mock.Mock(
+                        ps1_process=mock.Mock(ps1_source="zarr"),
+                    ),
+                    notifications=mock.Mock(enabled=False),
+                )
+            ), mock.patch.object(cli, "ensure_daemon_running"), mock.patch.object(
+                cli, "_ensure_discord_bot", return_value=None
+            ), mock.patch.object(
+                cli, "record_deployment_path"
+            ):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli.cmd_submit(args)
+            self.assertIn("already exists", str(ctx.exception))
+
+
 if __name__ == "__main__":
     unittest.main()
