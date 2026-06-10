@@ -8,6 +8,8 @@ Documentation for the **syndiff-pipeline** open-source release.
 |----------|----------|----------|
 | [Main README](../README.md) | Diff-imaging users | Hotpants, ePSF, background, forced photometry (`run_pipeline.py`) |
 | [Template pipeline guide](template_pipeline.md) | Template builders | Multi-target orchestration (`syndiff-template`), Condor, config, CLI |
+| [`syndiff-template` scripts reference](syndiff_template_scripts.md) | Template builders | What each CLI command, stage, and script module does |
+| [`template_runner` architecture](template_runner_architecture.md) | Maintainers | Supervisor, scheduler loop, SQLite state machine, verify/launch internals |
 | [batch_no2 PS1 download investigation](batch_no2_ps1_download_investigation.md) | Ops / debugging | NFS Zarr lock contention, config tuning, restart after kill |
 | [Example configs](../example/template_runner/README.md) | Quick start | Setup, workflow, per-command cheat sheet |
 

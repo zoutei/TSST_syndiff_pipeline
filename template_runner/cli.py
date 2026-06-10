@@ -895,16 +895,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--config", required=True)
     sp.add_argument("--targets", required=True)
     sp.add_argument("--stages", default=None)
-    sp.add_argument("--run-id", default=None)
-    sp.add_argument("--force-rerun", action="store_true")
+    sp.add_argument("--run-id", default=None, help="Unique run name (must not already exist)")
+    sp.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Ignore existing artifacts for selected stages (new run only)",
+    )
     sp.set_defaults(func=cmd_submit)
 
     sp = sub.add_parser("run", help="Foreground run (debug)")
     sp.add_argument("--config", required=True)
     sp.add_argument("--targets", required=True)
     sp.add_argument("--stages", default=None)
-    sp.add_argument("--run-id", default=None)
-    sp.add_argument("--force-rerun", action="store_true")
+    sp.add_argument("--run-id", default=None, help="Unique run name (must not already exist)")
+    sp.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Ignore existing artifacts for selected stages (new run only)",
+    )
     sp.set_defaults(func=cmd_run)
 
     sp = sub.add_parser("status", help="Show stage status grid (all active runs by default)")
