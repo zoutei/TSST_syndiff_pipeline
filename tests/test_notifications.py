@@ -432,6 +432,44 @@ class TestPreview(unittest.TestCase):
 
 
 class TestNotifier(unittest.TestCase):
+    def test_run_retried_includes_target_for_stage_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            handoff = base
+            db = base / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
+            cfg_path = base / "config.yaml"
+            (base / "deployment.yaml").write_text(
+                "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
+            )
+            cfg = NotificationConfig(
+                enabled=True,
+                events=NotificationEvents(run_retried=True),
+            )
+            notifier = Notifier(
+                state,
+                cfg,
+                config_path=cfg_path,
+                handoff_root=str(handoff),
+                deployment_file="deployment.yaml",
+            )
+            with mock.patch(
+                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+            ) as post:
+                notifier.notify_run_retried(
+                    "r1",
+                    str(base),
+                    target_label=target.label(),
+                    stage="mapping",
+                    reset_downstream=True,
+                )
+                self.assertEqual(post.call_count, 1)
+                self.assertIn("run_retried", post.call_args[0][1])
+                self.assertIn(target.label(), post.call_args[0][1])
+                self.assertIn("reset_downstream: true", post.call_args[0][1])
+
     def test_stage_canceled_outcome(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

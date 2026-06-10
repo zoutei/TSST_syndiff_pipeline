@@ -229,6 +229,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
             "run_completed": cfg.notifications.events.run_completed,
             "run_failed": cfg.notifications.events.run_failed,
             "run_canceled": cfg.notifications.events.run_canceled,
+            "run_retried": cfg.notifications.events.run_retried,
             "run_stalled": cfg.notifications.events.run_stalled,
             "run_resumed": cfg.notifications.events.run_resumed,
             "stage_failed": cfg.notifications.events.stage_failed,
