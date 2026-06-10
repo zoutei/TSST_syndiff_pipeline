@@ -44,6 +44,8 @@ STAGE_DEPS: Dict[str, List[str]] = {
 
 SKIP_REASON_STREAM = "stream_mode"
 SKIP_REASON_ARTIFACTS = "artifacts_verified"
+SKIP_REASON_NOT_SELECTED = "not_selected"
+SKIP_REASON_SUPERSEDED = "superseded"
 
 STAGE_POOL: Dict[str, str] = {
     "tess_ffi_download": "network",
@@ -139,6 +141,19 @@ class CommandRow:
             return {}
 
 
+def upstream_stages_for(active_stages: Sequence[str]) -> frozenset[str]:
+    """Transitive dependency closure for stages selected in a partial run."""
+    required: set[str] = set()
+    stack = list(active_stages)
+    while stack:
+        stage = stack.pop()
+        for dep in STAGE_DEPS.get(stage, []):
+            if dep not in required:
+                required.add(dep)
+                stack.append(dep)
+    return frozenset(required)
+
+
 def effective_stage_deps(stage: str, stages=None) -> List[str]:
     """Return dependency list for *stage*, honoring ps1_source=stream overrides."""
     if (
@@ -163,6 +178,43 @@ def downstream_stages(stage: str) -> List[str]:
                 out.add(s)
                 changed = True
     return [s for s in STAGE_NAMES if s in out]
+
+
+def run_stage_closure(active_stages: Sequence[str]) -> frozenset[str]:
+    """Selected stages plus every upstream dependency needed for this partial run."""
+    return frozenset(set(active_stages) | upstream_stages_for(active_stages))
+
+
+def artifact_verify_needed(
+    state: "PipelineState",
+    run_id: str,
+    target_label: str,
+    stage: str,
+    active_stages: Sequence[str],
+) -> bool:
+    """True if an external *stage* still needs on-disk artifact verification.
+
+    Upstream stages are not verified when a downstream stage in the run
+    closure is already ``success``/``skipped`` (e.g. skip ``ps1_download``
+    when ``ps1_process`` artifacts are already complete).
+    """
+    active = set(active_stages)
+    if stage in active:
+        return False
+    closure = run_stage_closure(active_stages)
+    if stage not in closure:
+        return False
+    row = state.get_stage_run(run_id, target_label, stage)
+    if row is None or row.status in SATISFIED_STATUSES:
+        return False
+    direct_dependents = [s for s, deps in STAGE_DEPS.items() if stage in deps]
+    for dep in direct_dependents:
+        if dep not in closure:
+            continue
+        dep_row = state.get_stage_run(run_id, target_label, dep)
+        if dep_row is not None and dep_row.status in SATISFIED_STATUSES:
+            return False
+    return True
 
 
 class PipelineState:
@@ -299,7 +351,7 @@ class PipelineState:
         self.requeue_to_ready(run_id, target_label, stage, error_tail=error_tail)
 
     def is_artifact_verified(self, run_id: str, target_label: str, stage: str) -> bool:
-        return self.external_checked(run_id, target_label, stage)
+        return self.external_verify_complete(run_id, target_label, stage)
 
     def cache_artifact_verified(
         self, run_id: str, target_label: str, stage: str, *, path: str = ""
@@ -366,7 +418,7 @@ class PipelineState:
                     status == STATUS_PENDING
                     and self.deps_satisfied(run_id, target_label, stage, stages=stages)
                     and (
-                        self.external_checked(run_id, target_label, stage)
+                        self.external_verify_complete(run_id, target_label, stage)
                         or may_promote_without_verify
                     )
                 ):
@@ -468,6 +520,13 @@ class PipelineState:
         self.set_run_status(run_id, RUN_RUNNING)
         return total
 
+    def set_selected_stages(self, run_id: str, stages: Sequence[str]) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE runs SET stages = ? WHERE run_id = ?",
+                (",".join(stages), run_id),
+            )
+
     def apply_force_rerun(
         self,
         run_id: str,
@@ -477,13 +536,15 @@ class PipelineState:
         """Daemon-side application of a force-rerun intent.
 
         Persists the run's ``force_rerun`` flag (so the daemon bypasses the
-        artifact-skip path for these stages), resets the selected stages to
-        ``pending`` (clearing cached artifact checks), and resumes the run.
+        artifact-skip path for these stages), updates ``runs.stages`` to match
+        the resubmit's ``--stages``, resets the selected stages to ``pending``
+        (clearing cached artifact checks), and resumes the run.
         """
         with self._conn() as conn:
             conn.execute(
                 "UPDATE runs SET force_rerun = 1 WHERE run_id = ?", (run_id,)
             )
+        self.set_selected_stages(run_id, stages)
         self.reset_stages_for_force_rerun(run_id, target_labels, stages)
         self.set_run_status(run_id, RUN_RUNNING)
 
@@ -590,6 +651,108 @@ class PipelineState:
             self.cache_skip_reason(run_id, label, "ps1_download", SKIP_REASON_STREAM)
             count += 1
         return count
+
+    def _clear_stage_skip_cache(
+        self, run_id: str, target_label: str, stage: str
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
+                "AND artifact_type IN (?, ?)",
+                (
+                    run_id,
+                    target_label,
+                    stage,
+                    "external_check",
+                    "skip_reason",
+                ),
+            )
+
+    def _reopen_not_selected_stage(
+        self, run_id: str, target_label: str, stage: str
+    ) -> None:
+        self._clear_stage_skip_cache(run_id, target_label, stage)
+        self.update_stage_status(run_id, target_label, stage, STATUS_PENDING)
+
+    def apply_not_selected_skips(self, run_id: str, targets: Sequence, cfg) -> int:
+        """Skip stages outside the upstream dependency closure of this run's --stages."""
+        active = set(self.get_active_stages(run_id))
+        required = upstream_stages_for(active)
+        count = 0
+        for t in targets:
+            if not getattr(t, "enabled", True):
+                continue
+            label = t.label()
+            for stage in STAGE_NAMES:
+                row = self.get_stage_run(run_id, label, stage)
+                if row is None:
+                    continue
+                if stage in active:
+                    if (
+                        row.status == STATUS_SKIPPED
+                        and self.get_skip_reason(run_id, label, stage)
+                        == SKIP_REASON_NOT_SELECTED
+                    ):
+                        self._reopen_not_selected_stage(run_id, label, stage)
+                    continue
+                if stage in required:
+                    continue
+                if row.status == STATUS_SKIPPED:
+                    if (
+                        self.get_skip_reason(run_id, label, stage)
+                        == SKIP_REASON_NOT_SELECTED
+                    ):
+                        continue
+                elif row.status in (STATUS_SUCCESS, STATUS_FAILED):
+                    continue
+                self._clear_stage_skip_cache(run_id, label, stage)
+                self.mark_skipped(run_id, label, stage)
+                self.cache_skip_reason(run_id, label, stage, SKIP_REASON_NOT_SELECTED)
+                count += 1
+        return count
+
+    def apply_superseded_skips(self, run_id: str, targets: Sequence) -> int:
+        """Skip upstream artifact checks made redundant by satisfied downstream work."""
+        active = self.get_active_stages(run_id)
+        closure = run_stage_closure(active)
+        count = 0
+        for t in targets:
+            if not getattr(t, "enabled", True):
+                continue
+            label = t.label()
+            for stage in STAGE_NAMES:
+                if stage in active or stage not in closure:
+                    continue
+                if artifact_verify_needed(self, run_id, label, stage, active):
+                    continue
+                row = self.get_stage_run(run_id, label, stage)
+                if row is None:
+                    continue
+                reason = self.get_skip_reason(run_id, label, stage)
+                if row.status == STATUS_SKIPPED and reason in (
+                    SKIP_REASON_NOT_SELECTED,
+                    SKIP_REASON_SUPERSEDED,
+                    SKIP_REASON_STREAM,
+                    SKIP_REASON_ARTIFACTS,
+                ):
+                    continue
+                if row.status in (STATUS_SUCCESS, STATUS_FAILED):
+                    continue
+                self._clear_stage_skip_cache(run_id, label, stage)
+                self.mark_skipped(run_id, label, stage)
+                self.cache_skip_reason(run_id, label, stage, SKIP_REASON_SUPERSEDED)
+                count += 1
+        return count
+
+    def _clear_external_check(
+        self, run_id: str, target_label: str, stage: str
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "DELETE FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
+                "AND artifact_type = ?",
+                (run_id, target_label, stage, "external_check"),
+            )
 
     def get_run(self, run_id: str) -> dict | None:
         with self._conn() as conn:
@@ -930,7 +1093,16 @@ class PipelineState:
     # ------------------------------------------------------------------
     # External -> skipped completeness cache
     # ------------------------------------------------------------------
-    def external_checked(self, run_id: str, target_label: str, stage: str) -> bool:
+    def external_verify_complete(self, run_id: str, target_label: str, stage: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT path FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
+                "AND artifact_type = ?",
+                (run_id, target_label, stage, "external_check"),
+            ).fetchone()
+            return row is not None and row["path"] == "1"
+
+    def external_verify_attempted(self, run_id: str, target_label: str, stage: str) -> bool:
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT 1 FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
@@ -938,6 +1110,10 @@ class PipelineState:
                 (run_id, target_label, stage, "external_check"),
             ).fetchone()
             return row is not None
+
+    def external_checked(self, run_id: str, target_label: str, stage: str) -> bool:
+        """True if any verify attempt was cached for this stage in this run."""
+        return self.external_verify_attempted(run_id, target_label, stage)
 
     def cache_external_check(
         self, run_id: str, target_label: str, stage: str, *, complete: bool, path: str | None = None
@@ -969,14 +1145,15 @@ class PipelineState:
             return row["path"] if row else None
 
     def list_unchecked_external_stages(self, run_id: str) -> List[StageRunRow]:
+        """External stages that still need a successful artifact verify (path != '1')."""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT s.* FROM stage_runs s "
                 "WHERE s.run_id = ? AND s.status = ? AND NOT EXISTS ("
                 "  SELECT 1 FROM artifacts a WHERE a.run_id = s.run_id "
                 "  AND a.target_label = s.target_label AND a.stage = s.stage "
-                "  AND a.artifact_type = ?)",
-                (run_id, STATUS_EXTERNAL, "external_check"),
+                "  AND a.artifact_type = ? AND a.path = ?)",
+                (run_id, STATUS_EXTERNAL, "external_check", "1"),
             ).fetchall()
             return [StageRunRow(**dict(r)) for r in rows]
 

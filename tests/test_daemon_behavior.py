@@ -37,10 +37,13 @@ from syndiff_pipeline.template_runner.stage_params import (
     TemplateStageParams,
     WcsGroupingStageParams,
 )
+from syndiff_pipeline.template_runner.run_report import format_status_grid
 from syndiff_pipeline.template_runner.state import (
     PipelineState,
     RUN_CANCELED,
     RUN_SUCCESS,
+    SKIP_REASON_NOT_SELECTED,
+    SKIP_REASON_SUPERSEDED,
     STATUS_CANCELED,
     STATUS_EXTERNAL,
     STATUS_FAILED,
@@ -50,6 +53,7 @@ from syndiff_pipeline.template_runner.state import (
     STATUS_SKIPPED,
     STATUS_SUCCESS,
     derive_run_final_status,
+    upstream_stages_for,
 )
 from syndiff_pipeline.template_runner.targets import Target
 from syndiff_pipeline.template_runner.verify import (
@@ -312,11 +316,17 @@ class TestSkipIntegration(unittest.TestCase):
             shutdown_verify_worker(wait=True)
 
             self.assertGreaterEqual(skipped, 1)
-            for stage in ("tess_ffi_download", "mapping", "ps1_download", "ps1_process"):
+            for stage in ("tess_ffi_download", "mapping", "ps1_process"):
                 self.assertEqual(
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_SKIPPED,
                 )
+            ps1_dl = state.get_stage_run(run_id, label, "ps1_download")
+            self.assertEqual(ps1_dl.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason(run_id, label, "ps1_download"),
+                SKIP_REASON_SUPERSEDED,
+            )
             for stage in ("wcs_grouping", "downsample"):
                 self.assertEqual(
                     state.get_stage_run(run_id, label, stage).status,
@@ -492,11 +502,12 @@ class TestSkipBeforePromote(unittest.TestCase):
             ):
                 _resolve_external_and_pending_skips(state, run_id, ctx, force_rerun=False)
 
-            self.assertTrue(state.external_checked(run_id, label, "mapping"))
+            self.assertTrue(state.external_verify_attempted(run_id, label, "mapping"))
+            self.assertFalse(state.external_verify_complete(run_id, label, "mapping"))
             promoted = state.promote_stages(run_id)
-            self.assertEqual(promoted, 1)
+            self.assertEqual(promoted, 0)
             self.assertEqual(
-                state.get_stage_run(run_id, label, "mapping").status, STATUS_READY
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
             )
 
     def test_mapping_skipped_before_launch_multi_target(self):
@@ -589,6 +600,9 @@ class TestStallDetection(unittest.TestCase):
             with unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler._schedule_external_and_pending_skips",
                 return_value=None,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler._verify_backlog",
+                return_value=(0, 0),
             ), unittest.mock.patch(
                 "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
                 return_value={},
@@ -1040,6 +1054,193 @@ class TestRetryAfterCancel(unittest.TestCase):
             )
             state.apply_retry_run("run_a")
             self.assertEqual(state.get_stage_run("run_a", label, "mapping").status, STATUS_PENDING)
+
+
+class TestNotSelectedSkips(unittest.TestCase):
+    def test_upstream_stages_for_wcs_only(self):
+        self.assertEqual(upstream_stages_for(["wcs_grouping"]), frozenset({"tess_ffi_download"}))
+
+    def test_wcs_only_partial_ps1_zarr_does_not_stall(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["wcs_grouping"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "tess_ffi_download", STATUS_SKIPPED, exit_code=0)
+            state.cache_external_check(run_id, label, "tess_ffi_download", complete=True)
+            state.update_stage_status(run_id, label, "wcs_grouping", STATUS_SUCCESS, exit_code=0)
+            state.cache_external_check(run_id, label, "ps1_download", complete=False)
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                return_value={},
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+            ):
+                _tick_run(state, run_id, ctx)
+
+            ps1 = state.get_stage_run(run_id, label, "ps1_download")
+            self.assertEqual(ps1.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason(run_id, label, "ps1_download"),
+                SKIP_REASON_NOT_SELECTED,
+            )
+            self.assertEqual(state.get_run(run_id)["status"], RUN_SUCCESS)
+
+    def test_ps1_process_only_keeps_ps1_download_external(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["ps1_process"]
+            )
+            label = target.label()
+            state.cache_external_check(run_id, label, "ps1_download", complete=False)
+            count = state.apply_not_selected_skips(run_id, ctx.targets, ctx.cfg)
+            ps1 = state.get_stage_run(run_id, label, "ps1_download")
+            down = state.get_stage_run(run_id, label, "downsample")
+            self.assertEqual(ps1.status, STATUS_EXTERNAL)
+            self.assertEqual(down.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason(run_id, label, "downsample"),
+                SKIP_REASON_NOT_SELECTED,
+            )
+            self.assertGreater(count, 0)
+
+    def test_status_grid_shows_na_for_not_selected(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["wcs_grouping"]
+            )
+            label = target.label()
+            state.apply_not_selected_skips(run_id, ctx.targets, ctx.cfg)
+            lines = format_status_grid(state, run_id)
+            self.assertEqual(len(lines), 1)
+            self.assertIn("map:n/a", lines[0])
+            self.assertIn("ps1_dl:n/a", lines[0])
+
+
+class TestSupersededSkips(unittest.TestCase):
+    def test_ps1_download_superseded_when_ps1_process_skipped(self):
+        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping", "downsample"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "wcs_grouping", STATUS_SKIPPED, exit_code=0)
+            state.update_stage_status(run_id, label, "ps1_process", STATUS_SKIPPED, exit_code=0)
+            state.cache_external_check(run_id, label, "ps1_download", complete=False)
+
+            count = state.apply_superseded_skips(run_id, ctx.targets)
+            ps1_dl = state.get_stage_run(run_id, label, "ps1_download")
+            self.assertGreater(count, 0)
+            self.assertEqual(ps1_dl.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason(run_id, label, "ps1_download"),
+                SKIP_REASON_SUPERSEDED,
+            )
+
+            from syndiff_pipeline.template_runner.state import artifact_verify_needed
+
+            self.assertFalse(
+                artifact_verify_needed(state, run_id, label, "ps1_download", ["mapping", "downsample"])
+            )
+
+    def test_tess_superseded_when_wcs_skipped(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "wcs_grouping", STATUS_SKIPPED, exit_code=0)
+            state.apply_superseded_skips(run_id, ctx.targets)
+            tess = state.get_stage_run(run_id, label, "tess_ffi_download")
+            self.assertEqual(tess.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason(run_id, label, "tess_ffi_download"),
+                SKIP_REASON_SUPERSEDED,
+            )
+
+    def test_ps1_download_still_verified_without_satisfied_ps1_process(self):
+        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["ps1_process"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "mapping", STATUS_SKIPPED, exit_code=0)
+            state.update_stage_status(run_id, label, "wcs_grouping", STATUS_SKIPPED, exit_code=0)
+
+            from syndiff_pipeline.template_runner.state import artifact_verify_needed
+
+            self.assertTrue(
+                artifact_verify_needed(state, run_id, label, "ps1_download", ["ps1_process"])
+            )
+
+    def test_wcs_not_superseded_when_distant_ps1_process_skipped(self):
+        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping", "downsample"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "ps1_process", STATUS_SKIPPED, exit_code=0)
+
+            from syndiff_pipeline.template_runner.state import artifact_verify_needed
+
+            self.assertTrue(
+                artifact_verify_needed(
+                    state, run_id, label, "wcs_grouping", ["mapping", "downsample"]
+                )
+            )
+            wcs = state.get_stage_run(run_id, label, "wcs_grouping")
+            self.assertEqual(wcs.status, STATUS_EXTERNAL)
+
+
+class TestVerifyDisplay(unittest.TestCase):
+    def test_status_grid_shows_sc_q_for_external_scan_queue(self):
+        from syndiff_pipeline.template_runner.run_report import format_status_grid
+
+        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["ps1_process"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping", "mapping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+            lines = format_status_grid(state, run_id)
+            self.assertIn("ps1_dl:sc_q", lines[0])
+
+    def test_promote_stages_requires_complete_verify(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+            state.cache_external_check(run_id, label, "mapping", complete=False)
+            promoted = state.promote_stages(run_id)
+            self.assertEqual(promoted, 0)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
+            )
 
 
 if __name__ == "__main__":

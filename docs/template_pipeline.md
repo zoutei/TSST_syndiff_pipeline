@@ -349,7 +349,7 @@ A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_
 | `skipped` | Artifacts verified complete (no rerun) |
 | `blocked` | Never started (upstream failure) |
 | `canceled` | User kill (retryable) |
-| `external` | Outside `--stages`; verify once then `skipped` |
+| `external` | Outside `--stages`; verify once then `skipped` if on-disk artifacts are complete. Stages outside the upstream dependency closure of `--stages` are marked **n/a** immediately (no artifact verify). Upstream stages are also marked **n/a** when a downstream dependency in the closure is already `success`/`skipped` (e.g. skip `ps1_download` verify when `ps1_process` artifacts exist). |
 
 Run-level status (`runs.status`): `running`, `stalled`, `success`, `failed`, `canceled`. A `stalled` run has no running or launchable work but non-terminal stages remain (see `stall_reason` in `progress`/`status`).
 

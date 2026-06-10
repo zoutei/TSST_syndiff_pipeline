@@ -23,7 +23,9 @@ from syndiff_pipeline.template_runner.runner_config import resolve_config
 from syndiff_pipeline.template_runner.state import (
     RUN_CANCELED,
     SKIP_REASON_ARTIFACTS,
+    SKIP_REASON_NOT_SELECTED,
     SKIP_REASON_STREAM,
+    SKIP_REASON_SUPERSEDED,
     STATUS_BLOCKED,
     STATUS_CANCELED,
     STATUS_EXTERNAL,
@@ -38,6 +40,7 @@ from syndiff_pipeline.template_runner.state import (
     TERMINAL_RUN_STATUSES,
     PipelineState,
     _utc_now,
+    artifact_verify_needed,
     derive_run_final_status,
     downstream_stages,
     effective_stage_deps,
@@ -87,6 +90,7 @@ _SHUTDOWN_VERIFY_DRAIN_S = 5.0
 # looks dead, the supervisor exits so a fresh one (which reconciles in-flight
 # jobs from durable status files) can take over.
 _HEARTBEAT_FATAL_AFTER_S = 90.0
+
 
 def _ensure_discord_bot_on_startup(handoff_root: str) -> None:
     from syndiff_pipeline.template_runner.discord_bot_control import (
@@ -510,7 +514,7 @@ def _verify_outcome_still_applicable(state: PipelineState, key: VerifyTaskKey) -
     row = state.get_stage_run(key.run_id, key.target_label, key.stage)
     if row is None or row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
         return False
-    if state.external_checked(key.run_id, key.target_label, key.stage):
+    if state.external_verify_complete(key.run_id, key.target_label, key.stage):
         return False
     return True
 
@@ -596,7 +600,22 @@ def _iter_verify_candidates(
                     continue
                 if state.get_skip_reason(run_id, label, "ps1_download") == SKIP_REASON_STREAM:
                     continue
-            if state.external_checked(run_id, label, row.stage):
+            if (
+                state.get_skip_reason(run_id, label, row.stage)
+                in (SKIP_REASON_NOT_SELECTED, SKIP_REASON_SUPERSEDED)
+            ):
+                continue
+            if row.status == STATUS_EXTERNAL:
+                if not artifact_verify_needed(
+                    state, run_id, label, row.stage, active_stages
+                ):
+                    continue
+            elif row.status == STATUS_PENDING:
+                if row.stage not in active_stages:
+                    continue
+            else:
+                continue
+            if state.external_verify_complete(run_id, label, row.stage):
                 continue
             if row.status == STATUS_PENDING and not state.deps_satisfied(
                 run_id, label, row.stage, stages=resolved.stages
@@ -629,6 +648,54 @@ def _iter_verify_candidates(
 
     candidates.sort(key=_sort_key)
     return candidates
+
+
+def _verify_backlog(
+    state: PipelineState,
+    run_id: str,
+    ctx,
+    *,
+    force_rerun: bool,
+) -> tuple[int, int]:
+    """Return (pending_candidate_count, in_flight_count) for artifact verify."""
+    worker = _verify_worker()
+    in_flight = worker.in_flight_count(run_id) if worker else 0
+    pending = len(
+        _iter_verify_candidates(state, run_id, ctx, force_rerun=force_rerun)
+    )
+    return pending, in_flight
+
+
+def _collect_verify_status_by_run(
+    state: PipelineState,
+    runs: list[dict],
+) -> dict[str, dict]:
+    """Build per-run verify observability payload for host-local JSON."""
+    worker = _verify_worker()
+    by_run: dict[str, dict] = {}
+    for run in runs:
+        run_id = run["run_id"]
+        ctx = _load_run_context(state, run_id)
+        if ctx is None:
+            by_run[run_id] = {"scan_running": 0, "scan_queued": 0, "active": []}
+            continue
+        force_rerun = bool((state.get_run(run_id) or {}).get("force_rerun"))
+        pending, in_flight = _verify_backlog(
+            state, run_id, ctx, force_rerun=force_rerun
+        )
+        active: list[list[str]] = []
+        if worker is not None:
+            active = [
+                [key.target_label, key.stage]
+                for key in worker.in_flight_keys(run_id)
+            ]
+        queued = max(0, pending - in_flight)
+        by_run[run_id] = {
+            "scan_running": in_flight,
+            "scan_queued": queued,
+            "active": active,
+        }
+    return by_run
 
 
 def _run_verify_pass(
@@ -728,6 +795,7 @@ def _run_verify_pass(
         if not block:
             break
 
+    state.apply_superseded_skips(run_id, ctx.targets)
     return total
 
 
@@ -824,7 +892,22 @@ def _stall_reasons(state: PipelineState, run_id: str, ctx) -> List[str]:
             reasons.append(f"{label}/{stage}: waiting on {', '.join(missing)}")
             continue
         if row.status in (STATUS_PENDING, STATUS_EXTERNAL):
-            reasons.append(f"{label}/{stage}: pending promotion or artifact verify")
+            active_stages = state.get_active_stages(run_id)
+            needs_verify = False
+            if row.status == STATUS_EXTERNAL:
+                needs_verify = artifact_verify_needed(
+                    state, run_id, label, stage, active_stages
+                )
+            elif stage in active_stages:
+                needs_verify = True
+            if needs_verify and not state.external_verify_complete(
+                run_id, label, stage
+            ):
+                reasons.append(f"{label}/{stage}: artifact verify queued")
+            elif row.status == STATUS_PENDING:
+                reasons.append(f"{label}/{stage}: pending promotion")
+            else:
+                reasons.append(f"{label}/{stage}: artifact verify queued")
             continue
         if row.status == STATUS_READY:
             pool = STAGE_POOL.get(stage)
@@ -928,6 +1011,8 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
 
     force_rerun = bool(run.get("force_rerun"))
     reconcile_running_stages(state, run_id, ctx)
+    state.apply_not_selected_skips(run_id, ctx.targets, ctx.cfg)
+    state.apply_superseded_skips(run_id, ctx.targets)
     _schedule_external_and_pending_skips(
         state,
         run_id,
@@ -1010,14 +1095,25 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
 
     worker = _verify_worker()
     verify_in_flight = worker.in_flight_count(run_id) if worker else 0
-    if running == 0 and launchable == 0 and nonterminal > 0 and verify_in_flight == 0:
+    verify_pending, _ = _verify_backlog(
+        state, run_id, ctx, force_rerun=bool(run.get("force_rerun"))
+    )
+    if (
+        running == 0
+        and launchable == 0
+        and nonterminal > 0
+        and verify_pending == 0
+        and verify_in_flight == 0
+    ):
         reasons = _stall_reasons(state, run_id, ctx)
         reason_text = "; ".join(reasons[:8])
         state.set_run_status(run_id, "stalled", stall_reason=reason_text)
         log.warning("Run %s stalled: %s", run_id, reason_text)
         if notifier is not None and prev_status != "stalled":
             notifier.notify_run_stalled(run_id, runs_root, stall_reason=reason_text)
-    elif prev_status == "stalled" and (running > 0 or launchable > 0):
+    elif prev_status == "stalled" and (
+        running > 0 or launchable > 0 or verify_pending > 0 or verify_in_flight > 0
+    ):
         state.set_run_status(run_id, "running", stall_reason="")
         if notifier is not None:
             notifier.notify_run_resumed(run_id)
@@ -1190,13 +1286,9 @@ def run_supervisor_daemon(handoff_root: str) -> int:
                         log.exception("Error while processing run %s", run_id)
 
                 worker = _verify_worker()
-                counts = {
-                    run["run_id"]: (
-                        worker.in_flight_count(run["run_id"]) if worker else 0
-                    )
-                    for run in state.list_active_runs()
-                }
-                write_verify_in_flight(handoff_root, counts)
+                active_runs = state.list_active_runs()
+                by_run = _collect_verify_status_by_run(state, active_runs)
+                write_verify_in_flight(handoff_root, by_run)
 
                 # Interruptible idle: wake early on shutdown instead of sleeping
                 # through a SIGTERM.
@@ -1250,18 +1342,22 @@ def run_scheduler(
     active = stages.parse_stage_list(stages_arg)
 
     run_row = state.get_run(run_id)
-    if run_row is None:
-        state.create_run(
+    if run_row is not None:
+        log.error(
+            "Run %s already exists; choose a new --run-id for submit/run, "
+            "or use syndiff-template retry for failed stages.",
             run_id,
-            str(logs.run_config_path(ctx.run_dir)),
-            str(logs.run_targets_path(ctx.run_dir)),
-            ctx.cfg.runs_dir(),
-            ctx.targets,
-            active,
-            force_rerun=force_rerun,
         )
-    elif force_rerun:
-        state.apply_force_rerun(run_id, [t.label() for t in ctx.targets], active)
+        return 1
+    state.create_run(
+        run_id,
+        str(logs.run_config_path(ctx.run_dir)),
+        str(logs.run_targets_path(ctx.run_dir)),
+        ctx.cfg.runs_dir(),
+        ctx.targets,
+        active,
+        force_rerun=force_rerun,
+    )
 
     state.set_run_status(run_id, "running")
     while True:
