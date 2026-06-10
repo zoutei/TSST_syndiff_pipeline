@@ -19,6 +19,7 @@ from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_runner.scheduler import (
     _apply_verify_outcome,
     _cancel_verify_for_retry,
+    _iter_verify_candidates,
     _resolve_external_and_pending_skips,
     _run_verify_pass,
     _tick_run,
@@ -42,6 +43,7 @@ from syndiff_pipeline.template_runner.state import (
     PipelineState,
     RUN_CANCELED,
     RUN_SUCCESS,
+    SKIP_REASON_ARTIFACTS,
     SKIP_REASON_NOT_SELECTED,
     SKIP_REASON_SUPERSEDED,
     STATUS_CANCELED,
@@ -1205,6 +1207,55 @@ class TestSupersededSkips(unittest.TestCase):
             )
             wcs = state.get_stage_run(run_id, label, "wcs_grouping")
             self.assertEqual(wcs.status, STATUS_EXTERNAL)
+
+
+class TestPartialRunRetry(unittest.TestCase):
+    def tearDown(self):
+        reset_verify_worker_for_tests()
+
+    def test_cancel_retry_partial_run_enqueues_ps1_verify(self):
+        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping", "downsample"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+            state.update_stage_status(run_id, label, "mapping", STATUS_SUCCESS, exit_code=0)
+            for stage in ("ps1_download", "ps1_process"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_skip_reason(run_id, label, stage, SKIP_REASON_ARTIFACTS)
+                state.cache_external_check(run_id, label, stage, complete=True)
+            state.update_stage_status(run_id, label, "mapping", STATUS_CANCELED, exit_code=143)
+            state.update_stage_status(run_id, label, "downsample", STATUS_CANCELED, exit_code=143)
+
+            state.reopen_failed_canceled(run_id)
+            state.update_stage_status(run_id, label, "mapping", STATUS_SUCCESS, exit_code=0)
+
+            candidates = _iter_verify_candidates(state, run_id, ctx, force_rerun=False)
+            keys = {(c[0].target_label, c[0].stage) for c in candidates}
+            self.assertIn((label, "ps1_download"), keys)
+
+    def test_orphan_pending_shows_sc_q_in_status_grid(self):
+        from syndiff_pipeline.template_runner.run_report import format_status_grid
+
+        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping", "downsample"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping", "mapping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SUCCESS, exit_code=0)
+            state.update_stage_status(run_id, label, "ps1_download", STATUS_PENDING)
+            state.update_stage_status(run_id, label, "ps1_process", STATUS_PENDING)
+
+            lines = format_status_grid(state, run_id)
+            self.assertIn("ps1_dl:sc_q", lines[0])
+            self.assertIn("ps1_pr:sc_q", lines[0])
 
 
 class TestVerifyDisplay(unittest.TestCase):

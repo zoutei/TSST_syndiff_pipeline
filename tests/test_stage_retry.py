@@ -12,13 +12,16 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.template_runner.state import (
     PipelineState,
+    SKIP_REASON_ARTIFACTS,
     STATUS_BLOCKED,
+    STATUS_CANCELED,
     STATUS_EXTERNAL,
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_READY,
     STATUS_SKIPPED,
     STATUS_SUCCESS,
+    reopen_status_for_retry,
 )
 from syndiff_pipeline.template_runner.targets import Target
 
@@ -179,6 +182,102 @@ class TestStageRetry(unittest.TestCase):
             label = target.label()
             mapping = state.get_stage_run("run_a", label, "mapping")
             self.assertEqual(mapping.status, STATUS_EXTERNAL)
+
+    def test_reopen_status_for_retry_helper(self):
+        active = ["mapping", "downsample"]
+        self.assertEqual(reopen_status_for_retry("mapping", active), STATUS_PENDING)
+        self.assertEqual(reopen_status_for_retry("downsample", active), STATUS_PENDING)
+        self.assertEqual(reopen_status_for_retry("ps1_download", active), STATUS_EXTERNAL)
+        self.assertEqual(reopen_status_for_retry("ps1_process", active), STATUS_EXTERNAL)
+        self.assertEqual(reopen_status_for_retry("wcs_grouping", active), STATUS_EXTERNAL)
+
+    def test_partial_run_retry_reopens_ps1_as_external(self):
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            state = PipelineState(str(Path(tmp) / "state.sqlite"))
+            stages = ["mapping", "downsample"]
+            state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
+            label = target.label()
+            for stage in ("ps1_download", "ps1_process"):
+                state.update_stage_status("run_a", label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_skip_reason("run_a", label, stage, SKIP_REASON_ARTIFACTS)
+                state.cache_external_check("run_a", label, stage, complete=True)
+            state.update_stage_status("run_a", label, "mapping", STATUS_CANCELED, exit_code=143)
+
+            state.reset_stage_for_retry("run_a", label, "mapping", reset_downstream=True)
+
+            mapping = state.get_stage_run("run_a", label, "mapping")
+            ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
+            ps1_pr = state.get_stage_run("run_a", label, "ps1_process")
+            down = state.get_stage_run("run_a", label, "downsample")
+            self.assertEqual(mapping.status, STATUS_PENDING)
+            self.assertEqual(ps1_dl.status, STATUS_EXTERNAL)
+            self.assertEqual(ps1_pr.status, STATUS_EXTERNAL)
+            self.assertEqual(down.status, STATUS_PENDING)
+            self.assertFalse(state.external_verify_complete("run_a", label, "ps1_download"))
+
+    def test_full_run_retry_still_pending_for_ps1(self):
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            state = PipelineState(str(Path(tmp) / "state.sqlite"))
+            stages = [
+                "tess_ffi_download",
+                "wcs_grouping",
+                "mapping",
+                "ps1_download",
+                "ps1_process",
+                "downsample",
+            ]
+            state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
+            label = target.label()
+            state.update_stage_status("run_a", label, "mapping", STATUS_CANCELED, exit_code=143)
+
+            state.reset_stage_for_retry("run_a", label, "mapping", reset_downstream=True)
+
+            ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
+            ps1_pr = state.get_stage_run("run_a", label, "ps1_process")
+            down = state.get_stage_run("run_a", label, "downsample")
+            self.assertEqual(ps1_dl.status, STATUS_PENDING)
+            self.assertEqual(ps1_pr.status, STATUS_PENDING)
+            self.assertEqual(down.status, STATUS_PENDING)
+
+    def test_mapping_only_retry_reopens_downstream_as_external(self):
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            state = PipelineState(str(Path(tmp) / "state.sqlite"))
+            state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], ["mapping"])
+            label = target.label()
+            state.update_stage_status("run_a", label, "mapping", STATUS_CANCELED, exit_code=143)
+
+            state.reset_stage_for_retry("run_a", label, "mapping", reset_downstream=True)
+
+            ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
+            down = state.get_stage_run("run_a", label, "downsample")
+            self.assertEqual(ps1_dl.status, STATUS_EXTERNAL)
+            self.assertEqual(down.status, STATUS_EXTERNAL)
+
+    def test_repair_orphaned_pending_upstream(self):
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            state = PipelineState(str(Path(tmp) / "state.sqlite"))
+            state.create_run(
+                "run_a", "/cfg.yaml", "/targets.csv", tmp, [target], ["mapping", "downsample"]
+            )
+            label = target.label()
+            state.update_stage_status("run_a", label, "ps1_download", STATUS_PENDING)
+            state.update_stage_status("run_a", label, "ps1_process", STATUS_PENDING)
+
+            repaired = state.repair_orphaned_pending_upstream("run_a")
+
+            self.assertEqual(repaired, 2)
+            self.assertEqual(
+                state.get_stage_run("run_a", label, "ps1_download").status,
+                STATUS_EXTERNAL,
+            )
+            self.assertEqual(
+                state.get_stage_run("run_a", label, "ps1_process").status,
+                STATUS_EXTERNAL,
+            )
 
 
 if __name__ == "__main__":

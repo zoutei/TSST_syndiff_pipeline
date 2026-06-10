@@ -986,11 +986,19 @@ syndiff-template retry --run-dir /path/to/runs/batch_no5
 # Retry one SCC + stage (resets downstream deps)
 syndiff-template retry --run-dir ... --scc 23,1,3 --stage mapping
 
+# Retry only the targeted stage (leave downstream untouched)
+syndiff-template retry --run-dir ... --scc 23,1,3 --stage mapping --no-reset-downstream
+
 # Queue intent without waking daemon (e.g. maintenance window)
 syndiff-template retry --run-dir ... --no-start-daemon
 ```
 
 By default, `retry` also calls `ensure_daemon_running` for the run's `handoff_root`.
+
+On partial runs (`--stages mapping,downsample`, etc.), retry reopens non-selected upstream
+stages to `external` for artifact re-verification (not `pending`). See
+[`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md) for the
+full state-machine matrix.
 
 #### `pause`
 
@@ -1132,6 +1140,7 @@ Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channe
 | `--watch` / `--interval` | `status` | Live refresh |
 | `--no-detail` | `progress` | Summary line only |
 | `--no-start-daemon` | `retry` | Queue intent without starting daemon |
+| `--no-reset-downstream` | `retry` | Targeted retry only; leave downstream stages untouched |
 | `--dry-run` / `-v` | `notify test` | Local preview / verbose |
 
 ### End-to-end example
@@ -1186,7 +1195,7 @@ One daemon per host schedules **all** active runs. The CLI only inserts **comman
 
 ### Pause / resume / kill / retry
 
-These insert rows into the `commands` table; the daemon applies them on the next tick. `kill` marks stages `canceled` and the run `canceled`. `retry` reopens failed/canceled/blocked stages (+ downstream) to `pending`. Use `--no-start-daemon` to queue the intent without ensuring the daemon is running.
+These insert rows into the `commands` table; the daemon applies them on the next tick. `kill` marks stages `canceled` and the run `canceled`. `retry` reopens failed/canceled/blocked stages (+ downstream): selected stages to `pending`, non-selected upstream stages in the closure to `external` for artifact re-verify. Use `--no-reset-downstream` on targeted retry to leave downstream untouched. Use `--no-start-daemon` to queue the intent without ensuring the daemon is running.
 
 Single-target retry resolves SCC from the frozen `targets.csv`, falling back to the run's SQLite `targets` table when the CSV row is missing or `enabled=false`.
 
