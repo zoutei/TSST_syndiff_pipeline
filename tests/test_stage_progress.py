@@ -228,6 +228,7 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_ctx = mock.Mock()
         fake_ctx.run_id = "run_a"
         fake_ctx.cfg.state_db_path = "/db.sqlite"
+        fake_ctx.cfg.handoff_root = "/tmp/handoff"
         fake_ctx.cfg.runs_dir.return_value = "/runs"
 
         running_row = mock.Mock(
@@ -249,8 +250,8 @@ class TestCmdProgressDetail(unittest.TestCase):
             "syndiff_pipeline.template_runner.cli.PipelineState",
             return_value=fake_state,
         ), mock.patch(
-            "syndiff_pipeline.template_runner.verify_status.read_verify_in_flight",
-            return_value=0,
+            "syndiff_pipeline.template_runner.verify_status.read_verify_run_status",
+            return_value={"scan_queued": 0, "scan_running": 0, "active": []},
         ), mock.patch(
             "syndiff_pipeline.template_runner.run_report.read_log_progress",
             return_value=mock.Mock(text="342/1009", kind="fraction"),
@@ -269,6 +270,7 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_ctx = mock.Mock()
         fake_ctx.run_id = "run_a"
         fake_ctx.cfg.state_db_path = "/db.sqlite"
+        fake_ctx.cfg.handoff_root = "/tmp/handoff"
 
         fake_state = mock.Mock()
         fake_state.count_by_status.return_value = {"running": 1}
@@ -281,8 +283,8 @@ class TestCmdProgressDetail(unittest.TestCase):
             "syndiff_pipeline.template_runner.cli.PipelineState",
             return_value=fake_state,
         ), mock.patch(
-            "syndiff_pipeline.template_runner.verify_status.read_verify_in_flight",
-            return_value=0,
+            "syndiff_pipeline.template_runner.verify_status.read_verify_run_status",
+            return_value={"scan_queued": 0, "scan_running": 0, "active": []},
         ), mock.patch("sys.stdout", buf):
             rc = cmd_progress(args)
 

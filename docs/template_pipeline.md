@@ -351,7 +351,16 @@ A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_
 | `canceled` | User kill (retryable) |
 | `external` | Outside `--stages`; verify once then `skipped` if on-disk artifacts are complete. Stages outside the upstream dependency closure of `--stages` are marked **n/a** immediately (no artifact verify). Upstream stages are also marked **n/a** when a downstream dependency in the closure is already `success`/`skipped` (e.g. skip `ps1_download` verify when `ps1_process` artifacts exist). |
 
-Run-level status (`runs.status`): `running`, `stalled`, `success`, `failed`, `canceled`. A `stalled` run has no running or launchable work but non-terminal stages remain (see `stall_reason` in `progress`/`status`).
+Run-level status (`runs.status`): `running`, `stalled`, `success`, `failed`, `canceled`. A `stalled` run has no running or launchable work, no artifact-verify backlog, and non-terminal stages remain (see `stall_reason` in `progress`/`status`). Runs stay **`running`** while artifact scans are queued (`sc_q`) or running (`scan`).
+
+**Status grid abbreviations** (per stage, after the short stage name):
+
+| Label | Meaning |
+|-------|---------|
+| `sc_q` | Artifact scan queued (SQLite status still `external`/`pending`) |
+| `scan` | Artifact scan in progress (background worker) |
+| `n/a` | Not selected or superseded upstream (no verify) |
+| `skip` / `succ` / etc. | First four characters of the SQLite status |
 
 ### Resource pools
 
@@ -903,7 +912,7 @@ syndiff-template status --run-dir /path/to/runs/batch_no5
 
 When not `--watch`, prints a warning if the supervisor daemon is not alive (with a suggested `daemon start` command).
 
-Shows `stalled` reason and `verify_in_flight` counts when applicable.
+Shows `stalled` reason and `scan_queued` / `scan_running` counts when applicable.
 
 #### `show`
 
@@ -1183,7 +1192,7 @@ scheduler:
   verify_budget_per_tick: 16
 ```
 
-`status` and `progress` show `verify_in_flight=N` when background artifact checks are running (read from a host-local counter file written by the daemon each tick; the CLI does not import the heavy verify stack).
+`status` and `progress` show `scan_queued=N` and `scan_running=N` when artifact scans are queued or running (read from a host-local JSON file written by the daemon each tick; the CLI does not import the heavy verify stack).
 
 ---
 
@@ -1286,12 +1295,14 @@ Manifests are written in two places:
   self-heals this file whenever it confirms a stage complete on disk.
 
 **Skip-verify before promote:** A selected stage in `pending` is not promoted to
-`ready` (and therefore not launched) until the supervisor has run at least one
-`stage_complete()` check for that stage in the current run. Each tick performs up
+`ready` (and therefore not launched) until artifact verify reports **complete**
+outputs for that stage in the current run (`external_verify_complete` in SQLite,
+or `force_rerun` on the selected stage). Each tick performs up
 to 16 such checks; stages that are not checked yet stay `pending` until a later
 tick. If the check finds complete outputs (manifest-first, then on-disk fallback),
-the stage is marked `skipped`; if not, it is cached as incomplete and may then
-promote to `ready`. This prevents downstream stages from launching before stable
+the stage is marked `skipped`; if not, an incomplete result is cached and verify
+**retries on later ticks** — the stage stays `pending` and is **not** promoted.
+This prevents downstream stages from launching before stable
 manifests are consulted when upstream skip checks consume the per-tick budget.
 
 ### `reconcile-manifests` (backfill)

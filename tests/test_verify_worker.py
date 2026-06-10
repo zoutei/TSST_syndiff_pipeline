@@ -21,6 +21,7 @@ from syndiff_pipeline.template_runner.scheduler import (
     _iter_verify_candidates,
     _run_verify_pass,
     _tick_run,
+    _verify_backlog,
 )
 from syndiff_pipeline.template_runner.state import (
     PipelineState,
@@ -39,6 +40,8 @@ from syndiff_pipeline.template_runner.verify import (
 from syndiff_pipeline.template_runner.verify_status import (
     clear_verify_in_flight,
     read_verify_in_flight,
+    read_verify_pending,
+    read_verify_run_status,
     write_verify_in_flight,
 )
 from syndiff_pipeline.template_runner.verify_worker import (
@@ -98,6 +101,25 @@ class TestVerifyStatus(unittest.TestCase):
             self.assertEqual(read_verify_in_flight(db, "run_missing"), 0)
             clear_verify_in_flight(db)
             self.assertEqual(read_verify_in_flight(db), 0)
+
+    def test_extended_status_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            write_verify_in_flight(
+                db,
+                {
+                    "run_a": {
+                        "scan_running": 1,
+                        "scan_queued": 4,
+                        "active": [["s0069", "ps1_download"]],
+                    }
+                },
+            )
+            status = read_verify_run_status(db, "run_a")
+            self.assertEqual(status["scan_running"], 1)
+            self.assertEqual(status["scan_queued"], 4)
+            self.assertEqual(status["active"], [["s0069", "ps1_download"]])
+            self.assertEqual(read_verify_pending(db, "run_a"), 4)
 
     def test_read_missing_file_returns_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,7 +214,7 @@ class TestVerifyScheduling(unittest.TestCase):
             if external_indices:
                 self.assertLess(mapping_idx, min(external_indices))
 
-    def test_async_verify_result_applied_on_later_pass(self):
+    def test_incomplete_verify_blocks_promote_but_allows_retry(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -215,7 +237,7 @@ class TestVerifyScheduling(unittest.TestCase):
                 _run_verify_pass(
                     state, run_id, ctx, force_rerun=False, budget=16, block=False
                 )
-                self.assertFalse(state.external_checked(run_id, label, "mapping"))
+                self.assertFalse(state.external_verify_complete(run_id, label, "mapping"))
                 _run_verify_pass(
                     state,
                     run_id,
@@ -226,12 +248,17 @@ class TestVerifyScheduling(unittest.TestCase):
                     block_timeout_s=3.0,
                 )
 
-            self.assertTrue(state.external_checked(run_id, label, "mapping"))
+            self.assertTrue(state.external_verify_attempted(run_id, label, "mapping"))
+            self.assertFalse(state.external_verify_complete(run_id, label, "mapping"))
             promoted = state.promote_stages(run_id)
-            self.assertEqual(promoted, 1)
+            self.assertEqual(promoted, 0)
             self.assertEqual(
-                state.get_stage_run(run_id, label, "mapping").status, STATUS_READY
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
             )
+            candidates = _iter_verify_candidates(
+                state, run_id, ctx, force_rerun=False
+            )
+            self.assertTrue(any(key.stage == "mapping" for key, *_ in candidates))
 
 
 class TestVerifyCommandIntegration(unittest.TestCase):
@@ -309,6 +336,68 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 run = state.get_run(run_id)
                 self.assertNotEqual(run.get("status"), "stalled")
                 self.assertGreaterEqual(get_verify_worker().in_flight_count(run_id), 1)
+
+    def test_run_not_stalled_with_verify_backlog(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            pending, in_flight = _verify_backlog(
+                state, run_id, ctx, force_rerun=False
+            )
+            self.assertGreater(pending, 0)
+            self.assertEqual(in_flight, 0)
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                return_value={},
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler._run_verify_pass",
+                return_value=0,
+            ):
+                _tick_run(state, run_id, ctx)
+                run = state.get_run(run_id)
+                self.assertNotEqual(run.get("status"), "stalled")
+
+    def test_stalled_run_resumes_when_verify_restarts(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+            state.set_run_status(run_id, "stalled", stall_reason="test stall")
+
+            def slow_complete(*_args, **_kwargs):
+                time.sleep(0.5)
+                return False
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                side_effect=slow_complete,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                return_value={},
+            ), unittest.mock.patch(
+                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+            ):
+                _tick_run(state, run_id, ctx)
+                run = state.get_run(run_id)
+                self.assertEqual(run.get("status"), "running")
+                self.assertEqual(run.get("stall_reason"), "")
 
 
 if __name__ == "__main__":
