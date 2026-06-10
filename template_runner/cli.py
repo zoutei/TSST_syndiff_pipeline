@@ -238,6 +238,14 @@ def _run_context_from_directory(run_directory: Path, run_id: str) -> RunContext:
     return resolve_run_context(run_dir=run_directory, run_id=run_id)
 
 
+def _reject_duplicate_run_id(state: PipelineState, run_id: str) -> None:
+    if state.get_run(run_id) is not None:
+        raise SystemExit(
+            f"Run {run_id!r} already exists. Choose a new --run-id for submit, "
+            f"or retry failed stages with: syndiff-template retry --run-id {run_id}"
+        )
+
+
 def cmd_submit(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner import stages
     from syndiff_pipeline.template_runner.targets import load_targets
@@ -247,6 +255,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
     active = stages.parse_stage_list(args.stages)
     run_id = args.run_id or _default_run_id()
     runs_root = cfg.runs_dir()
+
+    state = PipelineState(cfg.state_db_path)
+    _reject_duplicate_run_id(state, run_id)
 
     run_directory = _prepare_run_directory(
         args.config,
@@ -258,55 +269,35 @@ def cmd_submit(args: argparse.Namespace) -> int:
         force_rerun=bool(args.force_rerun),
     )
 
-    state = PipelineState(cfg.state_db_path)
-    created_new_run = False
-    if state.get_run(run_id) is None:
-        # New run: stages are materialized pending/external and the force_rerun
-        # flag is persisted at creation, before the daemon can schedule it. No
-        # post-hoc execution-state mutation is needed (or safe) here.
-        state.create_run(
-            run_id,
-            str(logs.run_config_path(run_directory)),
-            str(logs.run_targets_path(run_directory)),
-            runs_root,
-            targets,
-            active,
-            force_rerun=bool(args.force_rerun),
+    state.create_run(
+        run_id,
+        str(logs.run_config_path(run_directory)),
+        str(logs.run_targets_path(run_directory)),
+        runs_root,
+        targets,
+        active,
+        force_rerun=bool(args.force_rerun),
+    )
+    if cfg.stages.ps1_process.ps1_source == "stream":
+        if "ps1_download" in active:
+            print(
+                "Note: ps1_download ignored for this run (ps1_source=stream); "
+                "download happens inside ps1_process."
+            )
+        skipped = state.apply_ps1_stream_download_skips(run_id, targets, cfg)
+        if skipped:
+            print(f"Marked ps1_download n/a (stream_mode) for {skipped} target(s).")
+    not_selected = state.apply_not_selected_skips(run_id, targets, cfg)
+    if not_selected:
+        print(
+            f"Marked {not_selected} stage row(s) n/a "
+            "(not selected for this run)."
         )
-        if cfg.stages.ps1_process.ps1_source == "stream":
-            if "ps1_download" in active:
-                print(
-                    "Note: ps1_download ignored for this run (ps1_source=stream); "
-                    "download happens inside ps1_process."
-                )
-            skipped = state.apply_ps1_stream_download_skips(run_id, targets, cfg)
-            if skipped:
-                print(f"Marked ps1_download n/a (stream_mode) for {skipped} target(s).")
-        not_selected = state.apply_not_selected_skips(run_id, targets, cfg)
-        if not_selected:
-            print(
-                f"Marked {not_selected} stage row(s) n/a "
-                "(not selected for this run)."
-            )
-        superseded = state.apply_superseded_skips(run_id, targets)
-        if superseded:
-            print(
-                f"Marked {superseded} stage row(s) n/a "
-                "(upstream artifacts already satisfied downstream)."
-            )
-        created_new_run = True
-    elif args.force_rerun:
-        # Resubmitting force-rerun onto an EXISTING run. The daemon is the sole
-        # owner of execution state and may be actively scheduling this run, so
-        # the CLI must NOT reset stages directly (that races mid-launch). Emit a
-        # force_rerun intent instead; the daemon applies it as the single writer.
-        state.insert_command(
-            "force_rerun",
-            run_id=run_id,
-            args={
-                "target_labels": [t.label() for t in targets],
-                "stages": active,
-            },
+    superseded = state.apply_superseded_skips(run_id, targets)
+    if superseded:
+        print(
+            f"Marked {superseded} stage row(s) n/a "
+            "(upstream artifacts already satisfied downstream)."
         )
 
     deploy_path = deployment_path_for_config(args.config, cfg.deployment_file)
@@ -323,7 +314,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         bot_result = _ensure_discord_bot(deploy_path, site_config_path=args.config)
     daemon_log = logs.daemon_log_path(cfg.handoff_root)
 
-    if created_new_run and cfg.notifications.enabled:
+    if cfg.notifications.enabled:
         from syndiff_pipeline.template_runner.notifications import send_run_started_notification
 
         send_run_started_notification(
@@ -361,6 +352,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     active = stages.parse_stage_list(args.stages)
     runs_root = cfg.runs_dir()
 
+    state = PipelineState(cfg.state_db_path)
+    _reject_duplicate_run_id(state, run_id)
+
     run_directory = _prepare_run_directory(
         args.config,
         args.targets,
@@ -370,18 +364,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         detach=False,
         force_rerun=bool(args.force_rerun),
     )
-
-    state = PipelineState(cfg.state_db_path)
-    if state.get_run(run_id) is None:
-        state.create_run(
-            run_id,
-            str(logs.run_config_path(run_directory)),
-            str(logs.run_targets_path(run_directory)),
-            runs_root,
-            targets,
-            active,
-            force_rerun=bool(args.force_rerun),
-        )
 
     return run_scheduler(
         run_id,

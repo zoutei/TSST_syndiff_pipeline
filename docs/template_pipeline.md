@@ -847,8 +847,10 @@ syndiff-template submit \
 | `--config` | yes | Site policy YAML (stages, pools, notifications) |
 | `--targets` | yes | Targets CSV (sector, camera, ccd, coordinates, enabled) |
 | `--stages` | no | Comma-separated subset; default: all six stages |
-| `--run-id` | no | Run name; default: UTC timestamp `YYYYMMDD_HHMMSS` |
-| `--force-rerun` | no | Re-run selected stages even when artifacts exist; see [Force Rerun](#force-rerun-behavior) |
+| `--run-id` | no | Unique run name; must not already exist in pipeline state. Default: UTC timestamp `YYYYMMDD_HHMMSS` |
+| `--force-rerun` | no | On first submit only: run selected stages even when artifacts already exist; see [Force Rerun](#force-rerun-behavior) |
+
+**Resubmit policy**: each `submit` creates a **new** run row. You cannot reuse an existing `--run-id`. To recover from failures on an existing run, use [`retry`](#retry). To run a new batch (including a different `--stages` list), pick a new `--run-id`.
 
 **What happens**:
 
@@ -1406,11 +1408,13 @@ stages:
 
 ## Force Rerun Behavior
 
-`--force-rerun` on `submit` or `run`:
+`--force-rerun` on the **initial** `submit` or `run` for a new `--run-id`:
 
-1. **Scheduler bookkeeping**: resets selected stages to `pending` in SQLite (even if previously `success` or `skipped`).
-2. **Skips artifact-exists checks** for those stages.
+1. **Scheduler bookkeeping**: selected stages start `pending` even if matching artifacts already exist on disk.
+2. **Skips artifact-exists checks** for those stages during the run.
 3. **Does not** automatically delete upstream artifacts for other stages.
+
+You cannot combine `--force-rerun` with an existing `--run-id` (resubmit is rejected). To rerun work after a completed or failed run, submit with a **new** `--run-id`. To retry only failed/canceled stages on the same run, use [`retry`](#retry).
 
 ### `ps1_process` artifact cleanup
 
