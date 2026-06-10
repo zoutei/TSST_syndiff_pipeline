@@ -282,6 +282,18 @@ def cmd_submit(args: argparse.Namespace) -> int:
             skipped = state.apply_ps1_stream_download_skips(run_id, targets, cfg)
             if skipped:
                 print(f"Marked ps1_download n/a (stream_mode) for {skipped} target(s).")
+        not_selected = state.apply_not_selected_skips(run_id, targets, cfg)
+        if not_selected:
+            print(
+                f"Marked {not_selected} stage row(s) n/a "
+                "(not selected for this run)."
+            )
+        superseded = state.apply_superseded_skips(run_id, targets)
+        if superseded:
+            print(
+                f"Marked {superseded} stage row(s) n/a "
+                "(upstream artifacts already satisfied downstream)."
+            )
         created_new_run = True
     elif args.force_rerun:
         # Resubmitting force-rerun onto an EXISTING run. The daemon is the sole
