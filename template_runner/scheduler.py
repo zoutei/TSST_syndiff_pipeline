@@ -269,6 +269,31 @@ def _notify_stage_outcome(
     )
 
 
+def _notify_run_retried(
+    state: PipelineState,
+    run_id: str,
+    *,
+    target_label: str | None = None,
+    stage: str | None = None,
+    reset_downstream: bool | None = None,
+) -> None:
+    ctx = _load_run_context(state, run_id)
+    if ctx is None:
+        return
+    from syndiff_pipeline.template_runner.notifications import notifier_for_context
+
+    notifier = notifier_for_context(state, ctx)
+    if notifier is None:
+        return
+    notifier.notify_run_retried(
+        run_id,
+        ctx.cfg.runs_dir(),
+        target_label=target_label,
+        stage=stage,
+        reset_downstream=reset_downstream,
+    )
+
+
 def _notify_run_canceled(state: PipelineState, run_id: str, running_before) -> None:
     ctx = _load_run_context(state, run_id)
     if ctx is None:
@@ -1205,9 +1230,17 @@ def _apply_commands(state: PipelineState) -> None:
                         args["stage"],
                         reset_downstream=reset_downstream,
                     )
+                    _notify_run_retried(
+                        state,
+                        cmd.run_id,
+                        target_label=args["target_label"],
+                        stage=args["stage"],
+                        reset_downstream=reset_downstream,
+                    )
                 else:
                     state.apply_retry_run(cmd.run_id)
                     _cancel_verify_run(cmd.run_id)
+                    _notify_run_retried(state, cmd.run_id)
             elif cmd.kind == "force_rerun" and cmd.run_id:
                 labels = args.get("target_labels") or []
                 stages_arg = args.get("stages") or []

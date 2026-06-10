@@ -61,6 +61,7 @@ notifications:
     run_completed: true
     run_failed: true
     run_canceled: true
+    run_retried: true
     run_stalled: true
     run_resumed: true
     stage_failed: true

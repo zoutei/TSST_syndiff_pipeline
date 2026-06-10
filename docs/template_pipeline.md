@@ -586,6 +586,7 @@ notifications:
     run_completed: true
     run_failed: true
     run_canceled: true
+    run_retried: true
     run_stalled: true
     run_resumed: true
     stage_failed: true
@@ -617,6 +618,7 @@ discord_channel_id: "123456789012345678"
 | `run_started` | New `syndiff-template submit` (short summary, not progress grid) |
 | `run_completed` / `run_failed` | All stages terminal |
 | `run_canceled` | `syndiff-template kill` (whole run canceled) |
+| `run_retried` | `syndiff-template retry` (bulk or `--scc` + `--stage`) |
 | `run_stalled` / `run_resumed` | Scheduler stall detection / recovery |
 | `stage_completed` / `stage_failed` | Worker exits 0 / nonzero |
 | `stage_canceled` | Worker SIGTERM (`kill`) or exit 143 |

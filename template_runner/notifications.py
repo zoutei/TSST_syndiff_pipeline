@@ -41,6 +41,7 @@ class NotificationEvents:
     run_completed: bool = True
     run_failed: bool = True
     run_canceled: bool = True
+    run_retried: bool = True
     run_stalled: bool = True
     run_resumed: bool = True
     stage_failed: bool = True
@@ -71,6 +72,7 @@ def parse_notification_config(raw: dict | None) -> NotificationConfig:
         run_completed=bool(events_raw.get("run_completed", True)),
         run_failed=bool(events_raw.get("run_failed", True)),
         run_canceled=bool(events_raw.get("run_canceled", True)),
+        run_retried=bool(events_raw.get("run_retried", True)),
         run_stalled=bool(events_raw.get("run_stalled", True)),
         run_resumed=bool(events_raw.get("run_resumed", True)),
         stage_failed=bool(events_raw.get("stage_failed", True)),
@@ -319,6 +321,33 @@ class Notifier:
             max_chars=_DISCORD_PACK_MAX_CHARS,
         )
         self._send(run_id, "run:canceled", body)
+
+    def notify_run_retried(
+        self,
+        run_id: str,
+        runs_root: str,
+        *,
+        target_label: str | None = None,
+        stage: str | None = None,
+        reset_downstream: bool | None = None,
+    ) -> None:
+        if not self._cfg.events.run_retried:
+            return
+        header = f"[{run_id}] run_retried ({_utc_header()})"
+        if target_label and stage:
+            short = STAGE_SHORT_NAMES.get(stage, stage)
+            header += f"\n{target_label} / {short}"
+            if reset_downstream is not None:
+                header += f"\nreset_downstream: {str(reset_downstream).lower()}"
+        body = format_run_report_messages(
+            self._state,
+            run_id,
+            runs_root,
+            handoff_root=self._handoff_root,
+            header=header,
+            max_chars=_DISCORD_PACK_MAX_CHARS,
+        )
+        self._send(run_id, f"run:retried:{_utc_header()}", body)
 
     def notify_stage_outcome(
         self,
