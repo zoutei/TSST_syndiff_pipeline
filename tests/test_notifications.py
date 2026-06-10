@@ -223,8 +223,8 @@ class TestStatusReply(unittest.TestCase):
             state.create_run("r1", "/c", "/t", str(tmp), [target], ["mapping"])
             state.set_run_status("r1", "running")
             text = format_status_reply_message(state, ["r1"], str(tmp), handoff_root=str(handoff))
-            self.assertIn("run_id=r1", text)
-            self.assertIn("status (", text)
+            self.assertIn("[r1] status =", text)
+            self.assertIn("UTC)", text)
 
     def test_format_status_reply_splits_runs_instead_of_truncating(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -304,7 +304,25 @@ class TestRunReport(unittest.TestCase):
             self._seed_run(state, "run_a")
             state.set_run_status("run_a", "running")
             lines = format_progress_lines(state, "run_a", "/runs")
-            self.assertTrue(any(line.startswith("run_id=run_a") for line in lines))
+            self.assertTrue(any("=" in line for line in lines))
+
+    def test_format_progress_lines_omits_stale_stall_reason_when_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            self._seed_run(state, "run_a")
+            state.set_run_status("run_a", "running", stall_reason="old stall text")
+            lines = format_progress_lines(state, "run_a", "/runs")
+            self.assertFalse(any("stall_reason" in line for line in lines))
+
+    def test_format_progress_lines_includes_stall_reason_when_stalled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            self._seed_run(state, "run_a")
+            state.set_run_status("run_a", "stalled", stall_reason="pool saturated")
+            lines = format_progress_lines(state, "run_a", "/runs")
+            self.assertIn("stall_reason='pool saturated'", lines)
 
     def test_format_run_report_truncates_grid(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -373,7 +391,7 @@ class TestPreview(unittest.TestCase):
             state.set_run_status("r1", "running")
             text = format_preview_message(state, "r1", str(base))
             self.assertIn("[TEST]", text)
-            self.assertIn("run_id=r1", text)
+            self.assertIn("pending=", text)
 
     def test_send_preview_skips_dedup_table(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -456,6 +474,66 @@ class TestNotifier(unittest.TestCase):
                 )
                 self.assertEqual(post.call_count, 1)
                 self.assertIn("stage_canceled", post.call_args[0][1])
+
+    def test_stage_outcome_splits_long_messages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            handoff = base
+            db = base / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            targets = [
+                Target(i, 1, 1, 200.0 + i, 50.0, f"s{i:04d}_c1_k1_t{i:04d}")
+                for i in range(50)
+            ]
+            state.create_run(
+                "run_big",
+                "/c",
+                "/t",
+                str(base),
+                targets,
+                list(STAGE_NAMES),
+            )
+            state.set_run_status("run_big", "running")
+            for target in targets[:40]:
+                state.update_stage_status(
+                    "run_big",
+                    target.label(),
+                    "mapping",
+                    STATUS_RUNNING,
+                    started_at="t",
+                )
+            cfg_path = base / "config.yaml"
+            (base / "deployment.yaml").write_text(
+                "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
+            )
+            cfg = NotificationConfig(
+                enabled=True,
+                events=NotificationEvents(stage_completed=True),
+            )
+            notifier = Notifier(
+                state,
+                cfg,
+                config_path=cfg_path,
+                handoff_root=str(handoff),
+                deployment_file="deployment.yaml",
+            )
+            with mock.patch(
+                "syndiff_pipeline.template_runner.notifications.post_discord_webhook"
+            ) as post:
+                notifier.notify_stage_outcome(
+                    "run_big",
+                    str(base),
+                    target_label=targets[0].label(),
+                    stage="mapping",
+                    outcome="success",
+                    finished_at="2026-01-01T00:00:00",
+                )
+                self.assertGreater(post.call_count, 1)
+                for call in post.call_args_list:
+                    self.assertLessEqual(len(call[0][1]), _DISCORD_MAX_CONTENT)
+                joined = "\n\n".join(call[0][1] for call in post.call_args_list)
+                self.assertIn("stage_success", joined)
+                self.assertIn(targets[0].label(), joined)
 
     def test_dedup_prevents_second_post(self):
         with tempfile.TemporaryDirectory() as tmp:

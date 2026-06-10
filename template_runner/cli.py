@@ -423,7 +423,10 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_progress(args: argparse.Namespace) -> int:
-    from syndiff_pipeline.template_runner.run_report import format_progress_lines
+    from syndiff_pipeline.template_runner.run_report import (
+        format_progress_lines,
+        format_run_status_header,
+    )
 
     if _monitoring_mode(args):
         handoff = _resolve_handoff_from_args(args)
@@ -433,9 +436,10 @@ def cmd_progress(args: argparse.Namespace) -> int:
         )
         multi = len(run_ids) > 1
         for run_id in run_ids:
-            if multi:
-                print(f"=== run {run_id} ===")
             run = state.get_run(run_id) or {}
+            if multi:
+                print()
+            print(format_run_status_header(run_id, run))
             runs_root = run.get("runs_root") or str(handoff_runs_root(handoff))
             for line in format_progress_lines(
                 state,
@@ -449,6 +453,8 @@ def cmd_progress(args: argparse.Namespace) -> int:
 
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
+    run = state.get_run(ctx.run_id) or {}
+    print(format_run_status_header(ctx.run_id, run))
     for line in format_progress_lines(
         state,
         ctx.run_id,

@@ -18,7 +18,9 @@ from syndiff_pipeline.template_runner.run_report import (
     format_progress_lines,
     format_run_report,
     format_run_report_messages,
+    format_run_status_header,
     format_target_status_line,
+    pack_message_lines,
 )
 from syndiff_pipeline.template_runner.state import STAGE_SHORT_NAMES
 
@@ -29,6 +31,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _DISCORD_MAX_CONTENT = 2000
+_DISCORD_PACK_MAX_CHARS = _DISCORD_MAX_CONTENT - 100
 _WEBHOOK_TIMEOUT_S = 5.0
 
 
@@ -279,19 +282,21 @@ class Notifier:
             runs_root,
             handoff_root=self._handoff_root,
             header=header,
+            max_chars=_DISCORD_PACK_MAX_CHARS,
         )
         self._send(run_id, f"run:{outcome}", body)
 
     def notify_run_stalled(self, run_id: str, runs_root: str, *, stall_reason: str) -> None:
         if not self._cfg.events.run_stalled:
             return
-        header = f"[{run_id}] run_stalled ({_utc_header()})\nstall_reason={stall_reason!r}"
+        header = f"[{run_id}] run_stalled ({_utc_header()})"
         body = format_run_report_messages(
             self._state,
             run_id,
             runs_root,
             handoff_root=self._handoff_root,
             header=header,
+            max_chars=_DISCORD_PACK_MAX_CHARS,
         )
         self._send(run_id, f"run:stalled:{_utc_header()}", body)
 
@@ -311,6 +316,7 @@ class Notifier:
             runs_root,
             handoff_root=self._handoff_root,
             header=header,
+            max_chars=_DISCORD_PACK_MAX_CHARS,
         )
         self._send(run_id, "run:canceled", body)
 
@@ -352,13 +358,15 @@ class Notifier:
         target_line = format_target_status_line(self._state, run_id, target_label)
         if target_line:
             lines.extend(["", target_line])
-        self._send(run_id, f"stage:{target_label}:{stage}:{outcome}:{finished_at}", "\n".join(lines))
+        body = pack_message_lines(lines, max_chars=_DISCORD_PACK_MAX_CHARS)
+        self._send(run_id, f"stage:{target_label}:{stage}:{outcome}:{finished_at}", body)
 
     def notify_daemon_unhealthy(self, *, detail: str) -> None:
         if not self._cfg.events.daemon_unhealthy:
             return
         header = f"[supervisor] daemon_unhealthy ({_utc_header()})\n{detail}"
-        self._send("", f"daemon:unhealthy:{_utc_header()}", header)
+        body = pack_message_lines([header], max_chars=_DISCORD_PACK_MAX_CHARS)
+        self._send("", f"daemon:unhealthy:{_utc_header()}", body)
 
 
 def format_run_started_message(
@@ -432,7 +440,7 @@ def format_status_reply_messages(
             messages.append(f"Unknown run_id: {run_id}")
             continue
         root = run.get("runs_root") or runs_root
-        header = f"[{run_id}] status ({_utc_header()})"
+        header = format_run_status_header(run_id, run, timestamp=_utc_header())
         messages.extend(
             format_run_report_messages(
                 state,
@@ -440,6 +448,7 @@ def format_status_reply_messages(
                 root,
                 handoff_root=handoff_root,
                 header=header,
+                max_chars=_DISCORD_PACK_MAX_CHARS,
             )
         )
     return messages
@@ -513,6 +522,7 @@ def send_preview_notification(
         ctx.cfg.runs_dir(),
         handoff_root=ctx.cfg.handoff_root,
         header=f"[TEST] [{ctx.run_id}] {event_label} ({_utc_header()})",
+        max_chars=_DISCORD_PACK_MAX_CHARS,
     )
     for message in messages:
         post_discord_webhook(url, message)

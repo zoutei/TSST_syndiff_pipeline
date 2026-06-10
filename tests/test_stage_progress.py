@@ -259,7 +259,7 @@ class TestCmdProgressDetail(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         out = buf.getvalue()
-        self.assertIn("run_id=run_a", out)
+        self.assertIn("[run_a] status =", out)
         self.assertIn("s0041_c1_k2_2021udg ps1_dl: 342/1009", out)
 
     def test_no_detail_flag(self):

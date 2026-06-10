@@ -16,6 +16,19 @@ if TYPE_CHECKING:
     from syndiff_pipeline.template_runner.state import PipelineState
 
 
+def format_run_status_header(
+    run_id: str,
+    run: dict,
+    *,
+    timestamp: str | None = None,
+) -> str:
+    """First-line run summary; run_id is only shown in the brackets."""
+    status = run.get("status", "?")
+    if timestamp:
+        return f"[{run_id}] status = {status} ({timestamp})"
+    return f"[{run_id}] status = {status}"
+
+
 def format_progress_lines(
     state: PipelineState,
     run_id: str,
@@ -28,15 +41,18 @@ def format_progress_lines(
 
     counts = state.count_by_status(run_id)
     run = state.get_run(run_id) or {}
-    parts = [f"{k}={v}" for k, v in sorted(counts.items())]
-    line = f"run_id={run_id} status={run.get('status', '?')} " + " ".join(parts)
-    if handoff_root:
-        in_flight = read_verify_in_flight(handoff_root, run_id)
-        if in_flight:
-            line += f" verify_in_flight={in_flight}"
-    if run.get("stall_reason"):
-        line += f" stall_reason={run['stall_reason']!r}"
-    lines = [line]
+    count_parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+    lines: list[str] = []
+    if count_parts:
+        count_line = " ".join(count_parts)
+        if handoff_root:
+            in_flight = read_verify_in_flight(handoff_root, run_id)
+            if in_flight:
+                count_line += f" verify_in_flight={in_flight}"
+        lines.append(count_line)
+
+    if run.get("status") == "stalled" and run.get("stall_reason"):
+        lines.append(f"stall_reason={run['stall_reason']!r}")
 
     if not include_running_detail:
         return lines
@@ -46,6 +62,7 @@ def format_progress_lines(
         lines.append("  (no running tasks)")
         return lines
 
+    lines.append("")
     for row in sorted(running, key=lambda r: (r.target_label, r.stage)):
         from syndiff_pipeline.template_runner import logs
 
@@ -115,7 +132,7 @@ def format_run_report(
     max_chars: int = 1900,
 ) -> str:
     """Single-string report; may omit trailing grid rows when over *max_chars*."""
-    body_lines = [header, ""]
+    body_lines = [header]
     body_lines.extend(
         format_progress_lines(
             state,
@@ -151,7 +168,7 @@ def format_run_report_messages(
     max_chars: int = 1900,
 ) -> list[str]:
     """Discord-sized chunks; splits across messages instead of truncating."""
-    body_lines = [header, ""]
+    body_lines = [header]
     body_lines.extend(
         format_progress_lines(
             state,
@@ -164,20 +181,20 @@ def format_run_report_messages(
     progress_text = "\n".join(body_lines)
 
     if not include_status_grid:
-        return _pack_lines(body_lines, max_chars=max_chars)
+        return pack_message_lines(body_lines, max_chars=max_chars)
 
     grid = format_status_grid(state, run_id)
     if not grid:
         body_lines.append("  (no stage rows)")
-        return _pack_lines(body_lines, max_chars=max_chars)
+        return pack_message_lines(body_lines, max_chars=max_chars)
 
     combined_lines = body_lines + [""] + grid
     if len("\n".join(combined_lines)) <= max_chars:
         return ["\n".join(combined_lines)]
 
-    messages = _pack_lines(body_lines, max_chars=max_chars)
+    messages = pack_message_lines(body_lines, max_chars=max_chars)
     messages.extend(
-        _pack_lines([_continuation_header(header), ""] + grid, max_chars=max_chars)
+        pack_message_lines([_continuation_header(header), ""] + grid, max_chars=max_chars)
     )
     return messages
 
@@ -193,7 +210,7 @@ def _line_chars(lines: list[str]) -> int:
     return sum(len(line) + 1 for line in lines)
 
 
-def _pack_lines(lines: list[str], *, max_chars: int) -> list[str]:
+def pack_message_lines(lines: list[str], *, max_chars: int) -> list[str]:
     if max_chars <= 0:
         return []
     messages: list[str] = []
