@@ -185,6 +185,32 @@ def run_stage_closure(active_stages: Sequence[str]) -> frozenset[str]:
     return frozenset(set(active_stages) | upstream_stages_for(active_stages))
 
 
+def reopen_status_for_retry(stage: str, active_stages: Sequence[str]) -> str:
+    """Selected stages re-execute (pending); closure upstream re-verifies (external)."""
+    return STATUS_PENDING if stage in set(active_stages) else STATUS_EXTERNAL
+
+
+def stage_needs_artifact_verify_display(
+    state: "PipelineState",
+    run_id: str,
+    target_label: str,
+    stage: str,
+    status: str,
+    active_stages: Sequence[str],
+) -> bool:
+    """True if the status grid / stall reason should show artifact verify queued."""
+    if status == STATUS_EXTERNAL:
+        return artifact_verify_needed(state, run_id, target_label, stage, active_stages)
+    if status == STATUS_PENDING and stage in active_stages:
+        return True
+    if status == STATUS_PENDING and stage not in set(active_stages):
+        return (
+            stage in run_stage_closure(active_stages)
+            and artifact_verify_needed(state, run_id, target_label, stage, active_stages)
+        )
+    return False
+
+
 def artifact_verify_needed(
     state: "PipelineState",
     run_id: str,
@@ -1029,19 +1055,26 @@ class PipelineState:
     def reset_stage_for_retry(
         self, run_id: str, target_label: str, stage: str, reset_downstream: bool = True
     ) -> int:
-        """Reopen *stage* (+downstream) to pending; clear external caches so they re-verify."""
+        """Reopen *stage* (+downstream); clear artifact caches so they re-verify.
+
+        Selected stages (in ``runs.stages``) reopen to ``pending`` for re-execution.
+        Non-selected stages in the upstream closure reopen to ``external`` for
+        artifact verify → ``skipped``.
+        """
+        active = set(self.get_active_stages(run_id))
         stages_to_reset = [stage] + (downstream_stages(stage) if reset_downstream else [])
         if self.get_skip_reason(run_id, target_label, "ps1_download") == SKIP_REASON_STREAM:
             stages_to_reset = [s for s in stages_to_reset if s != "ps1_download"]
         count = 0
         with self._conn() as conn:
             for s in stages_to_reset:
+                reopen_status = reopen_status_for_retry(s, active)
                 cur = conn.execute(
                     "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
                     "exit_code = NULL, error_tail = NULL, native_id = NULL, launch_token = NULL, "
                     "claimed_at = NULL, submit_epoch = NULL "
-                    "WHERE run_id = ? AND target_label = ? AND stage = ? AND status != ?",
-                    (STATUS_PENDING, run_id, target_label, s, STATUS_EXTERNAL),
+                    "WHERE run_id = ? AND target_label = ? AND stage = ?",
+                    (reopen_status, run_id, target_label, s),
                 )
                 count += cur.rowcount
                 conn.execute(
@@ -1049,6 +1082,20 @@ class PipelineState:
                     (run_id, target_label, s),
                 )
         return count
+
+    def repair_orphaned_pending_upstream(self, run_id: str) -> int:
+        """Normalize pending upstream stages that should be external (partial runs)."""
+        active = set(self.get_active_stages(run_id))
+        closure = run_stage_closure(active)
+        repaired = 0
+        for row in self.list_stage_runs(run_id):
+            if row.status != STATUS_PENDING:
+                continue
+            if row.stage in active or row.stage not in closure:
+                continue
+            self.update_stage_status(run_id, row.target_label, row.stage, STATUS_EXTERNAL)
+            repaired += 1
+        return repaired
 
     def reopen_failed_canceled(self, run_id: str) -> int:
         """Reopen all failed/canceled stages (+downstream) to pending."""

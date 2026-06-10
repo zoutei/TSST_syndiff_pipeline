@@ -44,6 +44,8 @@ from syndiff_pipeline.template_runner.state import (
     derive_run_final_status,
     downstream_stages,
     effective_stage_deps,
+    run_stage_closure,
+    stage_needs_artifact_verify_display,
 )
 from syndiff_pipeline.template_runner.verify_status import (
     clear_verify_in_flight,
@@ -632,11 +634,20 @@ def _iter_verify_candidates(
                 continue
             if row.status == STATUS_EXTERNAL:
                 if not artifact_verify_needed(
-                    state, run_id, label, row.stage, active_stages
+                    state, run_id, label, row.stage, list(active_stages)
                 ):
                     continue
             elif row.status == STATUS_PENDING:
-                if row.stage not in active_stages:
+                if row.stage in active_stages:
+                    pass
+                elif (
+                    row.stage in run_stage_closure(active_stages)
+                    and artifact_verify_needed(
+                        state, run_id, label, row.stage, list(active_stages)
+                    )
+                ):
+                    pass
+                else:
                     continue
             else:
                 continue
@@ -918,13 +929,9 @@ def _stall_reasons(state: PipelineState, run_id: str, ctx) -> List[str]:
             continue
         if row.status in (STATUS_PENDING, STATUS_EXTERNAL):
             active_stages = state.get_active_stages(run_id)
-            needs_verify = False
-            if row.status == STATUS_EXTERNAL:
-                needs_verify = artifact_verify_needed(
-                    state, run_id, label, stage, active_stages
-                )
-            elif stage in active_stages:
-                needs_verify = True
+            needs_verify = stage_needs_artifact_verify_display(
+                state, run_id, label, stage, row.status, active_stages
+            )
             if needs_verify and not state.external_verify_complete(
                 run_id, label, stage
             ):
@@ -1038,6 +1045,13 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     reconcile_running_stages(state, run_id, ctx)
     state.apply_not_selected_skips(run_id, ctx.targets, ctx.cfg)
     state.apply_superseded_skips(run_id, ctx.targets)
+    repaired = state.repair_orphaned_pending_upstream(run_id)
+    if repaired:
+        log.info(
+            "Repaired %d orphaned pending upstream stage(s) in run %s",
+            repaired,
+            run_id,
+        )
     _schedule_external_and_pending_skips(
         state,
         run_id,

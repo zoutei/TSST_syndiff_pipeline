@@ -11,10 +11,8 @@ from syndiff_pipeline.template_runner.state import (
     SKIP_REASON_SUPERSEDED,
     STAGE_NAMES,
     STAGE_SHORT_NAMES,
-    STATUS_EXTERNAL,
-    STATUS_PENDING,
     STATUS_SKIPPED,
-    artifact_verify_needed,
+    stage_needs_artifact_verify_display,
 )
 
 if TYPE_CHECKING:
@@ -149,13 +147,9 @@ def _format_stage_status_short(
     key = (row.target_label, row.stage)
     if verifying_keys and key in verifying_keys:
         return f"{short}:scan"
-    needs_verify = False
-    if row.status == STATUS_EXTERNAL:
-        needs_verify = artifact_verify_needed(
-            state, run_id, row.target_label, row.stage, stages
-        )
-    elif row.status == STATUS_PENDING and row.stage in stages:
-        needs_verify = True
+    needs_verify = stage_needs_artifact_verify_display(
+        state, run_id, row.target_label, row.stage, row.status, stages
+    )
     if needs_verify and not state.external_verify_complete(
         run_id, row.target_label, row.stage
     ):

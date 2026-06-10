@@ -720,7 +720,7 @@ def cmd_retry(args: argparse.Namespace) -> int:
             args={
                 "target_label": t.label(),
                 "stage": args.stage,
-                "reset_downstream": True,
+                "reset_downstream": not getattr(args, "no_reset_downstream", False),
             },
         )
         print(f"Queued retry for {args.stage} on {t.label()} in run {ctx.run_id}")
@@ -990,6 +990,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-start-daemon",
         action="store_true",
         help="Queue the intent without ensuring the supervisor daemon is running",
+    )
+    sp.add_argument(
+        "--no-reset-downstream",
+        action="store_true",
+        help="Only reopen the targeted stage; leave downstream untouched",
     )
     sp.set_defaults(func=cmd_retry)
 
