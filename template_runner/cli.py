@@ -19,6 +19,7 @@ from syndiff_pipeline.template_runner.deployment import (
 from syndiff_pipeline.template_runner.runner_config import load_runner_config
 from syndiff_pipeline.template_runner.workspace import (
     discover_alive_handoff_roots,
+    load_recorded_deployment_path,
     record_deployment_path,
     runs_root as handoff_runs_root,
     state_db_path,
@@ -49,17 +50,32 @@ def _discord_bot_config_path(args: argparse.Namespace, ctx: RunContext | None = 
     return None
 
 
-def _ensure_discord_bot(config_path: str | Path):
+def _ensure_discord_bot(
+    deployment_path: str | Path,
+    *,
+    site_config_path: str | Path | None = None,
+):
     from syndiff_pipeline.template_runner.discord_bot_control import ensure_discord_bot_running
 
-    return ensure_discord_bot_running(config_path)
+    return ensure_discord_bot_running(
+        deployment_path,
+        site_config_path=site_config_path,
+    )
 
 
-def _print_discord_bot_status(config_path: str | Path, result) -> None:
+def _print_discord_bot_status(
+    deployment_path: str | Path,
+    result,
+    *,
+    site_config_path: str | Path | None = None,
+) -> None:
+    if result is None:
+        print("Discord bot: starting with supervisor (see daemon.log)")
+        return
     if not result.enabled:
         return
-    cfg = load_runner_config(config_path)
-    bot_log = logs.discord_bot_log_path(cfg.handoff_root)
+    handoff = str(load_handoff_root_from_deployment(deployment_path))
+    bot_log = logs.discord_bot_log_path(handoff)
     if result.pid:
         print(f"Discord bot pid={result.pid} spawned={result.spawned}")
         print(f"  bot log: {bot_log}")
@@ -118,6 +134,32 @@ def _resolve_handoff_from_args(args: argparse.Namespace) -> str:
     )
 
 
+def _resolve_deployment_from_args(args: argparse.Namespace) -> Path:
+    deployment = getattr(args, "deployment", None)
+    if deployment:
+        path = Path(deployment).expanduser().resolve()
+        handoff = load_handoff_root_from_deployment(path)
+        record_deployment_path(handoff, path)
+        return path
+
+    discovered = discover_alive_handoff_roots()
+    if len(discovered) == 1:
+        recorded = load_recorded_deployment_path(discovered[0])
+        if recorded is not None:
+            return recorded
+        raise SystemExit(
+            f"No deployment.yaml recorded for workspace {discovered[0]}. "
+            "Pass --deployment PATH."
+        )
+    if len(discovered) > 1:
+        lines = "\n".join(f"  {p}" for p in discovered)
+        raise SystemExit(f"Multiple supervisors running; pass --deployment:\n{lines}")
+    raise SystemExit(
+        "No supervisor found. Start with: syndiff-template submit --config ... "
+        "or syndiff-template daemon start --deployment ..."
+    )
+
+
 def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
     if getattr(args, "run_dir", None):
         return resolve_run_context(
@@ -127,7 +169,7 @@ def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
 
     run_id = getattr(args, "run_id", None)
     if not run_id:
-        raise SystemExit("Specify --run-dir, or --run-id with --deployment/--config.")
+        raise SystemExit("Specify --run-dir, or --run-id with --deployment.")
 
     deployment = getattr(args, "deployment", None)
     if deployment:
@@ -136,11 +178,6 @@ def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
             run_id=run_id,
             runs_root=str(handoff_runs_root(handoff)),
         )
-
-    config_path = getattr(args, "config", None)
-    if config_path:
-        cfg = load_runner_config(config_path)
-        return resolve_run_context(run_id=run_id, runs_root=cfg.runs_dir())
 
     handoff = _resolve_handoff_from_args(args)
     return resolve_run_context(run_id=run_id, runs_root=str(handoff_runs_root(handoff)))
@@ -260,12 +297,18 @@ def cmd_submit(args: argparse.Namespace) -> int:
             },
         )
 
-    record_deployment_path(
-        cfg.handoff_root,
-        deployment_path_for_config(args.config, cfg.deployment_file),
+    deploy_path = deployment_path_for_config(args.config, cfg.deployment_file)
+    record_deployment_path(cfg.handoff_root, deploy_path)
+    from syndiff_pipeline.template_runner.discord_bot_control import (
+        record_discord_bot_site_config,
     )
-    result = ensure_daemon_running(cfg.handoff_root)
-    bot_result = _ensure_discord_bot(args.config)
+
+    record_discord_bot_site_config(cfg.handoff_root, args.config)
+    result = ensure_daemon_running(cfg.handoff_root, deployment_path=deploy_path)
+    if result.spawned:
+        bot_result = None
+    else:
+        bot_result = _ensure_discord_bot(deploy_path, site_config_path=args.config)
     daemon_log = logs.daemon_log_path(cfg.handoff_root)
 
     if created_new_run and cfg.notifications.enabled:
@@ -286,7 +329,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     print(f"Submitted run_id={run_id} supervisor_pid={result.pid}")
     print(f"  daemon log: {daemon_log}")
-    _print_discord_bot_status(args.config, bot_result)
+    _print_discord_bot_status(deploy_path, bot_result, site_config_path=args.config)
     print("Monitor: syndiff-template progress")
     print("         syndiff-template status --watch")
     print(f"         syndiff-template progress --run-id {run_id}")
@@ -692,10 +735,20 @@ def cmd_retry(args: argparse.Namespace) -> int:
         print(f"Queued bulk retry for run {ctx.run_id}")
 
     if not getattr(args, "no_start_daemon", False):
-        ensure_daemon_running(ctx.cfg.handoff_root)
+        from syndiff_pipeline.template_runner.discord_bot_control import (
+            record_discord_bot_site_config,
+        )
+
+        deploy_path = load_recorded_deployment_path(ctx.cfg.handoff_root)
+        result = ensure_daemon_running(
+            ctx.cfg.handoff_root,
+            deployment_path=deploy_path,
+        )
         bot_config = _discord_bot_config_path(args, ctx)
-        if bot_config is not None:
-            _ensure_discord_bot(bot_config)
+        if bot_config is not None and deploy_path is not None:
+            record_discord_bot_site_config(ctx.cfg.handoff_root, bot_config)
+            if not result.spawned:
+                _ensure_discord_bot(deploy_path, site_config_path=bot_config)
     return 0
 
 
@@ -728,7 +781,8 @@ def cmd_kill(args: argparse.Namespace) -> int:
 def cmd_discord_bot(args: argparse.Namespace) -> int:
     from syndiff_pipeline.template_runner.discord_bot import run_discord_bot
 
-    run_discord_bot(args.config)
+    deploy_path = _resolve_deployment_from_args(args)
+    run_discord_bot(deploy_path)
     return 0
 
 
@@ -739,15 +793,26 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     )
 
     handoff = _resolve_handoff_from_args(args)
+    deploy_arg = getattr(args, "deployment", None)
+    deploy_path = (
+        Path(deploy_arg).expanduser().resolve()
+        if deploy_arg
+        else load_recorded_deployment_path(handoff)
+    )
     if args.action == "start":
-        result = ensure_daemon_running(handoff)
-        bot_result = ensure_discord_bot_for_handoff_root(handoff)
+        result = ensure_daemon_running(handoff, deployment_path=deploy_path)
+        if result.spawned:
+            bot_result = None
+        else:
+            bot_result = ensure_discord_bot_for_handoff_root(handoff)
         print(f"Supervisor pid={result.pid} spawned={result.spawned}")
         if bot_result is not None:
             if bot_result.enabled and bot_result.pid:
                 print(f"Discord bot pid={bot_result.pid} spawned={bot_result.spawned}")
             elif bot_result.skipped_reason:
                 print(f"WARNING: Discord bot not running: {bot_result.skipped_reason}")
+        elif result.spawned:
+            print("Discord bot: starting with supervisor (see daemon.log)")
         else:
             print("Discord bot not started (no recorded site config; submit a run first)")
         return 0
@@ -820,11 +885,6 @@ def _add_run_scope(sp: argparse.ArgumentParser) -> None:
         "--deployment",
         default=None,
         help="Path to deployment.yaml (with --run-id; optional if one supervisor is running)",
-    )
-    sp.add_argument(
-        "--config",
-        default=None,
-        help="Site config.yaml (alternative to --deployment with --run-id)",
     )
 
 
@@ -970,7 +1030,7 @@ def build_parser() -> argparse.ArgumentParser:
         "bot",
         help="Run bot that replies to channel messages with progress + status",
     )
-    sp_bot.add_argument("--config", required=True)
+    _add_workspace_scope(sp_bot)
     sp_bot.set_defaults(func=cmd_discord_bot)
 
     return p

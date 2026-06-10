@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from syndiff_pipeline.template_runner.deployment import load_handoff_root_from_deployment
+
 DEFAULT_STATE_DB_NAME = "pipeline_state.sqlite"
 
 
@@ -65,8 +67,9 @@ def discover_alive_handoff_roots() -> list[Path]:
         if "--daemon" not in parts:
             continue
         try:
-            idx = parts.index("--handoff-root")
-            handoff = parts[idx + 1]
+            idx = parts.index("--deployment")
+            deploy = parts[idx + 1]
+            handoff = str(load_handoff_root_from_deployment(deploy))
         except (ValueError, IndexError):
             continue
         pid = int(entry.name)

@@ -12,10 +12,13 @@ import threading
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, List
 
 from syndiff_pipeline.template_runner import condor, daemon, launcher, logs, stages
+from syndiff_pipeline.template_runner.deployment import load_handoff_root_from_deployment
 from syndiff_pipeline.template_runner.run_context import resolve_run_context
+from syndiff_pipeline.template_runner.workspace import record_deployment_path
 from syndiff_pipeline.template_runner.runner_config import resolve_config
 from syndiff_pipeline.template_runner.state import (
     RUN_CANCELED,
@@ -85,12 +88,7 @@ _SHUTDOWN_VERIFY_DRAIN_S = 5.0
 # jobs from durable status files) can take over.
 _HEARTBEAT_FATAL_AFTER_S = 90.0
 
-# Re-check the Discord bot periodically so a crash between submits does not
-# leave on-demand status replies offline until the next job submission.
-_DISCORD_BOT_CHECK_INTERVAL_S = 60.0
-
-
-def _maybe_ensure_discord_bot(handoff_root: str) -> None:
+def _ensure_discord_bot_on_startup(handoff_root: str) -> None:
     from syndiff_pipeline.template_runner.discord_bot_control import (
         ensure_discord_bot_for_handoff_root,
     )
@@ -98,12 +96,12 @@ def _maybe_ensure_discord_bot(handoff_root: str) -> None:
     try:
         result = ensure_discord_bot_for_handoff_root(handoff_root)
     except Exception:
-        log.warning("Discord bot health check failed", exc_info=True)
+        log.warning("Discord bot startup ensure failed", exc_info=True)
         return
     if result is None:
         return
     if result.spawned and result.pid:
-        log.info("Restarted Discord bot pid=%s", result.pid)
+        log.info("Started Discord bot pid=%s", result.pid)
     elif result.skipped_reason:
         log.warning("Discord bot not running: %s", result.skipped_reason)
 
@@ -1168,16 +1166,10 @@ def run_supervisor_daemon(handoff_root: str) -> int:
             daemon=True,
         )
         heartbeat_thread.start()
-        _maybe_ensure_discord_bot(handoff_root)
+        _ensure_discord_bot_on_startup(handoff_root)
 
-        last_discord_bot_check = time.monotonic()
         try:
             while not _shutdown:
-                now = time.monotonic()
-                if now - last_discord_bot_check >= _DISCORD_BOT_CHECK_INTERVAL_S:
-                    last_discord_bot_check = now
-                    _maybe_ensure_discord_bot(handoff_root)
-
                 _apply_commands(state)
 
                 for run in state.list_active_runs():
@@ -1288,9 +1280,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Template pipeline supervisor")
     parser.add_argument("--daemon", action="store_true", help="Run global supervisor daemon")
     parser.add_argument(
-        "--handoff-root",
+        "--deployment",
         default=None,
-        help="Handoff workspace root (daemon mode; state DB is derived)",
+        help="Path to deployment.yaml (required for --daemon)",
     )
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--run-dir", default=None, help="Path to run directory with frozen config")
@@ -1299,9 +1291,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.daemon:
-        if not args.handoff_root:
-            raise SystemExit("--handoff-root required for --daemon")
-        return run_supervisor_daemon(args.handoff_root)
+        if not args.deployment:
+            raise SystemExit("--deployment required for --daemon")
+        deploy_path = Path(args.deployment).expanduser().resolve()
+        handoff_root = str(load_handoff_root_from_deployment(deploy_path))
+        record_deployment_path(handoff_root, deploy_path)
+        return run_supervisor_daemon(handoff_root)
 
     if not args.run_id or not args.run_dir:
         raise SystemExit("--run-id and --run-dir required without --daemon")

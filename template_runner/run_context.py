@@ -50,7 +50,7 @@ def resolve_run_context(
         rd = logs.run_dir(runs_root, run_id)
     else:
         raise SystemExit(
-            "Specify --run-dir, or --config with --run-id."
+            "Specify --run-dir, or --run-id with --deployment (or auto-discovered workspace)."
         )
 
     if not rd.is_dir():

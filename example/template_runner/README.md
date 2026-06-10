@@ -132,7 +132,7 @@ Requires `notifications.enabled: true` in `config.yaml` and keys in `deployment.
 | Command | Usage |
 |---------|-------|
 | **notify test** | `syndiff-template notify test --run-dir RUN [--dry-run] [-v]` |
-| **discord bot** | `syndiff-template discord bot --config config.yaml` (foreground; normally auto-started) |
+| **discord bot** | `syndiff-template discord bot --deployment deployment.yaml` (foreground; normally auto-started) |
 
 ## Variant configs
 

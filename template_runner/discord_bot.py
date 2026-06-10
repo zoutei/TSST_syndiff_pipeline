@@ -10,14 +10,13 @@ import sys
 from pathlib import Path
 
 from syndiff_pipeline.template_runner import daemon, logs
-from syndiff_pipeline.template_runner.notifications import (
-    format_status_reply_messages,
-    resolve_bot_token,
-    resolve_channel_id,
-    resolve_run_ids_for_status_request,
+from syndiff_pipeline.template_runner.deployment import (
+    load_deployment_file,
+    load_handoff_root_from_deployment,
 )
-from syndiff_pipeline.template_runner.runner_config import RunnerConfig, load_runner_config
+from syndiff_pipeline.template_runner.notifications import format_status_reply_messages
 from syndiff_pipeline.template_runner.state import PipelineState
+from syndiff_pipeline.template_runner.workspace import runs_root, state_db_path
 
 log = logging.getLogger(__name__)
 
@@ -50,46 +49,43 @@ def _require_discord():
 class PipelineDiscordBot:
     """Reply to channel messages with live progress + status grid."""
 
-    def __init__(
-        self,
-        cfg: RunnerConfig,
-        *,
-        config_path: str | Path,
-    ):
-        self._cfg = cfg
-        self._config_path = Path(config_path).expanduser().resolve()
-        self._state = PipelineState(cfg.state_db_path)
-        notif = cfg.notifications
-        self._channel_id = resolve_channel_id(
-            config_path=self._config_path,
-            deployment_file=cfg.deployment_file,
-            config_channel_id=notif.bot.channel_id,
+    def __init__(self, deployment_path: str | Path):
+        self._deployment_path = Path(deployment_path).expanduser().resolve()
+        deployment = load_deployment_file(self._deployment_path)
+        self._handoff_root = str(
+            load_handoff_root_from_deployment(self._deployment_path)
         )
-        self._token = resolve_bot_token(
-            config_path=self._config_path,
-            deployment_file=cfg.deployment_file,
+        self._runs_dir = str(runs_root(self._handoff_root))
+        self._state = PipelineState(str(state_db_path(self._handoff_root)))
+        self._token = str(deployment.get("discord_bot_token", "")).strip() or None
+        self._channel_id = (
+            str(deployment.get("discord_channel_id", "")).strip() or None
         )
 
     def _build_status_reply(self, message_text: str) -> list[str]:
+        from syndiff_pipeline.template_runner.notifications import (
+            resolve_run_ids_for_status_request,
+        )
+
         run_ids = resolve_run_ids_for_status_request(self._state, message_text)
         return format_status_reply_messages(
             self._state,
             run_ids,
-            self._cfg.runs_dir(),
-            handoff_root=self._cfg.handoff_root,
+            self._runs_dir,
+            handoff_root=self._handoff_root,
         )
 
     def run(self) -> None:
         discord = _require_discord()
         if not self._token:
             raise SystemExit(
-                f"No Discord bot token found (set discord_bot_token in "
-                f"{self._cfg.deployment_file} beside config)"
+                f"No Discord bot token found in {self._deployment_path} "
+                "(set discord_bot_token in deployment.yaml)"
             )
         if not self._channel_id:
             raise SystemExit(
-                "No Discord channel configured. Set notifications.bot.channel_id in config "
-                "or discord_channel_id in deployment.yaml."
+                f"No Discord channel configured in {self._deployment_path}. "
+                "Set discord_channel_id in deployment.yaml."
             )
 
         intents = discord.Intents.default()
@@ -170,35 +166,36 @@ class PipelineDiscordBot:
                 except Exception:
                     log.exception("Failed to send Discord reply via channel.send")
 
-        log.info("Starting Discord bot for %s", self._config_path)
+        log.info("Starting Discord bot for %s", self._deployment_path)
         client.run(self._token, log_handler=None)
 
 
 def run_discord_bot(
-    config_path: str | Path,
+    deployment_path: str | Path,
     *,
     detached: bool = False,
 ) -> None:
-    path = Path(config_path).expanduser().resolve()
-    cfg = load_runner_config(path)
-    if not cfg.notifications.bot.enabled:
-        raise SystemExit(
-            "Discord bot is disabled. Set notifications.bot.enabled: true in config."
-        )
-    pid_path = logs.discord_bot_pid_path(cfg.handoff_root)
+    path = Path(deployment_path).expanduser().resolve()
+    load_deployment_file(path)
+    handoff_root = str(load_handoff_root_from_deployment(path))
+    pid_path = logs.discord_bot_pid_path(handoff_root)
     if detached:
         daemon.write_pid(pid_path, os.getpid())
         try:
-            PipelineDiscordBot(cfg, config_path=path).run()
+            PipelineDiscordBot(path).run()
         finally:
             daemon.remove_pid_file(pid_path)
     else:
-        PipelineDiscordBot(cfg, config_path=path).run()
+        PipelineDiscordBot(path).run()
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SynDiff pipeline Discord bot")
-    parser.add_argument("--config", required=True, help="Site config.yaml path")
+    parser.add_argument(
+        "--deployment",
+        required=True,
+        help="Path to deployment.yaml",
+    )
     parser.add_argument(
         "--detached",
         action="store_true",
@@ -206,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    run_discord_bot(args.config, detached=args.detached)
+    run_discord_bot(args.deployment, detached=args.detached)
     return 0
 
 

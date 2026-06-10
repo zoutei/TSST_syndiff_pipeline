@@ -288,17 +288,17 @@ syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
 **Discord alerts** (optional): when `notifications.enabled: true` in config, the supervisor posts to a webhook on run/stage events. Messages include the same **progress** summary and **status** grid as the CLI. Preview without changing pipeline state:
 
 ```bash
-syndiff-template notify test --config my_config.yaml --run-id batch_no4
+syndiff-template notify test --run-id batch_no4
 ```
 
 See [Discord notifications](#discord-notifications).
 
-Shorthand (uses site config only to locate `runs_root`):
+Run-scoped commands use frozen config from the run directory — use `--run-id` (workspace auto-discovered) or `--run-dir`:
 
 ```bash
-syndiff-template progress --config my_config.yaml --run-id 20260607_210919
-syndiff-template status --watch --config my_config.yaml --run-id 20260607_210919
-syndiff-template retry --config my_config.yaml --run-id 20260607_210919
+syndiff-template progress --run-id 20260607_210919
+syndiff-template status --watch --run-id 20260607_210919
+syndiff-template retry --run-id 20260607_210919
 ```
 
 ### 5. Use templates in SynDiff
@@ -630,7 +630,8 @@ syndiff-template daemon start --deployment example/template_runner/deployment.ya
 `submit` also ensures the bot is running. `daemon stop` stops both the supervisor and the bot. Check both with `daemon status`. For foreground debugging only:
 
 ```bash
-syndiff-template discord bot --config my_config.yaml
+syndiff-template discord bot --deployment example/template_runner/deployment.yaml
+syndiff-template discord bot   # auto-discover when one workspace
 ```
 
 Any message you post in the configured channel gets a reply with live `progress` + `status` (same format as event alerts). Include a `run_id` in the message to query a specific run; otherwise the bot reports all active runs (or the most recent run if none are active).
@@ -638,7 +639,7 @@ Any message you post in the configured channel gets a reply with live `progress`
 **Test** (read-only; does not write `notification_events` or change run state):
 
 ```bash
-syndiff-template notify test --config my_config.yaml --run-id batch_no4
+syndiff-template notify test --run-id batch_no4
 syndiff-template notify test --run-dir /path/to/runs/batch_no4 --dry-run   # print locally
 ```
 
@@ -1080,7 +1081,7 @@ Daemon files on disk:
 
 ```bash
 syndiff-template notify test --run-dir /path/to/runs/batch_no5
-syndiff-template notify test --config my_config.yaml --run-id batch_no5 --dry-run
+syndiff-template notify test --run-id batch_no5 --dry-run
 syndiff-template notify test --run-dir ... -v   # print message after sending
 ```
 
@@ -1091,7 +1092,8 @@ Requires `discord_webhook_url` in `deployment.yaml` and `notifications.enabled: 
 **Purpose**: Run the on-demand status-reply bot in the **foreground** (normally started detached by `daemon start` or `submit`).
 
 ```bash
-syndiff-template discord bot --config my_config.yaml
+syndiff-template discord bot --deployment example/template_runner/deployment.yaml
+syndiff-template discord bot   # auto-discover when one workspace
 ```
 
 Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channel_id`), and `discord.py` installed.
@@ -1102,7 +1104,7 @@ Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channe
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `--config PATH` | site | Site `config.yaml` for `submit` / `verify`; loads deployment beside config |
+| `--config PATH` | `submit`, `run`, `verify`, `reconcile-manifests` | Site `config.yaml`; loads deployment beside config |
 | `--deployment PATH` | workspace | `deployment.yaml`; optional when one supervisor is auto-discovered |
 | `--run-dir PATH` | run-scoped | `{handoff_root}/runs/<run_id>` with frozen config |
 | `--run-id ID` | run-scoped | One run; with `--deployment` or auto-discovered workspace |
