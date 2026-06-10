@@ -17,7 +17,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template import ps1_download
+from syndiff_pipeline.template_creation.processing import ps1_download
 
 
 def _write_array(group, name: str, shape: tuple[int, int] = (4, 4)) -> None:

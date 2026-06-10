@@ -14,10 +14,10 @@
 #
 # Run from repo root:
 #   mamba activate syndiff
-#   python -m syndiff_pipeline.run_pipeline --config syndiff_pipeline/example/recipe_a_prf.yaml
+#   python -m syndiff_pipeline.difference_imaging.orchestration.cli --config syndiff_pipeline/example/recipe_a_prf.yaml
 #
 # Optional logging:
-#   python -m syndiff_pipeline.run_pipeline --config syndiff_pipeline/example/recipe_a_prf.yaml 2>&1 | tee syndiff_pipeline/example/output/recipe_a_prf/pipeline_run.log
+#   python -m syndiff_pipeline.difference_imaging.orchestration.cli --config syndiff_pipeline/example/recipe_a_prf.yaml 2>&1 | tee syndiff_pipeline/example/output/recipe_a_prf/pipeline_run.log
 
 ffi_dir: "/astro/armin/koji/syndiff/data/tess_ffi"
 output_dir: "/astro/armin/koji/syndiff_pipeline_output/recipe_a_prf"

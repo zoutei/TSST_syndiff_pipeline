@@ -10,7 +10,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration.state import (
     PipelineState,
     SKIP_REASON_ARTIFACTS,
     STATUS_BLOCKED,
@@ -23,7 +23,7 @@ from syndiff_pipeline.template_runner.state import (
     STATUS_SUCCESS,
     reopen_status_for_retry,
 )
-from syndiff_pipeline.template_runner.targets import Target
+from syndiff_pipeline.template_creation.orchestration.targets import Target
 
 
 class TestStageRetry(unittest.TestCase):

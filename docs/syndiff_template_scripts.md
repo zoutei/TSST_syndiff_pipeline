@@ -106,8 +106,8 @@ These are not usually typed at a shell prompt, but they are the scripts `syndiff
 
 | Script | Invocation | What it does |
 |--------|------------|--------------|
-| **`template_runner/run_stage.py`** | `python -m syndiff_pipeline.template_runner.run_stage --run-id … --stage … --run-dir … --target-label …` | Worker for a single target + stage. Configures logging, writes `per_target/<label>/<stage>.log` and durable `*.status.json`, calls `stages.execute_stage()`, and writes completion manifests on success. Used for both local subprocesses and Condor jobs. |
-| **`template_runner/scheduler.py`** | `python -m syndiff_pipeline.template_runner.scheduler --daemon --deployment …` or foreground `--run-id` + `--run-dir` | Supervisor loop: ingests command intents, reconciles running jobs, verifies artifacts, promotes stages, claims pool slots, launches workers (local or Condor), detects stalls. The detached daemon is the long-lived process behind `submit`. |
+| **`template_runner/run_stage.py`** | `python -m syndiff_pipeline.template_creation.orchestration.run_stage --run-id … --stage … --run-dir … --target-label …` | Worker for a single target + stage. Configures logging, writes `per_target/<label>/<stage>.log` and durable `*.status.json`, calls `stages.execute_stage()`, and writes completion manifests on success. Used for both local subprocesses and Condor jobs. |
+| **`template_runner/scheduler.py`** | `python -m syndiff_pipeline.template_creation.orchestration.scheduler --daemon --deployment …` or foreground `--run-id` + `--run-dir` | Supervisor loop: ingests command intents, reconciles running jobs, verifies artifacts, promotes stages, claims pool slots, launches workers (local or Condor), detects stalls. The detached daemon is the long-lived process behind `submit`. |
 | **`template_runner/condor_wrapper.sh`** | HTCondor `executable` on execute nodes | Activates the `syndiff` conda environment on NFS-mounted home and `exec`s the `run_stage.py` command. Required because Condor jobs do not inherit the submit host shell. |
 | **`template_runner/discord_bot.py`** | `syndiff-template discord bot --deployment …` or auto-spawned by daemon | Listens in a configured Discord channel and replies to messages with live `progress` + `status` output. |
 
@@ -121,12 +121,12 @@ Modules under `template/` implement the science algorithms. Several can still be
 
 | Module | Standalone command | What it does |
 |--------|-------------------|--------------|
-| **`template/pancakes.py`** | `python -m syndiff_pipeline.template.pancakes` | PanCAKES mapping only: TESS FITS → skycell pixel maps and registration FITS. Same core logic as the `mapping` stage. |
-| **`template/ps1_download.py`** | `python -m syndiff_pipeline.template.ps1_download` | Download PS1 skycells from the mapping CSV into the shared Zarr store. |
-| **`template/ps1_process.py`** | `python -m syndiff_pipeline.template.ps1_process` | Run the sliding-window convolution pipeline for one SCC. |
-| **`template/downsample.py`** | `python -m syndiff_pipeline.template.downsample` | Multi-offset downsampling for one SCC (offsets and ROI can be passed on the CLI). |
-| **`template/compute_ps1_skycell_shifts.py`** | `python -m syndiff_pipeline.template.compute_ps1_skycell_shifts` | Utility: compute per-skycell PS1 pixel shifts from a small TESS pixel offset using WCS round-trips. Used in shift precompute for downsample; runnable alone for debugging WCS shifts. |
-| **`download.py`** | `python -m syndiff_pipeline.download` | Download TESS FFIs for one sector/camera/CCD. Same as the `tess_ffi_download` stage. |
+| **`template/pancakes.py`** | `python -m syndiff_pipeline.template_creation.processing.pancakes` | PanCAKES mapping only: TESS FITS → skycell pixel maps and registration FITS. Same core logic as the `mapping` stage. |
+| **`template/ps1_download.py`** | `python -m syndiff_pipeline.template_creation.processing.ps1_download` | Download PS1 skycells from the mapping CSV into the shared Zarr store. |
+| **`template/ps1_process.py`** | `python -m syndiff_pipeline.template_creation.processing.ps1_process` | Run the sliding-window convolution pipeline for one SCC. |
+| **`template/downsample.py`** | `python -m syndiff_pipeline.template_creation.processing.downsample` | Multi-offset downsampling for one SCC (offsets and ROI can be passed on the CLI). |
+| **`template/compute_ps1_skycell_shifts.py`** | `python -m syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts` | Utility: compute per-skycell PS1 pixel shifts from a small TESS pixel offset using WCS round-trips. Used in shift precompute for downsample; runnable alone for debugging WCS shifts. |
+| **`download.py`** | `python -m syndiff_pipeline.common.download` | Download TESS FFIs for one sector/camera/CCD. Same as the `tess_ffi_download` stage. |
 
 ### Library-only (imported by stages)
 

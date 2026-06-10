@@ -15,23 +15,23 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template.pancakes import (
+from syndiff_pipeline.template_creation.processing.pancakes import (
     moc_ra_shift_degrees,
     normalize_ra_degrees,
     shift_polygon_ras_for_moc,
     shift_ras_for_moc,
 )
-from syndiff_pipeline.template_runner import condor, logs
-from syndiff_pipeline.template_runner.run_context import resolve_run_context
-from syndiff_pipeline.template_runner.scheduler import reconcile_running_stages
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration import condor, logs
+from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+from syndiff_pipeline.template_creation.orchestration.scheduler import reconcile_running_stages
+from syndiff_pipeline.template_creation.orchestration.state import (
     PipelineState,
     STAGE_DEPS,
     STATUS_FAILED,
     STATUS_READY,
     STATUS_RUNNING,
 )
-from syndiff_pipeline.template_runner.targets import Target
+from syndiff_pipeline.template_creation.orchestration.targets import Target
 
 
 class TestCondorPollGrace(unittest.TestCase):

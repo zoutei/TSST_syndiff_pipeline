@@ -14,7 +14,7 @@ import numpy as np
 import zarr
 from astropy.io import fits
 
-from syndiff_pipeline.template.downsample import create_syndiff_header, require_convolved_zarr_data
+from syndiff_pipeline.template_creation.processing.downsample import create_syndiff_header, require_convolved_zarr_data
 
 
 class TestDownsampleValidation(unittest.TestCase):

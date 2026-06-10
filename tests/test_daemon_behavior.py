@@ -12,11 +12,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner import daemon, logs
-from syndiff_pipeline.template_runner.scheduler import _write_local_heartbeat
-from syndiff_pipeline.template_runner.scheduler_control import daemon_is_alive, stop_daemon
-from syndiff_pipeline.template_runner.runner_config import ResolvedTargetConfig
-from syndiff_pipeline.template_runner.scheduler import (
+from syndiff_pipeline.template_creation.orchestration import daemon, logs
+from syndiff_pipeline.template_creation.orchestration.scheduler import _write_local_heartbeat
+from syndiff_pipeline.template_creation.orchestration.scheduler_control import daemon_is_alive, stop_daemon
+from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
+from syndiff_pipeline.template_creation.orchestration.scheduler import (
     _apply_verify_outcome,
     _cancel_verify_for_retry,
     _iter_verify_candidates,
@@ -24,13 +24,13 @@ from syndiff_pipeline.template_runner.scheduler import (
     _run_verify_pass,
     _tick_run,
 )
-from syndiff_pipeline.template_runner.verify_worker import (
+from syndiff_pipeline.template_creation.orchestration.verify_worker import (
     VerifyTaskKey,
     get_verify_worker,
     reset_verify_worker_for_tests,
     shutdown_verify_worker,
 )
-from syndiff_pipeline.template_runner.stage_params import (
+from syndiff_pipeline.template_creation.orchestration.stage_params import (
     DownsampleStageParams,
     MappingStageParams,
     Ps1DownloadStageParams,
@@ -38,8 +38,8 @@ from syndiff_pipeline.template_runner.stage_params import (
     TemplateStageParams,
     WcsGroupingStageParams,
 )
-from syndiff_pipeline.template_runner.run_report import format_status_grid
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
+from syndiff_pipeline.template_creation.orchestration.state import (
     PipelineState,
     RUN_CANCELED,
     RUN_SUCCESS,
@@ -57,8 +57,8 @@ from syndiff_pipeline.template_runner.state import (
     derive_run_final_status,
     upstream_stages_for,
 )
-from syndiff_pipeline.template_runner.targets import Target
-from syndiff_pipeline.template_runner.verify import (
+from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.template_creation.orchestration.verify import (
     persist_completion_manifests,
     stage_complete,
     stage_config_fingerprint,
@@ -270,14 +270,14 @@ class TestSkipIntegration(unittest.TestCase):
                 [target],
                 ["downsample"],
             )
-            from syndiff_pipeline.template_runner.run_context import resolve_run_context
+            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             label = target.label()
             row = state.get_stage_run(run_id, label, "mapping")
             self.assertEqual(row.status, STATUS_EXTERNAL)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 return_value=True,
             ):
                 skipped = _resolve_external_and_pending_skips(
@@ -309,7 +309,7 @@ class TestSkipIntegration(unittest.TestCase):
                 )
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=complete,
             ):
                 skipped = _resolve_external_and_pending_skips(
@@ -414,7 +414,7 @@ def _minimal_run_setup(
         active_stages,
         force_rerun=force_rerun,
     )
-    from syndiff_pipeline.template_runner.run_context import resolve_run_context
+    from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
 
     ctx = resolve_run_context(run_dir=run_dir)
     return state, ctx, run_id, runs_root
@@ -428,7 +428,7 @@ def _write_mapping_csv_and_manifest(
     runs_root: Path | None = None,
 ) -> None:
     """Write mapping CSV plus a valid manifest at *manifest_path*."""
-    from syndiff_pipeline.template_runner.runner_config import load_runner_config, resolve_config
+    from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config, resolve_config
 
     if runs_root is not None:
         cfg_path = runs_root / "run_a" / "config.yaml"
@@ -499,7 +499,7 @@ class TestSkipBeforePromote(unittest.TestCase):
                 state.cache_external_check(run_id, label, stage, complete=True)
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 return_value=False,
             ):
                 _resolve_external_and_pending_skips(state, run_id, ctx, force_rerun=False)
@@ -535,10 +535,10 @@ class TestSkipBeforePromote(unittest.TestCase):
             ctx.cfg.verify_budget_per_tick = 2
             launch_mock = unittest.mock.Mock()
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
                 launch_mock,
             ):
                 for _ in range(5):
@@ -596,17 +596,17 @@ class TestStallDetection(unittest.TestCase):
             )
             label = target.label()
             state.update_stage_status(run_id, label, "downsample", STATUS_PENDING)
-            from syndiff_pipeline.template_runner.run_context import resolve_run_context
+            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler._schedule_external_and_pending_skips",
+                "syndiff_pipeline.template_creation.orchestration.scheduler._schedule_external_and_pending_skips",
                 return_value=None,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler._verify_backlog",
+                "syndiff_pipeline.template_creation.orchestration.scheduler._verify_backlog",
                 return_value=(0, 0),
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ):
                 _tick_run(state, run_id, ctx)
@@ -644,10 +644,10 @@ class TestAsyncVerify(unittest.TestCase):
                 return {}
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 side_effect=track_reconcile,
             ):
                 started = time.monotonic()
@@ -656,7 +656,7 @@ class TestAsyncVerify(unittest.TestCase):
 
             self.assertEqual(reconcile_calls, [1])
             self.assertLess(elapsed, 1.0)
-            from syndiff_pipeline.template_runner.verify_worker import get_verify_worker
+            from syndiff_pipeline.template_creation.orchestration.verify_worker import get_verify_worker
 
             self.assertGreaterEqual(get_verify_worker().in_flight_count(run_id), 1)
 
@@ -684,7 +684,7 @@ class TestVerifyApplyGuards(unittest.TestCase):
                 return True
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -724,7 +724,7 @@ class TestVerifyApplyGuards(unittest.TestCase):
                 return True
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -804,7 +804,7 @@ class TestManifestFastPath(unittest.TestCase):
                     )
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
             ) as complete_mock:
                 _resolve_external_and_pending_skips(
                     state, run_id, ctx, force_rerun=False
@@ -828,7 +828,7 @@ class TestApplyNoMainThreadCollect(unittest.TestCase):
     def test_apply_does_not_collect_artifacts_on_main_thread(self):
         import threading
 
-        from syndiff_pipeline.template_runner import verify as verify_mod
+        from syndiff_pipeline.template_creation.orchestration import verify as verify_mod
 
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
@@ -850,10 +850,10 @@ class TestApplyNoMainThreadCollect(unittest.TestCase):
                 return real_collect(*args, **kwargs)
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify_worker.stage_complete",
+                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
                 return_value=True,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.verify.collect_stage_artifacts",
+                "syndiff_pipeline.template_creation.orchestration.verify.collect_stage_artifacts",
                 side_effect=guard_collect,
             ):
                 _resolve_external_and_pending_skips(
@@ -895,12 +895,12 @@ class TestStopDaemon(unittest.TestCase):
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("55555", encoding="utf-8")
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
                 side_effect=[True, False],
             ) as alive, unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.terminate_process_tree",
             ) as term, unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_process_exit",
                 return_value=True,
             ) as wait:
                 result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
@@ -919,12 +919,12 @@ class TestStopDaemon(unittest.TestCase):
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("66666", encoding="utf-8")
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
                 side_effect=[True, False],
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.terminate_process_tree",
             ) as term, unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_process_exit",
                 side_effect=[False, True],
             ) as wait:
                 result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
@@ -942,12 +942,12 @@ class TestStopDaemon(unittest.TestCase):
             pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("77777", encoding="utf-8")
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
                 return_value=True,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.terminate_process_tree",
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_process_exit",
                 return_value=False,
             ):
                 result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
@@ -970,12 +970,12 @@ class TestStopDaemon(unittest.TestCase):
                 lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
                 side_effect=[True, False],
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.terminate_process_tree",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.terminate_process_tree",
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler_control.daemon.wait_for_process_exit",
+                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_process_exit",
                 side_effect=[False, True],
             ):
                 result = stop_daemon(handoff, term_timeout_s=0.1, kill_wait_s=0.1)
@@ -1009,7 +1009,7 @@ class TestRunFinalStatus(unittest.TestCase):
         self.assertEqual(derive_run_final_status(counts), RUN_CANCELED)
 
     def test_derive_run_final_status_failed_without_cancel(self):
-        from syndiff_pipeline.template_runner.state import RUN_FAILED
+        from syndiff_pipeline.template_creation.orchestration.state import RUN_FAILED
 
         counts = {STATUS_SUCCESS: 2, STATUS_FAILED: 1}
         self.assertEqual(derive_run_final_status(counts), RUN_FAILED)
@@ -1035,7 +1035,7 @@ class TestRunFinalStatus(unittest.TestCase):
             state.apply_cancel_run(run_id)
             self.assertEqual((state.get_run(run_id) or {}).get("status"), RUN_CANCELED)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ):
                 _tick_run(state, run_id, ctx)
@@ -1076,10 +1076,10 @@ class TestNotSelectedSkips(unittest.TestCase):
             state.cache_external_check(run_id, label, "ps1_download", complete=False)
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_runner.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
             ):
                 _tick_run(state, run_id, ctx)
 
@@ -1148,7 +1148,7 @@ class TestSupersededSkips(unittest.TestCase):
                 SKIP_REASON_SUPERSEDED,
             )
 
-            from syndiff_pipeline.template_runner.state import artifact_verify_needed
+            from syndiff_pipeline.template_creation.orchestration.state import artifact_verify_needed
 
             self.assertFalse(
                 artifact_verify_needed(state, run_id, label, "ps1_download", ["mapping", "downsample"])
@@ -1182,7 +1182,7 @@ class TestSupersededSkips(unittest.TestCase):
             state.update_stage_status(run_id, label, "mapping", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status(run_id, label, "wcs_grouping", STATUS_SKIPPED, exit_code=0)
 
-            from syndiff_pipeline.template_runner.state import artifact_verify_needed
+            from syndiff_pipeline.template_creation.orchestration.state import artifact_verify_needed
 
             self.assertTrue(
                 artifact_verify_needed(state, run_id, label, "ps1_download", ["ps1_process"])
@@ -1198,7 +1198,7 @@ class TestSupersededSkips(unittest.TestCase):
             label = target.label()
             state.update_stage_status(run_id, label, "ps1_process", STATUS_SKIPPED, exit_code=0)
 
-            from syndiff_pipeline.template_runner.state import artifact_verify_needed
+            from syndiff_pipeline.template_creation.orchestration.state import artifact_verify_needed
 
             self.assertTrue(
                 artifact_verify_needed(
@@ -1239,7 +1239,7 @@ class TestPartialRunRetry(unittest.TestCase):
             self.assertIn((label, "ps1_download"), keys)
 
     def test_orphan_pending_shows_sc_q_in_status_grid(self):
-        from syndiff_pipeline.template_runner.run_report import format_status_grid
+        from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
 
         target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
         with tempfile.TemporaryDirectory() as tmp:
@@ -1260,7 +1260,7 @@ class TestPartialRunRetry(unittest.TestCase):
 
 class TestVerifyDisplay(unittest.TestCase):
     def test_status_grid_shows_sc_q_for_external_scan_queue(self):
-        from syndiff_pipeline.template_runner.run_report import format_status_grid
+        from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
 
         target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
         with tempfile.TemporaryDirectory() as tmp:

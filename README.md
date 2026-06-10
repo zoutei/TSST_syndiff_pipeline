@@ -176,7 +176,7 @@ syndiff-template progress --deployment example/template_runner/deployment.yaml
 | `pipeline_execute.py`    | **Ready** | Config-driven orchestrator (`run_config_pipeline`). Executes pipeline stage kinds in YAML order. Handles state bootstrap when `wcs_grouping` is omitted (resume from existing manifest).                                                                                                                                                                |
 | `run_pipeline.py`        | **Ready** | Main CLI entry point; requires non-empty `pipeline:` and delegates to `pipeline_execute`.                                                                                                                                                                                                           |
 | `plot_pipeline.py`       | **Ready** | Background removal animated GIF (round-1 smooth bkg cube).                                                                                                                                                                                                                                                                                           |
-| `template_runner/`       | **Ready** | `syndiff-template` multi-target scheduler: WCS handoff through downsample; SQLite state; HTCondor for `ps1_process`. See [`docs/template_pipeline.md`](docs/template_pipeline.md).                                                                                                                                                                      |
+| `syndiff_pipeline/` package | **Ready** | Installable layout: `common/` (download, wcs_grouping), `difference_imaging/` (orchestration, stages, support), `template_creation/` (processing + orchestration). Entry points: `syndiff-run`, `syndiff-template`. |
 
 
 ### External Dependencies (Not Part of This Package)
@@ -238,7 +238,7 @@ mamba activate syndiff
 # (auto-discovered if placed as a sibling directory)
 
 # Run from the SynDiff repo root:
-python -m syndiff_pipeline.run_pipeline --config your_config.yaml
+python -m syndiff_pipeline.difference_imaging.orchestration.cli --config your_config.yaml
 ```
 
 ---
@@ -529,26 +529,26 @@ Some tools still expect Hotpants round directories and Numpy stacks directly und
 ### Run the full pipeline (config-driven)
 
 ```bash
-python -m syndiff_pipeline.run_pipeline --config recipe_a_prf.yaml
+python -m syndiff_pipeline.difference_imaging.orchestration.cli --config recipe_a_prf.yaml
 ```
 
 ### Validate without running
 
 ```bash
-python -m syndiff_pipeline.run_pipeline --config recipe_a_prf.yaml --validate-only
+python -m syndiff_pipeline.difference_imaging.orchestration.cli --config recipe_a_prf.yaml --validate-only
 ```
 
 ### Download FFIs before running
 
 ```bash
-python -m syndiff_pipeline.run_pipeline --config config.yaml --download
+python -m syndiff_pipeline.difference_imaging.orchestration.cli --config config.yaml --download
 ```
 
 ### Download FFIs standalone
 
 ```bash
-python -m syndiff_pipeline.download --sector 20 --camera 3 --ccd 3
-python -m syndiff_pipeline.download --sector 20 --camera 3 --ccd 3 --via-mast
+python -m syndiff_pipeline.common.download --sector 20 --camera 3 --ccd 3
+python -m syndiff_pipeline.common.download --sector 20 --camera 3 --ccd 3 --via-mast
 ```
 
 ### CLI overrides
@@ -775,7 +775,7 @@ pipeline:
 
 SynDiff assumes the following inputs exist before the pipeline runs:
 
-1. **TESS FFIs** — calibrated FFI FITS files under `{ffi_dir}/s{sector:04d}/cam{camera}_ccd{ccd}/`. Use `python -m syndiff_pipeline.download` or provide pre-downloaded files.
+1. **TESS FFIs** — calibrated FFI FITS files under `{ffi_dir}/s{sector:04d}/cam{camera}_ccd{ccd}/`. Use `python -m syndiff_pipeline.common.download` or provide pre-downloaded files.
 2. **PS1 Templates** — per-group template FITS on the TESS pixel grid, produced by `TSST_Syndiff_Core`. Place under `template_dir` as either:
   - `group_<id>/ps1_template.fits` (or `template.fits`)
   - Flat `syndiff_template_sNNNN_C_C_dxX.XXX_dyY.YYY.fits` naming convention

@@ -13,7 +13,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template.pancakes import (
+from syndiff_pipeline.template_creation.processing.pancakes import (
     finalize_master_skycells_csv,
     master_skycells_csv_paths,
     prepare_mapping_csv_workspace,

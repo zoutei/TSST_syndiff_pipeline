@@ -10,9 +10,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.runner_config import RunnerConfig, parse_stage_params, resolve_config
-from syndiff_pipeline.template_runner.stage_params import Ps1ProcessStageParams
-from syndiff_pipeline.template_runner.state import (
+from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig, parse_stage_params, resolve_config
+from syndiff_pipeline.template_creation.orchestration.stage_params import Ps1ProcessStageParams
+from syndiff_pipeline.template_creation.orchestration.state import (
     SKIP_REASON_ARTIFACTS,
     SKIP_REASON_STREAM,
     STATUS_PENDING,
@@ -21,8 +21,8 @@ from syndiff_pipeline.template_runner.state import (
     STAGE_NAMES,
     effective_stage_deps,
 )
-from syndiff_pipeline.template_runner.targets import Target
-from syndiff_pipeline.template_runner.run_report import _format_stage_status_short
+from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.template_creation.orchestration.run_report import _format_stage_status_short
 
 
 class TestEffectiveStageDeps(unittest.TestCase):

@@ -12,15 +12,15 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.discord_bot_control import (
+from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
     discover_discord_bot_pids,
     ensure_discord_bot_for_handoff_root,
     ensure_discord_bot_running,
     record_discord_bot_site_config,
     stop_discord_bot,
 )
-from syndiff_pipeline.template_runner import logs
-from syndiff_pipeline.template_runner.workspace import record_deployment_path
+from syndiff_pipeline.template_creation.orchestration import logs
+from syndiff_pipeline.template_creation.orchestration.workspace import record_deployment_path
 from tests.site_config import write_site_config, write_site_deployment
 
 
@@ -85,19 +85,19 @@ class TestDiscordBotControl(unittest.TestCase):
             base = Path(tmp)
             cfg_path, handoff, deploy_path = _enabled_bot_setup(base)
             with mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.spawn_detached_discord_bot",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.spawn_detached_discord_bot",
                 return_value=4242,
             ) as spawn, mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.wait_for_discord_bot",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.wait_for_discord_bot",
                 return_value=True,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discord_bot_is_alive",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discord_bot_is_alive",
                 return_value=True,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.daemon.read_pid",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_pid",
                 return_value=4242,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discover_discord_bot_pids",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 return_value=[],
             ):
                 result = ensure_discord_bot_running(
@@ -114,19 +114,19 @@ class TestDiscordBotControl(unittest.TestCase):
             base = Path(tmp)
             cfg_path, handoff, deploy_path = _enabled_bot_setup(base)
             with mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.spawn_detached_discord_bot",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.spawn_detached_discord_bot",
                 return_value=4242,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.wait_for_discord_bot",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.wait_for_discord_bot",
                 return_value=True,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discord_bot_is_alive",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discord_bot_is_alive",
                 side_effect=[False, True],
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.daemon.read_pid",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_pid",
                 return_value=4242,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discover_discord_bot_pids",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 return_value=[],
             ):
                 ensure_discord_bot_running(deploy_path, site_config_path=cfg_path)
@@ -164,19 +164,19 @@ class TestDiscordBotControl(unittest.TestCase):
                 return pid == 5001
 
             with mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.spawn_detached_discord_bot",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.spawn_detached_discord_bot",
                 side_effect=counting_spawn,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.wait_for_discord_bot",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.wait_for_discord_bot",
                 side_effect=wait_side_effect,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.daemon.read_pid",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_pid",
                 side_effect=read_pid_side_effect,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.daemon.is_process_alive",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.is_process_alive",
                 side_effect=is_process_alive_side_effect,
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discover_discord_bot_pids",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 return_value=[],
             ):
                 barrier = threading.Barrier(2)
@@ -211,10 +211,10 @@ class TestDiscordBotControl(unittest.TestCase):
             pid_path = handoff / "discord_bot.pid"
             pid_path.write_text("99999", encoding="utf-8")
             with mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discover_discord_bot_pids",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 return_value=[],
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.daemon.is_process_alive",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.is_process_alive",
                 return_value=False,
             ):
                 stopped = stop_discord_bot(handoff)
@@ -226,10 +226,10 @@ class TestDiscordBotControl(unittest.TestCase):
             handoff = Path(tmp) / "handoff"
             handoff.mkdir(parents=True)
             with mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control.discover_discord_bot_pids",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 side_effect=[[111, 222], []],
             ), mock.patch(
-                "syndiff_pipeline.template_runner.discord_bot_control._terminate_pids",
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control._terminate_pids",
             ) as terminate:
                 stopped = stop_discord_bot(handoff)
             self.assertTrue(stopped)
@@ -238,7 +238,7 @@ class TestDiscordBotControl(unittest.TestCase):
 
     def test_discover_discord_bot_pids_empty_when_no_proc(self):
         with mock.patch(
-            "syndiff_pipeline.template_runner.discord_bot_control.Path"
+            "syndiff_pipeline.template_creation.orchestration.discord_bot_control.Path"
         ) as path_cls:
             path_cls.return_value.is_dir.return_value = False
             self.assertEqual(discover_discord_bot_pids("/tmp/handoff"), [])

@@ -395,7 +395,7 @@ Execute nodes run `template_runner/condor_wrapper.sh`, which activates the `synd
 
 ### `tess_ffi_download`
 
-**Module**: `syndiff_pipeline.download`
+**Module**: `syndiff_pipeline.common.download`
 
 Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` using the shared download helpers.
 
@@ -405,7 +405,7 @@ Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` using the share
 
 ### `wcs_grouping`
 
-**Module**: `template_runner/handoff.py` → `syndiff_pipeline.wcs_grouping`
+**Module**: `template_runner/handoff.py` → `syndiff_pipeline.common.wcs_grouping`
 
 **Inputs**: FFIs on disk; target RA/Dec from targets CSV.
 
@@ -863,11 +863,11 @@ syndiff-template submit \
 5. Starts the Discord bot when enabled: on supervisor startup if a new supervisor was spawned, otherwise immediately from `submit` (one bot per workspace, flock-guarded).
 6. Updates `{handoff_root}/runs/latest` → `<run_id>`.
 
-**Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically):
+**Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically). Set `stages.ps1_process.ps1_source: stream` in `config.yaml` (see commented lines in the example file):
 
 ```bash
 syndiff-template submit \
-  --config example/template_runner/config_real_skycell_stream.yaml \
+  --config example/template_runner/config.yaml \
   --targets example/template_runner/targets_example.csv \
   --stages mapping,ps1_process,downsample \
   --run-id batch_stream_01
@@ -1364,7 +1364,7 @@ Adjust the miniforge path in the wrapper if your install location differs.
 Per job, written to `per_target/{target}/{stage}.condor.submit`:
 
 - `executable = .../condor_wrapper.sh`
-- `arguments = /path/to/python -m syndiff_pipeline.template_runner.run_stage ...`
+- `arguments = /path/to/python -m syndiff_pipeline.template_creation.orchestration.run_stage ...`
 - `request_cpus`, `request_memory`, `requirements`, `rank`
 - `output`, `error`, `log` → sibling `.condor.*` files
 

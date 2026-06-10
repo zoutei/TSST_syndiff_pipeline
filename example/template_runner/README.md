@@ -14,9 +14,8 @@ These files configure the **`syndiff-template`** CLI, which builds PS1 templates
 
 | File | Description |
 |------|-------------|
-| [`config.yaml`](config.yaml) | Site policy: stages, resource pools, notifications (no filesystem paths) |
+| [`config.yaml`](config.yaml) | Site policy: stages, resource pools, notifications (`ps1_source: zarr` default; stream option documented in-file) |
 | [`deployment.yaml.example`](deployment.yaml.example) | Copy to `deployment.yaml` — deployment paths (`handoff_root`, `data_root`) + credentials |
-| [`config_real_skycell_stream.yaml`](config_real_skycell_stream.yaml) | PS1 stream-ingest variant (`ps1_source: stream`) |
 | [`config_s0020_c3_k3_roi.yaml`](config_s0020_c3_k3_roi.yaml) | ROI test run with downsample overrides |
 | [`targets_example.csv`](targets_example.csv) | Multi-target example (sector, camera, ccd, coordinates) |
 | [`events_example.csv`](events_example.csv) | Supernova catalog format with `tess_coverage` tokens |
@@ -136,11 +135,11 @@ Requires `notifications.enabled: true` in `config.yaml` and keys in `deployment.
 
 ## Variant configs
 
-**Stream mode** — download PS1 skycells inside `ps1_process` (no shared Zarr):
+**Stream mode** — download PS1 skycells inside `ps1_process` (no shared Zarr). In `config.yaml`, set `stages.ps1_process.ps1_source: stream` and `num_ingest_workers: 16` (see commented lines in that file):
 
 ```bash
 syndiff-template submit \
-  --config config_real_skycell_stream.yaml \
+  --config config.yaml \
   --targets targets_example.csv \
   --stages mapping,ps1_process,downsample
 ```

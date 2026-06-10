@@ -13,8 +13,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.cli import cmd_progress
-from syndiff_pipeline.template_runner.stage_progress import read_log_progress
+from syndiff_pipeline.template_creation.orchestration.cli import cmd_progress
+from syndiff_pipeline.template_creation.orchestration.stage_progress import read_log_progress
 
 
 class TestReadLogProgress(unittest.TestCase):
@@ -244,16 +244,16 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_state.running_stage_runs.return_value = [running_row]
 
         with mock.patch(
-            "syndiff_pipeline.template_runner.cli._resolve_run_from_args",
+            "syndiff_pipeline.template_creation.orchestration.cli._resolve_run_from_args",
             return_value=fake_ctx,
         ), mock.patch(
-            "syndiff_pipeline.template_runner.cli.PipelineState",
+            "syndiff_pipeline.template_creation.orchestration.cli.PipelineState",
             return_value=fake_state,
         ), mock.patch(
-            "syndiff_pipeline.template_runner.verify_status.read_verify_run_status",
+            "syndiff_pipeline.template_creation.orchestration.verify_status.read_verify_run_status",
             return_value={"scan_queued": 0, "scan_running": 0, "active": []},
         ), mock.patch(
-            "syndiff_pipeline.template_runner.run_report.read_log_progress",
+            "syndiff_pipeline.template_creation.orchestration.run_report.read_log_progress",
             return_value=mock.Mock(text="342/1009", kind="fraction"),
         ), mock.patch("sys.stdout", buf):
             rc = cmd_progress(args)
@@ -277,13 +277,13 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_state.get_run.return_value = {"status": "running"}
 
         with mock.patch(
-            "syndiff_pipeline.template_runner.cli._resolve_run_from_args",
+            "syndiff_pipeline.template_creation.orchestration.cli._resolve_run_from_args",
             return_value=fake_ctx,
         ), mock.patch(
-            "syndiff_pipeline.template_runner.cli.PipelineState",
+            "syndiff_pipeline.template_creation.orchestration.cli.PipelineState",
             return_value=fake_state,
         ), mock.patch(
-            "syndiff_pipeline.template_runner.verify_status.read_verify_run_status",
+            "syndiff_pipeline.template_creation.orchestration.verify_status.read_verify_run_status",
             return_value={"scan_queued": 0, "scan_running": 0, "active": []},
         ), mock.patch("sys.stdout", buf):
             rc = cmd_progress(args)

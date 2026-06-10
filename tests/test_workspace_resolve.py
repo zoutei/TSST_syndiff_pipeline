@@ -9,8 +9,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_runner.deployment import load_handoff_root_from_deployment
-from syndiff_pipeline.template_runner.workspace import (
+from syndiff_pipeline.template_creation.orchestration.deployment import load_handoff_root_from_deployment
+from syndiff_pipeline.template_creation.orchestration.workspace import (
     discover_alive_handoff_roots,
     load_recorded_deployment_path,
     record_deployment_path,
