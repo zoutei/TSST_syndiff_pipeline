@@ -399,18 +399,23 @@ def _print_status_for_run(
     multi_run: bool,
 ) -> None:
     from syndiff_pipeline.template_runner.run_report import format_status_grid
-    from syndiff_pipeline.template_runner.verify_status import read_verify_in_flight
+    from syndiff_pipeline.template_runner.verify_status import read_verify_run_status
 
     if multi_run:
         print(f"=== run {run_id} ===")
     run = state.get_run(run_id) or {}
     print(f"Run {run_id} status={run.get('status', '?')}")
-    in_flight = read_verify_in_flight(handoff_root, run_id)
-    if in_flight:
-        print(f"  verify_in_flight={in_flight}")
-    if run.get("status") == "stalled" and run.get("stall_reason"):
+    scan_status = read_verify_run_status(handoff_root, run_id)
+    scan_queued = int(scan_status.get("scan_queued", 0))
+    scan_running = int(scan_status.get("scan_running", 0))
+    verify_backlog = scan_queued + scan_running
+    if scan_queued:
+        print(f"  scan_queued={scan_queued}")
+    if scan_running:
+        print(f"  scan_running={scan_running}")
+    if run.get("status") == "stalled" and run.get("stall_reason") and verify_backlog == 0:
         print(f"  stalled: {run['stall_reason']}")
-    for line in format_status_grid(state, run_id):
+    for line in format_status_grid(state, run_id, handoff_root=handoff_root):
         print(line)
 
 

@@ -153,6 +153,13 @@ class ArtifactVerifyWorker:
                 return len(self._in_flight)
             return sum(1 for key in self._in_flight if key.run_id == run_id)
 
+    def in_flight_keys(self, run_id: str | None = None) -> list[VerifyTaskKey]:
+        with self._lock:
+            keys = list(self._in_flight.keys())
+        if run_id is not None:
+            keys = [key for key in keys if key.run_id == run_id]
+        return keys
+
     def cancel_keys(self, keys: Iterable[VerifyTaskKey]) -> int:
         """Drop in-flight verify futures for *keys*; return count cancelled."""
         cancelled = 0

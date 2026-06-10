@@ -150,6 +150,10 @@ def daemon_heartbeat_file(handoff_root: str | Path) -> Path:
     return Path(tempfile.gettempdir()) / "syndiff-daemon" / f"{key}.heartbeat"
 
 
+def discord_bot_lock_path(handoff_root: str | Path) -> Path:
+    return _handoff_dir(handoff_root) / "discord_bot.lock"
+
+
 def discord_bot_pid_path(handoff_root: str | Path) -> Path:
     return _handoff_dir(handoff_root) / "discord_bot.pid"
 

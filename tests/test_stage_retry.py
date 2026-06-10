@@ -94,8 +94,8 @@ class TestStageRetry(unittest.TestCase):
             state.update_stage_status("run_a", label, "ps1_process", STATUS_BLOCKED)
             state.update_stage_status("run_a", label, "downsample", STATUS_BLOCKED)
 
-            # Skip verification must run before a blocked stage can reach ready.
-            state.cache_external_check("run_a", label, "ps1_download", complete=False)
+            # Artifact verify complete allows blocked upstream to promote to ready.
+            state.cache_external_check("run_a", label, "ps1_download", complete=True)
             promoted = state.promote_stages("run_a")
 
             self.assertEqual(promoted, 1)

@@ -355,7 +355,12 @@ class Notifier:
                 include_running_detail=True,
             )
         )
-        target_line = format_target_status_line(self._state, run_id, target_label)
+        target_line = format_target_status_line(
+            self._state,
+            run_id,
+            target_label,
+            handoff_root=self._handoff_root,
+        )
         if target_line:
             lines.extend(["", target_line])
         body = pack_message_lines(lines, max_chars=_DISCORD_PACK_MAX_CHARS)
