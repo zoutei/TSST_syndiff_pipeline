@@ -1020,7 +1020,7 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         if notifier is not None and prev_status != "stalled":
             notifier.notify_run_stalled(run_id, runs_root, stall_reason=reason_text)
     elif prev_status == "stalled" and (running > 0 or launchable > 0):
-        state.set_run_status(run_id, "running")
+        state.set_run_status(run_id, "running", stall_reason="")
         if notifier is not None:
             notifier.notify_run_resumed(run_id)
 
