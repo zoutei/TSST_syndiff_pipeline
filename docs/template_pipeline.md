@@ -1,10 +1,20 @@
-# SynDiff PS1 Template Pipeline (`syndiff-template`)
+# SynDiff unified pipeline (`syndiff`)
 
-This document describes the **template-building pipeline** orchestrated by the `syndiff-template` CLI. It turns TESS Full Frame Images (FFIs) and Pan-STARRS1 (PS1) skycell data into per-offset PS1 template FITS files that feed the main SynDiff difference-imaging pipeline (`run_pipeline.py`).
+This document describes the **orchestrated SynDiff pipeline** behind the `syndiff` CLI. One supervisor daemon and one SQLite state DB schedule a **seven-stage DAG**: six template-building stages (TESS FFIs + PS1 → `syndiff_template_*.fits.gz`) and a `diff` stage (Hotpants, ePSF, background, forced photometry). CLI presets select stage subsets:
 
-For difference imaging, Hotpants, ePSF, and forced photometry, see the [main README](../README.md).
+```text
+syndiff all submit      # template stages → diff (full end-to-end)
+syndiff template submit # template stages only
+syndiff diff submit     # diff only (verifies tess_dl + wcs handoff + downsample; mapping/ps1 marked n/a)
+```
+
+Monitoring verbs (`progress`, `status`, `retry`, …) are workspace-wide and work identically regardless of which preset started the run.
+
+For difference imaging stage lists and example YAMLs, see [`config/diff_config.yaml`](../config/diff_config.yaml) and [`config/example/`](../config/example/). Forked **pyhotpants** and **MOCPy** requirements are summarized in the [main README](../README.md#forked-dependencies).
 
 **Documentation index**: [`docs/README.md`](README.md)
+
+**See also**: [`syndiff_cli.md`](syndiff_cli.md) (command index), [`cluster_smoke_checklist.md`](cluster_smoke_checklist.md) (cluster validation), [`template_runner_architecture.md`](template_runner_architecture.md) (maintainer internals).
 
 ---
 
@@ -55,42 +65,44 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid** fo
 3. **Mapping** (“pancakes”) — map TESS pixels to PS1 skycells; download Gaia catalog for the reference FFI.
 4. **PS1 download** — fetch PS1 skycell cutouts into a shared Zarr store.
 5. **PS1 process** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-6. **Downsample** — combine convolved skycells at multiple sub-pixel offsets → `syndiff_template_*.fits`.
+6. **Downsample** — combine convolved skycells at multiple sub-pixel offsets → `syndiff_template_*.fits.gz`.
+7. **Diff** — run the config-driven difference-imaging pipeline; outputs under `{workspace_root}/events/{label}/ws/`.
 
 The runner is designed for **batch operation across many SCCs**:
 
 - A host-level **supervisor daemon** (single owner via flock) dequeues work for all active runs subject to resource-pool limits.
 - Progress is tracked in **SQLite (WAL)** and on disk (logs, summaries, per-stage status/manifest files).
 - Stages can be run **subset-by-subset** (e.g. only `ps1_process,downsample`) when upstream artifacts already exist.
-- **`mapping`** and **`ps1_process`** can run on a shared **HTCondor** pool; all other stages run as local subprocesses on the submit host.
+- **`mapping`**, **`ps1_process`**, and **`diff`** can run on a shared **HTCondor** pool; other stages run as local subprocesses on the submit host (`wcs_grouping` is unpooled).
 
 ---
 
 ## Documentation layers and code lineage
 
-This guide covers **orchestration** — how to configure and run `syndiff-template` across many targets. The **algorithms** behind each stage are documented separately because they were developed and originally documented in the standalone [`syndiff`](../../syndiff/) research repository before being integrated into `syndiff_pipeline`.
+This guide covers **orchestration** — how to configure and run `syndiff` across many targets. The **algorithms** behind each stage are documented separately because they were developed and originally documented in the standalone [`syndiff`](../../syndiff/) research repository before being integrated into `syndiff_pipeline`.
 
 | Layer | Location | What it covers |
 |-------|----------|----------------|
 | Orchestration | This file (`docs/template_pipeline.md`) | YAML config, scheduler, SQLite, Condor, CLI, logs |
 | Stage algorithms | [`docs/stages/`](stages/README.md) | PanCAKES mapping, PS1 convolution, downsampling internals |
 | Legacy standalone workflow | [`docs/stages/standalone_pipeline_overview.md`](stages/standalone_pipeline_overview.md) | Original `pipeline.py` + per-script CLI |
-| Diff imaging | [`README.md`](../README.md) | Hotpants → photometry after templates exist |
+| Diff imaging | [`config/example/`](../config/example/), [`config/diff_config.yaml`](../config/diff_config.yaml) | Hotpants → photometry after templates exist |
 
 ### Script → module → stage mapping
 
-| Legacy script (`syndiff/`) | Package module | `syndiff-template` stage |
+| Legacy script (`syndiff/`) | Package module | `syndiff` stage |
 |----------------------------|----------------|--------------------------|
 | — | `download.py` | `tess_ffi_download` |
-| — | `wcs_grouping.py` + `template_runner/handoff.py` | `wcs_grouping` |
-| `pancakes_v2.py` | `template/pancakes.py` | `mapping` |
-| `download_and_store_zarr.py` | `template/ps1_download.py` | `ps1_download` |
-| `process_ps1.py` | `template/ps1_process.py` | `ps1_process` |
-| `multi_offset_downsampling.py` | `template/downsample.py` | `downsample` |
+| — | `common/wcs_grouping.py` + `template_creation/orchestration/handoff.py` | `wcs_grouping` |
+| `pancakes_v2.py` | `template_creation/processing/pancakes.py` | `mapping` |
+| `download_and_store_zarr.py` | `template_creation/processing/ps1_download.py` | `ps1_download` |
+| `process_ps1.py` | `template_creation/processing/ps1_process.py` | `ps1_process` |
+| `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` | `downsample` |
+| — | `difference_imaging/orchestration/execute.py` | `diff` |
 
 The runner adds capabilities not present in the standalone scripts: **multi-target batching**, **WCS drift grouping** for transients, **artifact verification**, **force-rerun cleanup**, **pause/kill/retry**, and **HTCondor** for `mapping` and `ps1_process`.
 
-If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff-template submit` with `example/template_runner/config.yaml` and `deployment.yaml` beside it (paths in deployment.yaml; stages in config).
+If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff all submit --site config/ --targets targets.csv`. Site configs live under `config/` (`pipeline.yaml`, `diff_config.yaml`, `deployment.yaml`).
 
 ---
 
@@ -98,7 +110,7 @@ If you previously used `syndiff/run.sh` one-liners, the equivalent production pa
 
 ```mermaid
 flowchart TB
-    subgraph CLI["syndiff-template CLI"]
+    subgraph CLI["syndiff CLI"]
         submit[submit]
         monitor[status / progress / logs]
         control[pause / resume / kill / retry]
@@ -122,6 +134,7 @@ flowchart TB
         s4[ps1_download]
         s5[ps1_process]
         s6[downsample]
+        s7[diff]
     end
 
     submit --> Daemon
@@ -135,6 +148,7 @@ flowchart TB
     local --> Stages
     condor --> s3
     condor --> s5
+    condor --> s7
     Stages --> sqlite
 ```
 
@@ -143,11 +157,12 @@ flowchart TB
 | Stage | Default executor | Resource pool | Notes |
 |-------|------------------|---------------|-------|
 | `tess_ffi_download` | local | `network` | MAST / tesscurl downloads |
-| `wcs_grouping` | local | `cpu_light` | Writes per-target handoff under `handoff_root` |
+| `wcs_grouping` | local | *(none)* | Unpooled — fast; writes handoff under `events/{target_label}/` |
 | `mapping` | **condor** | `mapping` | Gaia + skycell mapping (pancakes); lighter Condor claim than `ps1_process` |
 | `ps1_download` | local | `network` | Shared Zarr at `{data_root}/ps1_skycells_zarr/` |
 | `ps1_process` | **condor** | `ps1_process` | Whole-node jobs; configurable |
 | `downsample` | local | `cpu_light` | Reads convolved Zarr + mapping |
+| `diff` | **condor** (or `local` with `--local`) | `diff` | Config-driven Hotpants → photometry; outputs in `events/{label}/ws/` |
 
 **Stage dependency graph**
 
@@ -167,9 +182,12 @@ tess_ffi_download
   ps1_process ───────────────────────────────┤
                                              ▼
                                        downsample
+                                             │
+                                             ▼
+                                          diff
 ```
 
-`downsample` requires both `wcs_grouping` (crop bounds / ROI from `cluster_template_job.json`) and `ps1_process` (convolved Zarr).
+`downsample` requires both `wcs_grouping` (crop bounds / ROI from `cluster_template_job.json`) and `ps1_process` (convolved Zarr). `diff` requires `downsample` (template FITS on disk).
 
 When you run a **stage subset**, dependencies outside the subset are satisfied if **on-disk artifacts pass verification** (see [Verification](#verification)).
 
@@ -177,26 +195,16 @@ When you run a **stage subset**, dependencies outside the subset are satisfied i
 
 ## Installation
 
-The template runner ships with the `syndiff-pipeline` package.
+See the [main README](../README.md#installation) for full install instructions (`pip install -e .`, conda env, forked dependencies).
 
 ```bash
-# From a clone of this repository
-pip install -e .
-
-# Or install in your conda/mamba environment
 mamba activate syndiff   # recommended env name in this project
-pip install -e /path/to/syndiff_pipeline
-```
-
-This registers the console script:
-
-```bash
-syndiff-template --help
+syndiff --help
 ```
 
 **Python**: ≥ 3.10 (see `pyproject.toml`).
 
-**Core dependencies** (shared with the rest of SynDiff): `numpy`, `pandas`, `astropy`, `zarr`, `pyyaml`, `sep`, `scipy`, `shapely`, `numba`, `tqdm`, `filelock`, and others used by the `template/` modules.
+**Core dependencies** (shared with the rest of SynDiff): `numpy`, `pandas`, `astropy`, `zarr`, `pyyaml`, `sep`, `scipy`, `shapely`, `numba`, `tqdm`, `filelock`, and others used by the `template_creation/processing/` modules.
 
 **Mapping-specific**: the PanCAKES stage requires a **modified MOCPy** build with `MOC.filter_points_in_polygons` (Rust backend). See [`docs/stages/mapping_pancakes.md`](stages/mapping_pancakes.md) and the standalone repo’s `install_mocpy.sh`. Standard `pip install mocpy` is not sufficient.
 
@@ -210,20 +218,26 @@ syndiff-template --help
 
 ### 1. Prepare config and targets
 
-Copy and edit the examples under `example/template_runner/`:
+Copy and edit the site folder under `config/`:
 
 ```bash
-cp example/template_runner/config.yaml my_config.yaml
-cp example/template_runner/deployment.yaml.example deployment.yaml
-cp example/template_runner/targets_example.csv my_targets.csv
+cp config/deployment.yaml.example config/deployment.yaml
+# Edit workspace_root, data_root, credentials
 ```
 
-**Site config** (`my_config.yaml`): stages, resource pools, notifications only — no filesystem paths.
+**Site folder** (`config/`):
 
-**Deployment** (`deployment.yaml`, gitignored, beside config): set at minimum:
+| File | Role |
+|------|------|
+| `pipeline.yaml` | Template policy: stages, resource pools, notifications |
+| `diff_config.yaml` | Diff-imaging policy + `condor:` resources for the `diff` stage |
+| `deployment.yaml` | Gitignored paths + credentials (`workspace_root`, `data_root`, Gaia, Discord) |
+| `targets_example.csv` | Targets (always passed via `--targets` on the CLI) |
 
-- `handoff_root` — per-target WCS handoffs, SQLite state, run metadata, daemon files.
-- `data_root` — science data tree (FFIs, mapping caches, Zarr, templates).
+**Deployment** (`deployment.yaml`): set at minimum:
+
+- `workspace_root` — orchestration workspace: `control/` (SQLite, daemon), `runs/`, and `events/{target_label}/`.
+- `data_root` — science data tree (FFIs, mapping caches, Zarr, template FITS).
 - `gaia_username` / `gaia_password` — Gaia TAP+ credentials for mapping (optional for anonymous TAP).
 - Discord keys when notifications are enabled.
 
@@ -234,8 +248,8 @@ See [Configuration Reference](#configuration-reference).
 ### 2. Verify prerequisites (optional but recommended)
 
 ```bash
-syndiff-template verify \
-  --config my_config.yaml \
+syndiff verify \
+  --site config \
   --targets my_targets.csv \
   --stages tess_ffi_download,wcs_grouping,mapping,ps1_download
 ```
@@ -247,8 +261,8 @@ Always activate your conda environment first so the scheduler records the correc
 ```bash
 mamba activate syndiff
 
-syndiff-template submit \
-  --config my_config.yaml \
+syndiff template submit \
+  --site config \
   --targets my_targets.csv \
   --stages ps1_process,downsample
 ```
@@ -259,10 +273,10 @@ Example output:
 
 ```text
 Submitted run_id=20260607_210919 supervisor_pid=2692578
-  daemon log: /path/to/template_handoffs/daemon.log
-Monitor: syndiff-template progress
-         syndiff-template status --watch
-         syndiff-template progress --run-id 20260607_210919
+  daemon log: /path/to/workspace/control/daemon.log
+Monitor: syndiff progress
+         syndiff status --watch
+         syndiff progress --run-id 20260607_210919
 ```
 
 ### 4. Monitor
@@ -270,16 +284,16 @@ Monitor: syndiff-template progress
 Simplest — no flags (auto-discovers the supervisor; shows all **active** runs, or latest if none):
 
 ```bash
-syndiff-template progress
-syndiff-template status --watch
+syndiff progress
+syndiff status --watch
 ```
 
 One run by id or portable run directory:
 
 ```bash
-syndiff-template progress --run-id batch_no5
-syndiff-template status --watch --run-dir /path/to/runs/20260607_210919
-syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
+syndiff progress --run-id batch_no5
+syndiff status --watch --run-dir /path/to/runs/20260607_210919
+syndiff tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
@@ -288,7 +302,7 @@ syndiff-template tail --run-dir /path/to/runs/20260607_210919 \
 **Discord alerts** (optional): when `notifications.enabled: true` in config, the supervisor posts to a webhook on run/stage events. Messages include the same **progress** summary and **status** grid as the CLI. Preview without changing pipeline state:
 
 ```bash
-syndiff-template notify test --run-id batch_no4
+syndiff notify test --run-id batch_no4
 ```
 
 See [Discord notifications](#discord-notifications).
@@ -296,14 +310,14 @@ See [Discord notifications](#discord-notifications).
 Run-scoped commands use frozen config from the run directory — use `--run-id` (workspace auto-discovered) or `--run-dir`:
 
 ```bash
-syndiff-template progress --run-id 20260607_210919
-syndiff-template status --watch --run-id 20260607_210919
-syndiff-template retry --run-id 20260607_210919
+syndiff progress --run-id 20260607_210919
+syndiff status --watch --run-id 20260607_210919
+syndiff retry --run-id 20260607_210919
 ```
 
 ### 5. Use templates in SynDiff
 
-Downsampled FITS appear under `{data_root}/shifted_downsampled/` (or `stages.downsample.output_base`). Point the main SynDiff config’s `template_dir` at that tree before running `run_pipeline.py`.
+Downsampled FITS appear under `{data_root}/shifted_downsampled/` (or `stages.downsample.output_base`). After downsample, the template pipeline creates `events/{target}/ws/templates` → that physical directory. Differencing resolves templates via this symlink (or an explicit `paths.template_dir` override in `diff_config.yaml`).
 
 ---
 
@@ -315,13 +329,13 @@ Three layers — no environment variables:
 
 | Layer | File | Purpose |
 |-------|------|---------|
-| Site policy | `config.yaml` | Stages, pools, notifications, per-SCC overrides |
-| Deployment | `deployment.yaml` (beside config, gitignored; paths + credentials) | `handoff_root`, `data_root`, Gaia + Discord |
+| Site policy | `pipeline.yaml` | Stages, pools, notifications, per-SCC overrides |
+| Deployment | `deployment.yaml` (beside config, gitignored; paths + credentials) | `workspace_root`, `data_root`, Gaia + Discord |
 | Bundled | `resources/skycell_wcs.csv` | PS1 SkyCells WCS (auto-resolved) |
 
-On **submit**, resolved paths are frozen into `{handoff_root}/runs/<run_id>/config.yaml`. Workers and run-scoped CLI commands read that file — they do not need `deployment.yaml` unless reloading credentials (e.g. Gaia for mapping uses `source_config_path` from `run_meta.json`).
+On **submit**, resolved paths are frozen into `{workspace_root}/runs/<run_id>/config.yaml`. Workers and run-scoped CLI commands read that file — they do not need `deployment.yaml` unless reloading credentials (e.g. Gaia for mapping uses `source_config_path` from `run_meta.json`).
 
-**Workspace** = one `handoff_root` → one SQLite DB (`pipeline_state.sqlite`), one supervisor daemon, one `runs/` tree.
+**Workspace** = one `workspace_root` → one SQLite DB under `control/`, one supervisor daemon, one `runs/` tree. Full layout: [storage_layout.md](storage_layout.md).
 
 ### Targets
 
@@ -337,7 +351,7 @@ Example: `s0023_c1_k3_2020ftl` for sector 23, camera 1, CCD 3, SN 2020ftl.
 
 ### Runs and stages
 
-A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). Each target materializes the **full 6-stage DAG** in SQLite. Stages selected at submit start `pending`; others start `external` and are resolved once to `skipped` when on-disk artifacts verify complete.
+A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). Each target materializes the **full 7-stage DAG** in SQLite. Stages selected at submit start `pending`; others start `external` and are resolved once to `skipped` when on-disk artifacts verify complete.
 
 | Status | Meaning |
 |--------|---------|
@@ -349,7 +363,7 @@ A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_
 | `skipped` | Artifacts verified complete (no rerun) |
 | `blocked` | Never started (upstream failure) |
 | `canceled` | User kill (retryable) |
-| `external` | Outside `--stages`; verify once then `skipped` if on-disk artifacts are complete. Stages outside the upstream dependency closure of `--stages` are marked **n/a** immediately (no artifact verify). Upstream stages are also marked **n/a** when a downstream dependency in the closure is already `success`/`skipped` (e.g. skip `ps1_download` verify when `ps1_process` artifacts exist). |
+| `external` | Outside `--stages`; verify once then `skipped` if on-disk artifacts are complete. Stages outside the artifact-verify closure of `--stages` are marked **n/a** immediately (no artifact verify). For `diff submit`, only `tess_ffi_download`, `wcs_grouping`, and `downsample` are verified; `mapping`, `ps1_download`, and `ps1_process` are **n/a** without scanning. Upstream stages in the verify closure are also marked **n/a** when a downstream dependency is already `success`/`skipped` (e.g. skip `wcs_grouping` verify when `downsample` artifacts exist). |
 
 Run-level status (`runs.status`): `running`, `stalled`, `success`, `failed`, `canceled`. A `stalled` run has no running or launchable work, no artifact-verify backlog, and non-terminal stages remain (see `stall_reason` in `progress`/`status`). Runs stay **`running`** while artifact scans are queued (`sc_q`) or running (`scan`).
 
@@ -369,7 +383,8 @@ Concurrency is limited per **pool** (not globally):
 | Pool | Stages | Typical limit | Purpose |
 |------|--------|---------------|---------|
 | `network` | `tess_ffi_download`, `ps1_download` | 3 | Throttle MAST / PS1 API |
-| `cpu_light` | `wcs_grouping`, `downsample` | 2 | Moderate CPU / I/O |
+| `cpu_light` | `downsample` | 2 | Moderate CPU / I/O |
+| `diff` | `diff` | (configurable) | Condor slot count for diff jobs |
 | `mapping` | `mapping` | 6 | Condor slot count for mapping jobs |
 | `ps1_process` | `ps1_process` | 4 | Condor slot count for PS1 convolution |
 
@@ -378,7 +393,7 @@ Configure under `resources:` in YAML. For Condor stages, each pool's `max_concur
 ### Local vs HTCondor execution
 
 - **Local**: `subprocess.Popen` with `start_new_session=True` (own process group for clean kill).
-- **Condor**: `mapping` and `ps1_process` by default (`stages.mapping.executor: condor`, `stages.ps1_process.executor: condor`).
+- **Condor**: `mapping`, `ps1_process`, and `diff` by default (`stages.mapping.executor: condor`, `stages.ps1_process.executor: condor`, `stages.diff.executor: condor`).
 
 The Condor path:
 
@@ -387,7 +402,7 @@ The Condor path:
 3. Stores the **cluster ID** in SQLite as `pid`.
 4. Polls with `condor_q` / `condor_history`.
 
-Execute nodes run `template_runner/condor_wrapper.sh`, which activates the `syndiff` conda env and `exec`s the same `run_stage.py` command the local launcher would use.
+Execute nodes run `common/orchestration/condor_wrapper.sh`, which activates the `syndiff` conda env and `exec`s the same `run_stage.py` command the local launcher would use.
 
 ---
 
@@ -405,11 +420,11 @@ Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` using the share
 
 ### `wcs_grouping`
 
-**Module**: `template_runner/handoff.py` → `syndiff_pipeline.common.wcs_grouping`
+**Module**: `template_creation/orchestration/handoff.py` → `syndiff_pipeline.common.wcs_grouping`
 
 **Inputs**: FFIs on disk; target RA/Dec from targets CSV.
 
-**Outputs** (under `{handoff_root}/{target_label}/`):
+**Outputs** (under `{workspace_root}/events/{target_label}/`):
 
 | File | Description |
 |------|-------------|
@@ -423,7 +438,7 @@ Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` using the share
 
 ### `mapping`
 
-**Module**: `template/pancakes.py` (ported from `pancakes_v2.py`)
+**Module**: `template_creation/processing/pancakes.py` (ported from `pancakes_v2.py`)
 
 Builds TESS↔PS1 skycell pixel mappings for the reference FFI from `cluster_template_job.json`. Optionally downloads a Gaia catalog (`skip_download_catalog: false` by default).
 
@@ -453,7 +468,7 @@ With `oversampling_factor > 1`, paths include an `oversampling_{N}/` prefix and 
 
 ### `ps1_download`
 
-**Module**: `template/ps1_download.py` (ported from `download_and_store_zarr.py`)
+**Module**: `template_creation/processing/ps1_download.py` (ported from `download_and_store_zarr.py`)
 
 Downloads PS1 skycell data listed in the mapping CSV into a **shared Zarr store**:
 
@@ -471,7 +486,7 @@ Uses a lock file (`ps1_skycells.zarr.lock`) so concurrent downloads for differen
 
 ### `ps1_process`
 
-**Module**: `template/ps1_process.py` (ported from `process_ps1.py`)
+**Module**: `template_creation/processing/ps1_process.py` (ported from `process_ps1.py`)
 
 Reads PS1 Zarr + mapping CSV; runs the **modern sliding-window convolution pipeline**. Sizes worker counts from **whole-machine** `os.cpu_count()` and available RAM — on Condor this expects a **whole-node** claim (`request_cpus=64`, large memory).
 
@@ -498,7 +513,7 @@ Reads PS1 Zarr + mapping CSV; runs the **modern sliding-window convolution pipel
 
 ### `downsample`
 
-**Module**: `template/downsample.py` (ported from `multi_offset_downsampling.py`)
+**Module**: `template_creation/processing/downsample.py` (ported from `multi_offset_downsampling.py`)
 
 Combines convolved Zarr data at multiple sub-pixel offsets from `cluster_template_job.json`. Produces template FITS for SynDiff Hotpants.
 
@@ -515,15 +530,39 @@ Default production offsets are the calibrated dither list from the standalone sc
 
 ```text
 sector{SSSS}_camera{C}_ccd{K}[_x..._y...][_os{N}]/
-  syndiff_template_s{SSSS}_{C}_{C}_dx{X.XXX}_dy{Y.YYY}.fits
+  syndiff_template_s{SSSS}_{camera}_{ccd}_dx{X.XXX}_dy{Y.YYY}.fits.gz
   ...
 ```
 
-**Verification**: at least one `syndiff_template_*.fits` under the target directory glob.
+**Verification**: at least one `syndiff_template_*.fits.gz` under the target directory glob.
 
-**Progress sidecar**: during pipeline runs, parallel batch workers update `per_target/<label>/downsample.progress.json` (beside `downsample.log`) with skycell-weighted progress (`skycells_done` / `total_skycells`). `syndiff-template progress` reads this file for in-flight fraction; shift precompute shows as `shifts k/n` phase text. The log is unchanged aside from existing batch completion lines.
+**Progress sidecar**: during pipeline runs, parallel batch workers update `per_target/<label>/downsample.progress.json` (beside `downsample.log`) with skycell-weighted progress (`skycells_done` / `total_skycells`). `syndiff progress` reads this file for in-flight fraction; shift precompute shows as `shifts k/n` phase text. The log is unchanged aside from existing batch completion lines.
 
 **Deep dive**: [downsample_technical.md](stages/downsample_technical.md)
+
+---
+
+### `diff`
+
+**Module**: `difference_imaging/orchestration/execute.py` (registry: `difference_imaging/orchestration/stages.py`)
+
+Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → background → forced photometry) after templates exist. Policy comes from the site [`diff_config.yaml`](../config/diff_config.yaml), referenced by `diff_config:` in `pipeline.yaml`; per-target copies are frozen under `per_target/<label>/diff_config.yaml` at launch.
+
+**Outputs** (under `{workspace_root}/events/{target_label}/ws/`):
+
+- Frame manifest CSV and per-pipeline-label workspace directories (Hotpants diffs, photometry, etc.)
+
+**Config** (`stages.diff` in `pipeline.yaml`):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `executor` | `"condor"` | `"condor"` or `"local"`; uses resource pool `diff` |
+
+Condor resource requests (`request_cpus`, `request_memory`, …) are defined in `diff_config.yaml` under `condor:`.
+
+**Verification**: frame manifest CSV present and at least one workspace label directory under `ws/` (excluding `master` and `templates`).
+
+**Diff-only submit** (`syndiff diff submit`): upstream template stages outside the artifact-verify closure are marked **n/a** immediately. Only `tess_ffi_download`, `wcs_grouping`, and `downsample` are verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`) — not `mapping`, `ps1_download`, or `ps1_process`.
 
 ---
 
@@ -533,17 +572,18 @@ Configuration is split into three layers:
 
 | Layer | File | Contains |
 |-------|------|----------|
-| Site policy | `config.yaml` | `stages`, `resources`, `notifications`, `overrides` |
-| Deployment | `deployment.yaml` (gitignored, beside config) | `handoff_root`, `data_root`, Gaia + Discord credentials |
+| Site policy | `pipeline.yaml` | `stages`, `resources`, `notifications`, `overrides` |
+| Deployment | `deployment.yaml` (gitignored, beside config) | `workspace_root`, `data_root`, Gaia + Discord credentials |
 | Bundled assets | `resources/skycell_wcs.csv` in the repo | PS1 SkyCells WCS table (auto-resolved) |
 
-Loaded by `template_runner/runner_config.py`. On submit, a **frozen** run `config.yaml` embeds resolved absolute paths so workers do not re-read deployment.yaml.
+Loaded by `template_creation/orchestration/runner_config.py`. On submit, a **frozen** run `config.yaml` embeds resolved absolute paths so workers do not re-read deployment.yaml.
 
-### Site config keys (`config.yaml`)
+### Site config keys (`pipeline.yaml`)
 
 | Key | Required | Description |
 |-----|----------|-------------|
 | `deployment_file` | no | Filename of the gitignored deployment overlay beside config (default: `deployment.yaml`) |
+| `diff_config` | no | Path to diff site policy YAML (default: `diff_config.yaml` beside `pipeline.yaml`) |
 | `stages` | no | Per-stage parameters (see below) |
 | `resources` | no | Pool concurrency limits |
 | `scheduler` | no | Scheduler tuning |
@@ -552,24 +592,28 @@ Loaded by `template_runner/runner_config.py`. On submit, a **frozen** run `confi
 
 ### Deployment file keys (`deployment.yaml`)
 
-`deployment.yaml` is the gitignored deployment overlay beside `config.yaml`: machine-specific paths (`handoff_root`, `data_root`) and credentials (Gaia, Discord).
+`deployment.yaml` is the gitignored deployment overlay beside `pipeline.yaml`: machine-specific paths (`workspace_root`, `data_root`) and credentials (Gaia, Discord).
 
 | Key | Required | Description |
 |-----|----------|-------------|
-| `handoff_root` | yes | Workspace root: handoffs, `{handoff_root}/pipeline_state.sqlite`, `{handoff_root}/runs/` |
+| `workspace_root` | yes | Workspace root: `control/`, `runs/`, `events/` — see [storage_layout.md](storage_layout.md) |
 | `data_root` | yes | Science data tree (FFIs, mapping, Zarr, catalogs) |
 | `ffi_dir` | no | Override TESS FFI root (default: `{data_root}/tess_ffi`) |
 | `gaia_username` / `gaia_password` | no | Gaia TAP+ credentials for mapping |
 | `discord_webhook_url` | no | Incoming webhook for notifications |
 | `discord_bot_token` / `discord_channel_id` | no | On-demand status bot |
 
-Derived paths (not in config): `state_db_path` = `{handoff_root}/pipeline_state.sqlite`, `runs_root` = `{handoff_root}/runs`, `mapping_root` = `{data_root}/skycell_pixel_mapping`, etc.
+Derived paths (not in config): `state_db_path` = `{workspace_root}/control/pipeline_state.sqlite`, `runs_root` = `{workspace_root}/runs`, `mapping_root` = `{data_root}/skycell_pixel_mapping`, etc.
 
 ### Scheduler
 
 ```yaml
 scheduler:
   heartbeat_interval_s: 30.0
+  max_stage_attempts: 3      # requeue cap before marking failed
+  requeue_backoff_s: 30.0    # delay before relaunching lost workers
+  verify_max_workers: 1
+  verify_budget_per_tick: 16
 ```
 
 ### Discord notifications
@@ -602,7 +646,7 @@ notifications:
 `deployment.yaml` (not committed; copy from `deployment.yaml.example`):
 
 ```yaml
-handoff_root: /path/to/template_handoffs
+workspace_root: /path/to/workspace
 data_root: /path/to/syndiff/data
 gaia_username: ...
 gaia_password: ...
@@ -615,10 +659,10 @@ discord_channel_id: "123456789012345678"
 
 | Event | When |
 |-------|------|
-| `run_started` | New `syndiff-template submit` (short summary, not progress grid) |
+| `run_started` | New `syndiff template submit` (short summary, not progress grid) |
 | `run_completed` / `run_failed` | All stages terminal |
-| `run_canceled` | `syndiff-template kill` (whole run canceled) |
-| `run_retried` | `syndiff-template retry` (bulk or `--scc` + `--stage`) |
+| `run_canceled` | `syndiff kill` (whole run canceled) |
+| `run_retried` | `syndiff retry` (bulk or `--scc` + `--stage`) |
 | `run_stalled` / `run_resumed` | Scheduler stall detection / recovery |
 | `stage_completed` / `stage_failed` | Worker exits 0 / nonzero |
 | `stage_canceled` | Worker SIGTERM (`kill`) or exit 143 |
@@ -635,14 +679,14 @@ Event notifications (except `run_started`) include the same **progress** summary
 
 ```bash
 pip install 'discord.py>=2.3'   # or: pip install -e '.[discord]'
-syndiff-template daemon start --deployment example/template_runner/deployment.yaml
+syndiff daemon start --deployment config/deployment.yaml
 ```
 
 `submit` also ensures the bot is running. `daemon stop` stops both the supervisor and the bot. Check both with `daemon status`. For foreground debugging only:
 
 ```bash
-syndiff-template discord bot --deployment example/template_runner/deployment.yaml
-syndiff-template discord bot   # auto-discover when one workspace
+syndiff discord bot --deployment config/deployment.yaml
+syndiff discord bot   # auto-discover when one workspace
 ```
 
 Any message you post in the configured channel gets a reply with live `progress` + `status` (same format as event alerts). Include a `run_id` in the message to query a specific run; otherwise the bot reports all active runs (or the most recent run if none are active).
@@ -650,8 +694,8 @@ Any message you post in the configured channel gets a reply with live `progress`
 **Test** (read-only; does not write `notification_events` or change run state):
 
 ```bash
-syndiff-template notify test --run-id batch_no4
-syndiff-template notify test --run-dir /path/to/runs/batch_no4 --dry-run   # print locally
+syndiff notify test --run-id batch_no4
+syndiff notify test --run-dir /path/to/runs/batch_no4 --dry-run   # print locally
 ```
 
 ### Resource pools
@@ -666,9 +710,15 @@ resources:
     max_concurrent: 6
   ps1_process:
     max_concurrent: 4
+  diff:
+    max_concurrent: 2
+
+stages:
+  diff:
+    executor: condor   # or local with syndiff diff submit --local
 ```
 
-Defaults if omitted: `network=3`, `cpu_light=2`, `mapping=6`, `ps1_process=4`.
+Defaults if omitted: `network=3`, `cpu_light=2`, `mapping=6`, `ps1_process=4`, `diff=2`.
 
 ### Stage parameters
 
@@ -682,8 +732,9 @@ Unknown keys under `stages.*` raise `ValueError` at load time (strict allow-list
 | `wcs_drift_savgol_window` | `11` | Savitzky–Golay window for drift smoothing |
 | `wcs_drift_savgol_polyorder` | `2` | SG polynomial order |
 | `bkg_vector_path` | null | Optional TESSVectors path for Earth/Moon angles |
-| `crop_quadrant` | `"full"` | Default crop mode if bounds not set (`full` = entire FFI; `full_science` = usable area only) |
-| `x_min`, `x_max`, `y_min`, `y_max` | null | Explicit crop bounds (pixels) |
+| `crop_mode` | `"full"` | Crop preset when bounds not set: `full` (entire FFI), quadrants `tl`/`tr`/`bl`/`br`, or `target_box` (square centered on target) |
+| `crop_box_size` | `1024` | Side length when `crop_mode` is `target_box` |
+| `x_min`, `x_max`, `y_min`, `y_max` | null | Explicit crop bounds (pixels; override any `crop_mode` preset) |
 | `x_left_dead`, `x_right_dead` | `44` | Horizontal dead columns |
 | `y_edge_strip` | `30` | Vertical edge strip |
 
@@ -741,13 +792,19 @@ Unknown keys under `stages.*` raise `ValueError` at load time (strict allow-list
 | `output_base` | null | Template FITS output root |
 | `single_offset` | `false` | Single `[0,0]` offset only (smoke) |
 
+#### `stages.diff`
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `executor` | `"condor"` | `"condor"` or `"local"`; Condor resource requests come from `diff_config.yaml` |
+
 ### Resolved per-target paths
 
 For each target, `resolve_config()` derives:
 
 | Field | Path |
 |-------|------|
-| `handoff_dir` | `{handoff_root}/{target_label}/` |
+| `event_dir` | `{workspace_root}/events/{target_label}/` |
 | `mapping_root` | `{data_root}/skycell_pixel_mapping/` |
 | `zarr_dir` | `{data_root}/ps1_skycells_zarr/` |
 | `template_output_base` | `{data_root}/shifted_downsampled/` |
@@ -777,13 +834,13 @@ ID,redshift,type,ra,dec,...,tess_coverage,...
 
 `ID` may be prefixed with `SN `. `tess_coverage` uses tokens like `S23C1D3` or `S44C2D1; S45C1D4` for multi-SCC events. One target row is expanded per SCC token.
 
-See `example/template_runner/events_example.csv`.
+See `config/targets_example.csv` (legacy mirror; site quick start uses `config/targets_example.csv`).
 
 ---
 
 ## CLI Reference
 
-Run `syndiff-template --help` or `syndiff-template <command> --help` for the built-in argparse summary. This section explains **what each command does**, **which flags it needs**, and **typical workflows**.
+Run `syndiff --help` or `syndiff <command> --help` for the built-in argparse summary. This section explains **what each command does**, **which flags it needs**, and **typical workflows**.
 
 ### How commands find your run
 
@@ -791,19 +848,19 @@ Commands fall into three scopes:
 
 | Scope | What you pass | When to use |
 |-------|---------------|-------------|
-| **Site** | `--config path/to/config.yaml` (+ `--targets` for submit/verify) | Starting work, reading `handoff_root` from `deployment.yaml` beside config |
+| **Site** | `--config path/to/pipeline.yaml` (+ `--targets` for submit/verify) | Starting work, reading `workspace_root` from `deployment.yaml` beside config |
 | **Workspace** | `--deployment path/to/deployment.yaml` (optional; auto-discovers one live supervisor) | Daemon control, listing runs, default monitoring |
 | **Run** | `--run-dir /path/to/runs/<run_id>` **or** `--run-id ID` (+ optional `--deployment`) | One specific run; run control (`retry`, `kill`, …) |
 
 **`progress` / `status` with no flags** auto-discover the workspace and show **all active runs** (fallback: latest run if none active).
 
-**`deployment.yaml` is workspace scope.** The supervisor only needs `handoff_root`; it can run many pipeline runs concurrently.
+**`deployment.yaml` is workspace scope.** The supervisor only needs `workspace_root`; it can run many pipeline runs concurrently.
 
 **Recommend `--run-id` on submit** (e.g. `batch_no5`) so runs are easy to target with `--run-id` later. Not required — timestamps are auto-generated if omitted.
 
 **`--run-dir`** is portable: the run directory is self-contained (frozen config, targets, logs) and needs no deployment file on the monitoring host.
 
-**No environment variables** for configuration — paths and credentials come from `deployment.yaml`, site `config.yaml`, CLI flags, and bundled `resources/`.
+**No environment variables** for configuration — paths and credentials come from `deployment.yaml`, site `pipeline.yaml`, CLI flags, and bundled `resources/`.
 
 ### Command index
 
@@ -836,8 +893,8 @@ Commands fall into three scopes:
 **Purpose**: Production entry point. Creates a run directory, registers the run in SQLite, ensures the supervisor daemon is running, and returns immediately.
 
 ```bash
-syndiff-template submit \
-  --config my_config.yaml \
+syndiff template submit \
+  --config my_pipeline.yaml \
   --targets my_targets.csv \
   [--stages mapping,ps1_process,downsample] \
   [--run-id batch_no5] \
@@ -848,7 +905,7 @@ syndiff-template submit \
 |------|----------|-------------|
 | `--config` | yes | Site policy YAML (stages, pools, notifications) |
 | `--targets` | yes | Targets CSV (sector, camera, ccd, coordinates, enabled) |
-| `--stages` | no | Comma-separated subset; default: all six stages |
+| `--stages` | no | Comma-separated subset; default: preset stage list (6 template or 7 with diff) |
 | `--run-id` | no | Unique run name; must not already exist in pipeline state. Default: UTC timestamp `YYYYMMDD_HHMMSS` |
 | `--force-rerun` | no | On first submit only: run selected stages even when artifacts already exist; see [Force Rerun](#force-rerun-behavior) |
 
@@ -856,19 +913,19 @@ syndiff-template submit \
 
 **What happens**:
 
-1. Loads `deployment.yaml` beside `--config` for `handoff_root`, `data_root`, credentials.
-2. Materializes frozen `config.yaml` + `targets.csv` into `{handoff_root}/runs/<run_id>/`.
-3. Inserts run + per-target stage rows in `{handoff_root}/pipeline_state.sqlite`.
-4. Starts the supervisor daemon (if not already alive for this `handoff_root`).
+1. Loads `deployment.yaml` beside `--config` for `workspace_root`, `data_root`, credentials.
+2. Materializes frozen `config.yaml` + `targets.csv` into `{workspace_root}/runs/<run_id>/`.
+3. Inserts run + per-target stage rows in `{workspace_root}/control/pipeline_state.sqlite`.
+4. Starts the supervisor daemon (if not already alive for this `workspace_root`).
 5. Starts the Discord bot when enabled: on supervisor startup if a new supervisor was spawned, otherwise immediately from `submit` (one bot per workspace, flock-guarded).
-6. Updates `{handoff_root}/runs/latest` → `<run_id>`.
+6. Updates `{workspace_root}/runs/latest` → `<run_id>`.
 
-**Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically). Set `stages.ps1_process.ps1_source: stream` in `config.yaml` (see commented lines in the example file):
+**Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically). Set `stages.ps1_process.ps1_source: stream` in `pipeline.yaml` (see commented lines in the example file):
 
 ```bash
-syndiff-template submit \
-  --config example/template_runner/config.yaml \
-  --targets example/template_runner/targets_example.csv \
+syndiff template submit \
+  --site config \
+  --targets config/targets_example.csv \
   --stages mapping,ps1_process,downsample \
   --run-id batch_stream_01
 ```
@@ -878,7 +935,7 @@ syndiff-template submit \
 **Purpose**: Run one target batch in the **foreground** (blocks until the run finishes). Same config/targets as `submit`, but no daemon — useful for debugging scheduler logic on a laptop.
 
 ```bash
-syndiff-template run --config my_config.yaml --targets my_targets.csv [--stages ...] [--run-id ...] [--force-rerun]
+syndiff template run --config my_pipeline.yaml --targets my_targets.csv [--stages ...] [--run-id ...] [--force-rerun]
 ```
 
 Warning is printed when stdout is a TTY. For long production jobs, use `submit` instead.
@@ -894,11 +951,11 @@ Warning is printed when stdout is a TTY. For long production jobs, use `submit` 
 **Purpose**: One-line aggregate counts (`pending=`, `running=`, `success=`, …) plus optional per-task detail parsed from stage logs.
 
 ```bash
-syndiff-template progress
-syndiff-template progress --deployment example/template_runner/deployment.yaml
-syndiff-template progress --run-id batch_no5
-syndiff-template progress --run-dir /path/to/handoffs/runs/batch_no5
-syndiff-template progress --no-detail   # summary only (for scripts)
+syndiff progress
+syndiff progress --site config
+syndiff progress --run-id batch_no5
+syndiff progress --run-dir /path/to/runs/batch_no5
+syndiff progress --no-detail   # summary only (for scripts)
 ```
 
 Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows` or `down: 45/84` from `downsample.progress.json`.
@@ -908,10 +965,10 @@ Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows` 
 **Purpose**: Per-target stage grid (`tess_dl:pend | map:run | ps1_dl:succ | …`). Abbreviations match `STAGE_SHORT_NAMES` in the scheduler.
 
 ```bash
-syndiff-template status
-syndiff-template status --watch --interval 15   # refresh every 15s
-syndiff-template status --run-id batch_no5
-syndiff-template status --run-dir /path/to/runs/batch_no5
+syndiff status
+syndiff status --watch --interval 15   # refresh every 15s
+syndiff status --run-id batch_no5
+syndiff status --run-dir /path/to/runs/batch_no5
 ```
 
 When not `--watch`, prints a warning if the supervisor daemon is not alive (with a suggested `daemon start` command).
@@ -923,24 +980,24 @@ Shows `stalled` reason and `scan_queued` / `scan_running` counts when applicable
 **Purpose**: Dump `run_meta.json` (submit time, `source_config_path`, stages list, `force_rerun` flag).
 
 ```bash
-syndiff-template show --run-dir /path/to/runs/batch_no5
+syndiff show --run-dir /path/to/runs/batch_no5
 ```
 
 #### `logs` / `tail`
 
-**Purpose**: Print logs. Without `--target`/`--stage`, prints the **daemon log** at `{handoff_root}/daemon.log`. With both, prints the stage worker log.
+**Purpose**: Print logs. Without `--target`/`--stage`, prints the **daemon log** at `{workspace_root}/control/daemon.log`. With both, prints the stage worker log.
 
 ```bash
 # Daemon log (whole workspace)
-syndiff-template logs --run-dir /path/to/runs/batch_no5
+syndiff logs --run-dir /path/to/runs/batch_no5
 
 # Stage log (one target + stage)
-syndiff-template logs --run-dir ... \
+syndiff logs --run-dir ... \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 
 # Follow (like tail -f)
-syndiff-template tail --run-dir ... --target s0023_c1_k3_2020ftl --stage ps1_process
-syndiff-template logs --run-dir ... --target ... --stage ... --follow
+syndiff tail --run-dir ... --target s0023_c1_k3_2020ftl --stage ps1_process
+syndiff logs --run-dir ... --target ... --stage ... --follow
 ```
 
 Stage logs live at `per_target/<target_label>/<stage>.log` inside the run directory.
@@ -949,15 +1006,15 @@ Stage logs live at `per_target/<target_label>/<stage>.log` inside the run direct
 
 ### Workspace commands
 
-These operate on the **handoff workspace** (one SQLite DB per `handoff_root`). Pass `--config` (same site config as submit).
+These operate on the **handoff workspace** (one SQLite DB per `workspace_root`). Pass `--site`, `--deployment`, or rely on auto-discovery when one supervisor is running.
 
 #### `runs`
 
 **Purpose**: List recent runs from SQLite with status and daemon liveness.
 
 ```bash
-syndiff-template runs --config my_config.yaml
-syndiff-template runs --config my_config.yaml --limit 50
+syndiff runs --site config
+syndiff runs --deployment config/deployment.yaml --limit 50
 ```
 
 #### `active`
@@ -965,8 +1022,8 @@ syndiff-template runs --config my_config.yaml --limit 50
 **Purpose**: Runs with status `running` or `stalled`, plus supervisor PID and heartbeat age.
 
 ```bash
-syndiff-template active --config my_config.yaml
-syndiff-template active --config my_config.yaml
+syndiff active --site config
+syndiff active
 ```
 
 ---
@@ -981,19 +1038,20 @@ All insert **command intents** into SQLite; the supervisor daemon is the sole wr
 
 ```bash
 # Retry everything failed/canceled in the run
-syndiff-template retry --run-dir /path/to/runs/batch_no5
+syndiff retry --run-dir /path/to/runs/batch_no5
 
-# Retry one SCC + stage (resets downstream deps)
-syndiff-template retry --run-dir ... --scc 23,1,3 --stage mapping
+# Retry one target (--scc or --target alias) + stage (resets downstream deps)
+syndiff retry --run-dir ... --scc 23,1,3 --stage mapping
+syndiff retry --run-dir ... --target s0023_c1_k3_2020ftl --stage mapping
 
 # Retry only the targeted stage (leave downstream untouched)
-syndiff-template retry --run-dir ... --scc 23,1,3 --stage mapping --no-reset-downstream
+syndiff retry --run-dir ... --scc 23,1,3 --stage mapping --no-reset-downstream
 
 # Queue intent without waking daemon (e.g. maintenance window)
-syndiff-template retry --run-dir ... --no-start-daemon
+syndiff retry --run-dir ... --no-start-daemon
 ```
 
-By default, `retry` also calls `ensure_daemon_running` for the run's `handoff_root`.
+By default, `retry` also calls `ensure_daemon_running` for the run's `workspace_root`.
 
 On partial runs (`--stages mapping,downsample`, etc.), retry reopens non-selected upstream
 stages to `external` for artifact re-verification (not `pending`). See
@@ -1005,7 +1063,7 @@ full state-machine matrix.
 **Purpose**: Stop launching new stages for this run (in-flight workers continue until done).
 
 ```bash
-syndiff-template pause --run-dir /path/to/runs/batch_no5
+syndiff pause --run-dir /path/to/runs/batch_no5
 ```
 
 #### `resume`
@@ -1013,7 +1071,7 @@ syndiff-template pause --run-dir /path/to/runs/batch_no5
 **Purpose**: Clear pause and resume dequeuing.
 
 ```bash
-syndiff-template resume --run-dir /path/to/runs/batch_no5
+syndiff resume --run-dir /path/to/runs/batch_no5
 ```
 
 #### `kill`
@@ -1021,7 +1079,7 @@ syndiff-template resume --run-dir /path/to/runs/batch_no5
 **Purpose**: Cancel the run — daemon terminates local subprocesses, sweeps Condor clusters, marks run `canceled`.
 
 ```bash
-syndiff-template kill --run-dir /path/to/runs/batch_no5
+syndiff kill --run-dir /path/to/runs/batch_no5
 ```
 
 ---
@@ -1035,8 +1093,8 @@ syndiff-template kill --run-dir /path/to/runs/batch_no5
 **Pre-run** (site config + targets):
 
 ```bash
-syndiff-template verify \
-  --config my_config.yaml \
+syndiff verify \
+  --config my_pipeline.yaml \
   --targets my_targets.csv \
   [--stages mapping,ps1_download] \
   [--scc 23,1,3]
@@ -1045,7 +1103,7 @@ syndiff-template verify \
 **Post-run** (frozen run config inside run dir):
 
 ```bash
-syndiff-template verify --run-dir /path/to/runs/batch_no5 --scc 23,1,3 --stages ps1_process
+syndiff verify --run-dir /path/to/runs/batch_no5 --scc 23,1,3 --stages ps1_process
 ```
 
 Output: `[OK]`, `[FAIL]`, or `[UNKNOWN]` per target/stage with message and path.
@@ -1055,8 +1113,8 @@ Output: `[OK]`, `[FAIL]`, or `[UNKNOWN]` per target/stage with message and path.
 **Purpose**: One-shot backfill of **stable** completion manifests under `{runs_root}/.manifests/` for data that already exists on disk. Future runs skip expensive re-verification when manifests match.
 
 ```bash
-syndiff-template reconcile-manifests --config my_config.yaml --targets my_targets.csv
-syndiff-template reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
+syndiff reconcile-manifests --config my_pipeline.yaml --targets my_targets.csv
+syndiff reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
 ```
 
 ---
@@ -1067,18 +1125,18 @@ syndiff-template reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
 
 #### `daemon`
 
-**Purpose**: Control the host-level supervisor (one process per `handoff_root`, flock-guarded). Optional for normal workflow — prefer `submit`.
+**Purpose**: Control the host-level supervisor (one process per `workspace_root`, flock-guarded). Optional for normal workflow — prefer `submit`.
 
 ```bash
 # Start (Discord bot uses site config recorded from a prior submit)
-syndiff-template daemon start --deployment example/template_runner/deployment.yaml
-syndiff-template daemon start   # auto-discover when one supervisor expected
+syndiff daemon start --deployment config/deployment.yaml
+syndiff daemon start --site config
 
 # Stop supervisor + Discord bot
-syndiff-template daemon stop --deployment ...
+syndiff daemon stop --deployment ...
 
 # JSON status: alive, wedged, pid, heartbeat_age_s, discord_bot
-syndiff-template daemon status
+syndiff daemon status
 ```
 
 | Action | Notes |
@@ -1087,27 +1145,30 @@ syndiff-template daemon status
 | `stop` | Stops supervisor and all Discord bots for this workspace |
 | `status` | JSON: supervisor liveness + Discord bot state |
 
-Daemon and bot files on disk:
+Daemon and bot files on disk (under `control/`):
 
 ```text
-{handoff_root}/daemon.pid
-{handoff_root}/daemon.log
-{handoff_root}/daemon.lock
-{handoff_root}/pipeline_state.sqlite
-{handoff_root}/discord_bot.pid
-{handoff_root}/discord_bot.lock
-{handoff_root}/discord_bot.log
-{handoff_root}/discord_bot_config.path
+{workspace_root}/control/daemon.pid
+{workspace_root}/control/daemon.log
+{workspace_root}/control/daemon.lock
+{workspace_root}/control/pipeline_state.sqlite
+{workspace_root}/control/discord_bot.pid
+{workspace_root}/control/discord_bot.lock
+{workspace_root}/control/discord_bot.log
+{workspace_root}/control/discord_bot_config.path
+{workspace_root}/control/workspace_deployment.path
 ```
+
+See [storage_layout.md](storage_layout.md) for the full workspace tree.
 
 #### `notify test`
 
 **Purpose**: Send a read-only Discord message (progress + status grid) without recording `notification_events` dedup rows.
 
 ```bash
-syndiff-template notify test --run-dir /path/to/runs/batch_no5
-syndiff-template notify test --run-id batch_no5 --dry-run
-syndiff-template notify test --run-dir ... -v   # print message after sending
+syndiff notify test --run-dir /path/to/runs/batch_no5
+syndiff notify test --run-id batch_no5 --dry-run
+syndiff notify test --run-dir ... -v   # print message after sending
 ```
 
 Requires `discord_webhook_url` in `deployment.yaml` and `notifications.enabled: true`.
@@ -1117,8 +1178,8 @@ Requires `discord_webhook_url` in `deployment.yaml` and `notifications.enabled: 
 **Purpose**: Run the on-demand status-reply bot in the **foreground** (normally started detached by `daemon start` or `submit`).
 
 ```bash
-syndiff-template discord bot --deployment example/template_runner/deployment.yaml
-syndiff-template discord bot   # auto-discover when one workspace
+syndiff discord bot --deployment config/deployment.yaml
+syndiff discord bot --site config
 ```
 
 Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channel_id`), and `discord.py` installed.
@@ -1129,13 +1190,15 @@ Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channe
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `--config PATH` | `submit`, `run`, `verify`, `reconcile-manifests` | Site `config.yaml`; loads deployment beside config |
+| `--site DIR` | `submit`, `run`, `verify`, workspace verbs | Site folder (`pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`) |
+| `--config PATH` | `submit`, `run`, `verify`, `reconcile-manifests` | Site `pipeline.yaml`; loads deployment beside config |
 | `--deployment PATH` | workspace | `deployment.yaml`; optional when one supervisor is auto-discovered |
-| `--run-dir PATH` | run-scoped | `{handoff_root}/runs/<run_id>` with frozen config |
+| `--run-dir PATH` | run-scoped | `{workspace_root}/runs/<run_id>` with frozen `config.yaml` |
 | `--run-id ID` | run-scoped | One run; with `--deployment` or auto-discovered workspace |
 | `--targets PATH` | `submit`, `run`, `verify`, `reconcile-manifests` | Targets CSV |
 | `--stages LIST` | `submit`, `run`, `verify`, `reconcile-manifests` | Comma-separated; default: all stages |
-| `--scc S,C,C` | `verify`, `retry`, `reconcile-manifests` | Filter to one sector/camera/ccd |
+| `--scc S,C,C` | `verify`, `retry`, `reconcile-manifests` | Filter to one sector/camera/ccd or target label |
+| `--target LABEL` | `retry`, `logs`, `tail` | Alias for `--scc` on retry; target label for log commands |
 | `--force-rerun` | `submit`, `run` | Ignore existing artifacts for selected stages |
 | `--watch` / `--interval` | `status` | Live refresh |
 | `--no-detail` | `progress` | Summary line only |
@@ -1147,26 +1210,25 @@ Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channe
 
 ```bash
 mamba activate syndiff
-cd example/template_runner
-cp deployment.yaml.example deployment.yaml
-# Edit deployment.yaml: handoff_root, data_root, optional Gaia + Discord
+cp config/deployment.yaml.example config/deployment.yaml
+# Edit deployment.yaml: workspace_root, data_root, optional Gaia + Discord
 
-syndiff-template verify --config config.yaml --targets targets_example.csv
+syndiff verify --site config --targets config/targets_example.csv
 
-syndiff-template submit \
-  --config config.yaml \
-  --targets targets_example.csv \
+syndiff template submit \
+  --site config \
+  --targets config/targets_example.csv \
   --stages ps1_process,downsample \
   --run-id smoke_01
 
-syndiff-template progress
-syndiff-template status --watch
-syndiff-template progress --run-id smoke_01
-syndiff-template tail --run-dir /astro/.../template_handoffs/runs/smoke_01 \
+syndiff progress
+syndiff status --watch
+syndiff progress --run-id smoke_01
+syndiff tail --run-dir /astro/.../workspace/runs/smoke_01 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 
-syndiff-template active
-syndiff-template daemon status
+syndiff active --site config
+syndiff daemon status
 ```
 
 ---
@@ -1177,7 +1239,7 @@ syndiff-template daemon status
 
 1. Creates `{runs_root}/{run_id}/` layout and `run_meta.json`.
 2. Copies source config and targets into the run directory as frozen `config.yaml` and `targets.csv`.
-3. Inserts run + full 6-stage DAG per target in SQLite (`pending` for selected stages, `external` for others).
+3. Inserts run + full 7-stage DAG per target in SQLite (`pending` for selected stages, `external` for others).
 4. Ensures the host-level **supervisor daemon** is running (flock-guarded single owner).
 5. Symlinks `{runs_root}/latest` → `run_id`.
 
@@ -1201,10 +1263,11 @@ Single-target retry resolves SCC from the frozen `targets.csv`, falling back to 
 
 Before large batches on NFS-backed data, run `reconcile-manifests` for targets that already have on-disk outputs. That backfills stable manifests under `{runs_root}/.manifests/` so the supervisor can skip stages via a fast manifest read instead of full padding/Zarr scans.
 
-Optional scheduler knobs (in `config.yaml` under `scheduler:`):
+Optional scheduler knobs (in `pipeline.yaml` under `scheduler:`):
 
 ```yaml
 scheduler:
+  condor_hold_timeout_s: 600.0   # remove held Condor jobs after N seconds
   verify_max_workers: 1
   verify_budget_per_tick: 16
 ```
@@ -1219,7 +1282,7 @@ scheduler:
 
 ```text
 {runs_root}/{run_id}/
-  config.yaml            # frozen run config (absolute paths)
+  config.yaml              # frozen run config (absolute paths)
   targets.csv            # frozen targets from submit time
   run_meta.json          # submit metadata, source + run-local paths, force_rerun flag
   summary.json           # live status counts
@@ -1235,10 +1298,10 @@ scheduler:
     {stage}.manifest.json   # stable cross-run completion manifest (backfilled by reconcile-manifests)
 ```
 
-Host-level supervisor files live under `handoff_root`:
+Host-level supervisor files live under `{workspace_root}/control/` (see [storage_layout.md](storage_layout.md)):
 
 ```text
-{handoff_root}/
+{workspace_root}/control/
   pipeline_state.sqlite
   daemon.lock
   daemon.pid
@@ -1261,7 +1324,7 @@ Condor `.condor.*` files capture wrapper/submit diagnostics when the job fails b
 
 ### SQLite state
 
-Default: `{handoff_root}/pipeline_state.sqlite`
+Default: `{workspace_root}/control/pipeline_state.sqlite`
 
 Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL timeout 60s). Used by all status/progress commands.
 
@@ -1269,7 +1332,7 @@ Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL
 
 ## Verification
 
-`syndiff-template verify` checks **on-disk artifacts**, not SQLite run state.
+`syndiff verify` checks **on-disk artifacts**, not SQLite run state.
 
 | Stage | Check |
 |-------|-------|
@@ -1278,7 +1341,8 @@ Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL
 | `mapping` | Master skycells CSV |
 | `ps1_download` | Every expected skycell has all 12 arrays (`{band}`, `{band}_mask`, `{band}_wt` for r/i/z/y) with materialized chunks |
 | `ps1_process` | Each expected skycell's `{skycell}_data` array has materialized chunks |
-| `downsample` | All per-offset `syndiff_template_*.fits` present (one per offset) |
+| `downsample` | All per-offset `syndiff_template_*.fits.gz` present (one per offset) |
+| `diff` | Frame manifest CSV and workspace label directories under `events/{label}/ws/` |
 
 Partial convolved Zarr (interrupted run) reports e.g. `Partial convolved zarr: 3/120 skycells saved`.
 
@@ -1312,15 +1376,13 @@ Manifests are written in two places:
   self-heals this file whenever it confirms a stage complete on disk.
 
 **Skip-verify before promote:** A selected stage in `pending` is not promoted to
-`ready` (and therefore not launched) until artifact verify reports **complete**
-outputs for that stage in the current run (`external_verify_complete` in SQLite,
-or `force_rerun` on the selected stage). Each tick performs up
-to 16 such checks; stages that are not checked yet stay `pending` until a later
-tick. If the check finds complete outputs (manifest-first, then on-disk fallback),
-the stage is marked `skipped`; if not, an incomplete result is cached and verify
-**retries on later ticks** — the stage stays `pending` and is **not** promoted.
-This prevents downstream stages from launching before stable
-manifests are consulted when upstream skip checks consume the per-tick budget.
+`ready` until artifact verify has **run** for that stage (`external_verify_attempted`
+in SQLite, or `force_rerun` on the selected stage). Each tick performs up to 16
+such checks. If verify finds **complete** outputs (manifest-first, then on-disk
+fallback), the stage becomes `skipped` (no launch). If verify finds **incomplete**
+outputs, an incomplete result is cached and the stage is promoted to `ready` on
+the next tick so it can execute. Verify retries for `external` rows until complete
+or superseded.
 
 ### `reconcile-manifests` (backfill)
 
@@ -1328,7 +1390,7 @@ For data produced before manifests existed (e.g. existing `/astro` Zarr stores),
 run a one-shot backfill to write stable manifests for everything already complete:
 
 ```bash
-syndiff-template reconcile-manifests --config cfg.yaml --targets targets.csv
+syndiff reconcile-manifests --config cfg.yaml --targets targets.csv
 # or against a frozen run:  --run-dir /path/to/runs/<run_id>
 # scope with --scc S/C/D and --stages ps1_download,ps1_process
 ```
@@ -1343,19 +1405,19 @@ re-scanning the store.
 
 ### Requirements
 
-- Submit host: Condor client tools, `syndiff` conda env, NFS access to `data_root`, `handoff_root`, and `runs_root`.
+- Submit host: Condor client tools, `syndiff` conda env, NFS access to `data_root`, `workspace_root`, and `runs_root`.
 - Execute nodes: same NFS mounts for `/home` (conda) and science data; no inbound file transfer (`should_transfer_files = NO`).
 - Jobs run as the submitting Unix user (`getenv = false` — wrapper sets up environment).
 
 ### Wrapper script
 
-`template_runner/condor_wrapper.sh`:
+`common/orchestration/condor_wrapper.sh`:
 
 1. Resolves `HOME` via `getent` (Condor does not export it).
 2. `source ~/miniforge3/etc/profile.d/conda.sh && conda activate syndiff`
 3. `exec` the stage command (absolute Python path from submit host).
 
-**Important**: Run `syndiff-template submit` with `syndiff` activated so `sys.executable` in the command points at the correct env.
+**Important**: Run `syndiff template submit` with `syndiff` activated so `sys.executable` in the command points at the correct env.
 
 Adjust the miniforge path in the wrapper if your install location differs.
 
@@ -1364,7 +1426,7 @@ Adjust the miniforge path in the wrapper if your install location differs.
 Per job, written to `per_target/{target}/{stage}.condor.submit`:
 
 - `executable = .../condor_wrapper.sh`
-- `arguments = /path/to/python -m syndiff_pipeline.template_creation.orchestration.run_stage ...`
+- `arguments = /path/to/python -m syndiff_pipeline.common.orchestration.run_stage ...`
 - `request_cpus`, `request_memory`, `requirements`, `rank`
 - `output`, `error`, `log` → sibling `.condor.*` files
 
@@ -1486,7 +1548,7 @@ Multiple SCCs share one Zarr. Lock file serializes writers; excessive `network.m
 
 ### Scheduler died but Condor jobs still running
 
-Run `syndiff-template kill` (or `condor_rm` manually using cluster IDs from `condor_q`). Check `active` and `runs` commands.
+Run `syndiff kill` (or `condor_rm` manually using cluster IDs from `condor_q`). Check `active` and `runs` commands.
 
 ### Import errors on Condor execute nodes
 
@@ -1497,21 +1559,18 @@ Ensure the same conda env exists on NFS and the submit host used `syndiff` when 
 ## Relationship to SynDiff Diff Imaging
 
 ```text
-┌─────────────────────────────────────┐
-│  syndiff-template (this document)   │
-│  PS1 templates on TESS grid         │
-│  → shifted_downsampled/*.fits       │
-└─────────────────┬───────────────────┘
-                  │ template_dir
-                  ▼
-┌─────────────────────────────────────┐
-│  run_pipeline.py / SynDiff          │
-│  WCS grouping → Hotpants → ePSF →   │
-│  background → forced photometry     │
-└─────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  syndiff all submit (one DAG, one supervisor)            │
+│  tess_ffi … downsample → diff (Hotpants → photometry)    │
+└──────────────────────────────────────────────────────────┘
+         │                                    │
+         ▼                                    ▼
+  {data_root}/shifted_downsampled/     {workspace_root}/events/{label}/ws/
+  (physical template FITS)             templates → symlink to shifted_downsampled/…
+                                       (diff workspaces + light curves)
 ```
 
-Template pipeline **handoff** (`cluster_template_job.json`, frame manifest) is written under `handoff_root`, separate from SynDiff’s main `output_dir`. You can reuse WCS grouping logic in both contexts; paths are configured independently.
+Template handoff (`cluster_template_job.json`, `syndiff_ffi_frames.csv`, `ws/templates` symlink) and diff outputs share **`{workspace_root}/events/{target_label}/`**. Diff ROI defaults come from cluster JSON; override with `diff_config.yaml` `defaults.crop_mode` / `crop_box_size` without re-running template `wcs_grouping`. Science caches remain under `data_root`. Foreground single-target diff still works via `syndiff diff run` without the daemon.
 
 ---
 
@@ -1532,26 +1591,29 @@ For maintainers and algorithm reviewers, full step-by-step technical references 
 
 | Module | Role |
 |--------|------|
-| `template_runner/cli.py` | `syndiff-template` entry point |
-| `template_runner/scheduler.py` | Resource-pool orchestration |
-| `template_runner/state.py` | SQLite schema and queries |
-| `template_runner/runner_config.py` | YAML loading, path resolution, overrides |
-| `template_runner/stage_params.py` | Typed stage parameters + validation |
-| `template_runner/stages.py` | Stage registry and in-process execution |
-| `template_runner/run_stage.py` | Subprocess/Condor worker entry point |
-| `template_runner/launcher.py` | Local vs Condor launch |
-| `template_runner/condor.py` | Condor submit file + CLI polling |
-| `template_runner/condor_wrapper.sh` | Conda activation on execute nodes |
-| `template_runner/daemon.py` | Detached scheduler spawn + process trees |
-| `template_runner/logs.py` | Log paths, frozen input materialization, tee helper |
-| `template_runner/run_context.py` | Resolve frozen config/targets from a run directory |
-| `template_runner/targets.py` | CSV target loading |
-| `template_runner/verify.py` | Artifact verification + force-rerun cleanup |
-| `template_runner/handoff.py` | WCS grouping wrapper |
-| `template/pancakes.py` | Mapping stage |
-| `template/ps1_download.py` | PS1 Zarr download |
-| `template/ps1_process.py` | Convolution pipeline |
-| `template/downsample.py` | Multi-offset template FITS |
+| `syndiff_pipeline/cli.py` | `syndiff` noun/verb entry point |
+| `common/orchestration/cli.py` | Monitoring, control, verify verbs |
+| `common/orchestration/scheduler.py` | Resource-pool orchestration |
+| `common/orchestration/state.py` | SQLite schema and queries |
+| `template_creation/orchestration/runner_config.py` | YAML loading, path resolution, overrides |
+| `template_creation/orchestration/stage_params.py` | Typed stage parameters + validation |
+| `template_creation/orchestration/stages.py` | Template stage registry |
+| `difference_imaging/orchestration/stages.py` | `diff` stage registry |
+| `common/orchestration/run_stage.py` | Subprocess/Condor worker entry point |
+| `common/orchestration/launcher.py` | Local vs Condor launch |
+| `common/orchestration/condor.py` | Condor submit file + CLI polling |
+| `common/orchestration/condor_wrapper.sh` | Conda activation on execute nodes |
+| `common/orchestration/daemon.py` | Detached scheduler spawn + process trees |
+| `common/orchestration/logs.py` | Log paths, frozen input materialization, tee helper |
+| `common/orchestration/run_context.py` | Resolve frozen config/targets from a run directory |
+| `common/orchestration/targets.py` | CSV target loading |
+| `template_creation/orchestration/verify.py` | Artifact verification + force-rerun cleanup |
+| `template_creation/orchestration/handoff.py` | WCS grouping wrapper |
+| `template_creation/processing/pancakes.py` | Mapping stage |
+| `template_creation/processing/ps1_download.py` | PS1 Zarr download |
+| `template_creation/processing/ps1_process.py` | Convolution pipeline |
+| `template_creation/processing/downsample.py` | Multi-offset template FITS |
+| `difference_imaging/orchestration/execute.py` | Diff pipeline (`run_config_pipeline`) |
 
 ---
 
@@ -1559,12 +1621,11 @@ For maintainers and algorithm reviewers, full step-by-step technical references 
 
 | File | Purpose |
 |------|---------|
-| `example/template_runner/config.yaml` | Site policy (stages, pools, notifications) |
-| `example/template_runner/deployment.yaml.example` | Deployment paths + credentials template |
+| `config/pipeline.yaml` | Site policy (stages, pools, notifications) |
+| `config/diff_config.yaml` | Diff-imaging policy + Condor resources |
+| `config/deployment.yaml.example` | Deployment paths + credentials template |
+| `config/targets_example.csv` | Normalized multi-target CSV |
 | `resources/skycell_wcs.csv` | Bundled PS1 SkyCells WCS table |
-| `example/template_runner/targets_example.csv` | Normalized multi-target CSV |
-| `example/template_runner/events_example.csv` | SN catalog format |
-| `example/template_runner/README.md` | Quick-start pointer |
 | `docs/stages/` | Algorithm deep-dives (from `../syndiff/` step READMEs) |
 | `../syndiff/run.sh` | Historical per-SCC command log (reference only) |
 

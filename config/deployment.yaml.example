@@ -1,11 +1,13 @@
-# Copy to deployment.yaml (gitignored) next to config.yaml.
+# Copy to deployment.yaml (gitignored) beside pipeline.yaml and diff_config.yaml.
 #
 # Deployment paths (machine-specific)
-handoff_root: /astro/armin/koji/syndiff/template_handoffs
+workspace_root: /astro/armin/koji/syndiff/workspace
 data_root: /astro/armin/koji/syndiff/data
 
 # Optional override only for non-standard layouts:
 # ffi_dir: /other/path/tess_ffi
+# median_mask_path: /other/path/median_mask.fits
+# straps_csv: /other/path/tess_straps.csv
 
 # Gaia TAP+ credentials (mapping stage)
 gaia_username: ""

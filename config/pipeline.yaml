@@ -1,15 +1,17 @@
-# Site policy: stages, resource pools, notifications. Paths live in deployment.yaml.
+# Orchestrator policy: template stages, resource pools, notifications.
+# Machine-specific paths live in deployment.yaml (copy deployment.yaml.example).
+# Targets are passed on the CLI via --targets (never embedded here).
 deployment_file: deployment.yaml
-#
-# See TESTING.md for how to validate without running full multi-hour stages.
+diff_config: diff_config.yaml
 
 stages:
   wcs_grouping:
     offset_threshold: 0.01
     wcs_drift_savgol_window: 11
     wcs_drift_savgol_polyorder: 2
+    # Full-chip templates; use diff_config crop override for smaller differencing ROI.
+    crop_mode: full
   mapping:
-    # pancakes_v2 defaults (run.sh did not pass overrides)
     oversampling_factor: 1
     buffer: 200
     tess_buffer: 150
@@ -18,22 +20,16 @@ stages:
     num_workers: 8
     overwrite: false
   ps1_process:
-    # run.sh active line: process_ps1.py 23 2 1 --remove-saturated-stars
-    ps1_source: zarr  # default: read shared Zarr from ps1_download
-    # Stream mode (no shared ps1_skycells.zarr): set ps1_source: stream and
-    # num_ingest_workers below; ps1_download is skipped (shows ps1_dl:n/a).
-    #   ps1_source: stream
-    #   num_ingest_workers: 16
+    ps1_source: zarr
     remove_saturated_stars: true
     enable_saturation_correction: false
     psf_sigma: 40.0
-    # Set to 1 for smoke tests only (see config_smoke.yaml)
     projections_limit: null
   downsample:
     ignore_mask_bits: [12]
     oversampling_factor: 1
-    # output under data_root/shifted_downsampled by default
-    output_base: /astro/armin/koji/syndiff/data/shifted_downsampled
+  diff:
+    executor: condor
 
 resources:
   network:
@@ -44,9 +40,12 @@ resources:
     max_concurrent: 6
   ps1_process:
     max_concurrent: 4
+  diff:
+    max_concurrent: 6
 
 scheduler:
   heartbeat_interval_s: 30.0
+  # condor_hold_timeout_s: 600.0  # remove held Condor jobs after N seconds (default 600)
 
 notifications:
   enabled: true
@@ -66,7 +65,6 @@ notifications:
   bot:
     enabled: true
 
-# Per-SCC overrides (optional). Example: smoke-limit ps1_process on one SCC.
 overrides:
   "23/2/1":
     stages:
