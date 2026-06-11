@@ -33,6 +33,10 @@ from scipy.ndimage import binary_dilation, convolve, gaussian_filter, label, lap
 from scipy.signal import savgol_filter
 from skimage.restoration import inpaint
 
+from syndiff_pipeline.common.joblib_progress import (
+    parallel_map_with_optional_tqdm as _parallel_map_with_optional_tqdm,
+    tqdm_iter as _tqdm_iter,
+)
 from syndiff_pipeline.difference_imaging.stages.adaptive_background import AdaptiveBackground
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     parse_workspace_frame_stem,
@@ -938,35 +942,6 @@ def _load_and_rough_stream_worker(
     return _background_frame_worker(
         (i, row, mask, gauss_smooth, recombine, interp)
     )
-
-
-def _parallel_map_with_optional_tqdm(
-    delayed_calls,
-    n_tasks: int,
-    desc: str,
-    n_jobs_eff: int,
-):
-    try:
-        from tqdm.auto import tqdm
-    except ImportError:
-        return Parallel(n_jobs=n_jobs_eff, backend="loky")(delayed_calls)
-    try:
-        gen = Parallel(n_jobs=n_jobs_eff, backend="loky", return_as="generator")(
-            delayed_calls
-        )
-        return list(tqdm(gen, total=n_tasks, desc=desc, unit="frame"))
-    except TypeError:
-        log.debug("joblib Parallel(return_as=...) unavailable; running without tqdm bar.")
-        return Parallel(n_jobs=n_jobs_eff, backend="loky")(delayed_calls)
-
-
-def _tqdm_iter(tasks: list, desc: str):
-    try:
-        from tqdm.auto import tqdm
-
-        return tqdm(tasks, desc=desc, unit="frame")
-    except ImportError:
-        return tasks
 
 
 def _assign_rough_slice_and_maybe_write_fits(
