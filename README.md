@@ -1,6 +1,6 @@
 # SynDiff Pipeline
 
-TESS Full Frame Image (FFI) difference imaging pipeline for transient detection and forced photometry.
+TESS Full Frame Image (FFI) template building and difference-imaging pipeline for transient detection and forced photometry.
 
 > **This project has not been released.** All modules are under active development.
 
@@ -8,18 +8,33 @@ TESS Full Frame Image (FFI) difference imaging pipeline for transient detection 
 
 ## Overview
 
-SynDiff performs difference imaging on TESS FFIs against PS1 (Pan-STARRS1) templates to produce clean difference images and extract forced PSF photometry light curves at a target coordinate. The workflow covers:
+SynDiff is an end-to-end pipeline for TESS Full Frame Image (FFI) transient work: it builds PS1-based templates on the TESS pixel grid, then runs difference imaging and forced photometry at a science target. The unified **`syndiff`** CLI runs template creation first, then difference imaging — either end-to-end or one phase at a time.
+
+### Template creation (TESS FFIs + PS1 → `syndiff_template_*.fits`)
 
 1. **FFI download** — bulk download of calibrated TESS FFIs from MAST.
-2. **WCS drift analysis** — per-frame WCS, pixel drift of the science target, template offset groups.
-3. **Shared masking** — bitmask from Gaia (bright stars, saturation crosses, TESS straps).
-4. **Image differencing** — kernel-matching subtraction via **[pyhotpants](#forked-dependencies)** (FFI crops vs PS1 templates).
-5. **Empirical PSF fitting** — tiled ePSF via TGLC.
-6. **Saturated star templates** — model and subtract bright saturated sources when needed.
-7. **Background estimation** — rough per-frame background, then adaptive temporal smoothing (TESSVectors).
-8. **Forced photometry** — PSF-fitted flux at the target (ePSF or official TESS PRF).
+2. **WCS grouping** — per-frame WCS, pixel drift of the science target, template offset groups; writes handoff JSON for diff.
+3. **Mapping (PanCAKES)** — map TESS pixels to PS1 skycells; Gaia catalog for the reference FFI. Uses a customized **[MOCPy](#forked-dependencies)** fork.
+4. **PS1 download** — fetch PS1 skycell cutouts into a shared Zarr store.
+5. **PS1 process** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
+6. **Downsample** — combine convolved skycells at multiple sub-pixel offsets → `syndiff_template_*.fits.gz`.
 
-Template building (TESS↔PS1 mapping, PS1 convolution, multi-offset downsampling) uses a customized **[MOCPy](#forked-dependencies)** fork for the PanCAKES mapping stage.
+### Difference imaging (templates + FFIs → light curves)
+
+After templates exist, the **`diff`** stage runs a YAML-ordered pipeline ([`config/diff_config.yaml`](config/diff_config.yaml)). You choose which steps to include; the default site config is a short path (mask → Hotpants → forced photometry with the official TESS PRF). A fuller recipe might look like:
+
+1. **Shared masking** — bitmask from Gaia (bright stars, saturation crosses, TESS straps).
+2. **Image differencing** — kernel-matching subtraction via **[pyhotpants](#forked-dependencies)** (FFI crops vs PS1 templates).
+3. **Forced photometry** — PSF-fitted flux at the target (official TESS PRF by default, or ePSF when that stage is enabled).
+
+Optional steps you can add to the `pipeline:` list:
+
+- **Empirical PSF fitting** — tiled ePSF via TGLC (`epsf` stage; use with `psf_type: epsf`).
+- **Saturated star templates** — model and subtract bright saturated sources (`sat_template` + `subtract`).
+- **Background removal** — rough per-frame background, then adaptive temporal smoothing (`background_estimate` / `background_rough`, then `subtract` from the diffs).
+- **Second round of differencing** — run Hotpants again on background-subtracted science images for cleaner residuals (see commented blocks in [`config/diff_config.yaml`](config/diff_config.yaml) and [`config/example/diff_config_c_second_hotpants.yaml`](config/example/diff_config_c_second_hotpants.yaml)).
+
+Run the full workflow with `syndiff all submit`, template building only with `syndiff template submit`, or diff only (when upstream artifacts already exist) with `syndiff diff submit`.
 
 ---
 
@@ -67,7 +82,7 @@ For full template + diff runs, also install **custom MOCPy** (above) and ensure 
 
 ## Unified SynDiff pipeline (`syndiff`)
 
-The **`syndiff`** CLI orchestrates the full workflow behind one supervisor daemon and one SQLite state database. A single **seven-stage DAG** covers template building (TESS FFIs + PS1 → `syndiff_template_*.fits`) and difference imaging (Hotpants → photometry):
+The **`syndiff`** CLI orchestrates the full workflow behind one supervisor daemon and one SQLite state database — template building (TESS FFIs + PS1 → `syndiff_template_*.fits`) and difference imaging (config-driven Hotpants → photometry):
 
 ```text
 syndiff all submit      # template stages → diff
@@ -156,13 +171,3 @@ See [`config/README.md`](config/README.md) for site layout. Outputs live under `
 | [`docs/stages/`](docs/stages/README.md) | PanCAKES, PS1 process, downsample algorithms |
 | [`docs/cluster_smoke_checklist.md`](docs/cluster_smoke_checklist.md) | Cluster smoke test after setup |
 | [`config/`](config/) | Site configs and example diff YAMLs |
-
----
-
-## Known limitations
-
-- Second-pass Hotpants accepts `inputs.convolved` in YAML but does not consume it yet (warning logged).
-- Hotpants `science` must be `"ffi"`; workspace science input is not implemented.
-- No per-stage checkpointing — trim the `pipeline:` list and declare pre-existing workspaces with a preamble entry (`- external_workspaces: [hp_d]`) before the stages that consume them; legacy `pipeline_external_workspace_labels` is still supported.
-- Mission WCS must be adequate for drift grouping; external astrometry may be required beforehand.
-- PS1 templates must exist before diff imaging (`syndiff template submit` or `syndiff all submit`).
