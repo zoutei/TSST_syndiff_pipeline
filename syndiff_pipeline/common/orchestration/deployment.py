@@ -15,7 +15,7 @@ log = logging.getLogger(__name__)
 _LEGACY_PATH_KEYS = frozenset(
     {
         "data_root",
-        "handoff_root",
+        "workspace_root",
         "runs_root",
         "state_db_path",
         "ffi_dir",
@@ -49,10 +49,10 @@ def load_deployment_file(deployment_path: str | Path) -> dict:
     return data
 
 
-def load_handoff_root_from_deployment(deployment_path: str | Path) -> Path:
+def load_workspace_root_from_deployment(deployment_path: str | Path) -> Path:
     path = Path(deployment_path).expanduser().resolve()
     deployment = load_deployment_file(path)
-    return Path(require_deployment_path(deployment, "handoff_root", deployment_path=path))
+    return Path(require_deployment_path(deployment, "workspace_root", deployment_path=path))
 
 
 def load_deployment(config_path: str | Path, deployment_file: str = "deployment.yaml") -> dict:

@@ -10,7 +10,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     SKIP_REASON_ARTIFACTS,
     STATUS_BLOCKED,
@@ -23,7 +23,7 @@ from syndiff_pipeline.template_creation.orchestration.state import (
     STATUS_SUCCESS,
     reopen_status_for_retry,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 
 
 class TestStageRetry(unittest.TestCase):
@@ -97,8 +97,8 @@ class TestStageRetry(unittest.TestCase):
             state.update_stage_status("run_a", label, "ps1_process", STATUS_BLOCKED)
             state.update_stage_status("run_a", label, "downsample", STATUS_BLOCKED)
 
-            # Artifact verify complete allows blocked upstream to promote to ready.
-            state.cache_external_check("run_a", label, "ps1_download", complete=True)
+            # A cached verify attempt allows blocked upstream to promote to ready.
+            state.cache_external_check("run_a", label, "ps1_download", complete=False)
             promoted = state.promote_stages("run_a")
 
             self.assertEqual(promoted, 1)

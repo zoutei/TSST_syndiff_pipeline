@@ -13,22 +13,23 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration import logs
-from syndiff_pipeline.template_creation.orchestration.launcher import LaunchDescriptor
-from syndiff_pipeline.template_creation.orchestration.scheduler import (
+from syndiff_pipeline.common.orchestration import logs
+from syndiff_pipeline.common.orchestration.launcher import LaunchDescriptor
+from syndiff_pipeline.common.orchestration.scheduler import (
     _LOCAL_START_GRACE_S,
     _try_launch_ready_row,
     reconcile_running_stages,
 )
-from syndiff_pipeline.template_creation.orchestration.scheduler_control import daemon_is_alive
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.scheduler_control import daemon_is_alive
+from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     STATUS_CANCELED,
     STATUS_READY,
     STATUS_RUNNING,
     STATUS_SUCCESS,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.workspace import state_db_path
 
 
 def _minimal_run(tmp: Path, target: Target, stages: list[str]) -> tuple[PipelineState, str]:
@@ -43,7 +44,7 @@ def _minimal_run(tmp: Path, target: Target, stages: list[str]) -> tuple[Pipeline
         "\n".join(
             [
                 "data_root: /data",
-                f"handoff_root: {tmp}",
+                f"workspace_root: {tmp}",
                 f"runs_root: {runs_root}",
                 f"state_db_path: {state_db}",
                 "skycell_wcs_csv: skycells.csv",
@@ -97,13 +98,116 @@ class TestSchedulerReconcile(unittest.TestCase):
                 native_id=999999,
                 log_path=str(tmp_path / "x.log"),
             )
-            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+            from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             counts = reconcile_running_stages(state, "run_a", ctx)
             row = state.get_stage_run("run_a", label, "ps1_download")
             self.assertEqual(counts["requeued"], 1)
             self.assertEqual(row.status, STATUS_READY)
+
+    def test_reconcile_adopts_status_pid_when_db_native_id_missing(self):
+        """Daemon crash between launch and set_launch_descriptor must not requeue."""
+        target = self._target()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                state, run_dir = _minimal_run(tmp_path, target, ["ps1_download"])
+                label = target.label()
+                runs_root = str(tmp_path / "runs")
+                token = state.new_launch_token()
+                state.update_stage_status("run_a", label, "ps1_download", STATUS_READY)
+                state.claim_ready("run_a", label, "ps1_download", token)
+                logs.write_json_atomic(
+                    logs.stage_status_path(runs_root, "run_a", label, "ps1_download"),
+                    {
+                        "launch_token": token,
+                        "pid": proc.pid,
+                        "state": "running",
+                    },
+                )
+                from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+
+                ctx = resolve_run_context(run_dir=run_dir)
+                with unittest.mock.patch(
+                    "syndiff_pipeline.common.orchestration.scheduler.daemon.is_process_alive",
+                    return_value=True,
+                ):
+                    counts = reconcile_running_stages(state, "run_a", ctx)
+                row = state.get_stage_run("run_a", label, "ps1_download")
+                self.assertEqual(counts["adopted"], 1)
+                self.assertEqual(counts["requeued"], 0)
+                self.assertEqual(counts["still_running"], 1)
+                self.assertEqual(row.status, STATUS_RUNNING)
+                self.assertEqual(row.launch_token, token)
+                self.assertEqual(row.native_id, proc.pid)
+        finally:
+            proc.kill()
+
+    def test_reconcile_requeues_dead_status_pid_when_db_native_id_missing(self):
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, run_dir = _minimal_run(tmp_path, target, ["ps1_download"])
+            label = target.label()
+            runs_root = str(tmp_path / "runs")
+            token = state.new_launch_token()
+            state.update_stage_status("run_a", label, "ps1_download", STATUS_READY)
+            state.claim_ready("run_a", label, "ps1_download", token)
+            dead_pid = 999999
+            logs.write_json_atomic(
+                logs.stage_status_path(runs_root, "run_a", label, "ps1_download"),
+                {
+                    "launch_token": token,
+                    "pid": dead_pid,
+                    "state": "running",
+                },
+            )
+            from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+
+            ctx = resolve_run_context(run_dir=run_dir)
+            with unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler.daemon.is_process_alive",
+                return_value=False,
+            ):
+                counts = reconcile_running_stages(state, "run_a", ctx)
+            row = state.get_stage_run("run_a", label, "ps1_download")
+            self.assertEqual(counts["requeued"], 1)
+            self.assertEqual(row.status, STATUS_READY)
+
+    def test_run_stage_setup_failure_writes_exited_status(self):
+        from syndiff_pipeline.common.orchestration import run_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runs_root = tmp_path / "runs"
+            run_id = "run_a"
+            label = "missing_target"
+            stage = "ps1_download"
+            bogus_run_dir = runs_root / "does_not_exist"
+            rc = run_stage.main(
+                [
+                    "--run-id",
+                    run_id,
+                    "--stage",
+                    stage,
+                    "--run-dir",
+                    str(bogus_run_dir),
+                    "--target-label",
+                    label,
+                    "--launch-token",
+                    "tok-setup-fail",
+                ]
+            )
+            self.assertNotEqual(rc, 0)
+            status_path = logs.stage_status_path(str(runs_root), run_id, label, stage)
+            self.assertTrue(status_path.is_file())
+            status_doc = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status_doc["state"], "exited")
+            self.assertNotEqual(status_doc.get("exit_code"), 0)
 
     def test_reconcile_adopts_live_local_pid_without_duplicate(self):
         # A running row whose status.json launch_token matches and whose pid is
@@ -141,7 +245,7 @@ class TestSchedulerReconcile(unittest.TestCase):
                         "state": "running",
                     },
                 )
-                from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+                from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
                 ctx = resolve_run_context(run_dir=run_dir)
                 counts = reconcile_running_stages(state, "run_a", ctx)
@@ -183,7 +287,7 @@ class TestSchedulerReconcile(unittest.TestCase):
                     "exit_code": 0,
                 },
             )
-            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+            from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             counts = reconcile_running_stages(state, "run_a", ctx)
@@ -208,11 +312,11 @@ class TestSchedulerReconcile(unittest.TestCase):
                 log_path=str(tmp_path / "x.log"),
                 submit_epoch=1_700_000_000.0,
             )
-            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+            from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.condor.poll_cluster",
+                "syndiff_pipeline.common.orchestration.scheduler.condor.poll_cluster_status",
                 return_value=0,
             ):
                 counts = reconcile_running_stages(state, "run_a", ctx)
@@ -246,11 +350,11 @@ class TestSchedulerReconcile(unittest.TestCase):
                 log_path=str(log_path),
                 submit_epoch=1_700_000_000.0,
             )
-            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+            from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.condor.poll_cluster",
+                "syndiff_pipeline.common.orchestration.scheduler.condor.poll_cluster_status",
                 return_value=143,
             ):
                 counts = reconcile_running_stages(state, "run_a", ctx)
@@ -293,7 +397,7 @@ class TestSchedulerReconcile(unittest.TestCase):
                         "state": "running",
                     },
                 )
-                from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+                from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
                 ctx = resolve_run_context(run_dir=run_dir)
                 counts = reconcile_running_stages(state, "run_a", ctx)
@@ -338,14 +442,14 @@ class TestSchedulerReconcile(unittest.TestCase):
                         "state": "running",
                     },
                 )
-                from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+                from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
                 ctx = resolve_run_context(run_dir=run_dir)
                 with unittest.mock.patch(
-                    "syndiff_pipeline.template_creation.orchestration.scheduler._age_seconds",
+                    "syndiff_pipeline.common.orchestration.scheduler._age_seconds",
                     return_value=_LOCAL_START_GRACE_S + 1,
                 ), unittest.mock.patch(
-                    "syndiff_pipeline.template_creation.orchestration.scheduler._terminate_job",
+                    "syndiff_pipeline.common.orchestration.scheduler._terminate_job",
                 ) as mock_terminate:
                     counts = reconcile_running_stages(state, "run_a", ctx)
                 row = state.get_stage_run("run_a", label, "ps1_download")
@@ -388,7 +492,7 @@ class TestSchedulerReconcile(unittest.TestCase):
                         "state": "running",
                     },
                 )
-                from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+                from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
                 ctx = resolve_run_context(run_dir=run_dir)
                 for _ in range(2):
@@ -419,7 +523,7 @@ class TestSchedulerReconcile(unittest.TestCase):
                 {"launch_token": "old-token", "pid": 1, "state": "running"},
             )
             row = state.get_stage_run("run_a", label, "ps1_download")
-            from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+            from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
             ctx = resolve_run_context(run_dir=run_dir)
             seen_at_launch: list[bool] = []
@@ -434,7 +538,7 @@ class TestSchedulerReconcile(unittest.TestCase):
                 )
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
                 side_effect=fake_launch,
             ):
                 launched = _try_launch_ready_row(
@@ -456,13 +560,13 @@ class TestDaemonIsAlive(unittest.TestCase):
     def test_stale_supervisor_heartbeat_is_not_alive(self):
         with tempfile.TemporaryDirectory() as tmp:
             handoff = tmp
-            state = PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))
+            state = PipelineState(str(state_db_path(handoff)))
             state.update_supervisor_heartbeat(12345)
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
-                return_value=999999,
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.read_process_identity",
+                return_value=(None, 999999),
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.is_process_alive",
                 return_value=False,
             ):
                 with state._conn() as conn:
@@ -476,12 +580,12 @@ class TestDaemonIsAlive(unittest.TestCase):
         """A busy daemon (fresh local heartbeat) must read as alive / not wedged,
         even when the NFS DB heartbeat is stale or unwritable. This is the core
         of the wedge fix: liveness comes from the host-local file, not the DB."""
-        from syndiff_pipeline.template_creation.orchestration.scheduler import _write_local_heartbeat
-        from syndiff_pipeline.template_creation.orchestration.scheduler_control import daemon_is_wedged
+        from syndiff_pipeline.common.orchestration.scheduler import _write_local_heartbeat
+        from syndiff_pipeline.common.orchestration.scheduler_control import daemon_is_wedged
 
         with tempfile.TemporaryDirectory() as tmp:
             handoff = tmp
-            state = PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))
+            state = PipelineState(str(state_db_path(handoff)))
             state.update_supervisor_heartbeat(4321)
             # Make the DB heartbeat ancient (simulating a wedged/slow NFS write).
             with state._conn() as conn:
@@ -495,10 +599,10 @@ class TestDaemonIsAlive(unittest.TestCase):
                 lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
-                return_value=4321,
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.read_process_identity",
+                return_value=(None, 4321),
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.is_process_alive",
                 return_value=True,
             ):
                 self.assertTrue(daemon_is_alive(handoff))
@@ -506,23 +610,23 @@ class TestDaemonIsAlive(unittest.TestCase):
 
     def test_alive_pid_with_no_heartbeat_is_wedged(self):
         """A live pid with no fresh heartbeat anywhere is the true wedge case."""
-        from syndiff_pipeline.template_creation.orchestration.scheduler_control import daemon_is_wedged
+        from syndiff_pipeline.common.orchestration.scheduler_control import daemon_is_wedged
 
         with tempfile.TemporaryDirectory() as tmp:
             handoff = tmp
-            PipelineState(str(Path(handoff) / "pipeline_state.sqlite"))  # creates schema, no heartbeat row
+            PipelineState(str(state_db_path(handoff)))  # creates schema, no heartbeat row
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
-                return_value=4321,
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.read_process_identity",
+                return_value=(None, 4321),
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.is_process_alive",
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.is_process_alive",
                 return_value=True,
             ):
                 self.assertTrue(daemon_is_wedged(handoff))
 
     def test_fresh_local_heartbeat_without_live_pid_is_not_alive(self):
         """Ghost liveness after kill: local heartbeat fresh but pid gone."""
-        from syndiff_pipeline.template_creation.orchestration.scheduler import _write_local_heartbeat
+        from syndiff_pipeline.common.orchestration.scheduler import _write_local_heartbeat
 
         with tempfile.TemporaryDirectory() as tmp:
             handoff = tmp
@@ -531,8 +635,8 @@ class TestDaemonIsAlive(unittest.TestCase):
                 lambda: logs.daemon_heartbeat_file(handoff).unlink(missing_ok=True)
             )
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
-                return_value=None,
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.read_process_identity",
+                return_value=(None, None),
             ):
                 self.assertFalse(daemon_is_alive(handoff))
 

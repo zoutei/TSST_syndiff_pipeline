@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -15,12 +16,15 @@ log = logging.getLogger(__name__)
 
 _WRAPPER = Path(__file__).resolve().parent / "condor_wrapper.sh"
 
-_JOB_COMPLETED = 4
 _JOB_REMOVED = 3
+_JOB_COMPLETED = 4
+_JOB_HELD = 5
 
 _POLL_GRACE_SECONDS = 120.0
+HOLD_TIMEOUT_S = 600.0
 
 _submission_times: dict[int, float] = {}
+_held_times: dict[int, float] = {}
 
 
 @dataclass(frozen=True)
@@ -50,7 +54,51 @@ def condor_artifact_paths(
         "log": base / f"{stage}.condor.log",
         "submit": base / f"{stage}.condor.submit",
         "clusters": base / f"{stage}.condor.clusters",
+        "hold": base / f"{stage}.condor.hold",
     }
+
+
+def _read_hold_epoch(hold_path: Path) -> float | None:
+    try:
+        line = hold_path.read_text(encoding="utf-8").strip()
+        if not line:
+            return None
+        return float(line)
+    except (OSError, ValueError):
+        return None
+
+
+def _write_hold_epoch(hold_path: Path, epoch: float) -> None:
+    hold_path.parent.mkdir(parents=True, exist_ok=True)
+    hold_path.write_text(f"{epoch}\n", encoding="utf-8")
+
+
+def _clear_hold_epoch(hold_path: Path | None) -> None:
+    if hold_path is None:
+        return
+    try:
+        hold_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _resolve_held_since(
+    cluster_id: int,
+    *,
+    hold_path: Path | None,
+    now: float,
+) -> float:
+    if cluster_id in _held_times:
+        return _held_times[cluster_id]
+    if hold_path is not None:
+        persisted = _read_hold_epoch(hold_path)
+        if persisted is not None:
+            _held_times[cluster_id] = persisted
+            return persisted
+    _held_times[cluster_id] = now
+    if hold_path is not None:
+        _write_hold_epoch(hold_path, now)
+    return now
 
 
 def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -70,6 +118,35 @@ def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.Comple
 
 def _format_arguments(cmd: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in cmd)
+
+
+def _format_condor_environment() -> str | None:
+    conda_sh = os.environ.get("SYNDIFF_CONDA_SH")
+    if not conda_sh:
+        return None
+    conda_env = os.environ.get("SYNDIFF_CONDA_ENV", "syndiff")
+    return " ".join(
+        [
+            f"SYNDIFF_CONDA_SH={shlex.quote(conda_sh)}",
+            f"SYNDIFF_CONDA_ENV={shlex.quote(conda_env)}",
+        ]
+    )
+
+
+def _parse_status_exit(parts: Sequence[str]) -> tuple[int | None, int | None]:
+    if not parts:
+        return None, None
+    try:
+        status = int(parts[0])
+    except ValueError:
+        return None, None
+    exit_code: int | None = None
+    if len(parts) > 1 and parts[1] not in ("undefined", "?"):
+        try:
+            exit_code = int(parts[1])
+        except ValueError:
+            exit_code = None
+    return status, exit_code
 
 
 def _record_cluster_submission(artifacts: dict[str, Path], cluster_id: int) -> None:
@@ -94,6 +171,9 @@ def write_submit_file(
         f"request_cpus = {resources.request_cpus}",
         f"request_memory = {resources.request_memory_mb}",
     ]
+    environment = _format_condor_environment()
+    if environment:
+        lines.append(f'environment = "{environment}"')
     if resources.requirements:
         lines.append(f"requirements = {resources.requirements}")
     if resources.rank:
@@ -151,46 +231,76 @@ def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
     line = proc.stdout.strip()
     if not line:
         return None, None
-    parts = line.split()
-    if not parts:
-        return None, None
-    status = int(parts[0])
-    exit_code: int | None = None
-    if len(parts) > 1 and parts[1] not in ("undefined", "?"):
-        try:
-            exit_code = int(parts[1])
-        except ValueError:
-            exit_code = None
-    return status, exit_code
+    return _parse_status_exit(line.split())
 
 
 def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
     proc = _run_condor(
-        ["condor_history", str(cluster_id), "-af", "JobStatus", "ExitCode"],
+        ["condor_history", str(cluster_id), "-af", "JobStatus", "ExitCode", "-limit", "1"],
         check=False,
     )
     line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
     if not line:
         return None, None
-    parts = line.split()
-    status = int(parts[0])
-    exit_code: int | None = None
-    if len(parts) > 1 and parts[1] not in ("undefined", "?"):
+    return _parse_status_exit(line.split())
+
+
+def _query_hold_reason(cluster_id: int) -> str | None:
+    proc = _run_condor(
+        ["condor_q", str(cluster_id), "-af", "HoldReason"],
+        check=False,
+    )
+    line = proc.stdout.strip()
+    return line or None
+
+
+def query_clusters(cluster_ids: Sequence[int]) -> dict[int, tuple[int | None, int | None]]:
+    """Batch-query Condor for multiple cluster ids."""
+    if not cluster_ids:
+        return {}
+    unique_ids = list(dict.fromkeys(int(cluster_id) for cluster_id in cluster_ids))
+    result: dict[int, tuple[int | None, int | None]] = {}
+    proc = _run_condor(
+        [
+            "condor_q",
+            *[str(cluster_id) for cluster_id in unique_ids],
+            "-af",
+            "ClusterId",
+            "JobStatus",
+            "ExitCode",
+        ],
+        check=False,
+    )
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
         try:
-            exit_code = int(parts[1])
+            cluster_id = int(parts[0])
         except ValueError:
-            exit_code = None
-    return status, exit_code
+            continue
+        status, exit_code = _parse_status_exit(parts[1:])
+        if status is not None:
+            result[cluster_id] = (status, exit_code)
+    for cluster_id in unique_ids:
+        if cluster_id not in result:
+            result[cluster_id] = _query_history(cluster_id)
+    return result
 
 
-def poll_cluster(cluster_id: int, *, submitted_at: float | None = None) -> int | None:
-    """Return None while running; otherwise the job exit code.
-
-    *submitted_at* must be wall-clock epoch seconds (stored in DB), not monotonic.
-    """
-    status, exit_code = _query_queue(cluster_id)
-    if status is None:
-        status, exit_code = _query_history(cluster_id)
+def poll_cluster_status(
+    cluster_id: int,
+    status: int | None,
+    exit_code: int | None,
+    *,
+    submitted_at: float | None = None,
+    hold_timeout_s: float = HOLD_TIMEOUT_S,
+    hold_path: Path | None = None,
+) -> int | None:
+    """Map a Condor JobStatus/ExitCode pair to a stage exit code, or None if still running."""
     if status is None:
         ts = submitted_at if submitted_at is not None else _submission_times.get(cluster_id)
         if ts is not None and time.time() - ts < _POLL_GRACE_SECONDS:
@@ -198,21 +308,71 @@ def poll_cluster(cluster_id: int, *, submitted_at: float | None = None) -> int |
         log.warning("Condor cluster %s not found in queue or history", cluster_id)
         return 1
     if status == _JOB_COMPLETED:
+        _held_times.pop(cluster_id, None)
+        _clear_hold_epoch(hold_path)
         return exit_code if exit_code is not None else 0
     if status == _JOB_REMOVED:
+        _held_times.pop(cluster_id, None)
+        _clear_hold_epoch(hold_path)
         # condor_rm on a running job often records ExitCode 0 when the worker
         # handled SIGTERM cleanly; treat that as canceled (143), not success.
         if exit_code in (None, 0):
             return 143
         return exit_code
+    if status == _JOB_HELD:
+        now = time.time()
+        held_since = _resolve_held_since(cluster_id, hold_path=hold_path, now=now)
+        hold_reason = _query_hold_reason(cluster_id)
+        log.warning(
+            "Condor cluster %s held (reason: %s)",
+            cluster_id,
+            hold_reason or "unknown",
+        )
+        if now - held_since >= hold_timeout_s:
+            log.warning(
+                "Removing held Condor cluster %s after %.0fs timeout (reason: %s)",
+                cluster_id,
+                hold_timeout_s,
+                hold_reason or "unknown",
+            )
+            _clear_hold_epoch(hold_path)
+            remove_cluster(cluster_id)
+            return 1
+        return None
     return None
 
 
-def remove_cluster(cluster_id: int) -> bool:
+def poll_cluster(
+    cluster_id: int,
+    *,
+    submitted_at: float | None = None,
+    hold_timeout_s: float = HOLD_TIMEOUT_S,
+    hold_path: Path | None = None,
+) -> int | None:
+    """Return None while running; otherwise the job exit code.
+
+    *submitted_at* must be wall-clock epoch seconds (stored in DB), not monotonic.
+    """
+    status, exit_code = _query_queue(cluster_id)
+    if status is None:
+        status, exit_code = _query_history(cluster_id)
+    return poll_cluster_status(
+        cluster_id,
+        status,
+        exit_code,
+        submitted_at=submitted_at,
+        hold_timeout_s=hold_timeout_s,
+        hold_path=hold_path,
+    )
+
+
+def remove_cluster(cluster_id: int, *, hold_path: Path | None = None) -> bool:
     proc = _run_condor(["condor_rm", str(cluster_id)], check=False)
     if proc.returncode == 0:
         log.info("Removed Condor cluster %s", cluster_id)
         _submission_times.pop(cluster_id, None)
+        _held_times.pop(cluster_id, None)
+        _clear_hold_epoch(hold_path)
         return True
     msg = (proc.stderr or proc.stdout or "").strip()
     log.warning("condor_rm %s failed (exit %s): %s", cluster_id, proc.returncode, msg)
@@ -228,7 +388,10 @@ def sweep_run_condor_clusters(state, cfg, run_id: str) -> int:
         executor = job.executor or cfg.stage_executor(job.stage)
         if executor != "condor":
             continue
-        if remove_cluster(int(cluster_id)):
+        artifacts = condor_artifact_paths(
+            runs_root, run_id, job.target_label, job.stage
+        )
+        if remove_cluster(int(cluster_id), hold_path=artifacts["hold"]):
             removed += 1
     return removed
 

@@ -22,11 +22,10 @@ from syndiff_pipeline.template_creation.orchestration.run_report import (
     format_target_status_line,
     pack_message_lines,
 )
-from syndiff_pipeline.template_creation.orchestration.state import STAGE_SHORT_NAMES
-
+from syndiff_pipeline.common.orchestration import logs
 if TYPE_CHECKING:
     from syndiff_pipeline.template_creation.orchestration.runner_config import NotificationConfig
-    from syndiff_pipeline.template_creation.orchestration.state import PipelineState
+    from syndiff_pipeline.common.orchestration.state import PipelineState
 
 log = logging.getLogger(__name__)
 
@@ -182,7 +181,7 @@ def post_discord_webhook(url: str, content: str) -> None:
         data=payload,
         headers={
             "Content-Type": "application/json",
-            "User-Agent": "syndiff-template-notifications",
+            "User-Agent": "syndiff-notifications",
         },
         method="POST",
     )
@@ -201,7 +200,7 @@ class Notifier:
         cfg: NotificationConfig,
         *,
         config_path: str | Path,
-        handoff_root: str,
+        workspace_root: str,
         deployment_file: str = "deployment.yaml",
         source_config_path: str | Path | None = None,
     ):
@@ -214,7 +213,7 @@ class Notifier:
             if source_config_path
             else None
         )
-        self._handoff_root = handoff_root
+        self._workspace_root = workspace_root
         self._webhook_url: str | None = None
 
     def _webhook(self) -> str | None:
@@ -277,12 +276,18 @@ class Notifier:
             return
         if outcome == "failed" and not self._cfg.events.run_failed:
             return
+        if self._workspace_root:
+            from syndiff_pipeline.common.orchestration.verify_status import (
+                refresh_verify_run_status,
+            )
+
+            refresh_verify_run_status(self._workspace_root, self._state, run_id)
         header = f"[{run_id}] run_{outcome} ({_utc_header()})"
         body = format_run_report_messages(
             self._state,
             run_id,
             runs_root,
-            handoff_root=self._handoff_root,
+            workspace_root=self._workspace_root,
             header=header,
             max_chars=_DISCORD_PACK_MAX_CHARS,
         )
@@ -296,7 +301,7 @@ class Notifier:
             self._state,
             run_id,
             runs_root,
-            handoff_root=self._handoff_root,
+            workspace_root=self._workspace_root,
             header=header,
             max_chars=_DISCORD_PACK_MAX_CHARS,
         )
@@ -316,7 +321,7 @@ class Notifier:
             self._state,
             run_id,
             runs_root,
-            handoff_root=self._handoff_root,
+            workspace_root=self._workspace_root,
             header=header,
             max_chars=_DISCORD_PACK_MAX_CHARS,
         )
@@ -335,7 +340,9 @@ class Notifier:
             return
         header = f"[{run_id}] run_retried ({_utc_header()})"
         if target_label and stage:
-            short = STAGE_SHORT_NAMES.get(stage, stage)
+            from syndiff_pipeline.pipeline_spec import stage_short_names
+
+            short = stage_short_names().get(stage, stage)
             header += f"\n{target_label} / {short}"
             if reset_downstream is not None:
                 header += f"\nreset_downstream: {str(reset_downstream).lower()}"
@@ -343,7 +350,7 @@ class Notifier:
             self._state,
             run_id,
             runs_root,
-            handoff_root=self._handoff_root,
+            workspace_root=self._workspace_root,
             header=header,
             max_chars=_DISCORD_PACK_MAX_CHARS,
         )
@@ -370,7 +377,9 @@ class Notifier:
             return
         if outcome not in ("success", "failed", "canceled", "died"):
             return
-        short = STAGE_SHORT_NAMES.get(stage, stage)
+        from syndiff_pipeline.pipeline_spec import stage_short_names
+
+        short = stage_short_names().get(stage, stage)
         header = f"[{run_id}] stage_{outcome} ({_utc_header()})\n{target_label} / {short}"
         if error_tail:
             header += f"\nerror: {error_tail[:400]}"
@@ -380,7 +389,7 @@ class Notifier:
                 self._state,
                 run_id,
                 runs_root,
-                handoff_root=self._handoff_root,
+                workspace_root=self._workspace_root,
                 include_running_detail=True,
             )
         )
@@ -388,7 +397,7 @@ class Notifier:
             self._state,
             run_id,
             target_label,
-            handoff_root=self._handoff_root,
+            workspace_root=self._workspace_root,
         )
         if target_line:
             lines.extend(["", target_line])
@@ -430,7 +439,7 @@ def format_run_started_message(
             f"run_dir: {run_path}",
             "",
             "Reply in Discord for live progress/status, or:",
-            f"  syndiff-template progress --run-dir {run_path}",
+            f"  syndiff progress --run-dir {run_path}",
         ]
     )
     return "\n".join(lines)
@@ -462,7 +471,7 @@ def format_status_reply_messages(
     run_ids: Sequence[str],
     runs_root: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
 ) -> list[str]:
     """On-demand progress + status grid; one or more Discord-sized messages."""
     if not run_ids:
@@ -480,7 +489,7 @@ def format_status_reply_messages(
                 state,
                 run_id,
                 root,
-                handoff_root=handoff_root,
+                workspace_root=workspace_root,
                 header=header,
                 max_chars=_DISCORD_PACK_MAX_CHARS,
             )
@@ -493,7 +502,7 @@ def format_status_reply_message(
     run_ids: Sequence[str],
     runs_root: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
 ) -> str:
     """Single-string status reply (joins all parts; prefer format_status_reply_messages)."""
     return "\n\n".join(
@@ -501,7 +510,7 @@ def format_status_reply_message(
             state,
             run_ids,
             runs_root,
-            handoff_root=handoff_root,
+            workspace_root=workspace_root,
         )
     )
 
@@ -511,7 +520,7 @@ def format_preview_message(
     run_id: str,
     runs_root: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
     event_label: str = "notification preview",
 ) -> str:
     """Read-only snapshot: progress summary + status grid (same shape as daemon alerts)."""
@@ -520,7 +529,7 @@ def format_preview_message(
         state,
         run_id,
         runs_root,
-        handoff_root=handoff_root,
+        workspace_root=workspace_root,
         header=header,
     )
 
@@ -535,7 +544,6 @@ def send_preview_notification(
     cfg = getattr(ctx.cfg, "notifications", None)
     if cfg is None:
         raise SystemExit("notifications block missing from config")
-    from syndiff_pipeline.template_creation.orchestration import logs
 
     config_path = logs.run_config_path(ctx.run_dir)
     source_config_path = (ctx.meta or {}).get("source_config_path")
@@ -554,7 +562,7 @@ def send_preview_notification(
         state,
         ctx.run_id,
         ctx.cfg.runs_dir(),
-        handoff_root=ctx.cfg.handoff_root,
+        workspace_root=ctx.cfg.workspace_root,
         header=f"[TEST] [{ctx.run_id}] {event_label} ({_utc_header()})",
         max_chars=_DISCORD_PACK_MAX_CHARS,
     )
@@ -572,7 +580,7 @@ def send_run_started_notification(
     run_dir: str | Path,
     target_labels: list[str],
     stages: list[str],
-    handoff_root: str,
+    workspace_root: str,
     deployment_file: str = "deployment.yaml",
     force_rerun: bool = False,
 ) -> None:
@@ -581,7 +589,7 @@ def send_run_started_notification(
         state,
         cfg,
         config_path=config_path,
-        handoff_root=handoff_root,
+        workspace_root=workspace_root,
         deployment_file=deployment_file,
     )
     notifier.notify_run_started(
@@ -597,7 +605,6 @@ def notifier_for_context(state: PipelineState, ctx) -> Notifier | None:
     cfg = getattr(ctx.cfg, "notifications", None)
     if cfg is None:
         return None
-    from syndiff_pipeline.template_creation.orchestration import logs
 
     config_path = logs.run_config_path(ctx.run_dir)
     source_config_path = (ctx.meta or {}).get("source_config_path")
@@ -605,7 +612,7 @@ def notifier_for_context(state: PipelineState, ctx) -> Notifier | None:
         state,
         cfg,
         config_path=config_path,
-        handoff_root=ctx.cfg.handoff_root,
+        workspace_root=ctx.cfg.workspace_root,
         deployment_file=getattr(ctx.cfg, "deployment_file", "deployment.yaml"),
         source_config_path=source_config_path,
     )

@@ -10,12 +10,12 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     STATUS_PENDING,
     STATUS_SUCCESS,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config, RunnerConfig
 from syndiff_pipeline.template_creation.orchestration.verify import clear_ps1_process_artifacts
 

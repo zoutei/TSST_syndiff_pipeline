@@ -14,13 +14,12 @@ from pathlib import Path
 from typing import List, Optional
 
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
-from syndiff_pipeline.template_creation.orchestration.state import STAGE_NAMES
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 
 log = logging.getLogger(__name__)
 
 # Bump when the manifest JSON schema changes; a mismatch invalidates a manifest.
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -43,12 +42,50 @@ class VerifyResult:
 # ---------------------------------------------------------------------------
 
 
-def config_fingerprint(resolved: ResolvedTargetConfig, stage: str) -> str:
-    """Stable hash of the stage params that affect this stage's outputs.
+def _diff_stage_context(
+    resolved: ResolvedTargetConfig,
+    runner_cfg: RunnerConfig | None = None,
+    *,
+    meta: dict | None = None,
+) -> "StageRunContext":
+    from syndiff_pipeline.common.orchestration.spec import StageRunContext
 
-    A change to any fingerprinted param invalidates a stale manifest so a new
-    config never reuses outputs produced under a different configuration.
-    """
+    cfg = runner_cfg
+    if cfg is None:
+        raise ValueError("diff stage verification requires RunnerConfig")
+    return StageRunContext(
+        run_id="",
+        runs_root="",
+        target_label=resolved.target.label(),
+        target=resolved.target,
+        runner_cfg=cfg,
+        meta=dict(meta or {}),
+    )
+
+
+def diff_config_fingerprint(
+    resolved: ResolvedTargetConfig,
+    runner_cfg: RunnerConfig,
+    *,
+    meta: dict | None = None,
+) -> str:
+    from syndiff_pipeline.difference_imaging.orchestration.stages import _diff_config_fingerprint
+
+    return _diff_config_fingerprint(_diff_stage_context(resolved, runner_cfg, meta=meta))
+
+
+def config_fingerprint(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
+) -> str:
+    """Stable hash of the stage params that affect this stage's outputs."""
+    if stage == "diff":
+        if runner_cfg is None:
+            raise ValueError("diff config fingerprint requires RunnerConfig")
+        return diff_config_fingerprint(resolved, runner_cfg, meta=meta)
     parts: list[str] = [stage]
     t = resolved.target
     parts.extend([str(t.sector), str(t.camera), str(t.ccd)])
@@ -82,6 +119,22 @@ def config_fingerprint(resolved: ResolvedTargetConfig, stage: str) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
+def _downsample_manifest_meta(
+    resolved: ResolvedTargetConfig,
+    meta: dict | None,
+) -> dict | None:
+    if meta and "template_dir_physical" in meta and "template_dir_symlink" in meta:
+        return meta
+    from syndiff_pipeline.common.orchestration.template_handoff import (
+        template_dir_meta_from_event_dir,
+    )
+
+    derived = template_dir_meta_from_event_dir(resolved.event_dir)
+    if derived:
+        return {**(meta or {}), **derived}
+    return meta
+
+
 def write_manifest(
     manifest_path,
     resolved: ResolvedTargetConfig,
@@ -89,12 +142,17 @@ def write_manifest(
     produced_paths,
     expected_count: int,
     produced_count: int,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
 ) -> dict:
     """Atomically write a completion manifest (tmp file + rename).
 
     Schema: schema_version, stage, expected_count, produced_count, artifacts
     (list of paths), config_fingerprint, completed_at (iso utc).
     """
+    if stage == "downsample":
+        meta = _downsample_manifest_meta(resolved, meta)
     path = Path(manifest_path)
     payload = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -102,9 +160,15 @@ def write_manifest(
         "expected_count": int(expected_count),
         "produced_count": int(produced_count),
         "artifacts": [str(p) for p in (produced_paths or [])],
-        "config_fingerprint": config_fingerprint(resolved, stage),
+        "config_fingerprint": config_fingerprint(
+            resolved, stage, runner_cfg=runner_cfg, meta=meta
+        ),
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if meta:
+        for key in ("template_dir_physical", "template_dir_symlink"):
+            if key in meta:
+                payload[key] = str(meta[key])
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as fh:
@@ -130,7 +194,14 @@ def read_manifest(manifest_path) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
-def manifest_valid(manifest: dict, resolved: ResolvedTargetConfig, stage: str) -> bool:
+def manifest_valid(
+    manifest: dict,
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
+) -> bool:
     """True if *manifest* is well-formed, matches the current config, and all
     listed artifacts still exist on disk."""
     if not isinstance(manifest, dict):
@@ -139,7 +210,9 @@ def manifest_valid(manifest: dict, resolved: ResolvedTargetConfig, stage: str) -
         return False
     if manifest.get("stage") != stage:
         return False
-    if manifest.get("config_fingerprint") != config_fingerprint(resolved, stage):
+    if manifest.get("config_fingerprint") != config_fingerprint(
+        resolved, stage, runner_cfg=runner_cfg, meta=meta
+    ):
         return False
     expected = manifest.get("expected_count")
     produced = manifest.get("produced_count")
@@ -167,6 +240,8 @@ def check_manifests_only(
     *,
     manifest_path: str | Path | None = None,
     stable_manifest_path: str | Path | None = None,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
 ) -> bool | None:
     """Fast manifest check without on-disk artifact scanning.
 
@@ -182,7 +257,9 @@ def check_manifests_only(
         if manifest is None:
             continue
         saw_manifest = True
-        if manifest_valid(manifest, resolved, stage):
+        if manifest_valid(
+            manifest, resolved, stage, runner_cfg=runner_cfg, meta=meta
+        ):
             return True
     if saw_manifest:
         return False
@@ -212,14 +289,30 @@ def write_stable_manifest(
     resolved: ResolvedTargetConfig,
     stage: str,
     stable_manifest_path: str | Path,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
 ) -> None:
     """Collect artifacts and write the stable under-runs-root manifest."""
     stable_path = Path(stable_manifest_path)
     existing = read_manifest(stable_path)
-    if existing is not None and manifest_valid(existing, resolved, stage):
+    if existing is not None and manifest_valid(
+        existing, resolved, stage, runner_cfg=runner_cfg, meta=meta
+    ):
         return
-    expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
-    write_manifest(stable_path, resolved, stage, artifacts, expected, produced)
+    expected, produced, artifacts = collect_stage_artifacts(
+        resolved, stage, runner_cfg=runner_cfg, meta=meta
+    )
+    write_manifest(
+        stable_path,
+        resolved,
+        stage,
+        artifacts,
+        expected,
+        produced,
+        runner_cfg=runner_cfg,
+        meta=meta,
+    )
 
 
 def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
@@ -271,7 +364,7 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
-    job_path = Path(resolved.handoff_dir) / "cluster_template_job.json"
+    job_path = Path(resolved.event_dir) / "cluster_template_job.json"
     if not job_path.is_file():
         return VerifyResult("wcs_grouping", False, "Missing cluster_template_job.json", str(job_path))
     try:
@@ -469,6 +562,25 @@ def ps1_process_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
     return Path(str(_convolved_zarr_path(resolved)).replace(".zarr", "_removed_stars.csv"))
 
 
+def event_dir_ps1_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
+    from syndiff_pipeline.template_creation.processing.downsample import (
+        PS1_REMOVED_STARS_CSV_FILENAME,
+    )
+
+    return Path(resolved.event_dir) / PS1_REMOVED_STARS_CSV_FILENAME
+
+
+def clear_downsample_event_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
+    """Remove event-dir artifacts written by the downsample stage."""
+    removed: list[str] = []
+    csv_path = event_dir_ps1_removed_stars_csv_path(resolved)
+    if csv_path.is_file():
+        csv_path.unlink()
+        removed.append(str(csv_path))
+        log.info("Force rerun: removed file %s", csv_path)
+    return removed
+
+
 def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
     removed: list[str] = []
     for path in (_convolved_zarr_path(resolved), ps1_process_removed_stars_csv_path(resolved)):
@@ -613,7 +725,7 @@ def _downsample_expected_basenames(resolved: ResolvedTargetConfig) -> tuple[list
 
     t = resolved.target
     ds = resolved.stages.downsample
-    job_path = Path(resolved.handoff_dir) / "cluster_template_job.json"
+    job_path = Path(resolved.event_dir) / "cluster_template_job.json"
     payload = load_cluster_template_job_payload(str(job_path))
     roi = roi_tuple_from_cluster_job_payload(payload)
     if ds.single_offset:
@@ -700,12 +812,67 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
             f"({len(missing)} missing)",
             sample,
         )
+
+    if ps1_process_removed_stars_csv_path(resolved).is_file():
+        csv_path = event_dir_ps1_removed_stars_csv_path(resolved)
+        if not csv_path.is_file():
+            return VerifyResult(
+                "downsample",
+                False,
+                f"Missing {csv_path.name} in event_dir",
+                str(csv_path),
+            )
+
     return VerifyResult(
         "downsample",
         True,
         f"All {n_expected} offset FITS present",
         sample,
     )
+
+
+def verify_diff(
+    resolved: ResolvedTargetConfig,
+    runner_cfg: RunnerConfig | None = None,
+    *,
+    meta: dict | None = None,
+) -> VerifyResult:
+    from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGE
+    from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
+    from syndiff_pipeline.difference_imaging.support.paths import workspace_root
+
+    if runner_cfg is None:
+        return VerifyResult(
+            "diff",
+            False,
+            "diff verification requires RunnerConfig with diff_config_path",
+            resolved.event_dir,
+        )
+    ctx = _diff_stage_context(resolved, runner_cfg, meta=meta)
+    event_dir = Path(resolved.event_dir)
+    ws_dir = Path(workspace_root(str(event_dir)))
+    manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
+    if DIFF_STAGE.verify_complete(ctx):
+        from syndiff_pipeline.common.orchestration.template_handoff import (
+            TEMPLATES_WS_LABEL,
+        )
+
+        labels = [
+            p.name
+            for p in ws_dir.iterdir()
+            if p.is_dir() and p.name not in ("master", TEMPLATES_WS_LABEL)
+        ]
+        return VerifyResult(
+            "diff",
+            True,
+            f"Frame manifest and {len(labels)} workspace label(s) present",
+            str(ws_dir),
+        )
+    if not Path(manifest_csv).is_file():
+        return VerifyResult("diff", False, "Missing frame manifest CSV", manifest_csv)
+    if not ws_dir.is_dir():
+        return VerifyResult("diff", False, "Missing ws/ under event_dir", str(ws_dir))
+    return VerifyResult("diff", False, "No workspace labels under ws/", str(ws_dir))
 
 
 VERIFY_FUNCS = {
@@ -715,13 +882,22 @@ VERIFY_FUNCS = {
     "ps1_download": verify_ps1_download,
     "ps1_process": verify_ps1_process,
     "downsample": verify_downsample,
+    "diff": verify_diff,
 }
 
 
-def verify_stage(resolved: ResolvedTargetConfig, stage: str) -> VerifyResult:
+def verify_stage(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    runner_cfg: RunnerConfig | None = None,
+    *,
+    meta: dict | None = None,
+) -> VerifyResult:
     fn = VERIFY_FUNCS.get(stage)
     if fn is None:
         raise ValueError(f"Unknown stage: {stage!r}")
+    if stage == "diff":
+        return fn(resolved, runner_cfg, meta=meta)
     return fn(resolved)
 
 
@@ -730,6 +906,9 @@ def stage_complete(
     stage: str,
     manifest_path: str | None = None,
     stable_manifest_path: str | None = None,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
 ) -> bool:
     """Return True if the stage outputs are complete.
 
@@ -744,19 +923,43 @@ def stage_complete(
         if candidate is None:
             continue
         manifest = read_manifest(candidate)
-        if manifest is not None and manifest_valid(manifest, resolved, stage):
+        if manifest is not None and manifest_valid(
+            manifest, resolved, stage, runner_cfg=runner_cfg, meta=meta
+        ):
             return True
-    result = verify_stage(resolved, stage)
+    result = verify_stage(resolved, stage, runner_cfg, meta=meta)
     if result.unknown:
         return False
     return result.ok
 
 
-def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple[int, int, list[str]]:
+def collect_stage_artifacts(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
+) -> tuple[int, int, list[str]]:
     """Return (expected_count, produced_count, artifact_paths) for manifest writing."""
+    if stage == "diff":
+        from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGE
+
+        if runner_cfg is None:
+            raise ValueError("diff artifact collection requires RunnerConfig")
+        ctx = _diff_stage_context(resolved, runner_cfg, meta=meta)
+        return DIFF_STAGE.collect_artifacts(ctx)
     if stage == "downsample":
         paths = expected_downsample_fits_paths(resolved)
-        existing = [str(p) for p in paths if p.is_file()]
+        if ps1_process_removed_stars_csv_path(resolved).is_file():
+            paths.append(event_dir_ps1_removed_stars_csv_path(resolved))
+        from syndiff_pipeline.common.orchestration.template_handoff import (
+            event_templates_symlink_path,
+        )
+
+        symlink = event_templates_symlink_path(resolved.event_dir)
+        if symlink.is_symlink() and symlink.resolve().is_dir():
+            paths.append(symlink)
+        existing = [str(p) for p in paths if p.is_file() or p.is_symlink()]
         return len(paths), len(existing), existing
     if stage == "ps1_process":
         expected = expected_ps1_process_skycells(resolved)
@@ -775,8 +978,13 @@ def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple
             WCS_DRIFT_TEMPLATE_DEBUG_FILENAME,
         )
 
-        job_path = Path(resolved.handoff_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
-        plot_path = Path(resolved.handoff_dir) / WCS_DRIFT_TEMPLATE_DEBUG_FILENAME
+        from syndiff_pipeline.difference_imaging.support.paths import pipeline_plots_root
+
+        job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
+        plot_path = (
+            Path(pipeline_plots_root(resolved.event_dir))
+            / WCS_DRIFT_TEMPLATE_DEBUG_FILENAME
+        )
         ok = job_path.is_file()
         artifacts = [str(job_path)] if ok else []
         if plot_path.is_file():
@@ -798,7 +1006,7 @@ def collect_stage_artifacts(resolved: ResolvedTargetConfig, stage: str) -> tuple
         expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf) or []
         files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
         return len(expected), len(files), [str(p) for p in files]
-    result = verify_stage(resolved, stage)
+    result = verify_stage(resolved, stage, runner_cfg, meta=meta)
     path = result.path or ""
     return 1, int(result.ok), [path] if path else []
 
@@ -807,29 +1015,52 @@ def persist_completion_manifests(
     resolved: ResolvedTargetConfig,
     stage: str,
     manifest_paths: list[str | Path],
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
 ) -> list[str]:
     """Write completion manifests for a stage already verified complete on disk.
 
     The caller supplies explicit manifest paths (per-run, stable, etc.) so this
     module stays decoupled from run-directory layout.
     """
-    expected, produced, artifacts = collect_stage_artifacts(resolved, stage)
+    expected, produced, artifacts = collect_stage_artifacts(
+        resolved, stage, runner_cfg=runner_cfg, meta=meta
+    )
     written: list[str] = []
     for manifest_path in manifest_paths:
-        write_manifest(manifest_path, resolved, stage, artifacts, expected, produced)
+        write_manifest(
+            manifest_path,
+            resolved,
+            stage,
+            artifacts,
+            expected,
+            produced,
+            runner_cfg=runner_cfg,
+            meta=meta,
+        )
         written.append(str(manifest_path))
     return written
 
 
-def verify_target(resolved: ResolvedTargetConfig, stages: Optional[List[str]] = None) -> List[VerifyResult]:
-    stages = stages or list(STAGE_NAMES)
-    return [verify_stage(resolved, s) for s in stages]
+def verify_target(
+    resolved: ResolvedTargetConfig,
+    runner_cfg: RunnerConfig,
+    stages: Optional[List[str]] = None,
+    *,
+    meta: dict | None = None,
+) -> List[VerifyResult]:
+    if stages is None:
+        from syndiff_pipeline.pipeline_spec import STAGE_NAMES
+
+        stages = list(STAGE_NAMES)
+    return [verify_stage(resolved, s, runner_cfg, meta=meta) for s in stages]
 
 
 def verify_all(cfg: RunnerConfig, targets: List[Target], stages: Optional[List[str]] = None) -> List[VerifyResult]:
     out: List[VerifyResult] = []
     for t in targets:
         resolved = resolve_config(t, cfg)
-        for r in verify_target(resolved, stages):
+        for r in verify_target(resolved, cfg, stages):
             out.append(r)
     return out

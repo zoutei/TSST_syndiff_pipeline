@@ -10,10 +10,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration import dispatch, logs
-from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
+from syndiff_pipeline.common.orchestration import logs
+from syndiff_pipeline.template_creation.orchestration import dispatch
+from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
-from tests.site_config import write_site_config
+from tests.site_fixtures import write_site_config
 
 
 def _write_targets(path: Path) -> None:
@@ -33,7 +34,7 @@ class TestMaterializeRunInputs(unittest.TestCase):
             source_cfg = tmp_path / "site" / "config.yaml"
             write_site_config(
                 source_cfg,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 data_root=str(data),
             )
             targets = tmp_path / "targets.csv"
@@ -56,7 +57,7 @@ class TestMaterializeRunInputs(unittest.TestCase):
             source_cfg = tmp_path / "config.yaml"
             write_site_config(
                 source_cfg,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 data_root=str(data),
             )
             targets = tmp_path / "targets.csv"
@@ -65,7 +66,7 @@ class TestMaterializeRunInputs(unittest.TestCase):
             logs.materialize_run_inputs(source_cfg, targets, run_dir)
 
             frozen_cfg = run_dir / "config.yaml"
-            frozen_cfg.write_text("data_root: /frozen\nhandoff_root: /frozen\n", encoding="utf-8")
+            frozen_cfg.write_text("data_root: /frozen\nworkspace_root: /frozen\n", encoding="utf-8")
 
             cfg_path, _ = logs.materialize_run_inputs(source_cfg, targets, run_dir)
             self.assertIn("/frozen", Path(cfg_path).read_text(encoding="utf-8"))
@@ -80,7 +81,7 @@ class TestResolveRunContext(unittest.TestCase):
             source_cfg = tmp_path / "config.yaml"
             write_site_config(
                 source_cfg,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 data_root=str(data),
             )
             targets = tmp_path / "targets.csv"
@@ -105,7 +106,7 @@ class TestResolveRunContext(unittest.TestCase):
             source_cfg = tmp_path / "config.yaml"
             write_site_config(
                 source_cfg,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 data_root=str(data),
             )
             targets = tmp_path / "targets.csv"

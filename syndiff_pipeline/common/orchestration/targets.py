@@ -142,11 +142,23 @@ def parse_scc(scc: str) -> tuple[int, int, int]:
 
 
 def find_target(targets: Iterable[Target], scc: str) -> Target:
-    """Find target by ``sector,camera,ccd`` or ``sector/camera/ccd`` key."""
-    sector, camera, ccd = parse_scc(scc)
+    """Find target by full label or ``sector,camera,ccd`` / ``sector/camera/ccd`` key."""
+    key = scc.strip()
     for t in targets:
-        if t.sector == sector and t.camera == camera and t.ccd == ccd:
+        if t.label() == key:
             return t
+    sector, camera, ccd = parse_scc(key)
+    matches = [
+        t for t in targets if t.sector == sector and t.camera == camera and t.ccd == ccd
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        names = ", ".join(sorted(t.label() for t in matches))
+        raise KeyError(
+            f"SCC {sector}/{camera}/{ccd} is ambiguous ({len(matches)} targets: {names}); "
+            "use the full target label"
+        )
     raise KeyError(f"No target for SCC {sector}/{camera}/{ccd}")
 
 

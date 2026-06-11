@@ -10,8 +10,9 @@ from typing import Optional
 
 from astropy.io import fits
 
-from syndiff_pipeline import wcs_grouping
+from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, _ffi_filename_pattern
+from syndiff_pipeline.difference_imaging.support.paths import pipeline_plots_root
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import WcsGroupingStageParams
 
@@ -33,7 +34,6 @@ def run_wcs_grouping(
     x_max: int | None = None,
     y_min: int | None = None,
     y_max: int | None = None,
-    crop_quadrant: str | None = None,
 ) -> str:
     """
     Run WCS grouping for one SCC target and write cluster_template_job.json.
@@ -42,8 +42,8 @@ def run_wcs_grouping(
     """
     t = resolved.target
     wg: WcsGroupingStageParams = resolved.stages.wcs_grouping
-    handoff_dir = resolved.handoff_dir
-    os.makedirs(handoff_dir, exist_ok=True)
+    event_dir = resolved.event_dir
+    os.makedirs(event_dir, exist_ok=True)
 
     ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
     all_sorted = sorted(list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd))
@@ -75,18 +75,21 @@ def run_wcs_grouping(
     )
     log.info("Reference FFI: %s", chosen_ref)
 
-    manifest_path = os.path.join(handoff_dir, "syndiff_ffi_frames.csv")
+    manifest_path = os.path.join(event_dir, "syndiff_ffi_frames.csv")
     wcs_table.to_csv(manifest_path, index=False)
 
     with fits.open(chosen_ref, memmap=True) as hdul:
         ref_header = hdul[1].header
-    crop_bounds = wcs_grouping.get_crop_bounds(
+    crop_bounds = wcs_grouping.resolve_crop_bounds_from_params(
         ref_header,
         x_min=x_min if x_min is not None else wg.x_min,
         x_max=x_max if x_max is not None else wg.x_max,
         y_min=y_min if y_min is not None else wg.y_min,
         y_max=y_max if y_max is not None else wg.y_max,
-        crop_quadrant=crop_quadrant if crop_quadrant is not None else wg.crop_quadrant,
+        crop_mode=wg.crop_mode,
+        crop_box_size=wg.crop_box_size,
+        target_ra=t.target_ra,
+        target_dec=t.target_dec,
         x_left_dead=wg.x_left_dead,
         x_right_dead=wg.x_right_dead,
         y_edge_strip=wg.y_edge_strip,
@@ -100,12 +103,17 @@ def run_wcs_grouping(
         t.camera,
         t.ccd,
         wg.offset_threshold,
-        handoff_dir,
+        event_dir,
         crop_bounds=crop_bounds,
+        crop_mode=wg.crop_mode,
+        crop_box_size=wg.crop_box_size if wg.crop_mode == "target_box" else None,
     )
     wcs_grouping.plot_wcs_drift_and_template_assignment(
         wcs_table,
-        os.path.join(handoff_dir, wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME),
+        os.path.join(
+            pipeline_plots_root(event_dir),
+            wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME,
+        ),
         ref_ffi_path=chosen_ref,
         sector=t.sector,
         camera=t.camera,

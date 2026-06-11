@@ -11,12 +11,12 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from syndiff_pipeline.template_creation.orchestration.notifications import (
+from syndiff_pipeline.common.orchestration.notifications import (
     NotificationConfig,
     parse_notification_config,
 )
 from syndiff_pipeline.template_creation.orchestration.bundled_assets import skycell_wcs_csv
-from syndiff_pipeline.template_creation.orchestration.deployment import (
+from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
     load_deployment,
     require_deployment_path,
@@ -27,10 +27,10 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     TemplateStageParams,
     parse_stage_params,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
-from syndiff_pipeline.template_creation.orchestration.workspace import (
-    normalize_handoff_root,
-    runs_root as handoff_runs_root,
+from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.workspace import (
+    normalize_workspace_root,
+    runs_root as runs_root,
     state_db_path,
 )
 
@@ -64,28 +64,35 @@ class RunnerConfig:
     deployment_file: str = "deployment.yaml"
     data_root: str = ""
     ffi_dir: str = ""
-    handoff_root: str = ""
+    workspace_root: str = ""
     runs_root: str = ""
     state_db_path: str = ""
     skycell_wcs_csv: str = ""
+    diff_config_path: str = ""
     stages: TemplateStageParams = field(default_factory=lambda: parse_stage_params({}))
-    resources: Dict[str, ResourcePoolParams] = field(default_factory=dict)
+    resources: Dict[str, ResourcePoolParams] = field(
+        default_factory=lambda: _parse_resources({})
+    )
     overrides: Dict[str, dict] = field(default_factory=dict)
     scheduler_heartbeat_interval_s: float = 30.0
     verify_max_workers: int = 1
     verify_budget_per_tick: int = 16
+    max_stage_attempts: int = 3
+    requeue_backoff_s: float = 30.0
+    condor_hold_timeout_s: float = 600.0
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     def runs_dir(self) -> str:
-        return self.runs_root or str(handoff_runs_root(self.handoff_root))
+        return self.runs_root or str(runs_root(self.workspace_root))
 
     def stage_executor(self, stage: str) -> str:
         """Return launch executor for a stage: 'local' or 'condor'."""
-        if stage == "ps1_process":
-            return self.stages.ps1_process.executor
-        if stage == "mapping":
-            return self.stages.mapping.executor
-        return "local"
+        from syndiff_pipeline.pipeline_spec import SYNDIFF_PIPELINE
+
+        stage_spec = SYNDIFF_PIPELINE.get(stage)
+        if stage_spec is None:
+            return "local"
+        return stage_spec.resolve_executor(self)
 
 
 def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
@@ -102,13 +109,15 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out["mapping"] = ResourcePoolParams(max_concurrent=6)
     if "ps1_process" not in out:
         out["ps1_process"] = ResourcePoolParams(max_concurrent=4)
+    if "diff" not in out:
+        out["diff"] = ResourcePoolParams(max_concurrent=2)
     return out
 
 
 def _paths_from_deployment(
     deployment: dict, *, deployment_path: Path
 ) -> tuple[str, str, str, str, str, str]:
-    handoff = require_deployment_path(deployment, "handoff_root", deployment_path=deployment_path)
+    handoff = require_deployment_path(deployment, "workspace_root", deployment_path=deployment_path)
     data = require_deployment_path(deployment, "data_root", deployment_path=deployment_path)
     ffi_override = str(deployment.get("ffi_dir", "")).strip()
     ffi_dir = (
@@ -116,9 +125,9 @@ def _paths_from_deployment(
         if ffi_override
         else str(Path(data) / "tess_ffi")
     )
-    handoff_path = normalize_handoff_root(handoff)
+    handoff_path = normalize_workspace_root(handoff)
     db = str(state_db_path(handoff_path))
-    runs = str(handoff_runs_root(handoff_path))
+    runs = str(runs_root(handoff_path))
     wcs = str(skycell_wcs_csv())
     return handoff, data, ffi_dir, db, runs, wcs
 
@@ -133,14 +142,24 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         deployment, deployment_path=deployment_path
     )
 
+    diff_site = str(
+        raw.get("diff_config", "")
+        or raw.get("diff_site_config", "")
+        or raw.get("diff_config_path", "")
+    ).strip()
+    diff_config_path = ""
+    if diff_site:
+        diff_config_path = _resolve_path(base_dir, diff_site) or ""
+
     return RunnerConfig(
         deployment_file=deployment_file,
         data_root=data,
         ffi_dir=ffi_dir,
-        handoff_root=handoff,
+        workspace_root=handoff,
         runs_root=runs,
         state_db_path=db,
         skycell_wcs_csv=wcs,
+        diff_config_path=diff_config_path,
         stages=parse_stage_params(raw.get("stages", {})),
         resources=_parse_resources(raw.get("resources")),
         overrides=dict(raw.get("overrides", {}) or {}),
@@ -150,6 +169,11 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         verify_max_workers=int(raw.get("scheduler", {}).get("verify_max_workers", 1)),
         verify_budget_per_tick=int(
             raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
+        ),
+        max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
+        requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
+        condor_hold_timeout_s=float(
+            raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
         ),
         notifications=notifications,
     )
@@ -164,7 +188,7 @@ def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
     return _build_runner_config(raw, config_path=path, base_dir=path.parent)
 
 
-def resolve_handoff_root(config_path: str | Path) -> Path:
+def resolve_workspace_root(config_path: str | Path) -> Path:
     """Resolve handoff workspace from site deployment file."""
     cfg_path = Path(config_path).expanduser().resolve()
     with cfg_path.open(encoding="utf-8") as fh:
@@ -173,9 +197,9 @@ def resolve_handoff_root(config_path: str | Path) -> Path:
     deployment_path = deployment_path_for_config(cfg_path, deployment_file)
     deployment = load_deployment(cfg_path, deployment_file)
     handoff = require_deployment_path(
-        deployment, "handoff_root", deployment_path=deployment_path
+        deployment, "workspace_root", deployment_path=deployment_path
     )
-    return normalize_handoff_root(handoff)
+    return normalize_workspace_root(handoff)
 
 
 def _normalize_override_paths(overrides: Dict[str, dict], base_dir: Path) -> Dict[str, dict]:
@@ -211,16 +235,25 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "ps1_download": asdict(cfg.stages.ps1_download),
         "ps1_process": asdict(cfg.stages.ps1_process),
         "downsample": asdict(cfg.stages.downsample),
+        "diff": asdict(cfg.stages.diff),
     }
+    if cfg.diff_config_path:
+        data["diff_config_path"] = cfg.diff_config_path
     data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
     data["scheduler"] = {
         "heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s,
         "verify_max_workers": cfg.verify_max_workers,
         "verify_budget_per_tick": cfg.verify_budget_per_tick,
+        "max_stage_attempts": cfg.max_stage_attempts,
+        "requeue_backoff_s": cfg.requeue_backoff_s,
+        "condor_hold_timeout_s": cfg.condor_hold_timeout_s,
     }
     data.pop("scheduler_heartbeat_interval_s", None)
     data.pop("verify_max_workers", None)
     data.pop("verify_budget_per_tick", None)
+    data.pop("max_stage_attempts", None)
+    data.pop("requeue_backoff_s", None)
+    data.pop("condor_hold_timeout_s", None)
     data["deployment_file"] = cfg.deployment_file
     data["notifications"] = {
         "enabled": cfg.notifications.enabled,
@@ -267,10 +300,17 @@ def load_and_materialize_runner_config(
             deployment_file=str(raw.get("deployment_file", "deployment.yaml")),
             data_root=_resolve_path(base, raw.get("data_root", "")) or "",
             ffi_dir=_resolve_path(base, raw.get("ffi_dir", "")) or "",
-            handoff_root=_resolve_path(base, raw.get("handoff_root", "")) or "",
+            workspace_root=_resolve_path(base, raw.get("workspace_root", "")) or "",
             runs_root=_resolve_path(base, raw.get("runs_root")) or "",
             state_db_path=_resolve_path(base, raw.get("state_db_path")) or "",
             skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
+            diff_config_path=_resolve_path(
+                base,
+                raw.get("diff_config_path")
+                or raw.get("diff_config")
+                or raw.get("diff_site_config"),
+            )
+            or "",
             stages=parse_stage_params(raw.get("stages", {})),
             resources=_parse_resources(raw.get("resources")),
             overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
@@ -281,14 +321,19 @@ def load_and_materialize_runner_config(
             verify_budget_per_tick=int(
                 raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
             ),
+            max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
+            requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
+            condor_hold_timeout_s=float(
+                raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
+            ),
             notifications=parse_notification_config(raw.get("notifications")),
         )
         if not cfg.ffi_dir and cfg.data_root:
             cfg.ffi_dir = str(Path(cfg.data_root) / "tess_ffi")
-        if not cfg.state_db_path and cfg.handoff_root:
-            cfg.state_db_path = str(state_db_path(cfg.handoff_root))
-        if not cfg.runs_root and cfg.handoff_root:
-            cfg.runs_root = str(handoff_runs_root(cfg.handoff_root))
+        if not cfg.state_db_path and cfg.workspace_root:
+            cfg.state_db_path = str(state_db_path(cfg.workspace_root))
+        if not cfg.runs_root and cfg.workspace_root:
+            cfg.runs_root = str(runs_root(cfg.workspace_root))
         if not cfg.skycell_wcs_csv:
             cfg.skycell_wcs_csv = str(skycell_wcs_csv())
     else:
@@ -300,7 +345,7 @@ def load_and_materialize_runner_config(
 
 def _is_materialized_config(raw: dict) -> bool:
     """Frozen run configs embed resolved paths; site configs use deployment.yaml instead."""
-    return bool(str(raw.get("handoff_root", "")).strip() and str(raw.get("data_root", "")).strip())
+    return bool(str(raw.get("workspace_root", "")).strip() and str(raw.get("data_root", "")).strip())
 
 
 def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Path) -> None:
@@ -326,7 +371,7 @@ class ResolvedTargetConfig:
     target: Target
     data_root: str
     ffi_dir: str
-    handoff_dir: str
+    event_dir: str
     skycell_wcs_csv: str
     stages: TemplateStageParams
     mapping_root: str
@@ -368,7 +413,7 @@ def resolve_config(
     if override and override.get("data_root"):
         data_root = str(Path(override["data_root"]).expanduser())
 
-    handoff_dir = str(Path(cfg.handoff_root) / target.label())
+    event_dir = str(Path(cfg.workspace_root) / "events" / target.label())
     mapping_root = str(Path(data_root) / "skycell_pixel_mapping")
     zarr_dir = str(Path(data_root) / "ps1_skycells_zarr")
     template_output_base = str(Path(data_root) / "shifted_downsampled")
@@ -377,7 +422,7 @@ def resolve_config(
         target=target,
         data_root=data_root,
         ffi_dir=cfg.ffi_dir,
-        handoff_dir=handoff_dir,
+        event_dir=event_dir,
         skycell_wcs_csv=cfg.skycell_wcs_csv,
         stages=parse_stage_params(merged_stages_raw),
         mapping_root=mapping_root,
@@ -396,6 +441,6 @@ def config_snapshot(resolved: ResolvedTargetConfig) -> Dict[str, Any]:
         "target_name": t.target_name,
         "target_ra": t.target_ra,
         "target_dec": t.target_dec,
-        "handoff_dir": resolved.handoff_dir,
+        "event_dir": resolved.event_dir,
         "data_root": resolved.data_root,
     }

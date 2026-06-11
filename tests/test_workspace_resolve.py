@@ -9,26 +9,26 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration.deployment import load_handoff_root_from_deployment
-from syndiff_pipeline.template_creation.orchestration.workspace import (
-    discover_alive_handoff_roots,
+from syndiff_pipeline.common.orchestration.deployment import load_workspace_root_from_deployment
+from syndiff_pipeline.common.orchestration.workspace import (
+    discover_alive_workspace_roots,
     load_recorded_deployment_path,
     record_deployment_path,
 )
 
 
 class TestDeploymentPathLoading(unittest.TestCase):
-    def test_load_handoff_root_from_deployment_file(self):
+    def test_load_workspace_root_from_deployment_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             deploy = base / "deployment.yaml"
             handoff = base / "handoff"
             deploy.write_text(
-                f"handoff_root: {handoff}\ndata_root: {base / 'data'}\n",
+                f"workspace_root: {handoff}\ndata_root: {base / 'data'}\n",
                 encoding="utf-8",
             )
             self.assertEqual(
-                str(load_handoff_root_from_deployment(deploy)),
+                str(load_workspace_root_from_deployment(deploy)),
                 str(handoff.resolve()),
             )
 
@@ -39,7 +39,7 @@ class TestDeploymentPathLoading(unittest.TestCase):
             handoff.mkdir()
             deploy = base / "deployment.yaml"
             deploy.write_text(
-                f"handoff_root: {handoff}\ndata_root: {base / 'data'}\n",
+                f"workspace_root: {handoff}\ndata_root: {base / 'data'}\n",
                 encoding="utf-8",
             )
             record_deployment_path(handoff, deploy)
@@ -50,7 +50,7 @@ class TestDeploymentPathLoading(unittest.TestCase):
 
 class TestDaemonDiscovery(unittest.TestCase):
     def test_discover_returns_list(self):
-        roots = discover_alive_handoff_roots()
+        roots = discover_alive_workspace_roots()
         self.assertIsInstance(roots, list)
 
 

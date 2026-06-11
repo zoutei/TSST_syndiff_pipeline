@@ -4,19 +4,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.template_creation.orchestration.stage_progress import read_log_progress
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.state import (
     SKIP_REASON_NOT_SELECTED,
     SKIP_REASON_STREAM,
     SKIP_REASON_SUPERSEDED,
-    STAGE_NAMES,
-    STAGE_SHORT_NAMES,
     STATUS_SKIPPED,
     stage_needs_artifact_verify_display,
 )
 
 if TYPE_CHECKING:
-    from syndiff_pipeline.template_creation.orchestration.state import PipelineState
+    from syndiff_pipeline.common.orchestration.state import PipelineState
 
 
 def format_run_status_header(
@@ -37,10 +36,10 @@ def format_progress_lines(
     run_id: str,
     runs_root: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
     include_running_detail: bool = True,
 ) -> list[str]:
-    from syndiff_pipeline.template_creation.orchestration.verify_status import read_verify_run_status
+    from syndiff_pipeline.common.orchestration.verify_status import read_verify_run_status
 
     counts = state.count_by_status(run_id)
     run = state.get_run(run_id) or {}
@@ -49,8 +48,8 @@ def format_progress_lines(
     verify_backlog = 0
     if count_parts:
         count_line = " ".join(count_parts)
-        if handoff_root:
-            verify_status = read_verify_run_status(handoff_root, run_id)
+        if workspace_root:
+            verify_status = read_verify_run_status(workspace_root, run_id)
             scan_running = int(verify_status.get("scan_running", 0))
             scan_queued = int(verify_status.get("scan_queued", 0))
             verify_backlog = scan_running + scan_queued
@@ -73,13 +72,13 @@ def format_progress_lines(
 
     lines.append("")
     for row in sorted(running, key=lambda r: (r.target_label, r.stage)):
-        from syndiff_pipeline.template_creation.orchestration import logs
-
         log_path = row.log_path or str(
             logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
         )
         prog = read_log_progress(log_path, row.stage, started_at=row.started_at)
-        short = STAGE_SHORT_NAMES.get(row.stage, row.stage)
+        from syndiff_pipeline.pipeline_spec import stage_short_names
+
+        short = stage_short_names().get(row.stage, row.stage)
         if prog:
             lines.append(f"  {row.target_label} {short}: {prog.text}")
         else:
@@ -91,23 +90,26 @@ def format_status_grid(
     state: PipelineState,
     run_id: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
 ) -> list[str]:
     rows = state.list_stage_runs(run_id)
     by_target: dict[str, list] = {}
     for r in rows:
         by_target.setdefault(r.target_label, []).append(r)
-    stage_order = {name: i for i, name in enumerate(STAGE_NAMES)}
+    from syndiff_pipeline.pipeline_spec import stage_names
+
+    names = stage_names()
+    stage_order = {name: i for i, name in enumerate(names)}
 
     def _stage_sort_key(row) -> int:
-        return stage_order.get(row.stage, len(STAGE_NAMES))
+        return stage_order.get(row.stage, len(names))
 
     active_stages = state.get_active_stages(run_id)
     verifying_keys: set[tuple[str, str]] = set()
-    if handoff_root:
-        from syndiff_pipeline.template_creation.orchestration.verify_status import read_verify_active_keys
+    if workspace_root:
+        from syndiff_pipeline.common.orchestration.verify_status import read_verify_active_keys
 
-        verifying_keys = set(read_verify_active_keys(handoff_root, run_id))
+        verifying_keys = set(read_verify_active_keys(workspace_root, run_id))
 
     lines: list[str] = []
     for label in sorted(by_target):
@@ -134,7 +136,9 @@ def _format_stage_status_short(
     active_stages: list[str] | None = None,
     verifying_keys: set[tuple[str, str]] | None = None,
 ) -> str:
-    short = STAGE_SHORT_NAMES.get(row.stage, row.stage)
+    from syndiff_pipeline.pipeline_spec import stage_short_names
+
+    short = stage_short_names().get(row.stage, row.stage)
     if row.status == STATUS_SKIPPED:
         reason = state.get_skip_reason(run_id, row.target_label, row.stage)
         if reason in (
@@ -162,18 +166,21 @@ def format_target_status_line(
     run_id: str,
     target_label: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
 ) -> str | None:
     rows = [r for r in state.list_stage_runs(run_id) if r.target_label == target_label]
     if not rows:
         return None
-    stage_order = {name: i for i, name in enumerate(STAGE_NAMES)}
-    rows_for_target = sorted(rows, key=lambda r: stage_order.get(r.stage, len(STAGE_NAMES)))
-    verifying_keys: set[tuple[str, str]] = set()
-    if handoff_root:
-        from syndiff_pipeline.template_creation.orchestration.verify_status import read_verify_active_keys
+    from syndiff_pipeline.pipeline_spec import stage_names
 
-        verifying_keys = set(read_verify_active_keys(handoff_root, run_id))
+    names = stage_names()
+    stage_order = {name: i for i, name in enumerate(names)}
+    rows_for_target = sorted(rows, key=lambda r: stage_order.get(r.stage, len(names)))
+    verifying_keys: set[tuple[str, str]] = set()
+    if workspace_root:
+        from syndiff_pipeline.common.orchestration.verify_status import read_verify_active_keys
+
+        verifying_keys = set(read_verify_active_keys(workspace_root, run_id))
     active_stages = state.get_active_stages(run_id)
     parts = [
         _format_stage_status_short(
@@ -193,7 +200,7 @@ def format_run_report(
     run_id: str,
     runs_root: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
     header: str,
     include_status_grid: bool = True,
     max_chars: int = 1900,
@@ -205,13 +212,13 @@ def format_run_report(
             state,
             run_id,
             runs_root,
-            handoff_root=handoff_root,
+            workspace_root=workspace_root,
             include_running_detail=True,
         )
     )
     if include_status_grid:
         body_lines.append("")
-        grid = format_status_grid(state, run_id, handoff_root=handoff_root)
+        grid = format_status_grid(state, run_id, workspace_root=workspace_root)
         if grid:
             body_lines.extend(
                 _truncate_grid(grid, max_chars=max_chars - len("\n".join(body_lines)) - 1)
@@ -229,7 +236,7 @@ def format_run_report_messages(
     run_id: str,
     runs_root: str,
     *,
-    handoff_root: str | None = None,
+    workspace_root: str | None = None,
     header: str,
     include_status_grid: bool = True,
     max_chars: int = 1900,
@@ -241,7 +248,7 @@ def format_run_report_messages(
             state,
             run_id,
             runs_root,
-            handoff_root=handoff_root,
+            workspace_root=workspace_root,
             include_running_detail=True,
         )
     )
@@ -250,7 +257,7 @@ def format_run_report_messages(
     if not include_status_grid:
         return pack_message_lines(body_lines, max_chars=max_chars)
 
-    grid = format_status_grid(state, run_id, handoff_root=handoff_root)
+    grid = format_status_grid(state, run_id, workspace_root=workspace_root)
     if not grid:
         body_lines.append("  (no stage rows)")
         return pack_message_lines(body_lines, max_chars=max_chars)

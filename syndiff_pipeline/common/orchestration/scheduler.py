@@ -15,45 +15,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List
 
-from syndiff_pipeline.template_creation.orchestration import condor, daemon, dispatch, launcher, logs
-from syndiff_pipeline.template_creation.orchestration.deployment import load_handoff_root_from_deployment
-from syndiff_pipeline.template_creation.orchestration.run_context import resolve_run_context
-from syndiff_pipeline.template_creation.orchestration.workspace import record_deployment_path
-from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
-from syndiff_pipeline.template_creation.orchestration.state import (
-    RUN_CANCELED,
-    SKIP_REASON_ARTIFACTS,
-    SKIP_REASON_NOT_SELECTED,
-    SKIP_REASON_STREAM,
-    SKIP_REASON_SUPERSEDED,
-    STATUS_BLOCKED,
-    STATUS_CANCELED,
-    STATUS_EXTERNAL,
-    STATUS_FAILED,
-    STATUS_PENDING,
-    STATUS_READY,
-    STATUS_RUNNING,
-    STATUS_SKIPPED,
-    STATUS_SUCCESS,
-    STAGE_DEPS,
-    STAGE_POOL,
-    TERMINAL_RUN_STATUSES,
-    PipelineState,
-    _utc_now,
-    artifact_verify_needed,
-    derive_run_final_status,
-    downstream_stages,
-    effective_stage_deps,
-    run_stage_closure,
-    stage_needs_artifact_verify_display,
-)
-from syndiff_pipeline.template_creation.orchestration.verify_status import (
+from syndiff_pipeline.common.orchestration import condor, daemon, launcher, logs
+from syndiff_pipeline.common.orchestration.deployment import load_workspace_root_from_deployment
+from syndiff_pipeline.common.orchestration.workspace import record_deployment_path
+import syndiff_pipeline.common.orchestration.state as pstate
+from syndiff_pipeline.common.orchestration.verify_status import (
     clear_verify_in_flight,
     write_verify_in_flight,
 )
 
 if TYPE_CHECKING:
-    from syndiff_pipeline.template_creation.orchestration.verify_worker import (
+    from syndiff_pipeline.common.orchestration.verify_worker import (
         BackfillTask,
         VerifyOutcome,
         VerifyTask,
@@ -67,11 +39,11 @@ _lock_fd: int | None = None
 
 NONTERMINAL_STATUSES = frozenset(
     {
-        STATUS_PENDING,
-        STATUS_READY,
-        STATUS_RUNNING,
-        STATUS_BLOCKED,
-        STATUS_EXTERNAL,
+        pstate.STATUS_PENDING,
+        pstate.STATUS_READY,
+        pstate.STATUS_RUNNING,
+        pstate.STATUS_BLOCKED,
+        pstate.STATUS_EXTERNAL,
     }
 )
 
@@ -94,22 +66,28 @@ _SHUTDOWN_VERIFY_DRAIN_S = 5.0
 _HEARTBEAT_FATAL_AFTER_S = 90.0
 
 
-def _ensure_discord_bot_on_startup(handoff_root: str) -> None:
+def _ensure_discord_bot_on_startup(workspace_root: str) -> None:
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
-        ensure_discord_bot_for_handoff_root,
+        ensure_discord_bot_for_workspace_root,
     )
 
     try:
-        result = ensure_discord_bot_for_handoff_root(handoff_root)
+        result = ensure_discord_bot_for_workspace_root(workspace_root)
     except Exception:
         log.warning("Discord bot startup ensure failed", exc_info=True)
         return
     if result is None:
         return
     if result.spawned and result.pid:
-        log.info("Started Discord bot pid=%s", result.pid)
+        log.info(
+            "Started Discord bot host=%s pid=%s",
+            result.host or daemon.local_hostname(),
+            result.pid,
+        )
     elif result.skipped_reason:
         log.warning("Discord bot not running: %s", result.skipped_reason)
+    elif result.pid and result.host:
+        log.info("Discord bot already running host=%s pid=%s", result.host, result.pid)
 
 
 def _age_seconds(iso_ts: str | None) -> float:
@@ -131,9 +109,9 @@ def _handle_signal(signum, frame):
     _shutdown = True
 
 
-def _write_local_heartbeat(handoff_root: str) -> None:
+def _write_local_heartbeat(workspace_root: str) -> None:
     """Write the host-local heartbeat file (NFS-independent liveness signal)."""
-    path = logs.daemon_heartbeat_file(handoff_root)
+    path = logs.daemon_heartbeat_file(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(str(time.time()), encoding="utf-8")
@@ -141,7 +119,7 @@ def _write_local_heartbeat(handoff_root: str) -> None:
 
 
 def _supervisor_heartbeat_loop(
-    state: PipelineState, handoff_root: str, pid: int, interval_s: float
+    state: pstate.PipelineState, workspace_root: str, pid: int, interval_s: float
 ) -> None:
     """Keep liveness fresh while the main loop is busy launching stages.
 
@@ -156,7 +134,7 @@ def _supervisor_heartbeat_loop(
         if _shutdown:
             break
         try:
-            _write_local_heartbeat(handoff_root)
+            _write_local_heartbeat(workspace_root)
             last_local_ok = time.monotonic()
         except Exception:
             log.exception("Failed to write local heartbeat file")
@@ -175,9 +153,9 @@ def _supervisor_heartbeat_loop(
             log.warning("Failed to update DB heartbeat (best-effort)", exc_info=True)
 
 
-def _write_summary(state: PipelineState, run_id: str, runs_root: str) -> None:
+def _write_summary(state: pstate.PipelineState, run_id: str, runs_root: str) -> None:
     counts = state.count_by_status(run_id)
-    summary = {"run_id": run_id, "counts": counts, "updated_at": _utc_now()}
+    summary = {"run_id": run_id, "counts": counts, "updated_at": pstate._utc_now()}
     logs.write_json_atomic(logs.summary_json_path(runs_root, run_id), summary)
     csv_path = logs.summary_csv_path(runs_root, run_id)
     rows = state.list_stage_runs(run_id)
@@ -211,13 +189,15 @@ def _write_summary(state: PipelineState, run_id: str, runs_root: str) -> None:
     tmp.replace(csv_path)
 
 
-def _load_run_context(state: PipelineState, run_id: str):
+def _load_run_context(state: pstate.PipelineState, run_id: str):
     run = state.get_run(run_id)
     if not run:
         return None
     runs_root = run["runs_root"]
     run_dir = logs.run_dir(runs_root, run_id)
     try:
+        from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+
         return resolve_run_context(run_dir=run_dir, run_id=run_id)
     except SystemExit as exc:
         # Missing/broken run directory must not crash the supervisor; skip it.
@@ -242,7 +222,7 @@ def _effective_exit_code(exit_code: int, log_path: str) -> int:
 
 
 def _notify_stage_outcome(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     *,
     target_label: str,
@@ -255,7 +235,7 @@ def _notify_stage_outcome(
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
-    from syndiff_pipeline.template_creation.orchestration.notifications import notifier_for_context
+    from syndiff_pipeline.common.orchestration.notifications import notifier_for_context
 
     notifier = notifier_for_context(state, ctx)
     if notifier is None:
@@ -272,7 +252,7 @@ def _notify_stage_outcome(
 
 
 def _notify_run_retried(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     *,
     target_label: str | None = None,
@@ -282,7 +262,7 @@ def _notify_run_retried(
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
-    from syndiff_pipeline.template_creation.orchestration.notifications import notifier_for_context
+    from syndiff_pipeline.common.orchestration.notifications import notifier_for_context
 
     notifier = notifier_for_context(state, ctx)
     if notifier is None:
@@ -296,17 +276,17 @@ def _notify_run_retried(
     )
 
 
-def _notify_run_canceled(state: PipelineState, run_id: str, running_before) -> None:
+def _notify_run_canceled(state: pstate.PipelineState, run_id: str, running_before) -> None:
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
-    from syndiff_pipeline.template_creation.orchestration.notifications import notifier_for_context
+    from syndiff_pipeline.common.orchestration.notifications import notifier_for_context
 
     notifier = notifier_for_context(state, ctx)
     if notifier is None:
         return
     runs_root = ctx.cfg.runs_dir()
-    finished_at = _utc_now()
+    finished_at = pstate._utc_now()
     for job in running_before:
         notifier.notify_stage_outcome(
             run_id,
@@ -320,8 +300,32 @@ def _notify_run_canceled(state: PipelineState, run_id: str, running_before) -> N
     notifier.notify_run_canceled(run_id, runs_root)
 
 
+def _resolve_local_pid(
+    job,
+    status_doc: dict | None,
+    *,
+    token_ok: bool,
+) -> tuple[int | None, bool, int | None]:
+    """Resolve PID, liveness, and status-file PID for a local running stage."""
+    status_pid: int | None = None
+    if status_doc is not None:
+        raw_status_pid = status_doc.get("pid")
+        if raw_status_pid is not None:
+            try:
+                status_pid = int(raw_status_pid)
+            except (TypeError, ValueError):
+                status_pid = None
+
+    pid = int(job.native_id) if job.native_id is not None else None
+    if pid is None and token_ok and status_pid is not None:
+        pid = status_pid
+
+    alive = pid is not None and daemon.is_process_alive(pid)
+    return pid, alive, status_pid
+
+
 def _finalize_stage(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     target_label: str,
     stage: str,
@@ -333,13 +337,13 @@ def _finalize_stage(
     log_path = log_path or str(logs.target_log_path(runs_root, run_id, target_label, stage))
     exit_code = _effective_exit_code(exit_code, log_path)
     error_tail = logs.read_log_tail(log_path, 20) if exit_code != 0 else ""
-    finished_at = _utc_now()
+    finished_at = pstate._utc_now()
     if exit_code == 0:
         state.update_stage_status(
             run_id,
             target_label,
             stage,
-            STATUS_SUCCESS,
+            pstate.STATUS_SUCCESS,
             finished_at=finished_at,
             exit_code=0,
             log_path=log_path,
@@ -359,7 +363,7 @@ def _finalize_stage(
             run_id,
             target_label,
             stage,
-            STATUS_CANCELED,
+            pstate.STATUS_CANCELED,
             finished_at=finished_at,
             exit_code=exit_code,
             log_path=log_path,
@@ -380,7 +384,7 @@ def _finalize_stage(
             run_id,
             target_label,
             stage,
-            STATUS_FAILED,
+            pstate.STATUS_FAILED,
             finished_at=finished_at,
             exit_code=exit_code,
             log_path=log_path,
@@ -401,7 +405,7 @@ def _finalize_stage(
 
 
 def reconcile_running_stages(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
 ) -> dict[str, int]:
@@ -410,7 +414,18 @@ def reconcile_running_stages(
     cfg = ctx.cfg
     runs_root = cfg.runs_dir()
 
-    for job in state.running_jobs(run_id):
+    running_jobs = list(state.running_jobs(run_id))
+    condor_cluster_ids = [
+        int(job.native_id)
+        for job in running_jobs
+        if (job.executor or cfg.stage_executor(job.stage)) == "condor"
+        and job.native_id is not None
+    ]
+    cluster_status = (
+        condor.query_clusters(condor_cluster_ids) if condor_cluster_ids else {}
+    )
+
+    for job in running_jobs:
         executor = job.executor or cfg.stage_executor(job.stage)
         native_id = job.native_id
         status_doc = _read_status_file(runs_root, run_id, job.target_label, job.stage)
@@ -421,29 +436,35 @@ def reconcile_running_stages(
                 # between claim and submit). Requeue once past the grace window.
                 if _age_seconds(job.claimed_at) >= _LOCAL_START_GRACE_S:
                     died_reason = "Condor stage claimed but never submitted; requeued"
-                    state.requeue_running_stage(
-                        run_id,
-                        job.target_label,
-                        job.stage,
-                        error_tail=died_reason,
-                    )
-                    _notify_stage_outcome(
+                    if _requeue_or_fail_stage(
                         state,
                         run_id,
-                        target_label=job.target_label,
-                        stage=job.stage,
-                        outcome="died",
+                        job,
                         runs_root=runs_root,
-                        finished_at=_utc_now(),
-                        error_tail=died_reason,
-                    )
-                    counts["requeued"] += 1
+                        reason=died_reason,
+                        max_attempts=cfg.max_stage_attempts,
+                        requeue_backoff_s=cfg.requeue_backoff_s,
+                    ):
+                        counts["requeued"] += 1
+                    else:
+                        counts["failed"] += 1
                 else:
                     counts["still_running"] += 1
                 continue
             # Wall-clock submit epoch (DB-persisted) drives the poll grace.
             submit_epoch = job.submit_epoch if job.submit_epoch is not None else 0.0
-            exit_code = condor.poll_cluster(int(native_id), submitted_at=submit_epoch)
+            status, raw_exit = cluster_status.get(int(native_id), (None, None))
+            hold_path = condor.condor_artifact_paths(
+                runs_root, run_id, job.target_label, job.stage
+            )["hold"]
+            exit_code = condor.poll_cluster_status(
+                int(native_id),
+                status,
+                raw_exit,
+                submitted_at=submit_epoch,
+                hold_timeout_s=cfg.condor_hold_timeout_s,
+                hold_path=hold_path,
+            )
             if exit_code is None:
                 counts["still_running"] += 1
                 continue
@@ -474,7 +495,27 @@ def reconcile_running_stages(
         )
 
         if token_ok and status_doc.get("state") in ("exited", "success", "failed"):
-            exit_code = int(status_doc.get("exit_code") or 0)
+            raw_exit = status_doc.get("exit_code")
+            if raw_exit is None:
+                _pid, alive, _status_pid = _resolve_local_pid(job, status_doc, token_ok=token_ok)
+                if alive:
+                    counts["still_running"] += 1
+                    continue
+                if _requeue_local_stage(
+                    state,
+                    run_id,
+                    job,
+                    runs_root=runs_root,
+                    reason="Local stage exited without exit code; requeued",
+                    terminate_if_alive=False,
+                    max_attempts=cfg.max_stage_attempts,
+                    requeue_backoff_s=cfg.requeue_backoff_s,
+                ):
+                    counts["requeued"] += 1
+                else:
+                    counts["failed"] += 1
+                continue
+            exit_code = int(raw_exit)
             _finalize_stage(
                 state,
                 run_id,
@@ -486,11 +527,23 @@ def reconcile_running_stages(
             counts["completed" if exit_code == 0 else "failed"] += 1
             continue
 
-        pid = int(native_id) if native_id is not None else None
-        alive = pid is not None and daemon.is_process_alive(pid)
+        pid, alive, status_pid = _resolve_local_pid(job, status_doc, token_ok=token_ok)
 
         if alive and token_ok:
             # Our process is alive and the token matches: adopt, never relaunch.
+            if native_id is None and status_pid is not None:
+                log_path = job.log_path or str(
+                    logs.target_log_path(runs_root, run_id, job.target_label, job.stage)
+                )
+                state.set_launch_descriptor(
+                    run_id,
+                    job.target_label,
+                    job.stage,
+                    executor="local",
+                    native_id=status_pid,
+                    submit_epoch=job.submit_epoch,
+                    log_path=log_path,
+                )
             counts["adopted"] += 1
             counts["still_running"] += 1
             continue
@@ -506,24 +559,35 @@ def reconcile_running_stages(
             continue
 
         # Dead without an exit record, or stale/mismatched token past grace: requeue.
-        _requeue_local_stage(
+        if _requeue_local_stage(
             state,
             run_id,
             job,
             runs_root=runs_root,
             reason="Local stage lost or stale; requeued",
             terminate_if_alive=alive,
-        )
-        counts["requeued"] += 1
+            max_attempts=cfg.max_stage_attempts,
+            requeue_backoff_s=cfg.requeue_backoff_s,
+        ):
+            counts["requeued"] += 1
+        else:
+            counts["failed"] += 1
 
     return counts
+
+
+def _pipeline_spec():
+    from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
+
+    return get_syndiff_pipeline()
 
 
 def _blocking_depth(stage: str, memo: dict[str, int] | None = None) -> int:
     memo = memo if memo is not None else {}
     if stage in memo:
         return memo[stage]
-    deps = STAGE_DEPS.get(stage, [])
+    spec = _pipeline_spec().get(stage)
+    deps = list(spec.deps) if spec is not None else []
     if not deps:
         memo[stage] = 0
         return 0
@@ -532,14 +596,14 @@ def _blocking_depth(stage: str, memo: dict[str, int] | None = None) -> int:
     return depth
 
 
-def _verify_outcome_still_applicable(state: PipelineState, key: VerifyTaskKey) -> bool:
+def _verify_outcome_still_applicable(state: pstate.PipelineState, key: VerifyTaskKey) -> bool:
     """True if a verify result may still be applied to SQLite for *key*."""
     run = state.get_run(key.run_id) or {}
     if run.get("force_rerun") and key.stage in set(state.get_active_stages(key.run_id)):
         # Selected stages are being force-rerun; do not artifact-skip them.
         return False
     row = state.get_stage_run(key.run_id, key.target_label, key.stage)
-    if row is None or row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
+    if row is None or row.status not in (pstate.STATUS_PENDING, pstate.STATUS_EXTERNAL):
         return False
     if state.external_verify_complete(key.run_id, key.target_label, key.stage):
         return False
@@ -547,7 +611,7 @@ def _verify_outcome_still_applicable(state: PipelineState, key: VerifyTaskKey) -
 
 
 def _verify_worker():
-    from syndiff_pipeline.template_creation.orchestration.verify_worker import try_get_verify_worker
+    from syndiff_pipeline.common.orchestration.verify_worker import try_get_verify_worker
 
     return try_get_verify_worker()
 
@@ -564,27 +628,30 @@ def _cancel_verify_keys(keys: list[VerifyTaskKey]) -> None:
         worker.cancel_keys(keys)
 
 
-def _apply_verify_outcome(state: PipelineState, outcome: VerifyOutcome) -> int:
+def _apply_verify_outcome(state: pstate.PipelineState, outcome: VerifyOutcome) -> int:
     """Persist one verify result; return 1 if the stage was skipped."""
     key = outcome.key
     if not _verify_outcome_still_applicable(state, key):
         return 0
     if outcome.error:
-        state.cache_external_check(
-            key.run_id, key.target_label, key.stage, complete=False
+        log.warning(
+            "Verify error for %s/%s/%s: %s",
+            key.run_id,
+            key.target_label,
+            key.stage,
+            outcome.error,
         )
         return 0
     if outcome.complete:
         state.mark_skipped(key.run_id, key.target_label, key.stage)
         state.cache_skip_reason(
-            key.run_id, key.target_label, key.stage, SKIP_REASON_ARTIFACTS
+            key.run_id, key.target_label, key.stage, pstate.SKIP_REASON_ARTIFACTS
         )
         state.cache_external_check(
             key.run_id,
             key.target_label,
             key.stage,
             complete=True,
-            path=outcome.stable_path,
         )
         return 1
     state.cache_external_check(
@@ -594,14 +661,14 @@ def _apply_verify_outcome(state: PipelineState, outcome: VerifyOutcome) -> int:
 
 
 def _iter_verify_candidates(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
     *,
     force_rerun: bool,
 ) -> list[tuple]:
     """Collect uncached pending/external stages eligible for verification."""
-    from syndiff_pipeline.template_creation.orchestration.verify_worker import VerifyTaskKey
+    from syndiff_pipeline.common.orchestration.verify_worker import VerifyTaskKey
 
     active_stages = set(state.get_active_stages(run_id))
     cfg = ctx.cfg
@@ -616,34 +683,47 @@ def _iter_verify_candidates(
         rows = rows_by_label.get(label)
         if not rows:
             continue
+        from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
         resolved = resolve_config(target, cfg)
         for row in rows:
-            if row.status not in (STATUS_PENDING, STATUS_EXTERNAL):
+            if row.status not in (pstate.STATUS_PENDING, pstate.STATUS_EXTERNAL):
                 continue
             if force_rerun and row.stage in active_stages:
                 continue
             if row.stage == "ps1_download":
                 if resolved.stages.ps1_process.ps1_source == "stream":
                     continue
-                if state.get_skip_reason(run_id, label, "ps1_download") == SKIP_REASON_STREAM:
+                if state.get_skip_reason(run_id, label, "ps1_download") == pstate.SKIP_REASON_STREAM:
                     continue
             if (
                 state.get_skip_reason(run_id, label, row.stage)
-                in (SKIP_REASON_NOT_SELECTED, SKIP_REASON_SUPERSEDED)
+                in (pstate.SKIP_REASON_NOT_SELECTED, pstate.SKIP_REASON_SUPERSEDED)
             ):
                 continue
-            if row.status == STATUS_EXTERNAL:
-                if not artifact_verify_needed(
-                    state, run_id, label, row.stage, list(active_stages)
+            if row.status == pstate.STATUS_EXTERNAL:
+                if not pstate.artifact_verify_needed(
+                    state,
+                    run_id,
+                    label,
+                    row.stage,
+                    list(active_stages),
+                    spec=state.pipeline_spec,
                 ):
                     continue
-            elif row.status == STATUS_PENDING:
+            elif row.status == pstate.STATUS_PENDING:
                 if row.stage in active_stages:
                     pass
                 elif (
-                    row.stage in run_stage_closure(active_stages)
-                    and artifact_verify_needed(
-                        state, run_id, label, row.stage, list(active_stages)
+                    row.stage
+                    in state.pipeline_spec.artifact_verify_closure(active_stages)
+                    and pstate.artifact_verify_needed(
+                        state,
+                        run_id,
+                        label,
+                        row.stage,
+                        list(active_stages),
+                        spec=state.pipeline_spec,
                     )
                 ):
                     pass
@@ -651,9 +731,12 @@ def _iter_verify_candidates(
                     continue
             else:
                 continue
-            if state.external_verify_complete(run_id, label, row.stage):
+            if row.status == pstate.STATUS_PENDING:
+                if state.external_verify_attempted(run_id, label, row.stage):
+                    continue
+            elif state.external_verify_complete(run_id, label, row.stage):
                 continue
-            if row.status == STATUS_PENDING and not state.deps_satisfied(
+            if row.status == pstate.STATUS_PENDING and not state.deps_satisfied(
                 run_id, label, row.stage, stages=resolved.stages
             ):
                 continue
@@ -676,7 +759,7 @@ def _iter_verify_candidates(
     def _sort_key(item: tuple) -> tuple:
         key, status, _resolved, _mp, _sp = item
         return (
-            0 if status == STATUS_PENDING else 1,
+            0 if status == pstate.STATUS_PENDING else 1,
             -_blocking_depth(key.stage),
             key.target_label,
             key.stage,
@@ -687,7 +770,7 @@ def _iter_verify_candidates(
 
 
 def _verify_backlog(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
     *,
@@ -702,8 +785,19 @@ def _verify_backlog(
     return pending, in_flight
 
 
+def collect_verify_status_for_run(
+    state: pstate.PipelineState,
+    run_id: str,
+) -> dict | None:
+    """Live artifact-scan observability for one run (daemon worker must be active)."""
+    run = state.get_run(run_id)
+    if not run:
+        return None
+    return _collect_verify_status_by_run(state, [run]).get(run_id)
+
+
 def _collect_verify_status_by_run(
-    state: PipelineState,
+    state: pstate.PipelineState,
     runs: list[dict],
 ) -> dict[str, dict]:
     """Build per-run verify observability payload for host-local JSON."""
@@ -735,7 +829,7 @@ def _collect_verify_status_by_run(
 
 
 def _run_verify_pass(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
     *,
@@ -746,7 +840,7 @@ def _run_verify_pass(
 ) -> int:
     """Manifest fast path on main thread; full verify in background pool."""
     from syndiff_pipeline.template_creation.orchestration.verify import check_manifests_only
-    from syndiff_pipeline.template_creation.orchestration.verify_worker import (
+    from syndiff_pipeline.common.orchestration.verify_worker import (
         BackfillTask,
         VerifyOutcome,
         VerifyTask,
@@ -773,11 +867,17 @@ def _run_verify_pass(
                 key.stage,
                 manifest_path=manifest_path,
                 stable_manifest_path=stable_path,
+                runner_cfg=ctx.cfg,
+                meta=ctx.meta,
             )
             if manifest_hit is True:
                 budget_left -= 1
                 if check_manifests_only(
-                    resolved, key.stage, stable_manifest_path=stable_path
+                    resolved,
+                    key.stage,
+                    stable_manifest_path=stable_path,
+                    runner_cfg=ctx.cfg,
+                    meta=ctx.meta,
                 ) is not True:
                     backfills.append(
                         BackfillTask(
@@ -804,6 +904,8 @@ def _run_verify_pass(
                     manifest_path=manifest_path,
                     stable_path=stable_path,
                     resolved=resolved,
+                    runner_cfg=ctx.cfg,
+                    meta=ctx.meta,
                 )
             )
 
@@ -836,7 +938,7 @@ def _run_verify_pass(
 
 
 def _resolve_external_and_pending_skips(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
     *,
@@ -858,7 +960,7 @@ def _resolve_external_and_pending_skips(
 
 
 def _schedule_external_and_pending_skips(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
     *,
@@ -881,22 +983,22 @@ def _schedule_external_and_pending_skips(
 def _cancel_verify_for_retry(
     run_id: str, target_label: str, stage: str, *, reset_downstream: bool
 ) -> None:
-    from syndiff_pipeline.template_creation.orchestration.verify_worker import VerifyTaskKey
+    from syndiff_pipeline.common.orchestration.verify_worker import VerifyTaskKey
 
     stages = [stage] + (
-        downstream_stages(stage) if reset_downstream else []
+        _pipeline_spec().downstream_stages(stage) if reset_downstream else []
     )
     keys = [VerifyTaskKey(run_id, target_label, s) for s in stages]
     _cancel_verify_keys(keys)
 
 
-def _global_pool_running(state: PipelineState) -> dict[str, int]:
+def _global_pool_running(state: pstate.PipelineState) -> dict[str, int]:
     """Running stage count per pool across ALL runs (global capacity)."""
     pool_running: dict[str, int] = defaultdict(int)
     for job in state.running_stage_runs(None):
-        pool = STAGE_POOL.get(job.stage)
-        if pool:
-            pool_running[pool] += 1
+        stage_spec = _pipeline_spec().get(job.stage)
+        if stage_spec is not None and stage_spec.pool:
+            pool_running[stage_spec.pool] += 1
     return pool_running
 
 
@@ -904,46 +1006,49 @@ def _pool_capacity(pool_running: dict[str, int], pool_name: str, pool_cfg) -> in
     return max(0, pool_cfg.max_concurrent - pool_running.get(pool_name, 0))
 
 
-def _stall_reasons(state: PipelineState, run_id: str, ctx) -> List[str]:
+def _stall_reasons(state: pstate.PipelineState, run_id: str, ctx) -> List[str]:
     reasons: List[str] = []
     cfg = ctx.cfg
     pool_running = _global_pool_running(state)
 
     for row in state.list_stage_runs(run_id):
-        if row.status not in (STATUS_PENDING, STATUS_READY, STATUS_BLOCKED, STATUS_EXTERNAL):
+        if row.status not in (pstate.STATUS_PENDING, pstate.STATUS_READY, pstate.STATUS_BLOCKED, pstate.STATUS_EXTERNAL):
             continue
         label = row.target_label
         stage = row.stage
-        if row.status == STATUS_BLOCKED:
+        if row.status == pstate.STATUS_BLOCKED:
             reasons.append(f"{label}/{stage}: blocked by upstream failure")
             continue
         target = next((t for t in ctx.targets if t.label() == label), None)
+        from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
         stages = resolve_config(target, cfg).stages if target is not None else None
         if not state.deps_satisfied(run_id, label, stage, stages=stages):
             missing = []
-            for dep in effective_stage_deps(stage, stages):
+            for dep in _pipeline_spec().effective_stage_deps(stage, stages):
                 dep_row = state.get_stage_run(run_id, label, dep)
-                if dep_row is None or dep_row.status not in (STATUS_SUCCESS, STATUS_SKIPPED):
+                if dep_row is None or dep_row.status not in (pstate.STATUS_SUCCESS, pstate.STATUS_SKIPPED):
                     missing.append(f"{dep}={dep_row.status if dep_row else 'missing'}")
             reasons.append(f"{label}/{stage}: waiting on {', '.join(missing)}")
             continue
-        if row.status in (STATUS_PENDING, STATUS_EXTERNAL):
+        if row.status in (pstate.STATUS_PENDING, pstate.STATUS_EXTERNAL):
             active_stages = state.get_active_stages(run_id)
-            needs_verify = stage_needs_artifact_verify_display(
+            needs_verify = pstate.stage_needs_artifact_verify_display(
                 state, run_id, label, stage, row.status, active_stages
             )
             if needs_verify and not state.external_verify_complete(
                 run_id, label, stage
             ):
                 reasons.append(f"{label}/{stage}: artifact verify queued")
-            elif row.status == STATUS_PENDING:
+            elif row.status == pstate.STATUS_PENDING:
                 reasons.append(f"{label}/{stage}: pending promotion")
             else:
                 reasons.append(f"{label}/{stage}: artifact verify queued")
             continue
-        if row.status == STATUS_READY:
-            pool = STAGE_POOL.get(stage)
-            if pool:
+        if row.status == pstate.STATUS_READY:
+            stage_spec = _pipeline_spec().get(stage)
+            if stage_spec is not None and stage_spec.pool:
+                pool = stage_spec.pool
                 cap = cfg.resources.get(pool)
                 if cap and pool_running[pool] >= cap.max_concurrent:
                     reasons.append(f"{label}/{stage}: pool {pool} saturated")
@@ -955,7 +1060,7 @@ def _stall_reasons(state: PipelineState, run_id: str, ctx) -> List[str]:
 
 
 def _try_launch_ready_row(
-    state: PipelineState,
+    state: pstate.PipelineState,
     run_id: str,
     ctx,
     row,
@@ -973,10 +1078,12 @@ def _try_launch_ready_row(
     if target is None:
         return False
 
+    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
     cfg = ctx.cfg
     target_stages = resolve_config(target, cfg).stages
     if not state.deps_satisfied(run_id, row.target_label, row.stage, stages=target_stages):
-        state.update_stage_status(run_id, row.target_label, row.stage, STATUS_PENDING)
+        state.update_stage_status(run_id, row.target_label, row.stage, pstate.STATUS_PENDING)
         return False
 
     executor = cfg.stage_executor(row.stage)
@@ -991,6 +1098,8 @@ def _try_launch_ready_row(
         logs.stage_status_path(
             runs_root, run_id, row.target_label, row.stage
         ).unlink(missing_ok=True)
+
+    from syndiff_pipeline.template_creation.orchestration import dispatch
 
     cmd = dispatch.build_stage_command(
         run_id,
@@ -1013,7 +1122,15 @@ def _try_launch_ready_row(
         )
     except Exception:
         log.exception("Launch failed for %s / %s; requeuing", row.target_label, row.stage)
-        state.requeue_to_ready(run_id, row.target_label, row.stage, error_tail="Launch failed")
+        _requeue_or_fail_after_launch_failure(
+            state,
+            run_id,
+            row.target_label,
+            row.stage,
+            cfg=cfg,
+            runs_root=runs_root,
+            reason="Launch failed",
+        )
         return False
 
     state.set_launch_descriptor(
@@ -1036,7 +1153,7 @@ def _try_launch_ready_row(
     return True
 
 
-def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
+def _tick_run(state: pstate.PipelineState, run_id: str, ctx) -> None:
     run = state.get_run(run_id) or {}
     if state.is_paused(run_id):
         return
@@ -1059,6 +1176,8 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
         force_rerun=force_rerun,
         budget=ctx.cfg.verify_budget_per_tick,
     )
+    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
     targets_by_label = {t.label(): t for t in ctx.targets}
     target_stages_map = {
         label: resolve_config(target, ctx.cfg).stages
@@ -1093,11 +1212,11 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
             )
 
     counts = state.count_by_status(run_id)
-    running = counts.get(STATUS_RUNNING, 0)
+    running = counts.get(pstate.STATUS_RUNNING, 0)
     launchable = sum(
         1
         for row in state.list_stage_runs(run_id)
-        if row.status == STATUS_READY
+        if row.status == pstate.STATUS_READY
         and state.deps_satisfied(
             run_id,
             row.target_label,
@@ -1108,19 +1227,19 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     nonterminal = sum(counts.get(s, 0) for s in NONTERMINAL_STATUSES)
 
     prev_status = run.get("status")
-    from syndiff_pipeline.template_creation.orchestration.notifications import notifier_for_context
+    from syndiff_pipeline.common.orchestration.notifications import notifier_for_context
 
     notifier = notifier_for_context(state, ctx)
 
     if nonterminal == 0:
-        final = derive_run_final_status(counts)
-        prev_terminal = prev_status in TERMINAL_RUN_STATUSES
+        final = pstate.derive_run_final_status(counts)
+        prev_terminal = prev_status in pstate.TERMINAL_RUN_STATUSES
         state.set_run_status(run_id, final)
         if not prev_terminal:
             log.info("Run %s complete: %s", run_id, final)
             # Canceled runs already received notify_run_canceled when the intent
             # was applied; do not also emit run_completed(success).
-            if notifier is not None and final != RUN_CANCELED:
+            if notifier is not None and final != pstate.RUN_CANCELED:
                 notifier.notify_run_completed(run_id, runs_root, outcome=final)
         elif final != prev_status:
             log.info(
@@ -1160,24 +1279,123 @@ def _tick_run(state: PipelineState, run_id: str, ctx) -> None:
     _write_summary(state, run_id, runs_root)
 
 
-def _requeue_local_stage(
-    state: PipelineState,
+def _requeue_or_fail_after_launch_failure(
+    state: pstate.PipelineState,
+    run_id: str,
+    target_label: str,
+    stage: str,
+    *,
+    cfg,
+    runs_root: str,
+    reason: str,
+) -> None:
+    """Requeue after launch failure, or finalize as failed after max attempts."""
+    row = state.get_stage_run(run_id, target_label, stage)
+    attempts = (row.attempts or 0) if row else 0
+    if attempts >= cfg.max_stage_attempts:
+        fail_reason = f"{reason} (gave up after {attempts} attempts)"
+        finished_at = pstate._utc_now()
+        log.warning(
+            "Giving up on %s / %s after %d attempts: %s",
+            target_label,
+            stage,
+            attempts,
+            reason,
+        )
+        state.update_stage_status(
+            run_id,
+            target_label,
+            stage,
+            pstate.STATUS_FAILED,
+            finished_at=finished_at,
+            error_tail=fail_reason,
+        )
+        state.block_downstream(run_id, target_label, stage)
+        state.clear_launch_fields(run_id, target_label, stage)
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=target_label,
+            stage=stage,
+            outcome="failed",
+            runs_root=runs_root,
+            finished_at=finished_at,
+            error_tail=fail_reason,
+        )
+        return
+
+    backoff_s = cfg.requeue_backoff_s * attempts
+    log.info(
+        "Requeued %s / %s after launch failure: %s (backoff %.1fs)",
+        target_label,
+        stage,
+        reason,
+        backoff_s,
+    )
+    state.requeue_to_ready(
+        run_id,
+        target_label,
+        stage,
+        error_tail=reason,
+        backoff_s=backoff_s,
+    )
+
+
+def _requeue_or_fail_stage(
+    state: pstate.PipelineState,
     run_id: str,
     job,
     *,
     runs_root: str,
     reason: str,
-    terminate_if_alive: bool,
-) -> None:
-    """Requeue a local running stage, terminating a live worker first."""
+    max_attempts: int,
+    requeue_backoff_s: float,
+    terminate_if_alive: bool = False,
+) -> bool:
+    """Requeue a lost running stage, or finalize as failed after max attempts."""
+    attempts = job.attempts or 0
+    if attempts >= max_attempts:
+        fail_reason = f"{reason} (gave up after {attempts} attempts)"
+        finished_at = pstate._utc_now()
+        log.warning(
+            "Giving up on %s / %s after %d attempts: %s",
+            job.target_label,
+            job.stage,
+            attempts,
+            reason,
+        )
+        state.update_stage_status(
+            run_id,
+            job.target_label,
+            job.stage,
+            pstate.STATUS_FAILED,
+            finished_at=finished_at,
+            error_tail=fail_reason,
+        )
+        state.block_downstream(run_id, job.target_label, job.stage)
+        state.clear_launch_fields(run_id, job.target_label, job.stage)
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=job.target_label,
+            stage=job.stage,
+            outcome="failed",
+            runs_root=runs_root,
+            finished_at=finished_at,
+            error_tail=fail_reason,
+        )
+        return False
+
     if terminate_if_alive and job.native_id is not None:
         _terminate_job(job)
-    log.info("Requeued %s / %s: %s", job.target_label, job.stage, reason)
+    backoff_s = requeue_backoff_s * attempts
+    log.info("Requeued %s / %s: %s (backoff %.1fs)", job.target_label, job.stage, reason, backoff_s)
     state.requeue_running_stage(
         run_id,
         job.target_label,
         job.stage,
         error_tail=reason,
+        backoff_s=backoff_s,
     )
     _notify_stage_outcome(
         state,
@@ -1186,8 +1404,33 @@ def _requeue_local_stage(
         stage=job.stage,
         outcome="died",
         runs_root=runs_root,
-        finished_at=_utc_now(),
+        finished_at=pstate._utc_now(),
         error_tail=reason,
+    )
+    return True
+
+
+def _requeue_local_stage(
+    state: pstate.PipelineState,
+    run_id: str,
+    job,
+    *,
+    runs_root: str,
+    reason: str,
+    terminate_if_alive: bool,
+    max_attempts: int,
+    requeue_backoff_s: float,
+) -> bool:
+    """Requeue a local running stage, terminating a live worker first."""
+    return _requeue_or_fail_stage(
+        state,
+        run_id,
+        job,
+        runs_root=runs_root,
+        reason=reason,
+        max_attempts=max_attempts,
+        requeue_backoff_s=requeue_backoff_s,
+        terminate_if_alive=terminate_if_alive,
     )
 
 
@@ -1201,12 +1444,12 @@ def _terminate_job(job) -> None:
         daemon.terminate_process_tree(int(job.native_id))
 
 
-def _terminate_run_jobs(state: PipelineState, run_id: str) -> None:
+def _terminate_run_jobs(state: pstate.PipelineState, run_id: str) -> None:
     for job in state.running_stage_runs(run_id):
         _terminate_job(job)
 
 
-def _apply_commands(state: PipelineState) -> None:
+def _apply_commands(state: pstate.PipelineState) -> None:
     for cmd in state.fetch_pending_commands():
         args = json.loads(cmd.args_json or "{}")
         try:
@@ -1229,7 +1472,7 @@ def _apply_commands(state: PipelineState) -> None:
                     row = state.get_stage_run(
                         cmd.run_id, args["target_label"], args["stage"]
                     )
-                    if row and row.status == STATUS_RUNNING:
+                    if row and row.status == pstate.STATUS_RUNNING:
                         _terminate_job(row)
                     reset_downstream = bool(args.get("reset_downstream", True))
                     state.apply_retry_stage(
@@ -1263,7 +1506,7 @@ def _apply_commands(state: PipelineState) -> None:
                 for label in labels:
                     for stage in stages_arg:
                         row = state.get_stage_run(cmd.run_id, label, stage)
-                        if row and row.status == STATUS_RUNNING:
+                        if row and row.status == pstate.STATUS_RUNNING:
                             _terminate_job(row)
                 state.apply_force_rerun(cmd.run_id, labels, stages_arg)
                 _cancel_verify_run(cmd.run_id)
@@ -1273,43 +1516,42 @@ def _apply_commands(state: PipelineState) -> None:
             state.mark_command_processed(cmd.id)
 
 
-def run_supervisor_daemon(handoff_root: str) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [supervisor] %(message)s",
-    )
+def run_supervisor_daemon(workspace_root: str) -> int:
+    daemon.configure_process_logging("supervisor")
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
     global _lock_fd
     # Non-blocking exclusive lock: a second daemon must fail to acquire and exit,
     # not block forever waiting for the incumbent owner.
-    from syndiff_pipeline.template_creation.orchestration.workspace import state_db_path
+    from syndiff_pipeline.common.orchestration.workspace import state_db_path
 
-    db_path = str(state_db_path(handoff_root))
-    with daemon.daemon_lock(handoff_root, blocking=False) as fd:
+    db_path = str(state_db_path(workspace_root))
+    with daemon.daemon_lock(workspace_root, blocking=False) as fd:
         if fd is None:
             log.info("Another supervisor already owns the lock; exiting.")
             return 0
         _lock_fd = fd
 
-        pid_path = logs.daemon_pid_path(handoff_root)
+        pid_path = logs.daemon_pid_path(workspace_root)
         pid = os.getpid()
-        daemon.write_pid(pid_path, pid)
-        state = PipelineState(db_path)
+        host = daemon.local_hostname()
+        daemon.write_process_identity(pid_path, pid, host=host)
+        log.info("Supervisor started workspace=%s", workspace_root)
+        state = pstate.PipelineState(db_path)
         # Establish liveness immediately (local file is authoritative) before
         # the first — potentially slow — scheduling pass begins.
-        _write_local_heartbeat(handoff_root)
+        _write_local_heartbeat(workspace_root)
         state.update_supervisor_heartbeat(pid)
 
         heartbeat_thread = threading.Thread(
             target=_supervisor_heartbeat_loop,
-            args=(state, handoff_root, pid, _HEARTBEAT_INTERVAL_S),
+            args=(state, workspace_root, pid, _HEARTBEAT_INTERVAL_S),
             name="supervisor-heartbeat",
             daemon=True,
         )
         heartbeat_thread.start()
-        _ensure_discord_bot_on_startup(handoff_root)
+        _ensure_discord_bot_on_startup(workspace_root)
 
         try:
             while not _shutdown:
@@ -1335,7 +1577,7 @@ def run_supervisor_daemon(handoff_root: str) -> int:
                 worker = _verify_worker()
                 active_runs = state.list_active_runs()
                 by_run = _collect_verify_status_by_run(state, active_runs)
-                write_verify_in_flight(handoff_root, by_run)
+                write_verify_in_flight(workspace_root, by_run)
 
                 # Interruptible idle: wake early on shutdown instead of sleeping
                 # through a SIGTERM.
@@ -1357,17 +1599,18 @@ def run_supervisor_daemon(handoff_root: str) -> int:
                         worker.drain(apply, block=False)
                     except Exception:
                         log.exception("Error draining verify worker on shutdown")
-                from syndiff_pipeline.template_creation.orchestration.verify_worker import shutdown_verify_worker
+                from syndiff_pipeline.common.orchestration.verify_worker import shutdown_verify_worker
 
                 shutdown_verify_worker(wait=_shutdown)
+            log.info("Supervisor shutting down workspace=%s", workspace_root)
             state.clear_supervisor()
             daemon.remove_pid_file(pid_path)
             try:
-                logs.daemon_heartbeat_file(handoff_root).unlink(missing_ok=True)
+                logs.daemon_heartbeat_file(workspace_root).unlink(missing_ok=True)
             except OSError:
                 pass
             try:
-                clear_verify_in_flight(handoff_root)
+                clear_verify_in_flight(workspace_root)
             except OSError:
                 pass
     return 0
@@ -1384,15 +1627,18 @@ def run_scheduler(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [scheduler] %(message)s",
     )
+    from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+    from syndiff_pipeline.template_creation.orchestration import dispatch
+
     ctx = resolve_run_context(run_dir=run_dir, run_id=run_id)
-    state = PipelineState(ctx.cfg.state_db_path)
+    state = pstate.PipelineState(ctx.cfg.state_db_path)
     active = dispatch.parse_stage_list(stages_arg)
 
     run_row = state.get_run(run_id)
     if run_row is not None:
         log.error(
             "Run %s already exists; choose a new --run-id for submit/run, "
-            "or use syndiff-template retry for failed stages.",
+            "or use syndiff retry for failed stages.",
             run_id,
         )
         return 1
@@ -1405,6 +1651,9 @@ def run_scheduler(
         active,
         force_rerun=force_rerun,
     )
+    from syndiff_pipeline.common.orchestration.run_setup import apply_post_create_run_setup
+
+    apply_post_create_run_setup(state, run_id, ctx.targets, ctx.cfg, active)
 
     state.set_run_status(run_id, "running")
     while True:
@@ -1437,9 +1686,9 @@ def main(argv: list[str] | None = None) -> int:
         if not args.deployment:
             raise SystemExit("--deployment required for --daemon")
         deploy_path = Path(args.deployment).expanduser().resolve()
-        handoff_root = str(load_handoff_root_from_deployment(deploy_path))
-        record_deployment_path(handoff_root, deploy_path)
-        return run_supervisor_daemon(handoff_root)
+        workspace_root = str(load_workspace_root_from_deployment(deploy_path))
+        record_deployment_path(workspace_root, deploy_path)
+        return run_supervisor_daemon(workspace_root)
 
     if not args.run_id or not args.run_dir:
         raise SystemExit("--run-id and --run-dir required without --daemon")

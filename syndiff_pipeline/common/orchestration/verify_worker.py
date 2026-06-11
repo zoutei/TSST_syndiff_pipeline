@@ -16,7 +16,10 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
-from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
+from syndiff_pipeline.template_creation.orchestration.runner_config import (
+    ResolvedTargetConfig,
+    RunnerConfig,
+)
 from syndiff_pipeline.template_creation.orchestration.verify import (
     copy_manifest_to_stable,
     stage_complete,
@@ -42,6 +45,8 @@ class VerifyTask:
     manifest_path: str
     stable_path: str
     resolved: ResolvedTargetConfig
+    runner_cfg: "RunnerConfig | None" = None
+    meta: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -78,11 +83,17 @@ def _run_verify_task(task: VerifyTask) -> VerifyOutcome:
             task.key.stage,
             manifest_path=task.manifest_path,
             stable_manifest_path=task.stable_path,
+            runner_cfg=task.runner_cfg,
+            meta=task.meta,
         )
         if complete:
             try:
                 write_stable_manifest(
-                    task.resolved, task.key.stage, task.stable_path
+                    task.resolved,
+                    task.key.stage,
+                    task.stable_path,
+                    runner_cfg=task.runner_cfg,
+                    meta=task.meta,
                 )
             except Exception as exc:  # noqa: BLE001 - manifest write must not fail verify
                 log.debug(

@@ -12,7 +12,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration.notifications import (
+from syndiff_pipeline.common.orchestration.notifications import (
     _DISCORD_MAX_CONTENT,
     NotificationConfig,
     NotificationEvents,
@@ -38,14 +38,14 @@ from syndiff_pipeline.template_creation.orchestration.run_report import (
     format_run_report_messages,
     format_status_grid,
 )
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.state import (
     STAGE_NAMES,
     PipelineState,
     STATUS_PENDING,
     STATUS_RUNNING,
     STATUS_SUCCESS,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 
 
 class TestNotificationConfig(unittest.TestCase):
@@ -148,7 +148,7 @@ class TestRunStarted(unittest.TestCase):
             )
             cfg = NotificationConfig(enabled=True)
             with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
             ) as post:
                 send_run_started_notification(
                     state,
@@ -158,7 +158,7 @@ class TestRunStarted(unittest.TestCase):
                     run_dir=base / "runs" / "r1",
                     target_labels=[target.label()],
                     stages=["mapping"],
-                    handoff_root=str(handoff),
+                    workspace_root=str(handoff),
                     deployment_file="deployment.yaml",
                 )
                 send_run_started_notification(
@@ -169,7 +169,7 @@ class TestRunStarted(unittest.TestCase):
                     run_dir=base / "runs" / "r1",
                     target_labels=[target.label()],
                     stages=["mapping"],
-                    handoff_root=str(handoff),
+                    workspace_root=str(handoff),
                     deployment_file="deployment.yaml",
                 )
                 self.assertEqual(post.call_count, 1)
@@ -222,7 +222,7 @@ class TestStatusReply(unittest.TestCase):
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("r1", "/c", "/t", str(tmp), [target], ["mapping"])
             state.set_run_status("r1", "running")
-            text = format_status_reply_message(state, ["r1"], str(tmp), handoff_root=str(handoff))
+            text = format_status_reply_message(state, ["r1"], str(tmp), workspace_root=str(handoff))
             self.assertIn("[r1] status =", text)
             self.assertIn("UTC)", text)
 
@@ -250,7 +250,7 @@ class TestStatusReply(unittest.TestCase):
                 state,
                 ["batch_no5", "s0020_c3_k3_2020ut_hdr_20260609_141441"],
                 str(tmp),
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
             )
             self.assertGreater(len(messages), 1)
             joined = "\n\n".join(messages)
@@ -416,12 +416,12 @@ class TestPreview(unittest.TestCase):
             ctx.run_dir = base
             ctx.meta = {"source_config_path": str(cfg_path)}
             ctx.cfg.runs_dir.return_value = str(base)
-            ctx.cfg.handoff_root = str(handoff)
+            ctx.cfg.workspace_root = str(handoff)
             ctx.cfg.notifications = NotificationConfig(enabled=True)
             ctx.cfg.deployment_file = "deployment.yaml"
 
             with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
             ) as post:
                 send_preview_notification(state, ctx)
                 send_preview_notification(state, ctx)
@@ -452,11 +452,11 @@ class TestNotifier(unittest.TestCase):
                 state,
                 cfg,
                 config_path=cfg_path,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 deployment_file="deployment.yaml",
             )
             with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
             ) as post:
                 notifier.notify_run_retried(
                     "r1",
@@ -495,11 +495,11 @@ class TestNotifier(unittest.TestCase):
                 state,
                 cfg,
                 config_path=cfg_path,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 deployment_file="deployment.yaml",
             )
             with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
             ) as post:
                 notifier.notify_stage_outcome(
                     "r1",
@@ -552,11 +552,11 @@ class TestNotifier(unittest.TestCase):
                 state,
                 cfg,
                 config_path=cfg_path,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 deployment_file="deployment.yaml",
             )
             with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
             ) as post:
                 notifier.notify_stage_outcome(
                     "run_big",
@@ -572,6 +572,38 @@ class TestNotifier(unittest.TestCase):
                 joined = "\n\n".join(call[0][1] for call in post.call_args_list)
                 self.assertIn("stage_success", joined)
                 self.assertIn(targets[0].label(), joined)
+
+    def test_notify_run_completed_refreshes_verify_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            handoff = base
+            db = base / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+            state.create_run("r1", "/c", "/t", str(base), [target], ["mapping"])
+            state.set_run_status("r1", "success")
+            cfg_path = base / "config.yaml"
+            (base / "deployment.yaml").write_text(
+                "discord_webhook_url: https://example.com/hook\n", encoding="utf-8"
+            )
+            cfg = NotificationConfig(
+                enabled=True,
+                events=NotificationEvents(run_completed=True),
+            )
+            notifier = Notifier(
+                state,
+                cfg,
+                config_path=cfg_path,
+                workspace_root=str(handoff),
+                deployment_file="deployment.yaml",
+            )
+            with mock.patch(
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
+            ), mock.patch(
+                "syndiff_pipeline.common.orchestration.verify_status.refresh_verify_run_status"
+            ) as refresh:
+                notifier.notify_run_completed("r1", str(base), outcome="success")
+                refresh.assert_called_once_with(str(handoff), state, "r1")
 
     def test_dedup_prevents_second_post(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -599,12 +631,12 @@ class TestNotifier(unittest.TestCase):
                 state,
                 cfg,
                 config_path=cfg_path,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 deployment_file="deployment.yaml",
             )
 
             with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.notifications.post_discord_webhook"
+                "syndiff_pipeline.common.orchestration.notifications.post_discord_webhook"
             ) as post:
                 label = target.label()
                 notifier.notify_stage_outcome(

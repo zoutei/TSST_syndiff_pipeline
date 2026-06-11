@@ -13,9 +13,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration import cli
-from syndiff_pipeline.template_creation.orchestration.state import PipelineState
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration import cli as orch_cli
+from syndiff_pipeline.cli import parse_execution_argv
+from syndiff_pipeline.common.orchestration.state import PipelineState
+from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.workspace import state_db_path
 
 
 class TestWorkspaceMonitoring(unittest.TestCase):
@@ -24,7 +26,7 @@ class TestWorkspaceMonitoring(unittest.TestCase):
             handoff = Path(tmp) / "handoff"
             handoff.mkdir()
             (handoff / "runs").mkdir()
-            db = handoff / "pipeline_state.sqlite"
+            db = state_db_path(handoff)
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             runs_root = str(handoff / "runs")
@@ -33,13 +35,13 @@ class TestWorkspaceMonitoring(unittest.TestCase):
             state.set_run_status("run_a", "running")
             state.set_run_status("run_b", "running")
 
-            args = cli.build_parser().parse_args(["progress"])
+            args = orch_cli.build_parser().parse_args(["progress"])
             with mock.patch.object(
-                cli, "_resolve_handoff_from_args", return_value=str(handoff)
+                orch_cli, "_resolve_handoff_from_args", return_value=str(handoff)
             ):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    rc = cli.cmd_progress(args)
+                    rc = orch_cli.cmd_progress(args)
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             self.assertIn("run_a", out)
@@ -51,21 +53,29 @@ class TestWorkspaceMonitoring(unittest.TestCase):
             runs = handoff / "runs"
             runs.mkdir(parents=True)
             (runs / "latest").symlink_to("run_old")
-            db = handoff / "pipeline_state.sqlite"
+            db = state_db_path(handoff)
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run("run_old", "/c", "/t", str(runs), [target], ["mapping"])
             state.set_run_status("run_old", "completed")
 
-            args = cli.build_parser().parse_args(["progress"])
+            args = orch_cli.build_parser().parse_args(["progress"])
             with mock.patch.object(
-                cli, "_resolve_handoff_from_args", return_value=str(handoff)
+                orch_cli, "_resolve_handoff_from_args", return_value=str(handoff)
             ):
                 buf = io.StringIO()
                 with redirect_stdout(buf):
-                    rc = cli.cmd_progress(args)
+                    rc = orch_cli.cmd_progress(args)
             self.assertEqual(rc, 0)
             self.assertIn("run_old", buf.getvalue())
+
+    def test_main_entry_routes_monitoring_verbs(self):
+        from syndiff_pipeline import cli as entry_cli
+
+        with mock.patch.object(orch_cli, "main", return_value=0) as mocked:
+            rc = entry_cli.main(["progress"])
+        self.assertEqual(rc, 0)
+        mocked.assert_called_once_with(["progress"])
 
 
 class TestSubmitRunIdPolicy(unittest.TestCase):
@@ -73,7 +83,7 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             handoff = Path(tmp) / "handoff"
             handoff.mkdir()
-            db = handoff / "pipeline_state.sqlite"
+            db = state_db_path(handoff)
             state = PipelineState(db)
             target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
             state.create_run(
@@ -89,7 +99,7 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
             cfg_path.write_text(
                 "\n".join(
                     [
-                        f"handoff_root: {handoff}",
+                        f"workspace_root: {handoff}",
                         f"data_root: {handoff / 'data'}",
                         "deployment_file: deployment.yaml",
                     ]
@@ -97,7 +107,7 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                 encoding="utf-8",
             )
             (Path(tmp) / "deployment.yaml").write_text(
-                f"handoff_root: {handoff}\ndata_root: {handoff / 'data'}\n",
+                f"workspace_root: {handoff}\ndata_root: {handoff / 'data'}\n",
                 encoding="utf-8",
             )
             targets_path = Path(tmp) / "targets.csv"
@@ -107,8 +117,9 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            args = cli.build_parser().parse_args(
+            _, _, args = parse_execution_argv(
                 [
+                    "template",
                     "submit",
                     "--config",
                     str(cfg_path),
@@ -121,8 +132,8 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                 ]
             )
             with mock.patch.object(
-                cli, "load_runner_config", return_value=mock.Mock(
-                    handoff_root=str(handoff),
+                orch_cli, "load_runner_config", return_value=mock.Mock(
+                    workspace_root=str(handoff),
                     runs_dir=lambda: str(handoff / "runs"),
                     state_db_path=str(db),
                     deployment_file="deployment.yaml",
@@ -131,13 +142,13 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                     ),
                     notifications=mock.Mock(enabled=False),
                 )
-            ), mock.patch.object(cli, "ensure_daemon_running"), mock.patch.object(
-                cli, "_ensure_discord_bot", return_value=None
+            ), mock.patch.object(orch_cli, "ensure_daemon_running"), mock.patch.object(
+                orch_cli, "_ensure_discord_bot", return_value=None
             ), mock.patch.object(
-                cli, "record_deployment_path"
+                orch_cli, "record_deployment_path"
             ):
                 with self.assertRaises(SystemExit) as ctx:
-                    cli.cmd_submit(args)
+                    orch_cli.cmd_submit(args)
             self.assertIn("already exists", str(ctx.exception))
 
 

@@ -8,20 +8,22 @@ version = "0.1.0"
 description = "SynDiff TESS FFI difference imaging and template-building pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
+dependencies = [
+  "hotpants>=0.1.1",
+]
 
 [project.optional-dependencies]
 discord = ["discord.py>=2.3"]
 
 [project.scripts]
-syndiff-template = "syndiff_pipeline.template_creation.orchestration.cli:main"
-syndiff-run = "syndiff_pipeline.difference_imaging.orchestration.cli:main"
+syndiff = "syndiff_pipeline.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["syndiff_pipeline*"]
 
 [tool.setuptools.package-data]
-"syndiff_pipeline.template_creation.orchestration" = ["condor_wrapper.sh"]
+"syndiff_pipeline.common.orchestration" = ["condor_wrapper.sh"]
 "syndiff_pipeline.resources" = ["skycell_wcs.csv", "README.md"]
 
 [tool.pyright]

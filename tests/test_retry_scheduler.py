@@ -13,17 +13,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration import logs
+from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.template_creation.orchestration.cli import cmd_retry
-from syndiff_pipeline.template_creation.orchestration.run_context import RunContext, resolve_run_context
-from syndiff_pipeline.template_creation.orchestration.scheduler_control import ensure_daemon_running
-from syndiff_pipeline.template_creation.orchestration.workspace import record_deployment_path
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.run_context import RunContext, resolve_run_context
+from syndiff_pipeline.common.orchestration.scheduler_control import ensure_daemon_running
+from syndiff_pipeline.common.orchestration.workspace import record_deployment_path, state_db_path
+from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     STATUS_FAILED,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target, find_target_for_run
-from tests.site_config import write_site_config
+from syndiff_pipeline.common.orchestration.targets import Target, find_target_for_run
+from tests.site_fixtures import write_site_config
 
 
 def _write_targets(path: Path, *, enabled: str = "true") -> None:
@@ -38,11 +38,11 @@ def _make_run_context(tmp: Path, *, enabled: str = "true") -> tuple[RunContext, 
     handoff = tmp / "handoff"
     data = tmp / "data"
     runs_root = handoff / "runs"
-    state_db = handoff / "pipeline_state.sqlite"
+    state_db = state_db_path(handoff)
     source_cfg = tmp / "site" / "config.yaml"
     write_site_config(
         source_cfg,
-        handoff_root=str(handoff),
+        workspace_root=str(handoff),
         data_root=str(data),
     )
     targets_csv = tmp / "targets.csv"
@@ -95,16 +95,19 @@ class TestEnsureDaemonRunning(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx, _state = _make_run_context(Path(tmp))
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.spawn_detached_daemon",
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.spawn_detached_daemon",
                 return_value=4242,
             ) as spawn, unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.wait_for_daemon",
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.wait_for_daemon",
                 return_value=True,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
-                return_value=4242,
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.read_process_identity",
+                return_value=("localhost", 4242),
+            ), unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.local_hostname",
+                return_value="localhost",
             ):
-                result = ensure_daemon_running(ctx.cfg.handoff_root)
+                result = ensure_daemon_running(ctx.cfg.workspace_root)
             self.assertTrue(result.spawned)
             self.assertEqual(result.pid, 4242)
             spawn.assert_called_once()
@@ -113,15 +116,18 @@ class TestEnsureDaemonRunning(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx, _state = _make_run_context(Path(tmp))
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon_is_alive",
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon_is_alive",
                 return_value=True,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.read_pid",
-                return_value=99999,
+                "syndiff_pipeline.common.orchestration.scheduler_control._supervisor_pid_identity",
+                return_value=(None, 99999),
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler_control.daemon.spawn_detached_daemon",
+                "syndiff_pipeline.common.orchestration.scheduler_control.get_supervisor_host",
+                return_value=None,
+            ), unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.spawn_detached_daemon",
             ) as spawn:
-                result = ensure_daemon_running(ctx.cfg.handoff_root)
+                result = ensure_daemon_running(ctx.cfg.workspace_root)
             self.assertFalse(result.spawned)
             self.assertEqual(result.pid, 99999)
             spawn.assert_not_called()
@@ -142,7 +148,7 @@ class TestCmdRetry(unittest.TestCase):
                 no_start_daemon=False,
             )
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.cli.ensure_daemon_running",
+                "syndiff_pipeline.common.orchestration.cli.ensure_daemon_running",
             ) as ensure:
                 rc = cmd_retry(args)
             self.assertEqual(rc, 0)
@@ -150,7 +156,7 @@ class TestCmdRetry(unittest.TestCase):
             self.assertEqual(len(cmds), 1)
             self.assertEqual(cmds[0].kind, "retry")
             ensure.assert_called_once()
-            self.assertEqual(ensure.call_args.args[0], ctx.cfg.handoff_root)
+            self.assertEqual(ensure.call_args.args[0], ctx.cfg.workspace_root)
             self.assertIsNotNone(ensure.call_args.kwargs.get("deployment_path"))
 
 

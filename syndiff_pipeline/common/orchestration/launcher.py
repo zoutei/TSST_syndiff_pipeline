@@ -5,10 +5,12 @@ from __future__ import annotations
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import List, Protocol
+from typing import TYPE_CHECKING, List, Protocol
 
-from syndiff_pipeline.template_creation.orchestration import condor
-from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
+from syndiff_pipeline.common.orchestration import condor
+
+if TYPE_CHECKING:
+    from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
 
 
 class StageJobHandle(Protocol):
@@ -50,25 +52,10 @@ class LaunchDescriptor:
     handle: StageJobHandle | None = None
 
 
-def _condor_resources(cfg: RunnerConfig, stage: str) -> condor.CondorResourceRequest:
-    if stage == "mapping":
-        params = cfg.stages.mapping
-    elif stage == "ps1_process":
-        params = cfg.stages.ps1_process
-    else:
-        raise ValueError(f"No Condor resource profile for stage {stage!r}")
-    return condor.CondorResourceRequest(
-        request_cpus=params.condor_request_cpus,
-        request_memory_mb=params.condor_request_memory,
-        requirements=params.condor_requirements,
-        rank=params.condor_rank,
-    )
-
-
 def launch_stage(
     cmd: List[str],
     *,
-    cfg: RunnerConfig,
+    cfg: "RunnerConfig",
     stage: str,
     runs_root: str,
     run_id: str,
@@ -77,7 +64,12 @@ def launch_stage(
 ) -> LaunchDescriptor:
     """Launch a stage locally or on Condor; return durable descriptor."""
     if cfg.stage_executor(stage) == "condor":
-        resources = _condor_resources(cfg, stage)
+        from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
+
+        stage_spec = get_syndiff_pipeline().require(stage)
+        resources = stage_spec.condor_resources(cfg)
+        if resources is None:
+            raise ValueError(f"No Condor resource profile for stage {stage!r}")
         cluster_id, submit_epoch = condor.submit_job(
             cmd,
             runs_root,

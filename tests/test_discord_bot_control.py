@@ -12,16 +12,20 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from syndiff_pipeline.common.orchestration import daemon
 from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+    _last_identity_from_bot_log,
+    discord_bot_is_alive,
     discover_discord_bot_pids,
-    ensure_discord_bot_for_handoff_root,
+    ensure_discord_bot_for_workspace_root,
     ensure_discord_bot_running,
+    locate_discord_bot,
     record_discord_bot_site_config,
     stop_discord_bot,
 )
-from syndiff_pipeline.template_creation.orchestration import logs
-from syndiff_pipeline.template_creation.orchestration.workspace import record_deployment_path
-from tests.site_config import write_site_config, write_site_deployment
+from syndiff_pipeline.common.orchestration import logs
+from syndiff_pipeline.common.orchestration.workspace import record_deployment_path
+from tests.site_fixtures import write_site_config, write_site_deployment
 
 
 def _enabled_bot_setup(base: Path) -> tuple[Path, Path, Path]:
@@ -29,7 +33,7 @@ def _enabled_bot_setup(base: Path) -> tuple[Path, Path, Path]:
     cfg_path = base / "config.yaml"
     write_site_config(
         cfg_path,
-        handoff_root=str(handoff),
+        workspace_root=str(handoff),
         data_root=str(base / "data"),
         notifications_enabled=True,
     )
@@ -42,7 +46,7 @@ def _enabled_bot_setup(base: Path) -> tuple[Path, Path, Path]:
     )
     write_site_deployment(
         base,
-        handoff_root=str(handoff),
+        workspace_root=str(handoff),
         data_root=str(base / "data"),
     )
     deploy_path = base / "deployment.yaml"
@@ -63,7 +67,7 @@ class TestDiscordBotControl(unittest.TestCase):
             cfg_path = base / "config.yaml"
             write_site_config(
                 cfg_path,
-                handoff_root=str(handoff),
+                workspace_root=str(handoff),
                 data_root=str(base / "data"),
                 notifications_enabled=True,
             )
@@ -94,8 +98,8 @@ class TestDiscordBotControl(unittest.TestCase):
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discord_bot_is_alive",
                 return_value=True,
             ), mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_pid",
-                return_value=4242,
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_process_identity",
+                return_value=(None, 4242),
             ), mock.patch(
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 return_value=[],
@@ -109,7 +113,7 @@ class TestDiscordBotControl(unittest.TestCase):
             self.assertTrue(result.spawned)
             self.assertEqual(result.pid, 4242)
 
-    def test_records_site_config_and_restarts_from_handoff_root(self):
+    def test_records_site_config_and_restarts_from_workspace_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             cfg_path, handoff, deploy_path = _enabled_bot_setup(base)
@@ -123,15 +127,15 @@ class TestDiscordBotControl(unittest.TestCase):
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discord_bot_is_alive",
                 side_effect=[False, True],
             ), mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_pid",
-                return_value=4242,
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_process_identity",
+                return_value=(None, 4242),
             ), mock.patch(
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
                 return_value=[],
             ):
                 ensure_discord_bot_running(deploy_path, site_config_path=cfg_path)
                 record_deployment_path(handoff, deploy_path)
-                result = ensure_discord_bot_for_handoff_root(handoff)
+                result = ensure_discord_bot_for_workspace_root(handoff)
             self.assertTrue(logs.discord_bot_site_config_path(handoff).is_file())
             self.assertIsNotNone(result)
             self.assertTrue(result.spawned)
@@ -152,13 +156,13 @@ class TestDiscordBotControl(unittest.TestCase):
             def wait_side_effect(*args, **kwargs):
                 return True
 
-            read_pids = iter([None, 5001, 5001])
+            read_identities = iter([(None, None), (None, 5001), (None, 5001)])
 
-            def read_pid_side_effect(*args, **kwargs):
+            def read_identity_side_effect(*args, **kwargs):
                 try:
-                    return next(read_pids)
+                    return next(read_identities)
                 except StopIteration:
-                    return 5001
+                    return (None, 5001)
 
             def is_process_alive_side_effect(pid):
                 return pid == 5001
@@ -170,8 +174,8 @@ class TestDiscordBotControl(unittest.TestCase):
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.wait_for_discord_bot",
                 side_effect=wait_side_effect,
             ), mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_pid",
-                side_effect=read_pid_side_effect,
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.read_process_identity",
+                side_effect=read_identity_side_effect,
             ), mock.patch(
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.is_process_alive",
                 side_effect=is_process_alive_side_effect,
@@ -208,7 +212,8 @@ class TestDiscordBotControl(unittest.TestCase):
             base = Path(tmp)
             handoff = base / "handoff"
             handoff.mkdir(parents=True)
-            pid_path = handoff / "discord_bot.pid"
+            pid_path = logs.discord_bot_pid_path(handoff)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
             pid_path.write_text("99999", encoding="utf-8")
             with mock.patch(
                 "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
@@ -236,12 +241,102 @@ class TestDiscordBotControl(unittest.TestCase):
             terminate.assert_called_once()
             self.assertEqual(terminate.call_args.args[0], [111, 222])
 
+    def test_last_identity_from_bot_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir(parents=True)
+            log_path = logs.discord_bot_log_path(handoff)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(
+                "2026-06-11 09:00:00 INFO [discord-bot host=submit01 pid=1234] connected\n"
+                "2026-06-11 10:00:00 INFO [bot-control host=login02 pid=99] spawning\n",
+                encoding="utf-8",
+            )
+            host, pid, stamp = _last_identity_from_bot_log(handoff)
+            self.assertEqual(host, "login02")
+            self.assertEqual(pid, 99)
+            self.assertEqual(stamp, "2026-06-11 10:00:00")
+
+    def test_locate_prefers_local_process(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir(parents=True)
+            with mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
+                return_value=[4242],
+            ), mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.local_hostname",
+                return_value="plscience10",
+            ):
+                loc = locate_discord_bot(handoff)
+            self.assertEqual(loc.likely_host, "plscience10")
+            self.assertEqual(loc.likely_pid, 4242)
+            self.assertTrue(loc.alive_here)
+
     def test_discover_discord_bot_pids_empty_when_no_proc(self):
         with mock.patch(
             "syndiff_pipeline.template_creation.orchestration.discord_bot_control.Path"
         ) as path_cls:
             path_cls.return_value.is_dir.return_value = False
             self.assertEqual(discover_discord_bot_pids("/tmp/handoff"), [])
+
+    def test_discord_bot_is_alive_trusts_remote_pid_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir(parents=True)
+            pid_path = logs.discord_bot_pid_path(handoff)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            daemon.write_process_identity(pid_path, 55555, host="submit01")
+            with mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.local_hostname",
+                return_value="login02",
+            ), mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.is_process_alive",
+            ) as alive:
+                self.assertTrue(discord_bot_is_alive(handoff))
+            alive.assert_not_called()
+
+    def test_ensure_skips_spawn_when_bot_on_remote_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            cfg_path, handoff, deploy_path = _enabled_bot_setup(base)
+            pid_path = logs.discord_bot_pid_path(handoff)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            daemon.write_process_identity(pid_path, 77777, host="submit01")
+            with mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.local_hostname",
+                return_value="login02",
+            ), mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.spawn_detached_discord_bot",
+            ) as spawn:
+                result = ensure_discord_bot_running(
+                    deploy_path,
+                    site_config_path=cfg_path,
+                )
+            spawn.assert_not_called()
+            self.assertFalse(result.spawned)
+            self.assertIn("submit01", result.skipped_reason or "")
+
+    def test_stop_does_not_kill_local_pid_for_remote_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir(parents=True)
+            pid_path = logs.discord_bot_pid_path(handoff)
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            daemon.write_process_identity(pid_path, 99999, host="submit01")
+            with mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.discover_discord_bot_pids",
+                return_value=[],
+            ), mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.daemon.local_hostname",
+                return_value="login02",
+            ), mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.discord_bot_control._terminate_pids",
+            ) as terminate:
+                stopped = stop_discord_bot(handoff)
+            self.assertFalse(stopped)
+            terminate.assert_not_called()
+            self.assertTrue(pid_path.is_file())
 
 
 if __name__ == "__main__":

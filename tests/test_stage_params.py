@@ -10,11 +10,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+    SHARED_MASK_ALLOWED,
     parse_background_rough,
     parse_forced_photometry,
     parse_hotpants,
     validate_stage_keys,
-    WCS_GROUPING_ALLOWED,
 )
 
 
@@ -22,10 +22,10 @@ class TestStageParams(unittest.TestCase):
     def test_unknown_key_raises(self):
         with self.assertRaises(ValueError) as ctx:
             validate_stage_keys(
-                {"kind": "wcs_grouping", "foo": 1},
+                {"kind": "shared_mask", "foo": 1},
                 0,
-                "wcs_grouping",
-                WCS_GROUPING_ALLOWED,
+                "shared_mask",
+                SHARED_MASK_ALLOWED,
             )
         self.assertIn("unknown keys", str(ctx.exception))
 
@@ -50,6 +50,34 @@ class TestStageParams(unittest.TestCase):
         )
         self.assertEqual(hp.sci_fwhm, 2.5)
         self.assertEqual(hp.hp_ko, 3)
+
+    def test_hotpants_write_flags_default_true(self):
+        hp = parse_hotpants(
+            {"kind": "hotpants", "inputs": {}, "output": {"diffs": "a"}},
+            0,
+        )
+        self.assertTrue(hp.write_convolved)
+        self.assertTrue(hp.write_bkg)
+        self.assertTrue(hp.write_stamps)
+        self.assertTrue(hp.write_kernel_params)
+
+    def test_hotpants_write_flags_override(self):
+        hp = parse_hotpants(
+            {
+                "kind": "hotpants",
+                "inputs": {},
+                "output": {"diffs": "a"},
+                "write_convolved": False,
+                "write_bkg": False,
+                "write_stamps": False,
+                "write_kernel_params": False,
+            },
+            0,
+        )
+        self.assertFalse(hp.write_convolved)
+        self.assertFalse(hp.write_bkg)
+        self.assertFalse(hp.write_stamps)
+        self.assertFalse(hp.write_kernel_params)
 
     def test_background_rough_bkg_source_hunt(self):
         sp = parse_background_rough(
@@ -83,6 +111,20 @@ class TestStageParams(unittest.TestCase):
         )
         self.assertEqual(p.psf_type, "epsf")
         self.assertEqual(p.phot_snap, "ref")
+        self.assertEqual(p.phot_debug_stamp_size, 25)
+
+    def test_forced_photometry_debug_stamp_size(self):
+        p = parse_forced_photometry(
+            {
+                "kind": "forced_photometry",
+                "inputs": {"diffs": "x", "epsf": "e"},
+                "output": "y",
+                "psf_type": "prf",
+                "phot_debug_stamp_size": 31,
+            },
+            0,
+        )
+        self.assertEqual(p.phot_debug_stamp_size, 31)
 
 
 if __name__ == "__main__":
