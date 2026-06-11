@@ -38,6 +38,19 @@ import pandas as pd
 from astropy.io import fits
 from joblib import Parallel, delayed
 from scipy.optimize import minimize
+
+from syndiff_pipeline.common.joblib_progress import (
+    parallel_map_with_optional_tqdm,
+    tqdm_iter,
+)
+from syndiff_pipeline.difference_imaging.stages.photometry_progress import (
+    init_progress_pair,
+    progress_path_for_diff_log,
+    progress_path_for_output_workspace,
+    record_epoch_progress,
+    reset_epochs_done_pair,
+    set_progress_phase_pair,
+)
 from scipy.ndimage import shift as nd_shift
 from scipy.signal import fftconvolve
 
@@ -54,6 +67,9 @@ class ForcedPhotTargetSpec:
     csv_basename: str = "lightcurve.csv"
     plot_source_label: str = "primary"
     plot_png_path: Optional[str] = None
+    plot_gif_diff_path: Optional[str] = None
+    plot_gif_science_path: Optional[str] = None
+    plot_gif_pair_path: Optional[str] = None
     tag: str = "primary"
 
 
@@ -127,6 +143,38 @@ def per_frame_target_crop_xy(
         except Exception as exc:
             log.debug("  per_frame_target_crop_xy row %s: %s", i, exc)
     return out
+
+
+def resolve_forced_target_xy(
+    spec: dict,
+    primary_xy: np.ndarray,
+    wcs_table: pd.DataFrame,
+    crop_bounds: dict,
+) -> np.ndarray:
+    """
+    Build per-epoch crop-local (x, y) for one normalized forced-target spec.
+
+    ``spec`` must include ``position_mode`` (``sky``, ``offset``, or ``fixed``)
+    from :func:`~syndiff_pipeline.difference_imaging.orchestration.config.normalize_additional_forced_targets`.
+    """
+    mode = str(spec.get("position_mode", "sky"))
+    n_epochs = len(wcs_table)
+    if mode == "sky":
+        return per_frame_target_crop_xy(
+            wcs_table, float(spec["ra"]), float(spec["dec"]), crop_bounds
+        )
+    if mode == "offset":
+        offset = np.array([float(spec["dx"]), float(spec["dy"])], dtype=np.float64)
+        primary = np.asarray(primary_xy, dtype=np.float64)
+        if primary.shape != (n_epochs, 2):
+            raise ValueError(
+                f"primary_xy shape {primary.shape} != ({n_epochs}, 2) for offset target"
+            )
+        return primary + offset
+    if mode == "fixed":
+        xy = np.array([float(spec["x"]), float(spec["y"])], dtype=np.float64)
+        return np.broadcast_to(xy, (n_epochs, 2)).copy()
+    raise ValueError(f"unknown forced target position_mode {mode!r}")
 
 
 def _tessreduce_error_plane(
@@ -483,6 +531,208 @@ def _extract_cutout(image: np.ndarray, x: float, y: float, size: int) -> np.ndar
     return cutout
 
 
+def photometry_marker_xy(
+    stamp_size: int,
+    source_offset_x: float,
+    source_offset_y: float,
+) -> tuple[float, float]:
+    """Stamp-pixel coordinates of the PSF-flux anchor (center + phot_snap offsets)."""
+    cent = stamp_size / 2.0 - 0.5
+    return cent + float(source_offset_x), cent + float(source_offset_y)
+
+
+def _science_cutout_worker(
+    task: Tuple[int, Optional[str], float, float, dict, int],
+) -> Tuple[int, Optional[np.ndarray]]:
+    """Load cropped FFI science and extract one stamp (epoch index, cutout)."""
+    from syndiff_pipeline.difference_imaging.stages.hotpants import _load_ffi_cropped
+
+    i, ffi_path, tx, ty, crop_bounds, phot_cutout_size = task
+    if ffi_path is None or not os.path.isfile(str(ffi_path)):
+        return i, None
+    if not (np.isfinite(tx) and np.isfinite(ty)):
+        return i, None
+    try:
+        sci, _ = _load_ffi_cropped(str(ffi_path), crop_bounds)
+        return i, _extract_cutout(sci, float(tx), float(ty), phot_cutout_size)
+    except Exception as exc:
+        log.debug("  science cutout frame %s: %s", i, exc)
+        return i, None
+
+
+def _diff_cutout_worker(
+    task: Tuple[int, Optional[str], float, float, int],
+) -> Tuple[int, Optional[np.ndarray]]:
+    """Load one difference FITS and extract a square stamp (epoch index, cutout)."""
+    i, path, tx, ty, stamp_size = task
+    if path is None or not os.path.isfile(str(path)):
+        return i, None
+    if not (np.isfinite(tx) and np.isfinite(ty)):
+        return i, None
+    try:
+        data, _ = read_diff_primary_and_noise_sigma(str(path))
+        return i, _extract_cutout(data, float(tx), float(ty), int(stamp_size))
+    except Exception as exc:
+        log.debug("  diff cutout frame %s: %s", i, exc)
+        return i, None
+
+
+def _extract_diff_cutouts_for_epochs(
+    diff_paths: list,
+    target_xy: np.ndarray,
+    stamp_size: int,
+    n_jobs: int,
+) -> list:
+    """Per-epoch difference-image stamps at ``target_xy`` (chronological order)."""
+    n = len(diff_paths)
+    txy = np.asarray(target_xy, dtype=np.float64)
+    tasks = [
+        (
+            i,
+            diff_paths[i],
+            float(txy[i, 0]),
+            float(txy[i, 1]),
+            int(stamp_size),
+        )
+        for i in range(n)
+    ]
+    cutouts: list = [None] * n
+    parallel = int(n_jobs or 1) != 1 and n > 1
+    if parallel:
+        results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_diff_cutout_worker)(t) for t in tasks
+        )
+        for i, cut in results:
+            cutouts[i] = cut
+    else:
+        for t in tasks:
+            i, cut = _diff_cutout_worker(t)
+            cutouts[i] = cut
+    return cutouts
+
+
+def _extract_science_cutouts_for_epochs(
+    wcs_table: pd.DataFrame,
+    target_xy: np.ndarray,
+    crop_bounds: dict,
+    phot_cutout_size: int,
+    n_jobs: int,
+) -> list:
+    """Per-manifest-row cropped science stamps at ``target_xy`` (chronological order)."""
+    path_col = "path" if "path" in wcs_table.columns else "filename"
+    n = len(wcs_table)
+    txy = np.asarray(target_xy, dtype=np.float64)
+    tasks = [
+        (
+            i,
+            wcs_table.iloc[i].get(path_col),
+            float(txy[i, 0]),
+            float(txy[i, 1]),
+            crop_bounds,
+            int(phot_cutout_size),
+        )
+        for i in range(n)
+    ]
+    cutouts: list = [None] * n
+    parallel = int(n_jobs or 1) != 1 and n > 1
+    if parallel:
+        results = Parallel(n_jobs=n_jobs, backend="loky")(
+            delayed(_science_cutout_worker)(t) for t in tasks
+        )
+        for i, cut in results:
+            cutouts[i] = cut
+    else:
+        for t in tasks:
+            i, cut = _science_cutout_worker(t)
+            cutouts[i] = cut
+    return cutouts
+
+
+def _write_cutout_debug_gifs(
+    diff_paths: list,
+    wcs_table: pd.DataFrame,
+    target_xy: np.ndarray,
+    crop_bounds: dict,
+    phot,
+    cfg,
+    *,
+    source_offset_x: float = 0.0,
+    source_offset_y: float = 0.0,
+    plot_gif_diff_path: Optional[str] = None,
+    plot_gif_science_path: Optional[str] = None,
+    plot_gif_pair_path: Optional[str] = None,
+) -> None:
+    """Write diff, science, and side-by-side stamp GIFs when paths are set."""
+    from syndiff_pipeline.difference_imaging.support import plot as plot_mod
+
+    if not (
+        plot_gif_diff_path or plot_gif_science_path or plot_gif_pair_path
+    ):
+        return
+
+    dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+    stamp_size = int(getattr(phot, "phot_debug_stamp_size", 25) or 25)
+    n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
+    marker_xy = photometry_marker_xy(stamp_size, source_offset_x, source_offset_y)
+    btjd = None
+    if wcs_table is not None and "btjd" in wcs_table.columns:
+        btjd = np.asarray(wcs_table["btjd"].values, dtype=float)
+
+    diff_cutouts: Optional[list] = None
+    if plot_gif_diff_path or plot_gif_pair_path:
+        diff_cutouts = _extract_diff_cutouts_for_epochs(
+            diff_paths,
+            target_xy,
+            stamp_size,
+            n_jobs,
+        )
+
+    sci_cutouts: Optional[list] = None
+    if plot_gif_science_path or plot_gif_pair_path:
+        sci_cutouts = _extract_science_cutouts_for_epochs(
+            wcs_table,
+            target_xy,
+            crop_bounds,
+            stamp_size,
+            n_jobs,
+        )
+
+    if plot_gif_diff_path and diff_cutouts is not None:
+        plot_mod.write_stamp_animation(
+            diff_cutouts,
+            plot_gif_diff_path,
+            btjd=btjd,
+            stamp_size=stamp_size,
+            cmap="RdBu_r",
+            scale_mode="symmetric",
+            cbar_label="Diff stamp",
+            dpi=dpi,
+            marker_xy=marker_xy,
+        )
+    if plot_gif_science_path and sci_cutouts is not None:
+        plot_mod.write_stamp_animation(
+            sci_cutouts,
+            plot_gif_science_path,
+            btjd=btjd,
+            stamp_size=stamp_size,
+            cmap="viridis",
+            scale_mode="percentile",
+            cbar_label="Science stamp",
+            dpi=dpi,
+            marker_xy=marker_xy,
+        )
+    if plot_gif_pair_path and diff_cutouts is not None and sci_cutouts is not None:
+        plot_mod.write_dual_stamp_animation(
+            diff_cutouts,
+            sci_cutouts,
+            plot_gif_pair_path,
+            btjd=btjd,
+            stamp_size=stamp_size,
+            dpi=dpi,
+            marker_xy=marker_xy,
+        )
+
+
 def _locator_bundle_for_parallel(prf_or_epsf, phot, cfg, crop_bounds, target_x, target_y):
     """
     Picklable description of the PSF locator for joblib workers.
@@ -676,12 +926,14 @@ def _forced_phot_multi_flux_worker(
         tuple,
         str,
     ],
-) -> Tuple[int, List[dict]]:
+) -> Tuple[int, List[dict], List[Optional[np.ndarray]]]:
     """
     One epoch: read FITS once; run ``psf_flux`` for each source (isolated ``create_psf``).
 
     ``per_source`` entries are
     (locator_bundle, tx_i, ty_i, source_x, source_y).
+
+    Returns cutout stamps per source (same order as records) for debug GIFs.
     """
     (
         i,
@@ -704,18 +956,20 @@ def _forced_phot_multi_flux_worker(
         }
 
     if path is None or not os.path.exists(path):
-        return i, [_nan_record() for _ in per_source]
+        return i, [_nan_record() for _ in per_source], [None] * len(per_source)
 
     try:
         data, sigma_full = read_diff_primary_and_noise_sigma(path)
     except Exception as exc:
         log.warning("  Cannot read %s: %s", path, exc)
-        return i, [_nan_record() for _ in per_source]
+        return i, [_nan_record() for _ in per_source], [None] * len(per_source)
 
     records: List[dict] = []
+    cuts: List[Optional[np.ndarray]] = []
     for locator_bundle, tx, ty, sx, sy in per_source:
         if not (np.isfinite(tx) and np.isfinite(ty)):
             records.append(_nan_record())
+            cuts.append(None)
             continue
         try:
             cut = _extract_cutout(data, float(tx), float(ty), phot_cutout_size)
@@ -726,6 +980,7 @@ def _forced_phot_multi_flux_worker(
                 )
         except Exception:
             records.append(_nan_record())
+            cuts.append(None)
             continue
 
         prf = _locator_from_bundle(locator_bundle)
@@ -753,7 +1008,8 @@ def _forced_phot_multi_flux_worker(
                 "group_id": group_id,
             }
         )
-    return i, records
+        cuts.append(cut)
+    return i, records, cuts
 
 
 def _sigma_clipped_mean(values: np.ndarray, *, n_sigma: float) -> float:
@@ -905,28 +1161,33 @@ def write_lightcurve_diagnostic_plot(
         )
         return None
 
-    ok = lc_df["flux"].notna()
-    if not ok.any():
-        log.warning("pipeline_plots: no finite flux values; skipping light curve plot.")
-        return None
-
-    x = lc_df.loc[ok, "btjd"].to_numpy(dtype=float)
-    y = lc_df.loc[ok, "flux"].to_numpy(dtype=float)
-    yerr = lc_df.loc[ok, "eflux"].to_numpy(dtype=float)
-
-    order = np.argsort(x)
-    xs = x[order]
-    ys = y[order]
-    yers = yerr[order]
-
-    mask_kept, binned_t, binned_f = _binned_sigma_clip_btjd(
-        xs,
-        ys,
-        bin_width_days=bin_width_days,
-        sigma=bin_sigma,
-    )
-
+    ok = lc_df["flux"].notna() & lc_df["btjd"].notna()
     n = int(ok.sum())
+    if ok.any():
+        x = lc_df.loc[ok, "btjd"].to_numpy(dtype=float)
+        y = lc_df.loc[ok, "flux"].to_numpy(dtype=float)
+        yerr = lc_df.loc[ok, "eflux"].to_numpy(dtype=float)
+        order = np.argsort(x)
+        xs = x[order]
+        ys = y[order]
+        yers = yerr[order]
+        mask_kept, binned_t, binned_f = _binned_sigma_clip_btjd(
+            xs,
+            ys,
+            bin_width_days=bin_width_days,
+            sigma=bin_sigma,
+        )
+    else:
+        log.warning(
+            "pipeline_plots: no finite flux values; writing empty light curve plot."
+        )
+        xs = np.array([], dtype=float)
+        ys = np.array([], dtype=float)
+        yers = np.array([], dtype=float)
+        mask_kept = np.zeros(0, dtype=bool)
+        binned_t = np.array([], dtype=float)
+        binned_f = np.array([], dtype=float)
+
     subtitle = f"{n} epochs"
 
     fig, (ax_top, ax_bot) = plt.subplots(
@@ -1045,9 +1306,15 @@ def _run_forced_photometry_single(
     *,
     ref_frame_index: Optional[int] = None,
     lightcurve_plot_path: Optional[str] = None,
+    plot_gif_diff_path: Optional[str] = None,
+    plot_gif_science_path: Optional[str] = None,
+    plot_gif_pair_path: Optional[str] = None,
     plot_title_suffix: Optional[str] = None,
     plot_source_label: Optional[str] = None,
     lightcurve_csv_filename: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_input: Optional[str] = None,
+    diff_log_path: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Original single-target path: one FITS read per epoch during cutouts, then
@@ -1097,21 +1364,47 @@ def _run_forced_photometry_single(
     parallel = n_jobs != 1 and n_epochs > 1
     snap = str(phot.phot_snap or "brightest").lower()
 
+    cli_progress_path = (
+        str(progress_path_for_diff_log(diff_log_path))
+        if diff_log_path is not None
+        else None
+    )
+    track_progress = output_label is not None
+    workspace_progress_path: Optional[str] = None
+    if track_progress:
+        workspace_progress_path = str(progress_path_for_output_workspace(output_dir))
+        init_progress_pair(
+            workspace_progress_path,
+            cli_progress_path,
+            output_label=str(output_label),
+            diffs_input=str(diffs_input or ""),
+            n_sources=1,
+            epochs_total=n_epochs,
+            phase="cutouts",
+        )
+    tqdm_base = f"photometry {output_label}" if track_progress else "photometry"
+
+    def _record_epoch() -> None:
+        if workspace_progress_path:
+            record_epoch_progress(workspace_progress_path, cli_progress_path)
+
     best_idx = None
     best_tw = -1.0
     cutouts: list = []
     sigma_cutouts: list = []
 
     if not parallel:
-        for i, path in enumerate(diff_paths):
+        for i, path in enumerate(tqdm_iter(diff_paths, desc=f"{tqdm_base} cutouts")):
             if path is None or not os.path.exists(path):
                 cutouts.append(None)
                 sigma_cutouts.append(None)
+                _record_epoch()
                 continue
             tx_i, ty_i = float(txy[i, 0]), float(txy[i, 1])
             if not (np.isfinite(tx_i) and np.isfinite(ty_i)):
                 cutouts.append(None)
                 sigma_cutouts.append(None)
+                _record_epoch()
                 continue
             try:
                 data, sigma_full = read_diff_primary_and_noise_sigma(path)
@@ -1125,6 +1418,7 @@ def _run_forced_photometry_single(
                 log.warning("  Cannot read %s: %s", path, exc)
                 cutouts.append(None)
                 sigma_cutouts.append(None)
+                _record_epoch()
                 continue
             cutouts.append(cut)
             sigma_cutouts.append(sigma_cut)
@@ -1133,6 +1427,7 @@ def _run_forced_photometry_single(
                 if tw > best_tw:
                     best_tw = tw
                     best_idx = i
+            _record_epoch()
     else:
         log.info(
             "  forced_photometry: cutouts n_jobs=%s (loky), %d epochs",
@@ -1143,8 +1438,12 @@ def _run_forced_photometry_single(
             (i, path, float(txy[i, 0]), float(txy[i, 1]), phot.phot_cutout_size)
             for i, path in enumerate(diff_paths)
         ]
-        cut_results = Parallel(n_jobs=n_jobs, backend="loky")(
-            delayed(_forced_phot_cutout_worker)(t) for t in cut_tasks
+        cut_results = parallel_map_with_optional_tqdm(
+            (delayed(_forced_phot_cutout_worker)(t) for t in cut_tasks),
+            n_tasks=n_epochs,
+            desc=f"{tqdm_base} cutouts",
+            n_jobs_eff=n_jobs,
+            on_result=lambda _r: _record_epoch(),
         )
         cut_results.sort(key=lambda r: r[0])
         cutouts = [None] * n_epochs
@@ -1216,9 +1515,14 @@ def _run_forced_photometry_single(
     sx = float(psf_obj.source_x)
     sy = float(psf_obj.source_y)
 
+    if track_progress:
+        reset_epochs_done_pair(workspace_progress_path, cli_progress_path, phase="flux")
+
     if not parallel:
         records = []
-        for i, (path, cut) in enumerate(zip(diff_paths, cutouts)):
+        for i, (path, cut) in enumerate(
+            zip(tqdm_iter(diff_paths, desc=tqdm_base), cutouts)
+        ):
             if cut is None:
                 records.append(
                     {
@@ -1229,6 +1533,7 @@ def _run_forced_photometry_single(
                         "group_id": int(gid_col[i]) if i < len(gid_col) else -1,
                     }
                 )
+                _record_epoch()
                 continue
 
             error = _tessreduce_error_plane(sigma_cutouts[i], cut.shape)
@@ -1253,6 +1558,7 @@ def _run_forced_photometry_single(
                     "group_id": int(gid_col[i]) if i < len(gid_col) else -1,
                 }
             )
+            _record_epoch()
     else:
         log.info("  forced_photometry: psf_flux n_jobs=%s (loky)", n_jobs)
         flux_tasks = []
@@ -1275,11 +1581,18 @@ def _run_forced_photometry_single(
                     str(path) if path else "",
                 )
             )
-        flux_results = Parallel(n_jobs=n_jobs, backend="loky")(
-            delayed(_forced_phot_flux_worker)(t) for t in flux_tasks
+        flux_results = parallel_map_with_optional_tqdm(
+            (delayed(_forced_phot_flux_worker)(t) for t in flux_tasks),
+            n_tasks=n_epochs,
+            desc=tqdm_base,
+            n_jobs_eff=n_jobs,
+            on_result=lambda _r: _record_epoch(),
         )
         flux_results.sort(key=lambda r: r[0])
         records = [rec for _, rec in flux_results]
+
+    if track_progress:
+        set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
 
     lc_df = pd.DataFrame(records)
 
@@ -1307,6 +1620,19 @@ def _run_forced_photometry_single(
             title_line=title,
             png_path=lightcurve_plot_path,
         )
+        _write_cutout_debug_gifs(
+            diff_paths,
+            wcs_table,
+            txy,
+            crop_bounds,
+            phot,
+            cfg,
+            source_offset_x=sx,
+            source_offset_y=sy,
+            plot_gif_diff_path=plot_gif_diff_path,
+            plot_gif_science_path=plot_gif_science_path,
+            plot_gif_pair_path=plot_gif_pair_path,
+        )
 
     return lc_df
 
@@ -1324,6 +1650,9 @@ def run_forced_photometry_multi(
     *,
     ref_frame_index: Optional[int] = None,
     plot_title_suffix: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_input: Optional[str] = None,
+    diff_log_path: Optional[str] = None,
 ) -> List[pd.DataFrame]:
     """
     Forced PSF photometry for **multiple** sources sharing the same difference-image list.
@@ -1355,9 +1684,15 @@ def run_forced_photometry_multi(
                 output_dir,
                 ref_frame_index=ref_frame_index,
                 lightcurve_plot_path=sp.plot_png_path,
+                plot_gif_diff_path=sp.plot_gif_diff_path,
+                plot_gif_science_path=sp.plot_gif_science_path,
+                plot_gif_pair_path=sp.plot_gif_pair_path,
                 plot_title_suffix=plot_title_suffix,
                 plot_source_label=sp.plot_source_label,
                 lightcurve_csv_filename=sp.csv_basename,
+                output_label=output_label,
+                diffs_input=diffs_input,
+                diff_log_path=diff_log_path,
             )
         ]
 
@@ -1416,6 +1751,30 @@ def run_forced_photometry_multi(
     snap = str(phot.phot_snap or "brightest").lower()
     phot_size = int(phot.phot_cutout_size)
     poly_order = int(phot.phot_bkg_poly_order)
+
+    cli_progress_path = (
+        str(progress_path_for_diff_log(diff_log_path))
+        if diff_log_path is not None
+        else None
+    )
+    track_progress = output_label is not None
+    workspace_progress_path: Optional[str] = None
+    if track_progress:
+        workspace_progress_path = str(progress_path_for_output_workspace(output_dir))
+        init_progress_pair(
+            workspace_progress_path,
+            cli_progress_path,
+            output_label=str(output_label),
+            diffs_input=str(diffs_input or ""),
+            n_sources=n_src,
+            epochs_total=n_epochs,
+            phase="cutouts" if snap == "brightest" else "flux",
+        )
+    tqdm_base = f"photometry {output_label}" if track_progress else "photometry"
+
+    def _record_epoch() -> None:
+        if workspace_progress_path:
+            record_epoch_progress(workspace_progress_path, cli_progress_path)
 
     sx = np.zeros(n_src, dtype=np.float64)
     sy = np.zeros(n_src, dtype=np.float64)
@@ -1506,7 +1865,7 @@ def run_forced_photometry_multi(
             scan_tasks.append((i, path, coords, phot_size))
 
         if not parallel:
-            for t in scan_tasks:
+            for t in tqdm_iter(scan_tasks, desc=f"{tqdm_base} scan"):
                 i, per_src = _forced_phot_brightest_scan_multi_worker(t)
                 for s, (cut, sigc, tw) in enumerate(per_src):
                     if tw > best_tw[s]:
@@ -1514,6 +1873,7 @@ def run_forced_photometry_multi(
                         best_idx[s] = i
                         best_cut[s] = cut
                         best_sig[s] = sigc
+                _record_epoch()
         else:
             log.info(
                 "  forced_photometry: brightest scan n_jobs=%s (loky), %d epochs, %d sources",
@@ -1521,8 +1881,15 @@ def run_forced_photometry_multi(
                 n_epochs,
                 n_src,
             )
-            scan_results = Parallel(n_jobs=n_jobs, backend="loky")(
-                delayed(_forced_phot_brightest_scan_multi_worker)(t) for t in scan_tasks
+            scan_results = parallel_map_with_optional_tqdm(
+                (
+                    delayed(_forced_phot_brightest_scan_multi_worker)(t)
+                    for t in scan_tasks
+                ),
+                n_tasks=n_epochs,
+                desc=f"{tqdm_base} scan",
+                n_jobs_eff=n_jobs,
+                on_result=lambda _r: _record_epoch(),
             )
             scan_results.sort(key=lambda r: r[0])
             for i, per_src in scan_results:
@@ -1577,6 +1944,12 @@ def run_forced_photometry_multi(
     records_cols: list[list[Optional[dict]]] = [
         [None] * n_epochs for _ in range(n_src)
     ]
+    cutouts_cols: list[list[Optional[np.ndarray]]] = [
+        [None] * n_epochs for _ in range(n_src)
+    ]
+
+    if track_progress and snap == "brightest":
+        reset_epochs_done_pair(workspace_progress_path, cli_progress_path, phase="flux")
 
     flux_tasks = []
     for i, path in enumerate(diff_paths):
@@ -1606,10 +1979,13 @@ def run_forced_photometry_multi(
         )
 
     if not parallel:
-        for t in flux_tasks:
-            i, recs = _forced_phot_multi_flux_worker(t)
+        for t in tqdm_iter(flux_tasks, desc=tqdm_base):
+            i, recs, cuts = _forced_phot_multi_flux_worker(t)
             for s, rec in enumerate(recs):
                 records_cols[s][i] = rec
+            for s, cut in enumerate(cuts):
+                cutouts_cols[s][i] = cut
+            _record_epoch()
     else:
         log.info(
             "  forced_photometry: multi flux n_jobs=%s (loky), %d epochs, %d sources",
@@ -1617,13 +1993,22 @@ def run_forced_photometry_multi(
             n_epochs,
             n_src,
         )
-        flux_results = Parallel(n_jobs=n_jobs, backend="loky")(
-            delayed(_forced_phot_multi_flux_worker)(t) for t in flux_tasks
+        flux_results = parallel_map_with_optional_tqdm(
+            (delayed(_forced_phot_multi_flux_worker)(t) for t in flux_tasks),
+            n_tasks=n_epochs,
+            desc=tqdm_base,
+            n_jobs_eff=n_jobs,
+            on_result=lambda _r: _record_epoch(),
         )
         flux_results.sort(key=lambda r: r[0])
-        for i, recs in flux_results:
+        for i, recs, cuts in flux_results:
             for s, rec in enumerate(recs):
                 records_cols[s][i] = rec
+            for s, cut in enumerate(cuts):
+                cutouts_cols[s][i] = cut
+
+    if track_progress:
+        set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
 
     os.makedirs(output_dir, exist_ok=True)
     out_dfs: List[pd.DataFrame] = []
@@ -1661,6 +2046,19 @@ def run_forced_photometry_multi(
                 title_line=title,
                 png_path=spec.plot_png_path,
             )
+            _write_cutout_debug_gifs(
+                diff_paths,
+                wcs_table,
+                np.asarray(spec.target_xy, dtype=np.float64),
+                crop_bounds,
+                phot,
+                cfg,
+                source_offset_x=float(sx[s]),
+                source_offset_y=float(sy[s]),
+                plot_gif_diff_path=spec.plot_gif_diff_path,
+                plot_gif_science_path=spec.plot_gif_science_path,
+                plot_gif_pair_path=spec.plot_gif_pair_path,
+            )
 
         out_dfs.append(lc_df)
 
@@ -1680,6 +2078,9 @@ def run_forced_photometry(
     *,
     ref_frame_index: Optional[int] = None,
     lightcurve_plot_path: Optional[str] = None,
+    plot_gif_diff_path: Optional[str] = None,
+    plot_gif_science_path: Optional[str] = None,
+    plot_gif_pair_path: Optional[str] = None,
     plot_title_suffix: Optional[str] = None,
     plot_source_label: Optional[str] = None,
     lightcurve_csv_filename: Optional[str] = None,
@@ -1703,6 +2104,9 @@ def run_forced_photometry(
         output_dir,
         ref_frame_index=ref_frame_index,
         lightcurve_plot_path=lightcurve_plot_path,
+        plot_gif_diff_path=plot_gif_diff_path,
+        plot_gif_science_path=plot_gif_science_path,
+        plot_gif_pair_path=plot_gif_pair_path,
         plot_title_suffix=plot_title_suffix,
         plot_source_label=plot_source_label,
         lightcurve_csv_filename=lightcurve_csv_filename,
