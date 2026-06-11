@@ -460,7 +460,7 @@ def select_hotpants_ref_stars(gaia_df: pd.DataFrame,
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        out_path = os.path.join(output_dir, "ref_stars.csv")
+        out_path = os.path.join(output_dir, "hotpants_substamp_stars.csv")
         ref_stars.to_csv(out_path, index=False)
         log.info(f"  Reference stars saved to {out_path}")
 
