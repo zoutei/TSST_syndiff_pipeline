@@ -1,4 +1,4 @@
-> **Package integration**: `syndiff-template` stage `mapping` · module `template/pancakes.py` · legacy script `pancakes_v2.py`  
+> **Package integration**: `syndiff` stage `mapping` · module `template_creation/processing/pancakes.py` · legacy script `pancakes_v2.py`  
 > **Orchestration docs**: [template pipeline guide](../template_pipeline.md)
 
 # PanCAKES v2.0: TESS-PS1 Pixel Mapping Pipeline
@@ -109,3 +109,9 @@ python pancakes_v2.py ./data/tess_ffis/tess2019140104529-s0012-1-3-0144-s_ffic.f
 - `--n_threads`: Number of threads for the mocpy filtering step. (Default: `8`)
 - `--max_workers`: Maximum number of parallel processes for generating individual skycell maps. (Default: auto-detected)
 - `--overwrite / --no-overwrite`: Flag to control overwriting existing files. (Default: `--overwrite`)
+
+---
+
+## Orchestrator integration
+
+In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` or `syndiff all submit`. Outputs land under `{data_root}/skycell_pixel_mapping/sector_*/camera_*/ccd_*/`; the scheduler verifies `tess_s{sector}_{camera}_{ccd}_master_skycells_list.csv` before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md) for Condor submission, resource pools, and artifact skip logic.

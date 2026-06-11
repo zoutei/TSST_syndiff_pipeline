@@ -1,4 +1,4 @@
-> **Package integration**: `syndiff-template` stage `downsample` · module `template/downsample.py` · legacy script `multi_offset_downsampling.py`  
+> **Package integration**: `syndiff` stage `downsample` · module `template_creation/processing/downsample.py` · legacy script `multi_offset_downsampling.py`  
 > **Orchestration docs**: [template pipeline guide](../template_pipeline.md)
 
 # Multi-Offset Downsampling — Detailed Technical Reference
@@ -667,3 +667,9 @@ python process_ps1.py 20 3 3 --remove-saturated-stars 2>&1 | tee log/comb_20_3_3
 # 4. Downsample PS1 onto TESS grid at multiple offsets (this script)
 python multi_offset_downsampling.py 20 3 3 2>&1 | tee log/multi_offset_20_3_3.log
 ```
+
+---
+
+## Orchestrator integration
+
+In the supervised pipeline, downsampling runs as the `downsample` stage after `wcs_grouping` writes `cluster_template_job.json`. Template FITS are written under `{data_root}/shifted_downsampled/…`; the orchestrator symlinks `events/{label}/ws/templates` to that directory and writes `ps1_removed_stars.csv` in the event dir. See the [template pipeline guide](../template_pipeline.md) for handoff inputs, verify rules, and the path to `diff`.

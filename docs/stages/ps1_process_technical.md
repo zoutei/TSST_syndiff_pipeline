@@ -1,4 +1,4 @@
-> **Package integration**: `syndiff-template` stage `ps1_process` · module `template/ps1_process.py` · legacy script `process_ps1.py`  
+> **Package integration**: `syndiff` stage `ps1_process` · module `template_creation/processing/ps1_process.py` · legacy script `process_ps1.py`  
 > **Orchestration docs**: [template pipeline guide](../template_pipeline.md) · [HTCondor](../template_pipeline.md#htcondor-integration)
 
 # PS1 Template Processing Pipeline — Detailed Technical Reference
@@ -687,3 +687,9 @@ python process_ps1.py 20 3 3 --remove-saturated-stars 2>&1 | tee log/comb_20_3_3
 | `[CrossPadding]` | Stage 3 | reproject_interp job progress per cell |
 | `[Saver]` | Stage 4 | Output zarr writes |
 | `[Band]` | band_utils | Flux conversion, mask combination |
+
+---
+
+## Orchestrator integration
+
+In the supervised pipeline, convolution runs as the `ps1_process` stage (default executor: HTCondor). The worker reads the shared PS1 Zarr at `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` and writes `{data_root}/convolved_results/sector_{SSSS}_camera_{C}_ccd_{K}.zarr`. See the [template pipeline guide](../template_pipeline.md) for Condor wrappers, memory pools, and skipping when convolved Zarr already verifies on disk.

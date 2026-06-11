@@ -1,10 +1,10 @@
 # Pipeline State Machine Reference
 
 Exhaustive reference for how SQLite `stage_runs` statuses evolve across submission
-types and control operations in `template_runner`.
+types and control operations in the unified SynDiff orchestrator.
 
-Source of truth: `template_runner/state.py`, `template_runner/scheduler.py`,
-`template_runner/run_report.py`, and `docs/template_pipeline.md`.
+Source of truth: `common/orchestration/state.py`, `common/orchestration/scheduler.py`,
+`pipeline_spec.py`, `run_report.py`, and `docs/template_pipeline.md`.
 
 ---
 
@@ -51,7 +51,7 @@ Source of truth: `template_runner/state.py`, `template_runner/scheduler.py`,
 
 | Label | Condition |
 |-------|-----------|
-| `sc_q` | Stage needs artifact verify and `external_verify_complete` is false |
+| `sc_q` | Stage needs artifact verify and `external_verify_attempted` is false |
 | `scan` | Verify worker currently scanning this stage |
 | `n/a` | `skipped` with reason `stream_mode`, `not_selected`, or `superseded` |
 | `pend`, `runn`, `succ`, etc. | First four characters of SQLite status |
@@ -61,7 +61,7 @@ orphaned `pending` upstream stages in the run closure (in closure but not in `--
 
 ---
 
-## 2. Stage dependency DAG
+## 2. Stage dependency DAG (7 stages)
 
 ```text
 tess_ffi_download
@@ -79,6 +79,9 @@ tess_ffi_download
   ps1_process ───────────────────────────────┤
                                              ▼
                                        downsample
+                                             │
+                                             ▼
+                                            diff
 ```
 
 | Stage | Depends on |
@@ -88,6 +91,7 @@ tess_ffi_download
 | `ps1_download` | `mapping` |
 | `ps1_process` | `ps1_download` (or `mapping` only when `ps1_source=stream`) |
 | `downsample` | `wcs_grouping`, `mapping`, `ps1_process` |
+| `diff` | `downsample` |
 
 ### Partial-run concepts
 
@@ -100,19 +104,33 @@ tess_ffi_download
 
 | `--stages` | `run_stage_closure` |
 |------------|---------------------|
-| all 6 | all 6 |
+| all 7 (preset `all`) | all 7 |
+| template preset (6 stages, no `diff`) | tess … down |
+| `diff` preset | tess … down, diff |
 | `mapping` | tess, wcs, mapping |
-| `downsample` | all 6 |
-| `mapping,downsample` | all 6 |
+| `downsample` | all 7 |
+| `mapping,downsample` | all 7 |
 | `wcs_grouping` | tess, wcs |
 | `ps1_process` | tess, wcs, mapping, ps1_dl, ps1_pr |
-| `ps1_process,downsample` | all 6 |
+| `ps1_process,downsample` | all 7 |
+
+### Diff-only artifact verify closure
+
+For `syndiff diff submit` (`--stages diff`), `artifact_verify_closure` is **narrower** than `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM`):
+
+| Stage | In run closure? | Artifact verify? |
+|-------|-----------------|------------------|
+| `tess_ffi_download`, `wcs_grouping`, `downsample` | yes | yes |
+| `mapping`, `ps1_download`, `ps1_process` | yes | no — immediate **n/a** (`not_selected`) |
+| `diff` | yes (selected) | yes (before launch) |
+
+Only `tess_ffi_download`, `wcs_grouping`, and `downsample` are scanned on disk; mapping CSV and PS1 Zarr are not verified for diff-only runs.
 
 ---
 
 ## 3. Submission — initial status after `create_run`
 
-`create_run` inserts all 6 stages per target:
+`create_run` inserts all 7 stages per target:
 
 - Stage ∈ `--stages` → **`pending`**
 - Stage ∉ `--stages` → **`external`**
@@ -127,16 +145,33 @@ Legend: **P** = pending, **E** = external, **S(n/a)** = skipped (not_selected)
 
 ### 3.1 Primary submission types
 
-| Stage | Full (6) | `mapping` only | `downsample` only | `mapping,downsample` |
-|-------|----------|----------------|-------------------|----------------------|
+**Template-only (6 stages, no `diff`)** — `syndiff template submit` default:
+
+| Stage | Template (6) | `mapping` only | `downsample` only | `mapping,downsample` |
+|-------|--------------|----------------|-------------------|----------------------|
 | `tess_ffi_download` | P | E | E | E |
 | `wcs_grouping` | P | E | E | E |
 | `mapping` | P | P | E | P |
 | `ps1_download` | P | S(n/a) | E | E |
 | `ps1_process` | P | S(n/a) | E | E |
 | `downsample` | P | S(n/a) | P | P |
+| `diff` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 
-### 3.2 Other partial runs
+**Full end-to-end (7 stages)** — `syndiff all submit`: all seven stages start **P** (pending) unless stream-mode or supersede skips apply; `diff` is included.
+
+### 3.2 Diff preset (`syndiff diff submit`)
+
+| Stage | `diff` only |
+|-------|-------------|
+| `tess_ffi_download` | E (verify → skip) |
+| `wcs_grouping` | E (verify → skip) |
+| `mapping` | S(n/a) |
+| `ps1_download` | S(n/a) |
+| `ps1_process` | S(n/a) |
+| `downsample` | E (verify → skip) |
+| `diff` | P |
+
+### 3.3 Other partial runs
 
 | `--stages` | Pending | External (verify path) | Skipped immediately (n/a) |
 |------------|---------|------------------------|---------------------------|
@@ -150,7 +185,7 @@ Legend: **P** = pending, **E** = external, **S(n/a)** = skipped (not_selected)
 | `ps1_download` | ps1_dl | tess, wcs, map | ps1_pr, down |
 | `wcs_grouping,downsample` | wcs, down | tess, map, ps1_dl, ps1_pr | — |
 
-### 3.3 `force_rerun=true` vs `false` on submit
+### 3.4 `force_rerun=true` vs `false` on submit
 
 | Aspect | `force_rerun=false` (default) | `force_rerun=true` |
 |--------|-------------------------------|---------------------|
@@ -194,7 +229,9 @@ flowchart TD
 `pending` → `ready` when:
 
 - `deps_satisfied`, AND
-- `external_verify_complete` OR (`force_rerun` AND stage ∈ `--stages`)
+- `external_verify_attempted` OR (`force_rerun` AND stage ∈ `--stages`)
+
+Complete verify → `skipped` (via `_apply_verify_outcome`). Incomplete verify → cached `path='0'` and stage promotes to execute.
 
 ### Artifact verify scheduling (`_iter_verify_candidates`)
 
@@ -206,7 +243,7 @@ Eligible when status is `pending` or `external`, subject to:
 - **`external`**: `artifact_verify_needed()` is true
 - **`pending`**: stage ∈ `--stages` only (**pending outside `--stages` is never verified**)
 - Deps satisfied (for pending)
-- Not already `external_verify_complete`
+- Not already `external_verify_attempted` (for pending selected stages)
 
 Verify outcome: complete → `skipped` + cache; incomplete → cache `path='0'`, retry later.
 
@@ -218,11 +255,11 @@ Only stages in `runs.stages` (`active_stages`) are launched.
 
 ## 5. Normal submission — end-to-end walkthroughs
 
-### 5.1 Full run (all 6 stages)
+### 5.1 Full run (all 7 stages)
 
 ```
 All stages: pending
-→ tess → wcs → mapping → ps1_dl → ps1_pr → downsample (per target, pool-limited)
+→ tess → wcs → mapping → ps1_dl → ps1_pr → downsample → diff (per target, pool-limited)
 → run: success
 ```
 
@@ -281,6 +318,15 @@ down:   pend → runn → succ
 → run: success
 ```
 
+### 5.8 `diff` only (`syndiff diff submit`)
+
+```
+tess, wcs, down: sc_q → skip   (DIFF_VERIFY_UPSTREAM only)
+map, ps1_dl, ps1_pr: n/a       (not artifact-verified)
+diff: pend → runn → succ
+→ run: success
+```
+
 ---
 
 ## 6. Cancel (`kill`)
@@ -301,7 +347,7 @@ Run status → `canceled`.
 
 | Run type | Canceled | Untouched |
 |----------|----------|-----------|
-| Full 6 | All non-terminal non-skipped | Prior `success`/`failed`/`skipped` |
+| Template (6) / All (7) | All non-terminal non-skipped | Prior `success`/`failed`/`skipped` |
 | `mapping` only | tess(E), wcs(E), mapping(P) | ps1_*, down (n/a skipped) |
 | `downsample` only | All 5 upstream(E) + down(P) | — |
 | `mapping,downsample` | tess, wcs, ps1_dl, ps1_pr(E) + map, down(P) | — |
@@ -311,7 +357,7 @@ Run status → `canceled`.
 
 ## 7. Retry
 
-### 7.1 Bulk retry (`syndiff-template retry`)
+### 7.1 Bulk retry (`syndiff retry`)
 
 - Seeds: all `failed`, `canceled`, `blocked` stages
 - Per seed: `reset_stage_for_retry(seed, reset_downstream=True)`
@@ -375,7 +421,7 @@ Running workers continue until exit during pause.
 
 | Run type | Reopened | External upstream | Downstream n/a |
 |----------|----------|-------------------|----------------|
-| Full 6 | failed/blocked/canceled + downstream → P | E unchanged | — |
+| Template (6) / All (7) | failed/blocked/canceled + downstream → P | E unchanged | — |
 | `mapping` only | mapping → P; downstream → E briefly | E | Re-skipped next tick ✓ |
 | `mapping,downsample` | failed map/down → P | ps1 stays E ✓ | — |
 | `ps1_process` only | ps1_pr → P; down S → P briefly | E | down re-skipped next tick ✓ |
@@ -387,7 +433,7 @@ Running workers continue until exit during pause.
 | **`mapping,downsample`** | map/down → P; ps1/tess/wcs in closure → E | ps1 sc_q → skip → down runs ✓ |
 | **`downsample` only** | down → P; upstream → E | upstream sc_q → skip → down runs ✓ |
 | **`mapping` only** | map → P; tess/wcs → E; ps1/down → E → n/a | Works ✓ |
-| Full 6 | All reset to pending | Works ✓ |
+| Template (6) / All (7) | All reset to pending | Works ✓ |
 
 **Historical example:** `mapping_downsample_v1` hit this deadlock before the fix; after
 deploy, `repair_orphaned_pending_upstream` auto-recovers such runs on the next daemon tick.
@@ -396,7 +442,7 @@ deploy, `repair_orphaned_pending_upstream` auto-recovers such runs on the next d
 
 | Run type | map | tess/wcs | ps1_dl/pr | down |
 |----------|-----|----------|-----------|------|
-| Full 6 | P | unchanged | P | P |
+| Template (6) / All (7) | P | unchanged | P | P |
 | `mapping` only | P | E | P→S(n/a) next tick | P→S(n/a) next tick |
 | `mapping,downsample` | P | E | E | P |
 
@@ -545,8 +591,8 @@ stateDiagram-v2
 | Goal | Safe approach |
 |------|---------------|
 | Retry failed mapping in `mapping,downsample` | Bulk or targeted retry (cancel+retry supported) |
-| Retry without invalidating downstream | `syndiff-template retry --scc ... --stage ... --no-reset-downstream` |
-| Recover after kill on partial run | `syndiff-template retry` (auto-repairs orphan pending) |
+| Retry without invalidating downstream | `syndiff retry --scc ... --stage ... --no-reset-downstream` |
+| Recover after kill on partial run | `syndiff retry` (auto-repairs orphan pending) |
 | Re-run from scratch | `submit --force-rerun` with **new** `--run-id` |
 
 ---

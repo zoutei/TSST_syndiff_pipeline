@@ -1,8 +1,12 @@
-> **Legacy workflow**: monolithic `pipeline.py` + individual scripts in the [`syndiff`](../../../syndiff/) repo.  
-> **Recommended for production**: [`syndiff-template`](../template_pipeline.md) in this package (multi-target scheduler, WCS grouping, Condor).  
-> **Algorithm deep-dives**: [stages index](README.md)
+> **⚠️ LEGACY DOCUMENTATION — do not use for new runs**
+>
+> This page describes the **standalone** `pipeline.py` workflow in the sibling [`syndiff`](../../../syndiff/) research repo (single FFI, manual script chaining, no SQLite scheduler).
+>
+> **For production and cluster work**, use the supervised [`syndiff` CLI](../template_pipeline.md) in this package: 7-stage DAG, WCS grouping, artifact verify, HTCondor, and `events/{label}/` layout.
+>
+> **Algorithm deep-dives** (still accurate for the science code): [stages index](README.md) · [PanCAKES](mapping_pancakes.md) · [PS1 process](ps1_process_technical.md) · [downsample](downsample_technical.md)
 
-> **Note (integrated package)**: In `syndiff-pipeline`, PS1 download writes one shared store `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` (not per-SCC Zarr paths). Convolved output is `{data_root}/convolved_results/sector_{SSSS}_camera_{C}_ccd_{K}.zarr`. See the [template pipeline guide](../template_pipeline.md) for current layouts.
+> **Integrated-package path differences**: PS1 download writes one shared store `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` (not per-SCC Zarr paths). Convolved output is `{data_root}/convolved_results/sector_{SSSS}_camera_{C}_ccd_{K}.zarr`. Mapping CSVs use `tess_s{sector}_{camera}_{ccd}_master_skycells_list.csv` under `skycell_pixel_mapping/sector_*/camera_*/ccd_*/`. See the [template pipeline guide](../template_pipeline.md) and [storage layout](../storage_layout.md) for current layouts.
 
 # Syndiff Pipeline (standalone scripts)
 

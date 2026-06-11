@@ -1,8 +1,8 @@
-# `template_runner` architecture
+# SynDiff orchestration architecture
 
-This document explains **how the `template_runner` package works internally** — the supervisor daemon, scheduler loop, SQLite state machine, artifact verification, stage launching, and recovery paths. It is written for maintainers who need to read or change the ~5k lines of orchestration code.
+This document explains **how the shared orchestration engine works internally** — the supervisor daemon, spec-driven scheduler loop, SQLite state machine, artifact verification, stage launching, and recovery paths. It is written for maintainers who need to read or change the orchestration code under `syndiff_pipeline/common/orchestration/`.
 
-For CLI usage see [`template_pipeline.md`](template_pipeline.md). For a one-line-per-script index see [`syndiff_template_scripts.md`](syndiff_template_scripts.md).
+The user-facing surface is the unified **`syndiff <noun> <verb>`** CLI (`syndiff_pipeline/cli.py`). For usage see [`template_pipeline.md`](template_pipeline.md). For a one-line-per-command index see [`syndiff_cli.md`](syndiff_cli.md).
 
 ---
 
@@ -10,6 +10,7 @@ For CLI usage see [`template_pipeline.md`](template_pipeline.md). For a one-line
 
 - [Mental model](#mental-model)
 - [Workspace layout](#workspace-layout)
+- [SQLite and NFS](#sqlite-and-nfs)
 - [Three roles: CLI, supervisor, workers](#three-roles-cli-supervisor-workers)
 - [End-to-end: submit to finished run](#end-to-end-submit-to-finished-run)
 - [The supervisor main loop](#the-supervisor-main-loop)
@@ -31,21 +32,22 @@ For CLI usage see [`template_pipeline.md`](template_pipeline.md). For a one-line
 
 ## Mental model
 
-`template_runner` is a **batch orchestrator**, not a workflow engine in the Airflow sense. The design choices are:
+The **SynDiff orchestrator** is a **batch orchestrator**, not a workflow engine in the Airflow sense. The design choices are:
 
 | Principle | What it means in code |
 |-----------|----------------------|
-| **One supervisor per workspace** | A flock-guarded daemon (`scheduler.py --daemon`) owns `{handoff_root}`. Only it mutates execution state. |
+| **One pipeline, one DAG** | `PipelineSpec` composes six template stages + one `diff` stage (`pipeline_spec.py`). CLI presets (`all`, `template`, `diff`) are `--stages` selections over the same DAG. |
+| **One supervisor per workspace** | A flock-guarded daemon (`scheduler.py --daemon`) owns `{workspace_root}`. Only it mutates execution state. |
 | **CLI writes intents, not state** | `retry`, `kill`, `pause` insert rows into `commands`; the daemon applies them. |
 | **SQLite is the schedule of record** | `stage_runs.status` drives what runs next. Workers do not update SQLite on success — the supervisor does after reading durable sidecars. |
 | **Durable sidecars survive daemon restarts** | Each worker writes `*.status.json` and `*.log` on NFS. After a crash, the supervisor reconciles from disk, not from lost `Popen` handles. |
-| **Global pool limits** | `network`, `mapping`, `ps1_process`, `cpu_light` caps apply **across all active runs** on that host, not per run. |
+| **Global pool limits** | `network`, `mapping`, `ps1_process`, `cpu_light`, `diff` caps apply **across all active runs** on that host, not per run. |
 | **Manifest-first skip** | Stages outside `--stages` can become `skipped` without re-running if on-disk artifacts (or a stable manifest) prove completeness. |
 
 ```mermaid
 flowchart LR
-    subgraph cli [CLI - template_runner/cli.py]
-        submit[submit]
+    subgraph cli [CLI - syndiff_pipeline/cli.py]
+        submit[all|template|diff submit]
         control[kill / retry / pause]
         monitor[progress / status]
     end
@@ -62,8 +64,8 @@ flowchart LR
     end
 
     subgraph storage [Storage]
-        sqlite[(pipeline_state.sqlite)]
-        nfs[NFS: runs/, data/, handoffs/]
+        sqlite[(control/pipeline_state.sqlite)]
+        nfs[NFS: runs/, data/, events/]
     end
 
     submit --> sqlite
@@ -83,42 +85,43 @@ flowchart LR
 
 ## Workspace layout
 
-A **workspace** is one `handoff_root` directory. Everything for multi-target batching on one machine cluster mount hangs off it.
+A **workspace** is one `workspace_root` directory. Orchestrator state lives under `control/`; durable pipeline data under `runs/` and `events/`.
+
+**Canonical reference:** [storage_layout.md](storage_layout.md) — full directory trees for `workspace_root` and `data_root`, NFS/SQLite rules, and migration from legacy layouts.
+
+Summary:
 
 ```text
-{handoff_root}/
-  pipeline_state.sqlite      # WAL-mode SQLite; all runs share one DB
-  daemon.lock                # flock: only one supervisor process
-  daemon.pid
-  daemon.log
-  discord_bot.lock           # flock: only one Discord bot per workspace
-  discord_bot.pid
-  discord_bot.log
-  discord_bot_config.path    # site config for bot (re)start
-  workspace.deployment.path  # recorded path to deployment.yaml
-  runs/
-    latest -> <run_id>       # symlink for convenience
-    <run_id>/
-      config.yaml            # frozen, absolute paths
-      targets.csv
-      run_meta.json
-      summary.json / summary.csv
-      per_target/
-        <target_label>/
-          <stage>.log
-          <stage>.status.json
-          <stage>.manifest.json
-          <stage>.condor.*     # when executor=condor
-    .manifests/              # cross-run stable completion manifests
-      <target_label>/
-        <stage>.manifest.json
-  <target_label>/            # WCS handoff (outside runs/)
-    cluster_template_job.json
-    syndiff_ffi_frames.csv
-    ...
+{workspace_root}/
+  control/                   # pipeline_state.sqlite, daemon.*, discord_bot.*
+  runs/                      # frozen configs, per-run logs/manifests, .manifests/
+  events/{target_label}/     # handoff JSON, ps1_removed_stars.csv, ws/
 ```
 
-**Science data** (`data_root`) is separate: FFIs, mapping caches, Zarr stores, convolved results, template FITS. The runner only stores **pointers** (resolved paths) in frozen config.
+`event_dir = {workspace_root}/events/{target_label}/`. Science caches remain under `data_root`. The runner stores **pointers** (resolved absolute paths) in frozen config.
+
+---
+
+## SQLite and NFS
+
+`pipeline_state.sqlite` uses **WAL mode**. SQLite WAL is safe only when every process that writes the database runs on the **same host** as the WAL writer.
+
+| Rule | Rationale |
+|------|-----------|
+| Run the **supervisor daemon** on one submit host per `workspace_root` | Only the daemon mutates `stage_runs` during scheduling |
+| Run **CLI control/monitor commands** on that same host when possible | Avoids NFS client races on the WAL |
+| Science data (`data_root`, `events/`, run logs) may live on NFS | Workers on Condor execute nodes read/write artifacts via NFS mounts |
+
+**Process identity on NFS:** `control/daemon.pid` and `control/discord_bot.pid` store two lines (`hostname` then `pid`). Liveness checks call `os.kill` only when the recorded host matches this machine. `ensure_daemon_running()` and Discord bot ensure refuse to spawn a second copy when a remote instance is already recorded.
+
+**Host mismatch warning:** `warn_if_daemon_host_mismatch()` (`scheduler_control.py`) compares `socket.gethostname()` to the supervisor host (pid file, then SQLite). When they differ, monitoring/control commands print:
+
+```text
+WARNING: supervisor daemon is on 'submit01' but this CLI is on 'login02'.
+SQLite WAL mode is unsafe across NFS clients; run CLI commands on the daemon host.
+```
+
+**Supervisor liveness** does not rely on NFS for heartbeats. The authoritative heartbeat file lives on the daemon host's local temp directory (`daemon_heartbeat_path`). NFS SQLite heartbeats are best-effort; if the local heartbeat cannot be updated for 90 s, the supervisor exits so a fresh process can take the flock and reconcile.
 
 ---
 
@@ -140,11 +143,11 @@ Two entry modes:
 | Mode | How started | Behavior |
 |------|-------------|----------|
 | **Daemon** | `daemon.spawn_detached_daemon()` → `scheduler --daemon --deployment …` | Infinite loop over all `active_runs()` |
-| **Foreground** | `syndiff-template run` | Single-run loop until terminal status |
+| **Foreground** | `syndiff template run` | Single-run loop until terminal status |
 
 Daemon startup (`run_supervisor_daemon`):
 
-1. Non-blocking `flock` on `daemon.lock` — second daemon exits immediately.
+1. Non-blocking `flock` on `control/daemon.lock` — second daemon exits immediately.
 2. Write `daemon.pid`, register heartbeat in SQLite + host-local file.
 3. Start background heartbeat thread (15 s interval).
 4. Ensure Discord bot once on startup (when `discord_bot_config.path` exists and bot is enabled).
@@ -156,9 +159,9 @@ Daemon startup (`run_supervisor_daemon`):
 
 One process per (run, target, stage) launch:
 
-1. Resolve frozen `RunContext` from `--run-dir`.
-2. Write `*.status.json` with `state: running` and `launch_token`.
-3. Tee stdout/stderr to `per_target/<label>/<stage>.log`.
+1. Write initial `*.status.json` with `state: running` and `launch_token` (before config parse, so early crashes leave an `exited` record).
+2. Resolve frozen `RunContext` from `--run-dir`.
+3. Redirect stdout/stderr to `per_target/<label>/<stage>.log` via fd-level `dup2` (captures subprocess/C-level output; bounded memory).
 4. Call `stages.execute_stage()` (in-process science code).
 5. On success, write per-run and stable completion manifests.
 6. Write `*.status.json` with `state: exited` and `exit_code`.
@@ -199,7 +202,7 @@ sequenceDiagram
     Daemon->>NFS: summary.json
 ```
 
-**`create_run`** (`state.py`) inserts the **full 6-stage DAG** for every enabled target:
+**`create_run`** (`state.py`) inserts the **full 7-stage DAG** for every enabled target:
 
 - Stages in `--stages` → `pending`
 - All other stages → `external` (may become `skipped` after verify)
@@ -225,11 +228,11 @@ while not shutdown:
         tick_run(state, run_id, ctx)    # see next section
         apply_commands(state)           # re-check after slow tick
 
-    write_verify_in_flight(handoff_root, by_run)  # scan_queued / scan_running JSON
+    write_verify_in_flight(workspace_root, by_run)  # scan_queued / scan_running JSON
     sleep(1s)                           # interruptible for SIGTERM
 ```
 
-Discord bot lifecycle is **not** polled in the main loop. The bot is ensured once at supervisor startup; `submit`, `retry`, and `daemon start` can also ensure it when the supervisor was already running. All ensure/stop paths use `discord_bot.lock` (flock) so at most one bot runs per `handoff_root`.
+Discord bot lifecycle is **not** polled in the main loop. The bot is ensured once at supervisor startup; `submit`, `retry`, and `daemon start` can also ensure it when the supervisor was already running. All ensure/stop paths use `control/discord_bot.lock` (flock) so at most one bot runs per `workspace_root`.
 
 On shutdown: drain verify worker briefly, clear supervisor row, remove pid/heartbeat files.
 
@@ -259,11 +262,15 @@ Each tick for one run executes **in this order** (see `scheduler.py::_tick_run`)
 A `pending` stage becomes `ready` only when:
 
 1. All **effective dependencies** are `success` or `skipped` (`deps_satisfied`).
-2. **Either** `external_verify_complete()` is true for this stage **or** `force_rerun` applies to this selected stage.
+2. **Either** `external_verify_attempted()` is true for this stage **or** `force_rerun` applies to this selected stage.
 
-This is why a `pending` stage may sit for several ticks: the verify pool must run `stage_complete()` and cache a **complete** result in `artifacts` (`external_check` with `path='1'`) before promotion. An incomplete verify (`path='0'`) is retried on later ticks and does not satisfy promotion.
+Verify runs **before** promotion. When artifacts are **complete**, `_apply_verify_outcome` marks the stage `skipped` (no execution needed). When artifacts are **incomplete**, verify caches `path='0'` and promotion proceeds on the next tick — the stage must **execute** to produce outputs. Incomplete verify does **not** block promotion indefinitely (that was the historical promotion deadlock).
 
 `blocked` stages unblock to `pending` when dependencies become satisfied again (e.g. after `retry`).
+
+### Requeue attempts and backoff
+
+`stage_runs.attempts` increments on every `requeue_to_ready`. After `max_stage_attempts` (config `scheduler.max_stage_attempts`, default **3**), the stage is finalized as `failed` instead of relaunching. Requeues also set `not_before = claimed_at + requeue_backoff_s × attempts` (default backoff **30 s**) so crash-looping workers do not spin immediately.
 
 ### Stall semantics
 
@@ -312,21 +319,26 @@ Runs stay **`running`** while artifact scans are queued or in flight. `stall_rea
 | `canceled` | User kill or SIGTERM (exit 143) |
 | `external` | Not in `--stages`; awaiting one-shot verify → usually `skipped` |
 
-**Run-level status** derives from terminal stage counts (`derive_run_final_status`): any `canceled` → run canceled; else any `failed` → run failed; else success.
+**Run-level status** derives from terminal stage counts (`derive_run_final_status`): any `failed` → run failed; else any `canceled` → run canceled; else success.
 
 ---
 
 ## Dependency graph and partial runs
 
-Fixed DAG (`state.py::STAGE_DEPS`):
+Composed DAG (`pipeline_spec.py` / `PipelineSpec`):
 
 ```text
 tess_ffi_download
        → wcs_grouping → mapping → ps1_download → ps1_process
               │                                      │
               └──────────── downsample ◄─────────────┘
-                    (also needs mapping)
+                    (also needs wcs_grouping + mapping)
+                         │
+                         ▼
+                        diff
 ```
+
+Stage metadata (deps, pools, executors, verify hooks) lives in `StageSpec` registries: `template_creation/orchestration/stages.py` (six template stages) and `difference_imaging/orchestration/stages.py` (`diff`, depends on `downsample`). `state.py` reads the composed spec instead of module-level `STAGE_DEPS`.
 
 **Effective deps** (`effective_stage_deps`) can shorten the graph:
 
@@ -343,6 +355,18 @@ tess_ffi_download
 | Superseded upstream | If a **direct** downstream stage in the run closure is already `success`/`skipped`, skip verifying upstream (e.g. `ps1_download` when `ps1_process` is satisfied) (`superseded`) |
 
 `artifact_verify_needed()` encodes the supersede rule using **direct dependents** from `STAGE_DEPS` only (not transitive downstream). `apply_superseded_skips()` runs at tick start and again at the end of each verify pass so same-tick verify results can supersede upstream stages immediately.
+
+### Diff-only artifact verify closure
+
+`artifact_verify_closure(active_stages)` (`spec.py`) can be **narrower** than `run_stage_closure`. For `syndiff diff submit` (`--stages diff`):
+
+| Stage | In run closure? | Artifact verify? |
+|-------|-----------------|------------------|
+| `tess_ffi_download`, `wcs_grouping`, `downsample` | yes | yes (`DIFF_VERIFY_UPSTREAM`) |
+| `mapping`, `ps1_download`, `ps1_process` | yes | no — immediate **n/a** (`not_selected`) |
+| `diff` | yes (selected) | yes (before launch) |
+
+`DIFF_VERIFY_UPSTREAM = {tess_ffi_download, wcs_grouping, downsample}` — enough to confirm FFIs, WCS handoff JSON, and template FITS without scanning mapping CSV or Zarr stores.
 
 ---
 
@@ -385,7 +409,7 @@ After verify, SQLite `artifacts` table stores:
 - `artifact_type = external_check` — verify attempt cached; `path='1'` = complete, `'0'` = incomplete (retried)
 - `artifact_type = skip_reason` — `stream_mode`, `artifacts_verified`, `not_selected`, `superseded`
 
-`external_verify_attempted()` is true after any cached attempt. `external_verify_complete()` requires `path='1'`. `promote_stages` requires `external_verify_complete()` before `pending → ready` (unless `force_rerun` on a selected stage).
+`external_verify_attempted()` is true after any cached attempt. `external_verify_complete()` requires `path='1'`. `promote_stages` gates on `external_verify_attempted()` (verify ran); complete artifacts become `skipped` via `_apply_verify_outcome`, incomplete artifacts proceed to launch.
 
 ### Verify visibility (status grid + CLI)
 
@@ -412,7 +436,7 @@ For local launches, any previous `*.status.json` is deleted before spawn so stal
 ### Command built (`stages.build_stage_command`)
 
 ```text
-python -m syndiff_pipeline.template_creation.orchestration.run_stage \
+python -m syndiff_pipeline.common.orchestration.run_stage \
   --run-id … --stage … --run-dir … --target-label … --launch-token … [--force-rerun]
 ```
 
@@ -431,7 +455,7 @@ subprocess.Popen(cmd, start_new_session=True, stdout=DEVNULL, stderr=DEVNULL)
 3. Execute node runs wrapper → `conda activate syndiff` → `exec` the same `run_stage.py` command.
 4. Poll with `condor_q` / `condor_history` after a 120 s grace window.
 
-**Important**: submit host must run `syndiff-template submit` with `syndiff` activated so `sys.executable` in the command points at the right env on NFS.
+**Important**: submit host must run `syndiff template submit` with `syndiff` activated so `sys.executable` in the command points at the right env on NFS.
 
 ---
 
@@ -456,7 +480,10 @@ The **durable status file** is authoritative — not the lost `Popen` from a pre
 |-----------|--------|
 | `condor_q` shows still running | Still running |
 | `condor_history` shows exit code | `_finalize_stage` |
+| JobStatus **5** (Held) | Log HoldReason; after `hold_timeout_s` (config), `condor_rm` and finalize as failed |
 | Claimed but no `native_id` after 300 s | Requeue (submit never completed) |
+
+`poll_cluster` batches all active clusters in one `condor_q` / `condor_history` call per tick (`-limit 1` on history).
 
 `_finalize_stage` also maps misleading exit 0 to 143 when the log tail shows graceful shutdown (SIGTERM).
 
@@ -490,6 +517,7 @@ CLI inserts into `commands`; `_apply_commands` processes FIFO each tick (and aga
 | `cpu_light` | `downsample` | 2 |
 | `mapping` | `mapping` | 6 |
 | `ps1_process` | `ps1_process` | 4 |
+| `diff` | `diff` | 2 |
 | *(none)* | `wcs_grouping` | unlimited |
 
 `wcs_grouping` is intentionally **unpooled** — it is fast and should not compete with `downsample` for `cpu_light` slots.
@@ -514,9 +542,17 @@ Condor `max_concurrent` limits **simultaneous submissions**, not CPUs per job.
 
 On submit, `logs.materialize_run_inputs()` copies config/targets into the run dir with **absolute paths** resolved from deployment.
 
+**Scheduler knobs** (under `scheduler:` in site `config.yaml`):
+
+| Key | Default | Purpose |
+|-----|---------|---------|
+| `condor_hold_timeout_s` | `600.0` | Remove Condor jobs stuck in `H` (held) after N seconds; held timer persists across daemon restarts |
+| `verify_max_workers` | `1` | Background verify thread pool size |
+| `verify_budget_per_tick` | `16` | Max verify tasks scheduled per supervisor tick |
+
 `resolve_config(target, cfg)` (`runner_config.py`) merges:
 
-- Workspace paths (`handoff_dir`, `mapping_root`, `zarr_dir`, …)
+- Workspace paths (`event_dir`, `mapping_root`, `zarr_dir`, …)
 - Per-SCC `overrides` from config
 - Typed stage params (`stage_params.py` — strict allow-list)
 
@@ -529,7 +565,7 @@ On submit, `logs.materialize_run_inputs()` copies config/targets into the run di
 | Scenario | Behavior |
 |----------|----------|
 | Supervisor dies | Next `submit` or `daemon start` spawns new process; reconciles `running` from `status.json` / Condor |
-| Worker dies without status file | After 300 s grace → requeue to `ready`, `stage_died` alert |
+| Worker dies without status file | After 300 s grace → requeue to `ready` (with backoff + attempts cap), `stage_died` alert |
 | Duplicate daemon start | Second process fails flock, exits 0 |
 | Duplicate Discord bot start | `discord_bot.lock` serializes ensure; `/proc` scan kills orphans on stop/spawn |
 | Wedged supervisor (PID alive, no heartbeat) | `ensure_daemon_running` calls `stop_daemon` then respawns |
@@ -544,13 +580,13 @@ Foreground `run_scheduler` (debug) uses the same `_tick_run` but sleeps 1 s betw
 
 ## Discord bot lifecycle
 
-The on-demand status bot is a **sidecar** to the supervisor — not required for pipeline execution. Like the supervisor, at most **one bot per `handoff_root`**.
+The on-demand status bot is a **sidecar** to the supervisor — not required for pipeline execution. Like the supervisor, at most **one bot per `workspace_root`**.
 
 | File | Role |
 |------|------|
 | `discord_bot.lock` | flock guard (same pattern as `daemon.lock`) |
 | `discord_bot.pid` | PID of the canonical detached bot |
-| `discord_bot_config.path` | Site `config.yaml` path, recorded on `submit` |
+| `discord_bot_config.path` | Site `pipeline.yaml` path, recorded on `submit` |
 
 **Who starts the bot:**
 
@@ -564,7 +600,7 @@ This avoids the race where `submit` spawns a new supervisor **and** starts a bot
 
 **Stop:** `daemon stop` terminates all live `discord_bot --detached` processes whose config maps to the workspace (via `/proc` scan), not only the PID in `discord_bot.pid`.
 
-**Multiple supervisors:** one per `handoff_root` (flock on `daemon.lock`). Multiple workspaces on one host each get their own supervisor and bot.
+**Multiple supervisors:** one per `workspace_root` (flock on `control/daemon.lock`). Multiple workspaces on one host each get their own supervisor and bot.
 
 ---
 
@@ -572,8 +608,8 @@ This avoids the race where `submit` spawns a new supervisor **and** starts a bot
 
 | Surface | Source |
 |---------|--------|
-| `syndiff-template status` | SQLite `stage_runs` → `run_report.format_status_grid` |
-| `syndiff-template progress` | SQLite counts + `stage_progress.py` log parsing + `downsample.progress.json` |
+| `syndiff status` | SQLite `stage_runs` → `run_report.format_status_grid` |
+| `syndiff progress` | SQLite counts + `stage_progress.py` log parsing + `downsample.progress.json` |
 | `summary.json` / `summary.csv` | Written each tick per run |
 | `daemon.log` | Supervisor INFO logs |
 | `per_target/.../<stage>.log` | Primary debug path (includes Condor execute output) |
@@ -589,15 +625,19 @@ Log-derived progress (`stage_progress.py`) avoids importing science modules in t
 
 | Module | Responsibility |
 |--------|----------------|
-| `cli.py` | Argument parsing; all user-facing commands |
+| `cli.py` (common) | Monitoring/control/verify verbs; shared by `syndiff_pipeline/cli.py` |
+| `syndiff_pipeline/cli.py` | Noun/verb entry (`all|template|diff submit|run`, delegates other verbs) |
 | `scheduler.py` | Supervisor loop, `_tick_run`, reconcile, verify scheduling, launch orchestration |
 | `daemon.py` | flock, spawn detached supervisor, process tree kill |
 | `scheduler_control.py` | `ensure_daemon_running`, `stop_daemon`, heartbeat staleness |
 | `state.py` | SQLite schema, status machine, deps, claim, commands, skip caches |
 | `launcher.py` | Local `Popen` vs Condor submit |
 | `condor.py` | Submit file generation, `condor_submit`, poll, `condor_rm` sweep |
-| `run_stage.py` | Worker entry: logging tee, `execute_stage`, manifests, status sidecar |
-| `stages.py` | Stage registry, `build_stage_command`, `execute_stage` dispatch |
+| `run_stage.py` | Worker entry: fd log redirection, spec-driven `execute_stage`, manifests, status sidecar |
+| `spec.py` | `StageSpec` / `PipelineSpec` abstraction |
+| `pipeline_spec.py` | Composed 7-stage SynDiff DAG |
+| `template_creation/.../stages.py` | Template stage registry + execute/verify hooks |
+| `difference_imaging/.../stages.py` | `diff` stage (`run_config_pipeline`, frozen per-target config) |
 | `verify.py` | On-disk verifiers, manifest read/write, `stage_complete` |
 | `verify_worker.py` | Background thread pool for NFS-heavy verify |
 | `verify_status.py` | Host-local verify-in-flight counter for CLI |
@@ -605,7 +645,7 @@ Log-derived progress (`stage_progress.py`) avoids importing science modules in t
 | `run_context.py` | Frozen run directory → `RunContext` |
 | `runner_config.py` | YAML load, path resolution, per-target `resolve_config` |
 | `stage_params.py` | Typed config for each stage |
-| `workspace.py` | `handoff_root` paths, supervisor discovery via `/proc` |
+| `workspace.py` | `workspace_root` paths, supervisor discovery via `/proc` |
 | `deployment.py` | Gitignored deployment overlay |
 | `targets.py` | CSV loaders (normalized + SN catalog format) |
 | `handoff.py` | `wcs_grouping` stage wrapper |
@@ -622,8 +662,8 @@ Log-derived progress (`stage_progress.py`) avoids importing science modules in t
 | Document | Contents |
 |----------|----------|
 | [`template_pipeline.md`](template_pipeline.md) | User guide: config, CLI flags, Condor sizing, troubleshooting |
-| [`syndiff_template_scripts.md`](syndiff_template_scripts.md) | One-line description of each script/command |
-| [`stages/README.md`](stages/README.md) | Science algorithms inside `template/` modules |
+| [`syndiff_cli.md`](syndiff_cli.md) | One-line description of each script/command |
+| [`stages/README.md`](stages/README.md) | Science algorithms inside `template_creation/processing/` modules |
 
 ---
 

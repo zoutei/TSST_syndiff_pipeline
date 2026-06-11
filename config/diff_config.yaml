@@ -1,0 +1,105 @@
+# Site diff policy. Paths resolve from deployment.yaml + per-target layout.
+# Targets are passed on the CLI via --targets (never embedded here).
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 8
+  pipeline_plots: true
+  master_fits_mirror: true
+  crop_mode: target_box
+  crop_box_size: 1024
+
+# Global forced-photometry extras — applied to every target.
+# dx/dy are crop-local pixel offsets from the primary target's per-frame WCS position.
+additional_forced_targets:
+  - name: offset_top
+    dx: 0
+    dy: -7
+  - name: offset_bottom
+    dx: 0
+    dy: 7
+  - name: offset_right
+    dx: 7
+    dy: 0
+  - name: offset_left
+    dx: -7
+    dy: 0
+
+pipeline:
+  # Template wcs_grouping + downsample must run first; diff loads handoff from
+  # cluster_template_job.json, syndiff_ffi_frames.csv, and events/{target}/ws/templates
+  - kind: shared_mask
+  - kind: hotpants
+    science: ffi
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_convolved: false
+    write_bkg: false
+    write_stamps: false
+    write_kernel_params: false
+  # - external_workspaces: [hp_d]
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+    psf_type: prf
+    phot_debug_stamp_size: 25
+    output: lc_prf_on_diffs
+  # - kind: background_rough
+  #   inputs:
+  #     diffs: hp_d
+  #     bkg: hp_b
+  #   output: bkg_rough
+  #   stream_load_rough: true
+  #   write_per_frame_fits: true
+  # - kind: subtract
+  #   inputs:
+  #     expression: "hp_d - bkg_rough"
+  #   output: diffs_minus_bkg
+  # - kind: forced_photometry
+  #   inputs:
+  #     diffs: diffs_minus_bkg
+  #   psf_type: prf
+  #   output: lc_prf_after_bkg
+  # - kind: subtract
+  #   inputs:
+  #     expression: "ffi - bkg_rough - hp_b"
+  #   output: ffi_wo_bkg
+  # - kind: hotpants
+  #   science: ffi_wo_bkg
+  #   output:
+  #     diffs: hp2_d
+  #     convolved: hp2_c
+  #     bkg: hp2_b
+  # - kind: forced_photometry
+  #   inputs:
+  #     diffs: hp2_d
+  #   psf_type: prf
+  #   output: lc_prf_on_diffs_loop2
+
+# Per-event extras — keyed by target label from targets CSV.
+# One ra/dec example + one fixed x/y example for 2020ut.
+# per_event_force_targets:
+#   s0020_c3_k3_2020ut:
+#     - name: bottom
+#       ra: 210.2696410
+#       dec: 81.8743734
+#     - name: fixed_pixel_check
+#       x: 512.0
+#       y: 600.0
+
+# overrides:
+#   # 2020ut (sector 20 / camera 3 / ccd 3): full-FFI templates + 1024×1024 diff ROI on target.
+#   "20/3/3":
+#     defaults:
+#       # n_jobs: 12
+#       crop_mode: target_box
+#       crop_box_size: 1024
+    # template_dir: omit → events/{target}/ws/templates symlink after template downsample
+
+condor:
+  request_cpus: 8
+  request_memory: 100000
+  requirements: "Memory >= 100000 && LoadAvg < 10"
+  rank: "-LoadAvg"
