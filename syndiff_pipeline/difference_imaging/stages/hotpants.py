@@ -45,9 +45,21 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 from astropy.wcs import WCS, FITSFixedWarning
-from joblib import Parallel, delayed
+from joblib import delayed
 
+from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.joblib_progress import (
+    parallel_map_with_optional_tqdm,
+    tqdm_iter,
+)
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import HotpantsParams
+from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
+    init_progress_pair,
+    progress_path_for_diff_log,
+    progress_path_for_diffs_workspace,
+    record_frame_progress,
+    set_progress_phase_pair,
+)
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     sanitize_workspace_label,
     tess_product_id_from_ffi_path,
@@ -65,22 +77,57 @@ def write_diff_noise_mask_fits(
     diff_img: np.ndarray,
     noise_img: Optional[np.ndarray],
     mask_img: Optional[np.ndarray],
+    *,
+    header: Optional[fits.Header] = None,
 ) -> None:
     """
     Write one multi-extension FITS: PRIMARY = difference, extensions NOISE (1σ)
     and MASK when provided. Uses float32 for all arrays.
     """
-    primary = fits.PrimaryHDU(np.asarray(diff_img, dtype=np.float32))
+    primary_hdr = fits.Header(header) if header is not None else None
+    primary = fits.PrimaryHDU(
+        np.asarray(diff_img, dtype=np.float32), header=primary_hdr
+    )
     hdul: list = [primary]
     if noise_img is not None:
+        noise_hdr = fits.Header(header) if header is not None else None
+        if noise_hdr is not None:
+            noise_hdr["EXTNAME"] = "NOISE"
         hdul.append(
-            fits.ImageHDU(np.asarray(noise_img, dtype=np.float32), name="NOISE")
+            fits.ImageHDU(
+                np.asarray(noise_img, dtype=np.float32),
+                header=noise_hdr,
+                name="NOISE",
+            )
         )
     if mask_img is not None:
+        mask_hdr = fits.Header(header) if header is not None else None
+        if mask_hdr is not None:
+            mask_hdr["EXTNAME"] = "MASK"
         hdul.append(
-            fits.ImageHDU(np.asarray(mask_img, dtype=np.float32), name="MASK")
+            fits.ImageHDU(
+                np.asarray(mask_img, dtype=np.float32),
+                header=mask_hdr,
+                name="MASK",
+            )
         )
     fits.HDUList(hdul).writeto(out_path, overwrite=True)
+
+
+def _write_image_fits(
+    out_path: str,
+    data: np.ndarray,
+    *,
+    header: Optional[fits.Header] = None,
+) -> None:
+    """Write a single 2D image FITS (float32), optionally with header."""
+    hdr = fits.Header(header) if header is not None else None
+    fits.writeto(
+        out_path,
+        np.asarray(data, dtype=np.float32),
+        header=hdr,
+        overwrite=True,
+    )
 
 
 # Loky workers: large read-only objects are set once per process via initializer
@@ -110,6 +157,7 @@ def _hotpants_loky_initializer(
         "round_id": round_id,
         "legacy_bkg_sidecar": legacy_bkg_sidecar,
         "sci_workspace_dir": sci_workspace_dir,
+        "template_cache": {},
     }
 
 
@@ -142,6 +190,7 @@ def _hotpants_loky_run_task(
         sci_bkg=bkg_i,
         legacy_diff_sidecar_bkg=p["legacy_bkg_sidecar"],
         sci_workspace_dir=p.get("sci_workspace_dir"),
+        template_cache=p.get("template_cache"),
     )
 
 
@@ -420,6 +469,8 @@ def build_hotpants_config(
     convolved_dir: str,
     frame_stem: str,
     stamps_dir: Optional[str] = None,
+    *,
+    write_stamps: bool = True,
 ):
     _, HotpantsConfig = _get_hotpants_classes()
 
@@ -428,8 +479,11 @@ def build_hotpants_config(
 
     os.makedirs(diff_dir, exist_ok=True)
     os.makedirs(convolved_dir, exist_ok=True)
-    stamp_out_dir = stamps_dir if stamps_dir is not None else diff_dir
-    os.makedirs(stamp_out_dir, exist_ok=True)
+    stamp_region_file = None
+    if write_stamps:
+        stamp_out_dir = stamps_dir if stamps_dir is not None else diff_dir
+        os.makedirs(stamp_out_dir, exist_ok=True)
+        stamp_region_file = os.path.join(stamp_out_dir, f"{frame_stem}_stamps.fits")
 
     hp_config = HotpantsConfig(
         rkernel=int(kernel_halfwidth),
@@ -455,8 +509,9 @@ def build_hotpants_config(
         noise_image_file=None,
         mask_image_file=None,
         sigma_image_file=None,
-        convolved_image_file=os.path.join(convolved_dir, f"{frame_stem}.fits"),
-        stamp_region_file=os.path.join(stamp_out_dir, f"{frame_stem}_stamps.fits"),
+        # Convolved model FITS written in-repo after run_pipeline (with cropped WCS).
+        convolved_image_file=None,
+        stamp_region_file=stamp_region_file,
     )
     return hp_config
 
@@ -469,15 +524,9 @@ def run_hotpants_frame(
     ref_stars_xy: np.ndarray,
     hp_config,
     *,
-    science_ffi_path: Optional[str] = None,
-    diff_fits_path_for_logs: Optional[str] = None,
+    collect_kernel_params: bool = True,
 ) -> dict:
-    """
-    Run Hotpants on in-memory template/science arrays.
-
-    ``science_ffi_path`` is included in log lines when pyhotpants emits its
-    minimal-header FITS warning (arrays are passed, so no science FITS header).
-    """
+    """Run Hotpants on in-memory template/science arrays."""
     Hotpants, _ = _get_hotpants_classes()
     result = {
         "diff": None,
@@ -500,27 +549,14 @@ def run_hotpants_frame(
             config=hp_config,
             output_header=None,
         )
-        # pyhotpants warns when saving FITS from in-memory arrays (no WCS header).
-        # Record warnings so we can append the science FFI path for debugging.
-        _HEADER_WARN_SUBSTR = "No FITS header available"
-        with warnings.catch_warnings(record=True) as wrec:
-            warnings.simplefilter("always")
-            res = hp.run_pipeline()
-        for w in wrec:
-            msg = str(w.message)
-            if _HEADER_WARN_SUBSTR in msg:
-                ffi = science_ffi_path or "unknown"
-                outf = getattr(hp_config, "output_file", None) or diff_fits_path_for_logs
-                log.warning("%s science_ffi=%r diff_output=%r", msg, ffi, outf)
-            else:
-                warnings.warn(w.message, category=w.category, stacklevel=1)
+        res = hp.run_pipeline()
         result["diff"] = res.get("diff_image")
         result["bkg"] = res.get("background")
         result["convolved"] = res.get("convolved_image")
         result["noise"] = res.get("noise_image")
         result["mask"] = res.get("output_mask")
         result["success"] = result["diff"] is not None
-        if result["success"]:
+        if result["success"] and collect_kernel_params:
             arrays = None
             try:
                 details = hp.get_substamp_details()
@@ -540,50 +576,73 @@ def run_hotpants_frame(
 
 
 def _load_ffi_cropped(ffi_path: str, bounds: dict) -> tuple:
-    with fits.open(ffi_path, memmap=True) as hdul:
-        sci = hdul[1].data.astype(np.float64)
-        try:
-            err = hdul[2].data.astype(np.float64)
-        except Exception:
-            err = np.zeros_like(sci)
     x0, x1 = bounds["x_min"], bounds["x_max"]
     y0, y1 = bounds["y_min"], bounds["y_max"]
-    return sci[y0:y1, x0:x1], err[y0:y1, x0:x1]
+    with fits.open(ffi_path, memmap=True) as hdul:
+        sci = hdul[1].data[y0:y1, x0:x1].astype(np.float64)
+        try:
+            err = hdul[2].data[y0:y1, x0:x1].astype(np.float64)
+        except Exception:
+            err = np.zeros_like(sci)
+    return sci, err
+
+
+class TemplateCoverageError(Exception):
+    """Diff crop extends outside syndiff template FITS coverage."""
 
 
 def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
+    from syndiff_pipeline.common.template_coverage import (
+        crop_bounds_subset_of_coverage,
+        template_coverage_ffi_bounds,
+    )
+
+    coverage = template_coverage_ffi_bounds(tmpl_path)
+    if not crop_bounds_subset_of_coverage(bounds, coverage):
+        raise TemplateCoverageError(
+            f"Diff crop {bounds} extends outside template coverage {coverage} "
+            f"for {tmpl_path}"
+        )
+
+    ox = coverage["x_min"]
+    oy = coverage["y_min"]
+    x0, x1 = bounds["x_min"] - ox, bounds["x_max"] - ox
+    y0, y1 = bounds["y_min"] - oy, bounds["y_max"] - oy
     with fits.open(tmpl_path, memmap=True) as hdul:
         if hdul[0].data is not None:
-            data = hdul[0].data.astype(np.float64)
-        else:
-            data = hdul[1].data.astype(np.float64)
-    sh = bounds.get("shape")
-    if sh is not None:
-        ny, nx = int(sh[0]), int(sh[1])
-        if data.shape == (ny, nx):
-            return data
-    x0, x1 = bounds["x_min"], bounds["x_max"]
-    y0, y1 = bounds["y_min"], bounds["y_max"]
-    return data[y0:y1, x0:x1]
+            return hdul[0].data[y0:y1, x0:x1].astype(np.float64)
+        return hdul[1].data[y0:y1, x0:x1].astype(np.float64)
 
 
-def _save_bkg_fits(bkg: np.ndarray, basename: str, bkg_dir: str) -> None:
+def _save_bkg_fits(
+    bkg: np.ndarray,
+    basename: str,
+    bkg_dir: str,
+    *,
+    header: Optional[fits.Header] = None,
+) -> None:
     """Write ``bkg`` as ``{bkg_dir}/{basename}.fits``."""
     os.makedirs(bkg_dir, exist_ok=True)
-    fits.writeto(
+    _write_image_fits(
         os.path.join(bkg_dir, f"{basename}.fits"),
-        bkg.astype(np.float32),
-        overwrite=True,
+        bkg,
+        header=header,
     )
 
 
-def _legacy_save_bkg_sidecar(bkg: np.ndarray, diff_basename: str, diff_dir: str) -> None:
+def _legacy_save_bkg_sidecar(
+    bkg: np.ndarray,
+    diff_basename: str,
+    diff_dir: str,
+    *,
+    header: Optional[fits.Header] = None,
+) -> None:
     """Write ``{diff_basename}_bkg.fits`` next to the diff (legacy layout)."""
     os.makedirs(diff_dir, exist_ok=True)
-    fits.writeto(
+    _write_image_fits(
         os.path.join(diff_dir, f"{diff_basename}_bkg.fits"),
-        bkg.astype(np.float32),
-        overwrite=True,
+        bkg,
+        header=header,
     )
 
 
@@ -601,6 +660,7 @@ def _process_one_frame(
     sci_bkg=None,
     legacy_diff_sidecar_bkg: bool = False,
     sci_workspace_dir: Optional[str] = None,
+    template_cache: Optional[dict] = None,
 ):
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
@@ -650,9 +710,27 @@ def _process_one_frame(
             "error_msg": "missing template",
         }
 
-    tmpl_crop = _load_template_cropped(tmpl_path, crop_bounds)
+    if template_cache is not None and group_id in template_cache:
+        tmpl_crop = template_cache[group_id]
+    else:
+        tmpl_crop = _load_template_cropped(tmpl_path, crop_bounds)
+        if template_cache is not None:
+            template_cache[group_id] = tmpl_crop
+
+    try:
+        crop_header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
+    except Exception as exc:
+        log.error("Failed to crop FFI header for %s: %s", product_id, exc)
+        return {
+            "stem": diff_stem,
+            "ffi_product_id": product_id,
+            "group_id": group_id,
+            "success": False,
+            "error_msg": f"header crop failed: {exc}",
+        }
 
     diff_out_path = os.path.join(dirs.diffs, f"{diff_stem}.fits")
+    conv_out_path = os.path.join(dirs.convolved, f"{diff_stem}.fits")
     hp_config = build_hotpants_config(
         sci_fwhm=hp.sci_fwhm,
         hp=hp,
@@ -660,6 +738,7 @@ def _process_one_frame(
         convolved_dir=dirs.convolved,
         frame_stem=diff_stem,
         stamps_dir=dirs.stamps,
+        write_stamps=hp.write_stamps,
     )
 
     result = run_hotpants_frame(
@@ -669,8 +748,7 @@ def _process_one_frame(
         mask_array=mask,
         ref_stars_xy=ref_stars_xy,
         hp_config=hp_config,
-        science_ffi_path=str(ffi_path),
-        diff_fits_path_for_logs=diff_out_path,
+        collect_kernel_params=hp.write_kernel_params,
     )
 
     if result["success"]:
@@ -680,19 +758,39 @@ def _process_one_frame(
                 result["diff"],
                 result.get("noise"),
                 result.get("mask"),
+                header=crop_header,
             )
         except Exception as exc:
             log.error("Failed writing %s: %s", diff_out_path, exc)
             result["success"] = False
             result["error_msg"] = str(exc)
-        if legacy_diff_sidecar_bkg and result.get("bkg") is not None:
-            _legacy_save_bkg_sidecar(result["bkg"], diff_stem, dirs.diffs)
-        elif dirs.bkg and result.get("bkg") is not None:
+        if (
+            hp.write_convolved
+            and result["success"]
+            and result.get("convolved") is not None
+        ):
+            try:
+                _write_image_fits(
+                    conv_out_path,
+                    result["convolved"],
+                    header=crop_header,
+                )
+            except Exception as exc:
+                log.error("Failed writing %s: %s", conv_out_path, exc)
+                result["success"] = False
+                result["error_msg"] = str(exc)
+        if hp.write_bkg and legacy_diff_sidecar_bkg and result.get("bkg") is not None:
+            _legacy_save_bkg_sidecar(
+                result["bkg"], diff_stem, dirs.diffs, header=crop_header
+            )
+        elif hp.write_bkg and dirs.bkg and result.get("bkg") is not None:
             bkg_label = workspace_label_from_dir(dirs.bkg)
             bkg_basename = workspace_frame_stem(product_id, bkg_label)
-            _save_bkg_fits(result["bkg"], bkg_basename, dirs.bkg)
+            _save_bkg_fits(
+                result["bkg"], bkg_basename, dirs.bkg, header=crop_header
+            )
         k_arrays = result.pop("kernel_params_arrays", None)
-        if k_arrays:
+        if hp.write_kernel_params and k_arrays:
             try:
                 _save_frame_kernel_params_npz(
                     diff_stem, kernel_params_dir(dirs.diffs), k_arrays, hp
@@ -721,6 +819,10 @@ def hotpants_loop(
     sci_bkg_stack: np.ndarray = None,
     workspace_dirs: Optional[HotpantsWorkspaceDirs] = None,
     sci_workspace_dir: Optional[str] = None,
+    *,
+    diffs_label: str = "diffs",
+    science: str = "ffi",
+    diff_log_path: Optional[str] = None,
 ) -> list:
     """
     Run hotpants over all FFIs in parallel.
@@ -748,14 +850,18 @@ def hotpants_loop(
         os.makedirs(workspace_dirs.diffs, exist_ok=True)
         os.makedirs(workspace_dirs.convolved, exist_ok=True)
 
-    stamps_path = stamps_dir_for_diffs_workspace(workspace_dirs.diffs)
-    os.makedirs(stamps_path, exist_ok=True)
-    workspace_dirs = replace(workspace_dirs, stamps=stamps_path)
+    if hp.write_stamps:
+        stamps_path = stamps_dir_for_diffs_workspace(workspace_dirs.diffs)
+        os.makedirs(stamps_path, exist_ok=True)
+        workspace_dirs = replace(workspace_dirs, stamps=stamps_path)
+    else:
+        workspace_dirs = replace(workspace_dirs, stamps=None)
 
-    recon_path = kernel_reconstruction_npz_path(workspace_dirs.diffs)
-    kparams_root = kernel_params_dir(workspace_dirs.diffs)
-    os.makedirs(kparams_root, exist_ok=True)
-    write_kernel_reconstruction_npz(hp, recon_path)
+    if hp.write_kernel_params:
+        recon_path = kernel_reconstruction_npz_path(workspace_dirs.diffs)
+        kparams_root = kernel_params_dir(workspace_dirs.diffs)
+        os.makedirs(kparams_root, exist_ok=True)
+        write_kernel_reconstruction_npz(hp, recon_path)
 
     ref_stars_xy = ref_stars_df[["x", "y"]].values
     path_to_row = {str(r["path"]): i for i, r in wcs_table.iterrows()}
@@ -783,14 +889,39 @@ def hotpants_loop(
     else:
         n_workers = max(1, int(hn))
 
+    cli_progress_path = (
+        str(progress_path_for_diff_log(diff_log_path))
+        if diff_log_path is not None
+        else None
+    )
+    workspace_progress_path = str(progress_path_for_diffs_workspace(workspace_dirs.diffs))
+    init_progress_pair(
+        workspace_progress_path,
+        cli_progress_path,
+        diffs_label=diffs_label,
+        round_id=round_id,
+        science=science,
+        frames_total=len(tasks),
+    )
+    tqdm_desc = f"hotpants {diffs_label}"
     log.info(
-        "Running hotpants round %s on %d frames (n_jobs=%s) ...",
+        "hotpants [%s] round %s: starting %d frames (n_jobs=%s)",
+        diffs_label,
         round_id,
         len(tasks),
         n_workers,
     )
 
+    def _record_progress(result: dict) -> None:
+        record_frame_progress(
+            workspace_progress_path,
+            cli_progress_path,
+            success=bool(result.get("success")),
+        )
+
     if n_workers == 1:
+        template_cache: dict = {}
+
         def _serial_worker(args):
             ffi_path, product_id, group_id, bkg_i = args
             if product_id is None:
@@ -809,17 +940,25 @@ def hotpants_loop(
                 sci_bkg=bkg_i,
                 legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
                 sci_workspace_dir=sci_workspace_dir,
+                template_cache=template_cache,
             )
 
-        results = [_serial_worker(t) for t in tasks]
+        results = []
+        for t in tqdm_iter(tasks, desc=tqdm_desc):
+            result = _serial_worker(t)
+            _record_progress(result)
+            results.append(result)
     else:
         # Process pool: pyhotpants C extension does not release the GIL, so
         # prefer="threads" would serialize CPU work across frames. loky runs
         # each frame in a separate interpreter for real multi-core speed.
         # Initializer injects large read-only arrays once per worker (not per task).
-        parallel = Parallel(
-            n_jobs=n_workers,
-            backend="loky",
+        # Progress is updated in the parent via on_result (NFS-safe, no worker flock).
+        results = parallel_map_with_optional_tqdm(
+            (delayed(_hotpants_loky_run_task)(t) for t in tasks),
+            n_tasks=len(tasks),
+            desc=tqdm_desc,
+            n_jobs_eff=n_workers,
             initializer=_hotpants_loky_initializer,
             initargs=(
                 mask,
@@ -832,11 +971,18 @@ def hotpants_loop(
                 legacy_bkg_sidecar,
                 sci_workspace_dir,
             ),
+            on_result=_record_progress,
         )
-        results = parallel(delayed(_hotpants_loky_run_task)(t) for t in tasks)
 
     n_ok = sum(1 for r in results if r.get("success"))
-    log.info("Round %s hotpants: %d/%d frames succeeded.", round_id, n_ok, len(results))
+    set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
+    log.info(
+        "hotpants [%s] round %s: %d/%d frames succeeded.",
+        diffs_label,
+        round_id,
+        n_ok,
+        len(results),
+    )
     return results
 
 
@@ -931,14 +1077,58 @@ def _syndiff_offsets_match(a: float, b: float, offset_threshold: float) -> bool:
 
 
 def _syndiff_roi_matches(parsed: ParsedSyndiffTemplate, crop_bounds: dict) -> bool:
-    if parsed.x_min is None:
-        return True
-    return (
-        int(crop_bounds["x_min"]) == parsed.x_min
-        and int(crop_bounds["x_max"]) == parsed.x_max
-        and int(crop_bounds["y_min"]) == parsed.y_min
-        and int(crop_bounds["y_max"]) == parsed.y_max
+    """ROI in filename is informational; matching is by SCC and dx/dy only."""
+    return True
+
+
+def _syndiff_template_preference_key(
+    parsed: ParsedSyndiffTemplate,
+    group_dx: float,
+    group_dy: float,
+) -> tuple[int, int, str]:
+    """Sort key for choosing one template when legacy duplicates exist."""
+    name = Path(parsed.path).name.lower()
+    prefer_gz = 0 if name.endswith(".fits.gz") else 1
+    canonical_suffix = f"_dx{float(group_dx):.3f}_dy{float(group_dy):.3f}".lower()
+    prefer_canonical = 0 if canonical_suffix in name else 1
+    return (prefer_gz, prefer_canonical, parsed.path)
+
+
+def _select_canonical_syndiff_template(
+    matches: list[ParsedSyndiffTemplate],
+    *,
+    group_id: int,
+    group_dx: float,
+    group_dy: float,
+) -> ParsedSyndiffTemplate:
+    """Pick one template when multiple files match the same WCS group offsets."""
+    chosen = min(
+        matches,
+        key=lambda p: _syndiff_template_preference_key(p, group_dx, group_dy),
     )
+    if len(matches) > 1:
+        log.warning(
+            "Multiple syndiff templates match group_id=%s (group_dx=%s group_dy=%s); "
+            "using %s (%d other candidate(s) ignored)",
+            group_id,
+            group_dx,
+            group_dy,
+            chosen.path,
+            len(matches) - 1,
+        )
+    return chosen
+
+
+def _template_dir_has_syndiff_files(template_dir: str) -> bool:
+    """True when *template_dir* contains at least one parsable syndiff_template_* file."""
+    root = Path(template_dir)
+    if not root.is_dir():
+        return False
+    for name in os.listdir(root):
+        full = root / name
+        if full.is_file() and parse_syndiff_template_filename(str(full)) is not None:
+            return True
+    return False
 
 
 def _required_syndiff_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
@@ -951,7 +1141,8 @@ def _required_syndiff_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
     for c in need:
         if c not in df.columns:
             raise SyndiffTemplateDiscoveryError(
-                f"wcs_table missing column {c!r}; run wcs_grouping first."
+                f"wcs_table missing column {c!r}; template handoff required "
+                "(syndiff_ffi_frames.csv from the template pipeline)."
             )
     sub = df[need].dropna()
     sub = sub.loc[sub["group_id"] >= 0]
@@ -980,7 +1171,9 @@ def verify_syndiff_templates(
     *offset_threshold*).
 
     Returns ``group_id`` → absolute path. Raises :exc:`SyndiffTemplateDiscoveryError`
-    if any group is missing or ambiguous.
+    if any group is missing. When multiple files match the same offsets (legacy
+    ``.fits`` plus canonical ``.fits.gz``), prefers ``.fits.gz`` and the downsample
+    ``dx{:.3f}_dy{:.3f}`` basename format.
     """
     root = Path(template_dir)
     if not root.is_dir():
@@ -1051,15 +1244,18 @@ def verify_syndiff_templates(
                 f"y={crop_bounds.get('y_min')}–{crop_bounds.get('y_max')}). "
                 f"Scanned {len(parsed_files)} syndiff_template_*.fits under {root!r}."
             )
-        if len(matches) > 1:
-            paths = [m.path for m in matches]
-            raise SyndiffTemplateDiscoveryError(
-                f"Ambiguous syndiff templates for group_id={gid} "
-                f"(group_dx={gdx} group_dy={gdy}): {paths!r}"
+        chosen = (
+            _select_canonical_syndiff_template(
+                matches,
+                group_id=gid,
+                group_dx=gdx,
+                group_dy=gdy,
             )
-
-        assignments[gid] = matches[0].path
-        used_paths.add(matches[0].path)
+            if len(matches) > 1
+            else matches[0]
+        )
+        assignments[gid] = chosen.path
+        used_paths.add(chosen.path)
 
     log.info(
         "Matched %d template group(s) from syndiff_template_*.fits under %s",
@@ -1091,6 +1287,8 @@ def ensure_template_paths_from_syndiff_or_group_dirs(
     if not tdir or not os.path.isdir(tdir):
         return
 
+    has_syndiff_files = _template_dir_has_syndiff_files(tdir)
+
     try:
         cfg.template_paths = verify_syndiff_templates(
             tdir,
@@ -1103,6 +1301,8 @@ def ensure_template_paths_from_syndiff_or_group_dirs(
         )
         return
     except SyndiffTemplateDiscoveryError as e:
+        if has_syndiff_files:
+            raise
         log.debug("Syndiff template scan did not succeed: %s", e)
 
     from syndiff_pipeline.difference_imaging.orchestration.config import discover_template_paths
