@@ -95,11 +95,11 @@ class SynDiffConfig:
     straps_csv: str = ""
     """CSV listing detector strap columns (TESS camera/CCD layout)."""
 
-    # ── Template paths: filled by user after wcs_grouping ────────────────────
+    # ── Template paths: filled from template-pipeline handoff ─────────────────
     template_paths: dict = field(default_factory=dict)
     """Mapping group_id → absolute path of the PS1 template FITS for that group.
     Example: {0: '/path/to/ps1_template_group0.fits', 1: '/path/...'}
-    Leave empty until ``cluster_template_job.json`` from ``wcs_grouping`` exists
+    Leave empty until ``cluster_template_job.json`` from the template pipeline exists
     and PS1 templates are available (or set ``template_dir`` for discovery)."""
 
     template_dir: str = ""
@@ -109,12 +109,10 @@ class SynDiffConfig:
     # ── Optional reference FFI ────────────────────────────────────────────────
     ref_ffi_path: Optional[str] = None
     """Absolute path of the FFI to use as WCS reference for pixel-projecting
-    Gaia stars.  If null (default), ``wcs_grouping`` chooses a frame using
+    Gaia stars.  If null (default), the template pipeline chooses a frame using
     TESSVectors Earth/Moon angle cuts (see ``ref_ffi_min_*``), raw–smooth drift
     agreement when Savitzky–Golay smoothing ran, and proximity to the median
-    smoothed drift; the path is recorded in ``output_dir/cluster_template_job.json``.
-    Uses optional ``bkg_vector_path`` on the ``wcs_grouping`` pipeline stage for local
-    TESSVectors CSV when set (else HEASARC)."""
+    smoothed drift; the path is recorded in ``output_dir/cluster_template_job.json``."""
 
     ref_ffi_min_earth_deg: float = 45.0
     """Minimum Earth–camera angle (degrees) for automatic reference FFI selection."""
@@ -134,10 +132,13 @@ class SynDiffConfig:
     """Dec (deg, J2000) of the science target."""
 
     additional_forced_targets: list = field(default_factory=list)
-    """Extra entries ``{ra, dec, name}`` (degrees, J2000; ``name`` is a short label).
-    Each produces ``ws/<forced_photometry output>/lightcurve_<name>.csv`` (primary
-    stays ``lightcurve.csv``). WCS grouping and templates use ``target_ra`` /
-    ``target_dec`` only."""
+    """Extra forced-photometry sources merged from site ``additional_forced_targets``
+    and ``per_event_force_targets``. Each entry has ``name`` and exactly one position
+    mode: ``ra``/``dec`` (sky), ``dx``/``dy`` (crop-local offset from primary), or
+    ``x``/``y`` (fixed crop pixels). Normalized dicts include ``position_mode``:
+    ``sky``, ``offset``, or ``fixed``. Outputs ``lightcurve_<name>.csv`` under
+    ``ws/<forced_photometry output>/``; primary stays ``lightcurve.csv``. WCS
+    grouping and templates use ``target_ra`` / ``target_dec`` only."""
 
     # ── Instrument ────────────────────────────────────────────────────────────
     sector: int = 20
@@ -157,8 +158,11 @@ class SynDiffConfig:
     y_max: Optional[int] = None
     """Top row of the crop, exclusive. Same explicit-mode rules as ``x_min``."""
 
-    crop_quadrant: str = "full"
-    """When **none** of ``x_min``/``x_max``/``y_min``/``y_max`` are set: ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` subdivide the usable area (dead strips removed) using chip midlines ``nx//2``, ``ny//2``; ``'full'`` uses the entire FFI array including dead columns/rows; ``'full_science'`` uses the usable rectangle only."""
+    crop_mode: Optional[str] = None
+    """Crop preset when no manual ``x_min``/``x_max``/``y_min``/``y_max`` are set: ``'full'`` (entire FFI), quadrant ``'tl'``/``'tr'``/``'bl'``/``'br'``, or ``'target_box'`` (square around ``target_ra``/``target_dec``). Unset inherits from ``cluster_template_job.json`` at diff bootstrap."""
+
+    crop_box_size: int = 1024
+    """Side length for ``crop_mode: target_box`` (default 1024)."""
 
     x_left_dead: int = 44
     """Dead columns on the left edge of the FFI (usable x starts here)."""
@@ -171,11 +175,13 @@ class SynDiffConfig:
 
     # ── Diagnostics & workspace ───────────────────────────────────────────────
     pipeline_plots: bool = False
-    """If True, write diagnostic figures: after ``wcs_grouping``,
+    """If True, write diagnostic figures: after template handoff,
     ``wcs_drift_template_debug.png`` and ``lightcurve_<stage>.png`` under
     ``{output_dir}/{pipeline_plots_dir}/`` by default; adaptive-background GIF
-    (when hooked up) in the same folder. Forced-photometry light-curve PNG titles
-    include the stage ``output`` workspace label. CSVs live under ``ws/<output>/``
+    (when hooked up) in the same folder. Forced-photometry light-curve PNGs are
+    written for the primary and every ``additional_forced_targets`` entry; cutout
+    stamp GIFs are primary-only. PNG titles include the stage ``output`` workspace
+    label. CSVs live under ``ws/<output>/``
     (``lightcurve.csv`` for the primary, ``lightcurve_<name>.csv`` for each
     ``additional_forced_targets`` entry)."""
 
@@ -183,21 +189,22 @@ class SynDiffConfig:
     """Resolution for PNGs written when ``pipeline_plots`` is True."""
 
     pipeline_plots_dir: str = "debug_plots"
-    """Subdirectory of ``output_dir`` for WCS and light-curve diagnostic PNGs when
-    ``pipeline_plots`` is True. If empty, diagnostics are written directly under
-    ``output_dir`` (not recommended when using workspace subdirs for data)."""
+    """Subdirectory name under ``output_dir`` for WCS and light-curve diagnostic PNGs
+    when ``pipeline_plots`` is True (not resolved against the config file directory).
+    If empty, diagnostics are written directly under ``output_dir`` (not recommended
+    when using workspace subdirs for data)."""
 
     pipeline_external_workspace_labels: Optional[list[Any]] = None
     """Hotpants / workspace labels already populated under ``output_dir/ws/<label>/``
     from a previous run. Added to the dependency graph during validation so you can
-    omit slow stages (e.g. re-run ``forced_photometry`` only). When ``wcs_grouping``
-    is absent from ``pipeline:``, ``run_config_pipeline`` reloads the frame manifest
-    and ``cluster_template_job.json`` from ``output_dir``."""
+    omit slow stages (e.g. re-run ``forced_photometry`` only). ``run_config_pipeline``
+    reloads the frame manifest and ``cluster_template_job.json`` from ``output_dir``
+    when template handoff files are present."""
 
     master_fits_mirror: bool = True
-    """If True (default), every per-FFI FITS under ``ws/<label>/`` is also exposed via a
-    relative symlink directly under ``master/`` (flat layout), refreshed after each
-    pipeline stage. Disable for read-only filesystems where symlink creation is unsupported."""
+    """If True (default), refresh ``ws/master/`` absolute symlinks (flat FITS mirror plus
+    flat FFI links for the target sector/camera/CCD when configured) after each pipeline
+    stage. Disable for read-only filesystems where symlink creation is unsupported."""
 
     # ── Parallelism ───────────────────────────────────────────────────────────
     n_jobs: int = 8
@@ -229,17 +236,38 @@ def _sanitize_forced_lightcurve_name(name: str) -> str:
     return out
 
 
+def _forced_target_position_mode(item: dict) -> str:
+    has_sky = "ra" in item and "dec" in item
+    has_offset = "dx" in item and "dy" in item
+    has_fixed = "x" in item and "y" in item
+    modes = sum([has_sky, has_offset, has_fixed])
+    if modes == 0:
+        raise ValueError(
+            "must specify exactly one position mode: (ra, dec), (dx, dy), or (x, y)"
+        )
+    if modes > 1:
+        raise ValueError(
+            "must specify exactly one position mode: (ra, dec), (dx, dy), or (x, y) "
+            "(not multiple)"
+        )
+    if has_sky:
+        return "sky"
+    if has_offset:
+        return "offset"
+    return "fixed"
+
+
 def normalize_additional_forced_targets(raw: Any) -> List[Dict[str, Any]]:
     """
-    Parse ``additional_forced_targets`` from YAML into a list of
-    ``{"ra": float, "dec": float, "name": str}`` dicts.
+    Parse forced-target entries from YAML into normalized dicts with ``name``,
+    ``position_mode`` (``sky`` | ``offset`` | ``fixed``), and mode-specific keys.
     """
     if raw is None:
         return []
     if not isinstance(raw, list):
         raise ValueError(
-            "additional_forced_targets must be a list of mappings with keys "
-            "'ra', 'dec', and 'name'"
+            "additional_forced_targets must be a list of mappings with "
+            "'name' and one of (ra, dec), (dx, dy), or (x, y)"
         )
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -248,29 +276,37 @@ def normalize_additional_forced_targets(raw: Any) -> List[Dict[str, Any]]:
             raise ValueError(
                 f"additional_forced_targets[{i}] must be a mapping, got {type(item).__name__}"
             )
-        if "ra" not in item or "dec" not in item:
-            raise ValueError(
-                f"additional_forced_targets[{i}] must include 'ra' and 'dec' (degrees)"
-            )
         if "name" not in item or item["name"] is None or not str(item["name"]).strip():
             raise ValueError(
                 f"additional_forced_targets[{i}]: non-empty 'name' is required "
                 "(used for lightcurve_<name>.csv and debug PNG)"
             )
         try:
-            ra = float(item["ra"])
-            dec = float(item["dec"])
-        except (TypeError, ValueError) as e:
-            raise ValueError(
-                f"additional_forced_targets[{i}]: ra/dec must be numeric"
-            ) from e
+            mode = _forced_target_position_mode(item)
+        except ValueError as e:
+            raise ValueError(f"additional_forced_targets[{i}]: {e}") from e
         sname = _sanitize_forced_lightcurve_name(str(item["name"]))
         if sname in seen:
             raise ValueError(
                 f"duplicate additional_forced_targets name {sname!r}; names must be unique"
             )
         seen.add(sname)
-        out.append({"ra": ra, "dec": dec, "name": sname})
+        entry: Dict[str, Any] = {"name": sname, "position_mode": mode}
+        try:
+            if mode == "sky":
+                entry["ra"] = float(item["ra"])
+                entry["dec"] = float(item["dec"])
+            elif mode == "offset":
+                entry["dx"] = float(item["dx"])
+                entry["dy"] = float(item["dy"])
+            else:
+                entry["x"] = float(item["x"])
+                entry["y"] = float(item["y"])
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"additional_forced_targets[{i}]: position values must be numeric"
+            ) from e
+        out.append(entry)
     return out
 
 
@@ -280,7 +316,7 @@ def _cfg_to_dict(cfg: SynDiffConfig) -> dict:
     return d
 
 
-def _resolve_config_path(value: Optional[str], base: Path) -> Optional[str]:
+def resolve_config_path(value: Optional[str], base: Path) -> Optional[str]:
     """Resolve a single path: absolute paths unchanged; relative paths → base / path."""
     if value is None or value == "":
         return value
@@ -288,6 +324,44 @@ def _resolve_config_path(value: Optional[str], base: Path) -> Optional[str]:
     if p.is_absolute():
         return str(p.resolve())
     return str((base / p).resolve())
+
+
+_resolve_config_path = resolve_config_path
+
+
+_PATH_FIELDS = (
+    "ffi_dir",
+    "output_dir",
+    "gaia_catalog",
+    "removed_stars_csv",
+    "median_mask_path",
+    "straps_csv",
+    "ref_ffi_path",
+    "template_dir",
+    "manifest",
+)
+
+
+def absolutize_config(cfg: SynDiffConfig, base: Path) -> SynDiffConfig:
+    """Return a copy of *cfg* with all path fields resolved to absolute paths."""
+    import copy
+
+    out = copy.deepcopy(cfg)
+    base = base.expanduser().resolve()
+    for key in _PATH_FIELDS:
+        val = getattr(out, key, None)
+        if val is not None and str(val).strip():
+            setattr(out, key, resolve_config_path(str(val), base))
+    if out.template_paths:
+        out.template_paths = {
+            int(k): resolve_config_path(str(v), base)
+            for k, v in out.template_paths.items()
+            if v is not None
+        }
+    for st in out.pipeline or []:
+        if isinstance(st, dict) and st.get("bkg_vector_path"):
+            st["bkg_vector_path"] = resolve_config_path(str(st["bkg_vector_path"]), base)
+    return out
 
 
 def load_config(yaml_path: str) -> SynDiffConfig:

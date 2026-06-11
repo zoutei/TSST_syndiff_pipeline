@@ -46,16 +46,6 @@ def validate_stage_keys(
 
 # ── Structural + param key sets ───────────────────────────────────────────────
 
-WCS_GROUPING_ALLOWED = frozenset(
-    {
-        "kind",
-        "offset_threshold",
-        "wcs_drift_savgol_window",
-        "wcs_drift_savgol_polyorder",
-        "bkg_vector_path",
-    }
-)
-
 SHARED_MASK_ALLOWED = frozenset(
     {
         "kind",
@@ -91,6 +81,10 @@ HOTPANTS_ALLOWED = frozenset(
         "hp_force_convolve",
         "hp_normalize",
         "hotpants_n_jobs",
+        "write_convolved",
+        "write_bkg",
+        "write_stamps",
+        "write_kernel_params",
     }
 )
 
@@ -171,6 +165,7 @@ FORCED_PHOTOMETRY_ALLOWED = frozenset(
         "output",
         "psf_type",
         "phot_cutout_size",
+        "phot_debug_stamp_size",
         "phot_bkg_poly_order",
         "phot_snap",
         "psf_size",
@@ -179,14 +174,6 @@ FORCED_PHOTOMETRY_ALLOWED = frozenset(
         "tile_ny",
     }
 )
-
-
-@dataclass
-class WcsGroupingParams:
-    offset_threshold: float = 0.01
-    wcs_drift_savgol_window: Optional[int] = 11
-    wcs_drift_savgol_polyorder: int = 2
-    bkg_vector_path: Optional[str] = None
 
 
 @dataclass
@@ -218,6 +205,10 @@ class HotpantsParams:
     hp_force_convolve: str = "t"
     hp_normalize: str = "i"
     hotpants_n_jobs: Optional[int] = None
+    write_convolved: bool = True
+    write_bkg: bool = True
+    write_stamps: bool = True
+    write_kernel_params: bool = True
 
 
 @dataclass
@@ -269,19 +260,13 @@ class BackgroundAdaptiveParams:
 class ForcedPhotometryParams:
     psf_type: str = "epsf"
     phot_cutout_size: int = 15
+    phot_debug_stamp_size: int = 25
     phot_bkg_poly_order: int = 3
     phot_snap: str = "brightest"
     psf_size: int = 11
     epsf_oversample: int = 2
     tile_nx: int = 4
     tile_ny: int = 4
-
-
-def parse_wcs_grouping(stage: dict, pipeline_idx: int) -> WcsGroupingParams:
-    validate_stage_keys(stage, pipeline_idx, "wcs_grouping", WCS_GROUPING_ALLOWED)
-    p = _merge_dataclass(WcsGroupingParams, stage)
-    p.bkg_vector_path = _pick_optional_str(stage, "bkg_vector_path")
-    return p
 
 
 def parse_shared_mask(stage: dict, pipeline_idx: int) -> SharedMaskParams:
@@ -370,7 +355,6 @@ def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryP
 def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
     """Strict key allow-list for *kind* (no merge). Used from validate_pipeline."""
     parsers = {
-        "wcs_grouping": lambda: parse_wcs_grouping(stage, pipeline_idx),
         "shared_mask": lambda: parse_shared_mask(stage, pipeline_idx),
         "hotpants": lambda: parse_hotpants(stage, pipeline_idx),
         "epsf": lambda: parse_epsf(stage, pipeline_idx),

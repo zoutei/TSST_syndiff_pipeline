@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import warnings
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -51,7 +52,7 @@ log = logging.getLogger(__name__)
 CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
 WCS_DRIFT_TEMPLATE_DEBUG_FILENAME = "wcs_drift_template_debug.png"
 
-_VALID_CROP_QUADRANTS = frozenset({"tl", "tr", "bl", "br", "full", "full_science"})
+_VALID_CROP_MODES = frozenset({"full", "tl", "tr", "bl", "br"})
 
 # WCS header keywords needed to build an astropy WCS
 _WCS_KEYS = [
@@ -751,6 +752,8 @@ def write_cluster_template_job_json(
     offset_threshold: float,
     output_dir: str,
     crop_bounds: Optional[dict] = None,
+    crop_mode: str | None = None,
+    crop_box_size: int | None = None,
 ) -> str:
     """
     Write a JSON bundle for the cluster template job: reference FFI name/path,
@@ -798,6 +801,10 @@ def write_cluster_template_job_json(
         if "shape" in crop_bounds:
             sh = crop_bounds["shape"]
             payload["shape"] = [int(sh[0]), int(sh[1])]
+    if crop_mode:
+        payload["crop_mode"] = str(crop_mode)
+    if crop_box_size is not None:
+        payload["crop_box_size"] = int(crop_box_size)
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
     with open(out_path, "w") as fh:
@@ -1103,7 +1110,7 @@ def get_crop_bounds(
     x_max=None,
     y_min=None,
     y_max=None,
-    crop_quadrant: str = "full",
+    crop_mode: str = "full",
     x_left_dead: int = 44,
     x_right_dead: int = 44,
     y_edge_strip: int = 30,
@@ -1116,21 +1123,20 @@ def get_crop_bounds(
     the corresponding corner of the **usable** rectangle (dead strips removed);
     then all edges are clamped to valid FFI indices ``[0, nx]`` / ``[0, ny]``.
 
-    **Quadrant mode** — if all four are ``None``: use ``crop_quadrant``.
+    **Preset mode** — if all four coords are ``None``: use ``crop_mode``.
     For ``'tl'``/``'tr'``/``'bl'``/``'br'``, subdivide the **usable** rectangle
     (dead strips removed) using chip midlines ``nx // 2`` and ``ny // 2``.
     Usable area is ``x ∈ [x_left_dead, nx - x_right_dead)``,
     ``y ∈ [0, ny - y_edge_strip)``.
     ``'full'`` selects the entire FFI array ``[0, nx) × [0, ny)`` including dead
-    columns/rows. ``'full_science'`` selects the usable rectangle only.
+    columns/rows. ``'target_box'`` is handled by :func:`resolve_crop_bounds_from_params`.
 
     Parameters
     ----------
     ffi_header : astropy.io.fits.Header
     x_min, x_max, y_min, y_max : int or None
-    crop_quadrant : str
-        ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` | ``'full'`` | ``'full_science'``
-        (quadrant mode only).
+    crop_mode : str
+        ``'full'`` | ``'tl'`` | ``'tr'`` | ``'bl'`` | ``'br'`` (preset mode only).
     x_left_dead, x_right_dead : int
         Dead columns on left and right (usable x excludes them).
     y_edge_strip : int
@@ -1154,10 +1160,10 @@ def get_crop_bounds(
             f"y=[{y_usable_lo},{y_usable_hi}), FFI shape {ny}×{nx}."
         )
 
-    q = str(crop_quadrant).strip().lower()
-    if q not in _VALID_CROP_QUADRANTS:
+    mode = str(crop_mode).strip().lower()
+    if mode not in _VALID_CROP_MODES:
         raise ValueError(
-            f"crop_quadrant must be one of {sorted(_VALID_CROP_QUADRANTS)}, got {crop_quadrant!r}"
+            f"crop_mode must be one of {sorted(_VALID_CROP_MODES)}, got {crop_mode!r}"
         )
 
     explicit = any(v is not None for v in (x_min, x_max, y_min, y_max))
@@ -1168,24 +1174,22 @@ def get_crop_bounds(
         ym = int(y_min) if y_min is not None else y_usable_lo
         yM = int(y_max) if y_max is not None else y_usable_hi
     else:
-        if q == "full":
+        if mode == "full":
             xm, xM, ym, yM = 0, nx, 0, ny
-        elif q == "full_science":
-            xm, xM, ym, yM = x_usable_lo, x_usable_hi, y_usable_lo, y_usable_hi
         else:
             x_mid = nx // 2
             y_mid = ny // 2
-            if q == "tr":
+            if mode == "tr":
                 xm = max(x_usable_lo, x_mid)
                 xM = x_usable_hi
                 ym = max(y_usable_lo, y_mid)
                 yM = y_usable_hi
-            elif q == "tl":
+            elif mode == "tl":
                 xm = x_usable_lo
                 xM = min(x_usable_hi, x_mid)
                 ym = max(y_usable_lo, y_mid)
                 yM = y_usable_hi
-            elif q == "br":
+            elif mode == "br":
                 xm = max(x_usable_lo, x_mid)
                 xM = x_usable_hi
                 ym = y_usable_lo
@@ -1221,9 +1225,213 @@ def get_crop_bounds(
     return bounds
 
 
+def get_target_box_crop_bounds(
+    ffi_header,
+    target_ra: float,
+    target_dec: float,
+    *,
+    box_size: int = 1024,
+) -> dict:
+    """
+    Square crop centered on ``(target_ra, target_dec)``, edge-clamped to the FFI.
+
+    Returns the same dict shape as :func:`get_crop_bounds`.
+    """
+    nx = int(ffi_header["NAXIS1"])
+    ny = int(ffi_header["NAXIS2"])
+    box_size = int(box_size)
+    if box_size < 1:
+        raise ValueError(f"box_size must be positive, got {box_size}")
+
+    wcs = WCS(ffi_header)
+    coord = SkyCoord(ra=float(target_ra), dec=float(target_dec), unit="deg")
+    tx, ty = wcs.world_to_pixel(coord)
+    tx, ty = float(tx), float(ty)
+    if not (0 <= tx < nx and 0 <= ty < ny):
+        raise ValueError(
+            f"Target ({target_ra}, {target_dec}) projects to ({tx:.2f}, {ty:.2f}) "
+            f"outside FFI [0, {nx}) × [0, {ny})."
+        )
+
+    half = box_size // 2
+    cx = int(round(tx))
+    cy = int(round(ty))
+    xm = cx - half
+    ym = cy - half
+    xM = xm + box_size
+    yM = ym + box_size
+
+    if xm < 0:
+        xM -= xm
+        xm = 0
+    if ym < 0:
+        yM -= ym
+        ym = 0
+    if xM > nx:
+        shift = xM - nx
+        xm -= shift
+        xM = nx
+    if yM > ny:
+        shift = yM - ny
+        ym -= shift
+        yM = ny
+
+    xm = max(0, xm)
+    ym = max(0, ym)
+    xM = min(nx, max(xM, xm + 1))
+    yM = min(ny, max(yM, ym + 1))
+
+    bounds = {
+        "x_min": xm,
+        "x_max": xM,
+        "y_min": ym,
+        "y_max": yM,
+        "shape": (yM - ym, xM - xm),
+    }
+    log.info(
+        "Target-box crop: x=[%d, %d), y=[%d, %d), shape=%s",
+        xm,
+        xM,
+        ym,
+        yM,
+        bounds["shape"],
+    )
+    return bounds
+
+
+def resolve_crop_bounds_from_params(
+    ffi_header,
+    *,
+    x_min=None,
+    x_max=None,
+    y_min=None,
+    y_max=None,
+    crop_mode: str | None = "full",
+    crop_box_size: int = 1024,
+    target_ra: float | None = None,
+    target_dec: float | None = None,
+    x_left_dead: int = 44,
+    x_right_dead: int = 44,
+    y_edge_strip: int = 30,
+) -> dict:
+    """Shared crop resolver for template wcs_grouping and diff bootstrap."""
+    explicit = any(v is not None for v in (x_min, x_max, y_min, y_max))
+    if explicit:
+        return get_crop_bounds(
+            ffi_header,
+            x_min=x_min,
+            x_max=x_max,
+            y_min=y_min,
+            y_max=y_max,
+            crop_mode="full",
+            x_left_dead=x_left_dead,
+            x_right_dead=x_right_dead,
+            y_edge_strip=y_edge_strip,
+        )
+    mode = str(crop_mode or "full").strip().lower()
+    if mode == "target_box":
+        if target_ra is None or target_dec is None:
+            raise ValueError(
+                "target_ra and target_dec are required when crop_mode is 'target_box'"
+            )
+        return get_target_box_crop_bounds(
+            ffi_header,
+            target_ra,
+            target_dec,
+            box_size=crop_box_size,
+        )
+    return get_crop_bounds(
+        ffi_header,
+        crop_mode=mode,
+        x_left_dead=x_left_dead,
+        x_right_dead=x_right_dead,
+        y_edge_strip=y_edge_strip,
+    )
+
+
+def diff_crop_explicitly_configured(cfg) -> bool:
+    """True when diff_config crop fields should override cluster JSON."""
+    if any(
+        getattr(cfg, k, None) is not None
+        for k in ("x_min", "x_max", "y_min", "y_max")
+    ):
+        return True
+    mode = str(getattr(cfg, "crop_mode", None) or "").strip().lower()
+    if mode == "target_box":
+        return True
+    return mode not in ("", "full")
+
+
+def resolve_diff_crop_bounds(cfg, event_dir: str) -> dict:
+    """Diff bootstrap crop: ``diff_config`` override or cluster JSON default."""
+    from astropy.io import fits
+
+    ref_path = load_reference_ffi_path(event_dir, getattr(cfg, "ref_ffi_path", None))
+    with fits.open(ref_path, memmap=True) as hdul:
+        ref_header = hdul[1].header
+
+    if diff_crop_explicitly_configured(cfg):
+        bounds = resolve_crop_bounds_from_params(
+            ref_header,
+            x_min=getattr(cfg, "x_min", None),
+            x_max=getattr(cfg, "x_max", None),
+            y_min=getattr(cfg, "y_min", None),
+            y_max=getattr(cfg, "y_max", None),
+            crop_mode=getattr(cfg, "crop_mode", None),
+            crop_box_size=int(getattr(cfg, "crop_box_size", 1024)),
+            target_ra=getattr(cfg, "target_ra", None),
+            target_dec=getattr(cfg, "target_dec", None),
+            x_left_dead=int(getattr(cfg, "x_left_dead", 44)),
+            x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
+            y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
+        )
+        log.info("Diff crop from diff_config override")
+        return bounds
+
+    bounds = load_crop_bounds(event_dir)
+    log.info("Diff crop inherited from cluster_template_job.json")
+    return bounds
+
+
 def crop_image(data: np.ndarray, bounds: dict) -> np.ndarray:
     """Apply crop bounds dict to a 2D array."""
     return data[bounds["y_min"]:bounds["y_max"], bounds["x_min"]:bounds["x_max"]]
+
+
+def crop_ffi_header(ffi_path: str, crop_bounds: dict) -> fits.Header:
+    """
+    Return a SIP-safe cropped copy of the science FFI HDU1 header.
+
+    For a rectangular subimage crop (no resampling), shift ``CRPIX`` and update
+    ``NAXIS``; all SIP polynomial keys (``A_*``, ``B_*``, etc.) are preserved
+    unchanged from the full FFI header.
+    """
+    x_min = int(crop_bounds["x_min"])
+    x_max = int(crop_bounds["x_max"])
+    y_min = int(crop_bounds["y_min"])
+    y_max = int(crop_bounds["y_max"])
+    ny_crop, nx_crop = (int(crop_bounds["shape"][0]), int(crop_bounds["shape"][1]))
+
+    with fits.open(ffi_path, memmap=True) as hdul:
+        hdr = deepcopy(hdul[1].header)
+
+    if "CRPIX1" in hdr:
+        hdr["CRPIX1"] = float(hdr["CRPIX1"]) - x_min
+    if "CRPIX2" in hdr:
+        hdr["CRPIX2"] = float(hdr["CRPIX2"]) - y_min
+
+    hdr["NAXIS"] = 2
+    hdr["NAXIS1"] = nx_crop
+    hdr["NAXIS2"] = ny_crop
+
+    hdr.set("XMIN", x_min, "Crop xmin in full FFI pixels")
+    hdr.set("XMAX", x_max, "Crop xmax (exclusive) in full FFI pixels")
+    hdr.set("YMIN", y_min, "Crop ymin in full FFI pixels")
+    hdr.set("YMAX", y_max, "Crop ymax (exclusive) in full FFI pixels")
+    hdr.set("ROIW", x_max - x_min, "Crop width in full FFI pixels")
+    hdr.set("ROIH", y_max - y_min, "Crop height in full FFI pixels")
+
+    return hdr
 
 
 def log_gaia_crop_alignment(gaia_df: pd.DataFrame, crop_bounds: dict) -> None:
@@ -1308,6 +1516,9 @@ def ensure_gaia_crop_xy(
     """
     df = gaia_df.copy()
     ny, nx = crop_bounds["shape"]
+
+    if ra_col in df.columns and dec_col in df.columns:
+        df = df.drop(columns=["x", "y"], errors="ignore")
 
     if "x" in df.columns and "y" in df.columns:
         if len(df) == 0:

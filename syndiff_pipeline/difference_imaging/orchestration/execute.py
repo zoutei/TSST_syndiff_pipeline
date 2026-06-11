@@ -47,9 +47,12 @@ from syndiff_pipeline.difference_imaging.support.paths import (
     ADAPTIVE_BKG_STACK_BASENAME,
     BACKGROUND_STACK_NPZ_ARRAY_KEY,
     BKG_SOURCE_HUNT_UNION_FITS_BASENAME,
-    link_workspace_fits_master,
+    link_master_workspace,
 )
 from syndiff_pipeline.difference_imaging.orchestration.context import PipelineInvocationContext
+from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+    is_external_workspaces_entry,
+)
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
@@ -62,7 +65,6 @@ from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     parse_sat_template,
     parse_shared_mask,
     parse_subtract,
-    parse_wcs_grouping,
 )
 from syndiff_pipeline.difference_imaging.support.subtract import parse_subtract_expression
 
@@ -136,13 +138,37 @@ def _write_per_frame_background_fits(
 
 def _pipeline_plots_root(output_dir: str, cfg: SynDiffConfig) -> str:
     """``output_dir`` or ``output_dir / pipeline_plots_dir`` for diagnostic figures."""
-    sub = getattr(cfg, "pipeline_plots_dir", "debug_plots")
-    if sub is None:
-        return output_dir
-    s = str(sub).strip()
-    if not s:
-        return output_dir
-    return os.path.join(output_dir, s)
+    from syndiff_pipeline.difference_imaging.support.paths import pipeline_plots_root
+
+    sub = getattr(cfg, "pipeline_plots_dir", None)
+    return pipeline_plots_root(output_dir, sub)
+
+
+def _forced_photometry_debug_plot_paths(
+    plot_dir: str,
+    label_out: str,
+    target_name: Optional[str],
+) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    """
+    Return ``(lightcurve_png, cutout_diff_gif, cutout_science_gif, cutout_pair_gif)``.
+
+    Light-curve PNGs are produced for every target; cutout GIFs only for the primary
+    (``target_name`` is None).
+    """
+    if target_name:
+        safe = re.sub(r"[^0-9A-Za-z._-]+", "_", target_name)
+        return (
+            os.path.join(plot_dir, f"lightcurve_{label_out}_{safe}.png"),
+            None,
+            None,
+            None,
+        )
+    return (
+        os.path.join(plot_dir, f"lightcurve_{label_out}.png"),
+        os.path.join(plot_dir, f"cutout_diff_{label_out}.gif"),
+        os.path.join(plot_dir, f"cutout_science_{label_out}.gif"),
+        os.path.join(plot_dir, f"cutout_pair_{label_out}.gif"),
+    )
 
 
 def _maybe_write_background_gif(
@@ -284,31 +310,39 @@ def _subtract_load_plane_and_sigma(
     return None, None
 
 
-def _bootstrap_state_skip_wcs_grouping(
+def _load_template_handoff(
     cfg: SynDiffConfig, out: str, manifest_path: str | None
-) -> tuple[Optional[pd.DataFrame], Optional[dict], Optional[str]]:
+) -> tuple[pd.DataFrame, dict, str, float]:
     """
-    When ``wcs_grouping`` is not in the pipeline, load manifest + crop + ref FFI
-    from *out* so downstream stages (e.g. forced photometry) can run alone.
+    Load template-pipeline handoff: frame manifest, crop bounds, reference FFI,
+    and offset threshold from ``output_dir``.
     """
-    kinds = {s.get("kind") for s in (cfg.pipeline or [])}
-    if "wcs_grouping" in kinds:
-        return None, None, None
-    wcs_table: Optional[pd.DataFrame] = None
-    crop_bounds: Optional[dict] = None
-    ref_ffi_path: Optional[str] = None
-    if manifest_csv_exists(out, manifest_path):
-        wcs_table = load_frame_manifest(out, manifest_path)
-        log.info(
-            "  Loaded frame manifest for resume (wcs_grouping not in pipeline): %s",
-            manifest_path_from_output_dir(out, manifest_path),
+    if not manifest_csv_exists(out, manifest_path):
+        man = manifest_path_from_output_dir(out, manifest_path)
+        raise RuntimeError(
+            f"Missing template handoff manifest {man!r}. "
+            "Template handoff required: run the template pipeline before differencing."
         )
+    wcs_table = load_frame_manifest(out, manifest_path)
+    log.info(
+        "  Loaded frame manifest from template handoff: %s",
+        manifest_path_from_output_dir(out, manifest_path),
+    )
     try:
-        crop_bounds = wcs_grouping.load_crop_bounds(out)
-    except FileNotFoundError:
-        pass
+        crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, out)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"Missing crop bounds in {out!r} (expected cluster_template_job.json). "
+            "Template handoff required: run the template pipeline before differencing."
+        ) from exc
     ref_ffi_path = wcs_grouping.load_reference_ffi_path(out, cfg.ref_ffi_path)
-    return wcs_table, crop_bounds, ref_ffi_path
+    if not ref_ffi_path:
+        raise RuntimeError(
+            f"Missing reference_ffi_path in cluster_template_job.json under {out!r}."
+        )
+    job = wcs_grouping.load_cluster_template_job(out)
+    offset_threshold = float(job.get("offset_threshold", 0.01))
+    return wcs_table, crop_bounds, ref_ffi_path, offset_threshold
 
 
 def _cfg_ffi_leaf(cfg: SynDiffConfig) -> str:
@@ -507,7 +541,8 @@ def _optional_prf_kernel_for_bkg_source_hunt(
     if crop_bounds is None or not ref_ffi_path:
         raise RuntimeError(
             "bkg_source_hunt with bkg_tessreduce_spatial_pipeline requires crop_bounds "
-            "and ref_ffi_path (complete wcs_grouping / resume with cluster metadata)."
+            "and ref_ffi_path (template handoff required: cluster_template_job.json "
+            "with crop_bounds and reference_ffi_path)."
         )
     return background.build_prf_kernel_for_par_psf_source_mask(
         cfg, crop_bounds, ref_ffi_path
@@ -634,7 +669,12 @@ def _ref_manifest_row_index(
     return None
 
 
-def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> None:
+def run_config_pipeline(
+    cfg: SynDiffConfig,
+    *,
+    validate_only: bool = False,
+    diff_log_path: str | None = None,
+) -> None:
     validate_pipeline(cfg)
     if validate_only:
         log.info("Pipeline configuration is valid.")
@@ -645,120 +685,34 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
     manifest_path = ctx.manifest_path
     os.makedirs(out, exist_ok=True)
 
-    wcs_table: Optional[pd.DataFrame] = None
-    crop_bounds = None
-    ref_ffi_path: Optional[str] = None
     shared_mask = None
     ref_stars: Optional[pd.DataFrame] = None
     gaia_df: Optional[pd.DataFrame] = None
     tile_centers = None
     processing_ffi_paths: list = []
-    pipeline_offset_threshold = 0.01
 
-    _bw, _bc, _br = _bootstrap_state_skip_wcs_grouping(cfg, out, manifest_path)
-    if _bw is not None:
-        wcs_table = _bw
-    if _bc is not None:
-        crop_bounds = _bc
-    if _br is not None:
-        ref_ffi_path = _br
+    wcs_table, crop_bounds, ref_ffi_path, pipeline_offset_threshold = (
+        _load_template_handoff(cfg, out, manifest_path)
+    )
+
+    if getattr(cfg, "master_fits_mirror", True):
+        try:
+            link_master_workspace(
+                out,
+                ffi_leaf=_cfg_ffi_leaf(cfg) if cfg.ffi_dir else None,
+            )
+        except Exception as exc:
+            log.warning("master workspace link update failed at pipeline start: %s", exc)
 
     for idx, stage in enumerate(cfg.pipeline):
+        if is_external_workspaces_entry(stage):
+            continue
         kind = stage["kind"]
         log.info("=" * 70)
         log.info("Stage: %s", kind)
 
-        if kind == "wcs_grouping":
-            wg = parse_wcs_grouping(stage, idx)
-            pipeline_offset_threshold = wg.offset_threshold
-            ffi_leaf = _cfg_ffi_leaf(cfg)
-            all_sorted = _sorted_local_ffis(cfg)
-            if not all_sorted:
-                glob_pat = os.path.join(
-                    ffi_leaf,
-                    _ffi_filename_pattern(cfg.sector, cfg.camera, cfg.ccd),
-                )
-                raise FileNotFoundError(f"No FFI files matching {glob_pat!r}")
-            ffi_paths = wcs_grouping.select_ffis_with_valid_target_wcs(
-                all_sorted,
-                cfg.target_ra,
-                cfg.target_dec,
-                max_ffis=cfg.max_ffis,
-            )
-            log.info("  FFIs on disk: %d; processing: %d", len(all_sorted), len(ffi_paths))
-
-            wcs_table = wcs_grouping.build_wcs_table(
-                ffi_paths, cfg.target_ra, cfg.target_dec
-            )
-            wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
-                wcs_table,
-                window_length=wg.wcs_drift_savgol_window,
-                polyorder=wg.wcs_drift_savgol_polyorder,
-            )
-            wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
-                wcs_table,
-                sector=cfg.sector,
-                camera=cfg.camera,
-                tessvectors_data_path=_norm_bkg_vector_path(wg.bkg_vector_path),
-            )
-            wcs_table, ref_ffi_path = wcs_grouping.finalize_wcs_table_with_reference_anchor(
-                wcs_table,
-                offset_threshold=wg.offset_threshold,
-                ref_ffi_path=(
-                    cfg.ref_ffi_path
-                    if cfg.ref_ffi_path and os.path.exists(cfg.ref_ffi_path)
-                    else None
-                ),
-                ref_earth_deg_min=cfg.ref_ffi_min_earth_deg,
-                ref_moon_deg_min=cfg.ref_ffi_min_moon_deg,
-                ref_max_smoothed_residual=cfg.ref_ffi_max_smoothed_residual,
-            )
-            save_frame_manifest(wcs_table, out, manifest_path)
-            log.info("  Reference FFI: %s", ref_ffi_path)
-
-            with fits.open(ref_ffi_path, memmap=True) as hdul:
-                ref_header = hdul[1].header
-            crop_bounds = wcs_grouping.get_crop_bounds(
-                ref_header,
-                x_min=cfg.x_min,
-                x_max=cfg.x_max,
-                y_min=cfg.y_min,
-                y_max=cfg.y_max,
-                crop_quadrant=cfg.crop_quadrant,
-                x_left_dead=cfg.x_left_dead,
-                x_right_dead=cfg.x_right_dead,
-                y_edge_strip=cfg.y_edge_strip,
-            )
-
-            summary_df = wcs_grouping.summarize_template_groups(wcs_table)
-            wcs_grouping.write_cluster_template_job_json(
-                summary_df,
-                ref_ffi_path,
-                cfg.sector,
-                cfg.camera,
-                cfg.ccd,
-                wg.offset_threshold,
-                out,
-                crop_bounds=crop_bounds,
-            )
-            if getattr(cfg, "pipeline_plots", False):
-                plot_dir = _pipeline_plots_root(out, cfg)
-                os.makedirs(plot_dir, exist_ok=True)
-                wcs_grouping.plot_wcs_drift_and_template_assignment(
-                    wcs_table,
-                    os.path.join(plot_dir, "wcs_drift_template_debug.png"),
-                    ref_ffi_path=ref_ffi_path,
-                    ref_earth_deg_min=cfg.ref_ffi_min_earth_deg,
-                    ref_moon_deg_min=cfg.ref_ffi_min_moon_deg,
-                    sector=cfg.sector,
-                    camera=cfg.camera,
-                    ccd=cfg.ccd,
-                )
-
-        elif kind == "shared_mask":
+        if kind == "shared_mask":
             sm = parse_shared_mask(stage, idx)
-            if wcs_table is None or crop_bounds is None or ref_ffi_path is None:
-                raise RuntimeError("shared_mask requires wcs_grouping first.")
             gaia_df = _load_gaia_catalog(cfg, out)
             if gaia_df is None:
                 raise RuntimeError("gaia_catalog required for shared_mask.")
@@ -799,19 +753,19 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             if wcs_table is None or crop_bounds is None or ref_ffi_path is None:
                 raise RuntimeError(
                     "hotpants requires wcs_table, crop_bounds, and reference FFI metadata "
-                    "(run wcs_grouping first, or resume from an output_dir with frame manifest "
-                    "and crop bounds from a prior run)."
+                    "(template handoff required: syndiff_ffi_frames.csv and "
+                    "cluster_template_job.json in output_dir)."
                 )
             shared_mask = _ensure_shared_mask_loaded(out, shared_mask)
             if ref_stars is None:
-                rs_path = os.path.join(out, "ref_stars.csv")
+                rs_path = os.path.join(out, "hotpants_substamp_stars.csv")
                 if not os.path.isfile(rs_path):
                     raise RuntimeError(
-                        "hotpants requires ref_stars (run shared_mask first) or "
+                        "hotpants requires hotpants_substamp_stars (run shared_mask first) or "
                         f"an existing {rs_path!r} from a prior run."
                     )
                 ref_stars = pd.read_csv(rs_path)
-                log.info("  Loaded ref_stars from prior run (%s)", rs_path)
+                log.info("  Loaded hotpants_substamp_stars from prior run (%s)", rs_path)
             try:
                 hotpants_runner.ensure_template_paths_from_syndiff_or_group_dirs(
                     cfg,
@@ -887,6 +841,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 sci_bkg_stack=sci_bkg_stack,
                 workspace_dirs=dirs,
                 sci_workspace_dir=sci_workspace_dir,
+                diffs_label=diffs_l,
+                science=sci_label,
+                diff_log_path=diff_log_path,
             )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l
@@ -993,13 +950,12 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
             if wcs_table is None:
                 raise RuntimeError(
                     "subtract requires a frame manifest (wcs_table). "
-                    "Run wcs_grouping first or resume from an output_dir with "
-                    "syndiff_ffi_frames.csv."
+                    "Template handoff required: syndiff_ffi_frames.csv in output_dir."
                 )
             if any(lab == "ffi" for _, lab in terms) and crop_bounds is None:
                 raise RuntimeError(
-                    "subtract: label 'ffi' needs crop_bounds (wcs_grouping or prior run "
-                    "with cluster_template_job / crop metadata)."
+                    "subtract: label 'ffi' needs crop_bounds (template handoff required: "
+                    "cluster_template_job.json with crop metadata)."
                 )
 
             src_col = "filename" if "filename" in wcs_table.columns else "path"
@@ -1438,10 +1394,8 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
 
             if wcs_table is None or crop_bounds is None or not ref_ffi_path:
                 raise RuntimeError(
-                    "forced_photometry needs WCS/crop state: run wcs_grouping first, "
-                    "or keep output_dir's syndiff_ffi_frames.csv and "
-                    "cluster_template_job.json from a prior run when omitting "
-                    "wcs_grouping from pipeline:."
+                    "forced_photometry needs WCS/crop state (template handoff required: "
+                    "syndiff_ffi_frames.csv and cluster_template_job.json in output_dir)."
                 )
 
             if cfg.target_ra is None or cfg.target_dec is None:
@@ -1487,57 +1441,87 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                     epsf_for_phot = np.nanmedian(epsf_for_phot, axis=0)
 
             extras = list(getattr(cfg, "additional_forced_targets", None) or [])
-            sky_targets: list[tuple[float, float, Optional[str], Optional[str], str]] = [
+            primary_xy = photometry.per_frame_target_crop_xy(
+                wcs_table,
+                float(cfg.target_ra),
+                float(cfg.target_dec),
+                crop_bounds,
+            )
+
+            phot_specs: list[tuple[np.ndarray, Optional[str], Optional[str], str, dict]] = [
                 (
-                    float(cfg.target_ra),
-                    float(cfg.target_dec),
+                    primary_xy,
                     None,
                     None,
                     "primary",
+                    {
+                        "position_mode": "sky",
+                        "ra": float(cfg.target_ra),
+                        "dec": float(cfg.target_dec),
+                    },
                 ),
             ]
             for j, pt in enumerate(extras):
-                sky_targets.append(
+                extra_xy = photometry.resolve_forced_target_xy(
+                    pt, primary_xy, wcs_table, crop_bounds
+                )
+                phot_specs.append(
                     (
-                        float(pt["ra"]),
-                        float(pt["dec"]),
+                        extra_xy,
                         str(pt["name"]),
                         f"lightcurve_{pt['name']}.csv",
                         f"extra[{j}]",
+                        pt,
                     )
                 )
 
             phot_targets: list[photometry.ForcedPhotTargetSpec] = []
-            for ra, dec, lc_name, csv_fname, tag in sky_targets:
-                target_xy = photometry.per_frame_target_crop_xy(
-                    wcs_table, ra, dec, crop_bounds
-                )
+            for target_xy, lc_name, csv_fname, tag, pt in phot_specs:
                 mx = float(np.nanmedian(target_xy[:, 0]))
                 my = float(np.nanmedian(target_xy[:, 1]))
+                mode = pt.get("position_mode", "sky")
+                if mode == "sky":
+                    ra_log = float(pt["ra"])
+                    dec_log = float(pt["dec"])
+                else:
+                    ra_log = float("nan")
+                    dec_log = float("nan")
+
                 if np.isfinite(mx) and np.isfinite(my):
                     _warn_if_forced_target_outside_crop(
                         mx,
                         my,
                         crop_bounds,
                         int(phot_params.phot_cutout_size),
-                        ra=ra,
-                        dec=dec,
+                        ra=ra_log,
+                        dec=dec_log,
                         tag=tag,
                     )
                 else:
                     log.warning(
-                        "forced_photometry: no finite per-FFI positions for %s (ra=%s dec=%s)",
+                        "forced_photometry: no finite per-FFI positions for %s (%s)",
                         tag,
-                        ra,
-                        dec,
+                        (
+                            f"ra={ra_log} dec={dec_log}"
+                            if mode == "sky"
+                            else f"mode={mode} name={pt.get('name', lc_name)}"
+                        ),
                     )
                 n_fin = int(np.isfinite(target_xy).all(axis=1).sum())
+                pos_desc = (
+                    f"ra={ra_log} dec={dec_log}"
+                    if mode == "sky"
+                    else (
+                        f"dx={pt['dx']} dy={pt['dy']}"
+                        if mode == "offset"
+                        else f"x={pt['x']} y={pt['y']}"
+                    )
+                )
                 log.info(
-                    "  forced_photometry: %s ra=%s dec=%s → per-FFI WCS crop-local xy "
+                    "  forced_photometry: %s %s → per-FFI crop-local xy "
                     "(median %.3f, %.3f; finite %d/%d)%s",
                     tag,
-                    ra,
-                    dec,
+                    pos_desc,
                     mx,
                     my,
                     n_fin,
@@ -1552,17 +1536,17 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 if getattr(cfg, "pipeline_plots", False):
                     pdir = _pipeline_plots_root(out, cfg)
                     os.makedirs(pdir, exist_ok=True)
-                    if lc_name:
-                        safe = re.sub(r"[^0-9A-Za-z._-]+", "_", lc_name)
-                        lc_plot_path = os.path.join(
-                            pdir, f"lightcurve_{label_out}_{safe}.png"
-                        )
-                    else:
-                        lc_plot_path = os.path.join(
-                            pdir, f"lightcurve_{label_out}.png"
-                        )
+                    (
+                        lc_plot_path,
+                        gif_diff_path,
+                        gif_science_path,
+                        gif_pair_path,
+                    ) = _forced_photometry_debug_plot_paths(pdir, label_out, lc_name)
                 else:
                     lc_plot_path = None
+                    gif_diff_path = None
+                    gif_science_path = None
+                    gif_pair_path = None
 
                 phot_targets.append(
                     photometry.ForcedPhotTargetSpec(
@@ -1570,6 +1554,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                         csv_basename=csv_fname or "lightcurve.csv",
                         plot_source_label=lc_name or "primary",
                         plot_png_path=lc_plot_path,
+                        plot_gif_diff_path=gif_diff_path,
+                        plot_gif_science_path=gif_science_path,
+                        plot_gif_pair_path=gif_pair_path,
                         tag=tag,
                     )
                 )
@@ -1586,6 +1573,9 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
                 output_dir=phot_out,
                 ref_frame_index=ref_idx,
                 plot_title_suffix=label_out,
+                output_label=label_out,
+                diffs_input=diff_label,
+                diff_log_path=diff_log_path,
             )
 
         else:
@@ -1593,9 +1583,12 @@ def run_config_pipeline(cfg: SynDiffConfig, *, validate_only: bool = False) -> N
 
         if getattr(cfg, "master_fits_mirror", True):
             try:
-                link_workspace_fits_master(out)
+                link_master_workspace(
+                    out,
+                    ffi_leaf=_cfg_ffi_leaf(cfg) if cfg.ffi_dir else None,
+                )
             except Exception as exc:
-                log.warning("master mirror update failed after stage %r: %s", kind, exc)
+                log.warning("master workspace link update failed after stage %r: %s", kind, exc)
 
     log.info("=" * 70)
     log.info("Config pipeline complete. Outputs: %s", out)
