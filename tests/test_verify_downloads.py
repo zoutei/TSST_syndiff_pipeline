@@ -22,7 +22,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     TemplateStageParams,
     WcsGroupingStageParams,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.template_creation.orchestration.verify import (
     stage_complete,
     verify_ps1_download,
@@ -48,7 +48,7 @@ def _resolved(tmp: Path, csv_path: Path | None = None) -> ResolvedTargetConfig:
         target=target,
         data_root=str(tmp / "data"),
         ffi_dir=str(tmp / "data" / "tess_ffi"),
-        handoff_dir=str(tmp / "handoff" / target.label()),
+        event_dir=str(tmp / "events" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),

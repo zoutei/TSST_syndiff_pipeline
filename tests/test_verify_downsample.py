@@ -11,6 +11,10 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from syndiff_pipeline.common.orchestration.template_handoff import (
+    ensure_event_templates_symlink,
+)
+from syndiff_pipeline.template_creation.orchestration.dispatch import _manifest_from_result
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (
     DownsampleStageParams,
@@ -20,8 +24,15 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     TemplateStageParams,
     WcsGroupingStageParams,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
-from syndiff_pipeline.template_creation.orchestration.verify import verify_downsample
+from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.template_creation.orchestration.verify import (
+    collect_stage_artifacts,
+    event_dir_ps1_removed_stars_csv_path,
+    persist_completion_manifests,
+    ps1_process_removed_stars_csv_path,
+    verify_downsample,
+    write_manifest,
+)
 
 
 def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
@@ -37,7 +48,7 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
         target=target,
         data_root=str(tmp / "data"),
         ffi_dir=str(tmp / "data" / "tess_ffi"),
-        handoff_dir=str(tmp / "handoff" / target.label()),
+        event_dir=str(tmp / "events" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),
@@ -52,8 +63,8 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
     )
 
 
-def _write_cluster_job(handoff_dir: Path, offsets: list[tuple[float, float]]) -> None:
-    handoff_dir.mkdir(parents=True, exist_ok=True)
+def _write_cluster_job(event_dir: Path, offsets: list[tuple[float, float]]) -> None:
+    event_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "schema_version": 1,
         "sector": 22,
@@ -65,7 +76,7 @@ def _write_cluster_job(handoff_dir: Path, offsets: list[tuple[float, float]]) ->
         "y_max": 2048,
         "groups": [{"group_dx": dx, "group_dy": dy} for dx, dy in offsets],
     }
-    (handoff_dir / "cluster_template_job.json").write_text(
+    (event_dir / "cluster_template_job.json").write_text(
         json.dumps(payload), encoding="utf-8"
     )
 
@@ -85,7 +96,7 @@ class TestVerifyDownsampleMultiOffset(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp, single_offset=False)
-            _write_cluster_job(Path(resolved.handoff_dir), offsets)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
             out_dir = _out_dir(resolved)
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -115,7 +126,7 @@ class TestVerifyDownsampleSingleOffset(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp, single_offset=True)
-            _write_cluster_job(Path(resolved.handoff_dir), offsets)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
             out_dir = _out_dir(resolved)
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,13 +142,66 @@ class TestVerifyDownsampleSingleOffset(unittest.TestCase):
             self.assertIn("All 1 offset FITS present", result.message)
 
 
+class TestVerifyDownsampleRemovedStarsCsv(unittest.TestCase):
+    def test_missing_event_csv_fails_when_ps1_source_exists(self):
+        offsets = [(0.0, 0.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=False)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
+            out_dir = _out_dir(resolved)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / _offset_fits_name(0.0, 0.0)).write_bytes(b"fits")
+
+            ps1_src = ps1_process_removed_stars_csv_path(resolved)
+            ps1_src.parent.mkdir(parents=True, exist_ok=True)
+            ps1_src.write_text("source_id,ra,dec\n1,0,0\n", encoding="utf-8")
+
+            result = verify_downsample(resolved)
+            self.assertFalse(result.ok)
+            self.assertIn("ps1_removed_stars.csv", result.message)
+
+            event_csv = event_dir_ps1_removed_stars_csv_path(resolved)
+            event_csv.parent.mkdir(parents=True, exist_ok=True)
+            event_csv.write_text("source_id,ra,dec,x,y\n1,0,0,1,2\n", encoding="utf-8")
+
+            result = verify_downsample(resolved)
+            self.assertTrue(result.ok)
+
+    def test_collect_stage_artifacts_includes_event_csv(self):
+        offsets = [(0.0, 0.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=False)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
+            out_dir = _out_dir(resolved)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / _offset_fits_name(0.0, 0.0)).write_bytes(b"fits")
+
+            ps1_src = ps1_process_removed_stars_csv_path(resolved)
+            ps1_src.parent.mkdir(parents=True, exist_ok=True)
+            ps1_src.write_text("source_id,ra,dec\n", encoding="utf-8")
+
+            expected, produced, artifacts = collect_stage_artifacts(resolved, "downsample")
+            self.assertEqual(expected, 2)
+            self.assertEqual(produced, 1)
+
+            event_csv = event_dir_ps1_removed_stars_csv_path(resolved)
+            event_csv.parent.mkdir(parents=True, exist_ok=True)
+            event_csv.write_text("source_id,ra,dec,x,y\n", encoding="utf-8")
+            expected, produced, artifacts = collect_stage_artifacts(resolved, "downsample")
+            self.assertEqual(expected, 2)
+            self.assertEqual(produced, 2)
+            self.assertIn(str(event_csv), artifacts)
+
+
 class TestVerifyDownsampleLegacyFits(unittest.TestCase):
     def test_uncompressed_fits_still_verifies(self):
         offsets = [(0.0, 0.0)]
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp, single_offset=False)
-            _write_cluster_job(Path(resolved.handoff_dir), offsets)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
             out_dir = _out_dir(resolved)
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -147,6 +211,71 @@ class TestVerifyDownsampleLegacyFits(unittest.TestCase):
             result = verify_downsample(resolved)
             self.assertTrue(result.ok)
             self.assertIn("All 1 offset FITS present", result.message)
+
+
+class TestDownsampleManifestTemplateDirs(unittest.TestCase):
+    def test_manifest_from_result_preserves_template_dir_meta(self):
+        physical = "/data/shifted/sector0022_camera3_ccd3"
+        symlink = "/events/s0022_c3_k3/ws/templates"
+        result = {
+            "expected_count": 2,
+            "produced_count": 2,
+            "artifacts": [f"{physical}/a.fits.gz"],
+            "template_dir_physical": physical,
+            "template_dir_symlink": symlink,
+        }
+        expected, produced, artifacts, meta = _manifest_from_result(result)
+        self.assertEqual(expected, 2)
+        self.assertEqual(produced, 2)
+        self.assertEqual(meta["template_dir_physical"], physical)
+        self.assertEqual(meta["template_dir_symlink"], symlink)
+
+    def test_write_manifest_includes_template_dirs_from_meta(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=True)
+            physical = _out_dir(resolved)
+            physical.mkdir(parents=True, exist_ok=True)
+            link = ensure_event_templates_symlink(resolved.event_dir, physical)
+            manifest_path = tmp / "downsample.manifest.json"
+            payload = write_manifest(
+                manifest_path,
+                resolved,
+                "downsample",
+                [str(physical / "a.fits.gz")],
+                1,
+                1,
+                meta={
+                    "template_dir_physical": str(physical),
+                    "template_dir_symlink": str(link),
+                },
+            )
+            self.assertEqual(payload["template_dir_physical"], str(physical))
+            self.assertEqual(payload["template_dir_symlink"], str(link))
+            on_disk = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(on_disk["template_dir_physical"], str(physical))
+            self.assertEqual(on_disk["template_dir_symlink"], str(link))
+
+    def test_persist_completion_manifests_derives_template_dirs_from_symlink(self):
+        offsets = [(0.0, 0.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=True)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
+            out_dir = _out_dir(resolved)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / _offset_fits_name(0.0, 0.0)).write_bytes(b"fits")
+            link = ensure_event_templates_symlink(resolved.event_dir, out_dir)
+
+            per_run = tmp / "per_run.manifest.json"
+            stable = tmp / "stable.manifest.json"
+            persist_completion_manifests(
+                resolved, "downsample", [per_run, stable]
+            )
+            for path in (per_run, stable):
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(payload["template_dir_physical"], str(out_dir.resolve()))
+                self.assertEqual(payload["template_dir_symlink"], str(link))
 
 
 if __name__ == "__main__":
