@@ -7,9 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
-from syndiff_pipeline.template_creation.orchestration import logs
+from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig, load_runner_config
-from syndiff_pipeline.template_creation.orchestration.targets import Target, load_targets
+from syndiff_pipeline.common.orchestration.targets import Target, load_targets
 
 
 @dataclass

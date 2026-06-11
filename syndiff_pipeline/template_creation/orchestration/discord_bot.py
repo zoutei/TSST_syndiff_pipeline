@@ -9,14 +9,14 @@ import os
 import sys
 from pathlib import Path
 
-from syndiff_pipeline.template_creation.orchestration import daemon, logs
-from syndiff_pipeline.template_creation.orchestration.deployment import (
+from syndiff_pipeline.common.orchestration import daemon, logs
+from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
-    load_handoff_root_from_deployment,
+    load_workspace_root_from_deployment,
 )
-from syndiff_pipeline.template_creation.orchestration.notifications import format_status_reply_messages
-from syndiff_pipeline.template_creation.orchestration.state import PipelineState
-from syndiff_pipeline.template_creation.orchestration.workspace import runs_root, state_db_path
+from syndiff_pipeline.common.orchestration.notifications import format_status_reply_messages
+from syndiff_pipeline.common.orchestration.state import PipelineState
+from syndiff_pipeline.common.orchestration.workspace import runs_root, state_db_path
 
 log = logging.getLogger(__name__)
 
@@ -52,18 +52,18 @@ class PipelineDiscordBot:
     def __init__(self, deployment_path: str | Path):
         self._deployment_path = Path(deployment_path).expanduser().resolve()
         deployment = load_deployment_file(self._deployment_path)
-        self._handoff_root = str(
-            load_handoff_root_from_deployment(self._deployment_path)
+        self._workspace_root = str(
+            load_workspace_root_from_deployment(self._deployment_path)
         )
-        self._runs_dir = str(runs_root(self._handoff_root))
-        self._state = PipelineState(str(state_db_path(self._handoff_root)))
+        self._runs_dir = str(runs_root(self._workspace_root))
+        self._state = PipelineState(str(state_db_path(self._workspace_root)))
         self._token = str(deployment.get("discord_bot_token", "")).strip() or None
         self._channel_id = (
             str(deployment.get("discord_channel_id", "")).strip() or None
         )
 
     def _build_status_reply(self, message_text: str) -> list[str]:
-        from syndiff_pipeline.template_creation.orchestration.notifications import (
+        from syndiff_pipeline.common.orchestration.notifications import (
             resolve_run_ids_for_status_request,
         )
 
@@ -72,7 +72,7 @@ class PipelineDiscordBot:
             self._state,
             run_ids,
             self._runs_dir,
-            handoff_root=self._handoff_root,
+            workspace_root=self._workspace_root,
         )
 
     def run(self) -> None:
@@ -177,13 +177,21 @@ def run_discord_bot(
 ) -> None:
     path = Path(deployment_path).expanduser().resolve()
     load_deployment_file(path)
-    handoff_root = str(load_handoff_root_from_deployment(path))
-    pid_path = logs.discord_bot_pid_path(handoff_root)
+    workspace_root = str(load_workspace_root_from_deployment(path))
+    pid_path = logs.discord_bot_pid_path(workspace_root)
     if detached:
-        daemon.write_pid(pid_path, os.getpid())
+        pid = os.getpid()
+        host = daemon.local_hostname()
+        daemon.write_process_identity(pid_path, pid, host=host)
+        log.info(
+            "Discord bot registered workspace=%s deployment=%s",
+            workspace_root,
+            path,
+        )
         try:
             PipelineDiscordBot(path).run()
         finally:
+            log.info("Discord bot exiting workspace=%s", workspace_root)
             daemon.remove_pid_file(pid_path)
     else:
         PipelineDiscordBot(path).run()
@@ -202,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Run as background worker (writes pid file; used by daemon start)",
     )
     args = parser.parse_args(argv)
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    daemon.configure_process_logging("discord-bot")
     run_discord_bot(args.deployment, detached=args.detached)
     return 0
 

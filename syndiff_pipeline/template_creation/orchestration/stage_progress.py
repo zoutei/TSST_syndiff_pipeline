@@ -1,6 +1,6 @@
 """Log-derived progress for running pipeline stages.
 
-Parses the tail of per-target stage logs so ``syndiff-template progress`` can
+Parses the tail of per-target stage logs so ``syndiff progress`` can
 show fractional progress without importing verify/template modules or scanning
 NFS artifact trees.
 """
@@ -42,6 +42,10 @@ _RE_TESS_TOTAL = re.compile(r"Downloading (\d+) FITS(?: file\(s\)| files)")
 _RE_TESS_PROGRESS = re.compile(r"FFI download progress: (\d+)/(\d+)")
 _RE_TESS_TQDM_FRAC = re.compile(r"(\d+)/(\d+)\s*\[")
 _RE_TESS_TQDM_PCT = re.compile(r"(\d+)%\|")
+
+_RE_HOTPANTS_FRAMES = re.compile(
+    r"hotpants \[(\w+)\] round \d+: (\d+)/(\d+) frames succeeded"
+)
 
 _PHASE_LINES = (
     ("Combining results", "combining"),
@@ -249,6 +253,46 @@ def _parse_wcs_grouping(text: str) -> StageProgress | None:
     return None
 
 
+def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
+    from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
+        format_progress_text as format_hotpants_progress,
+        progress_path_for_diff_log as hotpants_sidecar_path,
+        read_progress,
+    )
+    from syndiff_pipeline.difference_imaging.stages.photometry_progress import (
+        format_progress_text as format_photometry_progress,
+        progress_path_for_diff_log as photometry_sidecar_path,
+    )
+
+    best: tuple[str, str, str] | None = None
+    for sidecar_path, format_fn in (
+        (hotpants_sidecar_path(log_path), format_hotpants_progress),
+        (photometry_sidecar_path(log_path), format_photometry_progress),
+    ):
+        data = read_progress(sidecar_path)
+        if not data:
+            continue
+        text = format_fn(data)
+        if text is None:
+            continue
+        updated = str(data.get("updated_at") or "")
+        if best is None or updated >= best[0]:
+            phase = str(data.get("phase", ""))
+            kind = "fraction" if phase != "complete" else "phase"
+            best = (updated, text, kind)
+    if best is None:
+        return None
+    return StageProgress(best[1], best[2])
+
+
+def _parse_diff(text: str) -> StageProgress | None:
+    match = _last_match(_RE_HOTPANTS_FRAMES, text)
+    if match:
+        label, done, total = match.groups()
+        return StageProgress(f"hotpants {label} complete {done}/{total}", "phase")
+    return _phase_from_text(text)
+
+
 def _elapsed_progress(started_at: str | None) -> StageProgress | None:
     if not started_at:
         return None
@@ -271,6 +315,7 @@ _PARSERS = {
     "tess_ffi_download": _parse_tess_ffi_download,
     "mapping": _parse_mapping,
     "wcs_grouping": _parse_wcs_grouping,
+    "diff": _parse_diff,
 }
 
 
@@ -286,6 +331,10 @@ def read_log_progress(
     path = Path(log_path)
     if stage == "downsample":
         sidecar_prog = _parse_downsample_sidecar(path)
+        if sidecar_prog is not None:
+            return sidecar_prog
+    if stage == "diff":
+        sidecar_prog = _parse_diff_sidecar(path)
         if sidecar_prog is not None:
             return sidecar_prog
 

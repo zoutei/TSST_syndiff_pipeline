@@ -115,6 +115,119 @@ class TestReadLogProgress(unittest.TestCase):
         prog = read_log_progress(path, "downsample")
         self.assertEqual(prog.text, "~14/84")
 
+    def test_diff_hotpants_sidecar(self):
+        log_path = self._write_log("diff.log", "Stage: hotpants\n")
+        sidecar = log_path.parent / "diff.hotpants.progress.json"
+        sidecar.write_text(
+            (
+                '{"diffs_label": "hp_d", "round_id": 1, "science": "ffi", '
+                '"frames_total": 200, "frames_done": 45, "frames_ok": 44, '
+                '"phase": "running"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "hotpants hp_d 45/200")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_hotpants_log_fallback(self):
+        path = self._write_log(
+            "diff.log",
+            "hotpants [hp2_d] round 1: 180/200 frames succeeded.\n",
+        )
+        prog = read_log_progress(path, "diff")
+        self.assertEqual(prog.text, "hotpants hp2_d complete 180/200")
+        self.assertEqual(prog.kind, "phase")
+
+    def test_diff_photometry_sidecar(self):
+        log_path = self._write_log("diff.log", "Stage: forced_photometry\n")
+        sidecar = log_path.parent / "diff.photometry.progress.json"
+        sidecar.write_text(
+            (
+                '{"output_label": "lc_prf_on_diffs", "diffs_input": "hp_d", '
+                '"n_sources": 1, "epochs_total": 842, "epochs_done": 120, '
+                '"phase": "flux", "updated_at": "2026-06-11T12:00:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "photometry lc_prf_on_diffs 120/842")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_separate_sidecars_from_shared_log_path(self):
+        """Hotpants and photometry must not share one CLI sidecar filename."""
+        from syndiff_pipeline.difference_imaging.stages import (
+            hotpants_progress as hp,
+            photometry_progress as pp,
+        )
+
+        log_path = self._write_log("diff.log", "Stage: forced_photometry\n")
+        hotpants_cli = hp.progress_path_for_diff_log(log_path)
+        photometry_cli = pp.progress_path_for_diff_log(log_path)
+        self.assertNotEqual(hotpants_cli, photometry_cli)
+
+        ws_hp = self.log_dir / "ws" / "hp_d" / hp.PROGRESS_FILENAME
+        ws_phot = self.log_dir / "ws" / "lc_prf_on_diffs" / pp.PROGRESS_FILENAME
+
+        hp.init_progress_pair(
+            ws_hp,
+            hotpants_cli,
+            diffs_label="hp_d",
+            round_id=1,
+            science="ffi",
+            frames_total=1188,
+        )
+        hp.record_frame_progress(ws_hp, hotpants_cli, success=True)
+        hp.set_progress_phase_pair(ws_hp, hotpants_cli, "complete")
+
+        pp.init_progress_pair(
+            ws_phot,
+            photometry_cli,
+            output_label="lc_prf_on_diffs",
+            diffs_input="hp_d",
+            n_sources=7,
+            epochs_total=1188,
+            phase="flux",
+        )
+        pp.record_epoch_progress(ws_phot, photometry_cli)
+
+        self.assertTrue(hotpants_cli.is_file())
+        self.assertTrue(photometry_cli.is_file())
+        hp_data = hp.read_progress(hotpants_cli)
+        pp_data = pp.read_progress(photometry_cli)
+        self.assertIsNotNone(hp_data)
+        self.assertIsNotNone(pp_data)
+        self.assertIn("frames_total", hp_data)
+        self.assertIn("epochs_total", pp_data)
+        self.assertNotIn("epochs_total", hp_data)
+
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "photometry lc_prf_on_diffs (7 src) 1/1188")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_sidecar_prefers_newer_photometry(self):
+        log_path = self._write_log("diff.log", "Stage: forced_photometry\n")
+        hotpants_sidecar = log_path.parent / "diff.hotpants.progress.json"
+        photometry_sidecar = log_path.parent / "diff.photometry.progress.json"
+        hotpants_sidecar.write_text(
+            (
+                '{"diffs_label": "hp_d", "round_id": 1, "science": "ffi", '
+                '"frames_total": 200, "frames_done": 200, "frames_ok": 200, '
+                '"phase": "complete", "updated_at": "2026-06-11T11:00:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        photometry_sidecar.write_text(
+            (
+                '{"output_label": "lc_prf_on_diffs", "diffs_input": "hp_d", '
+                '"n_sources": 1, "epochs_total": 842, "epochs_done": 50, '
+                '"phase": "flux", "updated_at": "2026-06-11T12:00:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "photometry lc_prf_on_diffs 50/842")
+
     def test_downsample_sidecar_skycell_progress(self):
         log_path = self._write_log("downsample.log", "Processing 84 skycells in 12 batches...\n")
         sidecar = log_path.parent / "downsample.progress.json"
@@ -228,7 +341,7 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_ctx = mock.Mock()
         fake_ctx.run_id = "run_a"
         fake_ctx.cfg.state_db_path = "/db.sqlite"
-        fake_ctx.cfg.handoff_root = "/tmp/handoff"
+        fake_ctx.cfg.workspace_root = "/tmp/handoff"
         fake_ctx.cfg.runs_dir.return_value = "/runs"
 
         running_row = mock.Mock(
@@ -244,13 +357,13 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_state.running_stage_runs.return_value = [running_row]
 
         with mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.cli._resolve_run_from_args",
+            "syndiff_pipeline.common.orchestration.cli._resolve_run_from_args",
             return_value=fake_ctx,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.cli.PipelineState",
+            "syndiff_pipeline.common.orchestration.cli.PipelineState",
             return_value=fake_state,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.verify_status.read_verify_run_status",
+            "syndiff_pipeline.common.orchestration.verify_status.read_verify_run_status",
             return_value={"scan_queued": 0, "scan_running": 0, "active": []},
         ), mock.patch(
             "syndiff_pipeline.template_creation.orchestration.run_report.read_log_progress",
@@ -270,20 +383,20 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_ctx = mock.Mock()
         fake_ctx.run_id = "run_a"
         fake_ctx.cfg.state_db_path = "/db.sqlite"
-        fake_ctx.cfg.handoff_root = "/tmp/handoff"
+        fake_ctx.cfg.workspace_root = "/tmp/handoff"
 
         fake_state = mock.Mock()
         fake_state.count_by_status.return_value = {"running": 1}
         fake_state.get_run.return_value = {"status": "running"}
 
         with mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.cli._resolve_run_from_args",
+            "syndiff_pipeline.common.orchestration.cli._resolve_run_from_args",
             return_value=fake_ctx,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.cli.PipelineState",
+            "syndiff_pipeline.common.orchestration.cli.PipelineState",
             return_value=fake_state,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.verify_status.read_verify_run_status",
+            "syndiff_pipeline.common.orchestration.verify_status.read_verify_run_status",
             return_value={"scan_queued": 0, "scan_running": 0, "active": []},
         ), mock.patch("sys.stdout", buf):
             rc = cmd_progress(args)

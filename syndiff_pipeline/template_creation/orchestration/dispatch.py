@@ -9,26 +9,27 @@ import sys
 from pathlib import Path
 from typing import List
 
-from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, config_snapshot
-from syndiff_pipeline.template_creation.orchestration.deployment import (
+from syndiff_pipeline.template_creation.orchestration.runner_config import (
+    ResolvedTargetConfig,
+    config_snapshot,
+    parse_deployment_file,
+)
+from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
     gaia_credentials_file,
     load_deployment,
 )
-from syndiff_pipeline.template_creation.orchestration.runner_config import parse_deployment_file
-from syndiff_pipeline.template_creation.orchestration.state import STAGE_NAMES, STAGE_POOL
-
 log = logging.getLogger(__name__)
 
 
+def _pipeline():
+    from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
+
+    return get_syndiff_pipeline()
+
+
 def parse_stage_list(stages_arg: str | None) -> List[str]:
-    if not stages_arg or not str(stages_arg).strip():
-        return list(STAGE_NAMES)
-    names = [s.strip() for s in str(stages_arg).split(",") if s.strip()]
-    unknown = set(names) - set(STAGE_NAMES)
-    if unknown:
-        raise ValueError(f"Unknown stages: {sorted(unknown)}")
-    return names
+    return _pipeline().parse_stage_list(stages_arg)
 
 
 def build_stage_command(
@@ -43,7 +44,7 @@ def build_stage_command(
     cmd = [
         sys.executable,
         "-m",
-        "syndiff_pipeline.template_creation.orchestration.run_stage",
+        "syndiff_pipeline.common.orchestration.run_stage",
         "--run-id",
         run_id,
         "--stage",
@@ -97,47 +98,56 @@ def _download_gaia_catalog(
         )
 
 
-def _manifest_from_result(result: dict) -> tuple[int, int, list[str]] | None:
-    """Extract manifest fields from a stage result dict, if present."""
+_MANIFEST_META_KEYS = ("template_dir_physical", "template_dir_symlink")
+
+
+def _manifest_meta_from_result(result: dict) -> dict[str, str] | None:
+    meta = {key: str(result[key]) for key in _MANIFEST_META_KEYS if key in result}
+    return meta or None
+
+
+def _manifest_from_result(
+    result: dict,
+) -> tuple[int, int, list[str], dict[str, str] | None] | None:
     if not isinstance(result, dict):
         return None
     if "expected_count" not in result or "produced_count" not in result:
         return None
     artifacts = [str(p) for p in (result.get("artifacts") or [])]
-    return int(result["expected_count"]), int(result["produced_count"]), artifacts
+    return (
+        int(result["expected_count"]),
+        int(result["produced_count"]),
+        artifacts,
+        _manifest_meta_from_result(result),
+    )
 
 
-def execute_stage(
+def _execute_template_stage(
     resolved: ResolvedTargetConfig,
     stage: str,
     force_rerun: bool = False,
     *,
     progress_path: str | None = None,
-) -> tuple[int, int, list[str]] | None:
-    """Run one template pipeline stage in-process.
-
-    Returns manifest fields ``(expected_count, produced_count, artifacts)`` when
-    the stage provides them; otherwise ``None`` (caller may use
-    ``verify.collect_stage_artifacts`` after success).
-    """
+) -> tuple[int, int, list[str], dict[str, str] | None] | None:
+    """Run one template pipeline stage in-process."""
     t = resolved.target
     if stage == "tess_ffi_download":
         from syndiff_pipeline.common.download import download_ffis, nested_ffi_dir
 
         out_dir = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
         download_ffis(sector=t.sector, camera=t.camera, ccd=t.ccd, output_dir=out_dir)
-        return
+        return None
 
     if stage == "wcs_grouping":
         from syndiff_pipeline.template_creation.orchestration.handoff import run_wcs_grouping
 
         run_wcs_grouping(resolved)
-        return
+        return None
 
     if stage == "mapping":
         from syndiff_pipeline.template_creation.processing import pancakes
 
-        job_path = Path(resolved.handoff_dir) / "cluster_template_job.json"
+        job_path = Path(resolved.event_dir) / "cluster_template_job.json"
         with job_path.open(encoding="utf-8") as fh:
             job = json.load(fh)
         ref_ffi = job["reference_ffi_path"]
@@ -166,7 +176,7 @@ def execute_stage(
             max_workers=mp.max_workers,
             oversampling_factor=mp.oversampling_factor,
         )
-        return
+        return None
 
     if stage == "ps1_download":
         from syndiff_pipeline.template_creation.processing import ps1_download
@@ -218,6 +228,9 @@ def execute_stage(
     if stage == "downsample":
         import numpy as np
 
+        from syndiff_pipeline.template_creation.orchestration.verify import (
+            clear_downsample_event_artifacts,
+        )
         from syndiff_pipeline.template_creation.processing.downsample import (
             load_cluster_template_job_payload,
             main as run_downsample,
@@ -225,7 +238,11 @@ def execute_stage(
             roi_tuple_from_cluster_job_payload,
         )
 
-        job_path = str(Path(resolved.handoff_dir) / "cluster_template_job.json")
+        os.makedirs(resolved.event_dir, exist_ok=True)
+        if force_rerun:
+            clear_downsample_event_artifacts(resolved)
+
+        job_path = str(Path(resolved.event_dir) / "cluster_template_job.json")
         payload = load_cluster_template_job_payload(job_path)
         ds = resolved.stages.downsample
         if ds.single_offset:
@@ -256,14 +273,49 @@ def execute_stage(
             progress_path=progress_path,
             n_jobs=ds.n_jobs,
             skycells_per_batch=ds.skycells_per_batch,
+            event_dir=resolved.event_dir,
+            write_ps1_removed_stars_csv=True,
         )
+        from syndiff_pipeline.common.orchestration.template_handoff import (
+            ensure_event_templates_symlink,
+            event_templates_symlink_path,
+        )
+
+        physical_dir = result.get("output_dir")
+        if physical_dir:
+            symlink_path = ensure_event_templates_symlink(
+                resolved.event_dir, physical_dir
+            )
+            result = dict(result)
+            result["template_dir_physical"] = str(physical_dir)
+            result["template_dir_symlink"] = str(symlink_path)
         return _manifest_from_result(result)
 
-    raise ValueError(f"Unknown stage: {stage!r}")
+    raise ValueError(f"Unknown template stage: {stage!r}")
+
+
+def execute_stage(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    force_rerun: bool = False,
+    *,
+    progress_path: str | None = None,
+) -> tuple[int, int, list[str], dict[str, str] | None] | None:
+    """Run one template pipeline stage in-process via the composed pipeline spec."""
+    if stage == "diff":
+        raise ValueError("diff stage must run via run_stage diff path")
+    return _pipeline().require(stage).execute(
+        resolved,
+        force_rerun=force_rerun,
+        progress_path=progress_path,
+    )
 
 
 def stage_snapshot(resolved: ResolvedTargetConfig, stage: str) -> dict:
+    spec = _pipeline().get(stage)
+    if spec is not None and spec.stage_snapshot is not None:
+        return spec.stage_snapshot(resolved)
     snap = config_snapshot(resolved)
     snap["stage"] = stage
-    snap["pool"] = STAGE_POOL.get(stage)
+    snap["pool"] = spec.pool if spec is not None else None
     return snap

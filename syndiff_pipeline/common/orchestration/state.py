@@ -12,50 +12,16 @@ import sqlite3
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterator, List, Sequence
+from typing import Any, Dict, Iterator, List, Sequence
 
-STAGE_NAMES = (
-    "tess_ffi_download",
-    "wcs_grouping",
-    "mapping",
-    "ps1_download",
-    "ps1_process",
-    "downsample",
-)
-
-STAGE_SHORT_NAMES: Dict[str, str] = {
-    "tess_ffi_download": "tess_dl",
-    "wcs_grouping": "wcs",
-    "mapping": "map",
-    "ps1_download": "ps1_dl",
-    "ps1_process": "ps1_pr",
-    "downsample": "down",
-}
-
-STAGE_DEPS: Dict[str, List[str]] = {
-    "wcs_grouping": ["tess_ffi_download"],
-    "mapping": ["wcs_grouping"],
-    "ps1_download": ["mapping"],
-    "ps1_process": ["ps1_download"],
-    "downsample": ["wcs_grouping", "mapping", "ps1_process"],
-}
+from syndiff_pipeline.common.orchestration.spec import PipelineSpec
 
 SKIP_REASON_STREAM = "stream_mode"
 SKIP_REASON_ARTIFACTS = "artifacts_verified"
 SKIP_REASON_NOT_SELECTED = "not_selected"
 SKIP_REASON_SUPERSEDED = "superseded"
-
-STAGE_POOL: Dict[str, str] = {
-    "tess_ffi_download": "network",
-    "mapping": "mapping",
-    "ps1_download": "network",
-    "ps1_process": "ps1_process",
-    "downsample": "cpu_light",
-}
-# wcs_grouping is intentionally unpooled: it is very fast and should not
-# compete with downsample for the cpu_light concurrency limit.
 
 # Stage statuses (single, explicit state machine).
 STATUS_PENDING = "pending"
@@ -87,10 +53,10 @@ TERMINAL_RUN_STATUSES = frozenset({RUN_SUCCESS, RUN_FAILED, RUN_CANCELED})
 
 def derive_run_final_status(counts: Dict[str, int]) -> str:
     """Map terminal stage counts to a run-level outcome."""
-    if counts.get(STATUS_CANCELED, 0) > 0:
-        return RUN_CANCELED
     if counts.get(STATUS_FAILED, 0) > 0:
         return RUN_FAILED
+    if counts.get(STATUS_CANCELED, 0) > 0:
+        return RUN_CANCELED
     return RUN_SUCCESS
 
 # Command kinds (CLI -> daemon intents).
@@ -103,6 +69,10 @@ CMD_FORCE_RERUN = "force_rerun"
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _utc_after(seconds: float) -> str:
+    return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
 
 @dataclass
@@ -121,6 +91,8 @@ class StageRunRow:
     launch_token: str | None = None
     claimed_at: str | None = None
     submit_epoch: float | None = None
+    attempts: int | None = None
+    not_before: str | None = None
 
 
 @dataclass
@@ -141,48 +113,47 @@ class CommandRow:
             return {}
 
 
-def upstream_stages_for(active_stages: Sequence[str]) -> frozenset[str]:
+def _default_pipeline() -> PipelineSpec:
+    from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
+
+    return get_syndiff_pipeline()
+
+
+def _pipeline_spec(spec: PipelineSpec | None = None) -> PipelineSpec:
+    return spec if spec is not None else _default_pipeline()
+
+
+def upstream_stages_for(
+    active_stages: Sequence[str], *, spec: PipelineSpec | None = None
+) -> frozenset[str]:
     """Transitive dependency closure for stages selected in a partial run."""
-    required: set[str] = set()
-    stack = list(active_stages)
-    while stack:
-        stage = stack.pop()
-        for dep in STAGE_DEPS.get(stage, []):
-            if dep not in required:
-                required.add(dep)
-                stack.append(dep)
-    return frozenset(required)
+    return _pipeline_spec(spec).upstream_stages_for(active_stages)
 
 
-def effective_stage_deps(stage: str, stages=None) -> List[str]:
-    """Return dependency list for *stage*, honoring ps1_source=stream overrides."""
-    if (
-        stage == "ps1_process"
-        and stages is not None
-        and getattr(getattr(stages, "ps1_process", None), "ps1_source", "zarr") == "stream"
-    ):
-        return ["mapping"]
-    return list(STAGE_DEPS.get(stage, []))
+def effective_stage_deps(
+    stage: str, stages=None, *, spec: PipelineSpec | None = None
+) -> List[str]:
+    """Return dependency list for *stage*, honoring per-stage effective-deps hooks."""
+    return _pipeline_spec(spec).effective_stage_deps(stage, stages)
 
 
-def downstream_stages(stage: str) -> List[str]:
+def downstream_stages(stage: str, *, spec: PipelineSpec | None = None) -> List[str]:
     """All stages that (transitively) depend on *stage*."""
-    out: set[str] = set()
-    changed = True
-    while changed:
-        changed = False
-        for s, deps in STAGE_DEPS.items():
-            if s in out:
-                continue
-            if stage in deps or any(d in out for d in deps):
-                out.add(s)
-                changed = True
-    return [s for s in STAGE_NAMES if s in out]
+    return _pipeline_spec(spec).downstream_stages(stage)
 
 
-def run_stage_closure(active_stages: Sequence[str]) -> frozenset[str]:
+def run_stage_closure(
+    active_stages: Sequence[str], *, spec: PipelineSpec | None = None
+) -> frozenset[str]:
     """Selected stages plus every upstream dependency needed for this partial run."""
-    return frozenset(set(active_stages) | upstream_stages_for(active_stages))
+    return _pipeline_spec(spec).run_stage_closure(active_stages)
+
+
+def artifact_verify_closure(
+    active_stages: Sequence[str], *, spec: PipelineSpec | None = None
+) -> frozenset[str]:
+    """Stages eligible for artifact verify (narrower than run closure for diff-only)."""
+    return _pipeline_spec(spec).artifact_verify_closure(active_stages)
 
 
 def reopen_status_for_retry(stage: str, active_stages: Sequence[str]) -> str:
@@ -199,14 +170,19 @@ def stage_needs_artifact_verify_display(
     active_stages: Sequence[str],
 ) -> bool:
     """True if the status grid / stall reason should show artifact verify queued."""
+    spec = state.pipeline_spec
     if status == STATUS_EXTERNAL:
-        return artifact_verify_needed(state, run_id, target_label, stage, active_stages)
+        return artifact_verify_needed(
+            state, run_id, target_label, stage, active_stages, spec=spec
+        )
     if status == STATUS_PENDING and stage in active_stages:
-        return True
+        return not state.external_verify_attempted(run_id, target_label, stage)
     if status == STATUS_PENDING and stage not in set(active_stages):
         return (
-            stage in run_stage_closure(active_stages)
-            and artifact_verify_needed(state, run_id, target_label, stage, active_stages)
+            stage in spec.artifact_verify_closure(active_stages)
+            and artifact_verify_needed(
+                state, run_id, target_label, stage, active_stages, spec=spec
+            )
         )
     return False
 
@@ -217,6 +193,8 @@ def artifact_verify_needed(
     target_label: str,
     stage: str,
     active_stages: Sequence[str],
+    *,
+    spec: PipelineSpec | None = None,
 ) -> bool:
     """True if an external *stage* still needs on-disk artifact verification.
 
@@ -224,16 +202,17 @@ def artifact_verify_needed(
     closure is already ``success``/``skipped`` (e.g. skip ``ps1_download``
     when ``ps1_process`` artifacts are already complete).
     """
+    pipeline = _pipeline_spec(spec)
     active = set(active_stages)
     if stage in active:
         return False
-    closure = run_stage_closure(active_stages)
+    closure = pipeline.artifact_verify_closure(active_stages)
     if stage not in closure:
         return False
     row = state.get_stage_run(run_id, target_label, stage)
     if row is None or row.status in SATISFIED_STATUSES:
         return False
-    direct_dependents = [s for s, deps in STAGE_DEPS.items() if stage in deps]
+    direct_dependents = pipeline.direct_dependents(stage)
     for dep in direct_dependents:
         if dep not in closure:
             continue
@@ -244,8 +223,9 @@ def artifact_verify_needed(
 
 
 class PipelineState:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, *, pipeline_spec: PipelineSpec | None = None):
         self.db_path = str(Path(db_path).expanduser().resolve())
+        self.pipeline_spec = pipeline_spec or _default_pipeline()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
@@ -309,6 +289,8 @@ class PipelineState:
                     launch_token TEXT,
                     claimed_at TEXT,
                     submit_epoch REAL,
+                    attempts INTEGER,
+                    not_before TEXT,
                     PRIMARY KEY (run_id, target_label, stage)
                 );
                 CREATE TABLE IF NOT EXISTS artifacts (
@@ -344,6 +326,8 @@ class PipelineState:
                 """
             )
             self._ensure_column(conn, "runs", "stall_reason", "TEXT")
+            self._ensure_column(conn, "stage_runs", "attempts", "INTEGER")
+            self._ensure_column(conn, "stage_runs", "not_before", "TEXT")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -356,7 +340,7 @@ class PipelineState:
 
     def get_active_stages(self, run_id: str) -> List[str]:
         stages = self.selected_stages(run_id)
-        return stages or list(STAGE_NAMES)
+        return stages or list(self.pipeline_spec.stage_names)
 
     def set_run_status(self, run_id: str, status: str, *, stall_reason: str | None = None) -> None:
         with self._conn() as conn:
@@ -372,9 +356,17 @@ class PipelineState:
         return self.running_stage_runs(run_id)
 
     def requeue_running_stage(
-        self, run_id: str, target_label: str, stage: str, *, error_tail: str | None = None
+        self,
+        run_id: str,
+        target_label: str,
+        stage: str,
+        *,
+        error_tail: str | None = None,
+        backoff_s: float = 0.0,
     ) -> None:
-        self.requeue_to_ready(run_id, target_label, stage, error_tail=error_tail)
+        self.requeue_to_ready(
+            run_id, target_label, stage, error_tail=error_tail, backoff_s=backoff_s
+        )
 
     def is_artifact_verified(self, run_id: str, target_label: str, stage: str) -> bool:
         return self.external_verify_complete(run_id, target_label, stage)
@@ -382,7 +374,8 @@ class PipelineState:
     def cache_artifact_verified(
         self, run_id: str, target_label: str, stage: str, *, path: str = ""
     ) -> None:
-        self.cache_external_check(run_id, target_label, stage, complete=True, path=path)
+        del path
+        self.cache_external_check(run_id, target_label, stage, complete=True)
 
     def new_launch_token(self) -> str:
         return str(uuid.uuid4())
@@ -444,7 +437,7 @@ class PipelineState:
                     status == STATUS_PENDING
                     and self.deps_satisfied(run_id, target_label, stage, stages=stages)
                     and (
-                        self.external_verify_complete(run_id, target_label, stage)
+                        self.external_verify_attempted(run_id, target_label, stage)
                         or may_promote_without_verify
                     )
                 ):
@@ -457,36 +450,40 @@ class PipelineState:
         return promoted
 
     def fetch_ready_batch(self, run_id: str, pool: str, limit: int) -> List[StageRunRow]:
-        stages_in_pool = [s for s in STAGE_NAMES if STAGE_POOL.get(s) == pool]
+        stages_in_pool = self.pipeline_spec.stages_in_pool(pool)
         if not stages_in_pool:
             return []
         placeholders = ",".join("?" for _ in stages_in_pool)
+        now = _utc_now()
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM stage_runs
                 WHERE run_id = ? AND status = ? AND stage IN ({placeholders})
+                AND (not_before IS NULL OR not_before <= ?)
                 ORDER BY target_label, stage
                 LIMIT ?
                 """,
-                (run_id, STATUS_READY, *stages_in_pool, limit),
+                (run_id, STATUS_READY, *stages_in_pool, now, limit),
             ).fetchall()
             return [StageRunRow(**dict(r)) for r in rows]
 
     def fetch_ready_unpooled(self, run_id: str) -> List[StageRunRow]:
         """Ready stages with no resource pool (e.g. wcs_grouping)."""
-        unpooled = [s for s in STAGE_NAMES if s not in STAGE_POOL]
+        unpooled = self.pipeline_spec.unpooled_stages()
         if not unpooled:
             return []
         placeholders = ",".join("?" for _ in unpooled)
+        now = _utc_now()
         with self._conn() as conn:
             rows = conn.execute(
                 f"""
                 SELECT * FROM stage_runs
                 WHERE run_id = ? AND status = ? AND stage IN ({placeholders})
+                AND (not_before IS NULL OR not_before <= ?)
                 ORDER BY target_label, stage
                 """,
-                (run_id, STATUS_READY, *unpooled),
+                (run_id, STATUS_READY, *unpooled, now),
             ).fetchall()
             return [StageRunRow(**dict(r)) for r in rows]
 
@@ -499,7 +496,8 @@ class PipelineState:
                     conn.execute(
                         "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
                         "exit_code = NULL, error_tail = NULL, native_id = NULL, launch_token = NULL, "
-                        "claimed_at = NULL, submit_epoch = NULL, log_path = NULL "
+                        "claimed_at = NULL, submit_epoch = NULL, log_path = NULL, "
+                        "attempts = 0, not_before = NULL "
                         "WHERE run_id = ? AND target_label = ? AND stage = ?",
                         (STATUS_PENDING, run_id, label, stage),
                     )
@@ -584,7 +582,13 @@ class PipelineState:
     ) -> None:
         row = self.get_stage_run(run_id, target_label, stage)
         if row and row.status == STATUS_RUNNING:
-            self.requeue_to_ready(run_id, target_label, stage, error_tail="Retry requested")
+            self.requeue_to_ready(
+                run_id,
+                target_label,
+                stage,
+                error_tail="Retry requested",
+                reset_attempts=True,
+            )
         else:
             self.reset_stage_for_retry(
                 run_id, target_label, stage, reset_downstream=reset_downstream
@@ -620,7 +624,7 @@ class PipelineState:
         *,
         force_rerun: bool = False,
     ) -> None:
-        """Materialize the run plus the FULL 6-stage DAG per target.
+        """Materialize the run plus the FULL 7-stage DAG per target.
 
         Stages inside *stages* start ``pending``; every other stage starts
         ``external`` (resolved to ``skipped`` once verified on disk).
@@ -650,13 +654,58 @@ class PipelineState:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (run_id, t.label(), t.sector, t.camera, t.ccd, t.target_name, int(t.enabled)),
                 )
-                for stage in STAGE_NAMES:
+                for stage in self.pipeline_spec.stage_names:
                     status = STATUS_PENDING if stage in selected else STATUS_EXTERNAL
                     conn.execute(
                         "INSERT OR IGNORE INTO stage_runs (run_id, target_label, stage, status) "
                         "VALUES (?, ?, ?, ?)",
                         (run_id, t.label(), stage, status),
                     )
+
+    def _distinct_target_labels(self, run_id: str) -> List[str]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT target_label FROM stage_runs WHERE run_id = ? "
+                "ORDER BY target_label",
+                (run_id,),
+            ).fetchall()
+            if rows:
+                return [r["target_label"] for r in rows]
+            rows = conn.execute(
+                "SELECT target_label FROM targets WHERE run_id = ? ORDER BY target_label",
+                (run_id,),
+            ).fetchall()
+            return [r["target_label"] for r in rows]
+
+    def backfill_missing_stage_rows(self, run_id: str) -> int:
+        """Insert missing canonical ``stage_runs`` rows for an existing run.
+
+        Mirrors ``create_run`` row materialization for stages added after the run
+        was created (e.g. ``diff``). Idempotent: only inserts rows that are absent.
+        """
+        active = set(self.get_active_stages(run_id))
+        labels = self._distinct_target_labels(run_id)
+        if not labels:
+            return 0
+        count = 0
+        with self._conn() as conn:
+            for label in labels:
+                for stage in self.pipeline_spec.stage_names:
+                    exists = conn.execute(
+                        "SELECT 1 FROM stage_runs "
+                        "WHERE run_id = ? AND target_label = ? AND stage = ?",
+                        (run_id, label, stage),
+                    ).fetchone()
+                    if exists:
+                        continue
+                    status = STATUS_PENDING if stage in active else STATUS_EXTERNAL
+                    conn.execute(
+                        "INSERT INTO stage_runs (run_id, target_label, stage, status) "
+                        "VALUES (?, ?, ?, ?)",
+                        (run_id, label, stage, status),
+                    )
+                    count += 1
+        return count
 
     def apply_ps1_stream_download_skips(self, run_id: str, targets: Sequence, cfg) -> int:
         """Pre-skip ps1_download when ps1_process.ps1_source is stream."""
@@ -701,15 +750,16 @@ class PipelineState:
         self.update_stage_status(run_id, target_label, stage, STATUS_PENDING)
 
     def apply_not_selected_skips(self, run_id: str, targets: Sequence, cfg) -> int:
-        """Skip stages outside the upstream dependency closure of this run's --stages."""
+        """Skip stages outside the artifact-verify closure of this run's --stages."""
         active = set(self.get_active_stages(run_id))
-        required = upstream_stages_for(active)
+        verify_closure = self.pipeline_spec.artifact_verify_closure(active)
+        required = verify_closure - active
         count = 0
         for t in targets:
             if not getattr(t, "enabled", True):
                 continue
             label = t.label()
-            for stage in STAGE_NAMES:
+            for stage in self.pipeline_spec.stage_names:
                 row = self.get_stage_run(run_id, label, stage)
                 if row is None:
                     continue
@@ -740,16 +790,18 @@ class PipelineState:
     def apply_superseded_skips(self, run_id: str, targets: Sequence) -> int:
         """Skip upstream artifact checks made redundant by satisfied downstream work."""
         active = self.get_active_stages(run_id)
-        closure = run_stage_closure(active)
+        closure = self.pipeline_spec.artifact_verify_closure(active)
         count = 0
         for t in targets:
             if not getattr(t, "enabled", True):
                 continue
             label = t.label()
-            for stage in STAGE_NAMES:
+            for stage in self.pipeline_spec.stage_names:
                 if stage in active or stage not in closure:
                     continue
-                if artifact_verify_needed(self, run_id, label, stage, active):
+                if artifact_verify_needed(
+                    self, run_id, label, stage, active, spec=self.pipeline_spec
+                ):
                     continue
                 row = self.get_stage_run(run_id, label, stage)
                 if row is None:
@@ -928,7 +980,7 @@ class PipelineState:
         stages=None,
     ) -> bool:
         """True iff every effective dependency row is success/skipped."""
-        deps = effective_stage_deps(stage, stages)
+        deps = self.pipeline_spec.effective_stage_deps(stage, stages)
         if not deps:
             return True
         placeholders = ",".join("?" for _ in deps)
@@ -948,10 +1000,11 @@ class PipelineState:
         target_label: str,
         *,
         stages=None,
+        spec: PipelineSpec | None = None,
     ) -> List[str]:
         """Deps of *stage* not yet success/skipped, given a (label,stage)->status map."""
         out: List[str] = []
-        for dep in effective_stage_deps(stage, stages):
+        for dep in _pipeline_spec(spec).effective_stage_deps(stage, stages):
             if status_map.get((target_label, dep)) not in SATISFIED_STATUSES:
                 out.append(dep)
         return out
@@ -965,7 +1018,8 @@ class PipelineState:
         with self._conn() as conn:
             cur = conn.execute(
                 "UPDATE stage_runs SET status = ?, launch_token = ?, claimed_at = ?, "
-                "started_at = ?, finished_at = NULL, exit_code = NULL, error_tail = NULL "
+                "started_at = ?, finished_at = NULL, exit_code = NULL, error_tail = NULL, "
+                "attempts = COALESCE(attempts, 0) + 1, not_before = NULL "
                 "WHERE run_id = ? AND target_label = ? AND stage = ? AND status = ?",
                 (
                     STATUS_RUNNING,
@@ -1021,7 +1075,7 @@ class PipelineState:
 
     def block_downstream(self, run_id: str, target_label: str, failed_stage: str) -> None:
         with self._conn() as conn:
-            for stage in downstream_stages(failed_stage):
+            for stage in self.pipeline_spec.downstream_stages(failed_stage):
                 conn.execute(
                     "UPDATE stage_runs SET status = ? "
                     "WHERE run_id = ? AND target_label = ? AND stage = ? AND status IN (?, ?, ?)",
@@ -1037,17 +1091,42 @@ class PipelineState:
                 )
 
     def requeue_to_ready(
-        self, run_id: str, target_label: str, stage: str, *, error_tail: str | None = None
+        self,
+        run_id: str,
+        target_label: str,
+        stage: str,
+        *,
+        error_tail: str | None = None,
+        backoff_s: float = 0.0,
+        reset_attempts: bool = False,
     ) -> None:
         """Move a ``running`` row back to ``ready`` (lost worker, no exit record)."""
+        not_before = _utc_after(backoff_s) if backoff_s > 0 else None
         with self._conn() as conn:
-            conn.execute(
-                "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
-                "exit_code = NULL, native_id = NULL, launch_token = NULL, claimed_at = NULL, "
-                "submit_epoch = NULL, error_tail = ? "
-                "WHERE run_id = ? AND target_label = ? AND stage = ? AND status = ?",
-                (STATUS_READY, error_tail, run_id, target_label, stage, STATUS_RUNNING),
-            )
+            if reset_attempts:
+                conn.execute(
+                    "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
+                    "exit_code = NULL, native_id = NULL, launch_token = NULL, claimed_at = NULL, "
+                    "submit_epoch = NULL, error_tail = ?, attempts = 0, not_before = NULL "
+                    "WHERE run_id = ? AND target_label = ? AND stage = ? AND status = ?",
+                    (STATUS_READY, error_tail, run_id, target_label, stage, STATUS_RUNNING),
+                )
+            else:
+                conn.execute(
+                    "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
+                    "exit_code = NULL, native_id = NULL, launch_token = NULL, claimed_at = NULL, "
+                    "submit_epoch = NULL, error_tail = ?, not_before = ? "
+                    "WHERE run_id = ? AND target_label = ? AND stage = ? AND status = ?",
+                    (
+                        STATUS_READY,
+                        error_tail,
+                        not_before,
+                        run_id,
+                        target_label,
+                        stage,
+                        STATUS_RUNNING,
+                    ),
+                )
 
     # ------------------------------------------------------------------
     # Retry / cancel
@@ -1062,7 +1141,9 @@ class PipelineState:
         artifact verify → ``skipped``.
         """
         active = set(self.get_active_stages(run_id))
-        stages_to_reset = [stage] + (downstream_stages(stage) if reset_downstream else [])
+        stages_to_reset = [stage] + (
+            self.pipeline_spec.downstream_stages(stage) if reset_downstream else []
+        )
         if self.get_skip_reason(run_id, target_label, "ps1_download") == SKIP_REASON_STREAM:
             stages_to_reset = [s for s in stages_to_reset if s != "ps1_download"]
         count = 0
@@ -1072,7 +1153,7 @@ class PipelineState:
                 cur = conn.execute(
                     "UPDATE stage_runs SET status = ?, started_at = NULL, finished_at = NULL, "
                     "exit_code = NULL, error_tail = NULL, native_id = NULL, launch_token = NULL, "
-                    "claimed_at = NULL, submit_epoch = NULL "
+                    "claimed_at = NULL, submit_epoch = NULL, attempts = 0, not_before = NULL "
                     "WHERE run_id = ? AND target_label = ? AND stage = ?",
                     (reopen_status, run_id, target_label, s),
                 )
@@ -1086,7 +1167,7 @@ class PipelineState:
     def repair_orphaned_pending_upstream(self, run_id: str) -> int:
         """Normalize pending upstream stages that should be external (partial runs)."""
         active = set(self.get_active_stages(run_id))
-        closure = run_stage_closure(active)
+        closure = self.pipeline_spec.run_stage_closure(active)
         repaired = 0
         for row in self.list_stage_runs(run_id):
             if row.status != STATUS_PENDING:
@@ -1163,7 +1244,7 @@ class PipelineState:
         return self.external_verify_attempted(run_id, target_label, stage)
 
     def cache_external_check(
-        self, run_id: str, target_label: str, stage: str, *, complete: bool, path: str | None = None
+        self, run_id: str, target_label: str, stage: str, *, complete: bool
     ) -> None:
         with self._conn() as conn:
             conn.execute(
@@ -1258,3 +1339,19 @@ class PipelineState:
     def clear_daemon(self) -> None:
         with self._conn() as conn:
             conn.execute("DELETE FROM daemon WHERE id = 1")
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy re-exports of composed DAG constants for legacy import sites."""
+    pipeline = _default_pipeline()
+    if name == "STAGE_NAMES":
+        return pipeline.stage_names
+    if name == "STAGE_SHORT_NAMES":
+        return pipeline.stage_short_names()
+    if name == "STAGE_DEPS":
+        return pipeline.stage_deps()
+    if name == "STAGE_POOL":
+        return pipeline.stage_pools()
+    if name == "SYNDIFF_PIPELINE":
+        return pipeline
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

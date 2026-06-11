@@ -13,9 +13,9 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.template_creation.orchestration import logs
+from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config, resolve_config
-from syndiff_pipeline.template_creation.orchestration.scheduler import (
+from syndiff_pipeline.common.orchestration.scheduler import (
     _apply_commands,
     _apply_verify_outcome,
     _iter_verify_candidates,
@@ -23,28 +23,29 @@ from syndiff_pipeline.template_creation.orchestration.scheduler import (
     _tick_run,
     _verify_backlog,
 )
-from syndiff_pipeline.template_creation.orchestration.state import (
+from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     STATUS_EXTERNAL,
     STATUS_PENDING,
     STATUS_READY,
     STATUS_SKIPPED,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.template_creation.orchestration.verify import (
     copy_manifest_to_stable,
     manifest_valid,
     read_manifest,
     write_manifest,
 )
-from syndiff_pipeline.template_creation.orchestration.verify_status import (
+from syndiff_pipeline.common.orchestration.verify_status import (
     clear_verify_in_flight,
     read_verify_in_flight,
     read_verify_pending,
     read_verify_run_status,
+    refresh_verify_run_status,
     write_verify_in_flight,
 )
-from syndiff_pipeline.template_creation.orchestration.verify_worker import (
+from syndiff_pipeline.common.orchestration.verify_worker import (
     get_verify_worker,
     reset_verify_worker_for_tests,
     shutdown_verify_worker,
@@ -66,7 +67,7 @@ class TestCopyManifestToStable(unittest.TestCase):
                 "\n".join(
                     [
                         f"data_root: {tmp_path / 'data'}",
-                        f"handoff_root: {tmp_path}",
+                        f"workspace_root: {tmp_path}",
                         f"runs_root: {runs_root}",
                         f"state_db_path: {tmp_path / 'state.sqlite'}",
                         "skycell_wcs_csv: x.csv",
@@ -125,6 +126,54 @@ class TestVerifyStatus(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertEqual(read_verify_in_flight(Path(tmp) / "nope.sqlite"), 0)
 
+    def test_refresh_verify_run_status_noop_without_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            write_verify_in_flight(
+                db,
+                {
+                    "run_a": {
+                        "scan_running": 1,
+                        "scan_queued": 0,
+                        "active": [["s0020", "diff"]],
+                    }
+                },
+            )
+            with unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.verify_worker.try_get_verify_worker",
+                return_value=None,
+            ):
+                refresh_verify_run_status(db, unittest.mock.Mock(), "run_a")
+            status = read_verify_run_status(db, "run_a")
+            self.assertEqual(status["scan_running"], 1)
+
+    def test_refresh_verify_run_status_updates_stale_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = str(Path(tmp) / "state.sqlite")
+            write_verify_in_flight(
+                db,
+                {
+                    "run_a": {
+                        "scan_running": 1,
+                        "scan_queued": 2,
+                        "active": [["s0020", "diff"]],
+                    },
+                    "run_b": {"scan_running": 3, "scan_queued": 0, "active": []},
+                },
+            )
+            fresh = {"scan_running": 0, "scan_queued": 0, "active": []}
+            with unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.verify_worker.try_get_verify_worker",
+                return_value=unittest.mock.Mock(),
+            ), unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler.collect_verify_status_for_run",
+                return_value=fresh,
+            ):
+                refresh_verify_run_status(db, unittest.mock.Mock(), "run_a")
+            status = read_verify_run_status(db, "run_a")
+            self.assertEqual(status, fresh)
+            self.assertEqual(read_verify_run_status(db, "run_b")["scan_running"], 3)
+
 
 class TestVerifyWorkerLifecycle(unittest.TestCase):
     def setUp(self):
@@ -137,7 +186,7 @@ class TestVerifyWorkerLifecycle(unittest.TestCase):
         self.assertIsNone(try_get_verify_worker())
 
     def test_cancel_paths_do_not_create_worker(self):
-        from syndiff_pipeline.template_creation.orchestration.scheduler import _cancel_verify_run
+        from syndiff_pipeline.common.orchestration.scheduler import _cancel_verify_run
 
         _cancel_verify_run("run_x")
         self.assertIsNone(try_get_verify_worker())
@@ -171,7 +220,7 @@ class TestVerifyScheduling(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
+                "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -214,7 +263,7 @@ class TestVerifyScheduling(unittest.TestCase):
             if external_indices:
                 self.assertLess(mapping_idx, min(external_indices))
 
-    def test_incomplete_verify_blocks_promote_but_allows_retry(self):
+    def test_incomplete_verify_promotes_and_stops_reverify(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -231,7 +280,7 @@ class TestVerifyScheduling(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
+                "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -251,7 +300,42 @@ class TestVerifyScheduling(unittest.TestCase):
             self.assertTrue(state.external_verify_attempted(run_id, label, "mapping"))
             self.assertFalse(state.external_verify_complete(run_id, label, "mapping"))
             promoted = state.promote_stages(run_id)
-            self.assertEqual(promoted, 0)
+            self.assertEqual(promoted, 1)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_READY
+            )
+            candidates = _iter_verify_candidates(
+                state, run_id, ctx, force_rerun=False
+            )
+            self.assertFalse(any(key.stage == "mapping" for key, *_ in candidates))
+
+    def test_verify_error_does_not_promote_stage(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["mapping"]
+            )
+            label = target.label()
+            for stage in ("tess_ffi_download", "wcs_grouping"):
+                state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
+                state.cache_external_check(run_id, label, stage, complete=True)
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
+                side_effect=RuntimeError("disk read failed"),
+            ):
+                _run_verify_pass(
+                    state,
+                    run_id,
+                    ctx,
+                    force_rerun=False,
+                    budget=16,
+                    block=True,
+                    block_timeout_s=3.0,
+                )
+
+            self.assertFalse(state.external_verify_attempted(run_id, label, "mapping"))
             self.assertEqual(
                 state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
             )
@@ -259,6 +343,11 @@ class TestVerifyScheduling(unittest.TestCase):
                 state, run_id, ctx, force_rerun=False
             )
             self.assertTrue(any(key.stage == "mapping" for key, *_ in candidates))
+            promoted = state.promote_stages(run_id)
+            self.assertEqual(promoted, 0)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
+            )
 
 
 class TestVerifyCommandIntegration(unittest.TestCase):
@@ -284,7 +373,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return True
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
+                "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
                 _run_verify_pass(
@@ -324,13 +413,13 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
+                "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.common.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
             ):
                 _tick_run(state, run_id, ctx)
                 run = state.get_run(run_id)
@@ -356,12 +445,12 @@ class TestVerifyCommandIntegration(unittest.TestCase):
             self.assertEqual(in_flight, 0)
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.common.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler._run_verify_pass",
+                "syndiff_pipeline.common.orchestration.scheduler._run_verify_pass",
                 return_value=0,
             ):
                 _tick_run(state, run_id, ctx)
@@ -386,13 +475,13 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return False
 
             with unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.verify_worker.stage_complete",
+                "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.reconcile_running_stages",
+                "syndiff_pipeline.common.orchestration.scheduler.reconcile_running_stages",
                 return_value={},
             ), unittest.mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.scheduler.launcher.launch_stage",
+                "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
             ):
                 _tick_run(state, run_id, ctx)
                 run = state.get_run(run_id)

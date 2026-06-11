@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, FrozenSet, Type
 
 WCS_GROUPING_ALLOWED = frozenset(
@@ -11,7 +11,8 @@ WCS_GROUPING_ALLOWED = frozenset(
         "wcs_drift_savgol_window",
         "wcs_drift_savgol_polyorder",
         "bkg_vector_path",
-        "crop_quadrant",
+        "crop_mode",
+        "crop_box_size",
         "x_min",
         "x_max",
         "y_min",
@@ -61,6 +62,7 @@ PS1_PROCESS_ALLOWED = frozenset(
         "condor_rank",
     }
 )
+DIFF_ALLOWED = frozenset({"executor"})
 DOWNSAMPLE_ALLOWED = frozenset(
     {
         "ignore_mask_bits",
@@ -100,7 +102,8 @@ class WcsGroupingStageParams:
     wcs_drift_savgol_window: int | None = 11
     wcs_drift_savgol_polyorder: int = 2
     bkg_vector_path: str | None = None
-    crop_quadrant: str = "full"
+    crop_mode: str = "full"
+    crop_box_size: int = 1024
     x_min: int | None = None
     x_max: int | None = None
     y_min: int | None = None
@@ -157,6 +160,11 @@ class Ps1ProcessStageParams:
 
 
 @dataclass
+class DiffStageParams:
+    executor: str = "condor"
+
+
+@dataclass
 class DownsampleStageParams:
     ignore_mask_bits: list = None  # type: ignore[assignment]
     oversampling_factor: int = 1
@@ -185,6 +193,7 @@ class TemplateStageParams:
     ps1_download: Ps1DownloadStageParams
     ps1_process: Ps1ProcessStageParams
     downsample: DownsampleStageParams
+    diff: DiffStageParams = field(default_factory=DiffStageParams)
 
 
 def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
@@ -194,11 +203,13 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
     pd = stages_raw.get("ps1_download", {}) or {}
     pp = stages_raw.get("ps1_process", {}) or {}
     ds = stages_raw.get("downsample", {}) or {}
+    df = stages_raw.get("diff", {}) or {}
     validate_stage_keys(wg, WCS_GROUPING_ALLOWED, "wcs_grouping")
     validate_stage_keys(mp, MAPPING_ALLOWED, "mapping")
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
     validate_stage_keys(pp, PS1_PROCESS_ALLOWED, "ps1_process")
     validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
+    validate_stage_keys(df, DIFF_ALLOWED, "diff")
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
     ps1_source = pp.get("ps1_source", "zarr")
@@ -206,10 +217,13 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
         raise ValueError("stages.ps1_process.ps1_source must be 'zarr' or 'stream'")
     if mp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.mapping.executor must be 'local' or 'condor'")
+    if df.get("executor", "condor") not in ("local", "condor"):
+        raise ValueError("stages.diff.executor must be 'local' or 'condor'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),
         ps1_download=_merge_dataclass(Ps1DownloadStageParams, pd),
         ps1_process=_merge_dataclass(Ps1ProcessStageParams, pp),
         downsample=_merge_dataclass(DownsampleStageParams, ds),
+        diff=_merge_dataclass(DiffStageParams, df),
     )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -12,12 +13,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Tuple
-
-from syndiff_pipeline.template_creation.orchestration.runner_config import (
-    load_and_materialize_runner_config,
-    write_runner_config,
-)
-
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -55,6 +50,11 @@ def materialize_run_inputs(
     targets_path = run_targets_path(rd)
 
     if not cfg_path.is_file():
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            load_and_materialize_runner_config,
+            write_runner_config,
+        )
+
         cfg = load_and_materialize_runner_config(source_config)
         write_runner_config(cfg, cfg_path)
     if not targets_path.is_file():
@@ -117,25 +117,25 @@ def stable_stage_manifest_path(cfg_runs_root: str, target_label: str, stage: str
     return runs_root(cfg_runs_root) / ".manifests" / target_label / f"{stage}.manifest.json"
 
 
-def _handoff_dir(handoff_root: str | Path) -> Path:
-    from syndiff_pipeline.template_creation.orchestration.workspace import normalize_handoff_root
+def _control_dir(workspace_root: str | Path) -> Path:
+    from syndiff_pipeline.common.orchestration.workspace import control_root
 
-    return normalize_handoff_root(handoff_root)
-
-
-def daemon_lock_path(handoff_root: str | Path) -> Path:
-    return _handoff_dir(handoff_root) / "daemon.lock"
+    return control_root(workspace_root)
 
 
-def daemon_pid_path(handoff_root: str | Path) -> Path:
-    return _handoff_dir(handoff_root) / "daemon.pid"
+def daemon_lock_path(workspace_root: str | Path) -> Path:
+    return _control_dir(workspace_root) / "daemon.lock"
 
 
-def daemon_log_path(handoff_root: str | Path) -> Path:
-    return _handoff_dir(handoff_root) / "daemon.log"
+def daemon_pid_path(workspace_root: str | Path) -> Path:
+    return _control_dir(workspace_root) / "daemon.pid"
 
 
-def daemon_heartbeat_file(handoff_root: str | Path) -> Path:
+def daemon_log_path(workspace_root: str | Path) -> Path:
+    return _control_dir(workspace_root) / "daemon.log"
+
+
+def daemon_heartbeat_file(workspace_root: str | Path) -> Path:
     """Host-LOCAL heartbeat file (never on NFS).
 
     The supervisor's liveness signal must not depend on the same NFS/DB volume
@@ -143,33 +143,49 @@ def daemon_heartbeat_file(handoff_root: str | Path) -> Path:
     path so distinct pipelines on one host do not collide. Liveness is already
     host-local (pid checks use ``os.kill``), so a local temp path is correct.
     """
-    from syndiff_pipeline.template_creation.orchestration.workspace import state_db_path
+    from syndiff_pipeline.common.orchestration.workspace import state_db_path
 
-    resolved = str(state_db_path(handoff_root))
+    resolved = str(state_db_path(workspace_root))
     key = hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / "syndiff-daemon" / f"{key}.heartbeat"
 
 
-def discord_bot_lock_path(handoff_root: str | Path) -> Path:
-    return _handoff_dir(handoff_root) / "discord_bot.lock"
+def discord_bot_lock_path(workspace_root: str | Path) -> Path:
+    return _control_dir(workspace_root) / "discord_bot.lock"
 
 
-def discord_bot_pid_path(handoff_root: str | Path) -> Path:
-    return _handoff_dir(handoff_root) / "discord_bot.pid"
+def discord_bot_pid_path(workspace_root: str | Path) -> Path:
+    return _control_dir(workspace_root) / "discord_bot.pid"
 
 
-def discord_bot_log_path(handoff_root: str | Path) -> Path:
-    return _handoff_dir(handoff_root) / "discord_bot.log"
+def discord_bot_log_path(workspace_root: str | Path) -> Path:
+    return _control_dir(workspace_root) / "discord_bot.log"
 
 
-def discord_bot_site_config_path(handoff_root: str | Path) -> Path:
+def append_discord_bot_control_log(workspace_root: str | Path, message: str) -> None:
+    """Append a control-plane line to the shared Discord bot log on NFS."""
+    import os
+    from datetime import datetime, timezone
+
+    from syndiff_pipeline.common.orchestration import daemon
+
+    path = discord_bot_log_path(workspace_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    host = daemon.local_hostname()
+    pid = os.getpid()
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(f"{stamp} INFO [bot-control host={host} pid={pid}] {message}\n")
+
+
+def discord_bot_site_config_path(workspace_root: str | Path) -> Path:
     """Persisted site config used to (re)start the Discord bot."""
-    return _handoff_dir(handoff_root) / "discord_bot_config.path"
+    return _control_dir(workspace_root) / "discord_bot_config.path"
 
 
-def workspace_deployment_path(handoff_root: str | Path) -> Path:
+def workspace_deployment_path(workspace_root: str | Path) -> Path:
     """Persisted deployment.yaml path for this workspace."""
-    return _handoff_dir(handoff_root) / "workspace_deployment.path"
+    return _control_dir(workspace_root) / "workspace_deployment.path"
 
 
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
@@ -228,49 +244,54 @@ def stage_log(cfg_runs_root: str, run_id: str, target_label: str, stage: str, sn
     log_path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
     header = _format_header(stage, snapshot)
-    chunks: list[str] = [header]
     exit_code = 0
     error_tail = ""
     try:
-        with log_path.open("w", encoding="utf-8") as fh:
+        with log_path.open("w", encoding="utf-8", buffering=1) as fh:
             fh.write(header)
             fh.flush()
-
-            class Tee:
-                def write(self, s: str) -> int:
-                    chunks.append(s)
-                    fh.write(s)
-                    fh.flush()
-                    return len(s)
-
-                def flush(self) -> None:
-                    fh.flush()
-
-                def isatty(self) -> bool:
-                    return False
-
-                def fileno(self) -> int:
-                    return sys.stdout.fileno()
-
-            yield Tee()
-    except Exception as exc:
-        exit_code = 1
-        error_tail = str(exc)
-        raise
+            saved_out = os.dup(1)
+            saved_err = os.dup(2)
+            os.dup2(fh.fileno(), 1)
+            os.dup2(fh.fileno(), 2)
+            sys.stdout = os.fdopen(1, "w", closefd=False, buffering=1)
+            sys.stderr = os.fdopen(2, "w", closefd=False, buffering=1)
+            try:
+                yield None
+            except Exception as exc:
+                exit_code = 1
+                error_tail = str(exc)
+                raise
+            finally:
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                os.dup2(saved_out, 1)
+                os.dup2(saved_err, 2)
+                sys.stdout = os.fdopen(1, "w", closefd=False, buffering=1)
+                sys.stderr = os.fdopen(2, "w", closefd=False, buffering=1)
+                os.close(saved_out)
+                os.close(saved_err)
     finally:
         duration = time.monotonic() - t0
-        body = "".join(chunks)
-        tail_lines = body.strip().splitlines()[-20:]
         if not error_tail and exit_code != 0:
-            error_tail = "\n".join(tail_lines)
+            error_tail = read_log_tail(log_path, 20)
         footer = _format_footer(duration, exit_code, error_tail if exit_code else "")
         with log_path.open("a", encoding="utf-8") as fh:
             fh.write(footer)
 
 
-def read_log_tail(path: str | Path, n_lines: int = 40) -> str:
+def read_log_tail(path: str | Path, n_lines: int = 40, *, max_bytes: int = 65536) -> str:
     p = Path(path)
     if not p.is_file():
         return ""
-    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    size = p.stat().st_size
+    with p.open("rb") as fh:
+        if size > max_bytes:
+            fh.seek(size - max_bytes)
+            fh.readline()
+        data = fh.read().decode("utf-8", errors="replace")
+    lines = data.splitlines()
     return "\n".join(lines[-n_lines:])
