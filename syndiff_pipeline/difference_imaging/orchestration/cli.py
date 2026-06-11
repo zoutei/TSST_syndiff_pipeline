@@ -13,23 +13,9 @@ Usage:
 
 import argparse
 import logging
-import sys
 import warnings
-from pathlib import Path
 
 from astropy.wcs import FITSFixedWarning
-
-
-def _ensure_pyhotpants_path():
-    """Optionally add a nearby ``pyhotpants`` source tree (clone/install as documented)."""
-    here = Path(__file__).resolve()
-    for p in [here, *here.parents]:
-        php = p / "pyhotpants"
-        if php.is_dir() and str(php) not in sys.path:
-            sys.path.insert(0, str(php))
-
-
-_ensure_pyhotpants_path()
 
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
@@ -49,7 +35,7 @@ def run_pipeline(cfg, *, validate_only: bool = False):
     if not cfg.pipeline:
         raise ValueError(
             "Config must define a non-empty ``pipeline:`` list of stages. "
-            "See syndiff_pipeline/example/recipe_*.yaml and README.md."
+            "See config/example/diff_config_*.yaml and config/README.md."
         )
     from syndiff_pipeline.difference_imaging.orchestration.execute import run_config_pipeline
 
