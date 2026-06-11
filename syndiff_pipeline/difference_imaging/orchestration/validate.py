@@ -7,12 +7,14 @@ from __future__ import annotations
 from typing import Any
 
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
+from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+    split_pipeline,
+)
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import validate_stage_for_kind
 from syndiff_pipeline.difference_imaging.support.subtract import parse_subtract_expression
 
 STAGE_KINDS = frozenset(
     {
-        "wcs_grouping",
         "shared_mask",
         "hotpants",
         "epsf",
@@ -108,7 +110,7 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
     if not cfg.pipeline:
         raise ValueError(
             "Config has an empty ``pipeline`` list. Add a ``pipeline:`` section "
-            "to your YAML (see syndiff_pipeline/example/recipe_*.yaml)."
+            "to your YAML (see config/example/diff_config_*.yaml)."
         )
 
     available: set[str] = set()
@@ -117,10 +119,25 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
         if isinstance(lab, str) and lab.strip():
             available.add(lab.strip())
 
-    for idx, stage in enumerate(cfg.pipeline):
-        if not isinstance(stage, dict):
-            raise ValueError(f"pipeline[{idx}] must be a mapping, got {type(stage).__name__}")
+    preamble_labels, executable_stages = split_pipeline(cfg.pipeline)
+    for lab in preamble_labels:
+        available.add(lab)
+
+    if not executable_stages:
+        raise ValueError(
+            "Config pipeline has no executable stages (only external_workspaces preambles). "
+            "Add at least one stage with a 'kind:' key."
+        )
+
+    for idx, stage in executable_stages:
         kind = stage.get("kind")
+        if kind == "wcs_grouping":
+            raise ValueError(
+                f"pipeline[{idx}]: wcs_grouping is not a differencing stage. "
+                "Run the template pipeline (wcs_grouping → downsample) first; "
+                "diff loads WCS handoff from cluster_template_job.json and "
+                "syndiff_ffi_frames.csv in output_dir."
+            )
         if kind not in STAGE_KINDS:
             raise ValueError(f"pipeline[{idx}]: unknown kind {kind!r}")
 
