@@ -22,7 +22,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     WcsGroupingStageParams,
     DownsampleStageParams,
 )
-from syndiff_pipeline.template_creation.orchestration.targets import Target
+from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.template_creation.orchestration.verify import verify_ps1_process
 
 
@@ -40,7 +40,7 @@ def _resolved(tmp: Path, csv_path: Path, zarr_path: Path, projections_limit: int
         target=target,
         data_root=str(zarr_path.parent.parent),
         ffi_dir=str(tmp / "ffi"),
-        handoff_dir=str(tmp / "handoff" / target.label()),
+        event_dir=str(tmp / "events" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),

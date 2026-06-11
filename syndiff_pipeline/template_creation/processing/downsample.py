@@ -12,11 +12,13 @@ Updated to use Zarr data from the convolved_results directory structure:
 The script loads PS1 convolved image data from Zarr stores instead of individual
 FITS files, providing better performance and organization.
 
-When ``--job-json`` is passed (cluster template handoff), by default the script
-also writes ``ps1_removed_star_s....csv`` — crop-local Gaia rows for PS1
-``removed_stars``, using paths and WCS from that JSON. Use
-``--skip-ps1-removed-star-gaia-csv`` to disable. This extra step does not run for
-``--single-offset`` or when ``--job-json`` is omitted.
+When ``event_dir`` and ``cluster_job_json_path`` are set (orchestrator path or
+``--job-json`` CLI), by default the script also writes
+``{event_dir}/ps1_removed_stars.csv`` — crop-local Gaia rows for PS1
+``removed_stars``, using paths and WCS from the cluster job JSON. Use
+``write_ps1_removed_stars_csv=False`` (or ``--skip-ps1-removed-star-gaia-csv`` on
+the CLI) to disable. This extra step does not run for ``--single-offset`` or when
+no cluster job / event dir is provided.
 """
 
 import json
@@ -106,25 +108,26 @@ def read_removed_stars_csv(path: str | Path) -> pd.DataFrame:
     return df
 
 
-def ps1_removed_star_gaia_csv_stem(
+PS1_REMOVED_STARS_CSV_FILENAME = "ps1_removed_stars.csv"
+
+
+def default_ps1_process_removed_stars_csv_path(
+    convolved_dir: str | Path,
     sector: int,
     camera: int,
     ccd: int,
-    roi_bounds: tuple[int, int, int, int],
-) -> str:
-    """Basename stem matching ``syndiff_template_...`` ROI/os tagging (no ``.csv``)."""
-    x_min, y_min, x_max, y_max = roi_bounds
-    roi_part = ""
-    if not (x_min == 0 and y_min == 0):
-        roi_part = f"_x{x_min}-{x_max}_y{y_min}-{y_max}"
-    return f"ps1_removed_star_s{sector:04d}_{camera}_{ccd}{roi_part}"
+) -> Path:
+    """Default PS1 pipeline ``*_removed_stars.csv`` beside the convolved zarr."""
+    return Path(convolved_dir) / (
+        f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}_removed_stars.csv"
+    )
 
 
 def write_ps1_removed_star_gaia_csv(
     *,
     job_json_path: str | Path,
     removed_stars_csv: str | Path,
-    output_dir: str | Path,
+    event_dir: str | Path,
     sector: int,
     camera: int,
     ccd: int,
@@ -206,10 +209,7 @@ def write_ps1_removed_star_gaia_csv(
     # Integer source_id for CSV (no float rounding)
     cropped_df["source_id"] = cropped_df["source_id"].astype("int64")
 
-    stem = ps1_removed_star_gaia_csv_stem(
-        sector, camera, ccd, roi_bounds,
-    )
-    out_path = Path(output_dir) / f"{stem}.csv"
+    out_path = Path(event_dir) / PS1_REMOVED_STARS_CSV_FILENAME
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cropped_df.to_csv(out_path, index=False)
     print(
@@ -700,6 +700,9 @@ def main(
     progress_path: str | Path | None = None,
     n_jobs: int = 16,
     skycells_per_batch: int = 20,
+    event_dir: str | Path | None = None,
+    write_ps1_removed_stars_csv: bool = True,
+    removed_stars_csv: str | Path | None = None,
 ) -> dict:
     # Resolve base paths (allow overrides)
     data_root = Path(data_root)
@@ -996,11 +999,47 @@ def main(
         set_downsample_progress_phase(
             progress_path, "complete", total_skycells=total_skycells
         )
+
+    artifacts = [str(p) for p in written_paths]
+    expected_count = len(offsets)
+    produced_count = len(written_paths)
+
+    if event_dir and cluster_job_json_path and write_ps1_removed_stars_csv:
+        event_dir_p = Path(event_dir)
+        event_dir_p.mkdir(parents=True, exist_ok=True)
+        removed_path = (
+            Path(removed_stars_csv).expanduser().resolve()
+            if removed_stars_csv
+            else default_ps1_process_removed_stars_csv_path(
+                convolved_dir, sector, camera, ccd
+            ).resolve()
+        )
+        csv_out = event_dir_p / PS1_REMOVED_STARS_CSV_FILENAME
+        if not removed_path.is_file():
+            warnings.warn(
+                f"PS1 removed-star Gaia CSV skipped: file not found: {removed_path}",
+                UserWarning,
+                stacklevel=1,
+            )
+        else:
+            write_ps1_removed_star_gaia_csv(
+                job_json_path=cluster_job_json_path,
+                removed_stars_csv=removed_path,
+                event_dir=event_dir_p,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                roi_bounds=roi_bounds,
+            )
+            artifacts.append(str(csv_out))
+            expected_count += 1
+            produced_count += 1
+
     return {
         "output_dir": str(OUTPUT_DIR),
-        "artifacts": written_paths,
-        "expected_count": len(offsets),
-        "produced_count": len(written_paths),
+        "artifacts": artifacts,
+        "expected_count": expected_count,
+        "produced_count": produced_count,
     }
 
 
@@ -1058,7 +1097,7 @@ if __name__ == "__main__":
         "--skip-ps1-removed-star-gaia-csv",
         action="store_true",
         help=(
-            "Skip writing ps1_removed_star_s....csv (crop-local Gaia for PS1 removed stars). "
+            "Skip writing event_dir/ps1_removed_stars.csv (crop-local Gaia for PS1 removed stars). "
             "By default this step runs only when --job-json is provided (not with --single-offset)."
         ),
     )
@@ -1105,7 +1144,13 @@ if __name__ == "__main__":
     # Set mask bits to ignore (0-indexed)
     ignore_mask_bits = [12]
 
-    main_result = main(
+    event_dir = (
+        str(Path(cluster_job_json_path).resolve().parent)
+        if cluster_job_json_path
+        else None
+    )
+
+    main(
         sector=sector,
         camera=camera,
         ccd=ccd,
@@ -1122,43 +1167,7 @@ if __name__ == "__main__":
         oversampling_factor=args.oversampling_factor,
         reference_ffi_basename_expected=reference_ffi_basename_expected,
         cluster_job_json_path=cluster_job_json_path,
+        event_dir=event_dir,
+        write_ps1_removed_stars_csv=not args.skip_ps1_removed_star_gaia_csv,
+        removed_stars_csv=args.removed_stars_csv,
     )
-    output_run_dir = Path(main_result["output_dir"])
-
-    # Crop-local Gaia CSV for PS1 removed stars (cluster job only; default ON).
-    if (
-        args.job_json
-        and cluster_job_json_path
-        and not args.skip_ps1_removed_star_gaia_csv
-    ):
-        data_root_p = Path(args.data_root)
-        convolved_root = (
-            Path(args.convolved_dir).resolve()
-            if args.convolved_dir
-            else (data_root_p / "convolved_results").resolve()
-        )
-        default_removed = convolved_root / (
-            f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}_removed_stars.csv"
-        )
-        removed_path = (
-            Path(args.removed_stars_csv).expanduser().resolve()
-            if args.removed_stars_csv
-            else default_removed
-        )
-        if not removed_path.is_file():
-            warnings.warn(
-                f"PS1 removed-star Gaia CSV skipped: file not found: {removed_path}",
-                UserWarning,
-                stacklevel=1,
-            )
-        else:
-            roi_bounds = (int(x_min), int(y_min), int(x_max), int(y_max))
-            write_ps1_removed_star_gaia_csv(
-                job_json_path=cluster_job_json_path,
-                removed_stars_csv=removed_path,
-                output_dir=output_run_dir,
-                sector=sector,
-                camera=camera,
-                ccd=ccd,
-                roi_bounds=roi_bounds,
-            )

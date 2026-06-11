@@ -28,29 +28,29 @@ class TestRunStageDownsampleProgressPath(unittest.TestCase):
         fake_resolved = mock.Mock()
 
         with mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage.resolve_run_context",
+            "syndiff_pipeline.common.orchestration.run_stage.resolve_run_context",
             return_value=fake_ctx,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage.resolve_config",
+            "syndiff_pipeline.common.orchestration.run_stage.resolve_config",
             return_value=fake_resolved,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage.dispatch.execute_stage",
+            "syndiff_pipeline.common.orchestration.run_stage.dispatch.execute_stage",
             side_effect=fake_execute_stage,
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage.logs.stage_log",
+            "syndiff_pipeline.common.orchestration.run_stage.logs.stage_log",
             return_value=mock.Mock(
                 __enter__=mock.Mock(return_value=mock.Mock()),
                 __exit__=mock.Mock(return_value=False),
             ),
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage._write_status",
+            "syndiff_pipeline.common.orchestration.run_stage._write_status",
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage.collect_stage_artifacts",
+            "syndiff_pipeline.common.orchestration.run_stage.collect_stage_artifacts",
             return_value=(0, 0, []),
         ), mock.patch(
-            "syndiff_pipeline.template_creation.orchestration.run_stage.write_manifest",
+            "syndiff_pipeline.common.orchestration.run_stage.write_manifest",
         ):
-            from syndiff_pipeline.template_creation.orchestration import run_stage
+            from syndiff_pipeline.common.orchestration import run_stage
 
             rc = run_stage.main(
                 [
