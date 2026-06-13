@@ -25,7 +25,7 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     load_diff_site_policy,
 )
 from tests.site_fixtures import write_site_deployment
-from syndiff_pipeline.common.orchestration.template_handoff import (
+from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
 )
 from syndiff_pipeline.difference_imaging.orchestration.execute import (

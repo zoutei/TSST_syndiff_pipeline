@@ -125,7 +125,7 @@ def _downsample_manifest_meta(
 ) -> dict | None:
     if meta and "template_dir_physical" in meta and "template_dir_symlink" in meta:
         return meta
-    from syndiff_pipeline.common.orchestration.template_handoff import (
+    from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
         template_dir_meta_from_event_dir,
     )
 
@@ -853,7 +853,7 @@ def verify_diff(
     ws_dir = Path(workspace_root(str(event_dir)))
     manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
     if DIFF_STAGE.verify_complete(ctx):
-        from syndiff_pipeline.common.orchestration.template_handoff import (
+        from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
             TEMPLATES_WS_LABEL,
         )
 
@@ -952,7 +952,7 @@ def collect_stage_artifacts(
         paths = expected_downsample_fits_paths(resolved)
         if ps1_process_removed_stars_csv_path(resolved).is_file():
             paths.append(event_dir_ps1_removed_stars_csv_path(resolved))
-        from syndiff_pipeline.common.orchestration.template_handoff import (
+        from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
             event_templates_symlink_path,
         )
 

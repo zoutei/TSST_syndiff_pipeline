@@ -24,7 +24,7 @@ from syndiff_pipeline.difference_imaging.orchestration.config import (
     resolve_config_path,
     save_config,
 )
-from syndiff_pipeline.common.orchestration.template_handoff import (
+from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     event_templates_symlink_path,
 )
 

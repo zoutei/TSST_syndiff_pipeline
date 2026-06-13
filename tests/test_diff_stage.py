@@ -14,7 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration import condor
-from syndiff_pipeline.common.orchestration.template_handoff import (
+from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
 )
 from syndiff_pipeline.common.orchestration.spec import StageRunContext

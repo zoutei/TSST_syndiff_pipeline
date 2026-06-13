@@ -276,7 +276,7 @@ def _execute_template_stage(
             event_dir=resolved.event_dir,
             write_ps1_removed_stars_csv=True,
         )
-        from syndiff_pipeline.common.orchestration.template_handoff import (
+        from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
             ensure_event_templates_symlink,
             event_templates_symlink_path,
         )
