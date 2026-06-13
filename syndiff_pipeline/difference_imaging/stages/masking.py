@@ -81,9 +81,10 @@ def gaia_auto_mask(table: pd.DataFrame, Image: np.ndarray, scale: float = 1.0) -
 
 def Big_sat(table: pd.DataFrame, Image: np.ndarray, scale: float = 1.0) -> list:
     """
-    Build cross + circular body masks for Gaia stars brighter than mag 7.
+    Build cross + circular body masks for stars brighter than mag 7.
 
-    Expects table columns: x, y, mag (crop-local pixels).
+    Expects table columns: x, y, mag (crop-local pixels).  Gaia and BSC rows
+    may be concatenated (TESSreduce ``Cat_mask`` convention).
     Returns list of 2D mask arrays.
     """
     image = np.zeros_like(Image)
@@ -149,6 +150,13 @@ def Strap_mask(Image: np.ndarray, col_offset: int, straps_csv: str,
     """
     strap_mask = np.zeros_like(Image)
 
+    if not straps_csv or not os.path.isfile(straps_csv):
+        from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
+            tess_straps_csv,
+        )
+
+        straps_csv = str(tess_straps_csv())
+
     if not os.path.exists(straps_csv):
         log.warning(f"tess_straps.csv not found at {straps_csv}. Strap masking disabled.")
         return strap_mask
@@ -166,20 +174,57 @@ def Strap_mask(Image: np.ndarray, col_offset: int, straps_csv: str,
     return big_strap.astype(int)
 
 
+def detector_edge_mask(
+    shape: tuple[int, int],
+    crop_bounds: dict,
+    *,
+    nx: int,
+    ny: int,
+    x_left_dead: int = 44,
+    x_right_dead: int = 44,
+    y_edge_strip: int = 30,
+) -> np.ndarray:
+    """
+    Mask TESS detector non-science regions intersecting the crop (bit 8).
+
+    Usable FFI area is ``x in [x_left_dead, nx - x_right_dead)``,
+    ``y in [0, ny - y_edge_strip)``.
+    """
+    ny_crop, nx_crop = shape
+    x_min = int(crop_bounds["x_min"])
+    y_min = int(crop_bounds["y_min"])
+    x_usable_lo = int(x_left_dead)
+    x_usable_hi = nx - int(x_right_dead)
+    y_usable_hi = ny - int(y_edge_strip)
+
+    edge = np.zeros((ny_crop, nx_crop), dtype=bool)
+    for j in range(nx_crop):
+        x_ffi = x_min + j
+        if x_ffi < x_usable_lo or x_ffi >= x_usable_hi:
+            edge[:, j] = True
+    for i in range(ny_crop):
+        y_ffi = y_min + i
+        if y_ffi >= y_usable_hi:
+            edge[i, :] = True
+    return edge
+
+
 def Cat_mask(data_image: np.ndarray,
              gaia_df: pd.DataFrame,
              straps_csv: str,
              maglim: float = 13.0,
              scale: float = 1.0,
              strapsize: int = 6,
-             col_offset: int = 0) -> np.ndarray:
+             col_offset: int = 0,
+             bsc_df: pd.DataFrame | None = None) -> np.ndarray:
     """
     Build the full bitmask for one image.
 
     Bit layout:
       bit 1 (value 1) — catalog sources (gaia_auto_mask)
-      bit 2 (value 2) — very bright star crosses (Big_sat, mag < 7)
+      bit 2 (value 2) — very bright star crosses (Big_sat, mag < 7; Gaia + BSC)
       bit 4 (value 4) — TESS straps
+      bit 8 (value 8) — detector edge dead zones (applied in make_shared_mask)
 
     Parameters
     ----------
@@ -194,6 +239,8 @@ def Cat_mask(data_image: np.ndarray,
         Strap kernel width.
     col_offset : int
         x_min of the crop (for strap alignment).
+    bsc_df : pd.DataFrame, optional
+        Bright Star Catalogue rows in crop-local coords with ``vmag``.
 
     Returns
     -------
@@ -204,7 +251,15 @@ def Cat_mask(data_image: np.ndarray,
     mg = gaia_auto_mask(gaia_sub, data_image, scale)
     bit1 = (mg["all"] > 0).astype(int)  # catalog mask
 
-    sat_list = Big_sat(gaia_sub, data_image, scale)
+    sat_table = gaia_sub
+    if bsc_df is not None and len(bsc_df) > 0:
+        bsc_sat = bsc_df.copy()
+        bsc_sat["mag"] = bsc_sat["vmag"]
+        sat_table = pd.concat(
+            [gaia_sub, bsc_sat[["x", "y", "mag"]]],
+            ignore_index=True,
+        )
+    sat_list = Big_sat(sat_table, data_image, scale)
     if len(sat_list) > 0:
         bit2 = (np.nansum(sat_list, axis=0) > 0).astype(int) * 2
     else:
@@ -312,7 +367,15 @@ def make_shared_mask(ref_image: np.ndarray,
                      straps_csv: str,
                      maglim: float = 13.0,
                      strapsize: int = 6,
-                     output_dir: str = None) -> np.ndarray:
+                     output_dir: str = None,
+                     *,
+                     ref_ffi_path: str | None = None,
+                     bsc_catalog_path: str | None = None,
+                     nx: int | None = None,
+                     ny: int | None = None,
+                     x_left_dead: int = 44,
+                     x_right_dead: int = 44,
+                     y_edge_strip: int = 30) -> np.ndarray:
     """
     Build the shared bitmask for the cropped region.
 
@@ -326,11 +389,31 @@ def make_shared_mask(ref_image: np.ndarray,
     maglim : float      (mask stars brighter than this)
     strapsize : int
     output_dir : str, optional — if given, writes shared_mask.fits
+    ref_ffi_path : str, optional
+        Reference FFI for BSC WCS projection (required when BSC is used).
+    bsc_catalog_path : str, optional
+        Override path to decompressed BSC5 ``catalog``; default is bundled asset.
+    nx, ny : int, optional
+        Full FFI dimensions for detector edge masking.
+    x_left_dead, x_right_dead, y_edge_strip : int
+        Dead-zone strip sizes (TESS FFI layout).
 
     Returns
     -------
     int ndarray, same shape as ref_image
     """
+    bsc_in_crop = None
+    if ref_ffi_path is not None:
+        from syndiff_pipeline.common.bsc_catalog import (
+            load_bright_star_catalog,
+            project_bsc_to_crop,
+        )
+
+        bsc_full = load_bright_star_catalog(bsc_catalog_path)
+        bsc_in_crop = project_bsc_to_crop(bsc_full, ref_ffi_path, crop_bounds)
+        if len(bsc_in_crop):
+            log.info("  BSC: %d stars in crop for saturation crosses", len(bsc_in_crop))
+
     mask = Cat_mask(
         data_image=ref_image,
         gaia_df=gaia_df,
@@ -339,7 +422,20 @@ def make_shared_mask(ref_image: np.ndarray,
         scale=1.0,
         strapsize=strapsize,
         col_offset=crop_bounds["x_min"],
+        bsc_df=bsc_in_crop,
     )
+
+    if nx is not None and ny is not None:
+        edge = detector_edge_mask(
+            ref_image.shape,
+            crop_bounds,
+            nx=int(nx),
+            ny=int(ny),
+            x_left_dead=int(x_left_dead),
+            x_right_dead=int(x_right_dead),
+            y_edge_strip=int(y_edge_strip),
+        )
+        mask = mask | (edge.astype(np.int16) * 8)
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)

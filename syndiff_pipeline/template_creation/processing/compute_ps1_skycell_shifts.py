@@ -95,16 +95,18 @@ def compute_ps1_shift_for_skycell(
     ps1_wcs: WCS,
 ) -> tuple[float, float]:
     # Use the skycell center as evaluation point: map to TESS pixel, then perturb in TESS pixel space
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     sc = SkyCoord(sky_ra_deg * u.deg, sky_dec_deg * u.deg, frame="icrs")
-    x_tess, y_tess = tess_wcs.world_to_pixel(sc)
+    x_tess, y_tess = world_ra_dec_to_pixel(tess_wcs, sc.ra.deg, sc.dec.deg)
 
-    # World at original and shifted TESS pixels
-    world1 = tess_wcs.pixel_to_world(x_tess, y_tess)
-    world2 = tess_wcs.pixel_to_world(x_tess + dx_tess_pix, y_tess + dy_tess_pix)
+    ra1, dec1 = tess_wcs.pixel_to_world_values(x_tess, y_tess)
+    ra2, dec2 = tess_wcs.pixel_to_world_values(
+        x_tess + dx_tess_pix, y_tess + dy_tess_pix
+    )
 
-    # Map those world points into PS1 pixel coordinates
-    u1, v1 = ps1_wcs.world_to_pixel(world1)
-    u2, v2 = ps1_wcs.world_to_pixel(world2)
+    u1, v1 = world_ra_dec_to_pixel(ps1_wcs, ra1, dec1)
+    u2, v2 = world_ra_dec_to_pixel(ps1_wcs, ra2, dec2)
 
     return float(u2 - u1), float(v2 - v1)
 
