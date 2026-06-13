@@ -36,9 +36,9 @@ pipeline:
       convolved: hp_c
       bkg: hp_b
     write_convolved: false
-    write_bkg: false
+    write_bkg: true
     write_stamps: false
-    write_kernel_params: false
+    write_kernel_params: true
   # - external_workspaces: [hp_d]
   - kind: forced_photometry
     inputs:
