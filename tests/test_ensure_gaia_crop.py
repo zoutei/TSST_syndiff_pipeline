@@ -66,9 +66,7 @@ class TestEnsureGaiaCropXy(unittest.TestCase):
             )
 
             wcs = WCS(hdr)
-            x_ffi, y_ffi = wcs.world_to_pixel(
-                SkyCoord(ra=star_ra, dec=star_dec, unit="deg")
-            )
+            x_ffi, y_ffi = wcs_grouping.world_ra_dec_to_pixel(wcs, star_ra, star_dec)
             expected_x = x_ffi - crop_bounds["x_min"]
             expected_y = y_ffi - crop_bounds["y_min"]
 

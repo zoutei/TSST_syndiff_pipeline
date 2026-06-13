@@ -356,10 +356,10 @@ def project_gaia_to_skycell(
         return pd.DataFrame()
     try:
         H, W = cell_shape
+        from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
         ra_dec = gaia_catalog[["ra", "dec"]].values
-        pixel_coords = wcs.all_world2pix(ra_dec, 0)
-        pixel_x = pixel_coords[:, 0]
-        pixel_y = pixel_coords[:, 1]
+        pixel_x, pixel_y = world_ra_dec_to_pixel(wcs, ra_dec[:, 0], ra_dec[:, 1])
 
         in_footprint = (
             (pixel_x >= 0) & (pixel_x < W)

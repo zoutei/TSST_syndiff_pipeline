@@ -93,7 +93,13 @@ class SynDiffConfig:
     """Path to TGLC ``median_mask.fits`` (bad-pixel / background mask)."""
 
     straps_csv: str = ""
-    """CSV listing detector strap columns (TESS camera/CCD layout)."""
+    """Path to ``tess_straps.csv`` (detector strap columns). When empty, the bundled
+    ``syndiff_pipeline/resources/tess_straps.csv`` is used."""
+
+    bsc_catalog: str = ""
+    """Optional override for the decompressed BSC5 ``catalog`` file. When empty,
+    the bundled ``syndiff_pipeline/resources/bsc5/catalog`` is used for
+    bright-star saturation crosses in ``shared_mask``."""
 
     # ── Template paths: filled from template-pipeline handoff ─────────────────
     template_paths: dict = field(default_factory=dict)
@@ -130,6 +136,9 @@ class SynDiffConfig:
 
     target_dec: Optional[float] = None
     """Dec (deg, J2000) of the science target."""
+
+    target_name: str = ""
+    """Transient / science target name (e.g. ``2020ut``) for labels and diagnostics."""
 
     additional_forced_targets: list = field(default_factory=list)
     """Extra forced-photometry sources merged from site ``additional_forced_targets``
@@ -336,6 +345,7 @@ _PATH_FIELDS = (
     "removed_stars_csv",
     "median_mask_path",
     "straps_csv",
+    "bsc_catalog",
     "ref_ffi_path",
     "template_dir",
     "manifest",
@@ -417,6 +427,7 @@ def load_config(yaml_path: str) -> SynDiffConfig:
         "removed_stars_csv",
         "median_mask_path",
         "straps_csv",
+        "bsc_catalog",
         "template_dir",
         "manifest",
     ):
@@ -430,6 +441,7 @@ def load_config(yaml_path: str) -> SynDiffConfig:
         "removed_stars_csv",
         "median_mask_path",
         "straps_csv",
+        "bsc_catalog",
         "ref_ffi_path",
         "template_dir",
         "manifest",

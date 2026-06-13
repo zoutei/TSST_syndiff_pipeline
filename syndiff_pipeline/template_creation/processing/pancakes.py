@@ -894,8 +894,14 @@ def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, comp
     Returns:
         tuple: (selected_skycells, tess_pixel_mapping)
     """
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     # Calculate projection centers and skycell corners
-    tess_proj_center_x, tess_proj_center_y = tess_wcs.all_world2pix(complete_wcs_skycells["CRVAL1"].to_numpy(), complete_wcs_skycells["CRVAL2"].to_numpy(), 0)
+    tess_proj_center_x, tess_proj_center_y = world_ra_dec_to_pixel(
+        tess_wcs,
+        complete_wcs_skycells["CRVAL1"].to_numpy(),
+        complete_wcs_skycells["CRVAL2"].to_numpy(),
+    )
     sc_corners = calculate_radec_corners(complete_wcs_skycells, 50)
     complete_wcs_skycells["RA_Corner1"] = sc_corners[:, 0, 0]
     complete_wcs_skycells["DEC_Corner1"] = sc_corners[:, 0, 1]
@@ -1023,11 +1029,14 @@ def process_skycell_pixel_mapping(tess_wcs, tpix_coord_input, ps1_wcs, ps1_data_
     # Calculate TESS pixel corners in world coordinates
     corners = np.array([np.column_stack([x_coords - footprint_halfsize, y_coords - footprint_halfsize]), np.column_stack([x_coords + footprint_halfsize, y_coords - footprint_halfsize]), np.column_stack([x_coords + footprint_halfsize, y_coords + footprint_halfsize]), np.column_stack([x_coords - footprint_halfsize, y_coords + footprint_halfsize])])  # lower_left  # lower_right  # upper_right  # upper_left
 
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     corners_reshaped = corners.transpose(1, 0, 2).reshape(-1, 2)
     world_coords = tess_wcs.all_pix2world(corners_reshaped, 0)
 
     # Convert to PS1 pixel coordinates
-    coords_ps1_pix = ps1_wcs.all_world2pix(world_coords, 0).reshape(len(tess_pix_in_skycell), 4, 2)
+    ps1_x, ps1_y = world_ra_dec_to_pixel(ps1_wcs, world_coords[:, 0], world_coords[:, 1])
+    coords_ps1_pix = np.column_stack([ps1_x, ps1_y]).reshape(len(tess_pix_in_skycell), 4, 2)
 
     # Find PS1 pixels within TESS pixel rectangles
     ps1_pix_in_tess_result = find_pixels_in_rectangles(coords_ps1_pix, ps1_data_shape)

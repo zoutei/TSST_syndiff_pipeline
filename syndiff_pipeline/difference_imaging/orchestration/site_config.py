@@ -292,10 +292,17 @@ def resolve_diff_config(
         )
 
     optional_paths = {}
-    for key in ("median_mask_path", "straps_csv", "removed_stars_csv", "manifest"):
+    for key in ("median_mask_path", "straps_csv", "bsc_catalog", "removed_stars_csv", "manifest"):
         val = merged_paths.get(key) or deployment.get(key)
         if val:
             optional_paths[key] = resolve_config_path(str(val), data_root_path)
+
+    if not optional_paths.get("straps_csv"):
+        from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
+            tess_straps_csv,
+        )
+
+        optional_paths["straps_csv"] = str(tess_straps_csv())
 
     pipeline = copy.deepcopy(policy.pipeline)
     if override.get("pipeline"):
@@ -309,6 +316,7 @@ def resolve_diff_config(
         pipeline=pipeline,
         target_ra=target.target_ra,
         target_dec=target.target_dec,
+        target_name=target.target_name,
         sector=target.sector,
         camera=target.camera,
         ccd=target.ccd,

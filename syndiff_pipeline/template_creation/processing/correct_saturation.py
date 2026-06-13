@@ -58,8 +58,13 @@ def filter_catalog_for_region(catalog_df, wcs, x_min, x_max, y_min, y_max):
         return catalog_df.iloc[0:0].copy()  # Return empty DataFrame with same structure
 
     # Step 2: Convert pre-filtered stars to pixels
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     pre_filtered = catalog_df[pre_filter]
-    star_coords = wcs.all_world2pix(pre_filtered["ra"], pre_filtered["dec"], 0)
+    star_x, star_y = world_ra_dec_to_pixel(
+        wcs, pre_filtered["ra"].values, pre_filtered["dec"].values
+    )
+    star_coords = (star_x, star_y)
 
     # Step 3: Final pixel boundary filter
     pixel_filter = (star_coords[0] >= x_min) & (star_coords[0] < x_max) & (star_coords[1] >= y_min) & (star_coords[1] < y_max)
@@ -251,10 +256,10 @@ def filter_catalog_for_row(catalog_df: pd.DataFrame, cell_positions: dict, wcs) 
     data_y_max = max(pos[3] for pos in cell_positions.values())
 
     # Convert RA/DEC to pixel coordinates
-    from astropy.coordinates import SkyCoord
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
 
     coords = SkyCoord(catalog_df["ra"], catalog_df["dec"], unit="deg")
-    x_pixels, y_pixels = wcs.world_to_pixel(coords)
+    x_pixels, y_pixels = world_ra_dec_to_pixel(wcs, coords.ra.deg, coords.dec.deg)
 
     # Filter to stars within data boundaries
     valid_mask = (x_pixels >= data_x_min) & (x_pixels < data_x_max) & (y_pixels >= data_y_min) & (y_pixels < data_y_max)

@@ -121,6 +121,8 @@ def per_frame_target_crop_xy(
     from astropy.coordinates import SkyCoord
     from astropy.wcs import WCS
 
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     path_col = "path" if "path" in wcs_table.columns else "filename"
     coord_rd = SkyCoord(ra=float(ra) * u.deg, dec=float(dec) * u.deg)
     x_min = float(crop_bounds["x_min"])
@@ -137,7 +139,7 @@ def per_frame_target_crop_xy(
         try:
             with fits.open(ps, memmap=True) as hdul:
                 wcs = WCS(hdul[1].header, fix=False)
-                x_ffi, y_ffi = wcs.world_to_pixel(coord_rd)
+                x_ffi, y_ffi = world_ra_dec_to_pixel(wcs, coord_rd.ra.deg, coord_rd.dec.deg)
             out[i, 0] = float(x_ffi) - x_min
             out[i, 1] = float(y_ffi) - y_min
         except Exception as exc:
@@ -511,8 +513,10 @@ def get_target_pixel_crop(wcs, target_ra: float, target_dec: float,
     """
     from astropy.coordinates import SkyCoord
 
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     coord  = SkyCoord(ra=target_ra, dec=target_dec, unit="deg")
-    x_ffi, y_ffi = wcs.world_to_pixel(coord)
+    x_ffi, y_ffi = world_ra_dec_to_pixel(wcs, coord.ra.deg, coord.dec.deg)
     x_crop = float(x_ffi) - crop_bounds["x_min"]
     y_crop = float(y_ffi) - crop_bounds["y_min"]
     return x_crop, y_crop

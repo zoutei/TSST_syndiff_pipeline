@@ -82,6 +82,27 @@ def _header_to_wcs(header) -> WCS:
     return wcs
 
 
+def world_ra_dec_to_pixel(
+    wcs: WCS,
+    ra_deg,
+    dec_deg,
+) -> tuple[np.ndarray | float, np.ndarray | float]:
+    """
+    Map RA/Dec (degrees) to 0-based pixel ``(x, y)`` via ``WCS.world_to_pixel_values``.
+
+    Avoids iterative ``all_world2pix`` convergence warnings on TESS SIP WCS.
+    """
+    ra = np.asarray(ra_deg, dtype=np.float64)
+    dec = np.asarray(dec_deg, dtype=np.float64)
+    scalar = ra.ndim == 0
+    x, y = wcs.world_to_pixel_values(ra, dec)
+    x = np.asarray(x, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+    if scalar:
+        return float(x), float(y)
+    return x, y
+
+
 # ── Public functions ──────────────────────────────────────────────────────────
 
 def extract_wcs_from_ffi(ffi_path: str) -> dict:
@@ -127,7 +148,7 @@ def _ffi_usable_for_target_pixel(ffi_path: str, target_coord: SkyCoord) -> bool:
         return False
     try:
         wcs = _header_to_wcs(info["header"])
-        x, y = wcs.world_to_pixel(target_coord)
+        x, y = world_ra_dec_to_pixel(wcs, target_coord.ra.deg, target_coord.dec.deg)
         if not (np.isfinite(x) and np.isfinite(y)):
             return False
     except Exception:
@@ -258,7 +279,7 @@ def build_wcs_table(ffi_paths: list, target_ra: float,
         if info["wcs_ok"]:
             try:
                 wcs = _header_to_wcs(info["header"])
-                x, y = wcs.world_to_pixel(target_coord)
+                x, y = world_ra_dec_to_pixel(wcs, target_coord.ra.deg, target_coord.dec.deg)
                 x, y = float(x), float(y)
                 row["x_pix"] = x
                 row["y_pix"] = y
@@ -1245,7 +1266,7 @@ def get_target_box_crop_bounds(
 
     wcs = WCS(ffi_header)
     coord = SkyCoord(ra=float(target_ra), dec=float(target_dec), unit="deg")
-    tx, ty = wcs.world_to_pixel(coord)
+    tx, ty = world_ra_dec_to_pixel(wcs, coord.ra.deg, coord.dec.deg)
     tx, ty = float(tx), float(ty)
     if not (0 <= tx < nx and 0 <= ty < ny):
         raise ValueError(
@@ -1588,7 +1609,7 @@ def ensure_gaia_crop_xy(
         dec=df[dec_col].values,
         unit="deg",
     )
-    x_pix, y_pix = wcs.world_to_pixel(coords)
+    x_pix, y_pix = world_ra_dec_to_pixel(wcs, coords.ra.deg, coords.dec.deg)
     df = df.copy()
     df["x_ffi"] = x_pix
     df["y_ffi"] = y_pix
@@ -1680,7 +1701,7 @@ def build_unique_gaia_catalog(removed_stars_csv: str,
         dec=unique_df["dec"].values,
         unit="deg",
     )
-    x_pix, y_pix = wcs.world_to_pixel(coords)
+    x_pix, y_pix = world_ra_dec_to_pixel(wcs, coords.ra.deg, coords.dec.deg)
     unique_df["x_ffi"] = x_pix
     unique_df["y_ffi"] = y_pix
 

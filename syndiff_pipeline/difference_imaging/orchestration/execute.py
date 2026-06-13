@@ -43,6 +43,9 @@ from syndiff_pipeline.difference_imaging.support.manifest import (
     save_frame_manifest,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import HotpantsWorkspaceDirs
+from syndiff_pipeline.difference_imaging.support.ds9_regions import (
+    write_targets_ds9_regions,
+)
 from syndiff_pipeline.difference_imaging.support.paths import (
     ADAPTIVE_BKG_STACK_BASENAME,
     BACKGROUND_STACK_NPZ_ARRAY_KEY,
@@ -695,6 +698,20 @@ def run_config_pipeline(
         _load_template_handoff(cfg, out, manifest_path)
     )
 
+    write_targets_ds9_regions(
+        out,
+        target_ra=float(cfg.target_ra),
+        target_dec=float(cfg.target_dec),
+        target_name=str(getattr(cfg, "target_name", "") or Path(out).name),
+        sector=int(cfg.sector),
+        camera=int(cfg.camera),
+        ccd=int(cfg.ccd),
+        additional_forced_targets=getattr(cfg, "additional_forced_targets", None) or [],
+        wcs_table=wcs_table,
+        crop_bounds=crop_bounds,
+        ref_ffi_path=ref_ffi_path,
+    )
+
     if getattr(cfg, "master_fits_mirror", True):
         try:
             link_master_workspace(
@@ -719,7 +736,10 @@ def run_config_pipeline(
             gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds)
 
             with fits.open(ref_ffi_path, memmap=True) as hdul:
+                ref_header = hdul[1].header
                 ref_data = hdul[1].data.astype(np.float64)
+                ffi_nx = int(ref_header["NAXIS1"])
+                ffi_ny = int(ref_header["NAXIS2"])
             ref_crop = wcs_grouping.crop_image(ref_data, crop_bounds)
 
             gaia_mask_df = epsf_fitting.add_tess_flux_ratio(gaia_df.copy())
@@ -733,6 +753,13 @@ def run_config_pipeline(
                 maglim=sm.gaia_mag_bright,
                 strapsize=sm.strapsize,
                 output_dir=out,
+                ref_ffi_path=ref_ffi_path,
+                bsc_catalog_path=cfg.bsc_catalog or None,
+                nx=ffi_nx,
+                ny=ffi_ny,
+                x_left_dead=int(getattr(cfg, "x_left_dead", 44)),
+                x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
+                y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
             )
             ref_stars = masking.select_hotpants_ref_stars(
                 gaia_df=gaia_mask_df,

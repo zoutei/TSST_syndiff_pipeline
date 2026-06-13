@@ -176,12 +176,14 @@ def write_ps1_removed_star_gaia_csv(
         warnings.simplefilter("ignore")
         wcs = WCS(ref_header)
 
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
     coords = SkyCoord(
         ra=unique_df["ra"].values,
         dec=unique_df["dec"].values,
         unit="deg",
     )
-    x_pix, y_pix = wcs.world_to_pixel(coords)
+    x_pix, y_pix = world_ra_dec_to_pixel(wcs, coords.ra.deg, coords.dec.deg)
     unique_df["x_ffi"] = x_pix
     unique_df["y_ffi"] = y_pix
 

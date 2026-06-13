@@ -17,3 +17,25 @@ def skycell_wcs_csv() -> Path:
             "Ensure syndiff_pipeline/resources/skycell_wcs.csv is present."
         )
     return path
+
+
+def bright_star_catalog_path() -> Path:
+    """Decompressed BSC5 fixed-width catalog shipped with the repository."""
+    path = _PACKAGE_ROOT / "resources" / "bsc5" / "catalog"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing bundled resource: {path}. "
+            "Ensure syndiff_pipeline/resources/bsc5/catalog is present."
+        )
+    return path
+
+
+def tess_straps_csv() -> Path:
+    """TESS detector strap column list shipped with the repository."""
+    path = _PACKAGE_ROOT / "resources" / "tess_straps.csv"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing bundled resource: {path}. "
+            "Ensure syndiff_pipeline/resources/tess_straps.csv is present."
+        )
+    return path
