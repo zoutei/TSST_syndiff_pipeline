@@ -17,7 +17,7 @@ from syndiff_pipeline.difference_imaging.orchestration.config import (
     absolutize_config,
     load_config,
 )
-from syndiff_pipeline.common.orchestration.template_handoff import (
+from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (

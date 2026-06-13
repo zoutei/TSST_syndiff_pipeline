@@ -100,7 +100,7 @@ def _verify_diff(ctx: StageRunContext) -> bool:
         return False
     if not ws_dir.is_dir():
         return False
-    from syndiff_pipeline.common.orchestration.template_handoff import TEMPLATES_WS_LABEL
+    from syndiff_pipeline.common.orchestration.event_ws_symlinks import TEMPLATES_WS_LABEL
 
     labels = [
         p

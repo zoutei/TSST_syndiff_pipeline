@@ -5,9 +5,9 @@ Workspaces live under ``{output_dir}/ws/{label}/``.
 ``{output_dir}/ws/master/`` contains absolute symlinks to every ``ws/<label>/*.fits``
 file (flat basenames), plus flat symlinks for each FFI in the target
 sector/camera/CCD leaf directory when configured.
-Each ``ws/<label>/ffis`` symlink points at that same FFI leaf directory.
+``{output_dir}/ws/ffis`` symlink points at that same FFI leaf directory.
 Template FITS for differencing are linked at ``{output_dir}/ws/templates`` (see
-``template_handoff``).
+``event_ws_symlinks``).
 The default per-FFI manifest basename is ``syndiff_ffi_frames.csv`` at ``output_dir``.
 """
 
@@ -31,26 +31,24 @@ MASTER_TESS_FFI_LINK = "tess_ffi"
 HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
 HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits"
 
-from syndiff_pipeline.common.orchestration.ffi_handoff import (  # noqa: E402
+from syndiff_pipeline.common.orchestration.event_ws_symlinks import (  # noqa: E402
     FFIS_WS_LABEL,
-    ensure_event_workspace_ffis_symlinks,
-    ensure_workspace_ffis_symlink,
-    workspace_ffis_symlink_path,
-)
-from syndiff_pipeline.common.orchestration.template_handoff import (  # noqa: E402
     TEMPLATES_WS_LABEL,
-    event_templates_symlink_path,
+    ensure_event_ffis_symlink,
     ensure_event_templates_symlink,
+    event_ffis_symlink_path,
+    event_templates_symlink_path,
+    prune_stale_per_workspace_ffis_symlinks,
 )
 
 __all__ = [
     "FFIS_WS_LABEL",
     "TEMPLATES_WS_LABEL",
-    "ensure_event_workspace_ffis_symlinks",
+    "ensure_event_ffis_symlink",
     "ensure_event_templates_symlink",
-    "ensure_workspace_ffis_symlink",
+    "event_ffis_symlink_path",
     "event_templates_symlink_path",
-    "workspace_ffis_symlink_path",
+    "prune_stale_per_workspace_ffis_symlinks",
 ]
 
 # ``np.savez(..., **{BACKGROUND_STACK_NPZ_ARRAY_KEY: stack})`` for rough/smooth stacks
@@ -92,8 +90,8 @@ def clear_diff_workspace(event_dir: Union[str, Path]) -> None:
     """Remove ``ws/`` subtree for force rerun; preserve event_dir root artifacts.
 
     Root files such as ``gaia_catalog_pipeline.csv`` and
-    ``cluster_template_job.json`` are left untouched. The ``ws/templates``
-    symlink to physical template output is preserved across clears.
+    ``cluster_template_job.json`` are left untouched. The ``ws/templates`` and
+    ``ws/ffis`` symlinks are preserved across clears.
     """
     root = Path(event_dir)
     ws = root / WORKSPACE_SUBDIR
@@ -106,11 +104,21 @@ def clear_diff_workspace(event_dir: Union[str, Path]) -> None:
             templates_target = templates_link.resolve()
         except OSError:
             templates_target = None
+    ffis_link = event_ffis_symlink_path(root)
+    ffis_target = None
+    if ffis_link.is_symlink():
+        try:
+            ffis_target = ffis_link.resolve()
+        except OSError:
+            ffis_target = None
     shutil.rmtree(ws)
     log.info("Force rerun: removed diff workspace %s", ws)
     if templates_target is not None and templates_target.is_dir():
         ensure_event_templates_symlink(root, templates_target)
         log.info("Force rerun: restored templates symlink -> %s", templates_target)
+    if ffis_target is not None and ffis_target.is_dir():
+        ensure_event_ffis_symlink(root, ffis_target)
+        log.info("Force rerun: restored ffis symlink -> %s", ffis_target)
 
 
 def master_root(output_dir: str) -> str:
@@ -228,7 +236,7 @@ def link_master_workspace(
     refreshed = _prune_master_stamp_symlinks(m_root)
 
     for label in sorted(os.listdir(ws_root)):
-        if label in (MASTER_SUBDIR, TEMPLATES_WS_LABEL):
+        if label in (MASTER_SUBDIR, TEMPLATES_WS_LABEL, FFIS_WS_LABEL):
             continue
         if _is_hotpants_stamps_workspace_label(label):
             continue
@@ -263,12 +271,19 @@ def link_master_workspace(
                 if _ensure_abs_symlink(link, target):
                     refreshed += 1
             try:
-                refreshed += ensure_event_workspace_ffis_symlinks(
-                    output_dir, ffi_leaf_abs
-                )
+                ffis_link = event_ffis_symlink_path(output_dir)
+                existed_ok = False
+                if ffis_link.is_symlink():
+                    try:
+                        existed_ok = ffis_link.resolve() == Path(ffi_leaf_abs)
+                    except OSError:
+                        existed_ok = False
+                ensure_event_ffis_symlink(output_dir, ffi_leaf_abs)
+                refreshed += int(not existed_ok)
+                refreshed += prune_stale_per_workspace_ffis_symlinks(output_dir)
             except OSError as exc:
                 log.warning(
-                    "master workspace: ffis symlinks under ws/*/ failed: %s", exc
+                    "master workspace: ws/ffis symlink failed: %s", exc
                 )
         else:
             log.debug("master workspace: skip FFI leaf — not a directory: %s", ffi_leaf_abs)
