@@ -5,7 +5,10 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.common.bsc_catalog import load_bright_star_catalog
+from syndiff_pipeline.common.bsc_catalog import (
+    filter_catalog_to_ffi_footprint,
+    load_bright_star_catalog,
+)
 from syndiff_pipeline.difference_imaging.stages import masking
 
 
@@ -93,6 +96,26 @@ class TestBigSatBscMerge(unittest.TestCase):
             bsc_df=bsc_df,
         )
         self.assertEqual((mask_gaia & 1).sum(), (mask_both & 1).sum())
+
+
+class TestBscFootprintFilter(unittest.TestCase):
+    def test_off_field_bsc_excluded_for_2020ut(self):
+        import json
+
+        bsc = load_bright_star_catalog()
+        job_path = (
+            "/astro/armin/koji/syndiff/workspace/events/s0020_c3_k3_2020ut/"
+            "cluster_template_job.json"
+        )
+        try:
+            with open(job_path) as f:
+                ref_ffi = json.load(f)["reference_ffi_path"]
+        except FileNotFoundError:
+            self.skipTest("2020ut workspace not available")
+
+        filtered = filter_catalog_to_ffi_footprint(bsc, ref_ffi)
+        bright_hrs = {1303, 1350, 1482}
+        self.assertFalse(set(filtered.hr).intersection(bright_hrs))
 
 
 if __name__ == "__main__":

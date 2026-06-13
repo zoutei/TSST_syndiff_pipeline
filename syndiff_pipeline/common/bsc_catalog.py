@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import functools
+import logging
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from astropy.coordinates import SkyCoord
+from astropy.io import fits
+from astropy.wcs import WCS
+import astropy.units as u
 
 from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
     bright_star_catalog_path,
 )
+
+log = logging.getLogger(__name__)
 
 # 0-based (start, end) slices; end exclusive (VizieR ybsc5.readme byte positions).
 _BSC_COLSPECS = [
@@ -76,6 +83,59 @@ def load_bright_star_catalog(path: str | Path | None = None) -> pd.DataFrame:
     return _parse_bsc_fwf_table(raw)
 
 
+def filter_catalog_to_ffi_footprint(
+    df: pd.DataFrame,
+    ref_ffi_path: str,
+    *,
+    ra_col: str = "ra",
+    dec_col: str = "dec",
+    margin_deg: float = 1.0,
+) -> pd.DataFrame:
+    """
+    Keep catalog rows whose sky position is near the FFI field of view.
+
+    BSC is full-sky; projecting every row through TESS SIP WCS and keeping only
+    in-bounds pixels can assign spurious on-chip coordinates to stars tens of
+    degrees off the field (common at high declination).  Pre-filter by angular
+    distance from the image center to the farthest corner, plus ``margin_deg``.
+    """
+    import warnings
+
+    if df.empty:
+        return df.copy()
+
+    with fits.open(ref_ffi_path, memmap=True) as hdul:
+        hdr = hdul[1].header
+        nx = int(hdr["NAXIS1"])
+        ny = int(hdr["NAXIS2"])
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wcs = WCS(hdr)
+
+    center = SkyCoord(wcs.wcs.crval[0] * u.deg, wcs.wcs.crval[1] * u.deg)
+    corner_ra, corner_dec = wcs.pixel_to_world_values(
+        [0, nx - 1, nx - 1, 0],
+        [0, 0, ny - 1, ny - 1],
+    )
+    corner_coords = SkyCoord(corner_ra * u.deg, corner_dec * u.deg)
+    max_sep_deg = (
+        max(float(center.separation(c).deg) for c in corner_coords) + float(margin_deg)
+    )
+
+    coords = SkyCoord(df[ra_col].values * u.deg, df[dec_col].values * u.deg)
+    keep = center.separation(coords).deg <= max_sep_deg
+    n_drop = int((~keep).sum())
+    if n_drop:
+        log.info(
+            "BSC footprint filter: kept %d / %d rows within %.2f deg of field center",
+            int(keep.sum()),
+            len(df),
+            max_sep_deg,
+        )
+    return df.loc[keep].copy().reset_index(drop=True)
+
+
 def project_bsc_to_crop(
     bsc_df: pd.DataFrame,
     ref_ffi_path: str,
@@ -84,8 +144,9 @@ def project_bsc_to_crop(
     """Project BSC ``ra``/``dec`` to crop-local ``x``/``y``; keep in-bounds rows."""
     from syndiff_pipeline.common import wcs_grouping
 
+    in_footprint = filter_catalog_to_ffi_footprint(bsc_df, ref_ffi_path)
     return wcs_grouping.ensure_gaia_crop_xy(
-        bsc_df,
+        in_footprint,
         ref_ffi_path,
         crop_bounds,
         ra_col="ra",
