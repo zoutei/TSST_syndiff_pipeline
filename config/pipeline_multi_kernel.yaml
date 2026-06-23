@@ -1,0 +1,71 @@
+# Full pipeline: template creation + multi-kernel diff. Targets via CLI --targets.
+deployment_file: deployment.yaml
+diff_config: diff_config_multi_kernel.yaml
+
+stages:
+  wcs_grouping:
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+    # Full-chip templates; diff_config crop override for smaller differencing ROI.
+    crop_mode: full
+  mapping:
+    oversampling_factor: 1
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  ps1_download:
+    num_workers: 8
+    overwrite: false
+  ps1_process:
+    ps1_source: zarr
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+    psf_sigma: 40.0
+    projections_limit: null
+  downsample:
+    ignore_mask_bits: [12]
+    oversampling_factor: 1
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  cpu_light:
+    max_concurrent: 2
+  mapping:
+    max_concurrent: 6
+  ps1_process:
+    max_concurrent: 4
+  diff:
+    max_concurrent: 6
+
+scheduler:
+  heartbeat_interval_s: 30.0
+  verify_max_workers: 4
+  verify_budget_per_tick: 32
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    run_canceled: true
+    run_retried: true
+    run_stalled: true
+    run_resumed: true
+    stage_failed: true
+    stage_completed: true
+    stage_canceled: true
+    stage_died: true
+    daemon_unhealthy: true
+  bot:
+    enabled: true
+
+overrides:
+  "23/2/1":
+    stages:
+      ps1_process:
+        projections_limit: 1
