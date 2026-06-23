@@ -63,8 +63,16 @@ pipeline:
   - kind: forced_photometry
     inputs:
       diffs: ks_d
-    psf_type: prf
     output: lc_prf_on_diffs
+    methods:
+      - name: prf
+        type: psf
+        psf_type: prf
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
 
 condor:
   request_cpus: 8

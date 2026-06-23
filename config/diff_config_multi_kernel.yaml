@@ -1,5 +1,5 @@
 # Multi-kernel diff policy: same shared-kernel prefix as single_kernel, then per-FFI
-# Hotpants (hp_bgo=0) on ffi - photutils_bkg with raw template → photometry on hp_d.
+# Hotpants (hp_bgo=0) on sci - ks_b photutils bkg → photometry on hp_d.
 # Use: syndiff diff submit/run with --config config/diff_config_multi_kernel.yaml
 deployment_file: deployment.yaml
 
@@ -9,8 +9,8 @@ defaults:
   master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
-  workspace_run_id: multi_hp_kernel
-  # workspace_run_id: null
+  workspace_run_id: multi_hp_temp_calib
+  # workspace_run_id: null  # omit → canonical events/{target}/ws/
 
 additional_forced_targets:
   - name: offset_top
@@ -81,7 +81,6 @@ pipeline:
     write_convolved: false
     write_bkg: true
     write_stamps: false
-    write_kernel_params: true
     output:
       diffs: hp_d
       convolved: hp_c
@@ -89,8 +88,16 @@ pipeline:
   - kind: forced_photometry
     inputs:
       diffs: hp_d
-    psf_type: prf
     output: lc_prf_on_hp_diffs
+    methods:
+      - name: prf
+        type: psf
+        psf_type: prf
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
 
 condor:
   request_cpus: 8

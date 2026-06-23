@@ -183,13 +183,17 @@ def _pipeline_plots_root(cfg: SynDiffConfig) -> str:
 def _forced_photometry_lightcurve_plot_path(
     plot_dir: str,
     label_out: str,
+    method_name: str,
     target_name: Optional[str],
 ) -> str:
     """Return the light-curve diagnostic PNG path for one forced-photometry target."""
+    safe_method = re.sub(r"[^0-9A-Za-z._-]+", "_", method_name)
     if target_name:
         safe = re.sub(r"[^0-9A-Za-z._-]+", "_", target_name)
-        return os.path.join(plot_dir, f"lightcurve_{label_out}_{safe}.png")
-    return os.path.join(plot_dir, f"lightcurve_{label_out}.png")
+        return os.path.join(
+            plot_dir, f"lightcurve_{label_out}_{safe_method}_{safe}.png"
+        )
+    return os.path.join(plot_dir, f"lightcurve_{label_out}_{safe_method}.png")
 
 
 def _maybe_write_background_gif(
@@ -1677,18 +1681,27 @@ def run_config_pipeline(
                     (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
                 ]
 
-            use_prf = phot_params.psf_type == "prf"
-            if use_prf:
-                over_size = 2 * phot_params.psf_size + 1
-                n_tiles = len(tile_centers) if tile_centers else (
-                    phot_params.tile_ny * phot_params.tile_nx
+            epsf_by_workspace: dict[str, np.ndarray] = {}
+            stage_epsf_ws = inp.get("epsf")
+            if stage_epsf_ws:
+                epsf_ws = ctx.workspace(str(stage_epsf_ws).strip())
+                arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
+                if arr.ndim == 3:
+                    arr = np.nanmedian(arr, axis=0)
+                epsf_by_workspace[str(stage_epsf_ws).strip()] = arr
+            for method in phot_params.methods:
+                from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+                    PsfPhotometryMethodParams,
                 )
-                epsf_for_phot = np.zeros((n_tiles, over_size**2))
-            else:
-                epsf_ws = ctx.workspace(inp["epsf"])
-                epsf_for_phot, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
-                if epsf_for_phot.ndim == 3:
-                    epsf_for_phot = np.nanmedian(epsf_for_phot, axis=0)
+
+                if isinstance(method, PsfPhotometryMethodParams) and method.epsf_workspace:
+                    ws_lab = method.epsf_workspace
+                    if ws_lab not in epsf_by_workspace:
+                        epsf_ws = ctx.workspace(ws_lab)
+                        arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
+                        if arr.ndim == 3:
+                            arr = np.nanmedian(arr, axis=0)
+                        epsf_by_workspace[ws_lab] = arr
 
             extras = list(getattr(cfg, "additional_forced_targets", None) or [])
             primary_xy = photometry.per_frame_target_crop_xy(
@@ -1698,10 +1711,9 @@ def run_config_pipeline(
                 crop_bounds,
             )
 
-            phot_specs: list[tuple[np.ndarray, Optional[str], Optional[str], str, dict]] = [
+            target_specs: list[tuple] = [
                 (
                     primary_xy,
-                    None,
                     None,
                     "primary",
                     {
@@ -1715,18 +1727,16 @@ def run_config_pipeline(
                 extra_xy = photometry.resolve_forced_target_xy(
                     pt, primary_xy, wcs_table, crop_bounds
                 )
-                phot_specs.append(
+                target_specs.append(
                     (
                         extra_xy,
                         str(pt["name"]),
-                        f"lightcurve_{pt['name']}.csv",
                         f"extra[{j}]",
                         pt,
                     )
                 )
 
-            phot_targets: list[photometry.ForcedPhotTargetSpec] = []
-            for target_xy, lc_name, csv_fname, tag, pt in phot_specs:
+            for target_xy, lc_name, tag, pt in target_specs:
                 mx = float(np.nanmedian(target_xy[:, 0]))
                 my = float(np.nanmedian(target_xy[:, 1]))
                 mode = pt.get("position_mode", "sky")
@@ -1737,12 +1747,18 @@ def run_config_pipeline(
                     ra_log = float("nan")
                     dec_log = float("nan")
 
+                psf_sizes = [
+                    m.phot_cutout_size
+                    for m in phot_params.methods
+                    if hasattr(m, "phot_cutout_size")
+                ]
+                warn_cutout = int(max(psf_sizes)) if psf_sizes else 15
                 if np.isfinite(mx) and np.isfinite(my):
                     _warn_if_forced_target_outside_crop(
                         mx,
                         my,
                         crop_bounds,
-                        int(phot_params.phot_cutout_size),
+                        warn_cutout,
                         ra=ra_log,
                         dec=dec_log,
                         tag=tag,
@@ -1769,54 +1785,42 @@ def run_config_pipeline(
                 )
                 log.info(
                     "  forced_photometry: %s %s → per-FFI crop-local xy "
-                    "(median %.3f, %.3f; finite %d/%d)%s",
+                    "(median %.3f, %.3f; finite %d/%d)",
                     tag,
                     pos_desc,
                     mx,
                     my,
                     n_fin,
                     len(target_xy),
-                    (
-                        f" → ws/{label_out}/{csv_fname}"
-                        if csv_fname
-                        else f" → ws/{label_out}/lightcurve.csv"
-                    ),
                 )
 
-                if getattr(cfg, "pipeline_plots", False):
-                    pdir = _pipeline_plots_root(cfg)
-                    os.makedirs(pdir, exist_ok=True)
-                    lc_plot_path = _forced_photometry_lightcurve_plot_path(
-                        pdir, label_out, lc_name
-                    )
-                else:
-                    lc_plot_path = None
-
-                phot_targets.append(
-                    photometry.ForcedPhotTargetSpec(
-                        target_xy=target_xy,
-                        csv_basename=csv_fname or "lightcurve.csv",
-                        plot_source_label=lc_name or "primary",
-                        plot_png_path=lc_plot_path,
-                        tag=tag,
-                    )
+            def _plot_path(method_name: str, extra_name: Optional[str]) -> str:
+                pdir = _pipeline_plots_root(cfg)
+                os.makedirs(pdir, exist_ok=True)
+                return _forced_photometry_lightcurve_plot_path(
+                    pdir, label_out, method_name, extra_name
                 )
 
-            photometry.run_forced_photometry_multi(
+            photometry.run_forced_photometry_stage(
                 diff_paths=paths_for_phot,
-                targets=phot_targets,
-                epsf_r2_smooth=epsf_for_phot,
+                target_specs=target_specs,
+                phot_stage=phot_params,
+                epsf_by_workspace=epsf_by_workspace,
+                stage_epsf_workspace=(
+                    str(stage_epsf_ws).strip() if stage_epsf_ws else None
+                ),
                 tile_centers=tile_centers,
                 wcs_table=wcs_table,
                 crop_bounds=crop_bounds,
                 cfg=cfg,
-                phot=phot_params,
                 output_dir=phot_out,
                 ref_frame_index=ref_idx,
                 plot_title_suffix=label_out,
                 output_label=label_out,
                 diffs_input=diff_label,
                 diff_log_path=diff_log_path,
+                plot_path_fn=_plot_path,
+                diffs_dir=ctx.workspace(diff_label),
             )
 
         else:

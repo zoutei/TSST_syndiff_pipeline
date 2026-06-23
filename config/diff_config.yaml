@@ -54,13 +54,20 @@ pipeline:
     write_convolved: false
     write_bkg: true
     write_stamps: false
-    write_kernel_params: true
   # - external_workspaces: [hp_d]
   - kind: forced_photometry
     inputs:
       diffs: hp_d
-    psf_type: prf
     output: lc_prf_on_diffs
+    methods:
+      - name: prf
+        type: psf
+        psf_type: prf
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
   # - kind: background_rough
   #   inputs:
   #     diffs: hp_d

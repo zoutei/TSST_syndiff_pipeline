@@ -10,6 +10,7 @@ from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConf
 from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import split_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.site_config import freeze_target_diff_config
 from syndiff_pipeline.difference_imaging.orchestration.validate import _outputs_for_stage
+from syndiff_pipeline.difference_imaging.stages.photometry import lightcurve_csv_basename
 from syndiff_pipeline.difference_imaging.stages.kernel import (
     KERNEL_FIT_META_BASENAME,
     KERNEL_R2_NPZ_BASENAME,
@@ -97,7 +98,32 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
 
     if kind == "forced_photometry":
         label = str(stage["output"]).strip()
-        return (ws_dir / label / "lightcurve.csv").is_file()
+        phot_dir = ws_dir / label
+        if not phot_dir.is_dir():
+            return False
+        methods = stage.get("methods") or []
+        if not methods:
+            return False
+        extras = getattr(cfg, "additional_forced_targets", None) or []
+        for entry in methods:
+            if not isinstance(entry, dict):
+                return False
+            name = str(entry.get("name", "")).strip()
+            if not name:
+                return False
+            primary_csv = lightcurve_csv_basename(name)
+            if not (phot_dir / primary_csv).is_file():
+                return False
+            for pt in extras:
+                if not isinstance(pt, dict):
+                    continue
+                extra_name = str(pt.get("name", "")).strip()
+                if not extra_name:
+                    continue
+                extra_csv = lightcurve_csv_basename(name, extra_name)
+                if not (phot_dir / extra_csv).is_file():
+                    return False
+        return True
 
     if kind == "kernel_subtract":
         o = stage.get("output") or {}

@@ -6,8 +6,9 @@ Unknown keys on a stage mapping raise :exc:`ValueError` during validation.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields
-from typing import Any, FrozenSet, Optional, Type, TypeVar
+from typing import Any, FrozenSet, List, Optional, Type, TypeVar, Union
 
 
 T = TypeVar("T")
@@ -85,7 +86,6 @@ HOTPANTS_ALLOWED = frozenset(
         "write_convolved",
         "write_bkg",
         "write_stamps",
-        "write_kernel_params",
     }
 )
 
@@ -159,17 +159,41 @@ BACKGROUND_ESTIMATE_ALLOWED = frozenset(
     BACKGROUND_ROUGH_ALLOWED | BACKGROUND_ADAPTIVE_ALLOWED | {"mode"}
 )
 
-FORCED_PHOTOMETRY_ALLOWED = frozenset(
+_METHOD_PSF_KEYS = frozenset(
     {
-        "kind",
-        "inputs",
-        "output",
+        "name",
+        "type",
         "psf_type",
         "phot_cutout_size",
         "phot_bkg_poly_order",
         "phot_snap",
         "psf_size",
         "epsf_oversample",
+        "tile_nx",
+        "tile_ny",
+        "inputs",
+        "csv_basename",
+    }
+)
+
+_METHOD_APERTURE_KEYS = frozenset(
+    {
+        "name",
+        "type",
+        "tar_ap",
+        "sky_in",
+        "sky_out",
+        "aperture_cutout_size",
+        "csv_basename",
+    }
+)
+
+FORCED_PHOTOMETRY_ALLOWED = frozenset(
+    {
+        "kind",
+        "inputs",
+        "output",
+        "methods",
         "tile_nx",
         "tile_ny",
     }
@@ -255,12 +279,11 @@ class HotpantsParams:
     hp_ks: float = 3.0
     hp_kfm: float = 0.75
     hp_force_convolve: str = "t"
-    hp_normalize: str = "i"
+    hp_normalize: str = "t"
     hotpants_n_jobs: Optional[int] = None
     write_convolved: bool = True
     write_bkg: bool = True
     write_stamps: bool = True
-    write_kernel_params: bool = True
 
 
 @dataclass
@@ -309,8 +332,9 @@ class BackgroundAdaptiveParams:
 
 
 @dataclass
-class ForcedPhotometryParams:
-    psf_type: str = "epsf"
+class PsfPhotometryMethodParams:
+    name: str
+    psf_type: str = "prf"
     phot_cutout_size: int = 15
     phot_bkg_poly_order: int = 3
     phot_snap: str = "brightest"
@@ -318,6 +342,101 @@ class ForcedPhotometryParams:
     epsf_oversample: int = 2
     tile_nx: int = 4
     tile_ny: int = 4
+    epsf_workspace: Optional[str] = None
+    csv_basename: Optional[str] = None
+
+
+@dataclass
+class AperturePhotometryMethodParams:
+    name: str
+    tar_ap: int = 3
+    sky_in: int = 5
+    sky_out: int = 9
+    aperture_cutout_size: Optional[int] = None
+    csv_basename: Optional[str] = None
+
+
+PhotometryMethodSpec = Union[PsfPhotometryMethodParams, AperturePhotometryMethodParams]
+
+
+@dataclass
+class ForcedPhotometryParams:
+    methods: List[PhotometryMethodSpec] = field(default_factory=list)
+    tile_nx: int = 4
+    tile_ny: int = 4
+
+
+_METHOD_NAME_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def _parse_method_name(raw: object, pipeline_idx: int, method_idx: int) -> str:
+    name = str(raw).strip().lower()
+    if not name or not _METHOD_NAME_RE.match(name):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            f"'name' must match [a-z0-9_]+, got {raw!r}"
+        )
+    return name
+
+
+def _parse_psf_method(
+    entry: dict,
+    pipeline_idx: int,
+    method_idx: int,
+    stage_defaults: ForcedPhotometryParams,
+) -> PsfPhotometryMethodParams:
+    unknown = set(entry.keys()) - _METHOD_PSF_KEYS
+    if unknown:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}] "
+            f"(psf): unknown keys {sorted(unknown)!r}"
+        )
+    if "psf_type" not in entry:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            "psf_type required for type: psf"
+        )
+    pt = str(entry["psf_type"]).strip().lower()
+    if pt not in ("epsf", "prf"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            f"psf_type must be 'epsf' or 'prf', got {entry['psf_type']!r}"
+        )
+    names = {f.name for f in fields(PsfPhotometryMethodParams)} - {"name", "epsf_workspace"}
+    kw = {n: entry[n] for n in names if n in entry}
+    for n in ("tile_nx", "tile_ny"):
+        if n not in kw:
+            kw[n] = getattr(stage_defaults, n)
+    p = PsfPhotometryMethodParams(name=_parse_method_name(entry["name"], pipeline_idx, method_idx), **kw)
+    p.psf_type = pt
+    inp = entry.get("inputs") or {}
+    if isinstance(inp, dict) and inp.get("epsf"):
+        p.epsf_workspace = str(inp["epsf"]).strip()
+    if entry.get("csv_basename") is not None:
+        p.csv_basename = str(entry["csv_basename"]).strip()
+    return p
+
+
+def _parse_aperture_method(
+    entry: dict,
+    pipeline_idx: int,
+    method_idx: int,
+) -> AperturePhotometryMethodParams:
+    unknown = set(entry.keys()) - _METHOD_APERTURE_KEYS
+    if unknown:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}] "
+            f"(aperture): unknown keys {sorted(unknown)!r}"
+        )
+    names = {f.name for f in fields(AperturePhotometryMethodParams)} - {"name"}
+    kw = {n: entry[n] for n in names if n in entry}
+    p = AperturePhotometryMethodParams(
+        name=_parse_method_name(entry["name"], pipeline_idx, method_idx),
+        **kw,
+    )
+    if entry.get("csv_basename") is not None:
+        p.csv_basename = str(entry["csv_basename"]).strip()
+    return p
 
 
 @dataclass
@@ -340,7 +459,7 @@ class KernelFitParams:
     hp_ks: float = 3.0
     hp_kfm: float = 0.75
     hp_force_convolve: str = "t"
-    hp_normalize: str = "i"
+    hp_normalize: str = "t"
     write_kernel_params: bool = True
 
 
@@ -422,20 +541,56 @@ def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryP
     validate_stage_keys(
         stage, pipeline_idx, "forced_photometry", FORCED_PHOTOMETRY_ALLOWED
     )
-    if "psf_type" not in stage:
+    if "psf_type" in stage:
         raise ValueError(
-            f"pipeline[{pipeline_idx}] forced_photometry: required key 'psf_type' "
-            "(\"epsf\" or \"prf\")"
+            f"pipeline[{pipeline_idx}] forced_photometry: top-level 'psf_type' is no "
+            "longer supported; use a 'methods' list with type: psf entries "
+            "(see config/README.md)."
         )
-    pt = str(stage["psf_type"]).strip().lower()
-    if pt not in ("epsf", "prf"):
+    raw_methods = stage.get("methods")
+    if not raw_methods or not isinstance(raw_methods, list):
         raise ValueError(
-            f"pipeline[{pipeline_idx}] forced_photometry: psf_type must be "
-            f"'epsf' or 'prf', got {stage['psf_type']!r}"
+            f"pipeline[{pipeline_idx}] forced_photometry: required non-empty "
+            "'methods' list"
         )
-    p = _merge_dataclass(ForcedPhotometryParams, stage)
-    p.psf_type = pt
-    return p
+    stage_defaults = _merge_dataclass(ForcedPhotometryParams, stage)
+    parsed: List[PhotometryMethodSpec] = []
+    seen_names: set[str] = set()
+    for mi, entry in enumerate(raw_methods):
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry methods[{mi}]: "
+                "must be a mapping"
+            )
+        if "name" not in entry:
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry methods[{mi}]: "
+                "'name' is required"
+            )
+        if "type" not in entry:
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry methods[{mi}]: "
+                "'type' is required ('psf' or 'aperture')"
+            )
+        mtype = str(entry["type"]).strip().lower()
+        if mtype == "psf":
+            spec = _parse_psf_method(entry, pipeline_idx, mi, stage_defaults)
+        elif mtype == "aperture":
+            spec = _parse_aperture_method(entry, pipeline_idx, mi)
+        else:
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry methods[{mi}]: "
+                f"type must be 'psf' or 'aperture', got {entry['type']!r}"
+            )
+        if spec.name in seen_names:
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry: duplicate method "
+                f"name {spec.name!r}"
+            )
+        seen_names.add(spec.name)
+        parsed.append(spec)
+    stage_defaults.methods = parsed
+    return stage_defaults
 
 
 def kernel_fit_params_to_hotpants(kf: KernelFitParams) -> HotpantsParams:
@@ -457,7 +612,6 @@ def kernel_fit_params_to_hotpants(kf: KernelFitParams) -> HotpantsParams:
         hp_kfm=kf.hp_kfm,
         hp_force_convolve=kf.hp_force_convolve,
         hp_normalize=kf.hp_normalize,
-        write_kernel_params=kf.write_kernel_params,
         write_convolved=False,
         write_bkg=False,
         write_stamps=False,
