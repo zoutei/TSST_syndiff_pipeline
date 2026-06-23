@@ -176,11 +176,12 @@ class TestDiffStageExecution(unittest.TestCase):
         self.assertGreaterEqual(produced, 0)
         self.assertIsInstance(artifacts, list)
 
-    def test_clear_diff_workspace_preserves_root_files(self):
+    def test_clear_diff_workspace_preserves_handoff_files(self):
         ws_hp = self.event_dir / "ws" / "hp_d"
         ws_hp.mkdir(parents=True)
         (ws_hp / "frame.fits").write_bytes(b"SIMPLE  = T")
-        gaia_csv = self.event_dir / "gaia_catalog_pipeline.csv"
+        gaia_csv = self.event_dir / "ws" / "gaia_catalog_pipeline.csv"
+        gaia_csv.parent.mkdir(parents=True, exist_ok=True)
         gaia_csv.write_text("source_id,ra,dec\n", encoding="utf-8")
         handoff_json = self.event_dir / "cluster_template_job.json"
         self.assertTrue(handoff_json.is_file())
@@ -188,8 +189,8 @@ class TestDiffStageExecution(unittest.TestCase):
         clear_diff_workspace(self.event_dir)
 
         self.assertFalse((self.event_dir / "ws" / "hp_d").exists())
+        self.assertFalse(gaia_csv.is_file())
         self.assertTrue((self.event_dir / "ws" / "templates").is_symlink())
-        self.assertTrue(gaia_csv.is_file())
         self.assertTrue(handoff_json.is_file())
 
     @mock.patch(
@@ -200,7 +201,8 @@ class TestDiffStageExecution(unittest.TestCase):
         ws_hp.mkdir(parents=True)
         stale_fits = ws_hp / "stale.fits"
         stale_fits.write_bytes(b"SIMPLE  = T")
-        gaia_csv = self.event_dir / "gaia_catalog_pipeline.csv"
+        gaia_csv = self.event_dir / "ws" / "gaia_catalog_pipeline.csv"
+        gaia_csv.parent.mkdir(parents=True, exist_ok=True)
         gaia_csv.write_text("source_id,ra,dec\n", encoding="utf-8")
 
         ctx = self._ctx()

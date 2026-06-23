@@ -206,9 +206,10 @@ def _gaia_catalog_path(
     event_dir: Path,
     catalog_root: str,
 ) -> Path:
-    pipeline_csv = event_dir / "gaia_catalog_pipeline.csv"
-    if pipeline_csv.is_file():
-        return pipeline_csv.resolve()
+    for rel in ("ws/gaia_catalog_pipeline.csv", "gaia_catalog_pipeline.csv"):
+        pipeline_csv = event_dir / rel
+        if pipeline_csv.is_file():
+            return pipeline_csv.resolve()
     s, c, k = target.sector, target.camera, target.ccd
     return (
         data_root
