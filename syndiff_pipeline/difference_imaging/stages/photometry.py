@@ -67,9 +67,6 @@ class ForcedPhotTargetSpec:
     csv_basename: str = "lightcurve.csv"
     plot_source_label: str = "primary"
     plot_png_path: Optional[str] = None
-    plot_gif_diff_path: Optional[str] = None
-    plot_gif_science_path: Optional[str] = None
-    plot_gif_pair_path: Optional[str] = None
     tag: str = "primary"
 
 
@@ -563,208 +560,6 @@ def _extract_cutout(image: np.ndarray, x: float, y: float, size: int) -> np.ndar
     return cutout
 
 
-def photometry_marker_xy(
-    stamp_size: int,
-    source_offset_x: float,
-    source_offset_y: float,
-) -> tuple[float, float]:
-    """Stamp-pixel coordinates of the PSF-flux anchor (center + phot_snap offsets)."""
-    cent = stamp_size / 2.0 - 0.5
-    return cent + float(source_offset_x), cent + float(source_offset_y)
-
-
-def _science_cutout_worker(
-    task: Tuple[int, Optional[str], float, float, dict, int],
-) -> Tuple[int, Optional[np.ndarray]]:
-    """Load cropped FFI science and extract one stamp (epoch index, cutout)."""
-    from syndiff_pipeline.difference_imaging.stages.hotpants import _load_ffi_cropped
-
-    i, ffi_path, tx, ty, crop_bounds, phot_cutout_size = task
-    if ffi_path is None or not os.path.isfile(str(ffi_path)):
-        return i, None
-    if not (np.isfinite(tx) and np.isfinite(ty)):
-        return i, None
-    try:
-        sci, _ = _load_ffi_cropped(str(ffi_path), crop_bounds)
-        return i, _extract_cutout(sci, float(tx), float(ty), phot_cutout_size)
-    except Exception as exc:
-        log.debug("  science cutout frame %s: %s", i, exc)
-        return i, None
-
-
-def _diff_cutout_worker(
-    task: Tuple[int, Optional[str], float, float, int],
-) -> Tuple[int, Optional[np.ndarray]]:
-    """Load one difference FITS and extract a square stamp (epoch index, cutout)."""
-    i, path, tx, ty, stamp_size = task
-    if path is None or not os.path.isfile(str(path)):
-        return i, None
-    if not (np.isfinite(tx) and np.isfinite(ty)):
-        return i, None
-    try:
-        data, _ = read_diff_primary_and_noise_sigma(str(path))
-        return i, _extract_cutout(data, float(tx), float(ty), int(stamp_size))
-    except Exception as exc:
-        log.debug("  diff cutout frame %s: %s", i, exc)
-        return i, None
-
-
-def _extract_diff_cutouts_for_epochs(
-    diff_paths: list,
-    target_xy: np.ndarray,
-    stamp_size: int,
-    n_jobs: int,
-) -> list:
-    """Per-epoch difference-image stamps at ``target_xy`` (chronological order)."""
-    n = len(diff_paths)
-    txy = np.asarray(target_xy, dtype=np.float64)
-    tasks = [
-        (
-            i,
-            diff_paths[i],
-            float(txy[i, 0]),
-            float(txy[i, 1]),
-            int(stamp_size),
-        )
-        for i in range(n)
-    ]
-    cutouts: list = [None] * n
-    parallel = int(n_jobs or 1) != 1 and n > 1
-    if parallel:
-        results = Parallel(n_jobs=n_jobs, backend="loky")(
-            delayed(_diff_cutout_worker)(t) for t in tasks
-        )
-        for i, cut in results:
-            cutouts[i] = cut
-    else:
-        for t in tasks:
-            i, cut = _diff_cutout_worker(t)
-            cutouts[i] = cut
-    return cutouts
-
-
-def _extract_science_cutouts_for_epochs(
-    wcs_table: pd.DataFrame,
-    target_xy: np.ndarray,
-    crop_bounds: dict,
-    phot_cutout_size: int,
-    n_jobs: int,
-) -> list:
-    """Per-manifest-row cropped science stamps at ``target_xy`` (chronological order)."""
-    path_col = "path" if "path" in wcs_table.columns else "filename"
-    n = len(wcs_table)
-    txy = np.asarray(target_xy, dtype=np.float64)
-    tasks = [
-        (
-            i,
-            wcs_table.iloc[i].get(path_col),
-            float(txy[i, 0]),
-            float(txy[i, 1]),
-            crop_bounds,
-            int(phot_cutout_size),
-        )
-        for i in range(n)
-    ]
-    cutouts: list = [None] * n
-    parallel = int(n_jobs or 1) != 1 and n > 1
-    if parallel:
-        results = Parallel(n_jobs=n_jobs, backend="loky")(
-            delayed(_science_cutout_worker)(t) for t in tasks
-        )
-        for i, cut in results:
-            cutouts[i] = cut
-    else:
-        for t in tasks:
-            i, cut = _science_cutout_worker(t)
-            cutouts[i] = cut
-    return cutouts
-
-
-def _write_cutout_debug_gifs(
-    diff_paths: list,
-    wcs_table: pd.DataFrame,
-    target_xy: np.ndarray,
-    crop_bounds: dict,
-    phot,
-    cfg,
-    *,
-    source_offset_x: float = 0.0,
-    source_offset_y: float = 0.0,
-    plot_gif_diff_path: Optional[str] = None,
-    plot_gif_science_path: Optional[str] = None,
-    plot_gif_pair_path: Optional[str] = None,
-) -> None:
-    """Write diff, science, and side-by-side stamp GIFs when paths are set."""
-    from syndiff_pipeline.difference_imaging.support import plot as plot_mod
-
-    if not (
-        plot_gif_diff_path or plot_gif_science_path or plot_gif_pair_path
-    ):
-        return
-
-    dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
-    stamp_size = int(getattr(phot, "phot_debug_stamp_size", 25) or 25)
-    n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
-    marker_xy = photometry_marker_xy(stamp_size, source_offset_x, source_offset_y)
-    btjd = None
-    if wcs_table is not None and "btjd" in wcs_table.columns:
-        btjd = np.asarray(wcs_table["btjd"].values, dtype=float)
-
-    diff_cutouts: Optional[list] = None
-    if plot_gif_diff_path or plot_gif_pair_path:
-        diff_cutouts = _extract_diff_cutouts_for_epochs(
-            diff_paths,
-            target_xy,
-            stamp_size,
-            n_jobs,
-        )
-
-    sci_cutouts: Optional[list] = None
-    if plot_gif_science_path or plot_gif_pair_path:
-        sci_cutouts = _extract_science_cutouts_for_epochs(
-            wcs_table,
-            target_xy,
-            crop_bounds,
-            stamp_size,
-            n_jobs,
-        )
-
-    if plot_gif_diff_path and diff_cutouts is not None:
-        plot_mod.write_stamp_animation(
-            diff_cutouts,
-            plot_gif_diff_path,
-            btjd=btjd,
-            stamp_size=stamp_size,
-            cmap="RdBu_r",
-            scale_mode="symmetric",
-            cbar_label="Diff stamp",
-            dpi=dpi,
-            marker_xy=marker_xy,
-        )
-    if plot_gif_science_path and sci_cutouts is not None:
-        plot_mod.write_stamp_animation(
-            sci_cutouts,
-            plot_gif_science_path,
-            btjd=btjd,
-            stamp_size=stamp_size,
-            cmap="viridis",
-            scale_mode="percentile",
-            cbar_label="Science stamp",
-            dpi=dpi,
-            marker_xy=marker_xy,
-        )
-    if plot_gif_pair_path and diff_cutouts is not None and sci_cutouts is not None:
-        plot_mod.write_dual_stamp_animation(
-            diff_cutouts,
-            sci_cutouts,
-            plot_gif_pair_path,
-            btjd=btjd,
-            stamp_size=stamp_size,
-            dpi=dpi,
-            marker_xy=marker_xy,
-        )
-
-
 def _locator_bundle_for_parallel(prf_or_epsf, phot, cfg, crop_bounds, target_x, target_y):
     """
     Picklable description of the PSF locator for joblib workers.
@@ -787,6 +582,7 @@ def _locator_bundle_for_parallel(prf_or_epsf, phot, cfg, crop_bounds, target_x, 
             int(cfg.ccd),
             col_ffi,
             row_ffi,
+            resolve_tess_prf_localdatadir(cfg),
         )
     raise ValueError(f"Unknown psf_type {phot.psf_type!r}")
 
@@ -797,10 +593,12 @@ def _locator_from_bundle(bundle: tuple) -> Any:
         _, arr, os_factor = bundle
         return EpsfLocator(np.asarray(arr, dtype=np.float64), int(os_factor))
     if kind == "prf":
-        _, sector, camera, ccd, col_ffi, row_ffi = bundle
+        _, sector, camera, ccd, col_ffi, row_ffi, localdatadir = bundle
         from PRF import TESS_PRF
 
-        return TESS_PRF(camera, ccd, sector, col_ffi, row_ffi)
+        return TESS_PRF(
+            camera, ccd, sector, col_ffi, row_ffi, localdatadir=localdatadir
+        )
     raise ValueError(f"Unknown locator bundle kind {kind!r}")
 
 
@@ -1338,9 +1136,6 @@ def _run_forced_photometry_single(
     *,
     ref_frame_index: Optional[int] = None,
     lightcurve_plot_path: Optional[str] = None,
-    plot_gif_diff_path: Optional[str] = None,
-    plot_gif_science_path: Optional[str] = None,
-    plot_gif_pair_path: Optional[str] = None,
     plot_title_suffix: Optional[str] = None,
     plot_source_label: Optional[str] = None,
     lightcurve_csv_filename: Optional[str] = None,
@@ -1652,19 +1447,6 @@ def _run_forced_photometry_single(
             title_line=title,
             png_path=lightcurve_plot_path,
         )
-        _write_cutout_debug_gifs(
-            diff_paths,
-            wcs_table,
-            txy,
-            crop_bounds,
-            phot,
-            cfg,
-            source_offset_x=sx,
-            source_offset_y=sy,
-            plot_gif_diff_path=plot_gif_diff_path,
-            plot_gif_science_path=plot_gif_science_path,
-            plot_gif_pair_path=plot_gif_pair_path,
-        )
 
     return lc_df
 
@@ -1716,9 +1498,6 @@ def run_forced_photometry_multi(
                 output_dir,
                 ref_frame_index=ref_frame_index,
                 lightcurve_plot_path=sp.plot_png_path,
-                plot_gif_diff_path=sp.plot_gif_diff_path,
-                plot_gif_science_path=sp.plot_gif_science_path,
-                plot_gif_pair_path=sp.plot_gif_pair_path,
                 plot_title_suffix=plot_title_suffix,
                 plot_source_label=sp.plot_source_label,
                 lightcurve_csv_filename=sp.csv_basename,
@@ -2078,19 +1857,6 @@ def run_forced_photometry_multi(
                 title_line=title,
                 png_path=spec.plot_png_path,
             )
-            _write_cutout_debug_gifs(
-                diff_paths,
-                wcs_table,
-                np.asarray(spec.target_xy, dtype=np.float64),
-                crop_bounds,
-                phot,
-                cfg,
-                source_offset_x=float(sx[s]),
-                source_offset_y=float(sy[s]),
-                plot_gif_diff_path=spec.plot_gif_diff_path,
-                plot_gif_science_path=spec.plot_gif_science_path,
-                plot_gif_pair_path=spec.plot_gif_pair_path,
-            )
 
         out_dfs.append(lc_df)
 
@@ -2110,9 +1876,6 @@ def run_forced_photometry(
     *,
     ref_frame_index: Optional[int] = None,
     lightcurve_plot_path: Optional[str] = None,
-    plot_gif_diff_path: Optional[str] = None,
-    plot_gif_science_path: Optional[str] = None,
-    plot_gif_pair_path: Optional[str] = None,
     plot_title_suffix: Optional[str] = None,
     plot_source_label: Optional[str] = None,
     lightcurve_csv_filename: Optional[str] = None,
@@ -2136,9 +1899,6 @@ def run_forced_photometry(
         output_dir,
         ref_frame_index=ref_frame_index,
         lightcurve_plot_path=lightcurve_plot_path,
-        plot_gif_diff_path=plot_gif_diff_path,
-        plot_gif_science_path=plot_gif_science_path,
-        plot_gif_pair_path=plot_gif_pair_path,
         plot_title_suffix=plot_title_suffix,
         plot_source_label=plot_source_label,
         lightcurve_csv_filename=lightcurve_csv_filename,

@@ -166,7 +166,6 @@ FORCED_PHOTOMETRY_ALLOWED = frozenset(
         "output",
         "psf_type",
         "phot_cutout_size",
-        "phot_debug_stamp_size",
         "phot_bkg_poly_order",
         "phot_snap",
         "psf_size",
@@ -313,7 +312,6 @@ class BackgroundAdaptiveParams:
 class ForcedPhotometryParams:
     psf_type: str = "epsf"
     phot_cutout_size: int = 15
-    phot_debug_stamp_size: int = 25
     phot_bkg_poly_order: int = 3
     phot_snap: str = "brightest"
     psf_size: int = 11
