@@ -41,6 +41,9 @@ from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     tess_product_id_from_ffi_path,
 )
+from syndiff_pipeline.difference_imaging.support.flux_calibration import (
+    kernel_sum_at_center,
+)
 from syndiff_pipeline.difference_imaging.support.min_background import (
     pick_best_angle_ffi,
 )
@@ -92,6 +95,7 @@ def _run_hotpants_round(
     hp: HotpantsParams,
     work_dir: str,
     frame_stem: str,
+    collect_kernel_params: bool = True,
 ) -> tuple[dict, Any]:
     os.makedirs(work_dir, exist_ok=True)
     hp_config = build_hotpants_config(
@@ -108,7 +112,7 @@ def _run_hotpants_round(
         mask,
         ref_stars_xy,
         hp_config,
-        collect_kernel_params=hp.write_kernel_params,
+        collect_kernel_params=collect_kernel_params,
     )
     return result, hp_config
 
@@ -192,6 +196,7 @@ def run_kernel_fit(
             hp=hp,
             work_dir=os.path.join(work_root, "hp1"),
             frame_stem=f"{product_id}_hp1",
+            collect_kernel_params=False,
         )
         if not hp1.get("success"):
             raise RuntimeError(
@@ -214,6 +219,7 @@ def run_kernel_fit(
             hp=hp2_params,
             work_dir=os.path.join(work_root, "hp2"),
             frame_stem=f"{product_id}_hp2",
+            collect_kernel_params=params.write_kernel_params,
         )
         if not hp2.get("success"):
             raise RuntimeError(
@@ -229,6 +235,10 @@ def run_kernel_fit(
         kernel_solution = np.asarray(
             kernel_params["kernel_solution"], dtype=np.float64
         ).ravel()
+
+    reference_kernel_sum = kernel_sum_at_center(
+        kernel_solution, hp2_config, ffi.shape
+    )
 
     np.savez(
         npz_path,
@@ -247,6 +257,7 @@ def run_kernel_fit(
         "kernel_npz_path": os.path.abspath(npz_path),
         "weighting_factor": float(params.weighting_factor),
         "phot_box_size": int(params.phot_box_size),
+        "reference_kernel_sum": float(reference_kernel_sum),
     }
     with open(meta_path, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
