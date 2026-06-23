@@ -10,6 +10,7 @@ from syndiff_pipeline.common.orchestration.state import (
     SKIP_REASON_NOT_SELECTED,
     SKIP_REASON_STREAM,
     SKIP_REASON_SUPERSEDED,
+    STATUS_PENDING,
     STATUS_SKIPPED,
     stage_needs_artifact_verify_display,
 )
@@ -157,6 +158,10 @@ def _format_stage_status_short(
     if needs_verify and not state.external_verify_complete(
         run_id, row.target_label, row.stage
     ):
+        if row.status == STATUS_PENDING and not state.deps_satisfied(
+            run_id, row.target_label, row.stage
+        ):
+            return f"{short}:pend"
         return f"{short}:sc_q"
     return f"{short}:{row.status[:4]}"
 

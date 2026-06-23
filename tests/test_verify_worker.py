@@ -54,6 +54,32 @@ from syndiff_pipeline.common.orchestration.verify_worker import (
 from tests.test_daemon_behavior import _minimal_run_setup, _write_mapping_csv_and_manifest
 
 
+def _ensure_mapping_csv_exists(ctx, target: Target) -> None:
+    """Create a stub mapping CSV so absence probe defers to full verify."""
+    resolved = resolve_config(target, ctx.cfg)
+    csv_path = (
+        Path(resolved.mapping_root)
+        / f"sector_{target.sector:04d}"
+        / f"camera_{target.camera}"
+        / f"ccd_{target.ccd}"
+        / f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}_master_skycells_list.csv"
+    )
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    csv_path.write_text("NAME,projection\nskycell.0001.0001,0001\n", encoding="utf-8")
+
+
+def _mock_launch_descriptor(**kwargs):
+    from syndiff_pipeline.common.orchestration.launcher import LaunchDescriptor
+
+    return LaunchDescriptor(
+        executor="local",
+        native_id=12345,
+        launch_token=str(kwargs.get("launch_token", "tok")),
+        submit_epoch=time.time(),
+        handle=None,
+    )
+
+
 class TestCopyManifestToStable(unittest.TestCase):
     def test_copies_valid_manifest_atomically(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
@@ -214,6 +240,7 @@ class TestVerifyScheduling(unittest.TestCase):
                         run_id, label, stage, STATUS_SKIPPED, exit_code=0
                     )
                     state.cache_external_check(run_id, label, stage, complete=True)
+                _ensure_mapping_csv_exists(ctx, target)
 
             def slow_complete(*_args, **_kwargs):
                 time.sleep(2.0)
@@ -274,6 +301,7 @@ class TestVerifyScheduling(unittest.TestCase):
             for stage in ("tess_ffi_download", "wcs_grouping"):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            _ensure_mapping_csv_exists(ctx, target)
 
             def slow_complete(*_args, **_kwargs):
                 time.sleep(0.4)
@@ -320,6 +348,7 @@ class TestVerifyScheduling(unittest.TestCase):
             for stage in ("tess_ffi_download", "wcs_grouping"):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            _ensure_mapping_csv_exists(ctx, target)
 
             with unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
@@ -367,6 +396,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
             for stage in ("tess_ffi_download", "wcs_grouping"):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            _ensure_mapping_csv_exists(ctx, target)
 
             def slow_complete(*_args, **_kwargs):
                 time.sleep(0.8)
@@ -407,6 +437,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
             for stage in ("tess_ffi_download", "wcs_grouping"):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            _ensure_mapping_csv_exists(ctx, target)
 
             def slow_complete(*_args, **_kwargs):
                 time.sleep(1.0)
@@ -420,6 +451,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return_value={},
             ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
+                side_effect=lambda *a, **kw: _mock_launch_descriptor(**kw),
             ):
                 _tick_run(state, run_id, ctx)
                 run = state.get_run(run_id)
@@ -469,6 +501,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
             state.set_run_status(run_id, "stalled", stall_reason="test stall")
+            _ensure_mapping_csv_exists(ctx, target)
 
             def slow_complete(*_args, **_kwargs):
                 time.sleep(0.5)
@@ -482,6 +515,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 return_value={},
             ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
+                side_effect=lambda *a, **kw: _mock_launch_descriptor(**kw),
             ):
                 _tick_run(state, run_id, ctx)
                 run = state.get_run(run_id)

@@ -68,11 +68,20 @@ def _write_single_kernel_policy(path: Path) -> None:
                 "    inputs:",
                 "      convolved: tmpl_conv",
                 "    output:",
-                "      diffs: kd_d",
+                "      diffs: ks_d",
                 "  - kind: forced_photometry",
                 "    inputs:",
-                "      diffs: kd_d",
+                "      diffs: ks_d",
                 "    output: lc_prf_on_diffs",
+                "    methods:",
+                "      - name: prf",
+                "        type: psf",
+                "        psf_type: prf",
+                "      - name: ap3",
+                "        type: aperture",
+                "        tar_ap: 3",
+                "        sky_in: 5",
+                "        sky_out: 9",
                 "condor:",
                 "  request_cpus: 4",
                 "  request_memory: 32000",
@@ -131,13 +140,16 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
         )
 
     def test_canonical_ws_ignored_when_debug_id_set(self):
-        canonical = self.event_dir / "ws" / "kd_d"
+        canonical = self.event_dir / "ws" / "ks_d"
         canonical.mkdir(parents=True)
         (canonical / "frame.fits").write_bytes(b"SIMPLE  = T")
-        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve.csv").parent.mkdir(
+        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve_prf.csv").parent.mkdir(
             parents=True, exist_ok=True
         )
-        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve.csv").write_text(
+        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve_prf.csv").write_text(
+            "btjd,flux\n", encoding="utf-8"
+        )
+        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve_ap3.csv").write_text(
             "btjd,flux\n", encoding="utf-8"
         )
 
@@ -152,9 +164,9 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
         (ws_dbg / "kernel_fit").mkdir(parents=True, exist_ok=True)
         (ws_dbg / "kernel_fit" / "kernel_fit_meta.json").write_text("{}", encoding="utf-8")
         (ws_dbg / "kernel_fit" / "kernel_r2.npz").write_bytes(b"PK")
-        kd = ws_dbg / "kd_d"
+        kd = ws_dbg / "ks_d"
         kd.mkdir(parents=True)
-        (kd / "tess0001_kd_d.fits").write_bytes(b"SIMPLE  = T")
+        (kd / "tess0001_ks_d.fits").write_bytes(b"SIMPLE  = T")
 
         cfg = self._cfg()
         self.assertFalse(diff_workspace_complete(cfg, self.event_dir))
@@ -162,7 +174,10 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
     def test_complete_when_final_lightcurve_present_in_debug_tree(self):
         ws_dbg = self.event_dir / "ws_dbg" / "lc_prf_on_diffs"
         ws_dbg.mkdir(parents=True)
-        (ws_dbg / "lightcurve.csv").write_text("btjd,flux\n1,2\n", encoding="utf-8")
+        (ws_dbg / "lightcurve_prf.csv").write_text("btjd,flux\n1,2\n", encoding="utf-8")
+        (ws_dbg / "lightcurve_ap3.csv").write_text(
+            "btjd,flux,flux_wo_sky,sky,eflux\n1,2,1,1,0.1\n", encoding="utf-8"
+        )
 
         cfg = self._cfg()
         self.assertTrue(diff_workspace_complete(cfg, self.event_dir))
@@ -180,7 +195,8 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
 
         ws = self.event_dir / "ws_cli_debug" / "lc_prf_on_diffs"
         ws.mkdir(parents=True)
-        (ws / "lightcurve.csv").write_text("btjd,flux\n", encoding="utf-8")
+        (ws / "lightcurve_prf.csv").write_text("btjd,flux\n", encoding="utf-8")
+        (ws / "lightcurve_ap3.csv").write_text("btjd,flux\n", encoding="utf-8")
 
         self.assertTrue(diff_workspace_complete(cfg_meta, self.event_dir))
         self.assertFalse(diff_workspace_complete(cfg_yaml, self.event_dir))
@@ -202,12 +218,12 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
         self.assertNotEqual(fp_default, fp_override)
 
     def test_collect_artifacts_uses_debug_tree(self):
-        ws_dbg = self.event_dir / "ws_dbg" / "kd_d"
+        ws_dbg = self.event_dir / "ws_dbg" / "ks_d"
         ws_dbg.mkdir(parents=True)
-        fits = ws_dbg / "tess0001_kd_d.fits"
+        fits = ws_dbg / "tess0001_ks_d.fits"
         fits.write_bytes(b"SIMPLE  = T")
 
-        canonical = self.event_dir / "ws" / "kd_d"
+        canonical = self.event_dir / "ws" / "ks_d"
         canonical.mkdir(parents=True)
         (canonical / "other.fits").write_bytes(b"SIMPLE  = T")
 
