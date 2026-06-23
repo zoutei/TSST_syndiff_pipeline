@@ -8,6 +8,7 @@ from typing import Any
 
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+    inherited_workspace_labels,
     split_pipeline,
 )
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import validate_stage_for_kind
@@ -17,6 +18,9 @@ STAGE_KINDS = frozenset(
     {
         "shared_mask",
         "hotpants",
+        "kernel_fit",
+        "convolved_templates",
+        "kernel_subtract",
         "epsf",
         "sat_template",
         "subtract",
@@ -35,6 +39,17 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         labels = [o["diffs"], o["convolved"]]
         if o.get("bkg"):
             labels.append(o["bkg"])
+        return labels
+    if kind == "kernel_fit":
+        out = stage.get("output")
+        return [str(out).strip()] if out and str(out).strip() else []
+    if kind == "convolved_templates":
+        return [stage["output"]]
+    if kind == "kernel_subtract":
+        o = stage.get("output") or {}
+        labels = [o["diffs"]]
+        if o.get("phot_bkg"):
+            labels.append(o["phot_bkg"])
         return labels
     if kind in (
         "epsf",
@@ -58,6 +73,14 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
             refs.append(inp["bkg"])
         if inp.get("convolved"):
             refs.append(inp["convolved"])
+    elif kind == "convolved_templates":
+        v = (inp or {}).get("kernel_fit")
+        if v is not None and str(v).strip():
+            refs.append(str(v).strip())
+    elif kind == "kernel_subtract":
+        v = (inp or {}).get("convolved")
+        if v is not None and str(v).strip():
+            refs.append(str(v).strip())
     elif kind == "epsf":
         d = inp.get("diffs")
         if d is not None and str(d).strip():
@@ -119,13 +142,15 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
         if isinstance(lab, str) and lab.strip():
             available.add(lab.strip())
 
-    preamble_labels, executable_stages = split_pipeline(cfg.pipeline)
+    preamble_labels, inherit_specs, executable_stages = split_pipeline(cfg.pipeline)
     for lab in preamble_labels:
+        available.add(lab)
+    for lab in inherited_workspace_labels(inherit_specs):
         available.add(lab)
 
     if not executable_stages:
         raise ValueError(
-            "Config pipeline has no executable stages (only external_workspaces preambles). "
+            "Config pipeline has no executable stages (only preamble entries). "
             "Add at least one stage with a 'kind:' key."
         )
 
@@ -166,6 +191,33 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                 raise ValueError(
                     f"pipeline[{idx}] hotpants: science workspace label {sci!r} is not available "
                     f"(available: {sorted(available)!r}). Use science: ffi for raw cropped FFIs."
+                )
+
+        if kind == "kernel_fit":
+            if "output" not in stage or not str(stage["output"]).strip():
+                raise ValueError(f"pipeline[{idx}] kernel_fit: output workspace label required")
+
+        if kind == "convolved_templates":
+            inp = stage.get("inputs") or {}
+            if "kernel_fit" not in inp or not str(inp["kernel_fit"]).strip():
+                raise ValueError(
+                    f"pipeline[{idx}] convolved_templates: inputs.kernel_fit required"
+                )
+            if "output" not in stage or not str(stage["output"]).strip():
+                raise ValueError(
+                    f"pipeline[{idx}] convolved_templates: output workspace label required"
+                )
+
+        if kind == "kernel_subtract":
+            inp = stage.get("inputs") or {}
+            if "convolved" not in inp or not str(inp["convolved"]).strip():
+                raise ValueError(
+                    f"pipeline[{idx}] kernel_subtract: inputs.convolved required"
+                )
+            o = stage.get("output") or {}
+            if "diffs" not in o or not str(o["diffs"]).strip():
+                raise ValueError(
+                    f"pipeline[{idx}] kernel_subtract: output.diffs required"
                 )
 
         if kind == "epsf":

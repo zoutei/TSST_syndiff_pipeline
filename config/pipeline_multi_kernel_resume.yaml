@@ -1,0 +1,30 @@
+# Site policy for multi-kernel resume diff (Condor). Targets via CLI --targets.
+deployment_file: deployment.yaml
+diff_config: diff_config_multi_kernel_resume.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 6
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    run_canceled: true
+    run_retried: true
+    run_stalled: true
+    run_resumed: true
+    stage_failed: true
+    stage_completed: true
+    stage_canceled: true
+    stage_died: true
+    daemon_unhealthy: true
