@@ -39,6 +39,11 @@ from syndiff_pipeline.common.orchestration.scheduler_control import (
 from syndiff_pipeline.common.orchestration.run_setup import apply_post_create_run_setup
 from syndiff_pipeline.common.orchestration.state import (
     STAGE_NAMES,
+    STATUS_BLOCKED,
+    STATUS_PENDING,
+    STATUS_READY,
+    STATUS_RUNNING,
+    TERMINAL_STATUSES,
     PipelineState,
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
@@ -867,6 +872,60 @@ def cmd_retry(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_launch(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.common.orchestration.targets import find_target_for_run
+
+    if not args.scc or not args.stage:
+        raise SystemExit("Specify both --target (or --scc) and --stage.")
+
+    ctx = _resolve_run_from_args(args)
+    warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
+    state = PipelineState(ctx.cfg.state_db_path)
+    t = find_target_for_run(ctx, state, args.scc)
+    target_label = t.label()
+    stage = args.stage
+
+    row = state.get_stage_run(ctx.run_id, target_label, stage)
+    if row is None:
+        raise SystemExit(f"No stage row for {target_label} / {stage} in run {ctx.run_id!r}.")
+    if row.status == STATUS_RUNNING:
+        raise SystemExit(f"{target_label} / {stage} is already running.")
+    if row.status in TERMINAL_STATUSES:
+        raise SystemExit(f"{target_label} / {stage} is terminal ({row.status}).")
+    if row.status not in (STATUS_READY, STATUS_PENDING, STATUS_BLOCKED):
+        print(
+            f"Note: {target_label} / {stage} is {row.status}; "
+            "force launch will run once the stage is ready."
+        )
+
+    state.insert_command(
+        "force_launch",
+        run_id=ctx.run_id,
+        args={"target_label": target_label, "stage": stage},
+    )
+    print(
+        f"Queued force launch for {stage} on {target_label} in run {ctx.run_id} "
+        "(bypasses pool max_concurrent)"
+    )
+
+    if not getattr(args, "no_start_daemon", False):
+        from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+            record_discord_bot_site_config,
+        )
+
+        deploy_path = load_recorded_deployment_path(ctx.cfg.workspace_root)
+        result = ensure_daemon_running(
+            ctx.cfg.workspace_root,
+            deployment_path=deploy_path,
+        )
+        bot_config = _discord_bot_config_path(args, ctx)
+        if bot_config is not None and deploy_path is not None:
+            record_discord_bot_site_config(ctx.cfg.workspace_root, bot_config)
+            if not result.spawned:
+                _ensure_discord_bot(deploy_path, site_config_path=bot_config)
+    return 0
+
+
 def cmd_pause(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
@@ -1128,6 +1187,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Only reopen the targeted stage; leave downstream untouched",
     )
     sp.set_defaults(func=cmd_retry)
+
+    sp = sub.add_parser(
+        "launch",
+        help="Force-launch a ready stage (bypasses pool max_concurrent)",
+    )
+    _add_site_scope(sp)
+    _add_run_scope(sp)
+    sp.add_argument(
+        "--scc",
+        "--target",
+        default=None,
+        dest="scc",
+        help="Target label or SCC key (e.g. 24/1/2 or 2020ghq)",
+    )
+    sp.add_argument("--stage", required=True)
+    sp.add_argument(
+        "--no-start-daemon",
+        action="store_true",
+        help="Queue the intent without ensuring the supervisor daemon is running",
+    )
+    sp.set_defaults(func=cmd_launch)
 
     sp = sub.add_parser("pause", help="Pause run dequeuing")
     _add_run_scope(sp)

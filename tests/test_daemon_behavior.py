@@ -22,6 +22,7 @@ from syndiff_pipeline.common.orchestration.scheduler_control import (
 )
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.common.orchestration.scheduler import (
+    _apply_commands,
     _apply_verify_outcome,
     _cancel_verify_for_retry,
     _iter_verify_candidates,
@@ -1420,10 +1421,25 @@ class TestPartialRunRetry(unittest.TestCase):
 
             lines = format_status_grid(state, run_id)
             self.assertIn("ps1_dl:sc_q", lines[0])
-            self.assertIn("ps1_pr:sc_q", lines[0])
+            self.assertIn("ps1_pr:pend", lines[0])
 
 
 class TestVerifyDisplay(unittest.TestCase):
+    def test_status_grid_shows_pend_for_pending_upstream_blocked(self):
+        from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
+
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["tess_ffi_download", "wcs_grouping", "mapping"]
+            )
+            label = target.label()
+            lines = format_status_grid(state, run_id)
+            self.assertIn("tess_dl:sc_q", lines[0])
+            self.assertIn("wcs:pend", lines[0])
+            self.assertIn("map:pend", lines[0])
+
     def test_status_grid_shows_sc_q_for_external_scan_queue(self):
         from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
 
@@ -1563,6 +1579,118 @@ class TestGlobalPoolCapacity(unittest.TestCase):
                 _tick_run(state, contexts[1][0], contexts[1][2])
                 self.assertEqual(len(launch_calls), 2)
                 self.assertEqual(launch_calls[1][0], "run_b")
+
+
+class TestForceLaunch(unittest.TestCase):
+    def test_force_launch_bypasses_pool_capacity(self):
+        """force_launch flag launches even when network pool is saturated."""
+        from syndiff_pipeline.common.orchestration.launcher import LaunchDescriptor
+
+        targets = [
+            Target(22, 3, 3, 228.0, 52.0, "2020dgc"),
+            Target(23, 1, 3, 185.0, 5.3, "2020ftl"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            runs_root = tmp_path / "runs"
+            state_db = tmp_path / "state.sqlite"
+            state = PipelineState(str(state_db))
+
+            contexts: list = []
+            for run_id, target in (("run_a", targets[0]), ("run_b", targets[1])):
+                run_dir = runs_root / run_id
+                run_dir.mkdir(parents=True)
+                (run_dir / "per_target").mkdir()
+                cfg_path = run_dir / "config.yaml"
+                cfg_path.write_text(
+                    "\n".join(
+                        [
+                            f"data_root: {tmp_path / 'data'}",
+                            f"workspace_root: {tmp_path}",
+                            f"runs_root: {runs_root}",
+                            f"state_db_path: {state_db}",
+                            "skycell_wcs_csv: x.csv",
+                            "stages:",
+                            "  tess_ffi_download: {executor: local}",
+                            "resources:",
+                            "  network:",
+                            "    max_concurrent: 1",
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
+                (run_dir / "targets.csv").write_text(
+                    "sector,camera,ccd,target_ra,target_dec,target_name,enabled\n"
+                    f"{target.sector},{target.camera},{target.ccd},"
+                    f"{target.target_ra},{target.target_dec},{target.target_name},true\n",
+                    encoding="utf-8",
+                )
+                (run_dir / "run_meta.json").write_text(
+                    json.dumps({"run_id": run_id}), encoding="utf-8"
+                )
+                state.create_run(
+                    run_id,
+                    str(cfg_path),
+                    str(run_dir / "targets.csv"),
+                    str(runs_root),
+                    [target],
+                    ["tess_ffi_download"],
+                )
+                from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+
+                contexts.append((run_id, target.label(), resolve_run_context(run_dir=run_dir)))
+
+            run_a_id, run_a_label, run_a_ctx = contexts[0]
+            run_b_id, run_b_label, run_b_ctx = contexts[1]
+            for run_id, label, _ctx in contexts:
+                state.update_stage_status(run_id, label, "tess_ffi_download", STATUS_READY)
+
+            launch_calls: list[tuple[str, str]] = []
+
+            def fake_launch(*_args, **kwargs):
+                launch_calls.append((kwargs["run_id"], kwargs["stage"]))
+                return LaunchDescriptor(
+                    executor="local",
+                    native_id=424242,
+                    launch_token=kwargs["launch_token"],
+                    submit_epoch=0.0,
+                )
+
+            with unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler.reconcile_running_stages",
+                return_value={},
+            ), unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler.launcher.launch_stage",
+                side_effect=fake_launch,
+            ):
+                _tick_run(state, run_a_id, run_a_ctx)
+                self.assertEqual(len(launch_calls), 1)
+                self.assertEqual(launch_calls[0][0], "run_a")
+
+                state.set_force_launch(run_b_id, run_b_label, "tess_ffi_download", enabled=True)
+                _tick_run(state, run_b_id, run_b_ctx)
+                self.assertEqual(len(launch_calls), 2)
+                self.assertEqual(launch_calls[1][0], "run_b")
+                row = state.get_stage_run(run_b_id, run_b_label, "tess_ffi_download")
+                self.assertEqual(row.force_launch, 0)
+
+    def test_force_launch_command_sets_flag(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                tmp_path, [target], active_stages=["tess_ffi_download"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "tess_ffi_download", STATUS_READY)
+            state.insert_command(
+                "force_launch",
+                run_id=run_id,
+                args={"target_label": label, "stage": "tess_ffi_download"},
+            )
+            _apply_commands(state)
+            row = state.get_stage_run(run_id, label, "tess_ffi_download")
+            self.assertEqual(row.force_launch, 1)
 
 
 class TestFreshRunProgress(unittest.TestCase):
