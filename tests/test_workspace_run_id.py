@@ -44,8 +44,8 @@ class TestWorkspaceRunId(unittest.TestCase):
                 os.path.join(os.path.abspath(event), "ws_dbg_test"),
             )
             self.assertEqual(
-                ctx.workspace("kd_d"),
-                os.path.join(os.path.abspath(event), "ws_dbg_test", "kd_d"),
+                ctx.workspace("ks_d"),
+                os.path.join(os.path.abspath(event), "ws_dbg_test", "ks_d"),
             )
             self.assertEqual(
                 ctx.workspace_artifact(SHARED_MASK_FITS_BASENAME),

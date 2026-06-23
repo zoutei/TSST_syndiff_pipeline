@@ -58,11 +58,11 @@ pipeline:
       convolved: tmpl_conv
     phot_box_size: 4
     output:
-      diffs: kd_d
-      phot_bkg: kd_b
+      diffs: ks_d
+      phot_bkg: ks_b
   - kind: forced_photometry
     inputs:
-      diffs: kd_d
+      diffs: ks_d
     psf_type: prf
     output: lc_prf_on_diffs
 
