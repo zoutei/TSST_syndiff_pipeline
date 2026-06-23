@@ -51,14 +51,24 @@ Source of truth: `common/orchestration/state.py`, `common/orchestration/schedule
 
 | Label | Condition |
 |-------|-----------|
-| `sc_q` | Stage needs artifact verify and `external_verify_attempted` is false |
+| `sc_q` | Stage is **eligible** for artifact verify (`external_verify_attempted` is false, verify backlog applies) **and** (for `pending` rows) upstream dependencies are satisfied |
 | `scan` | Verify worker currently scanning this stage |
 | `n/a` | `skipped` with reason `stream_mode`, `not_selected`, or `superseded` |
 | `pend`, `runn`, `succ`, etc. | First four characters of SQLite status |
 
-`sc_q` is shown for `external` stages needing verify, selected `pending` stages, and
-orphaned `pending` upstream stages in the run closure (in closure but not in `--stages`).
+`sc_q` means the stage is queued for (or awaiting) its **one-time pre-launch artifact check**, not that a scan is actively walking NFS.
 
+| Situation | Grid label | Meaning |
+|-----------|------------|---------|
+| `pending`, upstream deps not done | `pend` | Waiting on upstream stages; verify not eligible yet |
+| `pending`, deps done, verify not run | `sc_q` | In verify backlog (or about to be scheduled) |
+| `pending`, verify ran, outputs incomplete | `pend` | Check cached; waiting for promote / launch |
+| `external`, verify needed | `sc_q` | Upstream artifact check before `skipped` |
+| Worker running `stage_complete` | `scan` | Active NFS/metadata scan |
+
+Run-level `scan_queued` / `scan_running` in `progress` count only deps-eligible verify candidates (same closure as the scheduler). Per-stage `sc_q` previously appeared on all unverified `pending` rows even when deps blocked verify; the grid now matches scheduler eligibility.
+
+`sc_q` is shown for `external` stages needing verify and selected `pending` stages whose dependencies are satisfied.
 ---
 
 ## 2. Stage dependency DAG (7 stages)
@@ -404,11 +414,21 @@ legacy orphan `pending` rows in the closure back to `external`.
 
 Does not expand downstream. Next tick re-applies `not_selected` / `superseded` skips.
 
-### 7.6 Pause / Resume
+### 7.6 `force_launch` command (`syndiff launch`)
+
+1. CLI inserts `force_launch` command with `target_label` + `stage`
+2. Daemon sets `stage_runs.force_launch = 1` (persists across restarts)
+3. `_launch_force_overrides` runs at the top of `_tick_run` (before pause check) and again after `promote_stages`
+4. Matching `ready` rows launch via `_try_launch_ready_row` **without** `_pool_capacity` check
+5. On successful launch, `force_launch` cleared to 0
+
+Adds concurrent jobs beyond `resources.<pool>.max_concurrent`; does not terminate jobs already holding pool slots.
+
+### 7.7 Pause / Resume
 
 | Operation | Effect |
 |-----------|--------|
-| **Pause** | `runs.paused = 1`; `_tick_run` returns immediately |
+| **Pause** | `runs.paused = 1`; normal `_tick_run` dequeuing skipped (force-launch overrides still honored) |
 | **Resume** | `runs.paused = 0`; normal tick resumes |
 
 Running workers continue until exit during pause.

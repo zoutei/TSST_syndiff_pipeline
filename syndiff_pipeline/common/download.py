@@ -164,8 +164,17 @@ def tesscurl_script_path(output_dir: str, sector: int) -> str:
     return os.path.join(output_dir, f"tesscurl_sector_{sector}_ffic.sh")
 
 
-def load_tesscurl_script_text(sector: int, output_dir: str | None = None) -> str | None:
-    """Load tesscurl manifest text from a cached script or MAST."""
+def load_tesscurl_script_text(
+    sector: int,
+    output_dir: str | None = None,
+    *,
+    local_only: bool = False,
+) -> str | None:
+    """Load tesscurl manifest text from a cached script or MAST.
+
+    When ``local_only`` is True (artifact verify), only the on-disk cache is read;
+  never contact MAST.
+    """
     if output_dir:
         cached = tesscurl_script_path(output_dir, sector)
         if os.path.isfile(cached):
@@ -173,6 +182,9 @@ def load_tesscurl_script_text(sector: int, output_dir: str | None = None) -> str
                 return Path(cached).read_text(encoding="utf-8", errors="replace")
             except OSError as exc:
                 log.warning("Could not read cached tesscurl script %s: %s", cached, exc)
+
+    if local_only:
+        return None
 
     script_url = TESSCURL_SCRIPT_URL.format(sector=sector)
     try:
@@ -184,13 +196,20 @@ def load_tesscurl_script_text(sector: int, output_dir: str | None = None) -> str
 
 
 def expected_ffi_basenames(
-    sector: int, camera: int, ccd: int, output_dir: str | None = None
+    sector: int,
+    camera: int,
+    ccd: int,
+    output_dir: str | None = None,
+    *,
+    local_only: bool = False,
 ) -> list[str] | None:
     """Return sorted expected FFI basenames from the tesscurl manifest.
 
     Returns ``None`` when the manifest cannot be loaded.
     """
-    script_text = load_tesscurl_script_text(sector, output_dir)
+    script_text = load_tesscurl_script_text(
+        sector, output_dir, local_only=local_only
+    )
     if script_text is None:
         return None
     pairs = parse_tesscurl_script(script_text)
