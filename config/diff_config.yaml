@@ -44,7 +44,6 @@ pipeline:
     inputs:
       diffs: hp_d
     psf_type: prf
-    phot_debug_stamp_size: 25
     output: lc_prf_on_diffs
   # - kind: background_rough
   #   inputs:

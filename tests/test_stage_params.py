@@ -135,20 +135,6 @@ class TestStageParams(unittest.TestCase):
         )
         self.assertEqual(p.psf_type, "epsf")
         self.assertEqual(p.phot_snap, "ref")
-        self.assertEqual(p.phot_debug_stamp_size, 25)
-
-    def test_forced_photometry_debug_stamp_size(self):
-        p = parse_forced_photometry(
-            {
-                "kind": "forced_photometry",
-                "inputs": {"diffs": "x", "epsf": "e"},
-                "output": "y",
-                "psf_type": "prf",
-                "phot_debug_stamp_size": 31,
-            },
-            0,
-        )
-        self.assertEqual(p.phot_debug_stamp_size, 31)
 
 
 if __name__ == "__main__":

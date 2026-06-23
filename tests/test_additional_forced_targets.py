@@ -19,7 +19,9 @@ from syndiff_pipeline.difference_imaging.orchestration.config import (
     normalize_additional_forced_targets,
 )
 from syndiff_pipeline.difference_imaging.stages import photometry as ph
-from syndiff_pipeline.difference_imaging.stages.photometry import photometry_marker_xy
+from syndiff_pipeline.difference_imaging.orchestration.execute import (
+    _forced_photometry_lightcurve_plot_path,
+)
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     freeze_target_diff_config,
     load_diff_site_policy,
@@ -27,9 +29,6 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
 from tests.site_fixtures import write_site_deployment
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
-)
-from syndiff_pipeline.difference_imaging.orchestration.execute import (
-    _forced_photometry_debug_plot_paths,
 )
 
 
@@ -130,40 +129,22 @@ def _sky_ra_dec_from_spec(pt: dict) -> tuple[float, float]:
     return float("nan"), float("nan")
 
 
-class TestPhotometryMarkerXy(unittest.TestCase):
-    def test_marker_at_center_when_offsets_zero(self):
-        mx, my = photometry_marker_xy(25, 0.0, 0.0)
-        self.assertAlmostEqual(mx, 12.0)
-        self.assertAlmostEqual(my, 12.0)
-
-    def test_marker_follows_phot_snap_offsets(self):
-        mx, my = photometry_marker_xy(25, 7.0, -7.0)
-        self.assertAlmostEqual(mx, 19.0)
-        self.assertAlmostEqual(my, 5.0)
-
-
-class TestForcedPhotometryDebugPlotPaths(unittest.TestCase):
-    def test_primary_gets_lightcurve_and_cutout_gifs(self):
+class TestForcedPhotometryLightcurvePlotPath(unittest.TestCase):
+    def test_primary_lightcurve_png(self):
         pdir = "/event/debug_plots"
-        lc, diff, sci, pair = _forced_photometry_debug_plot_paths(
+        lc = _forced_photometry_lightcurve_plot_path(
             pdir, "lc_prf_on_diffs", None
         )
         self.assertEqual(lc, "/event/debug_plots/lightcurve_lc_prf_on_diffs.png")
-        self.assertEqual(diff, "/event/debug_plots/cutout_diff_lc_prf_on_diffs.gif")
-        self.assertEqual(sci, "/event/debug_plots/cutout_science_lc_prf_on_diffs.gif")
-        self.assertEqual(pair, "/event/debug_plots/cutout_pair_lc_prf_on_diffs.gif")
 
     def test_extra_gets_lightcurve_only(self):
         pdir = "/event/debug_plots"
-        lc, diff, sci, pair = _forced_photometry_debug_plot_paths(
+        lc = _forced_photometry_lightcurve_plot_path(
             pdir, "lc_prf_on_diffs", "offset_top"
         )
         self.assertEqual(
             lc, "/event/debug_plots/lightcurve_lc_prf_on_diffs_offset_top.png"
         )
-        self.assertIsNone(diff)
-        self.assertIsNone(sci)
-        self.assertIsNone(pair)
 
 
 class TestPrimaryForcedPhotometrySpec(unittest.TestCase):
