@@ -296,6 +296,7 @@ def _prepare_run_directory(
     detach: bool,
     force_rerun: bool,
     source_diff_config_path: str | None = None,
+    workspace_run_id: str | None = None,
 ) -> Path:
     run_directory = logs.run_dir(runs_root, run_id)
     run_directory.mkdir(parents=True, exist_ok=True)
@@ -317,6 +318,8 @@ def _prepare_run_directory(
     }
     if source_diff_config_path:
         meta["source_diff_config_path"] = str(Path(source_diff_config_path).resolve())
+    if workspace_run_id is not None and str(workspace_run_id).strip():
+        meta["workspace_run_id"] = str(workspace_run_id).strip()
     logs.ensure_run_layout(runs_root, run_id, meta)
     logs.update_run_meta(runs_root, run_id, meta)
     return run_directory
@@ -355,6 +358,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
         detach=True,
         force_rerun=bool(args.force_rerun),
         source_diff_config_path=cfg.diff_config_path or None,
+        workspace_run_id=getattr(args, "workspace_run_id", None),
     )
 
     preset = getattr(args, "preset", None)
@@ -453,6 +457,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         detach=False,
         force_rerun=bool(args.force_rerun),
         source_diff_config_path=cfg.diff_config_path or None,
+        workspace_run_id=getattr(args, "workspace_run_id", None),
     )
 
     return run_scheduler(

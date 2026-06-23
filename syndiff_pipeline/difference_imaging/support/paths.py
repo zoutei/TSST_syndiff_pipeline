@@ -26,6 +26,17 @@ MASTER_SUBDIR = "master"
 DEFAULT_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
 HOTPANTS_SUBSTAMP_STARS_BASENAME = "hotpants_substamp_stars.csv"
 TARGETS_DS9_REGION_BASENAME = "targets.reg"
+SHARED_MASK_FITS_BASENAME = "shared_mask.fits"
+GAIA_CATALOG_PIPELINE_BASENAME = "gaia_catalog_pipeline.csv"
+DIFF_CONFIG_SNAPSHOT_BASENAME = "diff_config.yaml"
+
+WORKSPACE_ROOT_ARTIFACTS = (
+    SHARED_MASK_FITS_BASENAME,
+    HOTPANTS_SUBSTAMP_STARS_BASENAME,
+    GAIA_CATALOG_PIPELINE_BASENAME,
+    TARGETS_DS9_REGION_BASENAME,
+    DIFF_CONFIG_SNAPSHOT_BASENAME,
+)
 
 MASTER_TESS_FFI_LINK = "tess_ffi"
 HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
@@ -63,11 +74,30 @@ BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits"
 PIPELINE_PLOTS_SUBDIR = "debug_plots"
 
 
+def normalize_workspace_run_id(run_id: str | None) -> str | None:
+    """Return a non-empty run id or ``None`` for canonical ``ws/``."""
+    if run_id is None:
+        return None
+    s = str(run_id).strip()
+    if not s or s.lower() in ("null", "none"):
+        return None
+    return s
+
+
+def workspace_tree_name(run_id: str | None = None) -> str:
+    """Filesystem name for the active workspace tree: ``ws`` or ``ws_{run_id}``."""
+    rid = normalize_workspace_run_id(run_id)
+    return f"{WORKSPACE_SUBDIR}_{rid}" if rid else WORKSPACE_SUBDIR
+
+
 def pipeline_plots_root(
-    output_dir: str, subdir: str | None = PIPELINE_PLOTS_SUBDIR
+    output_dir: str,
+    subdir: str | None = PIPELINE_PLOTS_SUBDIR,
+    *,
+    run_id: str | None = None,
 ) -> str:
-    """Return ``output_dir`` or ``output_dir / subdir`` for diagnostic figures."""
-    root = os.path.abspath(output_dir)
+    """Return workspace-tree path for diagnostic figures."""
+    root = os.path.abspath(workspace_root(output_dir, run_id=run_id))
     if subdir is None:
         return root
     s = str(subdir).strip()
@@ -76,35 +106,56 @@ def pipeline_plots_root(
     return os.path.join(root, s)
 
 
-def workspace_dir(output_dir: str, label: str) -> str:
+def workspace_dir(
+    output_dir: str,
+    label: str,
+    *,
+    run_id: str | None = None,
+) -> str:
     """Absolute path to the workspace directory for a pipeline label."""
-    return os.path.join(os.path.abspath(output_dir), WORKSPACE_SUBDIR, label)
+    return os.path.join(workspace_root(output_dir, run_id=run_id), label)
 
 
-def workspace_root(output_dir: str) -> str:
-    """Absolute path of the ``ws/`` root under *output_dir*."""
-    return os.path.join(os.path.abspath(output_dir), WORKSPACE_SUBDIR)
+def workspace_root(output_dir: str, *, run_id: str | None = None) -> str:
+    """Absolute path of the active workspace tree under *output_dir*."""
+    return os.path.join(
+        os.path.abspath(output_dir),
+        workspace_tree_name(run_id),
+    )
 
 
-def clear_diff_workspace(event_dir: Union[str, Path]) -> None:
-    """Remove ``ws/`` subtree for force rerun; preserve event_dir root artifacts.
+def workspace_artifact_path(
+    output_dir: str,
+    basename: str,
+    *,
+    run_id: str | None = None,
+) -> str:
+    """Path to a run-scoped artifact at the workspace tree root."""
+    return os.path.join(workspace_root(output_dir, run_id=run_id), basename)
 
-    Root files such as ``gaia_catalog_pipeline.csv`` and
-    ``cluster_template_job.json`` are left untouched. The ``ws/templates`` and
-    ``ws/ffis`` symlinks are preserved across clears.
+
+def clear_diff_workspace(
+    event_dir: Union[str, Path],
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Remove one workspace subtree for force rerun; preserve event_dir handoff files.
+
+    Clears canonical ``ws/`` when *run_id* is unset, else ``ws_{run_id}/``.
+    The ``templates`` and ``ffis`` symlinks inside that tree are preserved across clears.
     """
     root = Path(event_dir)
-    ws = root / WORKSPACE_SUBDIR
+    ws = root / workspace_tree_name(run_id)
     if not ws.is_dir():
         return
-    templates_link = event_templates_symlink_path(root)
+    templates_link = ws / TEMPLATES_WS_LABEL
     templates_target = None
     if templates_link.is_symlink():
         try:
             templates_target = templates_link.resolve()
         except OSError:
             templates_target = None
-    ffis_link = event_ffis_symlink_path(root)
+    ffis_link = ws / FFIS_WS_LABEL
     ffis_target = None
     if ffis_link.is_symlink():
         try:
@@ -114,16 +165,16 @@ def clear_diff_workspace(event_dir: Union[str, Path]) -> None:
     shutil.rmtree(ws)
     log.info("Force rerun: removed diff workspace %s", ws)
     if templates_target is not None and templates_target.is_dir():
-        ensure_event_templates_symlink(root, templates_target)
+        ensure_event_templates_symlink(root, templates_target, run_id=run_id)
         log.info("Force rerun: restored templates symlink -> %s", templates_target)
     if ffis_target is not None and ffis_target.is_dir():
-        ensure_event_ffis_symlink(root, ffis_target)
+        ensure_event_ffis_symlink(root, ffis_target, run_id=run_id)
         log.info("Force rerun: restored ffis symlink -> %s", ffis_target)
 
 
-def master_root(output_dir: str) -> str:
-    """Absolute path of ``ws/master/`` under *output_dir*."""
-    return os.path.join(workspace_root(output_dir), MASTER_SUBDIR)
+def master_root(output_dir: str, *, run_id: str | None = None) -> str:
+    """Absolute path of ``ws/master/`` (or debug tree) under *output_dir*."""
+    return os.path.join(workspace_root(output_dir, run_id=run_id), MASTER_SUBDIR)
 
 
 def _abs_path(path: str) -> str:
@@ -215,6 +266,7 @@ def link_master_workspace(
     output_dir: str,
     *,
     ffi_leaf: Optional[str] = None,
+    run_id: str | None = None,
 ) -> int:
     """
     Populate ``ws/master/`` with absolute symlinks for Condor / shared-FS access.
@@ -228,10 +280,10 @@ def link_master_workspace(
     Idempotent: correct symlinks are left in place; broken or stale ones are
     replaced. Returns the number of symlinks created or refreshed in this call.
     """
-    ws_root = workspace_root(output_dir)
+    ws_root = workspace_root(output_dir, run_id=run_id)
     if not os.path.isdir(ws_root):
         return 0
-    m_root = master_root(output_dir)
+    m_root = master_root(output_dir, run_id=run_id)
     os.makedirs(m_root, exist_ok=True)
     refreshed = _prune_master_stamp_symlinks(m_root)
 
@@ -271,16 +323,18 @@ def link_master_workspace(
                 if _ensure_abs_symlink(link, target):
                     refreshed += 1
             try:
-                ffis_link = event_ffis_symlink_path(output_dir)
+                ffis_link = event_ffis_symlink_path(output_dir, run_id=run_id)
                 existed_ok = False
                 if ffis_link.is_symlink():
                     try:
                         existed_ok = ffis_link.resolve() == Path(ffi_leaf_abs)
                     except OSError:
                         existed_ok = False
-                ensure_event_ffis_symlink(output_dir, ffi_leaf_abs)
+                ensure_event_ffis_symlink(output_dir, ffi_leaf_abs, run_id=run_id)
                 refreshed += int(not existed_ok)
-                refreshed += prune_stale_per_workspace_ffis_symlinks(output_dir)
+                refreshed += prune_stale_per_workspace_ffis_symlinks(
+                    output_dir, run_id=run_id
+                )
             except OSError as exc:
                 log.warning(
                     "master workspace: ws/ffis symlink failed: %s", exc

@@ -34,18 +34,21 @@ from syndiff_pipeline.difference_imaging.support.paths import (
 
 
 class TestPipelinePlotsRoot(unittest.TestCase):
-    def test_default_subdir_under_event_dir(self):
+    def test_default_subdir_under_workspace_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = os.path.join(tmp, "events", "s0020_c3_k3_2020ut")
             self.assertEqual(
                 pipeline_plots_root(event),
-                os.path.join(os.path.abspath(event), "debug_plots"),
+                os.path.join(os.path.abspath(event), "ws", "debug_plots"),
             )
 
-    def test_empty_subdir_returns_event_dir(self):
+    def test_empty_subdir_returns_workspace_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = os.path.join(tmp, "event")
-            self.assertEqual(pipeline_plots_root(event, ""), os.path.abspath(event))
+            self.assertEqual(
+                pipeline_plots_root(event, ""),
+                os.path.join(os.path.abspath(event), "ws"),
+            )
 
     def test_absolutize_config_keeps_pipeline_plots_dir_relative(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -59,7 +62,7 @@ class TestPipelinePlotsRoot(unittest.TestCase):
             self.assertEqual(frozen.pipeline_plots_dir, "debug_plots")
             self.assertEqual(
                 pipeline_plots_root(frozen.output_dir, frozen.pipeline_plots_dir),
-                str((Path(tmp) / "events" / "test" / "debug_plots").resolve()),
+                str((Path(tmp) / "events" / "test" / "ws" / "debug_plots").resolve()),
             )
 
 

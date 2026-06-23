@@ -331,6 +331,8 @@ def ordered_diff_paths_for_workspace(
     output_dir: str,
     label: str,
     manifest_path: str | None = None,
+    *,
+    run_id: str | None = None,
 ) -> list:
     """
     One FITS path per manifest row for a workspace label (``ws/<label>/``).
@@ -342,7 +344,7 @@ def ordered_diff_paths_for_workspace(
     path_col = f"diff_{safe}_path"
     pids = row_ffi_product_id_series(df).reset_index(drop=True)
     df_reset = df.reset_index(drop=True)
-    ws = workspace_dir(output_dir, label)
+    ws = workspace_dir(output_dir, label, run_id=run_id)
     use_col = path_col if path_col in df_reset.columns else None
     out: list = []
     for i in range(len(df_reset)):
