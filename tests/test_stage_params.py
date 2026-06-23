@@ -34,7 +34,7 @@ class TestStageParams(unittest.TestCase):
             {"kind": "hotpants", "inputs": {}, "output": {"diffs": "a", "convolved": "b"}},
             0,
         )
-        self.assertEqual(hp.sci_fwhm, 1.0)
+        self.assertEqual(hp.sci_fwhm, 1.88)
         self.assertEqual(hp.hp_ko, 2)
 
     def test_hotpants_override(self):
@@ -50,6 +50,30 @@ class TestStageParams(unittest.TestCase):
         )
         self.assertEqual(hp.sci_fwhm, 2.5)
         self.assertEqual(hp.hp_ko, 3)
+
+    def test_hotpants_sigma_gauss_override(self):
+        hp = parse_hotpants(
+            {
+                "kind": "hotpants",
+                "inputs": {},
+                "output": {"diffs": "a", "convolved": "b"},
+                "hp_sigma_gauss": [0.752, 1.88, 3.76],
+                "hp_ngauss": 3,
+            },
+            0,
+        )
+        from syndiff_pipeline.difference_imaging.stages.hotpants import (
+            _kernel_scale_pixels,
+            _resolved_sigma_gauss,
+            build_hotpants_config,
+        )
+
+        self.assertEqual(_resolved_sigma_gauss(hp), [0.752, 1.88, 3.76])
+        self.assertAlmostEqual(_kernel_scale_pixels(hp), 1.88)
+        cfg = build_hotpants_config(hp, "/tmp", "/tmp", "t", write_stamps=False)
+        self.assertEqual(cfg.rkernel, 4)
+        self.assertEqual(cfg.rss, 4)
+        self.assertEqual(list(cfg.sigma_gauss), [0.752, 1.88, 3.76])
 
     def test_hotpants_write_flags_default_true(self):
         hp = parse_hotpants(
