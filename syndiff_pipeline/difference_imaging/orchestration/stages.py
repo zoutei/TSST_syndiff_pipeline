@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
 
 from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.common.orchestration.spec import StageRunContext, StageSpec
+from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+    collect_diff_workspace_artifacts,
+    diff_workspace_complete,
+    frozen_diff_config_for_context,
+)
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    freeze_target_diff_config,
     load_diff_site_policy,
     write_frozen_diff_config,
-)
-from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
-from syndiff_pipeline.difference_imaging.support.paths import (
-    DEFAULT_MANIFEST_BASENAME,
-    WORKSPACE_SUBDIR,
-    workspace_root,
 )
 
 
@@ -42,39 +39,11 @@ def _frozen_diff_config_path(ctx: StageRunContext) -> Path:
 
 
 def _diff_config_fingerprint(ctx: StageRunContext) -> str:
-    cfg = freeze_target_diff_config(_diff_site_config_path(ctx), ctx.target)
-    parts = [
-        "diff",
-        str(ctx.target.sector),
-        str(ctx.target.camera),
-        str(ctx.target.ccd),
-        json.dumps(cfg.pipeline, sort_keys=True, default=str),
-        json.dumps(cfg.additional_forced_targets, sort_keys=True, default=str),
-        str(cfg.n_jobs),
-        str(cfg.pipeline_plots),
-    ]
-    return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    from syndiff_pipeline.difference_imaging.orchestration.workspace_lock import (
+        diff_config_fingerprint,
+    )
 
-
-def _diff_workspace_artifacts(event_dir: Path) -> list[str]:
-    artifacts: list[str] = []
-    manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
-    if Path(manifest_csv).is_file():
-        artifacts.append(manifest_csv)
-    ws_dir = event_dir / WORKSPACE_SUBDIR
-    if ws_dir.is_dir():
-        for child in sorted(ws_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            if child.name == "master":
-                master_manifest = child / DEFAULT_MANIFEST_BASENAME
-                if master_manifest.is_file():
-                    artifacts.append(str(master_manifest))
-                continue
-            for path in sorted(child.rglob("*")):
-                if path.is_file():
-                    artifacts.append(str(path.resolve()))
-    return artifacts
+    return diff_config_fingerprint(frozen_diff_config_for_context(ctx))
 
 
 def execute_diff_stage(ctx: StageRunContext):
@@ -82,37 +51,25 @@ def execute_diff_stage(ctx: StageRunContext):
 
     site_path = _diff_site_config_path(ctx)
     frozen_path = _frozen_diff_config_path(ctx)
-    cfg = freeze_target_diff_config(site_path, ctx.target)
+    cfg = frozen_diff_config_for_context(ctx)
     write_frozen_diff_config(cfg, frozen_path)
     run_config_pipeline(cfg, validate_only=False, diff_log_path=ctx.progress_path)
     event_dir = Path(cfg.output_dir)
-    artifacts = _diff_workspace_artifacts(event_dir)
+    artifacts = collect_diff_workspace_artifacts(cfg, event_dir)
     expected = max(len(artifacts), 1)
     produced = len(artifacts)
     return expected, produced, artifacts
 
 
 def _verify_diff(ctx: StageRunContext) -> bool:
-    event_dir = _event_dir_for_target(ctx)
-    manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
-    ws_dir = Path(workspace_root(str(event_dir)))
-    if not manifest_csv.is_file():
-        return False
-    if not ws_dir.is_dir():
-        return False
-    from syndiff_pipeline.common.orchestration.event_ws_symlinks import TEMPLATES_WS_LABEL
-
-    labels = [
-        p
-        for p in ws_dir.iterdir()
-        if p.is_dir() and p.name not in ("master", TEMPLATES_WS_LABEL)
-    ]
-    return bool(labels)
+    cfg = frozen_diff_config_for_context(ctx)
+    return diff_workspace_complete(cfg, _event_dir_for_target(ctx))
 
 
 def _collect_diff_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
+    cfg = frozen_diff_config_for_context(ctx)
     event_dir = _event_dir_for_target(ctx)
-    artifacts = _diff_workspace_artifacts(event_dir)
+    artifacts = collect_diff_workspace_artifacts(cfg, event_dir)
     expected = max(len(artifacts), 1)
     produced = len(artifacts)
     return expected, produced, artifacts

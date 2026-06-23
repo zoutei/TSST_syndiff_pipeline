@@ -106,9 +106,9 @@ class TestVerifyDiffCli(unittest.TestCase):
         manifest_csv = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
-        ws_hp = self.event_dir / "ws" / "hp_d"
-        ws_hp.mkdir(parents=True)
-        (ws_hp / "frame.fits").write_bytes(b"SIMPLE  = T")
+        ws_root = self.event_dir / "ws"
+        ws_root.mkdir(parents=True, exist_ok=True)
+        (ws_root / "shared_mask.fits").write_bytes(b"SIMPLE  = T")
 
     def test_verify_stage_diff_with_runner_cfg(self):
         self._write_diff_outputs()
@@ -147,7 +147,7 @@ class TestVerifyDiffCli(unittest.TestCase):
 
         result = verify_stage(self.resolved, "diff", runner_cfg=self.runner)
         self.assertFalse(result.ok)
-        self.assertIn("No workspace labels", result.message)
+        self.assertIn("Final pipeline outputs missing", result.message)
 
     def test_stage_complete_diff_stale_fingerprint(self):
         artifact = self.event_dir / "ws" / "hp_d" / "frame.fits"
