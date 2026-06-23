@@ -1,5 +1,9 @@
 """Sidecar JSON progress for Hotpants frame processing.
 
+Workspace copy lives under the paired meta dir (``ws/hp_m/hotpants.progress.json`` for
+``ws/hp_d/``). CLI mirror stays beside ``per_target/<label>/diff.log`` as
+``diff.hotpants.progress.json`` (used by ``syndiff progress`` / stage_progress).
+
 Progress counters are updated from the parent process after each frame completes
 (see :func:`hotpants_loop` parallel branch). Updates use atomic write via a
 temporary file so they remain reliable on NFS mounts without working ``flock``.
@@ -16,9 +20,18 @@ PROGRESS_FILENAME = "hotpants.progress.json"
 CLI_PROGRESS_FILENAME = "diff.hotpants.progress.json"
 
 
+def progress_path_for_meta_workspace(meta_dir: Path | str) -> Path:
+    """Canonical per-pass sidecar under ``ws/{prefix}_m/``."""
+    return Path(meta_dir).expanduser().resolve() / PROGRESS_FILENAME
+
+
 def progress_path_for_diffs_workspace(diffs_dir: Path | str) -> Path:
-    """Canonical per-pass sidecar under ``ws/{diffs_label}/``."""
-    return Path(diffs_dir).expanduser().resolve() / PROGRESS_FILENAME
+    """Resolve meta workspace from *diffs_dir* basename (``hp_d`` → ``hp_m``)."""
+    from syndiff_pipeline.difference_imaging.support.paths import meta_workspace_label
+
+    diffs_path = Path(diffs_dir).expanduser().resolve()
+    meta_dir = diffs_path.parent / meta_workspace_label(diffs_path.name)
+    return progress_path_for_meta_workspace(meta_dir)
 
 
 def progress_path_for_diff_log(log_path: Path | str) -> Path:

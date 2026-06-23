@@ -12,7 +12,7 @@ from syndiff_pipeline.difference_imaging.stages import hotpants_progress as hp
 class TestHotpantsProgress(unittest.TestCase):
     def test_init_and_mark_frame_done(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "ws" / "hp_d" / hp.PROGRESS_FILENAME
+            path = Path(tmp) / "ws" / "hp_m" / hp.PROGRESS_FILENAME
             hp.init_progress(
                 path,
                 diffs_label="hp_d",
@@ -33,7 +33,7 @@ class TestHotpantsProgress(unittest.TestCase):
 
     def test_dual_path_record(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ws_path = Path(tmp) / "ws" / "hp2_d" / hp.PROGRESS_FILENAME
+            ws_path = Path(tmp) / "ws" / "hp2_m" / hp.PROGRESS_FILENAME
             cli_path = Path(tmp) / "diff.hotpants.progress.json"
             hp.init_progress_pair(
                 ws_path,
@@ -64,14 +64,13 @@ class TestHotpantsProgress(unittest.TestCase):
             log_path.parent.mkdir(parents=True)
             log_path.touch()
             diffs_dir = Path(tmp) / "ws" / "hp_d"
+            meta_path = hp.progress_path_for_diffs_workspace(diffs_dir)
             self.assertEqual(
                 hp.progress_path_for_diff_log(log_path).name,
                 hp.CLI_PROGRESS_FILENAME,
             )
-            self.assertEqual(
-                hp.progress_path_for_diffs_workspace(diffs_dir).name,
-                hp.PROGRESS_FILENAME,
-            )
+            self.assertEqual(meta_path.name, hp.PROGRESS_FILENAME)
+            self.assertEqual(meta_path.parent.name, "hp_m")
 
 
 if __name__ == "__main__":
