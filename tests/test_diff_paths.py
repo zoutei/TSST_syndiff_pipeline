@@ -25,11 +25,17 @@ from syndiff_pipeline.difference_imaging.stages.photometry import (
     write_lightcurve_diagnostic_plot,
 )
 from syndiff_pipeline.difference_imaging.support.paths import (
+    KERNEL_RECONSTRUCTION_NPZ_BASENAME,
     MASTER_TESS_FFI_LINK,
     clear_diff_workspace,
     link_master_workspace,
     master_root,
+    meta_workspace_dir_from_diffs_dir,
+    meta_workspace_label,
     pipeline_plots_root,
+)
+from syndiff_pipeline.difference_imaging.stages.hotpants import (
+    kernel_reconstruction_npz_path,
 )
 
 
@@ -213,6 +219,29 @@ class TestLinkMasterWorkspace(unittest.TestCase):
             link = event_templates_symlink_path(out)
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), physical.resolve())
+
+
+class TestMetaWorkspaceLabel(unittest.TestCase):
+    def test_diffs_to_meta(self):
+        self.assertEqual(meta_workspace_label("hp_d"), "hp_m")
+        self.assertEqual(meta_workspace_label("ks_d"), "ks_m")
+
+    def test_non_d_suffix(self):
+        self.assertEqual(meta_workspace_label("diff_r1"), "diff_r1_m")
+
+    def test_kernel_reconstruction_under_meta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            diffs = os.path.join(tmp, "ws", "hp_d")
+            os.makedirs(diffs)
+            path = kernel_reconstruction_npz_path(diffs)
+            self.assertEqual(
+                path,
+                os.path.join(tmp, "ws", "hp_m", KERNEL_RECONSTRUCTION_NPZ_BASENAME),
+            )
+            self.assertEqual(
+                meta_workspace_dir_from_diffs_dir(diffs),
+                os.path.join(tmp, "ws", "hp_m"),
+            )
 
 
 if __name__ == "__main__":
