@@ -99,14 +99,13 @@ def _process_one_frame(task: tuple) -> dict:
                 f"FFI shape {ffi.shape} != convolved template {convolved.shape}"
             )
 
-        diff_alg = ffi - convolved
+        diff_raw = ffi - convolved
         phot_bkg = photutils_background_masked(
-            diff_alg, shared_mask, box_size=phot_box_size
+            diff_raw, shared_mask, box_size=phot_box_size
         )
-        diff_clean = diff_alg - phot_bkg
 
         header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
-        _write_image_fits(diff_out, diff_clean, header=header)
+        _write_image_fits(diff_out, diff_raw, header=header)
         if bkg_dir and bkg_label:
             bkg_stem = workspace_frame_stem(product_id, bkg_label)
             _write_image_fits(

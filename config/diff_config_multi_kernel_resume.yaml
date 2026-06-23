@@ -28,13 +28,13 @@ additional_forced_targets:
 pipeline:
   - workspace_inherit:
       from: single_hp_kernel
-      labels: [kd_b]
+      labels: [ks_b]
       root_artifacts:
         - shared_mask.fits
         - hotpants_substamp_stars.csv
   - kind: hotpants
     inputs:
-      bkg: kd_b
+      bkg: ks_b
     hp_sigma_gauss: [0.752, 1.88, 3.76]
     hp_ko: 2
     hp_bgo: 0
@@ -55,14 +55,14 @@ pipeline:
     write_stamps: false
     write_kernel_params: true
     output:
-      diffs: mk_d
-      convolved: mk_c
-      bkg: mk_b
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
   - kind: forced_photometry
     inputs:
-      diffs: mk_d
+      diffs: hp_d
     psf_type: prf
-    output: lc_prf_on_mk_diffs
+    output: lc_prf_on_hp_diffs
 
 condor:
   request_cpus: 8
