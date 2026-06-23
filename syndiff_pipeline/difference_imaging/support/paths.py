@@ -72,6 +72,22 @@ ADAPTIVE_BKG_STACK_BASENAME = "bkg_temp_smooth"
 BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits"
 
 PIPELINE_PLOTS_SUBDIR = "debug_plots"
+KERNEL_RECONSTRUCTION_NPZ_BASENAME = "kernel_reconstruction.npz"
+PHOT_CALIB_CSV_BASENAME = "phot_calib.csv"
+
+
+def meta_workspace_label(diffs_label: str) -> str:
+    """Meta workspace paired with a diffs label (``hp_d`` → ``hp_m``)."""
+    label = str(diffs_label).strip()
+    if label.endswith("_d"):
+        return label[:-2] + "_m"
+    return f"{label}_m"
+
+
+def meta_workspace_dir_from_diffs_dir(diffs_dir: str) -> str:
+    """Absolute path to meta workspace sibling of a diffs workspace directory."""
+    d = os.path.abspath(diffs_dir)
+    return os.path.join(os.path.dirname(d), meta_workspace_label(os.path.basename(d)))
 
 
 def normalize_workspace_run_id(run_id: str | None) -> str | None:
