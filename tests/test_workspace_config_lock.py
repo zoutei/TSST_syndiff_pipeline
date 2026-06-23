@@ -31,8 +31,10 @@ def _minimal_cfg(**kwargs) -> SynDiffConfig:
             {
                 "kind": "forced_photometry",
                 "inputs": {"diffs": "hp_d"},
-                "psf_type": "prf",
                 "output": "lc",
+                "methods": [
+                    {"name": "prf", "type": "psf", "psf_type": "prf"},
+                ],
             },
         ],
         sector=20,

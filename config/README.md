@@ -35,3 +35,38 @@ On submit, the orchestrator copies policy into the workspace:
 - `{workspace_root}/runs/{run_id}/per_target/{label}/diff_config.yaml` — frozen per-target diff
 
 See [docs/storage_layout.md](../docs/storage_layout.md).
+
+## `forced_photometry` methods
+
+The `forced_photometry` stage uses a **`methods`** list. Each entry has a unique
+`name` (slug `[a-z0-9_]+`) and `type` (`psf` or `aperture`). The stage writes one
+CSV per method per target under `ws/<output>/`.
+
+```yaml
+- kind: forced_photometry
+  inputs:
+    diffs: hp_d
+  output: lc_photometry
+  methods:
+    - name: prf
+      type: psf
+      psf_type: prf
+    - name: ap3
+      type: aperture
+      tar_ap: 3
+      sky_in: 5
+      sky_out: 9
+```
+
+**CSV names:** primary → `lightcurve_{name}.csv`; extra targets from
+`additional_forced_targets` → `lightcurve_{name}_{target}.csv`.
+
+**PSF columns:** `btjd`, `flux`, `eflux`, `filename`, `group_id`.
+
+**Aperture columns:** same metadata plus `flux` (raw sum with sky), `flux_wo_sky`
+(sky-subtracted, primary science column), `sky`, and `eflux` (uncertainty on
+`flux_wo_sky`). Defaults match TESSreduce `diff_lc`: `tar_ap=3`, `sky_in=5`,
+`sky_out=9`.
+
+Top-level `psf_type` is no longer supported; migrate existing configs to a
+`methods` entry with `type: psf`.

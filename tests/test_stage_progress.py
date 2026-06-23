@@ -166,7 +166,7 @@ class TestReadLogProgress(unittest.TestCase):
         photometry_cli = pp.progress_path_for_diff_log(log_path)
         self.assertNotEqual(hotpants_cli, photometry_cli)
 
-        ws_hp = self.log_dir / "ws" / "hp_d" / hp.PROGRESS_FILENAME
+        ws_hp = self.log_dir / "ws" / "hp_m" / hp.PROGRESS_FILENAME
         ws_phot = self.log_dir / "ws" / "lc_prf_on_diffs" / pp.PROGRESS_FILENAME
 
         hp.init_progress_pair(

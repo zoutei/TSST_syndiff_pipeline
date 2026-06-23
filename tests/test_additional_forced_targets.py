@@ -133,17 +133,27 @@ class TestForcedPhotometryLightcurvePlotPath(unittest.TestCase):
     def test_primary_lightcurve_png(self):
         pdir = "/event/debug_plots"
         lc = _forced_photometry_lightcurve_plot_path(
-            pdir, "lc_prf_on_diffs", None
-        )
-        self.assertEqual(lc, "/event/debug_plots/lightcurve_lc_prf_on_diffs.png")
-
-    def test_extra_gets_lightcurve_only(self):
-        pdir = "/event/debug_plots"
-        lc = _forced_photometry_lightcurve_plot_path(
-            pdir, "lc_prf_on_diffs", "offset_top"
+            pdir, "lc_prf_on_diffs", "prf", None
         )
         self.assertEqual(
-            lc, "/event/debug_plots/lightcurve_lc_prf_on_diffs_offset_top.png"
+            lc, "/event/debug_plots/lightcurve_lc_prf_on_diffs_prf.png"
+        )
+
+    def test_extra_gets_method_and_target_in_name(self):
+        pdir = "/event/debug_plots"
+        lc = _forced_photometry_lightcurve_plot_path(
+            pdir, "lc_prf_on_diffs", "prf", "offset_top"
+        )
+        self.assertEqual(
+            lc,
+            "/event/debug_plots/lightcurve_lc_prf_on_diffs_prf_offset_top.png",
+        )
+
+    def test_lightcurve_csv_basename_primary_and_extra(self):
+        self.assertEqual(ph.lightcurve_csv_basename("prf"), "lightcurve_prf.csv")
+        self.assertEqual(
+            ph.lightcurve_csv_basename("prf", "offset_top"),
+            "lightcurve_prf_offset_top.csv",
         )
 
 

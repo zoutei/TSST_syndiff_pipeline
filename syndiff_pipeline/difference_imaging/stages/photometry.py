@@ -43,6 +43,12 @@ from syndiff_pipeline.common.joblib_progress import (
     parallel_map_with_optional_tqdm,
     tqdm_iter,
 )
+from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+    AperturePhotometryMethodParams,
+    ForcedPhotometryParams,
+    PhotometryMethodSpec,
+    PsfPhotometryMethodParams,
+)
 from syndiff_pipeline.difference_imaging.stages.photometry_progress import (
     init_progress_pair,
     progress_path_for_diff_log,
@@ -51,6 +57,10 @@ from syndiff_pipeline.difference_imaging.stages.photometry_progress import (
     reset_epochs_done_pair,
     set_progress_phase_pair,
 )
+from syndiff_pipeline.difference_imaging.support.flux_calibration import (
+    apply_zp_calibration_if_available,
+)
+from scipy.ndimage import convolve as nd_convolve
 from scipy.ndimage import shift as nd_shift
 from scipy.signal import fftconvolve
 
@@ -68,6 +78,26 @@ class ForcedPhotTargetSpec:
     plot_source_label: str = "primary"
     plot_png_path: Optional[str] = None
     tag: str = "primary"
+
+
+def lightcurve_csv_basename(
+    method_name: str,
+    target_name: Optional[str] = None,
+    *,
+    csv_basename_override: Optional[str] = None,
+) -> str:
+    """Return ``lightcurve_{method}.csv`` or ``lightcurve_{method}_{target}.csv``."""
+    if csv_basename_override is not None:
+        bn = os.path.basename(str(csv_basename_override).strip())
+        if not bn or ".." in bn or bn != csv_basename_override:
+            raise ValueError(
+                f"csv_basename must be a plain basename, got {csv_basename_override!r}"
+            )
+        return bn
+    m = str(method_name).strip().lower()
+    if target_name:
+        return f"lightcurve_{m}_{str(target_name).strip()}.csv"
+    return f"lightcurve_{m}.csv"
 
 
 def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[np.ndarray]]:
@@ -560,6 +590,361 @@ def _extract_cutout(image: np.ndarray, x: float, y: float, size: int) -> np.ndar
     return cutout
 
 
+def _aperture_cutout_size(method: AperturePhotometryMethodParams) -> int:
+    if method.aperture_cutout_size is not None:
+        return int(method.aperture_cutout_size)
+    return int(method.sky_out) + 2
+
+
+def _build_aperture_masks(
+    shape: tuple[int, int],
+    center_y: int,
+    center_x: int,
+    tar_ap: int,
+    sky_in: int,
+    sky_out: int,
+) -> tuple[np.ndarray, np.ndarray, int]:
+    """Square target mask and sky annulus (TESSreduce ``diff_lc`` style)."""
+    ap_tar = np.zeros(shape, dtype=np.float64)
+    ap_sky = np.zeros(shape, dtype=np.float64)
+    ap_tar[center_y, center_x] = 1.0
+    ap_sky[center_y, center_x] = 1.0
+    ap_tar = nd_convolve(ap_tar, np.ones((tar_ap, tar_ap)))
+    ap_sky = (
+        nd_convolve(ap_sky, np.ones((sky_out, sky_out)))
+        - nd_convolve(ap_sky, np.ones((sky_in, sky_in)))
+    )
+    ap_sky[ap_sky == 0] = np.nan
+    n_tar = int(np.nansum(ap_tar > 0))
+    return ap_tar, ap_sky, n_tar
+
+
+def _aperture_sky_mask_from_ref(
+    ref_cutout: np.ndarray,
+    ap_sky: np.ndarray,
+    *,
+    sigma: float = 1.0,
+) -> Optional[np.ndarray]:
+    """Sigma-clip sky annulus on the reference cutout; return exclusion mask."""
+    from astropy.stats import sigma_clip
+
+    annulus = ref_cutout * ap_sky
+    clipped = sigma_clip(annulus, sigma=sigma, masked=True)
+    if not hasattr(clipped, "mask"):
+        return None
+    return np.asarray(clipped.mask, dtype=bool)
+
+
+def aperture_flux_on_cutout(
+    data: np.ndarray,
+    ap_tar: np.ndarray,
+    ap_sky: np.ndarray,
+    n_tar: int,
+    *,
+    sigma: Optional[np.ndarray] = None,
+    sky_mask: Optional[np.ndarray] = None,
+) -> tuple[float, float, float, float]:
+    """
+    Aperture photometry on one cutout.
+
+    Returns ``flux`` (raw sum with sky), ``sky``, ``flux_wo_sky``, ``eflux``.
+  ``eflux`` is the uncertainty on ``flux_wo_sky``.
+    """
+    from astropy.stats import sigma_clipped_stats
+
+    annulus = data * ap_sky
+    if sky_mask is not None:
+        annulus = annulus.copy()
+        annulus[sky_mask] = np.nan
+    _, sky_med, sky_std = sigma_clipped_stats(annulus)
+    flux = float(np.nansum(data * ap_tar))
+    sky = float(sky_med) * n_tar
+    flux_wo_sky = flux - sky
+    if sigma is not None and sigma.shape == data.shape:
+        eflux = float(np.sqrt(np.nansum((sigma * ap_tar) ** 2)))
+    else:
+        eflux = float(sky_std) * n_tar
+    return flux, sky, flux_wo_sky, eflux
+
+
+def _forced_aperture_epoch_worker(
+    task: tuple,
+) -> tuple[int, list[dict], list[Optional[np.ndarray]]]:
+    """Per-epoch aperture flux for all sources (shared FITS read)."""
+    (
+        i,
+        path,
+        btjd,
+        gid,
+        cut_size,
+        per_source,
+        filename,
+    ) = task
+    n_src = len(per_source)
+    nan_rec = {
+        "btjd": btjd,
+        "flux": np.nan,
+        "flux_wo_sky": np.nan,
+        "sky": np.nan,
+        "eflux": np.nan,
+        "filename": filename,
+        "group_id": gid,
+    }
+    if path is None or not os.path.exists(str(path)):
+        return i, [dict(nan_rec) for _ in range(n_src)], [None] * n_src
+
+    try:
+        data_full, sigma_full = read_diff_primary_and_noise_sigma(str(path))
+    except Exception:
+        return i, [dict(nan_rec) for _ in range(n_src)], [None] * n_src
+
+    recs: list[dict] = []
+    cuts: list[Optional[np.ndarray]] = []
+    for tx, ty, ap_tar, ap_sky, n_tar, sky_mask in per_source:
+        if not (np.isfinite(tx) and np.isfinite(ty)):
+            recs.append(dict(nan_rec))
+            cuts.append(None)
+            continue
+        cut = _extract_cutout(data_full, tx, ty, cut_size)
+        sigma_cut = None
+        if sigma_full is not None:
+            sigma_cut = _extract_cutout(sigma_full, tx, ty, cut_size)
+        try:
+            flux, sky, flux_wo_sky, eflux = aperture_flux_on_cutout(
+                cut,
+                ap_tar,
+                ap_sky,
+                n_tar,
+                sigma=sigma_cut,
+                sky_mask=sky_mask,
+            )
+        except Exception:
+            recs.append(dict(nan_rec))
+            cuts.append(cut)
+            continue
+        recs.append(
+            {
+                "btjd": btjd,
+                "flux": flux,
+                "flux_wo_sky": flux_wo_sky,
+                "sky": sky,
+                "eflux": eflux,
+                "filename": filename,
+                "group_id": gid,
+            }
+        )
+        cuts.append(cut)
+    return i, recs, cuts
+
+
+def _run_aperture_photometry_multi(
+    diff_paths: list,
+    targets: List[ForcedPhotTargetSpec],
+    method: AperturePhotometryMethodParams,
+    wcs_table: pd.DataFrame,
+    cfg,
+    output_dir: str,
+    *,
+    ref_frame_index: Optional[int] = None,
+    plot_title_suffix: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_input: Optional[str] = None,
+    diff_log_path: Optional[str] = None,
+    diffs_dir: Optional[str] = None,
+) -> List[pd.DataFrame]:
+    """Aperture forced photometry for multiple sources (one FITS read per epoch)."""
+    if not targets:
+        raise ValueError("_run_aperture_photometry_multi: targets list is empty")
+
+    n_epochs = len(diff_paths)
+    n_src = len(targets)
+    cut_size = _aperture_cutout_size(method)
+    half = cut_size // 2
+    tar_ap = int(method.tar_ap)
+    sky_in = int(method.sky_in)
+    sky_out = int(method.sky_out)
+
+    for spec in targets:
+        txy = np.asarray(spec.target_xy, dtype=np.float64)
+        if txy.ndim != 2 or txy.shape[1] != 2:
+            raise ValueError(f"target_xy must have shape (n_epochs, 2) for {spec.tag!r}")
+        if txy.shape[0] != n_epochs:
+            raise ValueError(
+                f"target {spec.tag!r}: target_xy length {txy.shape[0]} != "
+                f"len(diff_paths) {n_epochs}"
+            )
+
+    ap_masks: list[tuple[np.ndarray, np.ndarray, int]] = []
+    sky_masks: list[Optional[np.ndarray]] = []
+    ri = ref_frame_index
+    for spec in targets:
+        ap_tar, ap_sky, n_tar = _build_aperture_masks(
+            (cut_size, cut_size), half, half, tar_ap, sky_in, sky_out
+        )
+        ap_masks.append((ap_tar, ap_sky, n_tar))
+        sky_masks.append(None)
+
+    if ri is not None and 0 <= ri < n_epochs:
+        path_ref = diff_paths[ri]
+        if path_ref is not None and os.path.exists(str(path_ref)):
+            try:
+                data_ref, _ = read_diff_primary_and_noise_sigma(str(path_ref))
+                for s, spec in enumerate(targets):
+                    txy = np.asarray(spec.target_xy, dtype=np.float64)
+                    tx_i, ty_i = float(txy[ri, 0]), float(txy[ri, 1])
+                    if not (np.isfinite(tx_i) and np.isfinite(ty_i)):
+                        continue
+                    ref_cut = _extract_cutout(data_ref, tx_i, ty_i, cut_size)
+                    _, ap_sky, _ = ap_masks[s]
+                    sky_masks[s] = _aperture_sky_mask_from_ref(ref_cut, ap_sky)
+            except Exception as exc:
+                log.warning(
+                    "  aperture photometry: ref-frame sky mask failed: %s", exc
+                )
+
+    n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
+    parallel = n_jobs != 1 and n_epochs > 1
+
+    cli_progress_path = (
+        str(progress_path_for_diff_log(diff_log_path))
+        if diff_log_path is not None
+        else None
+    )
+    track_progress = output_label is not None
+    workspace_progress_path: Optional[str] = None
+    if track_progress:
+        workspace_progress_path = str(progress_path_for_output_workspace(output_dir))
+        init_progress_pair(
+            workspace_progress_path,
+            cli_progress_path,
+            output_label=str(output_label),
+            diffs_input=str(diffs_input or ""),
+            n_sources=n_src,
+            epochs_total=n_epochs,
+            phase="flux",
+        )
+    tqdm_base = f"aperture {method.name} {output_label}" if track_progress else "aperture"
+
+    def _record_epoch() -> None:
+        if workspace_progress_path:
+            record_epoch_progress(workspace_progress_path, cli_progress_path)
+
+    btjd_col = (
+        wcs_table["btjd"].values
+        if "btjd" in wcs_table.columns
+        else np.full(n_epochs, np.nan)
+    )
+    gid_col = (
+        wcs_table["group_id"].values
+        if "group_id" in wcs_table.columns
+        else np.zeros(n_epochs, int)
+    )
+
+    records_cols: list[list[Optional[dict]]] = [[None] * n_epochs for _ in range(n_src)]
+    flux_tasks = []
+    for i, path in enumerate(diff_paths):
+        btjd = float(btjd_col[i]) if i < len(btjd_col) else float(np.nan)
+        gid = int(gid_col[i]) if i < len(gid_col) else -1
+        per_source = tuple(
+            (
+                float(np.asarray(targets[s].target_xy, dtype=np.float64)[i, 0]),
+                float(np.asarray(targets[s].target_xy, dtype=np.float64)[i, 1]),
+                ap_masks[s][0],
+                ap_masks[s][1],
+                ap_masks[s][2],
+                sky_masks[s],
+            )
+            for s in range(n_src)
+        )
+        flux_tasks.append(
+            (
+                i,
+                path,
+                btjd,
+                gid,
+                cut_size,
+                per_source,
+                str(path) if path else "",
+            )
+        )
+
+    if not parallel:
+        for t in tqdm_iter(flux_tasks, desc=tqdm_base):
+            i, recs, _cuts = _forced_aperture_epoch_worker(t)
+            for s, rec in enumerate(recs):
+                records_cols[s][i] = rec
+            _record_epoch()
+    else:
+        log.info(
+            "  aperture photometry [%s]: n_jobs=%s, %d epochs, %d sources",
+            method.name,
+            n_jobs,
+            n_epochs,
+            n_src,
+        )
+        flux_results = parallel_map_with_optional_tqdm(
+            (delayed(_forced_aperture_epoch_worker)(t) for t in flux_tasks),
+            n_tasks=n_epochs,
+            desc=tqdm_base,
+            n_jobs_eff=n_jobs,
+            on_result=lambda _r: _record_epoch(),
+        )
+        flux_results.sort(key=lambda r: r[0])
+        for i, recs, _cuts in flux_results:
+            for s, rec in enumerate(recs):
+                records_cols[s][i] = rec
+
+    if track_progress:
+        set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
+
+    os.makedirs(output_dir, exist_ok=True)
+    out_dfs: List[pd.DataFrame] = []
+    plot_on = getattr(cfg, "pipeline_plots", False)
+    dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+    base_title = (
+        f"Sector {cfg.sector} cam{cfg.camera} ccd{cfg.ccd} · "
+        f"aperture {method.name}"
+    )
+
+    for s, spec in enumerate(targets):
+        rec_list = records_cols[s]
+        assert all(r is not None for r in rec_list)
+        lc_df = pd.DataFrame(rec_list)
+        lc_df = apply_zp_calibration_if_available(
+            lc_df,
+            diffs_dir,
+            flux_col="flux_wo_sky",
+            eflux_col="eflux",
+        )
+        out_path = os.path.join(output_dir, spec.csv_basename)
+        lc_df.to_csv(out_path, index=False)
+        log.info(
+            "Light curve saved to %s  (%d epochs) [%s · %s]",
+            out_path,
+            len(lc_df),
+            method.name,
+            spec.tag,
+        )
+        if plot_on:
+            parts = [base_title]
+            if spec.plot_source_label:
+                parts.append(str(spec.plot_source_label))
+            if plot_title_suffix:
+                parts.append(str(plot_title_suffix))
+            title = " · ".join(parts)
+            write_lightcurve_diagnostic_plot(
+                lc_df,
+                output_dir,
+                dpi=dpi,
+                title_line=title,
+                png_path=spec.plot_png_path,
+                flux_column="flux_wo_sky",
+            )
+        out_dfs.append(lc_df)
+
+    return out_dfs
+
+
 def _locator_bundle_for_parallel(prf_or_epsf, phot, cfg, crop_bounds, target_x, target_y):
     """
     Picklable description of the PSF locator for joblib workers.
@@ -969,6 +1354,7 @@ def write_lightcurve_diagnostic_plot(
     bin_sigma: float = 3.0,
     zoom_ylim_pad_frac: float = 0.08,
     png_path: Optional[str] = None,
+    flux_column: str = "flux",
 ) -> Optional[str]:
     """
     Write ``lightcurve_control.png``: BTJD vs flux with ``eflux`` error bars on
@@ -984,18 +1370,18 @@ def write_lightcurve_diagnostic_plot(
         )
         return None
 
-    need = ("btjd", "flux", "eflux")
+    need = ("btjd", flux_column, "eflux")
     if not all(c in lc_df.columns for c in need):
         log.warning(
             "pipeline_plots: light curve missing required columns %s; skip plot.", need
         )
         return None
 
-    ok = lc_df["flux"].notna() & lc_df["btjd"].notna()
+    ok = lc_df[flux_column].notna() & lc_df["btjd"].notna()
     n = int(ok.sum())
     if ok.any():
         x = lc_df.loc[ok, "btjd"].to_numpy(dtype=float)
-        y = lc_df.loc[ok, "flux"].to_numpy(dtype=float)
+        y = lc_df.loc[ok, flux_column].to_numpy(dtype=float)
         yerr = lc_df.loc[ok, "eflux"].to_numpy(dtype=float)
         order = np.argsort(x)
         xs = x[order]
@@ -1142,6 +1528,7 @@ def _run_forced_photometry_single(
     output_label: Optional[str] = None,
     diffs_input: Optional[str] = None,
     diff_log_path: Optional[str] = None,
+    diffs_dir: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Original single-target path: one FITS read per epoch during cutouts, then
@@ -1422,6 +1809,7 @@ def _run_forced_photometry_single(
         set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
 
     lc_df = pd.DataFrame(records)
+    lc_df = apply_zp_calibration_if_available(lc_df, diffs_dir)
 
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, csv_name)
@@ -1467,6 +1855,7 @@ def run_forced_photometry_multi(
     output_label: Optional[str] = None,
     diffs_input: Optional[str] = None,
     diff_log_path: Optional[str] = None,
+    diffs_dir: Optional[str] = None,
 ) -> List[pd.DataFrame]:
     """
     Forced PSF photometry for **multiple** sources sharing the same difference-image list.
@@ -1504,6 +1893,7 @@ def run_forced_photometry_multi(
                 output_label=output_label,
                 diffs_input=diffs_input,
                 diff_log_path=diff_log_path,
+                diffs_dir=diffs_dir,
             )
         ]
 
@@ -1834,6 +2224,7 @@ def run_forced_photometry_multi(
         rec_list = records_cols[s]
         assert all(r is not None for r in rec_list)
         lc_df = pd.DataFrame(rec_list)
+        lc_df = apply_zp_calibration_if_available(lc_df, diffs_dir)
         out_path = os.path.join(output_dir, spec.csv_basename)
         lc_df.to_csv(out_path, index=False)
         log.info(
@@ -1903,3 +2294,110 @@ def run_forced_photometry(
         plot_source_label=plot_source_label,
         lightcurve_csv_filename=lightcurve_csv_filename,
     )
+
+
+def run_forced_photometry_stage(
+    diff_paths: list,
+    target_specs: list[tuple[np.ndarray, Optional[str], str, dict]],
+    phot_stage: ForcedPhotometryParams,
+    epsf_by_workspace: dict[str, np.ndarray],
+    stage_epsf_workspace: Optional[str],
+    tile_centers: list,
+    wcs_table: pd.DataFrame,
+    crop_bounds: dict,
+    cfg,
+    output_dir: str,
+    *,
+    ref_frame_index: Optional[int] = None,
+    plot_title_suffix: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_input: Optional[str] = None,
+    diff_log_path: Optional[str] = None,
+    plot_path_fn=None,
+    diffs_dir: Optional[str] = None,
+) -> dict[str, List[pd.DataFrame]]:
+    """
+    Run every configured forced-photometry method (PSF and/or aperture).
+
+    ``target_specs`` entries are ``(target_xy, extra_name, tag, pt_dict)`` where
+    ``extra_name`` is ``None`` for the primary target.
+    """
+    results: dict[str, List[pd.DataFrame]] = {}
+    for method in phot_stage.methods:
+        phot_targets: list[ForcedPhotTargetSpec] = []
+        for target_xy, extra_name, tag, pt in target_specs:
+            csv_fname = lightcurve_csv_basename(
+                method.name,
+                extra_name,
+                csv_basename_override=getattr(method, "csv_basename", None),
+            )
+            lc_name = extra_name or "primary"
+            lc_plot_path = None
+            if getattr(cfg, "pipeline_plots", False) and plot_path_fn is not None:
+                lc_plot_path = plot_path_fn(method.name, extra_name)
+            phot_targets.append(
+                ForcedPhotTargetSpec(
+                    target_xy=target_xy,
+                    csv_basename=csv_fname,
+                    plot_source_label=lc_name,
+                    plot_png_path=lc_plot_path,
+                    tag=tag,
+                )
+            )
+
+        if isinstance(method, PsfPhotometryMethodParams):
+            epsf_ws = method.epsf_workspace or stage_epsf_workspace
+            if method.psf_type == "prf":
+                over_size = 2 * method.psf_size + 1
+                n_tiles = len(tile_centers) if tile_centers else (
+                    method.tile_ny * method.tile_nx
+                )
+                epsf_for_phot = np.zeros((n_tiles, over_size**2))
+            else:
+                if not epsf_ws:
+                    raise ValueError(
+                        f"forced_photometry method {method.name!r}: psf_type 'epsf' "
+                        "requires inputs.epsf or per-method inputs.epsf"
+                    )
+                if epsf_ws not in epsf_by_workspace:
+                    raise ValueError(
+                        f"forced_photometry method {method.name!r}: ePSF workspace "
+                        f"{epsf_ws!r} not loaded"
+                    )
+                epsf_for_phot = epsf_by_workspace[epsf_ws]
+            dfs = run_forced_photometry_multi(
+                diff_paths=diff_paths,
+                targets=phot_targets,
+                epsf_r2_smooth=epsf_for_phot,
+                tile_centers=tile_centers,
+                wcs_table=wcs_table,
+                crop_bounds=crop_bounds,
+                cfg=cfg,
+                phot=method,
+                output_dir=output_dir,
+                ref_frame_index=ref_frame_index,
+                plot_title_suffix=plot_title_suffix,
+                output_label=output_label,
+                diffs_input=diffs_input,
+                diff_log_path=diff_log_path,
+                diffs_dir=diffs_dir,
+            )
+        elif isinstance(method, AperturePhotometryMethodParams):
+            dfs = _run_aperture_photometry_multi(
+                diff_paths=diff_paths,
+                targets=phot_targets,
+                method=method,
+                wcs_table=wcs_table,
+                cfg=cfg,
+                output_dir=output_dir,
+                ref_frame_index=ref_frame_index,
+                plot_title_suffix=plot_title_suffix,
+                output_label=output_label,
+                diffs_input=diffs_input,
+                diff_log_path=diff_log_path,
+                diffs_dir=diffs_dir,
+            )
+        else:
+            raise TypeError(f"unknown photometry method type: {type(method)!r}")
+        results[method.name] = dfs
+    return results

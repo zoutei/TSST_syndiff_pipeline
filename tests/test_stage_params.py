@@ -36,6 +36,7 @@ class TestStageParams(unittest.TestCase):
         )
         self.assertEqual(hp.sci_fwhm, 1.88)
         self.assertEqual(hp.hp_ko, 2)
+        self.assertEqual(hp.hp_normalize, "t")
 
     def test_hotpants_override(self):
         hp = parse_hotpants(
@@ -83,7 +84,6 @@ class TestStageParams(unittest.TestCase):
         self.assertTrue(hp.write_convolved)
         self.assertTrue(hp.write_bkg)
         self.assertTrue(hp.write_stamps)
-        self.assertTrue(hp.write_kernel_params)
 
     def test_hotpants_write_flags_override(self):
         hp = parse_hotpants(
@@ -94,14 +94,12 @@ class TestStageParams(unittest.TestCase):
                 "write_convolved": False,
                 "write_bkg": False,
                 "write_stamps": False,
-                "write_kernel_params": False,
             },
             0,
         )
         self.assertFalse(hp.write_convolved)
         self.assertFalse(hp.write_bkg)
         self.assertFalse(hp.write_stamps)
-        self.assertFalse(hp.write_kernel_params)
 
     def test_background_rough_bkg_source_hunt(self):
         sp = parse_background_rough(
@@ -115,26 +113,69 @@ class TestStageParams(unittest.TestCase):
         )
         self.assertFalse(sp.bkg_source_hunt)
 
-    def test_forced_photometry_requires_psf_type(self):
+    def test_forced_photometry_requires_methods(self):
         with self.assertRaises(ValueError):
             parse_forced_photometry(
                 {"kind": "forced_photometry", "inputs": {"diffs": "x"}, "output": "y"},
                 0,
             )
 
-    def test_forced_photometry_epsf(self):
+    def test_forced_photometry_rejects_legacy_psf_type(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_forced_photometry(
+                {
+                    "kind": "forced_photometry",
+                    "inputs": {"diffs": "x", "epsf": "e"},
+                    "output": "y",
+                    "psf_type": "epsf",
+                },
+                0,
+            )
+        self.assertIn("methods", str(ctx.exception))
+
+    def test_forced_photometry_multi_method(self):
         p = parse_forced_photometry(
             {
                 "kind": "forced_photometry",
                 "inputs": {"diffs": "x", "epsf": "e"},
                 "output": "y",
-                "psf_type": "epsf",
-                "phot_snap": "ref",
+                "methods": [
+                    {
+                        "name": "epsf",
+                        "type": "psf",
+                        "psf_type": "epsf",
+                        "phot_snap": "ref",
+                    },
+                    {
+                        "name": "ap3",
+                        "type": "aperture",
+                        "tar_ap": 3,
+                    },
+                ],
             },
             0,
         )
-        self.assertEqual(p.psf_type, "epsf")
-        self.assertEqual(p.phot_snap, "ref")
+        self.assertEqual(len(p.methods), 2)
+        self.assertEqual(p.methods[0].name, "epsf")
+        self.assertEqual(p.methods[0].psf_type, "epsf")
+        self.assertEqual(p.methods[0].phot_snap, "ref")
+        self.assertEqual(p.methods[1].name, "ap3")
+        self.assertEqual(p.methods[1].tar_ap, 3)
+
+    def test_forced_photometry_duplicate_method_name_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_forced_photometry(
+                {
+                    "kind": "forced_photometry",
+                    "inputs": {"diffs": "x"},
+                    "output": "y",
+                    "methods": [
+                        {"name": "prf", "type": "psf", "psf_type": "prf"},
+                        {"name": "prf", "type": "aperture"},
+                    ],
+                },
+                0,
+            )
 
 
 if __name__ == "__main__":

@@ -53,7 +53,6 @@ pipeline:
     write_convolved: false
     write_bkg: true
     write_stamps: false
-    write_kernel_params: true
     output:
       diffs: hp_d
       convolved: hp_c
@@ -61,8 +60,16 @@ pipeline:
   - kind: forced_photometry
     inputs:
       diffs: hp_d
-    psf_type: prf
     output: lc_prf_on_hp_diffs
+    methods:
+      - name: prf
+        type: psf
+        psf_type: prf
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
 
 condor:
   request_cpus: 8
