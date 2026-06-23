@@ -1058,6 +1058,20 @@ stages to `external` for artifact re-verification (not `pending`). See
 [`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md) for the
 full state-machine matrix.
 
+#### `launch`
+
+**Purpose**: Force-launch one stage immediately, bypassing resource-pool `max_concurrent` limits. Use when a stage is `ready` but blocked by another job in the same pool (e.g. `tess_dl` holding the `network` slot while `ps1_download` waits).
+
+```bash
+syndiff launch --site config --run-id test_multi_hp_temp_calib_20260623 \
+  --target s0024_c1_k2_2020ghq --stage ps1_download
+```
+
+- Requires `--target` (or `--scc`) and `--stage` (full internal name, e.g. `ps1_download`)
+- Adds an **extra** concurrent job beyond the pool limit; does not stop the job currently holding the slot
+- Works even when the run is paused
+- `--no-start-daemon` — queue intent without waking the supervisor
+
 #### `pause`
 
 **Purpose**: Stop launching new stages for this run (in-flight workers continue until done).
