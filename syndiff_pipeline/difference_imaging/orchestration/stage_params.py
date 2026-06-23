@@ -66,6 +66,7 @@ HOTPANTS_ALLOWED = frozenset(
         "output",
         "science",
         "sci_fwhm",
+        "hp_sigma_gauss",
         "hp_ko",
         "hp_bgo",
         "hp_nstampx",
@@ -189,7 +190,8 @@ class SharedMaskParams:
 
 @dataclass
 class HotpantsParams:
-    sci_fwhm: float = 1.0
+    sci_fwhm: float = 1.88
+    hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
     hp_bgo: int = 3
     hp_nstampx: int = 10

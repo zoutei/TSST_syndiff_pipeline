@@ -244,18 +244,49 @@ def kernel_params_dir(diff_dir: str) -> str:
     return os.path.join(parent, f"{base}_kernel_params")
 
 
+def _kernel_scale_pixels(hp: HotpantsParams) -> float:
+    """
+    Pixel scale for ``rkernel`` / ``rss`` (= ``int(2.5 * scale)``).
+
+    When ``hp_sigma_gauss`` is set, uses the middle component (FWHM-scale).
+    Otherwise falls back to ``sci_fwhm``.
+    """
+    if hp.hp_sigma_gauss:
+        sigma = [float(s) for s in hp.hp_sigma_gauss]
+        if len(sigma) >= 2:
+            return sigma[1]
+        return sigma[0]
+    return float(hp.sci_fwhm)
+
+
+def _resolved_sigma_gauss(hp: HotpantsParams) -> list[float]:
+    """Gaussian sigmas for Hotpants kernel basis (length ``hp_ngauss``)."""
+    ngauss = max(1, int(hp.hp_ngauss))
+    deg_full = [int(d) for d in list(hp.hp_deg_fixe)]
+    n = min(ngauss, len(deg_full))
+    if hp.hp_sigma_gauss is not None:
+        sigma = [float(s) for s in hp.hp_sigma_gauss]
+        if len(sigma) < n:
+            raise ValueError(
+                f"hp_sigma_gauss has {len(sigma)} value(s) but hp_ngauss={ngauss} "
+                f"and hp_deg_fixe need at least {n}"
+            )
+        return sigma[:n]
+    fwhm = float(hp.sci_fwhm)
+    sigma_full = [fwhm / 2.5, fwhm, fwhm * 2]
+    return sigma_full[:n]
+
+
 def _kernel_sigma_deg_for_basis(hp: HotpantsParams) -> tuple[int, list[float], list[int], int]:
     """
     Match :func:`build_hotpants_config`: ``rkernel``, truncated ``sigma_gauss`` /
     ``deg_fixe`` to ``hp_ngauss`` (same convention as ``HotpantsConfig``).
     """
-    sci_fwhm = float(hp.sci_fwhm)
-    rkernel = int(2.5 * sci_fwhm)
+    rkernel = int(2.5 * _kernel_scale_pixels(hp))
+    sigma_gauss = _resolved_sigma_gauss(hp)
+    deg_fixe = [int(d) for d in list(hp.hp_deg_fixe)][: len(sigma_gauss)]
     ngauss = max(1, int(hp.hp_ngauss))
-    sigma_full = [sci_fwhm / 2.5, sci_fwhm, sci_fwhm * 2]
-    deg_full = [int(d) for d in list(hp.hp_deg_fixe)]
-    n = min(ngauss, len(sigma_full), len(deg_full))
-    return rkernel, sigma_full[:n], deg_full[:n], ngauss
+    return rkernel, sigma_gauss, deg_fixe, ngauss
 
 
 def _calculate_kernel_basis(
@@ -332,7 +363,7 @@ def write_kernel_reconstruction_npz(hp: HotpantsParams, path: str) -> bool:
     except Exception as exc:
         log.error("_calculate_kernel_basis failed; skip %s: %s", path, exc)
         return False
-    rss = int(2.5 * float(hp.sci_fwhm))
+    rss = int(2.5 * _kernel_scale_pixels(hp))
     meta: dict[str, Any] = {
         "basis": basis,
         "rkernel": np.int32(rkernel),
@@ -344,7 +375,7 @@ def write_kernel_reconstruction_npz(hp: HotpantsParams, path: str) -> bool:
         "nss": np.int32(hp.hp_nss),
         "ngauss": np.int32(hp.hp_ngauss),
         "n_basis": np.int32(basis.shape[0]),
-        "sci_fwhm": np.float64(hp.sci_fwhm),
+        "sci_fwhm": np.float64(_kernel_scale_pixels(hp)),
         "sigma_gauss": np.asarray(sigma_gauss, dtype=np.float64),
         "deg_fixe": np.asarray(deg_fixe, dtype=np.int32),
         "hp_normalize": np.array(str(hp.hp_normalize)),
@@ -463,7 +494,6 @@ def _get_hotpants_classes():
 
 
 def build_hotpants_config(
-    sci_fwhm: float,
     hp: HotpantsParams,
     diff_dir: str,
     convolved_dir: str,
@@ -474,8 +504,9 @@ def build_hotpants_config(
 ):
     _, HotpantsConfig = _get_hotpants_classes()
 
-    kernel_halfwidth = int(2.5 * sci_fwhm)
-    substamp_halfwidth = int(2.5 * sci_fwhm)
+    rkernel, sigma_gauss, deg_fixe, ngauss = _kernel_sigma_deg_for_basis(hp)
+    kernel_halfwidth = rkernel
+    substamp_halfwidth = int(2.5 * _kernel_scale_pixels(hp))
 
     os.makedirs(diff_dir, exist_ok=True)
     os.makedirs(convolved_dir, exist_ok=True)
@@ -493,12 +524,12 @@ def build_hotpants_config(
         nstampy=int(hp.hp_nstampy),
         nss=int(hp.hp_nss),
         rss=int(substamp_halfwidth),
-        ngauss=int(hp.hp_ngauss),
-        deg_fixe=[int(d) for d in hp.hp_deg_fixe],
-        sigma_gauss=[float(sci_fwhm / 2.5), float(sci_fwhm), float(sci_fwhm * 2)],
+        ngauss=int(ngauss),
+        deg_fixe=[int(d) for d in deg_fixe],
+        sigma_gauss=[float(s) for s in sigma_gauss],
         kf_spread_mask1=float(hp.hp_kf_spread_mask1) if getattr(hp, 'hp_kf_spread_mask1', None) is not None else 1.0,
-        ks=int(hp.hp_ks) if getattr(hp, 'hp_ks', None) is not None else 0,
-        kfm=int(hp.hp_kfm) if getattr(hp, 'hp_kfm', None) is not None else 0,
+        ks=float(hp.hp_ks) if getattr(hp, "hp_ks", None) is not None else 0.0,
+        kfm=float(hp.hp_kfm) if getattr(hp, "hp_kfm", None) is not None else 0.0,
         fitthresh=float(hp.hp_fitthresh) if getattr(hp, 'hp_fitthresh', None) is not None else 500,
         stat_sig=float(hp.hp_stat_sig) if getattr(hp, 'hp_stat_sig', None) is not None else 3.0,
         force_convolve=str(hp.hp_force_convolve),
@@ -732,7 +763,6 @@ def _process_one_frame(
     diff_out_path = os.path.join(dirs.diffs, f"{diff_stem}.fits")
     conv_out_path = os.path.join(dirs.convolved, f"{diff_stem}.fits")
     hp_config = build_hotpants_config(
-        sci_fwhm=hp.sci_fwhm,
         hp=hp,
         diff_dir=dirs.diffs,
         convolved_dir=dirs.convolved,

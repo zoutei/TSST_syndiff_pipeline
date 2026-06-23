@@ -56,6 +56,21 @@ def manifest_csv_exists(output_dir: str, manifest_path: str | None = None) -> bo
     return os.path.isfile(manifest_path_from_output_dir(output_dir, manifest_path))
 
 
+def _ensure_manifest_text_column(
+    df: pd.DataFrame, col: str, *, default: str = ""
+) -> None:
+    """Ensure *col* can hold per-frame status strings (CSV reload may infer float)."""
+    if col not in df.columns:
+        df[col] = default
+        return
+    series = df[col]
+    if pd.api.types.is_string_dtype(series) or series.dtype == object:
+        return
+    df[col] = series.map(
+        lambda v: default if pd.isna(v) or v == "" else str(v)
+    )
+
+
 def _ensure_hotpants_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
     df = df.copy()
     cols = (
@@ -66,12 +81,14 @@ def _ensure_hotpants_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
     for c, init in cols:
         if c not in df.columns:
             df[c] = init
+        elif c.endswith("_error") or c.endswith("_path"):
+            _ensure_manifest_text_column(df, c)
     return df
 
 
 def _ensure_hotpants_label_columns(df: pd.DataFrame, label: str) -> pd.DataFrame:
     df = df.copy()
-    safe = str(label).replace(" ", "_")
+    safe = sanitize_workspace_label(label)
     for c, init in (
         (f"hotpants_{safe}_ok", pd.NA),
         (f"hotpants_{safe}_error", ""),
@@ -79,6 +96,8 @@ def _ensure_hotpants_label_columns(df: pd.DataFrame, label: str) -> pd.DataFrame
     ):
         if c not in df.columns:
             df[c] = init
+        elif c.endswith("_error") or c.endswith("_path"):
+            _ensure_manifest_text_column(df, c)
     return df
 
 
@@ -90,6 +109,8 @@ def _ensure_epsf_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
     ):
         if c not in df.columns:
             df[c] = init
+        elif c.endswith("_error"):
+            _ensure_manifest_text_column(df, c)
     return df
 
 
