@@ -658,8 +658,17 @@ def build_prf_kernel_for_par_psf_source_mask(cfg, crop_bounds: dict, ref_ffi_pat
     tx, ty = get_target_pixel_crop(ref_wcs, float(ra), float(dec), crop_bounds)
     col_ffi = float(tx + crop_bounds["x_min"])
     row_ffi = float(ty + crop_bounds["y_min"])
+    from syndiff_pipeline.difference_imaging.stages.photometry import (
+        resolve_tess_prf_localdatadir,
+    )
+
     prf_obj = TESS_PRF(
-        int(cfg.camera), int(cfg.ccd), int(cfg.sector), col_ffi, row_ffi
+        int(cfg.camera),
+        int(cfg.ccd),
+        int(cfg.sector),
+        col_ffi,
+        row_ffi,
+        localdatadir=resolve_tess_prf_localdatadir(cfg),
     )
     return np.asarray(prf_obj.locate(5, 5, (11, 11)), dtype=np.float64)
 
