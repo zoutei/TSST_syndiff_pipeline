@@ -47,7 +47,7 @@ pipeline:
     hp_fitthresh: 5.0
     hp_stat_sig: 3.0
     hp_force_convolve: "t"
-    hp_normalize: "i"
+    hp_normalize: "t"
     write_kernel_params: true
   - kind: convolved_templates
     inputs:

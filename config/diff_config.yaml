@@ -46,7 +46,7 @@ pipeline:
     hp_fitthresh: 5.0
     hp_stat_sig: 3.0
     hp_force_convolve: "t"
-    hp_normalize: "i"
+    hp_normalize: "t"
     output:
       diffs: hp_d
       convolved: hp_c
