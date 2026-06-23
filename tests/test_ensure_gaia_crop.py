@@ -79,6 +79,41 @@ class TestEnsureGaiaCropXy(unittest.TestCase):
             self.assertLess(float(out.iloc[0]["x"]), nx)
             self.assertLess(float(out.iloc[0]["y"]), ny)
 
+    def test_force_reproject_prefers_x_ffi_over_stale_xy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ref_path = f"{tmp}/ref_ffi.fits"
+            hdr = _write_ref_ffi(ref_path, nx=2048, ny=2048)
+            crop_bounds = {
+                "x_min": 100,
+                "x_max": 612,
+                "y_min": 200,
+                "y_max": 712,
+                "shape": (512, 512),
+            }
+
+            gaia_df = pd.DataFrame(
+                {
+                    "source_id": [12345],
+                    "x": [10.0],
+                    "y": [20.0],
+                    "x_ffi": [350.0],
+                    "y_ffi": [450.0],
+                }
+            )
+
+            trusted = wcs_grouping.ensure_gaia_crop_xy(
+                gaia_df, ref_path, crop_bounds, force_reproject=False
+            )
+            self.assertAlmostEqual(float(trusted.iloc[0]["x"]), 10.0)
+            self.assertAlmostEqual(float(trusted.iloc[0]["y"]), 20.0)
+
+            out = wcs_grouping.ensure_gaia_crop_xy(
+                gaia_df, ref_path, crop_bounds, force_reproject=True
+            )
+            self.assertEqual(len(out), 1)
+            self.assertAlmostEqual(float(out.iloc[0]["x"]), 250.0)
+            self.assertAlmostEqual(float(out.iloc[0]["y"]), 250.0)
+
 
 if __name__ == "__main__":
     unittest.main()

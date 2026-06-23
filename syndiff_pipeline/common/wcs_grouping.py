@@ -1502,6 +1502,7 @@ def ensure_gaia_crop_xy(
     ra_col: str = "ra",
     dec_col: str = "dec",
     xy_in_crop_fraction_min: float = 0.5,
+    force_reproject: bool = False,
 ) -> pd.DataFrame:
     """
     Ensure crop-local ``x``, ``y`` columns suitable for masking and ePSF.
@@ -1530,6 +1531,10 @@ def ensure_gaia_crop_xy(
     xy_in_crop_fraction_min : float
         Minimum fraction of finite ``x``, ``y`` rows that must fall inside the
         crop to trust pre-existing pixel columns (default ``0.5``).
+    force_reproject : bool
+        When ``True``, never trust pre-existing ``x``/``y`` if ``ra``/``dec`` or
+        ``x_ffi``/``y_ffi`` are available (use when ``diff_config`` overrides
+        the template ROI).
 
     Returns
     -------
@@ -1538,10 +1543,26 @@ def ensure_gaia_crop_xy(
     df = gaia_df.copy()
     ny, nx = crop_bounds["shape"]
 
-    if ra_col in df.columns and dec_col in df.columns:
+    can_reproject = (ra_col in df.columns and dec_col in df.columns) or (
+        "x_ffi" in df.columns and "y_ffi" in df.columns
+    )
+    if force_reproject:
+        if can_reproject:
+            if "x" in df.columns or "y" in df.columns:
+                log.info(
+                    "Gaia catalog: diff_config ROI — reprojecting into "
+                    "crop_bounds (dropping existing x,y)."
+                )
+            df = df.drop(columns=["x", "y"], errors="ignore")
+        elif "x" in df.columns and "y" in df.columns:
+            log.warning(
+                "Gaia catalog: diff_config ROI override but no ra/dec or "
+                "x_ffi/y_ffi; cannot reproject stale x,y."
+            )
+    elif ra_col in df.columns and dec_col in df.columns:
         df = df.drop(columns=["x", "y"], errors="ignore")
 
-    if "x" in df.columns and "y" in df.columns:
+    if not force_reproject and "x" in df.columns and "y" in df.columns:
         if len(df) == 0:
             return df.reset_index(drop=True)
         xv = pd.to_numeric(df["x"], errors="coerce").to_numpy(dtype=float)

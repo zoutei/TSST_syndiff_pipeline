@@ -123,11 +123,12 @@ class TestSiteConfigLoader(unittest.TestCase):
             ),
         )
 
-    def test_prefers_gaia_catalog_pipeline_in_event_dir(self):
+    def test_prefers_gaia_catalog_pipeline_in_workspace(self):
         target = _target()
         event_dir = self.handoff / "events" / target.label()
-        event_dir.mkdir(parents=True, exist_ok=True)
-        pipeline_csv = event_dir / "gaia_catalog_pipeline.csv"
+        ws = event_dir / "ws"
+        ws.mkdir(parents=True, exist_ok=True)
+        pipeline_csv = ws / "gaia_catalog_pipeline.csv"
         pipeline_csv.write_text("x,y\n", encoding="utf-8")
         cfg = freeze_target_diff_config(self.site / "diff_config.yaml", target)
         self.assertEqual(cfg.gaia_catalog, str(pipeline_csv.resolve()))
