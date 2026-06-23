@@ -837,9 +837,12 @@ def verify_diff(
     *,
     meta: dict | None = None,
 ) -> VerifyResult:
-    from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGE
+    from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+        diff_workspace_complete,
+        diff_workspace_root,
+        frozen_diff_config_for_verify,
+    )
     from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
-    from syndiff_pipeline.difference_imaging.support.paths import workspace_root
 
     if runner_cfg is None:
         return VerifyResult(
@@ -848,31 +851,43 @@ def verify_diff(
             "diff verification requires RunnerConfig with diff_config_path",
             resolved.event_dir,
         )
-    ctx = _diff_stage_context(resolved, runner_cfg, meta=meta)
-    event_dir = Path(resolved.event_dir)
-    ws_dir = Path(workspace_root(str(event_dir)))
-    manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
-    if DIFF_STAGE.verify_complete(ctx):
-        from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-            TEMPLATES_WS_LABEL,
+    if not runner_cfg.diff_config_path:
+        return VerifyResult(
+            "diff",
+            False,
+            "diff verification requires diff_config_path on RunnerConfig",
+            resolved.event_dir,
         )
-
-        labels = [
-            p.name
-            for p in ws_dir.iterdir()
-            if p.is_dir() and p.name not in ("master", TEMPLATES_WS_LABEL)
-        ]
+    cfg = frozen_diff_config_for_verify(
+        runner_cfg.diff_config_path,
+        resolved.target,
+        meta=meta,
+    )
+    event_dir = Path(resolved.event_dir)
+    ws_dir = diff_workspace_root(cfg, event_dir)
+    manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
+    if diff_workspace_complete(cfg, event_dir):
         return VerifyResult(
             "diff",
             True,
-            f"Frame manifest and {len(labels)} workspace label(s) present",
+            f"Frame manifest and final pipeline outputs present under {ws_dir.name}/",
             str(ws_dir),
         )
     if not Path(manifest_csv).is_file():
         return VerifyResult("diff", False, "Missing frame manifest CSV", manifest_csv)
     if not ws_dir.is_dir():
-        return VerifyResult("diff", False, "Missing ws/ under event_dir", str(ws_dir))
-    return VerifyResult("diff", False, "No workspace labels under ws/", str(ws_dir))
+        return VerifyResult(
+            "diff",
+            False,
+            f"Missing workspace tree {ws_dir.name}/ under event_dir",
+            str(ws_dir),
+        )
+    return VerifyResult(
+        "diff",
+        False,
+        f"Final pipeline outputs missing under {ws_dir.name}/",
+        str(ws_dir),
+    )
 
 
 VERIFY_FUNCS = {
