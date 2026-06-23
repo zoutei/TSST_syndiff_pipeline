@@ -229,9 +229,9 @@ class TestDiffStageExecution(unittest.TestCase):
         manifest_csv = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
-        ws_hp = self.event_dir / "ws" / "hp_d"
-        ws_hp.mkdir(parents=True)
-        (ws_hp / "frame.fits").write_bytes(b"SIMPLE  = T")
+        ws_root = self.event_dir / "ws"
+        ws_root.mkdir(parents=True, exist_ok=True)
+        (ws_root / "shared_mask.fits").write_bytes(b"SIMPLE  = T")
 
         result = verify_diff(resolved, self.runner)
         self.assertTrue(result.ok)

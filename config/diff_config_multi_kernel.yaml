@@ -1,0 +1,99 @@
+# Multi-kernel diff policy: same shared-kernel prefix as single_kernel, then per-FFI
+# Hotpants (hp_bgo=0) on ffi - photutils_bkg with raw template → photometry on mk_d.
+# Use: syndiff diff submit/run with --config config/diff_config_multi_kernel.yaml
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 8
+  pipeline_plots: false
+  master_fits_mirror: true
+  crop_mode: target_box
+  crop_box_size: 1024
+  workspace_run_id: multi_hp_kernel
+  # workspace_run_id: null
+
+additional_forced_targets:
+  - name: offset_top
+    dx: 0
+    dy: -7
+  - name: offset_bottom
+    dx: 0
+    dy: 7
+  - name: offset_right
+    dx: 7
+    dy: 0
+  - name: offset_left
+    dx: -7
+    dy: 0
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    phot_box_size: 4
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "i"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: kernel_subtract
+    inputs:
+      convolved: tmpl_conv
+    phot_box_size: 4
+    output:
+      diffs: kd_d
+      phot_bkg: kd_b
+  - kind: hotpants
+    inputs:
+      bkg: kd_b
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "i"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    write_kernel_params: true
+    output:
+      diffs: mk_d
+      convolved: mk_c
+      bkg: mk_b
+  - kind: forced_photometry
+    inputs:
+      diffs: mk_d
+    psf_type: prf
+    output: lc_prf_on_mk_diffs
+
+condor:
+  request_cpus: 8
+  request_memory: 100000
+  requirements: "Memory >= 100000 && LoadAvg < 10"
+  rank: "-LoadAvg"

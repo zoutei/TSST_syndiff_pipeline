@@ -37,8 +37,9 @@ class TestPipelineExternalWorkspaces(unittest.TestCase):
             {"external_workspaces": ["hp_d", "hp_b"]},
             _FORCED_PHOT,
         ]
-        labels, stages = split_pipeline(pipeline)
+        labels, inherit, stages = split_pipeline(pipeline)
         self.assertEqual(labels, ["hp_d", "hp_b"])
+        self.assertEqual(inherit, [])
         self.assertEqual(len(stages), 1)
         self.assertEqual(stages[0][0], 1)
         self.assertEqual(stages[0][1]["kind"], "forced_photometry")
@@ -49,8 +50,9 @@ class TestPipelineExternalWorkspaces(unittest.TestCase):
             {"external_workspaces": ["hp_b"]},
             _FORCED_PHOT,
         ]
-        labels, stages = split_pipeline(pipeline)
+        labels, inherit, stages = split_pipeline(pipeline)
         self.assertEqual(labels, ["hp_d", "hp_b"])
+        self.assertEqual(inherit, [])
         self.assertEqual(len(stages), 1)
 
     def test_split_pipeline_preamble_after_stage_fails(self):
