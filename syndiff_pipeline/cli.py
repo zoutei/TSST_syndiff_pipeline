@@ -61,6 +61,11 @@ def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
         help="Validate diff config/stages without executing (diff foreground run only)",
     )
     p.add_argument(
+        "--workspace-run-id",
+        default=None,
+        help="Debug workspace suffix (writes to ws_{id}/ instead of ws/)",
+    )
+    p.add_argument(
         "--local",
         action="store_true",
         help="Executor override: run diff stage locally (submit only)",
@@ -130,6 +135,8 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
         target,
         deployment_path=deployment,
     )
+    if getattr(args, "workspace_run_id", None):
+        cfg.workspace_run_id = str(args.workspace_run_id).strip()
     run_pipeline(cfg, validate_only=bool(args.validate_only))
     return 0
 

@@ -1,4 +1,4 @@
-"""Event-level ws directory symlinks (``templates``, ``ffis``)."""
+"""Event-level workspace tree symlinks (``templates``, ``ffis``)."""
 
 from __future__ import annotations
 
@@ -12,24 +12,61 @@ _HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
 _SKIP_WS_CHILDREN = frozenset({"master", "templates", FFIS_WS_LABEL})
 
 
-def _event_ws_symlink_path(event_dir: str | Path, label: str) -> Path:
-    """Absolute path to ``{event_dir}/ws/{label}``."""
-    return Path(event_dir).expanduser().resolve() / _WS_SUBDIR / label
+def _normalize_workspace_run_id(run_id: str | None) -> str | None:
+    if run_id is None:
+        return None
+    s = str(run_id).strip()
+    if not s or s.lower() in ("null", "none"):
+        return None
+    return s
 
 
-def event_templates_symlink_path(event_dir: str | Path) -> Path:
-    """Absolute path to ``{event_dir}/ws/templates``."""
-    return _event_ws_symlink_path(event_dir, TEMPLATES_WS_LABEL)
+def workspace_tree_name(run_id: str | None = None) -> str:
+    """Filesystem name for the workspace tree: ``ws`` or ``ws_{run_id}``."""
+    rid = _normalize_workspace_run_id(run_id)
+    return f"{_WS_SUBDIR}_{rid}" if rid else _WS_SUBDIR
 
 
-def event_ffis_symlink_path(event_dir: str | Path) -> Path:
-    """Absolute path to ``{event_dir}/ws/ffis``."""
-    return _event_ws_symlink_path(event_dir, FFIS_WS_LABEL)
+def workspace_tree_path(event_dir: str | Path, *, run_id: str | None = None) -> Path:
+    """Absolute path to ``{event_dir}/ws`` or ``{event_dir}/ws_{run_id}``."""
+    return Path(event_dir).expanduser().resolve() / workspace_tree_name(run_id)
 
 
-def template_dir_meta_from_event_dir(event_dir: str | Path) -> dict[str, str] | None:
+def _event_ws_symlink_path(
+    event_dir: str | Path,
+    label: str,
+    *,
+    run_id: str | None = None,
+) -> Path:
+    """Absolute path to ``{event_dir}/ws[_{run_id}]/{label}``."""
+    return workspace_tree_path(event_dir, run_id=run_id) / label
+
+
+def event_templates_symlink_path(
+    event_dir: str | Path,
+    *,
+    run_id: str | None = None,
+) -> Path:
+    """Absolute path to ``{event_dir}/ws[_{run_id}]/templates``."""
+    return _event_ws_symlink_path(event_dir, TEMPLATES_WS_LABEL, run_id=run_id)
+
+
+def event_ffis_symlink_path(
+    event_dir: str | Path,
+    *,
+    run_id: str | None = None,
+) -> Path:
+    """Absolute path to ``{event_dir}/ws[_{run_id}]/ffis``."""
+    return _event_ws_symlink_path(event_dir, FFIS_WS_LABEL, run_id=run_id)
+
+
+def template_dir_meta_from_event_dir(
+    event_dir: str | Path,
+    *,
+    run_id: str | None = None,
+) -> dict[str, str] | None:
     """Return manifest audit fields when ``ws/templates`` symlink exists."""
-    link_path = event_templates_symlink_path(event_dir)
+    link_path = event_templates_symlink_path(event_dir, run_id=run_id)
     if not link_path.is_symlink():
         return None
     physical = link_path.resolve()
@@ -39,9 +76,13 @@ def template_dir_meta_from_event_dir(event_dir: str | Path) -> dict[str, str] | 
     }
 
 
-def ffi_dir_meta_from_event_dir(event_dir: str | Path) -> dict[str, str] | None:
+def ffi_dir_meta_from_event_dir(
+    event_dir: str | Path,
+    *,
+    run_id: str | None = None,
+) -> dict[str, str] | None:
     """Return manifest audit fields when ``ws/ffis`` symlink exists."""
-    link_path = event_ffis_symlink_path(event_dir)
+    link_path = event_ffis_symlink_path(event_dir, run_id=run_id)
     if not link_path.is_symlink():
         return None
     physical = link_path.resolve()
@@ -51,15 +92,16 @@ def ffi_dir_meta_from_event_dir(event_dir: str | Path) -> dict[str, str] | None:
     }
 
 
-def _ensure_event_ws_symlink(
+def _ensure_workspace_tree_symlink(
     event_dir: str | Path,
-    physical_dir: str | Path,
     label: str,
+    physical_dir: str | Path,
     *,
     kind: str,
+    run_id: str | None = None,
 ) -> Path:
     """
-    Create or refresh ``{event_dir}/ws/{label}`` → *physical_dir*.
+    Create or refresh ``{event_dir}/ws[_{run_id}]/{label}`` → *physical_dir*.
 
     Uses a relative symlink when possible. Raises if an existing path is a
     symlink pointing elsewhere or a non-symlink file blocks the link.
@@ -71,7 +113,7 @@ def _ensure_event_ws_symlink(
             f"Physical {kind} directory does not exist: {physical}"
         )
 
-    ws_dir = event_root / _WS_SUBDIR
+    ws_dir = workspace_tree_path(event_root, run_id=run_id)
     ws_dir.mkdir(parents=True, exist_ok=True)
     link_path = ws_dir / label
 
@@ -97,36 +139,46 @@ def _ensure_event_ws_symlink(
 def ensure_event_templates_symlink(
     event_dir: str | Path,
     physical_template_dir: str | Path,
+    *,
+    run_id: str | None = None,
 ) -> Path:
-    """Create or refresh ``{event_dir}/ws/templates`` → *physical_template_dir*."""
-    return _ensure_event_ws_symlink(
+    """Create or refresh templates symlink under the active workspace tree."""
+    return _ensure_workspace_tree_symlink(
         event_dir,
-        physical_template_dir,
         TEMPLATES_WS_LABEL,
+        physical_template_dir,
         kind="template",
+        run_id=run_id,
     )
 
 
 def ensure_event_ffis_symlink(
     event_dir: str | Path,
     physical_ffi_dir: str | Path,
+    *,
+    run_id: str | None = None,
 ) -> Path:
-    """Create or refresh ``{event_dir}/ws/ffis`` → *physical_ffi_dir*."""
-    return _ensure_event_ws_symlink(
+    """Create or refresh ffis symlink under the active workspace tree."""
+    return _ensure_workspace_tree_symlink(
         event_dir,
-        physical_ffi_dir,
         FFIS_WS_LABEL,
+        physical_ffi_dir,
         kind="FFI",
+        run_id=run_id,
     )
 
 
-def prune_stale_per_workspace_ffis_symlinks(event_dir: str | Path) -> int:
+def prune_stale_per_workspace_ffis_symlinks(
+    event_dir: str | Path,
+    *,
+    run_id: str | None = None,
+) -> int:
     """
     Remove mistaken ``ws/{label}/ffis`` symlinks from workspace subdirectories.
 
     Returns the number of symlinks removed.
     """
-    ws_root = Path(event_dir).expanduser().resolve() / _WS_SUBDIR
+    ws_root = workspace_tree_path(event_dir, run_id=run_id)
     if not ws_root.is_dir():
         return 0
 

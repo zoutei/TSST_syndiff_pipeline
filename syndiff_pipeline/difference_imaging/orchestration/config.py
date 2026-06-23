@@ -215,6 +215,10 @@ class SynDiffConfig:
     flat FFI links for the target sector/camera/CCD when configured) after each pipeline
     stage. Disable for read-only filesystems where symlink creation is unsupported."""
 
+    workspace_run_id: Optional[str] = None
+    """When set, write all diff outputs under ``ws_{workspace_run_id}/`` instead of
+    canonical ``ws/``. Use for debug runs that must not touch production artifacts."""
+
     # ── Parallelism ───────────────────────────────────────────────────────────
     n_jobs: int = 8
     """Default worker count (joblib **loky**) for stages that read this global value:
@@ -513,6 +517,13 @@ def add_config_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         dest="pipeline_plots",
         help="Write pipeline diagnostic PNGs (overrides YAML).",
     )
+    parser.add_argument(
+        "--workspace-run-id",
+        type=str,
+        default=None,
+        dest="workspace_run_id",
+        help="Debug workspace suffix (writes to ws_{id}/ instead of ws/).",
+    )
     return parser
 
 
@@ -524,7 +535,7 @@ def config_from_args(args: argparse.Namespace) -> SynDiffConfig:
     cfg = load_config(args.config)
     for attr in (
         "sector", "camera", "ccd", "output_dir", "ffi_dir", "n_jobs", "max_ffis",
-        "pipeline_plots",
+        "pipeline_plots", "workspace_run_id",
     ):
         val = getattr(args, attr, None)
         if val is not None:
