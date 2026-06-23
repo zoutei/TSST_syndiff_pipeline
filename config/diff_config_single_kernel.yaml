@@ -47,7 +47,7 @@ pipeline:
     hp_fitthresh: 5.0
     hp_stat_sig: 3.0
     hp_force_convolve: "t"
-    hp_normalize: "i"
+    hp_normalize: "t"
     write_kernel_params: true
   - kind: convolved_templates
     inputs:
@@ -58,13 +58,21 @@ pipeline:
       convolved: tmpl_conv
     phot_box_size: 4
     output:
-      diffs: kd_d
-      phot_bkg: kd_b
+      diffs: ks_d
+      phot_bkg: ks_b
   - kind: forced_photometry
     inputs:
-      diffs: kd_d
-    psf_type: prf
+      diffs: ks_d
     output: lc_prf_on_diffs
+    methods:
+      - name: prf
+        type: psf
+        psf_type: prf
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
 
 condor:
   request_cpus: 8

@@ -16,7 +16,10 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.difference_imaging.stages import photometry as ph
-from syndiff_pipeline.difference_imaging.orchestration.stage_params import ForcedPhotometryParams
+from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+    ForcedPhotometryParams,
+    PsfPhotometryMethodParams,
+)
 
 
 def _tiny_epsf_locator():
@@ -46,8 +49,9 @@ class TestForcedPhotometryMultiReadCount(unittest.TestCase):
             pipeline_plot_dpi=150,
         )
 
-    def _minimal_phot(self, *, phot_snap: str = "fixed") -> ForcedPhotometryParams:
-        return ForcedPhotometryParams(
+    def _minimal_phot(self, *, phot_snap: str = "fixed") -> PsfPhotometryMethodParams:
+        return PsfPhotometryMethodParams(
+            name="epsf",
             psf_type="epsf",
             psf_size=5,
             phot_cutout_size=15,

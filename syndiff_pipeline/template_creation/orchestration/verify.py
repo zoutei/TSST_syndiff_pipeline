@@ -10,6 +10,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
@@ -20,6 +21,14 @@ log = logging.getLogger(__name__)
 
 # Bump when the manifest JSON schema changes; a mismatch invalidates a manifest.
 MANIFEST_SCHEMA_VERSION = 2
+
+
+class AbsenceProbeResult(Enum):
+    """Fast pre-check before scheduling a full background artifact verify."""
+
+    ABSENT = "absent"
+    MAYBE_PRESENT = "maybe"
+    UNKNOWN = "unknown"
 
 
 @dataclass
@@ -316,14 +325,20 @@ def write_stable_manifest(
 
 
 def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
-    from syndiff_pipeline.common.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
+    from syndiff_pipeline.common.download import (
+        expected_ffi_basenames,
+        list_local_ffis,
+        nested_ffi_dir,
+    )
 
     t = resolved.target
     ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
-    expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf)
+    local_files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
+    expected = expected_ffi_basenames(
+        t.sector, t.camera, t.ccd, output_dir=ffi_leaf, local_only=True
+    )
     if expected is None:
-        files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
-        if not files:
+        if not local_files:
             return VerifyResult(
                 "tess_ffi_download",
                 False,
@@ -334,7 +349,7 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
         return VerifyResult(
             "tess_ffi_download",
             False,
-            f"Cannot verify completeness ({len(files)} local files; tesscurl manifest unavailable)",
+            f"Cannot verify completeness ({len(local_files)} local files; tesscurl manifest unavailable)",
             ffi_leaf,
             unknown=True,
         )
@@ -346,7 +361,7 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
             ffi_leaf,
         )
 
-    existing = {Path(p).name for p in list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)}
+    existing = {Path(p).name for p in local_files}
     missing = [bn for bn in expected if bn not in existing]
     if missing:
         return VerifyResult(
@@ -491,6 +506,13 @@ def _ps1_download_skycell_complete(zarr_path: Path, skycell_name: str) -> bool:
 
 def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+    if not zarr_path.exists():
+        return VerifyResult(
+            "ps1_download",
+            False,
+            "Shared zarr store missing",
+            str(zarr_path),
+        )
     try:
         expected_skycells = _expected_ps1_download_skycells(resolved)
     except FileNotFoundError as exc:
@@ -498,13 +520,6 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     except ValueError as exc:
         return VerifyResult("ps1_download", False, str(exc), str(zarr_path))
 
-    if not zarr_path.exists():
-        return VerifyResult(
-            "ps1_download",
-            False,
-            f"Shared zarr store missing (0/{len(expected_skycells)} skycells)",
-            str(zarr_path),
-        )
     started = time.monotonic()
     complete = sum(
         1 for skycell in expected_skycells if _ps1_download_skycell_complete(zarr_path, skycell)
@@ -888,6 +903,95 @@ def verify_diff(
         f"Final pipeline outputs missing under {ws_dir.name}/",
         str(ws_dir),
     )
+
+
+def stage_absence_probe(
+    resolved: ResolvedTargetConfig,
+    stage: str,
+    *,
+    runner_cfg: RunnerConfig | None = None,
+    meta: dict | None = None,
+) -> AbsenceProbeResult:
+    """Fast filesystem probe: skip full verify when outputs cannot exist."""
+    from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, tesscurl_script_path
+    from syndiff_pipeline.common.orchestration.event_ws_symlinks import event_templates_symlink_path
+    from syndiff_pipeline.common.wcs_grouping import CLUSTER_TEMPLATE_JOB_FILENAME
+
+    if stage == "wcs_grouping":
+        job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
+        return (
+            AbsenceProbeResult.MAYBE_PRESENT
+            if job_path.is_file()
+            else AbsenceProbeResult.ABSENT
+        )
+
+    if stage == "mapping":
+        csv_path = _mapping_csv_path(resolved)
+        return (
+            AbsenceProbeResult.MAYBE_PRESENT
+            if csv_path.is_file()
+            else AbsenceProbeResult.ABSENT
+        )
+
+    if stage == "tess_ffi_download":
+        t = resolved.target
+        ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+        if list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd):
+            return AbsenceProbeResult.MAYBE_PRESENT
+        cached = tesscurl_script_path(ffi_leaf, t.sector)
+        if Path(cached).is_file():
+            return AbsenceProbeResult.ABSENT
+        return AbsenceProbeResult.ABSENT
+
+    if stage == "ps1_download":
+        zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+        return (
+            AbsenceProbeResult.MAYBE_PRESENT
+            if zarr_path.exists()
+            else AbsenceProbeResult.ABSENT
+        )
+
+    if stage == "ps1_process":
+        zarr_path = _convolved_zarr_path(resolved)
+        return (
+            AbsenceProbeResult.MAYBE_PRESENT
+            if zarr_path.exists()
+            else AbsenceProbeResult.ABSENT
+        )
+
+    if stage == "downsample":
+        job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
+        templates_link = event_templates_symlink_path(resolved.event_dir)
+        if job_path.is_file() or (
+            templates_link.is_symlink() and templates_link.resolve().is_dir()
+        ):
+            return AbsenceProbeResult.MAYBE_PRESENT
+        return AbsenceProbeResult.ABSENT
+
+    if stage == "diff":
+        if runner_cfg is None or not runner_cfg.diff_config_path:
+            return AbsenceProbeResult.UNKNOWN
+        from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+            diff_workspace_root,
+            frozen_diff_config_for_verify,
+        )
+        from syndiff_pipeline.difference_imaging.support.manifest import (
+            manifest_path_from_output_dir,
+        )
+
+        cfg = frozen_diff_config_for_verify(
+            runner_cfg.diff_config_path,
+            resolved.target,
+            meta=meta,
+        )
+        event_dir = Path(resolved.event_dir)
+        manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
+        ws_dir = diff_workspace_root(cfg, event_dir)
+        if ws_dir.is_dir() or manifest_csv.is_file():
+            return AbsenceProbeResult.MAYBE_PRESENT
+        return AbsenceProbeResult.ABSENT
+
+    return AbsenceProbeResult.UNKNOWN
 
 
 VERIFY_FUNCS = {

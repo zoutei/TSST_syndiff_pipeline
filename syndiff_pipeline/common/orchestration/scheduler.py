@@ -839,7 +839,11 @@ def _run_verify_pass(
     block_timeout_s: float = 0.0,
 ) -> int:
     """Manifest fast path on main thread; full verify in background pool."""
-    from syndiff_pipeline.template_creation.orchestration.verify import check_manifests_only
+    from syndiff_pipeline.template_creation.orchestration.verify import (
+        AbsenceProbeResult,
+        check_manifests_only,
+        stage_absence_probe,
+    )
     from syndiff_pipeline.common.orchestration.verify_worker import (
         BackfillTask,
         VerifyOutcome,
@@ -888,6 +892,22 @@ def _run_verify_pass(
                 outcome = VerifyOutcome(
                     key=key,
                     complete=True,
+                    stable_path=stable_path,
+                    resolved=resolved,
+                )
+                total += apply(outcome)
+                continue
+            probe = stage_absence_probe(
+                resolved,
+                key.stage,
+                runner_cfg=ctx.cfg,
+                meta=ctx.meta,
+            )
+            if probe is AbsenceProbeResult.ABSENT:
+                budget_left -= 1
+                outcome = VerifyOutcome(
+                    key=key,
+                    complete=False,
                     stable_path=stable_path,
                     resolved=resolved,
                 )
@@ -1153,12 +1173,65 @@ def _try_launch_ready_row(
     return True
 
 
+def _launch_force_overrides(
+    state: pstate.PipelineState,
+    run_id: str,
+    ctx,
+    *,
+    force_rerun: bool,
+    active_stages: list[str],
+    targets_by_label: dict,
+    runs_root: str,
+) -> int:
+    """Launch ready stages flagged force_launch, bypassing pool max_concurrent."""
+    launched = 0
+    launch_kwargs = dict(
+        force_rerun=force_rerun,
+        active_stages=active_stages,
+        targets_by_label=targets_by_label,
+        runs_root=runs_root,
+    )
+    for row in state.fetch_force_launch_ready(run_id):
+        if row.status in pstate.TERMINAL_STATUSES:
+            state.clear_force_launch(run_id, row.target_label, row.stage)
+            continue
+        if _try_launch_ready_row(
+            state,
+            run_id,
+            ctx,
+            row,
+            pool_label="force_launch",
+            **launch_kwargs,
+        ):
+            state.clear_force_launch(run_id, row.target_label, row.stage)
+            launched += 1
+            log.info(
+                "Force-launched %s / %s (pool capacity bypassed)",
+                row.target_label,
+                row.stage,
+            )
+    return launched
+
+
 def _tick_run(state: pstate.PipelineState, run_id: str, ctx) -> None:
     run = state.get_run(run_id) or {}
+    force_rerun = bool(run.get("force_rerun"))
+    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
+    targets_by_label = {t.label(): t for t in ctx.targets}
+    runs_root = ctx.cfg.runs_dir()
+    active_stages = state.get_active_stages(run_id)
+    force_kwargs = dict(
+        force_rerun=force_rerun,
+        active_stages=active_stages,
+        targets_by_label=targets_by_label,
+        runs_root=runs_root,
+    )
+    _launch_force_overrides(state, run_id, ctx, **force_kwargs)
+
     if state.is_paused(run_id):
         return
 
-    force_rerun = bool(run.get("force_rerun"))
     reconcile_running_stages(state, run_id, ctx)
     state.apply_not_selected_skips(run_id, ctx.targets, ctx.cfg)
     state.apply_superseded_skips(run_id, ctx.targets)
@@ -1176,17 +1249,14 @@ def _tick_run(state: pstate.PipelineState, run_id: str, ctx) -> None:
         force_rerun=force_rerun,
         budget=ctx.cfg.verify_budget_per_tick,
     )
-    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
-
-    targets_by_label = {t.label(): t for t in ctx.targets}
     target_stages_map = {
         label: resolve_config(target, ctx.cfg).stages
         for label, target in targets_by_label.items()
     }
     state.promote_stages(run_id, target_stages_map)
+    _launch_force_overrides(state, run_id, ctx, **force_kwargs)
 
     cfg = ctx.cfg
-    runs_root = cfg.runs_dir()
     active_stages = state.get_active_stages(run_id)
 
     # Pool capacity is enforced GLOBALLY across all active runs.
@@ -1510,6 +1580,47 @@ def _apply_commands(state: pstate.PipelineState) -> None:
                             _terminate_job(row)
                 state.apply_force_rerun(cmd.run_id, labels, stages_arg)
                 _cancel_verify_run(cmd.run_id)
+            elif cmd.kind == "force_launch" and cmd.run_id:
+                target_label = args.get("target_label")
+                stage = args.get("stage")
+                if not target_label or not stage:
+                    log.warning(
+                        "Incomplete force_launch command id=%s (need target_label + stage)",
+                        cmd.id,
+                    )
+                else:
+                    row = state.get_stage_run(cmd.run_id, target_label, stage)
+                    if row is None:
+                        log.warning(
+                            "force_launch: no stage row for %s / %s in run %s",
+                            target_label,
+                            stage,
+                            cmd.run_id,
+                        )
+                    elif row.status == pstate.STATUS_RUNNING:
+                        log.info(
+                            "force_launch: %s / %s already running in run %s",
+                            target_label,
+                            stage,
+                            cmd.run_id,
+                        )
+                    elif row.status in pstate.TERMINAL_STATUSES:
+                        log.warning(
+                            "force_launch: %s / %s is terminal (%s) in run %s",
+                            target_label,
+                            stage,
+                            row.status,
+                            cmd.run_id,
+                        )
+                    else:
+                        state.set_force_launch(cmd.run_id, target_label, stage, enabled=True)
+                        log.info(
+                            "force_launch queued for %s / %s in run %s (status=%s)",
+                            target_label,
+                            stage,
+                            cmd.run_id,
+                            row.status,
+                        )
             else:
                 log.warning("Unknown or incomplete command id=%s kind=%s", cmd.id, cmd.kind)
         finally:

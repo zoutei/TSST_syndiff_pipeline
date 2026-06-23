@@ -14,8 +14,10 @@ from syndiff_pipeline.difference_imaging.orchestration.validate import validate_
 _FORCED_PHOT = {
     "kind": "forced_photometry",
     "inputs": {"diffs": "hp_d"},
-    "psf_type": "prf",
     "output": "lc_prf_on_diffs",
+    "methods": [
+        {"name": "prf", "type": "psf", "psf_type": "prf"},
+    ],
 }
 
 
@@ -114,8 +116,10 @@ class TestPipelineExternalWorkspaces(unittest.TestCase):
                 {
                     "kind": "forced_photometry",
                     "inputs": {"diffs": "bkg_rough"},
-                    "psf_type": "prf",
                     "output": "lc_other",
+                    "methods": [
+                        {"name": "prf", "type": "psf", "psf_type": "prf"},
+                    ],
                 },
             ],
             pipeline_external_workspace_labels=["bkg_rough"],

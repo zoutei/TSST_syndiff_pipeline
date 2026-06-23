@@ -17,17 +17,11 @@ Template discovery: when ``cfg.template_paths`` is empty but ``template_dir`` is
 flat ``syndiff_template_*_dx*_dy*.fits`` names (matched to ``group_dx``/``group_dy``)
 or ``group_<id>/ps1_template.fits`` (see :func:`syndiff_pipeline.difference_imaging.orchestration.config.discover_template_paths`).
 
-Kernel artifacts (each :func:`hotpants_loop` pass): beside the diffs directory,
-``{basename}_kernel_reconstruction.npz`` holds the shared raw ``basis`` stack (built
-in-repo to match HOTPANTS ``kernel_vector`` / ``getKernelVec``, since pyhotpants does
-not ship a Python entry point for it) and Hotpants geometry metadata;
-``{basename}_kernel_params/{stem}.npz`` holds per-FFI
-fitted parameters: per-stamp data from ``get_substamp_details()`` (padded
-``local_kernel_solution`` and coordinates) plus the **global** ``kernel_solution``
-vector from ``run_pipeline()`` / ``get_final_outputs()`` (current pyhotpants does
-not include that vector in ``get_substamp_details()``). See
-:func:`write_kernel_reconstruction_npz` / :func:`_calculate_kernel_basis` and
-:func:`kernel_reconstruction_npz_path` / :func:`kernel_params_dir`.
+Meta workspace (``ws/{prefix}_m/`` for diffs ``ws/{prefix}_d/``) holds
+``hotpants.progress.json``, ``kernel_reconstruction.npz`` (shared basis stack),
+and ``phot_calib.csv``. Per-FFI kernel vectors are not written.
+See :func:`write_kernel_reconstruction_npz` and
+:func:`syndiff_pipeline.difference_imaging.support.paths.meta_workspace_dir_from_diffs_dir`.
 """
 
 from __future__ import annotations
@@ -59,6 +53,11 @@ from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
     progress_path_for_diffs_workspace,
     record_frame_progress,
     set_progress_phase_pair,
+)
+from syndiff_pipeline.difference_imaging.support.flux_calibration import (
+    kernel_sum_at_center,
+    tess_zp_from_kernel_sum,
+    write_phot_calib_table,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     sanitize_workspace_label,
@@ -228,20 +227,26 @@ def stamps_dir_for_diffs_workspace(diff_dir: str) -> str:
     return os.path.join(parent, f"{base}_stamps")
 
 
-def kernel_reconstruction_npz_path(diff_dir: str) -> str:
-    """Path to the shared ``*_kernel_reconstruction.npz`` next to the diffs directory."""
-    d = os.path.abspath(diff_dir)
-    parent = os.path.dirname(d)
-    base = os.path.basename(d)
-    return os.path.join(parent, f"{base}_kernel_reconstruction.npz")
+def kernel_reconstruction_npz_path(diffs_dir: str) -> str:
+    """Path to ``kernel_reconstruction.npz`` under the paired meta workspace."""
+    from syndiff_pipeline.difference_imaging.support.paths import (
+        KERNEL_RECONSTRUCTION_NPZ_BASENAME,
+        meta_workspace_dir_from_diffs_dir,
+    )
+
+    return os.path.join(
+        meta_workspace_dir_from_diffs_dir(diffs_dir),
+        KERNEL_RECONSTRUCTION_NPZ_BASENAME,
+    )
 
 
-def kernel_params_dir(diff_dir: str) -> str:
-    """Directory for per-FFI ``{stem}.npz`` kernel parameter archives."""
-    d = os.path.abspath(diff_dir)
-    parent = os.path.dirname(d)
-    base = os.path.basename(d)
-    return os.path.join(parent, f"{base}_kernel_params")
+def meta_workspace_dir_for_diffs(diffs_dir: str) -> str:
+    """Directory for Hotpants sidecars paired with *diffs_dir* (``hp_d`` → ``hp_m``)."""
+    from syndiff_pipeline.difference_imaging.support.paths import (
+        meta_workspace_dir_from_diffs_dir,
+    )
+
+    return meta_workspace_dir_from_diffs_dir(diffs_dir)
 
 
 def _kernel_scale_pixels(hp: HotpantsParams) -> float:
@@ -436,29 +441,6 @@ def _serialize_substamp_details(details: Any) -> Optional[dict[str, np.ndarray]]
     if not out:
         return None
     return out
-
-
-def _save_frame_kernel_params_npz(
-    stem: str,
-    out_dir: str,
-    arrays: dict[str, np.ndarray],
-    hp: HotpantsParams,
-) -> None:
-    """Write ``{stem}.npz`` with fitted parameters plus a small config echo."""
-    rkernel, _sig, _deg, _ = _kernel_sigma_deg_for_basis(hp)
-    extra = {
-        "rkernel": np.int32(rkernel),
-        "ko": np.int32(hp.hp_ko),
-        "bgo": np.int32(hp.hp_bgo),
-        "nstampx": np.int32(hp.hp_nstampx),
-        "nstampy": np.int32(hp.hp_nstampy),
-        "sci_fwhm": np.float64(hp.sci_fwhm),
-    }
-    if "local_kernel_solution" in arrays:
-        extra["n_substamps"] = np.int32(arrays["local_kernel_solution"].shape[0])
-    os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, f"{stem}.npz")
-    np.savez_compressed(out_path, **arrays, **extra)
 
 
 def _get_hotpants_classes():
@@ -778,10 +760,27 @@ def _process_one_frame(
         mask_array=mask,
         ref_stars_xy=ref_stars_xy,
         hp_config=hp_config,
-        collect_kernel_params=hp.write_kernel_params,
+        collect_kernel_params=True,
     )
 
     if result["success"]:
+        kernel_sum = None
+        tess_zp = None
+        try:
+            k_arrays = result.get("kernel_params_arrays") or {}
+            ks = k_arrays.get("kernel_solution")
+            if ks is None:
+                raise ValueError("Hotpants did not return kernel_solution")
+            kernel_sum = kernel_sum_at_center(
+                np.asarray(ks, dtype=np.float64),
+                hp_config,
+                sci_crop.shape,
+            )
+            tess_zp = tess_zp_from_kernel_sum(kernel_sum)
+        except Exception as exc:
+            log.warning(
+                "Could not record kernel metadata for %s: %s", product_id, exc
+            )
         try:
             write_diff_noise_mask_fits(
                 diff_out_path,
@@ -819,14 +818,10 @@ def _process_one_frame(
             _save_bkg_fits(
                 result["bkg"], bkg_basename, dirs.bkg, header=crop_header
             )
-        k_arrays = result.pop("kernel_params_arrays", None)
-        if hp.write_kernel_params and k_arrays:
-            try:
-                _save_frame_kernel_params_npz(
-                    diff_stem, kernel_params_dir(dirs.diffs), k_arrays, hp
-                )
-            except Exception as exc:
-                log.warning("Saving kernel params npz failed for %s: %s", diff_stem, exc)
+        if kernel_sum is not None:
+            result["kernel_sum"] = kernel_sum
+        if tess_zp is not None:
+            result["tess_zp"] = tess_zp
 
     result["stem"] = diff_stem
     result["ffi_product_id"] = product_id
@@ -887,11 +882,10 @@ def hotpants_loop(
     else:
         workspace_dirs = replace(workspace_dirs, stamps=None)
 
-    if hp.write_kernel_params:
-        recon_path = kernel_reconstruction_npz_path(workspace_dirs.diffs)
-        kparams_root = kernel_params_dir(workspace_dirs.diffs)
-        os.makedirs(kparams_root, exist_ok=True)
-        write_kernel_reconstruction_npz(hp, recon_path)
+    meta_dir = meta_workspace_dir_for_diffs(workspace_dirs.diffs)
+    os.makedirs(meta_dir, exist_ok=True)
+    recon_path = kernel_reconstruction_npz_path(workspace_dirs.diffs)
+    write_kernel_reconstruction_npz(hp, recon_path)
 
     ref_stars_xy = ref_stars_df[["x", "y"]].values
     path_to_row = {str(r["path"]): i for i, r in wcs_table.iterrows()}
@@ -1013,6 +1007,7 @@ def hotpants_loop(
         n_ok,
         len(results),
     )
+    write_phot_calib_table(meta_dir, results)
     return results
 
 

@@ -283,19 +283,65 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
             inp = stage.get("inputs") or {}
             if "diffs" not in inp:
                 raise ValueError(f"pipeline[{idx}] forced_photometry: inputs.diffs required")
-            pt = str(stage.get("psf_type", "")).strip().lower()
-            if pt == "epsf":
-                if not inp.get("epsf"):
+            if "psf_type" in stage:
+                raise ValueError(
+                    f"pipeline[{idx}] forced_photometry: top-level 'psf_type' is no "
+                    "longer supported; use a 'methods' list (see config/README.md)."
+                )
+            methods = stage.get("methods")
+            if not methods or not isinstance(methods, list):
+                raise ValueError(
+                    f"pipeline[{idx}] forced_photometry: required non-empty 'methods' list"
+                )
+            seen: set[str] = set()
+            needs_epsf = False
+            for mi, entry in enumerate(methods):
+                if not isinstance(entry, dict):
                     raise ValueError(
-                        f"pipeline[{idx}] forced_photometry: psf_type 'epsf' requires "
-                        f"inputs.epsf workspace label"
+                        f"pipeline[{idx}] forced_photometry methods[{mi}]: must be a mapping"
                     )
-            elif pt == "prf":
-                if inp.get("epsf"):
+                name = str(entry.get("name", "")).strip().lower()
+                if not name:
                     raise ValueError(
-                        f"pipeline[{idx}] forced_photometry: psf_type 'prf' must not set "
-                        f"inputs.epsf"
+                        f"pipeline[{idx}] forced_photometry methods[{mi}]: 'name' required"
                     )
+                if name in seen:
+                    raise ValueError(
+                        f"pipeline[{idx}] forced_photometry: duplicate method name {name!r}"
+                    )
+                seen.add(name)
+                mtype = str(entry.get("type", "")).strip().lower()
+                if mtype == "psf":
+                    pt = str(entry.get("psf_type", "")).strip().lower()
+                    if pt not in ("epsf", "prf"):
+                        raise ValueError(
+                            f"pipeline[{idx}] forced_photometry methods[{mi}]: "
+                            f"psf_type must be 'epsf' or 'prf'"
+                        )
+                    if pt == "epsf":
+                        meth_inp = entry.get("inputs") or {}
+                        if not (isinstance(meth_inp, dict) and meth_inp.get("epsf")):
+                            if not inp.get("epsf"):
+                                needs_epsf = True
+                    elif pt == "prf":
+                        meth_inp = entry.get("inputs") or {}
+                        if isinstance(meth_inp, dict) and meth_inp.get("epsf"):
+                            raise ValueError(
+                                f"pipeline[{idx}] forced_photometry methods[{mi}]: "
+                                "psf_type 'prf' must not set inputs.epsf"
+                            )
+                elif mtype == "aperture":
+                    pass
+                else:
+                    raise ValueError(
+                        f"pipeline[{idx}] forced_photometry methods[{mi}]: "
+                        f"type must be 'psf' or 'aperture', got {entry.get('type')!r}"
+                    )
+            if needs_epsf and not inp.get("epsf"):
+                raise ValueError(
+                    f"pipeline[{idx}] forced_photometry: at least one psf method uses "
+                    "psf_type 'epsf' but inputs.epsf workspace label is missing"
+                )
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] forced_photometry: output workspace label required")
 

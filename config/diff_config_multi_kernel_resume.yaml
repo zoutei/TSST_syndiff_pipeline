@@ -28,13 +28,13 @@ additional_forced_targets:
 pipeline:
   - workspace_inherit:
       from: single_hp_kernel
-      labels: [kd_b]
+      labels: [ks_b]
       root_artifacts:
         - shared_mask.fits
         - hotpants_substamp_stars.csv
   - kind: hotpants
     inputs:
-      bkg: kd_b
+      bkg: ks_b
     hp_sigma_gauss: [0.752, 1.88, 3.76]
     hp_ko: 2
     hp_bgo: 0
@@ -49,20 +49,27 @@ pipeline:
     hp_fitthresh: 5.0
     hp_stat_sig: 3.0
     hp_force_convolve: "t"
-    hp_normalize: "i"
+    hp_normalize: "t"
     write_convolved: false
     write_bkg: true
     write_stamps: false
-    write_kernel_params: true
     output:
-      diffs: mk_d
-      convolved: mk_c
-      bkg: mk_b
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
   - kind: forced_photometry
     inputs:
-      diffs: mk_d
-    psf_type: prf
-    output: lc_prf_on_mk_diffs
+      diffs: hp_d
+    output: lc_prf_on_hp_diffs
+    methods:
+      - name: prf
+        type: psf
+        psf_type: prf
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
 
 condor:
   request_cpus: 8

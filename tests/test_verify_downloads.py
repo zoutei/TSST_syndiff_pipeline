@@ -167,6 +167,18 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
                 self.assertIn("manifest unavailable", result.message)
                 self.assertFalse(stage_complete(resolved, "tess_ffi_download"))
 
+    def test_verify_does_not_fetch_tesscurl_from_network(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp)
+            with unittest.mock.patch(
+                "syndiff_pipeline.common.download._fetch_bytes",
+                side_effect=AssertionError("verify must not fetch tesscurl from MAST"),
+            ):
+                result = verify_tess_ffi_download(resolved)
+            self.assertFalse(result.ok)
+            self.assertTrue(result.unknown)
+
 
 class TestVerifyPs1Download(unittest.TestCase):
     def test_missing_mapping_csv_fails(self):
@@ -175,7 +187,7 @@ class TestVerifyPs1Download(unittest.TestCase):
             resolved = _resolved(tmp)
             result = verify_ps1_download(resolved)
             self.assertFalse(result.ok)
-            self.assertIn("Master skycells CSV missing", result.message)
+            self.assertIn("Shared zarr store missing", result.message)
 
     def test_partial_zarr_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:

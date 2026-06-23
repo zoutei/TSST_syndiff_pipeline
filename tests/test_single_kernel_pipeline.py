@@ -64,13 +64,15 @@ def test_validate_single_kernel_pipeline():
             {
                 "kind": "kernel_subtract",
                 "inputs": {"convolved": "tmpl_conv"},
-                "output": {"diffs": "kd_d", "phot_bkg": "kd_b"},
+                "output": {"diffs": "ks_d", "phot_bkg": "ks_b"},
             },
             {
                 "kind": "forced_photometry",
-                "inputs": {"diffs": "kd_d"},
-                "psf_type": "prf",
+                "inputs": {"diffs": "ks_d"},
                 "output": "lc_prf",
+                "methods": [
+                    {"name": "prf", "type": "psf", "psf_type": "prf"},
+                ],
             },
         ],
     )

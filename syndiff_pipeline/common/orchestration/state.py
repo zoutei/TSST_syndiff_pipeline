@@ -11,7 +11,7 @@ import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Sequence
@@ -65,6 +65,7 @@ CMD_PAUSE = "pause"
 CMD_RESUME = "resume"
 CMD_RETRY = "retry"
 CMD_FORCE_RERUN = "force_rerun"
+CMD_FORCE_LAUNCH = "force_launch"
 
 
 def _utc_now() -> str:
@@ -93,6 +94,16 @@ class StageRunRow:
     submit_epoch: float | None = None
     attempts: int | None = None
     not_before: str | None = None
+    force_launch: int | None = None
+
+
+_STAGE_RUN_FIELDS = frozenset(f.name for f in fields(StageRunRow))
+
+
+def _stage_run_from_row(row: sqlite3.Row | dict) -> StageRunRow:
+    """Build StageRunRow from SQLite, ignoring unknown columns (schema evolution)."""
+    data = dict(row)
+    return StageRunRow(**{k: data[k] for k in _STAGE_RUN_FIELDS if k in data})
 
 
 @dataclass
@@ -328,6 +339,7 @@ class PipelineState:
             self._ensure_column(conn, "runs", "stall_reason", "TEXT")
             self._ensure_column(conn, "stage_runs", "attempts", "INTEGER")
             self._ensure_column(conn, "stage_runs", "not_before", "TEXT")
+            self._ensure_column(conn, "stage_runs", "force_launch", "INTEGER DEFAULT 0")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -466,7 +478,7 @@ class PipelineState:
                 """,
                 (run_id, STATUS_READY, *stages_in_pool, now, limit),
             ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
 
     def fetch_ready_unpooled(self, run_id: str) -> List[StageRunRow]:
         """Ready stages with no resource pool (e.g. wcs_grouping)."""
@@ -485,7 +497,35 @@ class PipelineState:
                 """,
                 (run_id, STATUS_READY, *unpooled, now),
             ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
+
+    def set_force_launch(
+        self, run_id: str, target_label: str, stage: str, *, enabled: bool
+    ) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET force_launch = ? "
+                "WHERE run_id = ? AND target_label = ? AND stage = ?",
+                (int(enabled), run_id, target_label, stage),
+            )
+
+    def clear_force_launch(self, run_id: str, target_label: str, stage: str) -> None:
+        self.set_force_launch(run_id, target_label, stage, enabled=False)
+
+    def fetch_force_launch_ready(self, run_id: str) -> List[StageRunRow]:
+        """Ready stages flagged for pool-bypass launch."""
+        now = _utc_now()
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM stage_runs
+                WHERE run_id = ? AND status = ? AND force_launch = 1
+                AND (not_before IS NULL OR not_before <= ?)
+                ORDER BY target_label, stage
+                """,
+                (run_id, STATUS_READY, now),
+            ).fetchall()
+            return [_stage_run_from_row(r) for r in rows]
 
     def reset_stages_for_force_rerun(
         self, run_id: str, target_labels: Sequence[str], stages: Sequence[str]
@@ -513,7 +553,7 @@ class PipelineState:
                 "ORDER BY target_label, stage",
                 (run_id, STATUS_FAILED),
             ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
 
     def list_retryable_stage_runs(self, run_id: str) -> List[StageRunRow]:
         with self._conn() as conn:
@@ -522,7 +562,7 @@ class PipelineState:
                 "ORDER BY target_label, stage",
                 (run_id, STATUS_FAILED, STATUS_CANCELED, STATUS_RUNNING, STATUS_BLOCKED),
             ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
 
     def insert_command(
         self, kind: str, *, run_id: str | None = None, args: dict | None = None
@@ -884,7 +924,7 @@ class PipelineState:
                 "SELECT * FROM stage_runs WHERE run_id = ? AND target_label = ? AND stage = ?",
                 (run_id, target_label, stage),
             ).fetchone()
-            return StageRunRow(**dict(row)) if row else None
+            return _stage_run_from_row(row) if row else None
 
     def list_stage_runs(self, run_id: str) -> List[StageRunRow]:
         with self._conn() as conn:
@@ -892,7 +932,7 @@ class PipelineState:
                 "SELECT * FROM stage_runs WHERE run_id = ? ORDER BY target_label, stage",
                 (run_id,),
             ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
 
     def running_stage_runs(self, run_id: str | None = None) -> List[StageRunRow]:
         with self._conn() as conn:
@@ -905,7 +945,7 @@ class PipelineState:
                     "SELECT * FROM stage_runs WHERE run_id = ? AND status = ?",
                     (run_id, STATUS_RUNNING),
                 ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
 
     def update_stage_status(
         self,
@@ -1283,7 +1323,7 @@ class PipelineState:
                 "  AND a.artifact_type = ? AND a.path = ?)",
                 (run_id, STATUS_EXTERNAL, "external_check", "1"),
             ).fetchall()
-            return [StageRunRow(**dict(r)) for r in rows]
+            return [_stage_run_from_row(r) for r in rows]
 
     # ------------------------------------------------------------------
     # Commands (CLI -> daemon intents)
