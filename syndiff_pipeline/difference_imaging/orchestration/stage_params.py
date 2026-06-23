@@ -176,6 +176,57 @@ FORCED_PHOTOMETRY_ALLOWED = frozenset(
     }
 )
 
+_KERNEL_HP_KEYS = frozenset(
+    {
+        "sci_fwhm",
+        "hp_sigma_gauss",
+        "hp_ko",
+        "hp_bgo",
+        "hp_nstampx",
+        "hp_nstampy",
+        "hp_nss",
+        "hp_ngauss",
+        "hp_deg_fixe",
+        "hp_fitthresh",
+        "hp_stat_sig",
+        "hp_kf_spread_mask1",
+        "hp_ks",
+        "hp_kfm",
+        "hp_force_convolve",
+        "hp_normalize",
+        "write_kernel_params",
+    }
+)
+
+KERNEL_FIT_ALLOWED = frozenset(
+    {
+        "kind",
+        "output",
+        "weighting_factor",
+        "phot_box_size",
+        "write_debug_fits",
+    }
+    | _KERNEL_HP_KEYS
+)
+
+CONVOLVED_TEMPLATES_ALLOWED = frozenset(
+    {
+        "kind",
+        "inputs",
+        "output",
+    }
+)
+
+KERNEL_SUBTRACT_ALLOWED = frozenset(
+    {
+        "kind",
+        "inputs",
+        "output",
+        "phot_box_size",
+        "kernel_subtract_n_jobs",
+    }
+)
+
 
 @dataclass
 class SharedMaskParams:
@@ -271,6 +322,41 @@ class ForcedPhotometryParams:
     tile_ny: int = 4
 
 
+@dataclass
+class KernelFitParams:
+    weighting_factor: float = 0.5
+    phot_box_size: int = 4
+    write_debug_fits: bool = True
+    sci_fwhm: float = 1.88
+    hp_sigma_gauss: Optional[list] = None
+    hp_ko: int = 2
+    hp_bgo: int = 3
+    hp_nstampx: int = 10
+    hp_nstampy: int = 10
+    hp_nss: int = 100
+    hp_ngauss: int = 3
+    hp_deg_fixe: list = field(default_factory=lambda: [6, 4, 2])
+    hp_fitthresh: float = 5.0
+    hp_stat_sig: float = 3.0
+    hp_kf_spread_mask1: float = 0.0
+    hp_ks: float = 3.0
+    hp_kfm: float = 0.75
+    hp_force_convolve: str = "t"
+    hp_normalize: str = "i"
+    write_kernel_params: bool = True
+
+
+@dataclass
+class ConvolvedTemplatesParams:
+    pass
+
+
+@dataclass
+class KernelSubtractParams:
+    phot_box_size: int = 4
+    kernel_subtract_n_jobs: Optional[int] = None
+
+
 def parse_shared_mask(stage: dict, pipeline_idx: int) -> SharedMaskParams:
     validate_stage_keys(stage, pipeline_idx, "shared_mask", SHARED_MASK_ALLOWED)
     return _merge_dataclass(SharedMaskParams, stage)
@@ -354,6 +440,57 @@ def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryP
     return p
 
 
+def kernel_fit_params_to_hotpants(kf: KernelFitParams) -> HotpantsParams:
+    """Build :class:`HotpantsParams` from kernel-fit stage settings."""
+    return HotpantsParams(
+        sci_fwhm=kf.sci_fwhm,
+        hp_sigma_gauss=kf.hp_sigma_gauss,
+        hp_ko=kf.hp_ko,
+        hp_bgo=kf.hp_bgo,
+        hp_nstampx=kf.hp_nstampx,
+        hp_nstampy=kf.hp_nstampy,
+        hp_nss=kf.hp_nss,
+        hp_ngauss=kf.hp_ngauss,
+        hp_deg_fixe=kf.hp_deg_fixe,
+        hp_fitthresh=kf.hp_fitthresh,
+        hp_stat_sig=kf.hp_stat_sig,
+        hp_kf_spread_mask1=kf.hp_kf_spread_mask1,
+        hp_ks=kf.hp_ks,
+        hp_kfm=kf.hp_kfm,
+        hp_force_convolve=kf.hp_force_convolve,
+        hp_normalize=kf.hp_normalize,
+        write_kernel_params=kf.write_kernel_params,
+        write_convolved=False,
+        write_bkg=False,
+        write_stamps=False,
+    )
+
+
+def parse_kernel_fit(stage: dict, pipeline_idx: int) -> KernelFitParams:
+    validate_stage_keys(stage, pipeline_idx, "kernel_fit", KERNEL_FIT_ALLOWED)
+    return _merge_dataclass(KernelFitParams, stage)
+
+
+def parse_convolved_templates(
+    stage: dict, pipeline_idx: int
+) -> ConvolvedTemplatesParams:
+    validate_stage_keys(
+        stage, pipeline_idx, "convolved_templates", CONVOLVED_TEMPLATES_ALLOWED
+    )
+    return _merge_dataclass(ConvolvedTemplatesParams, stage)
+
+
+def parse_kernel_subtract(stage: dict, pipeline_idx: int) -> KernelSubtractParams:
+    validate_stage_keys(
+        stage, pipeline_idx, "kernel_subtract", KERNEL_SUBTRACT_ALLOWED
+    )
+    ks = _merge_dataclass(KernelSubtractParams, stage)
+    if "kernel_subtract_n_jobs" in stage:
+        v = stage["kernel_subtract_n_jobs"]
+        ks.kernel_subtract_n_jobs = None if v is None else int(v)
+    return ks
+
+
 def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
     """Strict key allow-list for *kind* (no merge). Used from validate_pipeline."""
     parsers = {
@@ -366,6 +503,9 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "background_adaptive": lambda: parse_background_adaptive(stage, pipeline_idx),
         "background_estimate": lambda: parse_background_estimate(stage, pipeline_idx),
         "forced_photometry": lambda: parse_forced_photometry(stage, pipeline_idx),
+        "kernel_fit": lambda: parse_kernel_fit(stage, pipeline_idx),
+        "convolved_templates": lambda: parse_convolved_templates(stage, pipeline_idx),
+        "kernel_subtract": lambda: parse_kernel_subtract(stage, pipeline_idx),
     }
     fn = parsers.get(kind)
     if fn is None:
