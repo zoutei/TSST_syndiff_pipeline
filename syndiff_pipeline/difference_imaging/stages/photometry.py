@@ -487,9 +487,37 @@ def build_psf_kernel(
             )
         col_ffi = target_x + crop_bounds["x_min"]
         row_ffi = target_y + crop_bounds["y_min"]
-        return TESS_PRF(cfg.camera, cfg.ccd, cfg.sector, col_ffi, row_ffi)
+        localdatadir = resolve_tess_prf_localdatadir(cfg)
+        return TESS_PRF(
+            cfg.camera,
+            cfg.ccd,
+            cfg.sector,
+            col_ffi,
+            row_ffi,
+            localdatadir=localdatadir,
+        )
 
     raise ValueError(f"Unknown psf_type '{phot.psf_type}'. Must be 'epsf' or 'prf'.")
+
+
+def resolve_tess_prf_localdatadir(cfg) -> str:
+    """
+    Local PRF tree for :class:`PRF.TESS_PRF` (``cam#_ccd#/`` subdirs under start_s*).
+
+    Uses ``cfg.prf_localdatadir`` when set; otherwise
+    ``{prf_localdatadir_root or TESS_PRF_LOCAL_ROOT or default}/start_s0001|start_s0004``.
+    """
+    explicit = getattr(cfg, "prf_localdatadir", None)
+    if explicit and str(explicit).strip():
+        return str(explicit).strip()
+    root = (
+        getattr(cfg, "prf_localdatadir_root", None)
+        or os.environ.get("TESS_PRF_LOCAL_ROOT")
+        or "/astro/armin/koji/syndiff/data/tess_prf/prf_fitsfiles"
+    )
+    sector = int(getattr(cfg, "sector", 4) or 4)
+    start = "start_s0001" if sector < 4 else "start_s0004"
+    return os.path.join(str(root), start) + os.sep
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
