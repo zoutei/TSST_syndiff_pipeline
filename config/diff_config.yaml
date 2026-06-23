@@ -4,7 +4,7 @@ deployment_file: deployment.yaml
 
 defaults:
   n_jobs: 8
-  pipeline_plots: true
+  pipeline_plots: false
   master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
@@ -31,6 +31,22 @@ pipeline:
   - kind: shared_mask
   - kind: hotpants
     science: ffi
+    # Gaussian kernel widths (px); middle value sets rkernel/rss via int(2.5 * sigma[1])
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "i"
     output:
       diffs: hp_d
       convolved: hp_c

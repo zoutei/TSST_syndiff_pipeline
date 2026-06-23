@@ -2,7 +2,7 @@
 # Machine-specific paths live in deployment.yaml (copy deployment.yaml.example).
 # Targets are passed on the CLI via --targets (never embedded here).
 deployment_file: deployment.yaml
-diff_config: diff_config.yaml
+diff_config: diff_config_single_kernel.yaml
 
 stages:
   wcs_grouping:

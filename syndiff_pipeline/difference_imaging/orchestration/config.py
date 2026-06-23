@@ -184,15 +184,14 @@ class SynDiffConfig:
 
     # ── Diagnostics & workspace ───────────────────────────────────────────────
     pipeline_plots: bool = False
-    """If True, write diagnostic figures: after template handoff,
-    ``wcs_drift_template_debug.png`` and ``lightcurve_<stage>.png`` under
-    ``{output_dir}/{pipeline_plots_dir}/`` by default; adaptive-background GIF
-    (when hooked up) in the same folder. Forced-photometry light-curve PNGs are
-    written for the primary and every ``additional_forced_targets`` entry; cutout
-    stamp GIFs are primary-only. PNG titles include the stage ``output`` workspace
-    label. CSVs live under ``ws/<output>/``
-    (``lightcurve.csv`` for the primary, ``lightcurve_<name>.csv`` for each
-    ``additional_forced_targets`` entry)."""
+    """If True, write diagnostic figures under ``{output_dir}/{pipeline_plots_dir}/``
+    by default: background animation GIFs during background stages,
+    ``lightcurve_<stage>.png`` for the primary and every
+    ``additional_forced_targets`` entry during ``forced_photometry``. PNG titles
+    include the stage ``output`` workspace label. ``wcs_drift_template_debug.png``
+    is written at WCS grouping handoff regardless of this flag. CSVs live under
+    ``ws/<output>/`` (``lightcurve.csv`` for the primary,
+    ``lightcurve_<name>.csv`` for each ``additional_forced_targets`` entry)."""
 
     pipeline_plot_dpi: int = 150
     """Resolution for PNGs written when ``pipeline_plots`` is True."""
