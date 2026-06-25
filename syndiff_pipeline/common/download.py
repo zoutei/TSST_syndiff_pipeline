@@ -32,9 +32,11 @@ import glob
 import logging
 import os
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import List, Tuple
+from typing import Callable, List, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -56,6 +58,9 @@ _CURL_LINE_RE = re.compile(
 _DOWNLOAD_TIMEOUT_SCRIPT_S = 120.0
 _DOWNLOAD_TIMEOUT_FITS_S = 600.0
 _CHUNK_BYTES = 1024 * 1024
+_GZIP_MAGIC = b"\x1f\x8b"
+_GZIP_COMPRESSLEVEL = 1
+_DEFAULT_MAX_WORKERS = 8
 _USER_AGENT = "syndiff_pipeline/TESS-FFI"
 
 _HTTP_ERROR_HELP = (
@@ -84,9 +89,55 @@ def nested_ffi_dir(sector: int, camera: int, ccd: int, root: str = "data/tess_ff
     return str(Path(root) / f"s{sector:04d}" / f"cam{camera}_ccd{ccd}")
 
 
-def _ffi_filename_pattern(sector: int, camera: int, ccd: int) -> str:
+FFIC_GZIP_SUFFIX = ".fits.gz"
+FFIC_PLAIN_SUFFIX = ".fits"
+
+
+def spoc_ffi_gzip_basename(spoc_basename: str) -> str:
+    """``tess..._ffic.fits`` → ``tess..._ffic.fits.gz``."""
+    base = os.path.basename(str(spoc_basename))
+    if base.lower().endswith(FFIC_GZIP_SUFFIX):
+        return base
+    if base.lower().endswith(FFIC_PLAIN_SUFFIX):
+        return base + ".gz"
+    return base + FFIC_GZIP_SUFFIX
+
+
+def spoc_ffi_basename_from_local(path_or_name: str) -> str:
+    """Map a local FFI path to the tesscurl manifest basename (``.fits``)."""
+    return manifest_basename_from_local(path_or_name)
+
+
+def is_spoc_ffi_filename(name: str) -> bool:
+    """True for SPOC calibrated FFI basenames (``.fits`` or ``.fits.gz``)."""
+    lower = os.path.basename(str(name)).lower()
+    return lower.endswith("_ffic.fits.gz") or lower.endswith("_ffic.fits")
+
+
+def resolve_local_ffi_path(directory: str, spoc_basename: str) -> str | None:
+    """Return on-disk FFI path, preferring ``.fits.gz`` over legacy ``.fits``."""
+    for candidate in (
+        spoc_ffi_gzip_basename(spoc_basename),
+        os.path.basename(str(spoc_basename)),
+    ):
+        path = os.path.join(directory, candidate)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def ffi_glob_patterns(sector: int, camera: int, ccd: int) -> list[str]:
+    """Glob patterns for SPOC FFIs (gzip first, then legacy plain)."""
+    return [
+        _ffi_filename_pattern(sector, camera, ccd, gz=True),
+        _ffi_filename_pattern(sector, camera, ccd, gz=False),
+    ]
+
+
+def _ffi_filename_pattern(sector: int, camera: int, ccd: int, *, gz: bool = False) -> str:
     """Return glob pattern for TESS FFI calibrated files."""
-    return f"tess*-s{sector:04d}-{camera}-{ccd}-*_ffic.fits"
+    suffix = "_ffic.fits.gz" if gz else "_ffic.fits"
+    return f"tess*-s{sector:04d}-{camera}-{ccd}-*{suffix}"
 
 
 def _ffic_product_basename_matches(
@@ -95,19 +146,62 @@ def _ffic_product_basename_matches(
     """
     True if ``productFilename`` is a calibrated FFI for exactly this sector/camera/CCD.
 
-    SPOC names look like ``tess2020019142923-s0020-3-3-0165-s_ffic.fits``.
+    SPOC names look like ``tess2020019142923-s0020-3-3-0165-s_ffic.fits`` (manifest)
+    or ``..._ffic.fits.gz`` on disk after gzip migration.
     """
     base = os.path.basename(str(product_filename))
     pat = re.compile(
-        rf"^tess[0-9]+-s{sector:04d}-{camera}-{ccd}-.+_ffic\.fits$",
+        rf"^tess[0-9]+-s{sector:04d}-{camera}-{ccd}-.+_ffic\.fits(?:\.gz)?$",
         re.IGNORECASE,
     )
     return pat.match(base) is not None
 
 
+def manifest_basename_from_local(path_or_name: str) -> str:
+    """Map a local FFI path to the tesscurl manifest basename (``.fits``)."""
+    name = os.path.basename(str(path_or_name))
+    if name.lower().endswith(".fits.gz"):
+        return name[:-3]
+    return name
+
+
+def local_ffi_manifest_basenames(paths: list[str]) -> set[str]:
+    """Manifest basenames for a list of local FFI paths (``.fits`` or ``.fits.gz``)."""
+    return {manifest_basename_from_local(p) for p in paths}
+
+
+def compress_spoc_ffi_to_gzip(plain_path: str) -> str:
+    """Compress ``path.fits`` to ``path.fits.gz`` and remove the uncompressed file."""
+    return _gzip_fits_file(plain_path)
+
+
+def _gzip_fits_file(fits_path: str) -> str:
+    """Compress ``path.fits`` to ``path.fits.gz`` and remove the uncompressed file."""
+    import gzip
+    import shutil
+
+    gz_path = fits_path + ".gz"
+    part = gz_path + ".part"
+    try:
+        with open(fits_path, "rb") as f_in, gzip.open(part, "wb") as f_out:
+            shutil.copyfileobj(f_in, f_out)
+        os.replace(part, gz_path)
+        os.remove(fits_path)
+    except BaseException:
+        if os.path.isfile(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        raise
+    return gz_path
+
+
 def list_local_ffis(ffi_dir: str, sector: int, camera: int, ccd: int) -> list:
     """
     Glob for already-downloaded FFI files matching sector/camera/CCD.
+
+    Prefers ``.fits.gz`` over legacy ``.fits`` when both exist for the same product.
 
     Parameters
     ----------
@@ -121,8 +215,15 @@ def list_local_ffis(ffi_dir: str, sector: int, camera: int, ccd: int) -> list:
     list of str
         Sorted list of absolute file paths.
     """
-    pattern = os.path.join(ffi_dir, _ffi_filename_pattern(sector, camera, ccd))
-    return sorted(glob.glob(pattern))
+    by_manifest: dict[str, str] = {}
+    for gz in (True, False):
+        pattern = os.path.join(ffi_dir, _ffi_filename_pattern(sector, camera, ccd, gz=gz))
+        for path in sorted(glob.glob(pattern)):
+            key = manifest_basename_from_local(path)
+            existing = by_manifest.get(key)
+            if existing is None or path.lower().endswith(".fits.gz"):
+                by_manifest[key] = path
+    return [by_manifest[k] for k in sorted(by_manifest)]
 
 
 def _fetch_bytes(url: str, timeout: float) -> bytes:
@@ -241,12 +342,109 @@ def _stream_url_to_file(url: str, dest_path: str, timeout: float) -> None:
         raise
 
 
+def _stream_url_to_gzip_fits(url: str, gz_dest_path: str, timeout: float) -> None:
+    """Stream ``url`` directly to ``gz_dest_path`` (atomic replace on success).
+
+    If the HTTP payload is already gzip-compressed (MAST FITS+GZIP), bytes are
+    written as-is. Otherwise chunks are gzip-compressed on the fly (no plain
+    ``.fits`` intermediate file).
+    """
+    import gzip
+
+    req = Request(url, headers={"User-Agent": _USER_AGENT})
+    part = gz_dest_path + ".part"
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            first_chunk = resp.read(_CHUNK_BYTES)
+            if not first_chunk:
+                raise OSError(f"Empty response from {url}")
+
+            already_gzip = first_chunk[:2] == _GZIP_MAGIC
+            if already_gzip:
+                with open(part, "wb") as fh:
+                    fh.write(first_chunk)
+                    while True:
+                        chunk = resp.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        fh.write(chunk)
+            else:
+                with gzip.open(part, "wb", compresslevel=_GZIP_COMPRESSLEVEL) as gz_out:
+                    gz_out.write(first_chunk)
+                    while True:
+                        chunk = resp.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        gz_out.write(chunk)
+        os.replace(part, gz_dest_path)
+    except BaseException:
+        if os.path.isfile(part):
+            try:
+                os.remove(part)
+            except OSError:
+                pass
+        raise
+
+
+def _run_one_ffi_download(basename: str, download_fn: Callable[[], None]) -> tuple[str, str | None]:
+    """Run a single FFI download; return ``(basename, error_message)``."""
+    try:
+        download_fn()
+        return basename, None
+    except (HTTPError, URLError, OSError) as exc:
+        return basename, str(exc)
+
+
+def _execute_ffi_downloads(
+    tasks: list[tuple[str, Callable[[], None]]],
+    max_workers: int,
+) -> tuple[int, int]:
+    """Run FFI download tasks sequentially or in parallel. Returns ``(n_ok, n_err)``."""
+    if not tasks:
+        return 0, 0
+
+    n_ok, n_err = 0, 0
+    lock = threading.Lock()
+    last_progress_log = time.monotonic()
+    completed = 0
+
+    def _record_result(basename: str, error: str | None) -> None:
+        nonlocal n_ok, n_err, completed, last_progress_log
+        with lock:
+            completed += 1
+            if error:
+                n_err += 1
+                log.warning("File %s: %s", basename, error)
+            else:
+                n_ok += 1
+            now = time.monotonic()
+            if completed % 10 == 0 or now - last_progress_log >= 30.0:
+                log.info("FFI download progress: %d/%d", completed, len(tasks))
+                last_progress_log = now
+
+    if max_workers <= 1:
+        for i in _progress_iterate(len(tasks), desc="FFI download"):
+            basename, download_fn = tasks[i]
+            _record_result(*_run_one_ffi_download(basename, download_fn))
+        return n_ok, n_err
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_run_one_ffi_download, basename, download_fn)
+            for basename, download_fn in tasks
+        ]
+        for fut in as_completed(futures):
+            _record_result(*fut.result())
+    return n_ok, n_err
+
+
 def _download_ffis_via_tesscurl(
     sector: int,
     camera: int,
     ccd: int,
     output_dir: str,
     overwrite: bool,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> list:
     script_url = TESSCURL_SCRIPT_URL.format(sector=sector)
     log.info("Fetching tesscurl manifest %s ...", script_url)
@@ -305,8 +503,8 @@ def _download_ffis_via_tesscurl(
     log.info("Found %s FFIC file(s) for this camera/CCD in tesscurl manifest.", len(filtered))
 
     if not overwrite:
-        existing = set(
-            os.path.basename(p) for p in list_local_ffis(output_dir, sector, camera, ccd)
+        existing = local_ffi_manifest_basenames(
+            list_local_ffis(output_dir, sector, camera, ccd)
         )
         before = len(filtered)
         filtered = [(bn, url) for bn, url in filtered if bn not in existing]
@@ -315,22 +513,21 @@ def _download_ffis_via_tesscurl(
             log.info("Skipping %s already-downloaded file(s).", n_skip)
 
     if filtered:
-        log.info("Downloading %s FITS file(s) to %s ...", len(filtered), output_dir)
-        n_ok, n_err = 0, 0
-        last_progress_log = time.monotonic()
-        for i in _progress_iterate(len(filtered), desc="FFI download"):
-            bn, url = filtered[i]
-            local_path = os.path.join(output_dir, bn)
-            try:
-                _stream_url_to_file(url, local_path, _DOWNLOAD_TIMEOUT_FITS_S)
-                n_ok += 1
-            except (HTTPError, URLError, OSError) as e:
-                n_err += 1
-                log.warning("File %s: %s", bn, e)
-            now = time.monotonic()
-            if (i + 1) % 10 == 0 or now - last_progress_log >= 30.0:
-                log.info("FFI download progress: %d/%d", i + 1, len(filtered))
-                last_progress_log = now
+        log.info(
+            "Downloading %s FITS file(s) to %s (workers=%s) ...",
+            len(filtered),
+            output_dir,
+            max_workers,
+        )
+        tasks: list[tuple[str, Callable[[], None]]] = []
+        for bn, url in filtered:
+            gz_path = os.path.join(output_dir, spoc_ffi_gzip_basename(bn))
+
+            def _download(url: str = url, gz_path: str = gz_path) -> None:
+                _stream_url_to_gzip_fits(url, gz_path, _DOWNLOAD_TIMEOUT_FITS_S)
+
+            tasks.append((bn, _download))
+        n_ok, n_err = _execute_ffi_downloads(tasks, max_workers)
         log.info("Download finished (%s ok, %s errors).", n_ok, n_err)
         if n_err:
             log.warning("Some downloads failed; re-run with --overwrite or check network.")
@@ -346,6 +543,7 @@ def _download_ffis_via_astroquery(
     ccd: int,
     output_dir: str,
     overwrite: bool,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> list:
     try:
         from astroquery.mast import Observations
@@ -446,8 +644,8 @@ def _download_ffis_via_astroquery(
     log.info("Found %s FFIC files to download.", len(ffic_products))
 
     if not overwrite:
-        existing = set(
-            os.path.basename(p) for p in list_local_ffis(output_dir, sector, camera, ccd)
+        existing = local_ffi_manifest_basenames(
+            list_local_ffis(output_dir, sector, camera, ccd)
         )
         to_download_mask = [
             str(fn) not in existing for fn in ffic_products["productFilename"]
@@ -458,29 +656,34 @@ def _download_ffis_via_astroquery(
         ffic_products = ffic_products[to_download_mask]
 
     if len(ffic_products) > 0:
-        log.info("Downloading %s FITS files to %s ...", len(ffic_products), output_dir)
-        n_ok, n_err = 0, 0
-        last_progress_log = time.monotonic()
-        for i in _progress_iterate(len(ffic_products), desc="FFI download"):
-            row = ffic_products[i]
-            local_path = os.path.join(
-                output_dir, os.path.basename(row["productFilename"])
-            )
-            status, msg, _url = Observations.download_file(
-                row["dataURI"],
-                local_path=local_path,
-                cache=not overwrite,
-                verbose=False,
-            )
-            if status == "COMPLETE":
-                n_ok += 1
-            else:
-                n_err += 1
-                log.warning("File %s: %s %s", row["productFilename"], status, msg or "")
-            now = time.monotonic()
-            if (i + 1) % 10 == 0 or now - last_progress_log >= 30.0:
-                log.info("FFI download progress: %d/%d", i + 1, len(ffic_products))
-                last_progress_log = now
+        log.info(
+            "Downloading %s FITS files to %s (workers=%s) ...",
+            len(ffic_products),
+            output_dir,
+            max_workers,
+        )
+        tasks: list[tuple[str, Callable[[], None]]] = []
+        for row in ffic_products:
+            basename = os.path.basename(row["productFilename"])
+            plain_path = os.path.join(output_dir, basename)
+
+            def _download(
+                row=row,
+                plain_path: str = plain_path,
+            ) -> None:
+                status, msg, _url = Observations.download_file(
+                    row["dataURI"],
+                    local_path=plain_path,
+                    cache=not overwrite,
+                    verbose=False,
+                )
+                if status != "COMPLETE":
+                    raise OSError(f"{status} {msg or ''}".strip())
+                if os.path.isfile(plain_path):
+                    _gzip_fits_file(plain_path)
+
+            tasks.append((basename, _download))
+        n_ok, n_err = _execute_ffi_downloads(tasks, max_workers)
         log.info("Download finished (%s ok, %s errors).", n_ok, n_err)
         if n_err:
             log.warning("Some downloads failed; re-run with --overwrite or check network.")
@@ -497,6 +700,7 @@ def download_ffis(
     output_dir: str,
     overwrite: bool = False,
     use_mast_astroquery: bool = False,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> list:
     """
     Download all calibrated TESS FFIs for a given sector/camera/CCD from MAST.
@@ -512,6 +716,9 @@ def download_ffis(
     use_mast_astroquery : bool
         If True, use astroquery CAOM queries and ``Observations.download_file``
         instead of the default tesscurl manifest + ``urllib`` downloads.
+    max_workers : int
+        Concurrent download workers (default 8). Use 1 for strictly sequential
+        downloads.
 
     Returns
     -------
@@ -520,12 +727,15 @@ def download_ffis(
     """
     output_dir = str(Path(output_dir).resolve())
     os.makedirs(output_dir, exist_ok=True)
+    max_workers = max(1, int(max_workers))
 
     if use_mast_astroquery:
         return _download_ffis_via_astroquery(
-            sector, camera, ccd, output_dir, overwrite
+            sector, camera, ccd, output_dir, overwrite, max_workers
         )
-    return _download_ffis_via_tesscurl(sector, camera, ccd, output_dir, overwrite)
+    return _download_ffis_via_tesscurl(
+        sector, camera, ccd, output_dir, overwrite, max_workers
+    )
 
 
 def main():
@@ -548,6 +758,12 @@ def main():
         action="store_true",
         help="Use astroquery MAST queries + Observations.download_file instead of tesscurl.",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=_DEFAULT_MAX_WORKERS,
+        help="Concurrent FFI download workers",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
 
@@ -564,6 +780,7 @@ def main():
         output_dir=output_dir,
         overwrite=args.overwrite,
         use_mast_astroquery=args.via_mast,
+        max_workers=args.workers,
     )
     print(f"\nTotal local FFI files: {len(paths)}")
     for p in paths[:5]:

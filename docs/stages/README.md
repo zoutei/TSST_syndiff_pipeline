@@ -7,7 +7,7 @@ These documents describe the **science algorithms** behind each template pipelin
 | Document | Stage | Legacy script | Package module |
 |----------|-------|---------------|----------------|
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
-| — | `tess_ffi_download` | — | `common/download.py` |
+| [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
 | — | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
