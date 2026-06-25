@@ -102,6 +102,8 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
 ```text
 {data_root}/
   tess_ffi/                        # tess_ffi_download (optional override via ffi_dir)
+    s{sector:04d}/cam{camera}_ccd{ccd}/
+      tess*_ffic.fits.gz           # calibrated FFIs (gzip after download)
   skycell_pixel_mapping/           # mapping (PanCAKES)
     sector_{SSSS}/camera_{C}/ccd_{K}/
       tess_s{SSSS}_{C}_{K}_master_skycells_list.csv

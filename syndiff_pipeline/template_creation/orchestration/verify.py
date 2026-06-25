@@ -328,6 +328,7 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     from syndiff_pipeline.common.download import (
         expected_ffi_basenames,
         list_local_ffis,
+        local_ffi_manifest_basenames,
         nested_ffi_dir,
     )
 
@@ -361,7 +362,7 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
             ffi_leaf,
         )
 
-    existing = {Path(p).name for p in local_files}
+    existing = local_ffi_manifest_basenames(local_files)
     missing = [bn for bn in expected if bn not in existing]
     if missing:
         return VerifyResult(

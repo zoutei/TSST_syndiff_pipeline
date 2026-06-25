@@ -148,6 +148,25 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertIn("2 FFI files", result.message)
 
+    def test_complete_download_passes_with_gz_only(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp)
+            ffi_leaf = Path(resolved.ffi_dir) / "s0022" / "cam3_ccd3"
+            manifest_names = [
+                "tess2020019142923-s0022-3-3-0165-s_ffic.fits",
+                "tess2020019142924-s0022-3-3-0166-s_ffic.fits",
+            ]
+            _write_tesscurl_manifest(
+                ffi_leaf / "tesscurl_sector_22_ffic.sh", 22, 3, 3, manifest_names
+            )
+            for name in manifest_names:
+                (ffi_leaf / (name + ".gz")).write_bytes(b"gzipped-fits")
+
+            result = verify_tess_ffi_download(resolved)
+            self.assertTrue(result.ok)
+            self.assertIn("2 FFI files", result.message)
+
     def test_manifest_unavailable_is_unknown_tristate(self):
         # When the tesscurl manifest is unavailable, expected_ffi_basenames
         # returns None and completeness is genuinely undeterminable: the result
