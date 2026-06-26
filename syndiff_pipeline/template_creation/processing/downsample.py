@@ -40,6 +40,7 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 
 # Import from existing script
+from syndiff_pipeline.difference_imaging.support.ffi_naming import strip_fits_suffix
 from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import RELEVANT_WCS_KEYS, build_ps1_wcs, compute_ps1_shift_for_skycell, load_tess_wcs
 from syndiff_pipeline.template_creation.processing.downsample_progress import (
     init_progress as init_downsample_progress,
@@ -748,19 +749,21 @@ def main(
         tess_header = hdul[hdu_idx].header
 
     if reference_ffi_basename_expected:
-        expected_bn = os.path.basename(str(reference_ffi_basename_expected).strip())
+        expected_raw = os.path.basename(str(reference_ffi_basename_expected).strip())
         tess_ffi_raw = tess_header.get("TESS_FFI")
-        actual_bn = (
+        actual_raw = (
             os.path.basename(str(tess_ffi_raw).strip())
             if tess_ffi_raw not in (None, "")
             else ""
         )
+        expected_bn = strip_fits_suffix(expected_raw)
+        actual_bn = strip_fits_suffix(actual_raw) if actual_raw else ""
         json_note = f" ({cluster_job_json_path})" if cluster_job_json_path else ""
         if not actual_bn or expected_bn != actual_bn:
-            actual_display = repr(actual_bn) if actual_bn else "(missing)"
+            actual_display = repr(actual_raw) if actual_raw else "(missing)"
             msg = (
                 "Reference FFI basename from cluster job JSON does not match master mapping TESS_FFI. "
-                f"expected_basename={expected_bn!r} (from job JSON{json_note}), "
+                f"expected_basename={expected_raw!r} (from job JSON{json_note}), "
                 f"mapping TESS_FFI basename={actual_display} "
                 f"(mapping file: {REG_MASTER_FILES_PATH})"
             )
