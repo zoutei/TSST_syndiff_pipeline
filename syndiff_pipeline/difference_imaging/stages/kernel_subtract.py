@@ -22,7 +22,9 @@ from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
     photutils_background_masked,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
+    workspace_frame_fits_path,
     workspace_frame_stem,
 )
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
@@ -46,7 +48,7 @@ def _load_convolved_crop(path: str, crop_bounds: dict) -> np.ndarray:
     oy = int(crop_bounds["y_min"])
     x1 = int(crop_bounds["x_max"])
     y1 = int(crop_bounds["y_max"])
-    with fits.open(path, memmap=True) as hdul:
+    with wcs_grouping.open_fits_memmap(path) as hdul:
         data = hdul[0].data
         if data.shape == tuple(crop_bounds["shape"]):
             return np.asarray(data, dtype=np.float64)
@@ -77,9 +79,9 @@ def _process_one_frame(task: tuple) -> dict:
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
     diff_stem = workspace_frame_stem(product_id, diffs_label)
-    diff_out = os.path.join(diffs_dir, f"{diff_stem}.fits")
+    diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
 
-    if os.path.isfile(diff_out):
+    if resolve_pipeline_fits_path(diffs_dir, diff_stem) is not None:
         return {
             "success": True,
             "product_id": product_id,
@@ -109,7 +111,7 @@ def _process_one_frame(task: tuple) -> dict:
         if bkg_dir and bkg_label:
             bkg_stem = workspace_frame_stem(product_id, bkg_label)
             _write_image_fits(
-                os.path.join(bkg_dir, f"{bkg_stem}.fits"),
+                workspace_frame_fits_path(bkg_dir, bkg_stem),
                 phot_bkg,
                 header=header,
             )

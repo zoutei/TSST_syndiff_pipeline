@@ -25,6 +25,10 @@ from syndiff_pipeline.difference_imaging.stages.kernel_fit import (
     kernel_r2_npz_path,
     load_kernel_fit_meta,
 )
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    resolve_pipeline_fits_path,
+    strip_fits_suffix,
+)
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     convolved_template_basename,
 )
@@ -116,7 +120,7 @@ def run_convolved_templates(
     ref_header = None
     try:
         ref_ffi = meta.get("min_bg_ffi_path")
-        if ref_ffi and os.path.isfile(ref_ffi):
+        if ref_ffi and wcs_grouping.fits_path_exists(ref_ffi):
             ref_header = wcs_grouping.crop_ffi_header(str(ref_ffi), crop_bounds)
     except Exception as exc:
         log.warning("Could not build WCS header for convolved templates: %s", exc)
@@ -126,8 +130,11 @@ def run_convolved_templates(
         tmpl_path = entry["template_path"]
         out_name = convolved_template_basename(tmpl_path)
         out_path = os.path.join(convolved_ws_dir, out_name)
-        if skip_existing and os.path.isfile(out_path):
-            rows.append({**entry, "convolved_path": out_path})
+        existing = resolve_pipeline_fits_path(
+            convolved_ws_dir, strip_fits_suffix(out_name)
+        )
+        if skip_existing and existing is not None:
+            rows.append({**entry, "convolved_path": existing})
             continue
 
         template_crop = _load_template_cropped(tmpl_path, crop_bounds)

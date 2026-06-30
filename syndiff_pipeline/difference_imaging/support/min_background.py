@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 
 import pandas as pd
+
+log = logging.getLogger(__name__)
 
 
 def _earth_moon_columns(df: pd.DataFrame) -> tuple[str, str]:
@@ -46,7 +49,18 @@ def pick_best_angle_ffi(
     """Return ``(absolute ffi path, score)`` for the highest angle-ranked row."""
     usable = _usable_manifest_rows(manifest)
     if not usable.any():
-        raise RuntimeError("No manifest rows with usable WCS and Earth/Moon angles.")
+        from syndiff_pipeline.common.wcs_grouping import (
+            choose_reference_ffi_path,
+            try_resolve_existing_fits_path,
+        )
+
+        log.warning(
+            "No manifest rows with Earth/Moon angles; falling back to WCS drift "
+            "reference pick for kernel-fit min-background FFI."
+        )
+        ffi_path = choose_reference_ffi_path(manifest)
+        resolved = try_resolve_existing_fits_path(ffi_path)
+        return str(resolved if resolved is not None else ffi_path), float("nan")
     scores = angle_score_series(manifest, weighting_factor)
     sub_scores = scores[usable]
     idx = int(sub_scores.idxmax())
@@ -54,4 +68,7 @@ def pick_best_angle_ffi(
     ffi_path = os.path.abspath(
         os.path.expanduser(str(manifest.loc[idx, path_col]))
     )
-    return ffi_path, float(scores.loc[idx])
+    from syndiff_pipeline.common.wcs_grouping import try_resolve_existing_fits_path
+
+    resolved = try_resolve_existing_fits_path(ffi_path)
+    return str(resolved if resolved is not None else ffi_path), float(scores.loc[idx])

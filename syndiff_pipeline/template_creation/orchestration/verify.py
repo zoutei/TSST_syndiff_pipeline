@@ -14,6 +14,7 @@ from enum import Enum
 from pathlib import Path
 from typing import List, Optional
 
+from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.common.orchestration.targets import Target
 
@@ -388,7 +389,7 @@ def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
     except json.JSONDecodeError as exc:
         return VerifyResult("wcs_grouping", False, f"Invalid JSON: {exc}", str(job_path))
     ref = payload.get("reference_ffi_path")
-    if not ref or not Path(ref).is_file():
+    if not ref or not wcs_grouping.fits_path_exists(ref):
         return VerifyResult("wcs_grouping", False, "reference_ffi_path missing or not found", str(job_path))
     return VerifyResult("wcs_grouping", True, "Valid cluster_template_job.json", str(job_path))
 
@@ -857,6 +858,7 @@ def verify_diff(
         diff_workspace_complete,
         diff_workspace_root,
         frozen_diff_config_for_verify,
+        resolve_diff_site_config_path,
     )
     from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 
@@ -875,7 +877,7 @@ def verify_diff(
             resolved.event_dir,
         )
     cfg = frozen_diff_config_for_verify(
-        runner_cfg.diff_config_path,
+        resolve_diff_site_config_path(meta=meta, runner_cfg=runner_cfg),
         resolved.target,
         meta=meta,
     )
@@ -975,13 +977,14 @@ def stage_absence_probe(
         from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
             diff_workspace_root,
             frozen_diff_config_for_verify,
+            resolve_diff_site_config_path,
         )
         from syndiff_pipeline.difference_imaging.support.manifest import (
             manifest_path_from_output_dir,
         )
 
         cfg = frozen_diff_config_for_verify(
-            runner_cfg.diff_config_path,
+            resolve_diff_site_config_path(meta=meta, runner_cfg=runner_cfg),
             resolved.target,
             meta=meta,
         )
