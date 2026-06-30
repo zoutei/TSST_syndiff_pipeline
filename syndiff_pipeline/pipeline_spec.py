@@ -86,6 +86,10 @@ def stage_short_names() -> dict[str, str]:
     return _pipeline().stage_short_names()
 
 
+def resolve_stage_name(name: str) -> str:
+    return _pipeline().resolve_stage_name(name)
+
+
 def __getattr__(name: str) -> Any:
     pipeline = _pipeline()
     if name == "SYNDIFF_PIPELINE":

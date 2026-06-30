@@ -13,6 +13,7 @@ from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
 from syndiff_pipeline.difference_imaging.stages.hotpants import (
     parse_syndiff_template_filename,
 )
+from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 
 
 def _offset_match(a: float, b: float, tol: float = 1e-3) -> bool:
@@ -53,13 +54,17 @@ def find_template_by_offset(
     return matches[0]
 
 
-def resolve_template_dir(output_dir: str) -> str:
-    link = event_templates_symlink_path(output_dir)
+def resolve_template_dir(output_dir: str, *, run_id: str | None = None) -> str:
+    link = event_templates_symlink_path(output_dir, run_id=run_id)
     if link.is_symlink() or link.is_dir():
         return str(link.resolve())
     ws_templates = Path(output_dir) / "ws" / "templates"
     if ws_templates.exists():
         return str(ws_templates.resolve())
+    event_root = Path(output_dir).expanduser().resolve()
+    for cand in sorted(event_root.glob("ws_*/templates")):
+        if cand.is_symlink() or cand.is_dir():
+            return str(cand.resolve())
     raise FileNotFoundError(
         f"No template directory found under {output_dir} "
         "(expected ws/templates symlink or directory)."
@@ -71,40 +76,19 @@ def template_offsets_for_ffi(
     ffi_path: str,
 ) -> tuple[float, float]:
     """Return ``(group_dx, group_dy)`` for an FFI from the manifest."""
-    ffi_path = os.path.abspath(os.path.expanduser(ffi_path))
-    path_col = "path" if "path" in manifest.columns else "filename"
-    if path_col not in manifest.columns:
-        raise KeyError("manifest missing path/filename column")
+    from syndiff_pipeline.common.wcs_grouping import ref_manifest_row_index
+
     for col in ("group_dx", "group_dy"):
         if col not in manifest.columns:
             raise KeyError(
                 f"manifest missing {col!r}; expected syndiff_ffi_frames.csv columns."
             )
 
-    hits: list[int] = []
-    for idx, row in manifest.iterrows():
-        raw = row.get(path_col)
-        if pd.isna(raw):
-            continue
-        candidate = os.path.abspath(os.path.expanduser(str(raw)))
-        if candidate == ffi_path or os.path.basename(candidate) == os.path.basename(
-            ffi_path
-        ):
-            hits.append(int(idx))
-
-    if not hits:
+    idx = ref_manifest_row_index(manifest, ffi_path)
+    if idx is None:
         raise ValueError(f"No manifest row for FFI {ffi_path!r}")
 
-    exact = [
-        i
-        for i in hits
-        if os.path.abspath(
-            os.path.expanduser(str(manifest.loc[i, path_col]))
-        )
-        == ffi_path
-    ]
-    idx = exact[0] if exact else hits[0]
-    row = manifest.loc[idx]
+    row = manifest.iloc[idx]
     gdx = row["group_dx"]
     gdy = row["group_dy"]
     if pd.isna(gdx) or pd.isna(gdy):
@@ -134,5 +118,7 @@ def resolve_template_for_ffi(
 def convolved_template_basename(template_path: str) -> str:
     parsed = parse_syndiff_template_filename(template_path)
     if parsed is None:
-        return "convolved_template.fits"
-    return f"convolved_template_dx{parsed.dx:.3f}_dy{parsed.dy:.3f}.fits"
+        return f"convolved_template{PIPELINE_FITS_EXT}"
+    return (
+        f"convolved_template_dx{parsed.dx:.3f}_dy{parsed.dy:.3f}{PIPELINE_FITS_EXT}"
+    )

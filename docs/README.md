@@ -29,7 +29,8 @@ docs/
     ├── standalone_pipeline_overview.md   ← legacy single-FFI pipeline.py workflow
     ├── mapping_pancakes.md       ← PanCAKES v2 (TESS↔PS1 pixel mapping)
     ├── ps1_process_technical.md  ← sliding-window convolution architecture
-    └── downsample_technical.md   ← multi-offset downsampling onto TESS grid
+    ├── downsample_technical.md   ← multi-offset downsampling onto TESS grid
+    └── phot_bkg_temporal_smooth.md  ← Savitzky–Golay temporal smooth of ks_b (kernel_subtract bkg)
 ```
 
 The stage deep-dives were originally maintained in the standalone [`syndiff`](../../syndiff/) research repository (`README_pancakes.md`, `README_process_ps1.md`, `README_downsample_offset.md`). They are copied here so this release is self-contained.

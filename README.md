@@ -131,7 +131,8 @@ syndiff all submit \
 
 syndiff progress
 syndiff status --watch
-syndiff retry --run-id batch_no5 --scc s0023_c1_k3_2020ftl --stage diff
+syndiff retry --deployment config/deployment.yaml --run-id batch_no5 \
+  --scc s0023_c1_k3_2020ftl --stage diff
 ```
 
 ### Command overview

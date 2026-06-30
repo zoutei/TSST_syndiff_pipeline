@@ -119,7 +119,7 @@ syndiff verify --site config --run-id smoke_01 \
 Re-queue a completed or failed `diff` stage for one target. Downstream reset is on by default.
 
 ```bash
-syndiff retry --site config --run-id smoke_01 \
+syndiff retry --deployment config/deployment.yaml --run-id smoke_01 \
   --scc s0023_c1_k3_2020ftl --stage diff
 ```
 
@@ -285,7 +285,7 @@ See [template_pipeline.md → HTCondor](template_pipeline.md#htcondor-integratio
 | Submit | `syndiff all submit --site config --targets … --run-id <id>` |
 | Monitor | `syndiff progress --site config --run-id <id>` |
 | Verify diff | `syndiff verify --site config --run-id <id> --stages diff` |
-| Retry diff | `syndiff retry --site config --run-id <id> --scc <label> --stage diff` |
+| Retry diff | `syndiff retry --deployment config/deployment.yaml --run-id <id> --scc <label> --stage diff` |
 | Manifests | `syndiff reconcile-manifests --site config --run-id <id>` |
 
 **Further reading:** [template_pipeline.md](template_pipeline.md), [template_runner_architecture.md](template_runner_architecture.md), [syndiff_cli.md](syndiff_cli.md), [storage_layout.md](storage_layout.md).
