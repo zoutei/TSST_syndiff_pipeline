@@ -1425,7 +1425,7 @@ class TestPartialRunRetry(unittest.TestCase):
 
 
 class TestVerifyDisplay(unittest.TestCase):
-    def test_status_grid_shows_pend_for_pending_upstream_blocked(self):
+    def test_status_grid_shows_pend_for_active_stages_at_start(self):
         from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
 
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
@@ -1436,7 +1436,7 @@ class TestVerifyDisplay(unittest.TestCase):
             )
             label = target.label()
             lines = format_status_grid(state, run_id)
-            self.assertIn("tess_dl:sc_q", lines[0])
+            self.assertIn("tess_dl:pend", lines[0])
             self.assertIn("wcs:pend", lines[0])
             self.assertIn("map:pend", lines[0])
 
@@ -1456,7 +1456,8 @@ class TestVerifyDisplay(unittest.TestCase):
             lines = format_status_grid(state, run_id)
             self.assertIn("ps1_dl:sc_q", lines[0])
 
-    def test_promote_stages_requires_verify_attempt(self):
+    def test_promote_stages_active_pending_skips_verify_gate(self):
+        """Selected stages pending for execution promote without artifact verify."""
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1469,17 +1470,11 @@ class TestVerifyDisplay(unittest.TestCase):
                 state.cache_external_check(run_id, label, stage, complete=True)
 
             promoted = state.promote_stages(run_id)
-            self.assertEqual(promoted, 0)
-            self.assertEqual(
-                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
-            )
-
-            state.cache_external_check(run_id, label, "mapping", complete=False)
-            promoted = state.promote_stages(run_id)
             self.assertEqual(promoted, 1)
             self.assertEqual(
                 state.get_stage_run(run_id, label, "mapping").status, STATUS_READY
             )
+            self.assertFalse(state.external_verify_attempted(run_id, label, "mapping"))
 
 
 class TestGlobalPoolCapacity(unittest.TestCase):
