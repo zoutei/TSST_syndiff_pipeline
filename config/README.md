@@ -70,3 +70,28 @@ CSV per method per target under `ws/<output>/`.
 
 Top-level `psf_type` is no longer supported; migrate existing configs to a
 `methods` entry with `type: psf`.
+
+## `background` (spatial → temporal → strap)
+
+Inserted after `kernel_subtract` in [`diff_config_single_kernel.yaml`](diff_config_single_kernel.yaml) and [`diff_config_multi_kernel.yaml`](diff_config_multi_kernel.yaml). Temporally smooths the full-crop photutils background cube (`ks_b`) with Savitzky–Golay when `steps.temporal.enabled: true`; writes `ks_b_s`. Pair with a `subtract` stage for resubtracted diffs.
+
+```yaml
+- kind: background
+  inputs:
+    bkg_in: ks_b
+  output: ks_b_s
+  steps:
+    spatial: { enabled: false }
+    temporal: { enabled: true, method: savgol, tile_size: 256 }
+    strap: { enabled: false }
+- kind: subtract
+  inputs:
+    expression: "ks_d + ks_b - ks_b_s"
+  output: ks_d_s
+```
+
+- **Single-kernel:** `forced_photometry` uses `inputs.diffs: ks_d_s`.
+- **Multi-kernel:** `hotpants` uses `inputs.bkg: ks_b_s`; photometry stays on `hp_d`.
+- **Resume:** [`diff_config_multi_kernel_resume.yaml`](diff_config_multi_kernel_resume.yaml) inherits `ks_b` + `ks_d`, runs background smooth, then Hotpants.
+
+Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifacts, and performance notes: [docs/stages/background.md](../docs/stages/background.md).

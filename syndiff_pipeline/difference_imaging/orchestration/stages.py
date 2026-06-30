@@ -20,14 +20,11 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
 
 
 def _diff_site_config_path(ctx: StageRunContext) -> Path:
-    for key in ("source_diff_config_path", "diff_config_path"):
-        raw = ctx.meta.get(key) or getattr(ctx.runner_cfg, "diff_config_path", "")
-        if raw:
-            return Path(str(raw)).expanduser().resolve()
-    raise ValueError(
-        "Diff stage requires source_diff_config_path in run_meta or "
-        "diff_config_path on RunnerConfig"
+    from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+        resolve_diff_site_config_path,
     )
+
+    return resolve_diff_site_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg)
 
 
 def _event_dir_for_target(ctx: StageRunContext) -> Path:

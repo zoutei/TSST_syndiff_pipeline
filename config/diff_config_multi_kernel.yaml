@@ -60,9 +60,23 @@ pipeline:
     output:
       diffs: ks_d
       phot_bkg: ks_b
+  - kind: background
+    inputs:
+      bkg_in: ks_b
+    output: ks_b_s
+    recombine_inputs: false
+    steps:
+      spatial:
+        enabled: false
+      temporal:
+        enabled: true
+        method: savgol
+        tile_size: 256
+      strap:
+        enabled: false
   - kind: hotpants
     inputs:
-      bkg: ks_b
+      bkg: ks_b_s
     hp_sigma_gauss: [0.752, 1.88, 3.76]
     hp_ko: 2
     hp_bgo: 0

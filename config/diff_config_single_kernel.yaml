@@ -60,9 +60,27 @@ pipeline:
     output:
       diffs: ks_d
       phot_bkg: ks_b
+  - kind: background
+    inputs:
+      bkg_in: ks_b
+    output: ks_b_s
+    recombine_inputs: false
+    steps:
+      spatial:
+        enabled: false
+      temporal:
+        enabled: true
+        method: savgol
+        tile_size: 256
+      strap:
+        enabled: false
+  - kind: subtract
+    inputs:
+      expression: "ks_d + ks_b - ks_b_s"
+    output: ks_d_s
   - kind: forced_photometry
     inputs:
-      diffs: ks_d
+      diffs: ks_d_s
     output: lc_prf_on_diffs
     methods:
       - name: prf

@@ -12,6 +12,7 @@ These documents describe the **science algorithms** behind each template pipelin
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
 | [Multi-offset downsample](downsample_technical.md) | `downsample` | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
+| [Unified background stage](background.md) | `background` | — | `difference_imaging/stages/background/` |
 | — | `diff` | — | `difference_imaging/orchestration/execute.py` (see [`config/diff_config.yaml`](../../config/diff_config.yaml)) |
 
 ## PS1 download (no separate deep-dive)
@@ -40,7 +41,13 @@ Downsample reads crop bounds and offset list from `cluster_template_job.json`.
 
 ## Diff imaging (orchestration docs)
 
-There is no standalone algorithm deep-dive — **`diff`** runs the Hotpants → photometry pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). Stage lists, SCC overrides, and Condor settings are documented in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
+There is no single algorithm deep-dive for the entire diff stack — **`diff`** runs the config-driven pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml) (Hotpants, kernel subtract, background smooth, photometry, etc.). Stage lists, SCC overrides, and Condor settings are documented in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
+
+**Stage-specific diff algorithms:**
+
+| Document | Stage |
+|----------|-------|
+| [Unified background stage](background.md) | `background` — spatial / temporal Savitzky–Golay / strap on `ks_b` → `ks_b_s` |
 
 ## Typical data flow
 

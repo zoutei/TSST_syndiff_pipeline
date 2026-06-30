@@ -57,6 +57,7 @@ SHARED_MASK_ALLOWED = frozenset(
         "ref_isolation_mag",
         "ref_isolation_px",
         "ref_separation_px",
+        "ps1_min_hit_count",
     }
 )
 
@@ -116,47 +117,16 @@ SAT_TEMPLATE_ALLOWED = frozenset(
 
 SUBTRACT_ALLOWED = frozenset({"kind", "inputs", "output"})
 
-BACKGROUND_ROUGH_ALLOWED = frozenset(
+BACKGROUND_ALLOWED = frozenset(
     {
         "kind",
         "inputs",
         "output",
-        "round_id",
-        "stream_load_rough",
+        "recombine_inputs",
         "write_per_frame_fits",
-        "bkg_tessreduce_spatial_pipeline",
-        "bkg_r1_recombine_hotpants",
-        "bkg_gauss_smooth",
-        "bkg_calc_qe",
-        "bkg_strap_iso",
-        "bkg_source_hunt",
-        "bkg_interpolate",
-        "bkg_rerun_negative",
-        "bkg_rerun_diff",
-        "bkg_use_error_image",
-        "bkg_vector_path",
+        "write_stack",
+        "steps",
     }
-)
-
-BACKGROUND_ADAPTIVE_ALLOWED = frozenset(
-    {
-        "kind",
-        "inputs",
-        "output",
-        "round_id",
-        "write_per_frame_fits",
-        "bkg_adaptive_method",
-        "bkg_adaptive_savgol_window",
-        "bkg_adaptive_savgol_polyorder",
-        "bkg_adaptive_w_min",
-        "bkg_adaptive_w_max",
-        "bkg_adaptive_block_size",
-        "bkg_vector_path",
-    }
-)
-
-BACKGROUND_ESTIMATE_ALLOWED = frozenset(
-    BACKGROUND_ROUGH_ALLOWED | BACKGROUND_ADAPTIVE_ALLOWED | {"mode"}
 )
 
 _METHOD_PSF_KEYS = frozenset(
@@ -260,6 +230,7 @@ class SharedMaskParams:
     ref_isolation_mag: float = 13.5
     ref_isolation_px: int = 8
     ref_separation_px: int = 10
+    ps1_min_hit_count: int = 5000
 
 
 @dataclass
@@ -302,33 +273,6 @@ class SatTemplateParams:
     tile_nx: int = 4
     tile_ny: int = 4
 
-
-@dataclass
-class BackgroundSpatialParams:
-    """Rough / spatial TESSreduce background (``background_rough`` / estimate rough leg)."""
-
-    bkg_tessreduce_spatial_pipeline: bool = True
-    bkg_r1_recombine_hotpants: bool = False
-    bkg_gauss_smooth: float = 2.0
-    bkg_calc_qe: bool = True
-    bkg_strap_iso: bool = True
-    bkg_source_hunt: bool = True
-    bkg_interpolate: bool = True
-    bkg_rerun_negative: bool = False
-    bkg_rerun_diff: bool = False
-    bkg_use_error_image: bool = False
-    bkg_vector_path: Optional[str] = None
-
-
-@dataclass
-class BackgroundAdaptiveParams:
-    bkg_adaptive_method: str = "savgol"
-    bkg_adaptive_savgol_window: Optional[int] = None
-    bkg_adaptive_savgol_polyorder: int = 2
-    bkg_adaptive_w_min: int = 3
-    bkg_adaptive_w_max: int = 51
-    bkg_adaptive_block_size: int = 5
-    bkg_vector_path: Optional[str] = None
 
 
 @dataclass
@@ -474,6 +418,15 @@ class KernelSubtractParams:
     kernel_subtract_n_jobs: Optional[int] = None
 
 
+def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
+    if not step_dict:
+        return cls()
+    names = {f.name for f in fields(cls)}
+    kw = {n: step_dict[n] for n in names if n in step_dict}
+    base = cls()
+    return cls(**{**base.__dict__, **kw})  # type: ignore[arg-type]
+
+
 def parse_shared_mask(stage: dict, pipeline_idx: int) -> SharedMaskParams:
     validate_stage_keys(stage, pipeline_idx, "shared_mask", SHARED_MASK_ALLOWED)
     return _merge_dataclass(SharedMaskParams, stage)
@@ -502,39 +455,64 @@ def parse_subtract(stage: dict, pipeline_idx: int) -> None:
     validate_stage_keys(stage, pipeline_idx, "subtract", SUBTRACT_ALLOWED)
 
 
-def parse_background_rough(stage: dict, pipeline_idx: int) -> BackgroundSpatialParams:
-    validate_stage_keys(stage, pipeline_idx, "background_rough", BACKGROUND_ROUGH_ALLOWED)
-    p = _merge_dataclass(BackgroundSpatialParams, stage)
-    p.bkg_vector_path = _pick_optional_str(stage, "bkg_vector_path")
-    return p
-
-
-def parse_background_adaptive(stage: dict, pipeline_idx: int) -> BackgroundAdaptiveParams:
-    validate_stage_keys(
-        stage, pipeline_idx, "background_adaptive", BACKGROUND_ADAPTIVE_ALLOWED
+def parse_background(stage: dict, pipeline_idx: int):
+    from syndiff_pipeline.difference_imaging.stages.background.pipeline import (
+        BackgroundParams,
+        BackgroundStepSpatialParams,
+        BackgroundStepStrapParams,
+        BackgroundStepTemporalParams,
     )
-    p = _merge_dataclass(BackgroundAdaptiveParams, stage)
-    p.bkg_vector_path = _pick_optional_str(stage, "bkg_vector_path")
-    return p
 
+    validate_stage_keys(stage, pipeline_idx, "background", BACKGROUND_ALLOWED)
+    steps = stage.get("steps") or {}
+    if not isinstance(steps, dict):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] background: 'steps' must be a mapping"
+        )
 
-def parse_background_estimate(
-    stage: dict, pipeline_idx: int
-) -> tuple[BackgroundSpatialParams, BackgroundAdaptiveParams]:
-    validate_stage_keys(
-        stage, pipeline_idx, "background_estimate", BACKGROUND_ESTIMATE_ALLOWED
+    spatial = _merge_step_params(
+        BackgroundStepSpatialParams, steps.get("spatial") or {}
     )
-    sp_names = {f.name for f in fields(BackgroundSpatialParams)}
-    ad_names = {f.name for f in fields(BackgroundAdaptiveParams)}
-    spatial = _merge_dataclass(
-        BackgroundSpatialParams, {k: stage[k] for k in stage if k in sp_names}
+    temporal = _merge_step_params(
+        BackgroundStepTemporalParams, steps.get("temporal") or {}
     )
-    adaptive = _merge_dataclass(
-        BackgroundAdaptiveParams, {k: stage[k] for k in stage if k in ad_names}
+    strap = _merge_step_params(
+        BackgroundStepStrapParams, steps.get("strap") or {}
     )
-    spatial.bkg_vector_path = _pick_optional_str(stage, "bkg_vector_path")
-    adaptive.bkg_vector_path = _pick_optional_str(stage, "bkg_vector_path")
-    return spatial, adaptive
+    if temporal.vector_path is None and "vector_path" in (steps.get("temporal") or {}):
+        temporal.vector_path = _pick_optional_str(steps.get("temporal") or {}, "vector_path")
+
+    if not (spatial.enabled or temporal.enabled or strap.enabled):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] background: at least one step must be enabled"
+        )
+
+    label_out = str(stage.get("output", "")).strip()
+    for step_name, step in (
+        ("spatial", spatial),
+        ("temporal", temporal),
+        ("strap", strap),
+    ):
+        save = getattr(step, "save", None)
+        if save and str(save).strip() == label_out:
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] background: steps.{step_name}.save "
+                f"must differ from output {label_out!r}"
+            )
+
+    recombine = stage.get("recombine_inputs")
+    if recombine is None:
+        inp = stage.get("inputs") or {}
+        recombine = bool(inp.get("bkg"))
+
+    return BackgroundParams(
+        recombine_inputs=bool(recombine),
+        write_per_frame_fits=bool(stage.get("write_per_frame_fits", True)),
+        write_stack=bool(stage.get("write_stack", True)),
+        spatial=spatial,
+        temporal=temporal,
+        strap=strap,
+    )
 
 
 def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryParams:
@@ -643,6 +621,28 @@ def parse_kernel_subtract(stage: dict, pipeline_idx: int) -> KernelSubtractParam
     return ks
 
 
+def upcoming_phot_cutout_size(pipeline: list, pipeline_idx: int) -> int:
+    """Max PSF ``phot_cutout_size`` from the next ``forced_photometry`` stage."""
+    sizes: list[int] = []
+    found = False
+    for idx, stage in enumerate(pipeline):
+        if not isinstance(stage, dict) or "kind" not in stage:
+            continue
+        if idx <= pipeline_idx:
+            continue
+        if stage.get("kind") != "forced_photometry":
+            continue
+        found = True
+        fp = parse_forced_photometry(stage, idx)
+        for m in fp.methods:
+            if hasattr(m, "phot_cutout_size"):
+                sizes.append(int(m.phot_cutout_size))
+        break
+    if not found or not sizes:
+        return 15
+    return max(sizes)
+
+
 def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
     """Strict key allow-list for *kind* (no merge). Used from validate_pipeline."""
     parsers = {
@@ -651,9 +651,7 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "epsf": lambda: parse_epsf(stage, pipeline_idx),
         "sat_template": lambda: parse_sat_template(stage, pipeline_idx),
         "subtract": lambda: parse_subtract(stage, pipeline_idx),
-        "background_rough": lambda: parse_background_rough(stage, pipeline_idx),
-        "background_adaptive": lambda: parse_background_adaptive(stage, pipeline_idx),
-        "background_estimate": lambda: parse_background_estimate(stage, pipeline_idx),
+        "background": lambda: parse_background(stage, pipeline_idx),
         "forced_photometry": lambda: parse_forced_photometry(stage, pipeline_idx),
         "kernel_fit": lambda: parse_kernel_fit(stage, pipeline_idx),
         "convolved_templates": lambda: parse_convolved_templates(stage, pipeline_idx),

@@ -21,6 +21,7 @@ adaptive_medfilt_3d(data, time, ...)
     pre-fetched angle arrays or without angles.
 """
 
+import multiprocessing
 import os
 import numpy as np
 import pandas as pd
@@ -398,31 +399,14 @@ def adaptive_medfilt_3d(
 
 # ── Savitzky-Golay smoother ────────────────────────────────────────────────────
 
-def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyorder=2, sigma_clip=5.0):
-    """Apply a Savitzky-Golay filter along the time axis of a (T, X, Y) cube.
-
-    Smoothing is applied independently per segment (gaps are not crossed).
-    Per-pixel temporal outliers are sigma-clipped and interpolated over before
-    filtering, preventing transient signals (e.g. asteroids) from biasing the
-    smooth background estimate. NaNs are handled the same way.
-
-    Parameters
-    ----------
-    data : array (T, X, Y)
-    time : array (T,), optional
-    gap_thresh : float
-    window_length : int or None
-        Must be odd; reduced automatically if shorter than a segment.
-        If None (default), computed from the cadence to span 6 hours.
-    polyorder : int
-    sigma_clip : float
-        Per-pixel frames more than sigma_clip * MAD above the median are
-        replaced by interpolation before smoothing. Set to None to disable.
-
-    Returns
-    -------
-    smoothed : array (T, X, Y)
-    """
+def _savgol_prepare(
+    data,
+    time,
+    gap_thresh,
+    window_length,
+    polyorder,
+):
+    """Return (data_filled, nan_mask, segments, wl, time) for savgol core."""
     data = np.asarray(data, dtype=np.float32)
     T, X, Y = data.shape
 
@@ -455,29 +439,58 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyor
         n_frames = max(3, int(round(0.25 / cadence)))  # 6 hours = 0.25 days
         window_length = n_frames if n_frames % 2 == 1 else n_frames + 1
     wl = window_length if window_length % 2 == 1 else window_length + 1
+    return data_filled, nan_mask, segments, wl, time
 
-    def _apply_savgol(arr):
-        out = arr.copy()
-        for s, e in segments:
-            n = e - s
-            w = wl
-            while w >= n:
-                w -= 2
-            if w < polyorder + 1:
-                continue
-            out[s:e] = savgol_filter(arr[s:e], window_length=w, polyorder=polyorder, axis=0)
-        return out
 
-    # First pass
-    first_pass = _apply_savgol(data_filled)
+def _savgol_apply_pass(data_filled, segments, wl, polyorder):
+    """Single Savitzky-Golay pass along time for all pixels."""
+    out = data_filled.copy()
+    T = data_filled.shape[0]
+    for s, e in segments:
+        n = e - s
+        w = wl
+        while w >= n:
+            w -= 2
+        if w < polyorder + 1:
+            continue
+        out[s:e] = savgol_filter(
+            data_filled[s:e], window_length=w, polyorder=polyorder, axis=0
+        )
+    return out
 
-    # Identify outliers from first-pass residuals and interpolate over them
+
+def _savgol_smooth_3d_core(
+    data,
+    time=None,
+    gap_thresh=3.0,
+    window_length=None,
+    polyorder=2,
+    sigma_clip=5.0,
+    *,
+    data_filled=None,
+    nan_mask=None,
+    segments=None,
+    wl=None,
+):
+    """Per-pixel Savitzky-Golay + sigma-clip; no global frame fallback."""
+    if data_filled is None:
+        data_filled, nan_mask, segments, wl, time = _savgol_prepare(
+            data, time, gap_thresh, window_length, polyorder
+        )
+    else:
+        T = data_filled.shape[0]
+        if time is None:
+            time = np.arange(T, dtype=float)
+        time = np.asarray(time, dtype=float)
+
+    T, X, Y = data_filled.shape
+    first_pass = _savgol_apply_pass(data_filled, segments, wl, polyorder)
+
     if sigma_clip is not None:
         resid = data_filled - first_pass
         resid_flat = resid.reshape(T, -1)
         mad = np.nanmedian(np.abs(resid_flat - np.nanmedian(resid_flat, axis=0)), axis=0)
         robust_std = 1.4826 * mad
-        # clip both positive and negative outliers
         outlier = np.abs(resid_flat) > sigma_clip * robust_std
         data_filled2 = data_filled.copy().reshape(T, -1)
         data_filled2[outlier] = np.nan
@@ -494,21 +507,157 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyor
                 m = np.isfinite(ts)
                 seg_flat[:, j] = np.interp(t_seg, t_seg[m], ts[m])
         data_filled2 = data_filled2.reshape(T, X, Y)
-        result = _apply_savgol(data_filled2)
+        result = _savgol_apply_pass(data_filled2, segments, wl, polyorder)
     else:
         result = first_pass
 
-    # Per-frame fallback: if the whole frame deviates significantly from the
-    # smooth (i.e. the smooth has smeared a sharp scattered-light transition),
-    # restore the original unsmoothed value for that frame.
-    frame_resid = np.nanmedian(np.abs(result - data_filled), axis=(1, 2))
-    typical = np.nanmedian(frame_resid)
-    mad_frame = np.nanmedian(np.abs(frame_resid - typical))
-    frame_outlier = frame_resid > typical + sigma_clip * 1.4826 * mad_frame
-    result[frame_outlier] = data_filled[frame_outlier]
+    return result, data_filled, nan_mask
 
+
+def _savgol_frame_fallback(result, data_filled, nan_mask, sigma_clip):
+    """Restore raw frames when whole-frame residual is an outlier (in-place)."""
+    if sigma_clip is not None:
+        frame_resid = np.nanmedian(np.abs(result - data_filled), axis=(1, 2))
+        typical = np.nanmedian(frame_resid)
+        mad_frame = np.nanmedian(np.abs(frame_resid - typical))
+        frame_outlier = frame_resid > typical + sigma_clip * 1.4826 * mad_frame
+        result[frame_outlier] = data_filled[frame_outlier]
     result[nan_mask] = np.nan
     return result
+
+
+def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyorder=2, sigma_clip=5.0):
+    """Apply a Savitzky-Golay filter along the time axis of a (T, X, Y) cube.
+
+    Smoothing is applied independently per segment (gaps are not crossed).
+    Per-pixel temporal outliers are sigma-clipped and interpolated over before
+    filtering, preventing transient signals (e.g. asteroids) from biasing the
+    smooth background estimate. NaNs are handled the same way.
+
+    Parameters
+    ----------
+    data : array (T, X, Y)
+    time : array (T,), optional
+    gap_thresh : float
+    window_length : int or None
+        Must be odd; reduced automatically if shorter than a segment.
+        If None (default), computed from the cadence to span 6 hours.
+    polyorder : int
+    sigma_clip : float
+        Per-pixel frames more than sigma_clip * MAD above the median are
+        replaced by interpolation before smoothing. Set to None to disable.
+
+    Returns
+    -------
+    smoothed : array (T, X, Y)
+    """
+    data_filled, nan_mask, segments, wl, time = _savgol_prepare(
+        data, time, gap_thresh, window_length, polyorder
+    )
+    result, data_filled, nan_mask = _savgol_smooth_3d_core(
+        data_filled,
+        time=time,
+        gap_thresh=gap_thresh,
+        window_length=wl,
+        polyorder=polyorder,
+        sigma_clip=sigma_clip,
+        data_filled=data_filled,
+        nan_mask=nan_mask,
+        segments=segments,
+        wl=wl,
+    )
+    return _savgol_frame_fallback(result, data_filled, nan_mask, sigma_clip)
+
+
+def _iter_spatial_tiles(ny, nx, tile_size):
+    if tile_size <= 0 or tile_size >= max(ny, nx):
+        yield 0, ny, 0, nx
+        return
+    for y0 in range(0, ny, tile_size):
+        y1 = min(y0 + tile_size, ny)
+        for x0 in range(0, nx, tile_size):
+            x1 = min(x0 + tile_size, nx)
+            yield y0, y1, x0, x1
+
+
+def _smooth_savgol_tile(args):
+    block, time, gap_thresh, wl, polyorder, sigma_clip = args
+    result, _, _ = _savgol_smooth_3d_core(
+        block,
+        time=time,
+        gap_thresh=gap_thresh,
+        window_length=wl,
+        polyorder=polyorder,
+        sigma_clip=sigma_clip,
+    )
+    return result
+
+
+def savgol_smooth_3d_parallel(
+    data,
+    time=None,
+    gap_thresh=3.0,
+    window_length=None,
+    polyorder=2,
+    sigma_clip=5.0,
+    *,
+    tile_size=256,
+    n_jobs=1,
+    out=None,
+):
+    """Full-cube Savitzky-Golay with tiled parallel core + global frame fallback.
+
+  If *out* is a writable array/memmap, results are written in place.
+    """
+    data_filled, nan_mask, segments, wl, time = _savgol_prepare(
+        data, time, gap_thresh, window_length, polyorder
+    )
+    T, ny, nx = data_filled.shape
+
+    if out is None:
+        core_out = np.empty_like(data_filled)
+    else:
+        core_out = out
+
+    tiles = list(_iter_spatial_tiles(ny, nx, tile_size))
+    n_workers = max(1, min(int(n_jobs), len(tiles), multiprocessing.cpu_count()))
+
+    if n_workers == 1 or len(tiles) == 1:
+        result, _, _ = _savgol_smooth_3d_core(
+            data_filled,
+            time=time,
+            gap_thresh=gap_thresh,
+            window_length=wl,
+            polyorder=polyorder,
+            sigma_clip=sigma_clip,
+            data_filled=data_filled,
+            nan_mask=nan_mask,
+            segments=segments,
+            wl=wl,
+        )
+        core_out[:] = result
+    else:
+        tasks = [
+            (
+                data_filled[:, y0:y1, x0:x1].copy(),
+                time,
+                gap_thresh,
+                wl,
+                polyorder,
+                sigma_clip,
+            )
+            for y0, y1, x0, x1 in tiles
+        ]
+        smoothed_tiles = Parallel(n_jobs=n_workers)(
+            delayed(_smooth_savgol_tile)(t) for t in tasks
+        )
+        for (y0, y1, x0, x1), tile_smooth in zip(tiles, smoothed_tiles):
+            core_out[:, y0:y1, x0:x1] = tile_smooth
+
+    _savgol_frame_fallback(core_out, data_filled, nan_mask, sigma_clip)
+    if hasattr(core_out, "flush"):
+        core_out.flush()
+    return core_out
 
 
 # ── Main class ─────────────────────────────────────────────────────────────────

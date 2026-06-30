@@ -11,7 +11,7 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     SHARED_MASK_ALLOWED,
-    parse_background_rough,
+    parse_background,
     parse_forced_photometry,
     parse_hotpants,
     validate_stage_keys,
@@ -101,17 +101,25 @@ class TestStageParams(unittest.TestCase):
         self.assertFalse(hp.write_bkg)
         self.assertFalse(hp.write_stamps)
 
-    def test_background_rough_bkg_source_hunt(self):
-        sp = parse_background_rough(
+    def test_background_steps_parse(self):
+        bp = parse_background(
             {
-                "kind": "background_rough",
+                "kind": "background",
                 "inputs": {"diffs": "d", "bkg": "h"},
                 "output": "out",
-                "bkg_source_hunt": False,
+                "steps": {
+                    "spatial": {"enabled": True, "box_size": 32},
+                    "temporal": {"enabled": False},
+                    "strap": {"enabled": True, "qe_floor": 1.01},
+                },
             },
             0,
         )
-        self.assertFalse(sp.bkg_source_hunt)
+        self.assertTrue(bp.spatial.enabled)
+        self.assertEqual(bp.spatial.box_size, 32)
+        self.assertFalse(bp.temporal.enabled)
+        self.assertTrue(bp.strap.enabled)
+        self.assertAlmostEqual(bp.strap.qe_floor, 1.01)
 
     def test_forced_photometry_requires_methods(self):
         with self.assertRaises(ValueError):

@@ -24,9 +24,7 @@ STAGE_KINDS = frozenset(
         "epsf",
         "sat_template",
         "subtract",
-        "background_rough",
-        "background_adaptive",
-        "background_estimate",
+        "background",
         "forced_photometry",
     }
 )
@@ -55,9 +53,7 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         "epsf",
         "sat_template",
         "subtract",
-        "background_rough",
-        "background_adaptive",
-        "background_estimate",
+        "background",
         "forced_photometry",
     ):
         return [stage["output"]]
@@ -81,6 +77,19 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
         v = (inp or {}).get("convolved")
         if v is not None and str(v).strip():
             refs.append(str(v).strip())
+    elif kind == "background":
+        for key in ("diffs", "bkg", "bkg_in"):
+            v = inp.get(key)
+            if v is not None and str(v).strip():
+                refs.append(str(v).strip())
+        steps = stage.get("steps") or {}
+        if isinstance(steps, dict):
+            for step_name in ("spatial", "temporal", "strap"):
+                step = steps.get(step_name) or {}
+                if isinstance(step, dict):
+                    save = step.get("save")
+                    if save is not None and str(save).strip():
+                        refs.append(str(save).strip())
     elif kind == "epsf":
         d = inp.get("diffs")
         if d is not None and str(d).strip():
@@ -105,21 +114,6 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
                 v = inp.get(key)
                 if v is not None and str(v).strip():
                     refs.append(str(v).strip())
-    elif kind == "background_rough":
-        for key in ("diffs", "bkg"):
-            v = inp.get(key)
-            if v is not None and str(v).strip():
-                refs.append(str(v).strip())
-    elif kind == "background_adaptive":
-        for key in ("rough", "diffs", "bkg"):
-            v = inp.get(key)
-            if v is not None and str(v).strip():
-                refs.append(str(v).strip())
-    elif kind == "background_estimate":
-        for key in ("diffs", "bkg"):
-            v = inp.get(key)
-            if v is not None and str(v).strip():
-                refs.append(str(v).strip())
     elif kind == "forced_photometry":
         d = inp.get("diffs")
         if d is not None and str(d).strip():
@@ -220,6 +214,39 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                     f"pipeline[{idx}] kernel_subtract: output.diffs required"
                 )
 
+        if kind == "background":
+            inp = stage.get("inputs") or {}
+            steps = stage.get("steps") or {}
+            if not isinstance(steps, dict):
+                raise ValueError(f"pipeline[{idx}] background: steps must be a mapping")
+            spatial_on = bool((steps.get("spatial") or {}).get("enabled", True))
+            temporal_on = bool((steps.get("temporal") or {}).get("enabled", True))
+            strap_on = bool((steps.get("strap") or {}).get("enabled", True))
+            bkg_in = str(inp.get("bkg_in") or "").strip()
+            diffs_in = str(inp.get("diffs") or "").strip()
+            if not spatial_on and not bkg_in:
+                raise ValueError(
+                    f"pipeline[{idx}] background: inputs.bkg_in required when "
+                    "spatial step is disabled"
+                )
+            if spatial_on and not diffs_in and not bkg_in:
+                raise ValueError(
+                    f"pipeline[{idx}] background: inputs.diffs required when "
+                    "spatial step is enabled"
+                )
+            if strap_on and not diffs_in:
+                raise ValueError(
+                    f"pipeline[{idx}] background: inputs.diffs required when "
+                    "strap step is enabled"
+                )
+            if temporal_on and not spatial_on and not bkg_in:
+                raise ValueError(
+                    f"pipeline[{idx}] background: inputs.bkg_in required for "
+                    "temporal step when spatial is disabled"
+                )
+            if "output" not in stage or not str(stage["output"]).strip():
+                raise ValueError(f"pipeline[{idx}] background: output label required")
+
         if kind == "epsf":
             inp = stage.get("inputs") or {}
             if "diffs" not in inp:
@@ -248,36 +275,6 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                         )
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] subtract: output label required")
-
-        if kind == "background_rough":
-            inp = stage.get("inputs") or {}
-            for req in ("diffs", "bkg"):
-                if req not in inp:
-                    raise ValueError(f"pipeline[{idx}] background_rough: inputs.{req} required")
-            if "output" not in stage or not str(stage["output"]).strip():
-                raise ValueError(f"pipeline[{idx}] background_rough: output label required")
-
-        if kind == "background_adaptive":
-            inp = stage.get("inputs") or {}
-            for req in ("rough", "diffs", "bkg"):
-                if req not in inp:
-                    raise ValueError(f"pipeline[{idx}] background_adaptive: inputs.{req} required")
-            if "output" not in stage or not str(stage["output"]).strip():
-                raise ValueError(f"pipeline[{idx}] background_adaptive: output label required")
-
-        if kind == "background_estimate":
-            inp = stage.get("inputs") or {}
-            for req in ("diffs", "bkg"):
-                if req not in inp:
-                    raise ValueError(f"pipeline[{idx}] background_estimate: inputs.{req} required")
-            if "mode" not in stage:
-                raise ValueError(f"pipeline[{idx}] background_estimate: mode required")
-            if stage["mode"] != "rough_then_adaptive":
-                raise ValueError(
-                    f"pipeline[{idx}] background_estimate: only mode 'rough_then_adaptive' is implemented"
-                )
-            if "output" not in stage or not str(stage["output"]).strip():
-                raise ValueError(f"pipeline[{idx}] background_estimate: output label required")
 
         if kind == "forced_photometry":
             inp = stage.get("inputs") or {}
