@@ -15,6 +15,10 @@ from syndiff_pipeline.difference_imaging.stages.kernel import (
     KERNEL_FIT_META_BASENAME,
     KERNEL_R2_NPZ_BASENAME,
 )
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    is_pipeline_fits_filename,
+    resolve_pipeline_artifact_path,
+)
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import (
     SHARED_MASK_FITS_BASENAME,
@@ -23,6 +27,23 @@ from syndiff_pipeline.difference_imaging.support.paths import (
 
 if TYPE_CHECKING:
     from syndiff_pipeline.common.orchestration.spec import StageRunContext
+    from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
+
+
+def resolve_diff_site_config_path(
+    *,
+    meta: dict | None = None,
+    runner_cfg: RunnerConfig | None = None,
+) -> Path:
+    """Match execute-time config resolution: run_meta overrides runner default."""
+    for key in ("source_diff_config_path", "diff_config_path"):
+        raw = (meta or {}).get(key) or getattr(runner_cfg, "diff_config_path", "")
+        if raw:
+            return Path(str(raw)).expanduser().resolve()
+    raise ValueError(
+        "Diff verification requires source_diff_config_path in run_meta or "
+        "diff_config_path on RunnerConfig"
+    )
 
 
 def apply_workspace_run_id_override(
@@ -50,10 +71,8 @@ def frozen_diff_config_for_verify(
 
 
 def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
-    from syndiff_pipeline.difference_imaging.orchestration.stages import _diff_site_config_path
-
     return frozen_diff_config_for_verify(
-        _diff_site_config_path(ctx),
+        resolve_diff_site_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg),
         ctx.target,
         meta=ctx.meta,
     )
@@ -83,7 +102,9 @@ def _label_dir_has_fits(ws_dir: Path, label: str) -> bool:
     d = ws_dir / label
     if not d.is_dir():
         return False
-    return any(p.suffix.lower() == ".fits" for p in d.rglob("*") if p.is_file())
+    return any(
+        is_pipeline_fits_filename(p.name) for p in d.rglob("*") if p.is_file()
+    )
 
 
 def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
@@ -94,7 +115,10 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
     kind = stage.get("kind")
 
     if kind == "shared_mask":
-        return (ws_dir / SHARED_MASK_FITS_BASENAME).is_file()
+        return (
+            resolve_pipeline_artifact_path(str(ws_dir), SHARED_MASK_FITS_BASENAME)
+            is not None
+        )
 
     if kind == "forced_photometry":
         label = str(stage["output"]).strip()
@@ -130,10 +154,25 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
         diffs = str(o.get("diffs", "")).strip()
         return bool(diffs) and _label_dir_has_fits(ws_dir, diffs)
 
-    if kind == "hotpants":
-        o = stage.get("output") or {}
-        diffs = str(o.get("diffs", "")).strip()
-        return bool(diffs) and _label_dir_has_fits(ws_dir, diffs)
+    if kind == "background":
+        label = str(stage.get("output", "")).strip()
+        if not label:
+            return False
+        out_dir = ws_dir / label
+        if not out_dir.is_dir():
+            return False
+        stack_npz = out_dir / "stack.npz"
+        stack_npy = out_dir / "stack.npy"
+        if stack_npz.is_file() or stack_npy.is_file():
+            return True
+        return _label_dir_has_fits(ws_dir, label)
+
+    if kind in (
+        "subtract",
+        "sat_template",
+    ):
+        outputs = _outputs_for_stage(stage)
+        return bool(outputs) and all(_label_dir_has_files(ws_dir, lab) for lab in outputs)
 
     if kind == "epsf":
         label = str(stage["output"]).strip()
@@ -153,15 +192,10 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
         label = str(stage.get("output", "")).strip()
         return bool(label) and (ws_dir / label / "convolved_templates.csv").is_file()
 
-    if kind in (
-        "subtract",
-        "background_rough",
-        "background_adaptive",
-        "background_estimate",
-        "sat_template",
-    ):
-        outputs = _outputs_for_stage(stage)
-        return bool(outputs) and all(_label_dir_has_files(ws_dir, lab) for lab in outputs)
+    if kind == "hotpants":
+        o = stage.get("output") or {}
+        diffs = str(o.get("diffs", "")).strip()
+        return bool(diffs) and _label_dir_has_fits(ws_dir, diffs)
 
     return False
 

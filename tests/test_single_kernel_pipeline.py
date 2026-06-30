@@ -67,8 +67,24 @@ def test_validate_single_kernel_pipeline():
                 "output": {"diffs": "ks_d", "phot_bkg": "ks_b"},
             },
             {
+                "kind": "background",
+                "inputs": {"bkg_in": "ks_b"},
+                "output": "ks_b_s",
+                "recombine_inputs": False,
+                "steps": {
+                    "spatial": {"enabled": False},
+                    "temporal": {"enabled": True, "tile_size": 256},
+                    "strap": {"enabled": False},
+                },
+            },
+            {
+                "kind": "subtract",
+                "inputs": {"expression": "ks_d + ks_b - ks_b_s"},
+                "output": "ks_d_s",
+            },
+            {
                 "kind": "forced_photometry",
-                "inputs": {"diffs": "ks_d"},
+                "inputs": {"diffs": "ks_d_s"},
                 "output": "lc_prf",
                 "methods": [
                     {"name": "prf", "type": "psf", "psf_type": "prf"},

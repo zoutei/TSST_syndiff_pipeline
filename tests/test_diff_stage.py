@@ -24,7 +24,10 @@ from syndiff_pipeline.difference_imaging.orchestration.stages import (
     execute_diff_stage,
     write_diff_manifest,
 )
-from syndiff_pipeline.difference_imaging.support.paths import clear_diff_workspace
+from syndiff_pipeline.difference_imaging.support.paths import (
+    SHARED_MASK_FITS_BASENAME,
+    clear_diff_workspace,
+)
 from syndiff_pipeline.pipeline_spec import STAGE_DEPS, STAGE_NAMES, STAGE_POOL, SYNDIFF_PIPELINE
 from syndiff_pipeline.template_creation.orchestration.runner_config import (
     RunnerConfig,
@@ -231,7 +234,7 @@ class TestDiffStageExecution(unittest.TestCase):
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
         ws_root = self.event_dir / "ws"
         ws_root.mkdir(parents=True, exist_ok=True)
-        (ws_root / "shared_mask.fits").write_bytes(b"SIMPLE  = T")
+        (ws_root / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
 
         result = verify_diff(resolved, self.runner)
         self.assertTrue(result.ok)

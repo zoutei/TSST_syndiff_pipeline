@@ -4,9 +4,6 @@ Config-driven pipeline execution (YAML ``pipeline`` list).
 
 from __future__ import annotations
 
-import glob
-import gc
-import json
 import logging
 import os
 import re
@@ -18,6 +15,7 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
 from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, _ffi_filename_pattern
 from syndiff_pipeline.difference_imaging.stages import (
     background,
@@ -31,7 +29,11 @@ from syndiff_pipeline.difference_imaging.stages import (
     sat_template,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    resolve_pipeline_artifact_path,
+    resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
+    workspace_frame_fits_basename,
+    workspace_frame_fits_path,
     workspace_frame_stem,
     workspace_label_from_dir,
 )
@@ -56,9 +58,6 @@ from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     event_templates_symlink_path,
 )
 from syndiff_pipeline.difference_imaging.support.paths import (
-    ADAPTIVE_BKG_STACK_BASENAME,
-    BACKGROUND_STACK_NPZ_ARRAY_KEY,
-    BKG_SOURCE_HUNT_UNION_FITS_BASENAME,
     GAIA_CATALOG_PIPELINE_BASENAME,
     HOTPANTS_SUBSTAMP_STARS_BASENAME,
     SHARED_MASK_FITS_BASENAME,
@@ -80,9 +79,7 @@ from syndiff_pipeline.difference_imaging.support.workspace_inherit import (
 )
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-    parse_background_adaptive,
-    parse_background_estimate,
-    parse_background_rough,
+    parse_background,
     parse_epsf,
     parse_forced_photometry,
     parse_hotpants,
@@ -100,69 +97,126 @@ from syndiff_pipeline.difference_imaging.support.subtract import parse_subtract_
 log = logging.getLogger(__name__)
 
 
-def _load_stack_npz_or_npy(dir_path: str, basename: str) -> np.ndarray:
-    """
-    Load ``{dir_path}/{basename}.npz`` (array ``BACKGROUND_STACK_NPZ_ARRAY_KEY``)
-    or ``{basename}.npy``. Uses memory mapping when loading from disk.
-    """
-    npz_path = os.path.join(dir_path, f"{basename}.npz")
-    npy_path = os.path.join(dir_path, f"{basename}.npy")
-    if os.path.isfile(npz_path):
-        z = np.load(npz_path, mmap_mode="r")
-        if BACKGROUND_STACK_NPZ_ARRAY_KEY not in z.files:
-            raise KeyError(
-                f"{npz_path!r} missing {BACKGROUND_STACK_NPZ_ARRAY_KEY!r}; "
-                f"have {list(z.files)}"
-            )
-        return z[BACKGROUND_STACK_NPZ_ARRAY_KEY]
-    if os.path.isfile(npy_path):
-        return np.load(npy_path, mmap_mode="r")
-    raise FileNotFoundError(
-        f"missing stack under {dir_path!r}: expected {basename}.npz or {basename}.npy"
+def _subtract_load_plane(
+    ws_root: str,
+    product_id: str,
+    frame_index: int,
+    npy_stack_by_ws: dict[str, np.ndarray | None],
+) -> Optional[np.ndarray]:
+    """Load one per-frame 2D plane from a background workspace stack or FITS."""
+    if ws_root not in npy_stack_by_ws:
+        stack = None
+        try:
+            stack = background.load_stack(ws_root)
+        except FileNotFoundError:
+            stack = None
+        npy_stack_by_ws[ws_root] = stack
+    stack = npy_stack_by_ws[ws_root]
+    if stack is not None and frame_index < len(stack):
+        return stack[frame_index].astype(np.float64)
+    if not product_id:
+        return None
+    ws_label = workspace_label_from_dir(ws_root)
+    stem = workspace_frame_stem(product_id, ws_label)
+    fp = resolve_pipeline_fits_path(ws_root, stem)
+    if fp is not None:
+        return fits.getdata(fp).astype(np.float64)
+    return None
+
+
+def _records_to_stem_rows(records: list) -> list:
+    return [
+        {
+            "ffi_product_id": r.product_id,
+            "stem": r.stem,
+            "success": r.success,
+        }
+        for r in records
+    ]
+
+
+def _run_background_stage(
+    *,
+    stage: dict,
+    idx: int,
+    cfg: SynDiffConfig,
+    ctx: PipelineInvocationContext,
+    ws_root: str,
+    shared_mask: Optional[np.ndarray],
+    wcs_table: pd.DataFrame,
+    processing_ffi_paths: list,
+    out: str,
+) -> np.ndarray:
+    """Execute unified ``background`` stage; returns updated shared_mask array."""
+    params = parse_background(stage, idx)
+    inp = stage.get("inputs") or {}
+    label_out = str(stage["output"]).strip()
+    out_ws = ctx.workspace(label_out)
+    os.makedirs(out_ws, exist_ok=True)
+    shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+
+    diff_label = str(inp.get("diffs") or "").strip()
+    bkg_label = str(inp.get("bkg") or "").strip()
+    bkg_in_label = str(inp.get("bkg_in") or "").strip()
+
+    diff_dir = ctx.workspace(diff_label) if diff_label else None
+    bkg_dir = ctx.workspace(bkg_label) if bkg_label else None
+    bkg_in_dir = ctx.workspace(bkg_in_label) if bkg_in_label else None
+
+    if diff_dir:
+        records = background.build_frame_records(
+            processing_ffi_paths, wcs_table, diff_dir, bkg_dir
+        )
+    elif bkg_in_dir:
+        records = background.build_frame_records_from_stack_ws(
+            processing_ffi_paths, bkg_in_dir
+        )
+    else:
+        raise RuntimeError(
+            f"background stage requires inputs.diffs and/or inputs.bkg_in"
+        )
+
+    fit_flux = None
+    strap_flux = None
+    bkg_in_stack = None
+    if bkg_in_dir:
+        bkg_in_stack = background.load_stack_or_fits(bkg_in_dir, records)
+    if diff_dir:
+        fit_flux, strap_flux = background.load_flux_cubes(
+            records, recombine_inputs=params.recombine_inputs
+        )
+
+    stack = background.run_background_pipeline(
+        params=params,
+        records=records,
+        mask=shared_mask,
+        wcs_table=wcs_table,
+        sector=int(cfg.sector),
+        camera=int(cfg.camera),
+        n_jobs=int(cfg.n_jobs),
+        fit_flux=fit_flux,
+        strap_flux=strap_flux,
+        bkg_in_stack=bkg_in_stack,
+        workspace_resolver=ctx.workspace,
     )
 
+    if params.write_stack:
+        background.save_stack(stack, out_ws)
+    if params.write_per_frame_fits:
+        background.write_per_frame_fits(out_ws, stack, records)
 
-def _row_product_id(row: dict) -> Optional[str]:
-    """Return ``ffi_product_id`` from a hotpants-shaped row, falling back to ``stem``."""
-    pid = row.get("ffi_product_id")
-    if pid:
-        return str(pid)
-    stem = row.get("stem")
-    if stem is None:
-        return None
-    return tess_product_id_from_ffi_path(str(stem))
-
-
-def _write_per_frame_background_fits(
-    out_ws: str,
-    stack: np.ndarray,
-    stem_rows: list,
-    filename_fmt: str,
-    *,
-    row_ok: Optional[Callable[[dict], bool]] = None,
-) -> None:
-    """Write one float32 FITS per row using ``filename_fmt.format(stem=...)``.
-
-    The substituted ``stem`` is the workspace stem for *out_ws*
-    (``{tess<digits>}_{out_ws_label}``), regardless of which Hotpants stem
-    produced the row.
-    """
-    out_label = workspace_label_from_dir(out_ws)
-    for i, row in enumerate(stem_rows):
-        if i >= stack.shape[0]:
-            break
-        if row_ok is not None and not row_ok(row):
-            continue
-        pid = _row_product_id(row)
-        if not pid:
-            continue
-        stem = workspace_frame_stem(pid, out_label)
-        fn = filename_fmt.format(stem=stem)
-        fits.writeto(
-            os.path.join(out_ws, fn),
-            np.asarray(stack[i], dtype=np.float32),
-            overwrite=True,
-        )
+    stem_rows = _records_to_stem_rows(records)
+    _maybe_write_background_gif(
+        cfg,
+        out,
+        stack,
+        wcs_table,
+        stem_rows,
+        filename=f"{label_out}_background_animation.gif",
+        cbar_label=f"Background ({label_out})",
+    )
+    log.info("  background: wrote stack under %s shape=%s", out_ws, stack.shape)
+    return shared_mask
 
 
 def _pipeline_plots_root(cfg: SynDiffConfig) -> str:
@@ -226,73 +280,6 @@ def _maybe_write_background_gif(
     )
 
 
-def _latest_rough_bkg_basename(ws_root: str) -> Optional[str]:
-    """
-    Basename (no extension) of the highest-``round_id`` ``rough_bkg_rN`` stack in *ws_root*,
-    preferring ``.npz`` over ``.npy`` when both exist for the same *N*.
-    """
-    best_n = -1
-    best_base: Optional[str] = None
-    for pattern in ("rough_bkg_r*.npz", "rough_bkg_r*.npy"):
-        for path in glob.glob(os.path.join(ws_root, pattern)):
-            base = os.path.splitext(os.path.basename(path))[0]
-            if not base.startswith("rough_bkg_r"):
-                continue
-            suf = base[len("rough_bkg_r") :]
-            try:
-                n = int(suf)
-            except ValueError:
-                continue
-            if n > best_n:
-                best_n = n
-                best_base = base
-    return best_base
-
-
-def _subtract_load_plane(
-    ws_root: str,
-    product_id: str,
-    frame_index: int,
-    npy_stack_by_ws: dict[str, np.ndarray | None],
-) -> Optional[np.ndarray]:
-    """
-    One per-frame 2D array from a workspace:
-
-    - ``bkg_temp_smooth`` stack (``background_adaptive``) or
-    - ``rough_bkg_rN`` stack (``background_rough``), then row *i* if present;
-    - else the per-frame FITS ``{product_id}_{ws_label}.fits`` under *ws_root*.
-    """
-    if ws_root not in npy_stack_by_ws:
-        stack = None
-        npz_path = os.path.join(ws_root, f"{ADAPTIVE_BKG_STACK_BASENAME}.npz")
-        npy_path = os.path.join(ws_root, f"{ADAPTIVE_BKG_STACK_BASENAME}.npy")
-        if os.path.isfile(npz_path):
-            z = np.load(npz_path, mmap_mode="r")
-            if BACKGROUND_STACK_NPZ_ARRAY_KEY in z.files:
-                stack = z[BACKGROUND_STACK_NPZ_ARRAY_KEY]
-        elif os.path.isfile(npy_path):
-            stack = np.load(npy_path, mmap_mode="r")
-        if stack is None:
-            rough_base = _latest_rough_bkg_basename(ws_root)
-            if rough_base is not None:
-                try:
-                    stack = _load_stack_npz_or_npy(ws_root, rough_base)
-                except (FileNotFoundError, KeyError):
-                    stack = None
-        npy_stack_by_ws[ws_root] = stack
-    stack = npy_stack_by_ws[ws_root]
-    if stack is not None and frame_index < len(stack):
-        return stack[frame_index].astype(np.float64)
-    if not product_id:
-        return None
-    ws_label = workspace_label_from_dir(ws_root)
-    stem = workspace_frame_stem(product_id, ws_label)
-    fp = os.path.join(ws_root, f"{stem}.fits")
-    if os.path.isfile(fp):
-        return fits.getdata(fp).astype(np.float64)
-    return None
-
-
 def _subtract_load_plane_and_sigma(
     ws_root: str,
     product_id: str,
@@ -301,38 +288,19 @@ def _subtract_load_plane_and_sigma(
 ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
     """
     Like :func:`_subtract_load_plane` but also load a per-pixel 1σ map when the
-    workspace FITS has a ``NOISE`` extension. Stacks (.npy background cubes)
-    return ``(plane, None)``.
+    workspace FITS has a ``NOISE`` extension. Stacks return ``(plane, None)``.
     """
-    if ws_root not in npy_stack_by_ws:
-        stack = None
-        npz_path = os.path.join(ws_root, f"{ADAPTIVE_BKG_STACK_BASENAME}.npz")
-        npy_path = os.path.join(ws_root, f"{ADAPTIVE_BKG_STACK_BASENAME}.npy")
-        if os.path.isfile(npz_path):
-            z = np.load(npz_path, mmap_mode="r")
-            if BACKGROUND_STACK_NPZ_ARRAY_KEY in z.files:
-                stack = z[BACKGROUND_STACK_NPZ_ARRAY_KEY]
-        elif os.path.isfile(npy_path):
-            stack = np.load(npy_path, mmap_mode="r")
-        if stack is None:
-            rough_base = _latest_rough_bkg_basename(ws_root)
-            if rough_base is not None:
-                try:
-                    stack = _load_stack_npz_or_npy(ws_root, rough_base)
-                except (FileNotFoundError, KeyError):
-                    stack = None
-        npy_stack_by_ws[ws_root] = stack
-    stack = npy_stack_by_ws[ws_root]
-    if stack is not None and frame_index < len(stack):
-        return stack[frame_index].astype(np.float64), None
-    if not product_id:
+    plane = _subtract_load_plane(ws_root, product_id, frame_index, npy_stack_by_ws)
+    if plane is None:
         return None, None
+    if npy_stack_by_ws.get(ws_root) is not None:
+        return plane, None
     ws_label = workspace_label_from_dir(ws_root)
     stem = workspace_frame_stem(product_id, ws_label)
-    fp = os.path.join(ws_root, f"{stem}.fits")
-    if os.path.isfile(fp):
+    fp = resolve_pipeline_fits_path(ws_root, stem)
+    if fp is not None:
         return photometry.read_diff_primary_and_noise_sigma(fp)
-    return None, None
+    return plane, None
 
 
 def _load_template_handoff(
@@ -485,71 +453,20 @@ def _tqdm_frames(
         return iterable
 
 
-def _hotpants_results_from_dirs(
-    ffi_paths: list,
-    wcs_table: pd.DataFrame,
-    diff_dir: str,
-    bkg_dir: Optional[str],
-) -> list:
-    path_to_group = _path_to_group_from_wcs(wcs_table)
-    results = []
-    for ffi_path in _tqdm_ffi_paths(ffi_paths, "Loading diff/bkg FITS"):
-        pid = tess_product_id_from_ffi_path(ffi_path)
-        if not pid:
-            continue
-        group_id = path_to_group.get(pid, 0)
-        results.append(
-            background.load_hotpants_row_from_disk(pid, diff_dir, bkg_dir, group_id)
-        )
-    return results
-
-
-def _hotpants_result_stems_for_ordering(
-    ffi_paths: list,
-    wcs_table: pd.DataFrame,
-    diff_dir: str,
-) -> list:
-    """
-    Same stem / success / group_id order as :func:`_hotpants_results_from_dirs`,
-    without loading diff or bkg arrays (for BTJD alignment in ``background_adaptive``).
-    """
-    path_to_group = _path_to_group_from_wcs(wcs_table)
-    diff_label = workspace_label_from_dir(diff_dir)
-
-    results = []
-    for ffi_path in ffi_paths:
-        pid = tess_product_id_from_ffi_path(ffi_path)
-        if not pid:
-            continue
-        diff_stem = workspace_frame_stem(pid, diff_label)
-        dp = os.path.join(diff_dir, f"{diff_stem}.fits")
-        group_id = path_to_group.get(pid, 0)
-        ok = os.path.isfile(dp)
-        results.append(
-            {
-                "stem": diff_stem,
-                "ffi_product_id": pid,
-                "success": ok,
-                "group_id": group_id,
-            }
-        )
-    return results
-
-
 def _ensure_shared_mask_loaded(
     ws_root: str,
     shared_mask: Optional[np.ndarray],
 ) -> np.ndarray:
     if shared_mask is not None:
         return shared_mask
-    sm_path = os.path.join(ws_root, SHARED_MASK_FITS_BASENAME)
-    if os.path.isfile(sm_path):
+    sm_path = resolve_pipeline_artifact_path(ws_root, SHARED_MASK_FITS_BASENAME)
+    if sm_path is not None:
         mask = np.asarray(fits.getdata(sm_path), dtype=np.int16)
         log.info("  Loaded shared_mask from prior run (%s)", sm_path)
         return mask
     raise RuntimeError(
         "Background stages need shared_mask in memory (run shared_mask first) "
-        f"or an existing {sm_path!r} from a prior run."
+        f"or an existing shared_mask FITS under {ws_root!r} from a prior run."
     )
 
 
@@ -621,103 +538,6 @@ def _ensure_template_paths_for_kernel(
         )
 
 
-def _strip_hp_heavy_arrays(hp_results: list) -> None:
-    """Drop diff/bkg FITS arrays from in-memory hotpants dicts to free RAM."""
-    for r in hp_results:
-        r.pop("diff", None)
-        r.pop("bkg", None)
-        r.pop("path", None)
-
-
-def _time_mjd_for_hotpants_rows(wcs_table: pd.DataFrame, hp_rows: list) -> np.ndarray:
-    """BTJD (WCS table, Hotpants order) → MJD for :mod:`adaptive_background`."""
-    btjd = background.btjd_for_hotpants_order(wcs_table, hp_rows)
-    return np.asarray(btjd, dtype=float) + 57000.0
-
-
-def _norm_bkg_vector_path(p: Optional[str]) -> Optional[str]:
-    if p is None or (isinstance(p, str) and not str(p).strip()):
-        return None
-    return str(p)
-
-
-def _optional_prf_kernel_for_bkg_source_hunt(
-    sp,
-    crop_bounds: Optional[dict],
-    ref_ffi_path: Optional[str],
-) -> Optional[np.ndarray]:
-    """PRF stamp for ``par_psf_source_mask`` when spatial TESSreduce background + source hunt."""
-    if not sp.bkg_source_hunt or not sp.bkg_tessreduce_spatial_pipeline:
-        return None
-    if crop_bounds is None or not ref_ffi_path:
-        raise RuntimeError(
-            "bkg_source_hunt with bkg_tessreduce_spatial_pipeline requires crop_bounds "
-            "and ref_ffi_path (template handoff required: cluster_template_job.json "
-            "with crop_bounds and reference_ffi_path)."
-        )
-    return background.build_prf_kernel_for_par_psf_source_mask(
-        cfg, crop_bounds, ref_ffi_path
-    )
-
-
-def _add_hotpants_bkg_to_stack_inplace(
-    stack: np.ndarray,
-    stem_rows: list,
-    bkg_dir: str,
-) -> None:
-    """
-    Add Hotpants polynomial background FITS per frame into ``stack`` (axis 0 = time).
-
-    Only rows with ``success`` True are updated; missing
-    ``{tess<digits>}_{bkg_label}.fits`` under ``bkg_dir`` contributes nothing
-    (same as a zero ``hp_b`` plane).
-    """
-    bkg_label = workspace_label_from_dir(bkg_dir)
-    for i, row in enumerate(stem_rows):
-        if i >= stack.shape[0]:
-            break
-        if not row.get("success"):
-            continue
-        pid = _row_product_id(row)
-        if not pid:
-            continue
-        bkg_stem = workspace_frame_stem(pid, bkg_label)
-        bp = os.path.join(bkg_dir, f"{bkg_stem}.fits")
-        if not os.path.isfile(bp):
-            continue
-        stack[i] = stack[i] + fits.getdata(bp).astype(np.float32, copy=False)
-
-
-def _adaptive_smooth_bkg_stack(
-    bkg_stack: np.ndarray,
-    wcs_table: pd.DataFrame,
-    hotpants_results: list,
-    cfg: SynDiffConfig,
-    adapt,
-) -> np.ndarray:
-    log.info(
-        "_adaptive_smooth_bkg_stack: BTJD order for %d hotpants result(s), bkg_stack %s",
-        len(hotpants_results),
-        getattr(bkg_stack, "shape", None),
-    )
-    time_btjd = background.btjd_for_hotpants_order(wcs_table, hotpants_results)
-    vpath = _norm_bkg_vector_path(adapt.bkg_vector_path)
-    return background.adaptive_smooth_background(
-        bkg_stack,
-        time_btjd,
-        cfg.sector,
-        cfg.camera,
-        vector_path=vpath,
-        method=adapt.bkg_adaptive_method,
-        savgol_window=adapt.bkg_adaptive_savgol_window,
-        savgol_polyorder=adapt.bkg_adaptive_savgol_polyorder,
-        w_min=adapt.bkg_adaptive_w_min,
-        w_max=adapt.bkg_adaptive_w_max,
-        block_size=adapt.bkg_adaptive_block_size,
-        n_jobs=cfg.n_jobs,
-    )
-
-
 def _warn_if_forced_target_outside_crop(
     target_x: float,
     target_y: float,
@@ -754,32 +574,6 @@ def _warn_if_forced_target_outside_crop(
         )
 
 
-def _ref_manifest_row_index(
-    wcs_table: pd.DataFrame, ref_ffi_path: str
-) -> Optional[int]:
-    """Manifest row whose FFI ``path``/``filename`` resolves to ``ref_ffi_path``."""
-    path_col = "path" if "path" in wcs_table.columns else "filename"
-    try:
-        ref_r = Path(ref_ffi_path).resolve()
-    except Exception:
-        ref_r = Path(os.path.expanduser(ref_ffi_path))
-    ref_abs = os.path.abspath(os.path.expanduser(str(ref_ffi_path)))
-    for i in range(len(wcs_table)):
-        p = wcs_table.iloc[i].get(path_col)
-        if p is None or (isinstance(p, float) and np.isnan(p)):
-            continue
-        ps = str(p).strip()
-        if not ps:
-            continue
-        try:
-            if Path(ps).resolve() == ref_r:
-                return i
-        except Exception:
-            if os.path.abspath(os.path.expanduser(ps)) == ref_abs:
-                return i
-    return None
-
-
 def run_config_pipeline(
     cfg: SynDiffConfig,
     *,
@@ -790,6 +584,17 @@ def run_config_pipeline(
     if validate_only:
         log.info("Pipeline configuration is valid.")
         return
+
+    effective_n_jobs = resolve_effective_n_jobs(int(cfg.n_jobs or 1))
+    if effective_n_jobs != cfg.n_jobs:
+        log.info(
+            "effective n_jobs=%s (cfg.n_jobs=%s, SYNDIFF_REQUEST_CPUS=%s, cpu_count=%s)",
+            effective_n_jobs,
+            cfg.n_jobs,
+            os.environ.get("SYNDIFF_REQUEST_CPUS", ""),
+            __import__("multiprocessing").cpu_count(),
+        )
+    cfg.n_jobs = effective_n_jobs
 
     ctx = PipelineInvocationContext.from_config(cfg)
     out = ctx.cfg.output_dir
@@ -860,7 +665,7 @@ def run_config_pipeline(
                 raise RuntimeError("gaia_catalog required for shared_mask.")
             gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
 
-            with fits.open(ref_ffi_path, memmap=True) as hdul:
+            with wcs_grouping.open_fits_memmap(ref_ffi_path) as hdul:
                 ref_header = hdul[1].header
                 ref_data = hdul[1].data.astype(np.float64)
                 ffi_nx = int(ref_header["NAXIS1"])
@@ -869,6 +674,31 @@ def run_config_pipeline(
 
             gaia_mask_df = epsf_fitting.add_tess_flux_ratio(gaia_df.copy())
             gaia_mask_df["mag"] = gaia_mask_df["tess_mag"]
+
+            ref_template_path: str | None = None
+            if int(sm.ps1_min_hit_count) > 0:
+                _ensure_template_paths_for_kernel(
+                    cfg,
+                    wcs_table,
+                    crop_bounds,
+                    pipeline_offset_threshold,
+                )
+                ref_row = wcs_grouping.ref_manifest_row_index(wcs_table, ref_ffi_path)
+                if ref_row is None:
+                    raise RuntimeError(
+                        f"reference FFI {ref_ffi_path!r} not found in frame manifest"
+                    )
+                ref_group_id = int(wcs_table.iloc[ref_row]["group_id"])
+                ref_template_path = cfg.template_paths.get(ref_group_id)
+                if not ref_template_path:
+                    raise RuntimeError(
+                        f"No template path for reference group_id={ref_group_id}"
+                    )
+                log.info(
+                    "  PS1 coverage mask from reference template (group_id=%s): %s",
+                    ref_group_id,
+                    ref_template_path,
+                )
 
             shared_mask = masking.make_shared_mask(
                 ref_image=ref_crop,
@@ -885,6 +715,8 @@ def run_config_pipeline(
                 x_left_dead=int(getattr(cfg, "x_left_dead", 44)),
                 x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
                 y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
+                template_path=ref_template_path,
+                ps1_min_hit_count=int(sm.ps1_min_hit_count),
             )
             ref_stars = masking.select_hotpants_ref_stars(
                 gaia_df=gaia_mask_df,
@@ -949,30 +781,7 @@ def run_config_pipeline(
             )
 
             processing_ffi_paths = _ffi_paths_for_processing(cfg)
-            sci_bkg_stack = None
-            if inp.get("bkg"):
-                bkg_ws = ctx.workspace(inp["bkg"])
-                bkg_label = workspace_label_from_dir(bkg_ws)
-                arr = []
-                for p in processing_ffi_paths:
-                    pid = tess_product_id_from_ffi_path(p)
-                    if not pid:
-                        arr.append(np.zeros((1, 1)))
-                        continue
-                    bp = os.path.join(
-                        bkg_ws, f"{workspace_frame_stem(pid, bkg_label)}.fits"
-                    )
-                    if os.path.isfile(bp):
-                        arr.append(fits.getdata(bp).astype(np.float64))
-                    else:
-                        arr.append(np.zeros((1, 1)))  # placeholder; hotpants may fail
-                ny, nx = crop_bounds["shape"]
-                sci_bkg_stack = np.stack(
-                    [
-                        a if a.shape == (ny, nx) else np.zeros((ny, nx), dtype=np.float64)
-                        for a in arr
-                    ]
-                )
+            sci_bkg_ws = ctx.workspace(inp["bkg"]) if inp.get("bkg") else None
 
             round_id = 2 if inp.get("bkg") else 1
             sci_label = str(stage.get("science", "ffi")).strip()
@@ -990,13 +799,19 @@ def run_config_pipeline(
                 output_dir=out,
                 ref_stars_df=ref_stars,
                 round_id=round_id,
-                sci_bkg_stack=sci_bkg_stack,
+                sci_bkg_ws=sci_bkg_ws,
                 workspace_dirs=dirs,
                 sci_workspace_dir=sci_workspace_dir,
                 diffs_label=diffs_l,
                 science=sci_label,
                 diff_log_path=diff_log_path,
             )
+            n_ok = sum(1 for r in results if r.get("success"))
+            if n_ok == 0:
+                raise RuntimeError(
+                    f"hotpants [{diffs_l}] round {round_id}: 0/{len(results)} frames "
+                    "succeeded; check manifest path matching and template_paths."
+                )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l
             )
@@ -1268,7 +1083,7 @@ def run_config_pipeline(
                 if skip or acc is None:
                     continue
                 out_stem = workspace_frame_stem(pid, out_label)
-                out_fp = os.path.join(out_ws, f"{out_stem}.fits")
+                out_fp = workspace_frame_fits_path(out_ws, out_stem)
                 if acc_var is not None:
                     noise_sigma = np.sqrt(acc_var)
                     fits.HDUList(
@@ -1280,359 +1095,23 @@ def run_config_pipeline(
                 else:
                     fits.writeto(out_fp, acc.astype(np.float32), overwrite=True)
 
-        elif kind == "background_rough":
-            sp = parse_background_rough(stage, idx)
-            inp = stage["inputs"]
-            label_out = stage["output"]
-            diff_dir = ctx.workspace(inp["diffs"])
-            hp_bkg_dir = ctx.workspace(inp["bkg"])
-            out_ws = ctx.workspace(label_out)
-            os.makedirs(out_ws, exist_ok=True)
-            shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+        elif kind == "background":
+            if wcs_table is None:
+                raise RuntimeError(
+                    "background requires wcs_table from template handoff."
+                )
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg)
-            round_id = int(stage.get("round_id", 1))
-            stream = bool(stage.get("stream_load_rough", False))
-            write_pf = bool(stage.get("write_per_frame_fits", True))
-            incremental_rough_fits = write_pf and not sp.bkg_tessreduce_spatial_pipeline
-            sh_union_fits = (
-                os.path.join(ws_root, BKG_SOURCE_HUNT_UNION_FITS_BASENAME)
-                if sp.bkg_source_hunt and sp.bkg_tessreduce_spatial_pipeline
-                else None
-            )
-            if stream and sp.bkg_tessreduce_spatial_pipeline:
-                raise RuntimeError(
-                    "background_rough: stream_load_rough is incompatible with "
-                    "bkg_tessreduce_spatial_pipeline=True (full flux cube required)."
-                )
-            if stream:
-                log.info(
-                    "  background_rough: stream_load_rough — load+estimate per frame in parallel "
-                    "(%d FFIs; avoids holding the full diff/bkg stack in RAM)",
-                    len(processing_ffi_paths),
-                )
-                path_to_group = _path_to_group_from_wcs(wcs_table)
-                rough = background.background_loop_streaming(
-                    processing_ffi_paths,
-                    diff_dir,
-                    hp_bkg_dir,
-                    path_to_group,
-                    shared_mask,
-                    output_dir=out_ws,
-                    round_id=round_id,
-                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
-                    n_jobs=cfg.n_jobs,
-                    interpolate_per_frame=sp.bkg_interpolate,
-                    per_frame_fits_dir=out_ws if incremental_rough_fits else None,
-                )
-                hp_results = _hotpants_result_stems_for_ordering(
-                    processing_ffi_paths, wcs_table, diff_dir
-                )
-                for _r in hp_results:
-                    _r["diff"] = True if _r.get("success") else None
-            else:
-                log.info(
-                    "  background_rough: loading diff/bkg FITS into memory (%d FFIs) ...",
-                    len(processing_ffi_paths),
-                )
-                hp_results = _hotpants_results_from_dirs(
-                    processing_ffi_paths, wcs_table, diff_dir, hp_bkg_dir
-                )
-                log.info(
-                    "  background_rough: FITS load complete; starting rough stack "
-                    "(TESSreduce spatial=%s)",
-                    sp.bkg_tessreduce_spatial_pipeline,
-                )
-                prf_k = _optional_prf_kernel_for_bkg_source_hunt(
-                    sp, crop_bounds, ref_ffi_path
-                )
-                rough = background.background_loop(
-                    hotpants_results=hp_results,
-                    mask=shared_mask,
-                    output_dir=out_ws,
-                    round_id=round_id,
-                    gauss_smooth=sp.bkg_gauss_smooth,
-                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
-                    n_jobs=cfg.n_jobs,
-                    tessreduce_spatial=sp.bkg_tessreduce_spatial_pipeline,
-                    time_mjd=(
-                        _time_mjd_for_hotpants_rows(wcs_table, hp_results)
-                        if sp.bkg_tessreduce_spatial_pipeline
-                        else None
-                    ),
-                    sector=int(cfg.sector),
-                    camera=int(cfg.camera),
-                    vector_path=_norm_bkg_vector_path(sp.bkg_vector_path),
-                    calc_qe=sp.bkg_calc_qe,
-                    strap_iso=sp.bkg_strap_iso,
-                    source_hunt=sp.bkg_source_hunt,
-                    interpolate=sp.bkg_interpolate,
-                    rerun_negative=sp.bkg_rerun_negative,
-                    rerun_diff=sp.bkg_rerun_diff,
-                    use_error_image=sp.bkg_use_error_image,
-                    prf_kernel_2d=prf_k,
-                    per_frame_fits_dir=out_ws if incremental_rough_fits else None,
-                    source_hunt_union_fits_path=sh_union_fits,
-                )
-            if write_pf:
-                if incremental_rough_fits:
-                    log.info(
-                        "  background_rough: per-frame FITS written incrementally under %s",
-                        out_ws,
-                    )
-                else:
-                    _write_per_frame_background_fits(
-                        out_ws,
-                        rough,
-                        hp_results,
-                        "{stem}.fits",
-                        row_ok=lambda r: bool(r.get("success"))
-                        and r.get("diff") is not None,
-                    )
-                    log.info(
-                        "  background_rough: wrote per-frame %s/*.fits", out_ws
-                    )
-            _maybe_write_background_gif(
-                cfg,
-                out,
-                rough,
-                wcs_table,
-                hp_results,
-                filename=f"rough_bkg_r{round_id}_animation.gif",
-                cbar_label="Rough background (per frame)",
-            )
-            _strip_hp_heavy_arrays(hp_results)
-            del rough
-            gc.collect()
-            log.info(
-                "  background_rough: stack saved as rough_bkg_r%s.npz and .npy under %s",
-                round_id,
-                out_ws,
-            )
-
-        elif kind == "background_adaptive":
-            ap = parse_background_adaptive(stage, idx)
-            inp = stage["inputs"]
-            label_out = stage["output"]
-            rough_ws = ctx.workspace(inp["rough"])
-            diff_dir = ctx.workspace(inp["diffs"])
-            hp_bkg_dir = ctx.workspace(inp["bkg"])
-            out_ws = ctx.workspace(label_out)
-            os.makedirs(out_ws, exist_ok=True)
-            round_id = int(stage.get("round_id", 1))
-            rough_base = f"rough_bkg_r{round_id}"
-            try:
-                rough = _load_stack_npz_or_npy(rough_ws, rough_base)
-            except FileNotFoundError as e:
-                raise FileNotFoundError(
-                    f"background_adaptive: missing {rough_base}.npz or {rough_base}.npy "
-                    f"under {rough_ws!r}"
-                ) from e
-            rough_path = os.path.join(rough_ws, rough_base + ".npz")
-            if not os.path.isfile(rough_path):
-                rough_path = os.path.join(rough_ws, rough_base + ".npy")
-            if not processing_ffi_paths:
-                processing_ffi_paths = _ffi_paths_for_processing(cfg)
-            hp_order = _hotpants_result_stems_for_ordering(
-                processing_ffi_paths, wcs_table, diff_dir
-            )
-            if len(hp_order) != rough.shape[0]:
-                raise RuntimeError(
-                    "background_adaptive: length mismatch "
-                    f"(rough shape[0]={rough.shape[0]} vs ffi stem list len={len(hp_order)}). "
-                    "Use the same max_ffis / manifest as when building the rough stack."
-                )
-            log.info(
-                "  background_adaptive: loaded %s; adding hp_b per frame then adaptive smooth ...",
-                rough_path,
-            )
-            bkg_arr = np.array(rough, dtype=np.float32, copy=True)
-            _add_hotpants_bkg_to_stack_inplace(bkg_arr, hp_order, hp_bkg_dir)
-            temp_smooth = _adaptive_smooth_bkg_stack(
-                bkg_arr, wcs_table, hp_order, cfg, ap
-            )
-            log.info(
-                "  background_adaptive: adaptive smooth returned; writing %s.npz and .npy",
-                ADAPTIVE_BKG_STACK_BASENAME,
-            )
-            background.save_background_stack(
-                temp_smooth,
-                os.path.join(out_ws, f"{ADAPTIVE_BKG_STACK_BASENAME}.npy"),
-            )
-            if bool(stage.get("write_per_frame_fits", True)):
-                _write_per_frame_background_fits(
-                    out_ws, temp_smooth, hp_order, "{stem}.fits"
-                )
-                log.info(
-                    "  background_adaptive: wrote per-frame %s/*.fits", out_ws
-                )
-            _maybe_write_background_gif(
-                cfg,
-                out,
-                temp_smooth,
-                wcs_table,
-                hp_order,
-                filename=f"{ADAPTIVE_BKG_STACK_BASENAME}_adaptive_animation.gif",
-                cbar_label="Adaptive smoothed background",
-            )
-
-        elif kind == "background_estimate":
-            sp, ap = parse_background_estimate(stage, idx)
-            inp = stage["inputs"]
-            label_out = stage["output"]
-            diff_dir = ctx.workspace(inp["diffs"])
-            hp_bkg_dir = ctx.workspace(inp["bkg"])
-            out_ws = ctx.workspace(label_out)
-            os.makedirs(out_ws, exist_ok=True)
-            shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
-            if not processing_ffi_paths:
-                processing_ffi_paths = _ffi_paths_for_processing(cfg)
-            round_id = int(stage.get("round_id", 1))
-            stream = bool(stage.get("stream_load_rough", False))
-            write_pf_est = bool(stage.get("write_per_frame_fits", True))
-            incremental_rough_fits_est = (
-                write_pf_est and not sp.bkg_tessreduce_spatial_pipeline
-            )
-            sh_union_fits = (
-                os.path.join(ws_root, BKG_SOURCE_HUNT_UNION_FITS_BASENAME)
-                if sp.bkg_source_hunt and sp.bkg_tessreduce_spatial_pipeline
-                else None
-            )
-            if stream and sp.bkg_tessreduce_spatial_pipeline:
-                raise RuntimeError(
-                    "background_estimate: stream_load_rough is incompatible with "
-                    "bkg_tessreduce_spatial_pipeline=True (full flux cube required)."
-                )
-            if stream:
-                log.info(
-                    "  background_estimate: stream_load_rough — load+estimate per frame "
-                    "(%d FFIs; avoids holding the full diff/bkg stack in RAM)",
-                    len(processing_ffi_paths),
-                )
-                path_to_group = _path_to_group_from_wcs(wcs_table)
-                rough = background.background_loop_streaming(
-                    processing_ffi_paths,
-                    diff_dir,
-                    hp_bkg_dir,
-                    path_to_group,
-                    shared_mask,
-                    output_dir=out_ws,
-                    round_id=round_id,
-                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
-                    n_jobs=cfg.n_jobs,
-                    interpolate_per_frame=sp.bkg_interpolate,
-                    per_frame_fits_dir=out_ws if incremental_rough_fits_est else None,
-                )
-                hp_results = _hotpants_result_stems_for_ordering(
-                    processing_ffi_paths, wcs_table, diff_dir
-                )
-                for _r in hp_results:
-                    _r["diff"] = True if _r.get("success") else None
-            else:
-                log.info(
-                    "  background_estimate: loading diff/bkg FITS into memory (%d FFIs) ...",
-                    len(processing_ffi_paths),
-                )
-                hp_results = _hotpants_results_from_dirs(
-                    processing_ffi_paths, wcs_table, diff_dir, hp_bkg_dir
-                )
-                log.info(
-                    "  background_estimate: FITS load complete; starting rough stack "
-                    "(TESSreduce spatial=%s)",
-                    sp.bkg_tessreduce_spatial_pipeline,
-                )
-                prf_k = _optional_prf_kernel_for_bkg_source_hunt(
-                    sp, crop_bounds, ref_ffi_path
-                )
-                rough = background.background_loop(
-                    hotpants_results=hp_results,
-                    mask=shared_mask,
-                    output_dir=out_ws,
-                    round_id=round_id,
-                    gauss_smooth=sp.bkg_gauss_smooth,
-                    recombine_hotpants=sp.bkg_r1_recombine_hotpants,
-                    n_jobs=cfg.n_jobs,
-                    tessreduce_spatial=sp.bkg_tessreduce_spatial_pipeline,
-                    time_mjd=(
-                        _time_mjd_for_hotpants_rows(wcs_table, hp_results)
-                        if sp.bkg_tessreduce_spatial_pipeline
-                        else None
-                    ),
-                    sector=int(cfg.sector),
-                    camera=int(cfg.camera),
-                    vector_path=_norm_bkg_vector_path(sp.bkg_vector_path),
-                    calc_qe=sp.bkg_calc_qe,
-                    strap_iso=sp.bkg_strap_iso,
-                    source_hunt=sp.bkg_source_hunt,
-                    interpolate=sp.bkg_interpolate,
-                    rerun_negative=sp.bkg_rerun_negative,
-                    rerun_diff=sp.bkg_rerun_diff,
-                    use_error_image=sp.bkg_use_error_image,
-                    prf_kernel_2d=prf_k,
-                    per_frame_fits_dir=out_ws if incremental_rough_fits_est else None,
-                    source_hunt_union_fits_path=sh_union_fits,
-                )
-            if write_pf_est:
-                if incremental_rough_fits_est:
-                    log.info(
-                        "  background_estimate: per-frame FITS written incrementally under %s",
-                        out_ws,
-                    )
-                else:
-                    _write_per_frame_background_fits(
-                        out_ws,
-                        rough,
-                        hp_results,
-                        "{stem}.fits",
-                        row_ok=lambda r: bool(r.get("success"))
-                        and r.get("diff") is not None,
-                    )
-                    log.info(
-                        "  background_estimate: wrote per-frame %s/*.fits", out_ws
-                    )
-            _maybe_write_background_gif(
-                cfg,
-                out,
-                rough,
-                wcs_table,
-                hp_results,
-                filename=f"rough_bkg_r{round_id}_animation.gif",
-                cbar_label="Rough background (per frame)",
-            )
-            log.info(
-                "  background_estimate: rough stack done shape=%s; adaptive temporal smooth ...",
-                getattr(rough, "shape", None),
-            )
-            _strip_hp_heavy_arrays(hp_results)
-            gc.collect()
-            bkg_arr = np.array(rough, dtype=np.float32, copy=True)
-            _add_hotpants_bkg_to_stack_inplace(bkg_arr, hp_results, hp_bkg_dir)
-            temp_smooth = _adaptive_smooth_bkg_stack(
-                bkg_arr, wcs_table, hp_results, cfg, ap
-            )
-            log.info(
-                "  background_estimate: adaptive smooth returned; writing %s.npz and .npy",
-                ADAPTIVE_BKG_STACK_BASENAME,
-            )
-            background.save_background_stack(
-                temp_smooth,
-                os.path.join(out_ws, f"{ADAPTIVE_BKG_STACK_BASENAME}.npy"),
-            )
-            if bool(stage.get("write_per_frame_fits", True)):
-                _write_per_frame_background_fits(
-                    out_ws, temp_smooth, hp_results, "{stem}.fits"
-                )
-                log.info(
-                    "  background_estimate: wrote per-frame %s/*.fits", out_ws
-                )
-            _maybe_write_background_gif(
-                cfg,
-                out,
-                temp_smooth,
-                wcs_table,
-                hp_results,
-                filename=f"{ADAPTIVE_BKG_STACK_BASENAME}_adaptive_animation.gif",
-                cbar_label="Adaptive smoothed background",
+            shared_mask = _run_background_stage(
+                stage=stage,
+                idx=idx,
+                cfg=cfg,
+                ctx=ctx,
+                ws_root=ws_root,
+                shared_mask=shared_mask,
+                wcs_table=wcs_table,
+                processing_ffi_paths=processing_ffi_paths,
+                out=out,
             )
 
         elif kind == "forced_photometry":
@@ -1653,6 +1132,16 @@ def run_config_pipeline(
                 continue
 
             diff_label = inp["diffs"]
+            diff_ws = ctx.workspace(diff_label)
+            if not any(
+                p.is_file()
+                for p in Path(diff_ws).rglob("*")
+                if p.name.endswith((".fits", ".fits.gz"))
+            ):
+                raise RuntimeError(
+                    f"forced_photometry: no diff FITS under workspace {diff_label!r} "
+                    f"({diff_ws}); hotpants may have failed."
+                )
             paths_for_phot = ordered_diff_paths_for_workspace(
                 wcs_table,
                 out,
@@ -1660,7 +1149,7 @@ def run_config_pipeline(
                 manifest_path,
                 run_id=ctx.workspace_run_id,
             )
-            ref_idx = _ref_manifest_row_index(wcs_table, ref_ffi_path)
+            ref_idx = wcs_grouping.ref_manifest_row_index(wcs_table, ref_ffi_path)
             if ref_idx is None:
                 log.warning(
                     "forced_photometry: ref_ffi_path not found in manifest %r; "
@@ -1704,11 +1193,13 @@ def run_config_pipeline(
                         epsf_by_workspace[ws_lab] = arr
 
             extras = list(getattr(cfg, "additional_forced_targets", None) or [])
+            science = (float(cfg.target_ra), float(cfg.target_dec))
             primary_xy = photometry.per_frame_target_crop_xy(
                 wcs_table,
                 float(cfg.target_ra),
                 float(cfg.target_dec),
                 crop_bounds,
+                manifest_science_ra_dec=science,
             )
 
             target_specs: list[tuple] = [
@@ -1725,7 +1216,11 @@ def run_config_pipeline(
             ]
             for j, pt in enumerate(extras):
                 extra_xy = photometry.resolve_forced_target_xy(
-                    pt, primary_xy, wcs_table, crop_bounds
+                    pt,
+                    primary_xy,
+                    wcs_table,
+                    crop_bounds,
+                    manifest_science_ra_dec=science,
                 )
                 target_specs.append(
                     (

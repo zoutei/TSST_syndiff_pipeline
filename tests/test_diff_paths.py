@@ -121,6 +121,26 @@ class TestLinkMasterWorkspace(unittest.TestCase):
             n2 = link_master_workspace(str(out), ffi_leaf=str(ffi_leaf))
             self.assertEqual(n2, 0)
 
+    def test_creates_symlink_for_gzipped_ffi_leaf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "event"
+            ws = out / "ws"
+            ws.mkdir(parents=True)
+
+            ffi_leaf = Path(tmp) / "tess_ffi" / "s0020" / "cam3_ccd3"
+            ffi_leaf.mkdir(parents=True)
+            ffi_gz = ffi_leaf / "tess2020-s0020-3-3-0165-s_ffic.fits.gz"
+            ffi_gz.write_bytes(b"SIMPLE  =                    T")
+
+            refreshed = link_master_workspace(str(out), ffi_leaf=str(ffi_leaf))
+            self.assertGreaterEqual(refreshed, 1)
+
+            m_root = master_root(str(out))
+            link = os.path.join(m_root, ffi_gz.name)
+            self.assertTrue(os.path.islink(link))
+            self.assertEqual(os.readlink(link), str(ffi_gz.resolve()))
+            self.assertTrue(os.path.isfile(link))
+
     def test_replaces_broken_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "event"
@@ -162,6 +182,23 @@ class TestLinkMasterWorkspace(unittest.TestCase):
             self.assertGreaterEqual(refreshed, 2)
             self.assertFalse(os.path.exists(legacy))
             self.assertTrue(os.path.islink(os.path.join(m_root, ffi.name)))
+
+    def test_prefers_gzip_when_both_exist(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "event"
+            ws = out / "ws"
+            hp = ws / "hp_d"
+            hp.mkdir(parents=True)
+            stem = "tess2020_hp_d"
+            (hp / f"{stem}.fits").write_bytes(b"legacy")
+            (hp / f"{stem}.fits.gz").write_bytes(b"gzip")
+
+            link_master_workspace(str(out))
+            m_root = master_root(str(out))
+            link = os.path.join(m_root, f"{stem}.fits.gz")
+            self.assertTrue(os.path.islink(link))
+            self.assertEqual(os.readlink(link), str((hp / f"{stem}.fits.gz").resolve()))
+            self.assertFalse(os.path.exists(os.path.join(m_root, f"{stem}.fits")))
 
     def test_skips_hotpants_stamp_fits(self):
         with tempfile.TemporaryDirectory() as tmp:

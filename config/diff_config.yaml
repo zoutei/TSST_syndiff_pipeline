@@ -68,22 +68,28 @@ pipeline:
         tar_ap: 3
         sky_in: 5
         sky_out: 9
-  # - kind: background_rough
+  # - kind: background
   #   inputs:
   #     diffs: hp_d
   #     bkg: hp_b
-  #   output: bkg_rough
-  #   stream_load_rough: true
-  #   write_per_frame_fits: true
+  #   output: bkg_final
+  #   recombine_inputs: true
+  #   steps:
+  #     spatial: { enabled: true, box_size: 16, exclude_straps: true }
+  #     temporal: { enabled: true, method: savgol, tile_size: 256 }
+  #     strap: { enabled: true, qe_floor: 1.001, fix_anomalies: true }
   # - kind: subtract
   #   inputs:
-  #     expression: "hp_d - bkg_rough"
+  #     expression: "hp_d - bkg_final"
   #   output: diffs_minus_bkg
   # - kind: forced_photometry
   #   inputs:
   #     diffs: diffs_minus_bkg
-  #   psf_type: prf
   #   output: lc_prf_after_bkg
+  #   methods:
+  #     - name: prf
+  #       type: psf
+  #       psf_type: prf
   # - kind: subtract
   #   inputs:
   #     expression: "ffi - bkg_rough - hp_b"
