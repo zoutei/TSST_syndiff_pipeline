@@ -25,6 +25,8 @@ from astropy.stats import sigma_clip
 from joblib import Parallel, delayed
 import multiprocessing
 
+from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
+
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
 log = logging.getLogger(__name__)
@@ -225,6 +227,7 @@ def Cat_mask(data_image: np.ndarray,
       bit 2 (value 2) — very bright star crosses (Big_sat, mag < 7; Gaia + BSC)
       bit 4 (value 4) — TESS straps
       bit 8 (value 8) — detector edge dead zones (applied in make_shared_mask)
+      bit 16 (value 16) — insufficient PS1 coverage (applied in make_shared_mask)
 
     Parameters
     ----------
@@ -361,6 +364,11 @@ def correct_straps(Image: np.ndarray, mask: np.ndarray,
 # ── New pipeline functions ────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def ps1_coverage_mask(count_crop: np.ndarray, *, min_hit_count: int = 5000) -> np.ndarray:
+    """True where PS1 hit count is below *min_hit_count*."""
+    return count_crop < int(min_hit_count)
+
+
 def make_shared_mask(ref_image: np.ndarray,
                      gaia_df: pd.DataFrame,
                      crop_bounds: dict,
@@ -375,7 +383,9 @@ def make_shared_mask(ref_image: np.ndarray,
                      ny: int | None = None,
                      x_left_dead: int = 44,
                      x_right_dead: int = 44,
-                     y_edge_strip: int = 30) -> np.ndarray:
+                     y_edge_strip: int = 30,
+                     template_path: str | None = None,
+                     ps1_min_hit_count: int = 5000) -> np.ndarray:
     """
     Build the shared bitmask for the cropped region.
 
@@ -397,6 +407,11 @@ def make_shared_mask(ref_image: np.ndarray,
         Full FFI dimensions for detector edge masking.
     x_left_dead, x_right_dead, y_edge_strip : int
         Dead-zone strip sizes (TESS FFI layout).
+    template_path : str, optional
+        Reference WCS-group syndiff template; when set, masks pixels with
+        ``COUNT < ps1_min_hit_count`` (bit 16).
+    ps1_min_hit_count : int
+        Minimum PS1 hit count per TESS pixel; ``0`` disables PS1 coverage masking.
 
     Returns
     -------
@@ -437,9 +452,27 @@ def make_shared_mask(ref_image: np.ndarray,
         )
         mask = mask | (edge.astype(np.int16) * 8)
 
+    if template_path and int(ps1_min_hit_count) > 0:
+        from syndiff_pipeline.common.template_coverage import load_template_count_cropped
+
+        count_crop = load_template_count_cropped(template_path, crop_bounds)
+        if count_crop is not None:
+            if count_crop.shape != ref_image.shape:
+                raise ValueError(
+                    f"Template COUNT crop shape {count_crop.shape} != ref_image "
+                    f"{ref_image.shape} for {template_path!r}"
+                )
+            no_ps1 = ps1_coverage_mask(count_crop, min_hit_count=ps1_min_hit_count)
+            mask = mask | (no_ps1.astype(np.int16) * 16)
+            log.info(
+                "  PS1 coverage: %d pixels with COUNT < %d",
+                int(no_ps1.sum()),
+                int(ps1_min_hit_count),
+            )
+
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        out_path = os.path.join(output_dir, "shared_mask.fits")
+        out_path = os.path.join(output_dir, SHARED_MASK_FITS_BASENAME)
         hdu = fits.PrimaryHDU(mask.astype(np.int16))
         hdu.writeto(out_path, overwrite=True)
         log.info(f"Shared mask written to {out_path}  "
