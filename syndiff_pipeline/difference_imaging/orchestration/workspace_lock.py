@@ -40,7 +40,6 @@ def diff_config_fingerprint(cfg: SynDiffConfig) -> str:
         str(cfg.ccd),
         json.dumps(cfg.pipeline, sort_keys=True, default=str),
         json.dumps(cfg.additional_forced_targets, sort_keys=True, default=str),
-        str(cfg.n_jobs),
         str(cfg.pipeline_plots),
         str(getattr(cfg, "workspace_run_id", None) or ""),
     ]

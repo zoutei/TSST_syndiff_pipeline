@@ -99,7 +99,7 @@ class TestWorkspaceConfigLock(unittest.TestCase):
             other = _minimal_cfg(
                 output_dir=tmp,
                 workspace_run_id="lock_test",
-                n_jobs=99,
+                pipeline=[{"kind": "shared_mask"}],
             )
             with self.assertRaises(WorkspaceConfigMismatchError):
                 write_immutable_workspace_config_snapshot(ctx, other)
