@@ -50,7 +50,12 @@ def execute_diff_stage(ctx: StageRunContext):
     frozen_path = _frozen_diff_config_path(ctx)
     cfg = frozen_diff_config_for_context(ctx)
     write_frozen_diff_config(cfg, frozen_path)
-    run_config_pipeline(cfg, validate_only=False, diff_log_path=ctx.progress_path)
+    run_config_pipeline(
+        cfg,
+        validate_only=False,
+        diff_log_path=ctx.progress_path,
+        force_rerun=ctx.force_rerun,
+    )
     event_dir = Path(cfg.output_dir)
     artifacts = collect_diff_workspace_artifacts(cfg, event_dir)
     expected = max(len(artifacts), 1)
