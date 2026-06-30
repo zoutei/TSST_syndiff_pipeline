@@ -149,6 +149,7 @@ def _hotpants_loky_initializer(
     legacy_bkg_sidecar: bool,
     sci_workspace_dir: Optional[str] = None,
     sci_bkg_ws: Optional[str] = None,
+    force_rerun: bool = False,
 ) -> None:
     global _HOTPANTS_LOKY_PAYLOAD
     _HOTPANTS_LOKY_PAYLOAD = {
@@ -162,6 +163,7 @@ def _hotpants_loky_initializer(
         "legacy_bkg_sidecar": legacy_bkg_sidecar,
         "sci_workspace_dir": sci_workspace_dir,
         "sci_bkg_ws": sci_bkg_ws,
+        "force_rerun": force_rerun,
         "template_cache": {},
     }
 
@@ -196,6 +198,7 @@ def _hotpants_loky_run_task(
         legacy_diff_sidecar_bkg=p["legacy_bkg_sidecar"],
         sci_workspace_dir=p.get("sci_workspace_dir"),
         template_cache=p.get("template_cache"),
+        force_rerun=bool(p.get("force_rerun")),
     )
 
 
@@ -707,9 +710,22 @@ def _process_one_frame(
     legacy_diff_sidecar_bkg: bool = False,
     sci_workspace_dir: Optional[str] = None,
     template_cache: Optional[dict] = None,
+    force_rerun: bool = False,
 ):
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
+
+    if not force_rerun:
+        existing_diff = resolve_pipeline_fits_path(dirs.diffs, diff_stem)
+        if existing_diff is not None:
+            return {
+                "stem": diff_stem,
+                "ffi_product_id": product_id,
+                "group_id": group_id,
+                "success": True,
+                "skipped": True,
+                "path": existing_diff,
+            }
 
     if sci_workspace_dir:
         sci_label = workspace_label_from_dir(sci_workspace_dir)
@@ -861,6 +877,8 @@ def _process_one_frame(
     result["ffi_product_id"] = product_id
     result["group_id"] = group_id
     result["path"] = diff_out_path
+    for key in ("diff", "bkg", "convolved", "noise", "mask", "kernel_params_arrays"):
+        result.pop(key, None)
     return result
 
 
@@ -882,6 +900,7 @@ def hotpants_loop(
     diffs_label: str = "diffs",
     science: str = "ffi",
     diff_log_path: Optional[str] = None,
+    force_rerun: bool = False,
 ) -> list:
     """
     Run hotpants over all FFIs in parallel.
@@ -998,6 +1017,7 @@ def hotpants_loop(
                 legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
                 sci_workspace_dir=sci_workspace_dir,
                 template_cache=template_cache,
+                force_rerun=force_rerun,
             )
 
         results = []
@@ -1028,18 +1048,23 @@ def hotpants_loop(
                 legacy_bkg_sidecar,
                 sci_workspace_dir,
                 sci_bkg_ws,
+                force_rerun,
             ),
             on_result=_record_progress,
         )
 
     n_ok = sum(1 for r in results if r.get("success"))
+    n_skipped = sum(1 for r in results if r.get("skipped"))
+    n_processed = n_ok - n_skipped
     set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
     log.info(
-        "hotpants [%s] round %s: %d/%d frames succeeded.",
+        "hotpants [%s] round %s: %d/%d frames succeeded (%d skipped, %d processed).",
         diffs_label,
         round_id,
         n_ok,
         len(results),
+        n_skipped,
+        n_processed,
     )
     write_phot_calib_table(meta_dir, results)
     return results

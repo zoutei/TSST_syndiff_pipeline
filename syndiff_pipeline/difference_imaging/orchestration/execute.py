@@ -579,6 +579,7 @@ def run_config_pipeline(
     *,
     validate_only: bool = False,
     diff_log_path: str | None = None,
+    force_rerun: bool = False,
 ) -> None:
     validate_pipeline(cfg)
     if validate_only:
@@ -805,6 +806,7 @@ def run_config_pipeline(
                 diffs_label=diffs_l,
                 science=sci_label,
                 diff_log_path=diff_log_path,
+                force_rerun=force_rerun,
             )
             n_ok = sum(1 for r in results if r.get("success"))
             if n_ok == 0:

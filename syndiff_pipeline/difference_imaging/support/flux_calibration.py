@@ -177,12 +177,20 @@ def build_phot_calib_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def write_phot_calib_table(meta_dir: str, results: list[dict[str, Any]]) -> str:
-    """Write ``phot_calib.csv`` under the meta workspace."""
+    """Write ``phot_calib.csv`` under the meta workspace, merging prior rows on resume."""
     os.makedirs(meta_dir, exist_ok=True)
     path = phot_calib_csv_path(meta_dir)
-    rows = build_phot_calib_rows(results)
-    pd.DataFrame(rows, columns=list(PHOT_CALIB_COLUMNS)).to_csv(path, index=False)
-    log.info("Wrote photometric calibration table: %s (%d rows)", path, len(rows))
+    new_rows = build_phot_calib_rows(results)
+    new_df = pd.DataFrame(new_rows, columns=list(PHOT_CALIB_COLUMNS))
+    existing = load_phot_calib_table(meta_dir)
+    if existing is not None and not existing.empty:
+        combined = pd.concat([existing, new_df], ignore_index=True)
+        combined = combined.drop_duplicates("product_id", keep="last")
+        out_df = combined[list(PHOT_CALIB_COLUMNS)]
+    else:
+        out_df = new_df
+    out_df.to_csv(path, index=False)
+    log.info("Wrote photometric calibration table: %s (%d rows)", path, len(out_df))
     return path
 
 
