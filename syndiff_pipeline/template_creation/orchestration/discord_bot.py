@@ -108,14 +108,27 @@ class PipelineDiscordBot:
                     ch_name,
                     channel_id,
                 )
-                if hasattr(ch, "permissions_for") and client.user:
-                    perms = ch.permissions_for(client.user)
-                    if not perms.view_channel:
-                        log.error("Bot lacks View Channel in #%s", ch_name)
-                    if not perms.read_messages:
-                        log.error("Bot lacks Read Messages in #%s", ch_name)
-                    if not perms.send_messages:
-                        log.error("Bot lacks Send Messages in #%s", ch_name)
+                guild = getattr(ch, "guild", None)
+                if hasattr(ch, "permissions_for") and client.user and guild is not None:
+                    member = guild.get_member(client.user.id)
+                    if member is None:
+                        try:
+                            member = await guild.fetch_member(client.user.id)
+                        except Exception:
+                            member = None
+                    if member is not None:
+                        perms = ch.permissions_for(member)
+                        if not perms.view_channel:
+                            log.error("Bot lacks View Channel in #%s", ch_name)
+                        if not perms.read_messages:
+                            log.error("Bot lacks Read Messages in #%s", ch_name)
+                        if not perms.send_messages:
+                            log.error("Bot lacks Send Messages in #%s", ch_name)
+                    else:
+                        log.warning(
+                            "Could not resolve guild member for permission check in #%s",
+                            ch_name,
+                        )
             except Exception as exc:
                 listen_channel_id = None
                 log.error(
