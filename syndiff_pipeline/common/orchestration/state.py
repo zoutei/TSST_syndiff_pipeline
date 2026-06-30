@@ -187,7 +187,7 @@ def stage_needs_artifact_verify_display(
             state, run_id, target_label, stage, active_stages, spec=spec
         )
     if status == STATUS_PENDING and stage in active_stages:
-        return not state.external_verify_attempted(run_id, target_label, stage)
+        return False
     if status == STATUS_PENDING and stage not in set(active_stages):
         return (
             stage in spec.artifact_verify_closure(active_stages)
@@ -445,11 +445,13 @@ class PipelineState:
                 may_promote_without_verify = bool(
                     run.get("force_rerun") and stage in active_stages
                 )
+                may_promote_active_pending = stage in active_stages
                 if (
                     status == STATUS_PENDING
                     and self.deps_satisfied(run_id, target_label, stage, stages=stages)
                     and (
-                        self.external_verify_attempted(run_id, target_label, stage)
+                        may_promote_active_pending
+                        or self.external_verify_attempted(run_id, target_label, stage)
                         or may_promote_without_verify
                     )
                 ):
