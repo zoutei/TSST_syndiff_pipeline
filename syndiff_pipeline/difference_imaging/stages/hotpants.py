@@ -5,9 +5,9 @@ Hotpants differencing: FFI (cropped) vs PS1 template, Gaia reference stars.
 
 When global ``cfg.n_jobs`` (or the stage's ``hotpants_n_jobs`` if set) is greater than 1,
 :func:`hotpants_loop` uses joblib **loky** with a **worker initializer** so the
-shared mask, reference-star coordinates, and template map are installed once per
-process instead of being cloudpickled with every FFI task (only per-frame
-arguments are serialized per task).
+shared mask, reference-star coordinates, template map, and optional background
+workspace path are installed once per process instead of being cloudpickled with
+every FFI task (only per-frame path metadata is serialized per task).
 
 Supports **legacy** layout (``diff_rN/``, optional ``convolved_rN/``) and
 **workspace** layout (separate dirs for diffs, convolved model, optional bkg).
@@ -42,6 +42,7 @@ from astropy.wcs import WCS, FITSFixedWarning
 from joblib import delayed
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
 from syndiff_pipeline.common.joblib_progress import (
     parallel_map_with_optional_tqdm,
     tqdm_iter,
@@ -60,8 +61,11 @@ from syndiff_pipeline.difference_imaging.support.flux_calibration import (
     write_phot_calib_table,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    iter_pipeline_fits_paths,
+    resolve_pipeline_fits_path,
     sanitize_workspace_label,
     tess_product_id_from_ffi_path,
+    workspace_frame_fits_path,
     workspace_frame_stem,
     workspace_label_from_dir,
 )
@@ -143,7 +147,8 @@ def _hotpants_loky_initializer(
     workspace_dirs: HotpantsWorkspaceDirs,
     round_id: int,
     legacy_bkg_sidecar: bool,
-    sci_workspace_dir: Optional[str],
+    sci_workspace_dir: Optional[str] = None,
+    sci_bkg_ws: Optional[str] = None,
 ) -> None:
     global _HOTPANTS_LOKY_PAYLOAD
     _HOTPANTS_LOKY_PAYLOAD = {
@@ -156,6 +161,7 @@ def _hotpants_loky_initializer(
         "round_id": round_id,
         "legacy_bkg_sidecar": legacy_bkg_sidecar,
         "sci_workspace_dir": sci_workspace_dir,
+        "sci_bkg_ws": sci_bkg_ws,
         "template_cache": {},
     }
 
@@ -172,7 +178,7 @@ def _hotpants_loky_run_task(
             "success": False,
             "error_msg": "hotpants loky worker not initialized",
         }
-    ffi_path, product_id, group_id, bkg_i = task
+    ffi_path, product_id, group_id = task
     if product_id is None:
         return {"stem": None, "success": False, "error_msg": "not in wcs_table"}
     return _process_one_frame(
@@ -186,7 +192,7 @@ def _hotpants_loky_run_task(
         ref_stars_xy=p["ref_stars_xy"],
         dirs=p["workspace_dirs"],
         round_id=p["round_id"],
-        sci_bkg=bkg_i,
+        sci_bkg_ws=p.get("sci_bkg_ws"),
         legacy_diff_sidecar_bkg=p["legacy_bkg_sidecar"],
         sci_workspace_dir=p.get("sci_workspace_dir"),
         template_cache=p.get("template_cache"),
@@ -496,7 +502,9 @@ def build_hotpants_config(
     if write_stamps:
         stamp_out_dir = stamps_dir if stamps_dir is not None else diff_dir
         os.makedirs(stamp_out_dir, exist_ok=True)
-        stamp_region_file = os.path.join(stamp_out_dir, f"{frame_stem}_stamps.fits")
+        stamp_region_file = workspace_frame_fits_path(
+            stamp_out_dir, f"{frame_stem}_stamps"
+        )
 
     hp_config = HotpantsConfig(
         rkernel=int(kernel_halfwidth),
@@ -591,7 +599,7 @@ def run_hotpants_frame(
 def _load_ffi_cropped(ffi_path: str, bounds: dict) -> tuple:
     x0, x1 = bounds["x_min"], bounds["x_max"]
     y0, y1 = bounds["y_min"], bounds["y_max"]
-    with fits.open(ffi_path, memmap=True) as hdul:
+    with wcs_grouping.open_fits_memmap(ffi_path) as hdul:
         sci = hdul[1].data[y0:y1, x0:x1].astype(np.float64)
         try:
             err = hdul[2].data[y0:y1, x0:x1].astype(np.float64)
@@ -621,7 +629,7 @@ def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
     oy = coverage["y_min"]
     x0, x1 = bounds["x_min"] - ox, bounds["x_max"] - ox
     y0, y1 = bounds["y_min"] - oy, bounds["y_max"] - oy
-    with fits.open(tmpl_path, memmap=True) as hdul:
+    with wcs_grouping.open_fits_memmap(tmpl_path) as hdul:
         if hdul[0].data is not None:
             return hdul[0].data[y0:y1, x0:x1].astype(np.float64)
         return hdul[1].data[y0:y1, x0:x1].astype(np.float64)
@@ -634,10 +642,10 @@ def _save_bkg_fits(
     *,
     header: Optional[fits.Header] = None,
 ) -> None:
-    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits``."""
+    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits.gz``."""
     os.makedirs(bkg_dir, exist_ok=True)
     _write_image_fits(
-        os.path.join(bkg_dir, f"{basename}.fits"),
+        workspace_frame_fits_path(bkg_dir, basename),
         bkg,
         header=header,
     )
@@ -650,13 +658,38 @@ def _legacy_save_bkg_sidecar(
     *,
     header: Optional[fits.Header] = None,
 ) -> None:
-    """Write ``{diff_basename}_bkg.fits`` next to the diff (legacy layout)."""
+    """Write ``{diff_basename}_bkg.fits.gz`` next to the diff (legacy layout)."""
     os.makedirs(diff_dir, exist_ok=True)
     _write_image_fits(
-        os.path.join(diff_dir, f"{diff_basename}_bkg.fits"),
+        workspace_frame_fits_path(diff_dir, f"{diff_basename}_bkg"),
         bkg,
         header=header,
     )
+
+
+def _load_sci_bkg_crop(
+    sci_bkg_ws: str,
+    product_id: str,
+    expected_shape: tuple[int, int],
+) -> np.ndarray:
+    """Load one frame's per-FFI background map from a workspace directory."""
+    ny, nx = expected_shape
+    label = workspace_label_from_dir(sci_bkg_ws)
+    stem = workspace_frame_stem(product_id, label)
+    bp = resolve_pipeline_fits_path(sci_bkg_ws, stem)
+    if bp is None:
+        log.warning("sci_bkg missing for %s under %s", product_id, sci_bkg_ws)
+        return np.zeros((ny, nx), dtype=np.float64)
+    bkg = fits.getdata(bp).astype(np.float64)
+    if bkg.shape != (ny, nx):
+        log.warning(
+            "sci_bkg shape %s != %s for %s; using zeros",
+            bkg.shape,
+            expected_shape,
+            product_id,
+        )
+        return np.zeros((ny, nx), dtype=np.float64)
+    return bkg
 
 
 def _process_one_frame(
@@ -670,7 +703,7 @@ def _process_one_frame(
     ref_stars_xy,
     dirs: HotpantsWorkspaceDirs,
     round_id: int,
-    sci_bkg=None,
+    sci_bkg_ws: Optional[str] = None,
     legacy_diff_sidecar_bkg: bool = False,
     sci_workspace_dir: Optional[str] = None,
     template_cache: Optional[dict] = None,
@@ -681,15 +714,15 @@ def _process_one_frame(
     if sci_workspace_dir:
         sci_label = workspace_label_from_dir(sci_workspace_dir)
         sci_stem = workspace_frame_stem(product_id, sci_label)
-        sp = os.path.join(sci_workspace_dir, f"{sci_stem}.fits")
-        if not os.path.isfile(sp):
-            log.error("science workspace FITS missing for %s: %s", product_id, sp)
+        sp = resolve_pipeline_fits_path(sci_workspace_dir, sci_stem)
+        if sp is None:
+            log.error("science workspace FITS missing for %s: %s", product_id, sci_stem)
             return {
                 "stem": diff_stem,
                 "ffi_product_id": product_id,
                 "group_id": group_id,
                 "success": False,
-                "error_msg": f"missing science FITS {sp}",
+                "error_msg": f"missing science FITS {sci_stem}",
             }
         sci_crop = fits.getdata(sp).astype(np.float64)
         # Use the same cropped noise map as a raw-FFI pass. All-zero i_error makes
@@ -709,7 +742,8 @@ def _process_one_frame(
     else:
         sci_crop, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
 
-    if round_id > 1 and sci_bkg is not None:
+    if round_id > 1 and sci_bkg_ws:
+        sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, product_id, sci_crop.shape)
         sci_crop = sci_crop - sci_bkg
 
     tmpl_path = template_path_map.get(group_id)
@@ -742,8 +776,8 @@ def _process_one_frame(
             "error_msg": f"header crop failed: {exc}",
         }
 
-    diff_out_path = os.path.join(dirs.diffs, f"{diff_stem}.fits")
-    conv_out_path = os.path.join(dirs.convolved, f"{diff_stem}.fits")
+    diff_out_path = workspace_frame_fits_path(dirs.diffs, diff_stem)
+    conv_out_path = workspace_frame_fits_path(dirs.convolved, diff_stem)
     hp_config = build_hotpants_config(
         hp=hp,
         diff_dir=dirs.diffs,
@@ -841,7 +875,7 @@ def hotpants_loop(
     output_dir: str,
     ref_stars_df: pd.DataFrame,
     round_id: int = 1,
-    sci_bkg_stack: np.ndarray = None,
+    sci_bkg_ws: Optional[str] = None,
     workspace_dirs: Optional[HotpantsWorkspaceDirs] = None,
     sci_workspace_dir: Optional[str] = None,
     *,
@@ -888,30 +922,29 @@ def hotpants_loop(
     write_kernel_reconstruction_npz(hp, recon_path)
 
     ref_stars_xy = ref_stars_df[["x", "y"]].values
-    path_to_row = {str(r["path"]): i for i, r in wcs_table.iterrows()}
+    path_to_row = wcs_grouping.manifest_path_row_index(wcs_table)
 
     tasks = []
     for i, ffi_path in enumerate(ffi_paths):
-        row_idx = path_to_row.get(str(ffi_path))
+        row_idx = path_to_row.get(wcs_grouping.canonical_fits_path_key(ffi_path))
         if row_idx is None:
             log.warning("FFI not in wcs_table: %s", ffi_path)
-            tasks.append((ffi_path, None, 0, None))
+            tasks.append((ffi_path, None, 0))
             continue
         row = wcs_table.iloc[row_idx]
         product_id = tess_product_id_from_ffi_path(ffi_path)
         if product_id is None:
             log.warning("FFI basename does not start with tess<digits>: %s", ffi_path)
-            tasks.append((ffi_path, None, 0, None))
+            tasks.append((ffi_path, None, 0))
             continue
         group_id = int(row.get("group_id", 0))
-        bkg_i = sci_bkg_stack[i] if (sci_bkg_stack is not None and i < len(sci_bkg_stack)) else None
-        tasks.append((ffi_path, product_id, group_id, bkg_i))
+        tasks.append((ffi_path, product_id, group_id))
 
-    hn = hp.hotpants_n_jobs
-    if hn is None:
-        n_workers = max(1, int(cfg.n_jobs or 1))
-    else:
-        n_workers = max(1, int(hn))
+    n_workers = resolve_effective_n_jobs(
+        int(cfg.n_jobs or 1),
+        stage_n_jobs=hp.hotpants_n_jobs,
+    )
+    n_workers = max(1, min(n_workers, len(tasks)))
 
     cli_progress_path = (
         str(progress_path_for_diff_log(diff_log_path))
@@ -947,7 +980,7 @@ def hotpants_loop(
         template_cache: dict = {}
 
         def _serial_worker(args):
-            ffi_path, product_id, group_id, bkg_i = args
+            ffi_path, product_id, group_id = args
             if product_id is None:
                 return {"stem": None, "success": False, "error_msg": "not in wcs_table"}
             return _process_one_frame(
@@ -961,7 +994,7 @@ def hotpants_loop(
                 ref_stars_xy=ref_stars_xy,
                 dirs=workspace_dirs,
                 round_id=round_id,
-                sci_bkg=bkg_i,
+                sci_bkg_ws=sci_bkg_ws,
                 legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
                 sci_workspace_dir=sci_workspace_dir,
                 template_cache=template_cache,
@@ -994,6 +1027,7 @@ def hotpants_loop(
                 round_id,
                 legacy_bkg_sidecar,
                 sci_workspace_dir,
+                sci_bkg_ws,
             ),
             on_result=_record_progress,
         )
@@ -1011,30 +1045,22 @@ def hotpants_loop(
     return results
 
 
+def _is_diff_sidecar_path(path: str) -> bool:
+    lower = path.lower()
+    return lower.endswith(
+        ("_bkg.fits.gz", "_stamps.fits.gz", "_bkg.fits", "_stamps.fits")
+    )
+
+
 def collect_diff_paths(output_dir: str, round_id: int) -> list:
     """Sorted diff FITS under ``diff_r{round_id}/`` (legacy layout)."""
-    import glob
-
     diff_dir = os.path.join(output_dir, f"diff_r{round_id}")
-    paths = sorted(glob.glob(os.path.join(diff_dir, "*.fits")))
-    paths = [
-        p
-        for p in paths
-        if not p.endswith("_bkg.fits") and not p.endswith("_stamps.fits")
-    ]
-    return paths
+    return [p for p in iter_pipeline_fits_paths(diff_dir) if not _is_diff_sidecar_path(p)]
 
 
 def collect_diff_paths_in_dir(diff_dir: str) -> list:
     """Sorted diff FITS in an arbitrary directory (workspace layout)."""
-    import glob
-
-    paths = sorted(glob.glob(os.path.join(diff_dir, "*.fits")))
-    return [
-        p
-        for p in paths
-        if not p.endswith("_bkg.fits") and not p.endswith("_stamps.fits")
-    ]
+    return [p for p in iter_pipeline_fits_paths(diff_dir) if not _is_diff_sidecar_path(p)]
 
 
 # ── syndiff_template_* filename discovery (flat template_dir) ─────────────────

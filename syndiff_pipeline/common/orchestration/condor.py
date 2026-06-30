@@ -120,17 +120,22 @@ def _format_arguments(cmd: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in cmd)
 
 
-def _format_condor_environment() -> str | None:
+def _format_condor_environment(*, request_cpus: int | None = None) -> str | None:
+    parts: list[str] = []
     conda_sh = os.environ.get("SYNDIFF_CONDA_SH")
-    if not conda_sh:
+    if conda_sh:
+        conda_env = os.environ.get("SYNDIFF_CONDA_ENV", "syndiff")
+        parts.extend(
+            [
+                f"SYNDIFF_CONDA_SH={shlex.quote(conda_sh)}",
+                f"SYNDIFF_CONDA_ENV={shlex.quote(conda_env)}",
+            ]
+        )
+    if request_cpus is not None and int(request_cpus) > 0:
+        parts.append(f"SYNDIFF_REQUEST_CPUS={int(request_cpus)}")
+    if not parts:
         return None
-    conda_env = os.environ.get("SYNDIFF_CONDA_ENV", "syndiff")
-    return " ".join(
-        [
-            f"SYNDIFF_CONDA_SH={shlex.quote(conda_sh)}",
-            f"SYNDIFF_CONDA_ENV={shlex.quote(conda_env)}",
-        ]
-    )
+    return " ".join(parts)
 
 
 def _parse_status_exit(parts: Sequence[str]) -> tuple[int | None, int | None]:
@@ -171,7 +176,7 @@ def write_submit_file(
         f"request_cpus = {resources.request_cpus}",
         f"request_memory = {resources.request_memory_mb}",
     ]
-    environment = _format_condor_environment()
+    environment = _format_condor_environment(request_cpus=resources.request_cpus)
     if environment:
         lines.append(f'environment = "{environment}"')
     if resources.requirements:

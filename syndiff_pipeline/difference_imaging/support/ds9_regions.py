@@ -16,6 +16,7 @@ from typing import Iterable, Optional
 import numpy as np
 import pandas as pd
 
+from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.difference_imaging.stages import photometry
 from syndiff_pipeline.difference_imaging.support.paths import TARGETS_DS9_REGION_BASENAME
 
@@ -38,31 +39,6 @@ def primary_target_region_label(
 def crop_local_to_ds9_xy(x_crop: float, y_crop: float) -> tuple[float, float]:
     """Convert crop-local 0-based (x, y) to DS9 1-based ROI image coords."""
     return float(x_crop) + 1.0, float(y_crop) + 1.0
-
-
-def _ref_manifest_row_index(
-    wcs_table: pd.DataFrame, ref_ffi_path: str
-) -> Optional[int]:
-    path_col = "path" if "path" in wcs_table.columns else "filename"
-    try:
-        ref_r = Path(ref_ffi_path).resolve()
-    except Exception:
-        ref_r = Path(os.path.expanduser(ref_ffi_path))
-    ref_abs = os.path.abspath(os.path.expanduser(str(ref_ffi_path)))
-    for i in range(len(wcs_table)):
-        p = wcs_table.iloc[i].get(path_col)
-        if p is None or (isinstance(p, float) and np.isnan(p)):
-            continue
-        ps = str(p).strip()
-        if not ps:
-            continue
-        try:
-            if Path(ps).resolve() == ref_r:
-                return i
-        except Exception:
-            if os.path.abspath(os.path.expanduser(ps)) == ref_abs:
-                return i
-    return None
 
 
 def _representative_crop_xy(
@@ -96,9 +72,14 @@ def iter_target_ds9_circles(
     Positions are crop-local ROI coordinates (+1 for DS9), using the reference
     FFI row when available.
     """
-    ref_idx = _ref_manifest_row_index(wcs_table, ref_ffi_path)
+    ref_idx = wcs_grouping.ref_manifest_row_index(wcs_table, ref_ffi_path)
+    science = (float(target_ra), float(target_dec))
     primary_xy = photometry.per_frame_target_crop_xy(
-        wcs_table, float(target_ra), float(target_dec), crop_bounds
+        wcs_table,
+        float(target_ra),
+        float(target_dec),
+        crop_bounds,
+        manifest_science_ra_dec=science,
     )
     pcx, pcy = _representative_crop_xy(primary_xy, ref_idx)
     px, py = crop_local_to_ds9_xy(pcx, pcy)
@@ -109,7 +90,7 @@ def iter_target_ds9_circles(
     for pt in additional_forced_targets:
         name = str(pt.get("name", "extra"))
         extra_xy = photometry.resolve_forced_target_xy(
-            pt, primary_xy, wcs_table, crop_bounds
+            pt, primary_xy, wcs_table, crop_bounds, manifest_science_ra_dec=science
         )
         cx, cy = _representative_crop_xy(extra_xy, ref_idx)
         x_ds9, y_ds9 = crop_local_to_ds9_xy(cx, cy)

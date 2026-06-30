@@ -108,7 +108,9 @@ def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[n
     Looks for extension ``NOISE``; if not found but a second HDU exists, uses HDU 1.
     Shape mismatch returns ``None`` for the error array.
     """
-    with fits.open(path, memmap=True) as hdul:
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+    with open_fits_memmap(path) as hdul:
         data = np.asarray(hdul[0].data, dtype=np.float64)
         noise: Optional[np.ndarray] = None
         if len(hdul) > 1:
@@ -132,23 +134,81 @@ def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[n
     return data, noise
 
 
+def _same_sky_position(
+    ra1: float,
+    dec1: float,
+    ra2: float,
+    dec2: float,
+    *,
+    tol_arcsec: float = 0.05,
+) -> bool:
+    """True when two ICRS positions match within *tol_arcsec*."""
+    from astropy import units as u
+    from astropy.coordinates import SkyCoord
+
+    c1 = SkyCoord(ra=float(ra1) * u.deg, dec=float(dec1) * u.deg)
+    c2 = SkyCoord(ra=float(ra2) * u.deg, dec=float(dec2) * u.deg)
+    return float(c1.separation(c2).arcsec) < float(tol_arcsec)
+
+
+def _target_crop_xy_from_manifest(
+    wcs_table: pd.DataFrame,
+    crop_bounds: dict,
+) -> np.ndarray:
+    """Crop-local (x, y) from manifest ``x_pix``/``y_pix`` (full-FFI pixels)."""
+    n = len(wcs_table)
+    out = np.full((n, 2), np.nan, dtype=np.float64)
+    if "x_pix" not in wcs_table.columns or "y_pix" not in wcs_table.columns:
+        return out
+
+    x_pix = pd.to_numeric(wcs_table["x_pix"], errors="coerce").to_numpy(dtype=np.float64)
+    y_pix = pd.to_numeric(wcs_table["y_pix"], errors="coerce").to_numpy(dtype=np.float64)
+    ok = np.isfinite(x_pix) & np.isfinite(y_pix)
+    if "wcs_ok" in wcs_table.columns:
+        wok = wcs_table["wcs_ok"]
+        if wok.dtype == bool:
+            ok &= wok.to_numpy()
+        else:
+            ok &= wok.astype(str).str.lower().isin({"true", "1", "yes", "t"}).to_numpy()
+
+    x_min = float(crop_bounds["x_min"])
+    y_min = float(crop_bounds["y_min"])
+    out[ok, 0] = x_pix[ok] - x_min
+    out[ok, 1] = y_pix[ok] - y_min
+    return out
+
+
 def per_frame_target_crop_xy(
     wcs_table: pd.DataFrame,
     ra: float,
     dec: float,
     crop_bounds: dict,
+    *,
+    manifest_science_ra_dec: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """
-    For each manifest row, open that FFI and map (ra, dec) to **crop-local** (x, y).
+    For each manifest row, map (ra, dec) to **crop-local** (x, y).
 
-    Uses the same column as the pipeline manifest: ``path`` or ``filename``.
-    Rows with missing paths or WCS failures get ``(nan, nan)``.
+    When *manifest_science_ra_dec* matches *(ra, dec)* and the manifest already
+    contains ``x_pix``/``y_pix`` from ``wcs_grouping``, those columns are reused
+    (no FITS opens). Otherwise each FFI header is read and the sky position is
+    projected with that frame's WCS.
     """
+    if manifest_science_ra_dec is not None and _same_sky_position(
+        ra, dec, manifest_science_ra_dec[0], manifest_science_ra_dec[1]
+    ):
+        out = _target_crop_xy_from_manifest(wcs_table, crop_bounds)
+        if np.isfinite(out).any():
+            return out
+
     from astropy import units as u
     from astropy.coordinates import SkyCoord
     from astropy.wcs import WCS
 
-    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+    from syndiff_pipeline.common.wcs_grouping import (
+        open_fits_memmap,
+        world_ra_dec_to_pixel,
+    )
 
     path_col = "path" if "path" in wcs_table.columns else "filename"
     coord_rd = SkyCoord(ra=float(ra) * u.deg, dec=float(dec) * u.deg)
@@ -161,10 +221,10 @@ def per_frame_target_crop_xy(
         if p is None or (isinstance(p, float) and np.isnan(p)):
             continue
         ps = str(p).strip()
-        if not ps or not os.path.isfile(ps):
+        if not ps:
             continue
         try:
-            with fits.open(ps, memmap=True) as hdul:
+            with open_fits_memmap(ps) as hdul:
                 wcs = WCS(hdul[1].header, fix=False)
                 x_ffi, y_ffi = world_ra_dec_to_pixel(wcs, coord_rd.ra.deg, coord_rd.dec.deg)
             out[i, 0] = float(x_ffi) - x_min
@@ -179,6 +239,8 @@ def resolve_forced_target_xy(
     primary_xy: np.ndarray,
     wcs_table: pd.DataFrame,
     crop_bounds: dict,
+    *,
+    manifest_science_ra_dec: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """
     Build per-epoch crop-local (x, y) for one normalized forced-target spec.
@@ -190,7 +252,11 @@ def resolve_forced_target_xy(
     n_epochs = len(wcs_table)
     if mode == "sky":
         return per_frame_target_crop_xy(
-            wcs_table, float(spec["ra"]), float(spec["dec"]), crop_bounds
+            wcs_table,
+            float(spec["ra"]),
+            float(spec["dec"]),
+            crop_bounds,
+            manifest_science_ra_dec=manifest_science_ra_dec,
         )
     if mode == "offset":
         offset = np.array([float(spec["dx"]), float(spec["dy"])], dtype=np.float64)
