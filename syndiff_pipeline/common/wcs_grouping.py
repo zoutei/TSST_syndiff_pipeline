@@ -129,7 +129,9 @@ def extract_wcs_from_ffi(ffi_path: str) -> dict:
         "NAXIS2": None,
     }
     try:
-        with fits.open(ffi_path, memmap=True) as hdul:
+        resolved = resolve_existing_fits_path(ffi_path)
+        result["path"] = str(resolved)
+        with open_fits_memmap(resolved) as hdul:
             hdr = hdul[1].header
             result["header"] = hdr
             result["wcs_ok"] = _wcs_header_complete(hdr)
@@ -746,22 +748,99 @@ def crop_bounds_from_cluster_payload(payload: dict) -> dict:
     return out
 
 
+def resolve_existing_fits_path(path: str | Path) -> Path:
+    """Return an on-disk FITS path, trying ``.fits.gz`` when the exact path is missing."""
+    ref_ffi_path = Path(os.path.expanduser(str(path)))
+    if ref_ffi_path.is_file():
+        return ref_ffi_path
+    if ref_ffi_path.suffix == ".gz":
+        candidate = ref_ffi_path.with_suffix("")
+        if candidate.is_file():
+            return candidate
+    elif ref_ffi_path.suffix == ".fits":
+        candidate = ref_ffi_path.with_suffix(ref_ffi_path.suffix + ".gz")
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"Could not find FITS file: {path}")
+
+
+def try_resolve_existing_fits_path(path: str | Path) -> Path | None:
+    """Like :func:`resolve_existing_fits_path`, but return ``None`` when missing."""
+    try:
+        return resolve_existing_fits_path(path)
+    except FileNotFoundError:
+        return None
+
+
+def fits_path_exists(path: str | Path) -> bool:
+    """True when *path* resolves to an on-disk FITS file (plain or ``.gz``)."""
+    return try_resolve_existing_fits_path(path) is not None
+
+
+def canonical_fits_path_key(path: str | Path) -> str:
+    """Comparison key treating ``.fits`` and ``.fits.gz`` as the same file."""
+    expanded = os.path.abspath(os.path.expanduser(str(path)))
+    if expanded.endswith(".fits.gz"):
+        return expanded[:-3]
+    return expanded
+
+
+def ref_manifest_row_index(
+    wcs_table: "pd.DataFrame", ref_ffi_path: str
+) -> int | None:
+    """Manifest row whose FFI ``path``/``filename`` matches *ref_ffi_path*."""
+    path_to_row = manifest_path_row_index(wcs_table)
+    return path_to_row.get(canonical_fits_path_key(ref_ffi_path))
+
+
+def manifest_path_row_index(wcs_table: "pd.DataFrame") -> dict[str, int]:
+    """Map canonical FITS path key → positional row index (``.fits`` / ``.fits.gz``)."""
+    path_col = "path" if "path" in wcs_table.columns else "filename"
+    out: dict[str, int] = {}
+    for i in range(len(wcs_table)):
+        p = wcs_table.iloc[i].get(path_col)
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            continue
+        ps = str(p).strip()
+        if not ps:
+            continue
+        out[canonical_fits_path_key(ps)] = i
+    return out
+
+
+def open_fits_memmap(path: str | Path, **kwargs):
+    """Open a FITS file after resolving ``.fits`` / ``.fits.gz`` variants."""
+    if "memmap" not in kwargs:
+        kwargs["memmap"] = True
+    return fits.open(resolve_existing_fits_path(path), **kwargs)
+
+
 def load_reference_ffi_path(
     output_dir: str, fallback: Optional[str] = None
 ) -> Optional[str]:
     """
     Reference FFI absolute path from ``cluster_template_job.json``, or legacy
     ``ref_ffi_path.txt``, or ``fallback`` (e.g. ``cfg.ref_ffi_path``).
+
+    When the stored path is missing on disk, tries the ``.fits.gz`` / ``.fits``
+    counterpart before returning.
     """
+    raw: str | None = None
     job = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
     if os.path.isfile(job):
         with open(job) as fh:
-            return str(json.load(fh)["reference_ffi_path"])
-    txt = os.path.join(output_dir, "ref_ffi_path.txt")
-    if os.path.isfile(txt):
-        with open(txt) as fh:
-            return fh.read().strip()
-    return str(fallback) if fallback else None
+            raw = str(json.load(fh)["reference_ffi_path"])
+    else:
+        txt = os.path.join(output_dir, "ref_ffi_path.txt")
+        if os.path.isfile(txt):
+            with open(txt) as fh:
+                raw = fh.read().strip()
+    if not raw:
+        raw = str(fallback) if fallback else None
+    if not raw:
+        return None
+    resolved = try_resolve_existing_fits_path(raw)
+    return str(resolved) if resolved is not None else raw
 
 
 def write_cluster_template_job_json(
@@ -1388,7 +1467,12 @@ def resolve_diff_crop_bounds(cfg, event_dir: str) -> dict:
     from astropy.io import fits
 
     ref_path = load_reference_ffi_path(event_dir, getattr(cfg, "ref_ffi_path", None))
-    with fits.open(ref_path, memmap=True) as hdul:
+    if not ref_path:
+        raise FileNotFoundError(
+            f"No reference_ffi_path in {event_dir}/{CLUSTER_TEMPLATE_JOB_FILENAME}"
+        )
+    ref_path = str(resolve_existing_fits_path(ref_path))
+    with open_fits_memmap(ref_path) as hdul:
         ref_header = hdul[1].header
 
     if diff_crop_explicitly_configured(cfg):
@@ -1433,7 +1517,7 @@ def crop_ffi_header(ffi_path: str, crop_bounds: dict) -> fits.Header:
     y_max = int(crop_bounds["y_max"])
     ny_crop, nx_crop = (int(crop_bounds["shape"][0]), int(crop_bounds["shape"][1]))
 
-    with fits.open(ffi_path, memmap=True) as hdul:
+    with open_fits_memmap(ffi_path) as hdul:
         hdr = deepcopy(hdul[1].header)
 
     if "CRPIX1" in hdr:
@@ -1616,7 +1700,7 @@ def ensure_gaia_crop_xy(
             f"{list(df.columns)!r})"
         )
 
-    with fits.open(ref_ffi_path, memmap=True) as hdul:
+    with open_fits_memmap(ref_ffi_path) as hdul:
         ref_header = hdul[1].header
         nx = int(ref_header["NAXIS1"])
         ny = int(ref_header["NAXIS2"])
@@ -1708,7 +1792,7 @@ def build_unique_gaia_catalog(removed_stars_csv: str,
     unique_df = unique_df[keep_cols].reset_index(drop=True)
 
     # Project sky coords to FFI pixel coords using reference FFI WCS
-    with fits.open(ref_ffi_path, memmap=True) as hdul:
+    with open_fits_memmap(ref_ffi_path) as hdul:
         ref_header = hdul[1].header
         nx = int(ref_header["NAXIS1"])
         ny = int(ref_header["NAXIS2"])

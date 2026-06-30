@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import glob
 import logging
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Optional
 from astropy.io import fits
 
 from syndiff_pipeline.common import wcs_grouping
-from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, _ffi_filename_pattern
+from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis, nested_ffi_dir
 from syndiff_pipeline.difference_imaging.support.paths import pipeline_plots_root
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import WcsGroupingStageParams
@@ -48,8 +47,8 @@ def run_wcs_grouping(
     ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
     all_sorted = sorted(list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd))
     if not all_sorted:
-        glob_pat = os.path.join(ffi_leaf, _ffi_filename_pattern(t.sector, t.camera, t.ccd))
-        raise FileNotFoundError(f"No FFI files matching {glob_pat!r}")
+        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
+        raise FileNotFoundError(f"No FFI files matching {patterns!r} under {ffi_leaf!r}")
 
     ffi_paths = wcs_grouping.select_ffis_with_valid_target_wcs(
         all_sorted, t.target_ra, t.target_dec, max_ffis=max_ffis
@@ -78,7 +77,7 @@ def run_wcs_grouping(
     manifest_path = os.path.join(event_dir, "syndiff_ffi_frames.csv")
     wcs_table.to_csv(manifest_path, index=False)
 
-    with fits.open(chosen_ref, memmap=True) as hdul:
+    with wcs_grouping.open_fits_memmap(chosen_ref) as hdul:
         ref_header = hdul[1].header
     crop_bounds = wcs_grouping.resolve_crop_bounds_from_params(
         ref_header,

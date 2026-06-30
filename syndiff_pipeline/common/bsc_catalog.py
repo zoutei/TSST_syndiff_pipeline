@@ -104,7 +104,9 @@ def filter_catalog_to_ffi_footprint(
     if df.empty:
         return df.copy()
 
-    with fits.open(ref_ffi_path, memmap=True) as hdul:
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+    with open_fits_memmap(ref_ffi_path) as hdul:
         hdr = hdul[1].header
         nx = int(hdr["NAXIS1"])
         ny = int(hdr["NAXIS2"])

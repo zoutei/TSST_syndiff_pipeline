@@ -39,6 +39,9 @@ from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
     photutils_background_masked,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    workspace_frame_fits_path,
+)
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     tess_product_id_from_ffi_path,
 )
 from syndiff_pipeline.difference_imaging.support.flux_calibration import (
@@ -265,36 +268,42 @@ def run_kernel_fit(
     if debug_ws_dir and params.write_debug_fits:
         os.makedirs(debug_ws_dir, exist_ok=True)
         _write_image_fits(
-            os.path.join(debug_ws_dir, "ffi.fits"), ffi, header=header
+            workspace_frame_fits_path(debug_ws_dir, "ffi"), ffi, header=header
         )
         _write_image_fits(
-            os.path.join(debug_ws_dir, "template.fits"), template, header=header
+            workspace_frame_fits_path(debug_ws_dir, "template"),
+            template,
+            header=header,
         )
         _write_image_fits(
-            os.path.join(debug_ws_dir, "hp1_diff.fits"), hp1["diff"], header=header
+            workspace_frame_fits_path(debug_ws_dir, "hp1_diff"),
+            hp1["diff"],
+            header=header,
         )
         if hp1.get("bkg") is not None:
             _write_image_fits(
-                os.path.join(debug_ws_dir, "hp1_bkg.fits"),
+                workspace_frame_fits_path(debug_ws_dir, "hp1_bkg"),
                 hp1["bkg"],
                 header=header,
             )
         _write_image_fits(
-            os.path.join(debug_ws_dir, "phot_bkg_fine_on_hp1_diff.fits"),
+            workspace_frame_fits_path(debug_ws_dir, "phot_bkg_fine_on_hp1_diff"),
             phot_bkg_hp1,
             header=header,
         )
         _write_image_fits(
-            os.path.join(debug_ws_dir, "sci1_clean.fits"),
+            workspace_frame_fits_path(debug_ws_dir, "sci1_clean"),
             sci_clean,
             header=header,
         )
         _write_image_fits(
-            os.path.join(debug_ws_dir, "hp2_diff.fits"), hp2["diff"], header=header
+            workspace_frame_fits_path(debug_ws_dir, "hp2_diff"),
+            hp2["diff"],
+            header=header,
         )
         if hp2.get("bkg") is not None:
             _write_image_fits(
-                os.path.join(debug_ws_dir, "hp2_bkg.fits"),
+                workspace_frame_fits_path(debug_ws_dir, "hp2_bkg"),
                 hp2["bkg"],
                 header=header,
             )

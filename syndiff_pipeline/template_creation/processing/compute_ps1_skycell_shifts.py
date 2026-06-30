@@ -28,7 +28,9 @@ RELEVANT_WCS_KEYS = [
 
 
 def load_tess_wcs(tess_fits_path: Path) -> tuple[WCS, tuple[int, int]]:
-    with fits.open(tess_fits_path) as hdul:
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+    with open_fits_memmap(tess_fits_path) as hdul:
         chosen_hdu_idx = None
         for idx, hdu in enumerate(hdul):
             if getattr(hdu, "data", None) is None:

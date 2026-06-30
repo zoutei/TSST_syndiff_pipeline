@@ -25,7 +25,7 @@ from astropy.io import fits
 from astropy.table import Table
 from joblib import Parallel, delayed
 
-from syndiff_pipeline.difference_imaging.support.ffi_naming import parse_workspace_frame_stem, tess_product_id_from_ffi_path
+from syndiff_pipeline.difference_imaging.support.ffi_naming import parse_workspace_frame_stem, strip_fits_suffix, tess_product_id_from_ffi_path
 
 log = logging.getLogger(__name__)
 
@@ -378,7 +378,9 @@ def build_median_mask_correction(median_mask_path: str,
                     "Using uniform column correction = 1.")
         return np.tile(col_corr, (ny_crop, 1))
 
-    with fits.open(median_mask_path) as hdul:
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+    with open_fits_memmap(median_mask_path) as hdul:
         # Find the row matching (camera, ccd)
         data = hdul[1].data if len(hdul) > 1 else hdul[0].data
         if data is None:
@@ -727,7 +729,7 @@ def fit_epsf_all_frames(diff_paths: list,
     tile_centers = None
 
     def _diff_path_to_pid(p: str) -> str:
-        stem = Path(str(p)).stem
+        stem = strip_fits_suffix(Path(str(p)).name)
         parsed = parse_workspace_frame_stem(stem)
         if parsed is not None:
             return parsed[0]

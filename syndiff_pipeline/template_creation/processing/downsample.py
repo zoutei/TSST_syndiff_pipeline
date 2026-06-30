@@ -40,6 +40,7 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 
 # Import from existing script
+from syndiff_pipeline.common.wcs_grouping import open_fits_memmap, resolve_existing_fits_path
 from syndiff_pipeline.difference_imaging.support.ffi_naming import strip_fits_suffix
 from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import RELEVANT_WCS_KEYS, build_ps1_wcs, compute_ps1_shift_for_skycell, load_tess_wcs
 from syndiff_pipeline.template_creation.processing.downsample_progress import (
@@ -168,7 +169,10 @@ def write_ps1_removed_star_gaia_csv(
             keep_cols.append(col)
     unique_df = unique_df[keep_cols].reset_index(drop=True)
 
-    with fits.open(ref_ffi, memmap=True) as hdul:
+    # Support ref_ffi with or without .gz at the end
+    ref_ffi_path = resolve_existing_fits_path(ref_ffi)
+
+    with open_fits_memmap(ref_ffi_path) as hdul:
         ref_header = hdul[1].header
         nx = int(ref_header["NAXIS1"])
         ny = int(ref_header["NAXIS2"])

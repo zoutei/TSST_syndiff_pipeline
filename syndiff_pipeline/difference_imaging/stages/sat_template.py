@@ -20,6 +20,12 @@ import pandas as pd
 from astropy.io import fits
 from scipy.ndimage import shift as nd_shift, zoom as nd_zoom
 
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    iter_pipeline_fits_paths,
+    strip_fits_suffix,
+    workspace_frame_fits_path,
+)
+
 log = logging.getLogger(__name__)
 
 # TESS zero point (AB mag system, approximate)
@@ -277,7 +283,7 @@ def save_group_templates(sat_tmpl_native: dict, sat_tmpl_hr: dict,
         sub = os.path.join(output_dir, f"sat_tmpl_{tag}_r{round_id}")
         os.makedirs(sub, exist_ok=True)
         for gid, tmpl in tmpl_dict.items():
-            out_path = os.path.join(sub, f"group_{gid}.fits")
+            out_path = workspace_frame_fits_path(sub, f"group_{gid}")
             fits.writeto(out_path, tmpl.astype(np.float32), overwrite=True)
         log.info(f"  Sat templates ({tag}) saved to {sub}/")
 
@@ -290,11 +296,14 @@ def load_group_templates(output_dir: str, round_id: int = 1) -> tuple:
     -------
     sat_tmpl_native, sat_tmpl_hr : dict {group_id: 2D ndarray}
     """
-    import glob
     def _load(sub):
         d = {}
-        for path in sorted(glob.glob(os.path.join(output_dir, sub, "group_*.fits"))):
-            gid = int(os.path.basename(path).replace("group_", "").replace(".fits", ""))
+        subdir = os.path.join(output_dir, sub)
+        for path in iter_pipeline_fits_paths(subdir):
+            stem = strip_fits_suffix(os.path.basename(path))
+            if not stem.startswith("group_"):
+                continue
+            gid = int(stem.replace("group_", "", 1))
             d[gid] = fits.getdata(path).astype(np.float64)
         return d
 

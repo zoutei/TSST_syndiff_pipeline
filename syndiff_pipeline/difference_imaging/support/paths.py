@@ -26,7 +26,7 @@ MASTER_SUBDIR = "master"
 DEFAULT_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
 HOTPANTS_SUBSTAMP_STARS_BASENAME = "hotpants_substamp_stars.csv"
 TARGETS_DS9_REGION_BASENAME = "targets.reg"
-SHARED_MASK_FITS_BASENAME = "shared_mask.fits"
+SHARED_MASK_FITS_BASENAME = "shared_mask.fits.gz"
 GAIA_CATALOG_PIPELINE_BASENAME = "gaia_catalog_pipeline.csv"
 DIFF_CONFIG_SNAPSHOT_BASENAME = "diff_config.yaml"
 
@@ -40,7 +40,18 @@ WORKSPACE_ROOT_ARTIFACTS = (
 
 MASTER_TESS_FFI_LINK = "tess_ffi"
 HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
-HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits"
+HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits.gz"
+LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits"
+
+from syndiff_pipeline.common.download import (  # noqa: E402
+    is_spoc_ffi_filename,
+    manifest_basename_from_local,
+    spoc_ffi_gzip_basename,
+)
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (  # noqa: E402
+    is_pipeline_fits_filename,
+    strip_fits_suffix,
+)
 
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (  # noqa: E402
     FFIS_WS_LABEL,
@@ -69,7 +80,7 @@ BACKGROUND_STACK_NPZ_ARRAY_KEY = "stack"
 ADAPTIVE_BKG_STACK_BASENAME = "bkg_temp_smooth"
 
 # Union mask (2D): pixels where PRF source-hunt excluded sky in any epoch (output_dir root)
-BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits"
+BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits.gz"
 
 PIPELINE_PLOTS_SUBDIR = "debug_plots"
 KERNEL_RECONSTRUCTION_NPZ_BASENAME = "kernel_reconstruction.npz"
@@ -250,7 +261,10 @@ def _is_hotpants_stamps_workspace_label(label: str) -> bool:
 
 
 def _is_hotpants_stamps_fits_basename(name: str) -> bool:
-    return name.lower().endswith(HOTPANTS_STAMPS_FITS_SUFFIX)
+    lower = name.lower()
+    return lower.endswith(HOTPANTS_STAMPS_FITS_SUFFIX) or lower.endswith(
+        LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX
+    )
 
 
 def _prune_master_stamp_symlinks(m_root: str) -> int:
@@ -311,11 +325,24 @@ def link_master_workspace(
         ws_label_dir = os.path.join(ws_root, label)
         if not os.path.isdir(ws_label_dir):
             continue
+        linked_stems: set[str] = set()
         for entry in sorted(os.listdir(ws_label_dir)):
-            if not entry.lower().endswith(".fits"):
+            if not is_pipeline_fits_filename(entry):
                 continue
             if _is_hotpants_stamps_fits_basename(entry):
                 continue
+            stem = strip_fits_suffix(entry)
+            if stem in linked_stems:
+                continue
+            gz_name = f"{stem}.fits.gz"
+            legacy_name = f"{stem}.fits"
+            if os.path.isfile(os.path.join(ws_label_dir, gz_name)):
+                entry = gz_name
+            elif os.path.isfile(os.path.join(ws_label_dir, legacy_name)):
+                entry = legacy_name
+            else:
+                continue
+            linked_stems.add(stem)
             target = os.path.join(ws_label_dir, entry)
             if not os.path.isfile(target):
                 continue
@@ -329,9 +356,22 @@ def link_master_workspace(
         if _remove_legacy_master_link(legacy_link):
             refreshed += 1
         if os.path.isdir(ffi_leaf_abs):
+            linked_manifest: set[str] = set()
             for entry in sorted(os.listdir(ffi_leaf_abs)):
-                if not entry.lower().endswith(".fits"):
+                if not is_spoc_ffi_filename(entry):
                     continue
+                manifest_bn = manifest_basename_from_local(entry)
+                if manifest_bn in linked_manifest:
+                    continue
+                gz_name = spoc_ffi_gzip_basename(manifest_bn)
+                plain_name = manifest_bn
+                if os.path.isfile(os.path.join(ffi_leaf_abs, gz_name)):
+                    entry = gz_name
+                elif os.path.isfile(os.path.join(ffi_leaf_abs, plain_name)):
+                    entry = plain_name
+                else:
+                    continue
+                linked_manifest.add(manifest_bn)
                 target = os.path.join(ffi_leaf_abs, entry)
                 if not os.path.isfile(target):
                     continue

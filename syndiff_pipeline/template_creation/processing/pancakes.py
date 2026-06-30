@@ -762,7 +762,9 @@ def load_tess_image(tess_file):
     Returns:
         tuple: (data_shape, wcs, ra_center, dec_center, header, sector, camera_id, ccd_id)
     """
-    hdul = fits.open(tess_file)
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+    hdul = open_fits_memmap(tess_file)
 
     try:
         header = deepcopy(hdul[1].header)

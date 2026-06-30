@@ -17,6 +17,7 @@ import pandas as pd
 
 from .ffi_naming import (
     parse_workspace_frame_stem,
+    resolve_pipeline_fits_path,
     sanitize_workspace_label,
     tess_product_id_from_ffi_path,
     workspace_frame_stem,
@@ -338,10 +339,11 @@ def ordered_photometry_diff_paths(
         if p is None:
             pid = str(pids.iloc[i])
             if pid:
-                cand = os.path.join(
-                    output_dir, subdir, f"{workspace_frame_stem(pid, label)}.fits"
+                cand = resolve_pipeline_fits_path(
+                    os.path.join(output_dir, subdir),
+                    workspace_frame_stem(pid, label),
                 )
-                if os.path.isfile(cand):
+                if cand is not None:
                     p = str(Path(cand).resolve())
         out.append(p)
     return out
@@ -379,8 +381,10 @@ def ordered_diff_paths_for_workspace(
         if p is None:
             pid = str(pids.iloc[i])
             if pid:
-                cand = os.path.join(ws, f"{workspace_frame_stem(pid, safe)}.fits")
-                if os.path.isfile(cand):
+                cand = resolve_pipeline_fits_path(
+                    ws, workspace_frame_stem(pid, safe)
+                )
+                if cand is not None:
                     p = str(Path(cand).resolve())
         out.append(p)
     return out
