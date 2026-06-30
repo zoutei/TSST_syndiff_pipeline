@@ -713,7 +713,7 @@ def _iter_verify_candidates(
                     continue
             elif row.status == pstate.STATUS_PENDING:
                 if row.stage in active_stages:
-                    pass
+                    continue
                 elif (
                     row.stage
                     in state.pipeline_spec.artifact_verify_closure(active_stages)
@@ -1537,31 +1537,49 @@ def _apply_commands(state: pstate.PipelineState) -> None:
                 state.set_paused(cmd.run_id, False)
             elif cmd.kind == "retry" and cmd.run_id:
                 if args.get("target_label") and args.get("stage"):
+                    try:
+                        stage = _pipeline_spec().resolve_stage_name(args["stage"])
+                    except ValueError as exc:
+                        log.warning(
+                            "Retry command id=%s ignored: %s",
+                            cmd.id,
+                            exc,
+                        )
+                        continue
+                    target_label = args["target_label"]
                     # If the targeted stage is still running, stop the worker
                     # first to avoid a duplicate when it is relaunched.
-                    row = state.get_stage_run(
-                        cmd.run_id, args["target_label"], args["stage"]
-                    )
-                    if row and row.status == pstate.STATUS_RUNNING:
+                    row = state.get_stage_run(cmd.run_id, target_label, stage)
+                    if row is None:
+                        log.warning(
+                            "Retry command id=%s ignored: no stage row for %s / %s "
+                            "in run %s",
+                            cmd.id,
+                            target_label,
+                            stage,
+                            cmd.run_id,
+                        )
+                        continue
+                    if row.status == pstate.STATUS_RUNNING:
                         _terminate_job(row)
                     reset_downstream = bool(args.get("reset_downstream", True))
                     state.apply_retry_stage(
                         cmd.run_id,
-                        args["target_label"],
-                        args["stage"],
+                        target_label,
+                        stage,
                         reset_downstream=reset_downstream,
                     )
                     _cancel_verify_for_retry(
                         cmd.run_id,
-                        args["target_label"],
-                        args["stage"],
+                        target_label,
+                        stage,
                         reset_downstream=reset_downstream,
                     )
                     _notify_run_retried(
                         state,
                         cmd.run_id,
-                        target_label=args["target_label"],
-                        stage=args["stage"],
+                        target_label=target_label,
+                        stage=stage,
                         reset_downstream=reset_downstream,
                     )
                 else:
@@ -1582,13 +1600,22 @@ def _apply_commands(state: pstate.PipelineState) -> None:
                 _cancel_verify_run(cmd.run_id)
             elif cmd.kind == "force_launch" and cmd.run_id:
                 target_label = args.get("target_label")
-                stage = args.get("stage")
-                if not target_label or not stage:
+                stage_raw = args.get("stage")
+                if not target_label or not stage_raw:
                     log.warning(
                         "Incomplete force_launch command id=%s (need target_label + stage)",
                         cmd.id,
                     )
                 else:
+                    try:
+                        stage = _pipeline_spec().resolve_stage_name(stage_raw)
+                    except ValueError as exc:
+                        log.warning(
+                            "force_launch command id=%s ignored: %s",
+                            cmd.id,
+                            exc,
+                        )
+                        continue
                     row = state.get_stage_run(cmd.run_id, target_label, stage)
                     if row is None:
                         log.warning(

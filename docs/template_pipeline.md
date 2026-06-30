@@ -1040,8 +1040,13 @@ All insert **command intents** into SQLite; the supervisor daemon is the sole wr
 # Retry everything failed/canceled in the run
 syndiff retry --run-dir /path/to/runs/batch_no5
 
+# Same via run ID (no --site; use --deployment or --run-dir)
+syndiff retry --deployment config/deployment.yaml --run-id batch_no5
+
 # Retry one target (--scc or --target alias) + stage (resets downstream deps)
 syndiff retry --run-dir ... --scc 23,1,3 --stage mapping
+syndiff retry --deployment config/deployment.yaml --run-id batch_no5 \
+  --scc s0023_c2_k1_2020ghq --stage diff
 syndiff retry --run-dir ... --target s0023_c1_k3_2020ftl --stage mapping
 
 # Retry only the targeted stage (leave downstream untouched)

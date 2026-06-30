@@ -71,6 +71,13 @@ def preset_stages(preset: str) -> list[str]:
     raise ValueError(f"Unknown preset: {preset!r}")
 
 
+def _resolve_single_stage(stage: str) -> str:
+    try:
+        return dispatch.resolve_stage_name(stage)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 def _resolve_stages_arg(args: argparse.Namespace) -> tuple[list[str], str]:
     if getattr(args, "stages", None):
         active = dispatch.parse_stage_list(args.stages)
@@ -678,7 +685,8 @@ def cmd_show(args: argparse.Namespace) -> int:
 def cmd_logs(args: argparse.Namespace) -> int:
     ctx = _resolve_run_from_args(args)
     if args.target and args.stage:
-        path = logs.target_log_path(ctx.cfg.runs_dir(), ctx.run_id, args.target, args.stage)
+        stage = _resolve_single_stage(args.stage)
+        path = logs.target_log_path(ctx.cfg.runs_dir(), ctx.run_id, args.target, stage)
     else:
         path = logs.daemon_log_path(ctx.cfg.workspace_root)
     if not path.is_file():
@@ -835,16 +843,22 @@ def cmd_retry(args: argparse.Namespace) -> int:
 
     if args.scc and args.stage:
         t = find_target_for_run(ctx, state, args.scc)
+        stage = _resolve_single_stage(args.stage)
+        row = state.get_stage_run(ctx.run_id, t.label(), stage)
+        if row is None:
+            raise SystemExit(
+                f"No stage row for {t.label()} / {stage} in run {ctx.run_id!r}."
+            )
         state.insert_command(
             "retry",
             run_id=ctx.run_id,
             args={
                 "target_label": t.label(),
-                "stage": args.stage,
+                "stage": stage,
                 "reset_downstream": not getattr(args, "no_reset_downstream", False),
             },
         )
-        print(f"Queued retry for {args.stage} on {t.label()} in run {ctx.run_id}")
+        print(f"Queued retry for {stage} on {t.label()} in run {ctx.run_id}")
     elif args.scc or args.stage:
         raise SystemExit(
             "Specify both --scc and --stage for a single retry, "
@@ -883,7 +897,7 @@ def cmd_launch(args: argparse.Namespace) -> int:
     state = PipelineState(ctx.cfg.state_db_path)
     t = find_target_for_run(ctx, state, args.scc)
     target_label = t.label()
-    stage = args.stage
+    stage = _resolve_single_stage(args.stage)
 
     row = state.get_stage_run(ctx.run_id, target_label, stage)
     if row is None:

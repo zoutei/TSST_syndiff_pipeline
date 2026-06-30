@@ -46,6 +46,28 @@ Common flags: `--site DIR` (loads `pipeline.yaml` + `diff_config.yaml` + `deploy
 
 Run `syndiff <verb> --help` for flags. These operate on the **workspace** (one `workspace_root` → one SQLite DB and supervisor).
 
+### Run scope (`--site` vs `--run-dir` / `--run-id`)
+
+**`--site` is only for submit/run and some monitor/verify commands** (`progress`, `status`, `verify`). It is **not** accepted by run-control or run-scoped log commands (`retry`, `pause`, `resume`, `kill`, `show`, `logs`, `tail`).
+
+To target a specific batch run, use either:
+
+| Scope | Example |
+|-------|---------|
+| Full run directory | `--run-dir /path/to/workspace/runs/batch_no5` |
+| Run ID + deployment | `--run-id batch_no5 --deployment config/deployment.yaml` |
+
+`--deployment` is optional when exactly one supervisor is already running (auto-discovered). `--run-id` alone resolves `runs/{run_id}/` under the workspace in `deployment.yaml`.
+
+```bash
+# Retry one target's diff stage (run control — no --site)
+syndiff retry \
+  --deployment config/deployment.yaml \
+  --run-id test_multi_hp_temp_calib_20260623 \
+  --scc s0023_c2_k1_2020ghq \
+  --stage diff
+```
+
 ### Monitor
 
 | Command | What it does |

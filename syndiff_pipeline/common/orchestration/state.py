@@ -1187,6 +1187,8 @@ class PipelineState:
         if self.get_skip_reason(run_id, target_label, "ps1_download") == SKIP_REASON_STREAM:
             stages_to_reset = [s for s in stages_to_reset if s != "ps1_download"]
         count = 0
+        for s in stages_to_reset:
+            self._clear_stage_skip_cache(run_id, target_label, s)
         with self._conn() as conn:
             for s in stages_to_reset:
                 reopen_status = reopen_status_for_retry(s, active)

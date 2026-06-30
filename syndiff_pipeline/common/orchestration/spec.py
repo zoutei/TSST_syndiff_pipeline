@@ -94,14 +94,28 @@ class PipelineSpec:
             raise KeyError(f"Unknown stage: {name!r}")
         return spec
 
+    def resolve_stage_name(self, name: str) -> str:
+        """Map a full or short stage name to the canonical internal name."""
+        raw = str(name).strip()
+        if not raw:
+            raise ValueError("Stage name must not be empty")
+        if raw in self.stage_names:
+            return raw
+        short_to_full = {spec.short_name: spec.name for spec in self.stages}
+        if raw in short_to_full:
+            return short_to_full[raw]
+        full_names = ", ".join(self.stage_names)
+        short_names = ", ".join(sorted(short_to_full))
+        raise ValueError(
+            f"Unknown stage {raw!r}; use a full name ({full_names}) "
+            f"or short name ({short_names})"
+        )
+
     def parse_stage_list(self, stages_arg: str | None) -> List[str]:
         if not stages_arg or not str(stages_arg).strip():
             return list(self.stage_names)
         names = [s.strip() for s in str(stages_arg).split(",") if s.strip()]
-        unknown = set(names) - set(self.stage_names)
-        if unknown:
-            raise ValueError(f"Unknown stages: {sorted(unknown)}")
-        return names
+        return [self.resolve_stage_name(n) for n in names]
 
     def stages_in_pool(self, pool: str) -> List[str]:
         return [s.name for s in self.stages if s.pool == pool]

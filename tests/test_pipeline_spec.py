@@ -115,6 +115,22 @@ class TestPipelineSpec(unittest.TestCase):
         with self.assertRaises(KeyError):
             SYNDIFF_PIPELINE.require("not_a_stage")
 
+    def test_resolve_stage_name_full(self):
+        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("mapping"), "mapping")
+
+    def test_resolve_stage_name_short(self):
+        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("map"), "mapping")
+        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("ps1_pr"), "ps1_process")
+
+    def test_resolve_stage_name_unknown(self):
+        with self.assertRaises(ValueError) as ctx:
+            SYNDIFF_PIPELINE.resolve_stage_name("not_a_stage")
+        self.assertIn("Unknown stage", str(ctx.exception))
+
+    def test_resolve_stage_name_empty(self):
+        with self.assertRaises(ValueError):
+            SYNDIFF_PIPELINE.resolve_stage_name("  ")
+
     def test_direct_dependents(self):
         self.assertEqual(
             SYNDIFF_PIPELINE.direct_dependents("mapping"),

@@ -159,6 +159,44 @@ class TestCmdRetry(unittest.TestCase):
             self.assertEqual(ensure.call_args.args[0], ctx.cfg.workspace_root)
             self.assertIsNotNone(ensure.call_args.kwargs.get("deployment_path"))
 
+    def test_targeted_retry_accepts_short_stage_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, state = _make_run_context(Path(tmp))
+            label = "s0023_c1_k3_2020ftl"
+            state.update_stage_status(ctx.run_id, label, "mapping", STATUS_FAILED)
+            args = argparse.Namespace(
+                run_dir=str(ctx.run_dir),
+                run_id=ctx.run_id,
+                config=None,
+                scc=label,
+                stage="map",
+                no_start_daemon=True,
+                no_reset_downstream=False,
+            )
+            rc = cmd_retry(args)
+            self.assertEqual(rc, 0)
+            cmds = state.fetch_pending_commands()
+            self.assertEqual(len(cmds), 1)
+            payload = json.loads(cmds[0].args_json or "{}")
+            self.assertEqual(payload["stage"], "mapping")
+
+    def test_targeted_retry_unknown_stage_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx, state = _make_run_context(Path(tmp))
+            label = "s0023_c1_k3_2020ftl"
+            args = argparse.Namespace(
+                run_dir=str(ctx.run_dir),
+                run_id=ctx.run_id,
+                config=None,
+                scc=label,
+                stage="not_a_stage",
+                no_start_daemon=True,
+                no_reset_downstream=False,
+            )
+            with self.assertRaises(SystemExit) as ctx_exit:
+                cmd_retry(args)
+            self.assertIn("Unknown stage", str(ctx_exit.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

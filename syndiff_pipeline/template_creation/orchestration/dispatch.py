@@ -32,6 +32,10 @@ def parse_stage_list(stages_arg: str | None) -> List[str]:
     return _pipeline().parse_stage_list(stages_arg)
 
 
+def resolve_stage_name(stage: str) -> str:
+    return _pipeline().resolve_stage_name(stage)
+
+
 def build_stage_command(
     run_id: str,
     stage: str,
