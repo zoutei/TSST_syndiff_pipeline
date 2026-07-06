@@ -29,6 +29,7 @@ _held_times: dict[int, float] = {}
 
 @dataclass(frozen=True)
 class CondorResourceRequest:
+    """CondorResourceRequest."""
     request_cpus: int = 64
     request_memory_mb: int = 500_000
     requirements: str | None = "Memory >= 500000 && LoadAvg < 10"
@@ -36,16 +37,38 @@ class CondorResourceRequest:
 
 
 def wrapper_path() -> Path:
+    """Wrapper path.
+    
+    Returns
+    -------
+    Path"""
     return _WRAPPER
 
 
 def poll_grace_seconds() -> float:
+    """Poll grace seconds.
+    
+    Returns
+    -------
+    float"""
     return _POLL_GRACE_SECONDS
 
 
 def condor_artifact_paths(
     runs_root: str, run_id: str, target_label: str, stage: str
 ) -> dict[str, Path]:
+    """Condor artifact paths.
+    
+    Parameters
+    ----------
+    runs_root : str
+    run_id : str
+    target_label : str
+    stage : str
+    
+    Returns
+    -------
+    dict[str, Path]"""
     base = Path(runs_root) / run_id / "per_target" / target_label
     base.mkdir(parents=True, exist_ok=True)
     return {
@@ -59,6 +82,15 @@ def condor_artifact_paths(
 
 
 def _read_hold_epoch(hold_path: Path) -> float | None:
+    """Read hold epoch.
+    
+    Parameters
+    ----------
+    hold_path : Path
+    
+    Returns
+    -------
+    float | None"""
     try:
         line = hold_path.read_text(encoding="utf-8").strip()
         if not line:
@@ -69,11 +101,22 @@ def _read_hold_epoch(hold_path: Path) -> float | None:
 
 
 def _write_hold_epoch(hold_path: Path, epoch: float) -> None:
+    """Write hold epoch.
+    
+    Parameters
+    ----------
+    hold_path : Path
+    epoch : float"""
     hold_path.parent.mkdir(parents=True, exist_ok=True)
     hold_path.write_text(f"{epoch}\n", encoding="utf-8")
 
 
 def _clear_hold_epoch(hold_path: Path | None) -> None:
+    """Clear hold epoch.
+    
+    Parameters
+    ----------
+    hold_path : Path | None"""
     if hold_path is None:
         return
     try:
@@ -88,6 +131,17 @@ def _resolve_held_since(
     hold_path: Path | None,
     now: float,
 ) -> float:
+    """Resolve held since.
+    
+    Parameters
+    ----------
+    cluster_id : int
+    hold_path : Path | None
+    now : float
+    
+    Returns
+    -------
+    float"""
     if cluster_id in _held_times:
         return _held_times[cluster_id]
     if hold_path is not None:
@@ -102,6 +156,16 @@ def _resolve_held_since(
 
 
 def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Run condor.
+    
+    Parameters
+    ----------
+    args : Sequence[str]
+    check : bool, optional, default ``True``
+    
+    Returns
+    -------
+    subprocess.CompletedProcess[str]"""
     proc = subprocess.run(
         list(args),
         capture_output=True,
@@ -117,10 +181,28 @@ def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.Comple
 
 
 def _format_arguments(cmd: Sequence[str]) -> str:
+    """Format arguments.
+    
+    Parameters
+    ----------
+    cmd : Sequence[str]
+    
+    Returns
+    -------
+    str"""
     return " ".join(shlex.quote(str(part)) for part in cmd)
 
 
 def _format_condor_environment(*, request_cpus: int | None = None) -> str | None:
+    """Format condor environment.
+    
+    Parameters
+    ----------
+    request_cpus : int | None, optional, default ``None``
+    
+    Returns
+    -------
+    str | None"""
     parts: list[str] = []
     conda_sh = os.environ.get("SYNDIFF_CONDA_SH")
     if conda_sh:
@@ -139,6 +221,15 @@ def _format_condor_environment(*, request_cpus: int | None = None) -> str | None
 
 
 def _parse_status_exit(parts: Sequence[str]) -> tuple[int | None, int | None]:
+    """Parse status exit.
+    
+    Parameters
+    ----------
+    parts : Sequence[str]
+    
+    Returns
+    -------
+    tuple[int | None, int | None]"""
     if not parts:
         return None, None
     try:
@@ -155,6 +246,12 @@ def _parse_status_exit(parts: Sequence[str]) -> tuple[int | None, int | None]:
 
 
 def _record_cluster_submission(artifacts: dict[str, Path], cluster_id: int) -> None:
+    """Record cluster submission.
+    
+    Parameters
+    ----------
+    artifacts : dict[str, Path]
+    cluster_id : int"""
     clusters_path = artifacts["clusters"]
     with clusters_path.open("a", encoding="utf-8") as fh:
         fh.write(f"{cluster_id}\n")
@@ -166,6 +263,14 @@ def write_submit_file(
     artifacts: dict[str, Path],
     resources: CondorResourceRequest,
 ) -> None:
+    """Write submit file.
+    
+    Parameters
+    ----------
+    submit_path : Path
+    cmd : Sequence[str]
+    artifacts : dict[str, Path]
+    resources : CondorResourceRequest"""
     if not _WRAPPER.is_file():
         raise FileNotFoundError(f"Condor wrapper missing: {_WRAPPER}")
     lines = [
@@ -229,6 +334,15 @@ def submit_job(
 
 
 def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
+    """Query queue.
+    
+    Parameters
+    ----------
+    cluster_id : int
+    
+    Returns
+    -------
+    tuple[int | None, int | None]"""
     proc = _run_condor(
         ["condor_q", str(cluster_id), "-af", "JobStatus", "ExitCode"],
         check=False,
@@ -240,6 +354,15 @@ def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
 
 
 def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
+    """Query history.
+    
+    Parameters
+    ----------
+    cluster_id : int
+    
+    Returns
+    -------
+    tuple[int | None, int | None]"""
     proc = _run_condor(
         ["condor_history", str(cluster_id), "-af", "JobStatus", "ExitCode", "-limit", "1"],
         check=False,
@@ -251,6 +374,15 @@ def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
 
 
 def _query_hold_reason(cluster_id: int) -> str | None:
+    """Query hold reason.
+    
+    Parameters
+    ----------
+    cluster_id : int
+    
+    Returns
+    -------
+    str | None"""
     proc = _run_condor(
         ["condor_q", str(cluster_id), "-af", "HoldReason"],
         check=False,
@@ -372,6 +504,16 @@ def poll_cluster(
 
 
 def remove_cluster(cluster_id: int, *, hold_path: Path | None = None) -> bool:
+    """Remove cluster.
+    
+    Parameters
+    ----------
+    cluster_id : int
+    hold_path : Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    bool"""
     proc = _run_condor(["condor_rm", str(cluster_id)], check=False)
     if proc.returncode == 0:
         log.info("Removed Condor cluster %s", cluster_id)
@@ -385,6 +527,17 @@ def remove_cluster(cluster_id: int, *, hold_path: Path | None = None) -> bool:
 
 
 def sweep_run_condor_clusters(state, cfg, run_id: str) -> int:
+    """Sweep run condor clusters.
+    
+    Parameters
+    ----------
+    state
+    cfg
+    run_id : str
+    
+    Returns
+    -------
+    int"""
     removed = 0
     for job in state.running_jobs(run_id):
         cluster_id = job.native_id
@@ -402,6 +555,16 @@ def sweep_run_condor_clusters(state, cfg, run_id: str) -> int:
 
 
 def sweep_run_condor_audit_clusters(runs_root: str, run_id: str) -> int:
+    """Sweep run condor audit clusters.
+    
+    Parameters
+    ----------
+    runs_root : str
+    run_id : str
+    
+    Returns
+    -------
+    int"""
     removed = 0
     base = Path(runs_root) / run_id / "per_target"
     if not base.is_dir():

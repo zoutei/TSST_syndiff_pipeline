@@ -15,6 +15,16 @@ T = TypeVar("T")
 
 
 def _pick_optional_str(stage: dict, name: str) -> Optional[str]:
+    """Pick optional str.
+    
+    Parameters
+    ----------
+    stage : dict
+    name : str
+    
+    Returns
+    -------
+    Optional[str]"""
     if name not in stage:
         return None
     v = stage[name]
@@ -25,6 +35,15 @@ def _pick_optional_str(stage: dict, name: str) -> Optional[str]:
 
 
 def _merge_dataclass(cls: Type[T], stage: dict) -> T:
+    """Merge dataclass.
+    
+    Parameters
+    ----------
+    stage : dict
+    
+    Returns
+    -------
+    T"""
     names = {f.name for f in fields(cls)}
     kw = {n: stage[n] for n in names if n in stage}
     base = cls()
@@ -37,6 +56,14 @@ def validate_stage_keys(
     kind: str,
     allowed: FrozenSet[str],
 ) -> None:
+    """Validate stage keys.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    kind : str
+    allowed : FrozenSet[str]"""
     unknown = set(stage.keys()) - allowed
     if unknown:
         raise ValueError(
@@ -223,6 +250,7 @@ KERNEL_SUBTRACT_ALLOWED = frozenset(
 
 @dataclass
 class SharedMaskParams:
+    """SharedMaskParams."""
     gaia_mag_bright: float = 13.0
     strapsize: int = 6
     ref_mag_min: float = 13.5
@@ -235,6 +263,7 @@ class SharedMaskParams:
 
 @dataclass
 class HotpantsParams:
+    """HotpantsParams."""
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
@@ -259,6 +288,7 @@ class HotpantsParams:
 
 @dataclass
 class EpsfParams:
+    """EpsfParams."""
     tile_nx: int = 4
     tile_ny: int = 4
     epsf_oversample: int = 2
@@ -267,6 +297,7 @@ class EpsfParams:
 
 @dataclass
 class SatTemplateParams:
+    """SatTemplateParams."""
     high_res_os: int = 9
     epsf_oversample: int = 2
     psf_size: int = 11
@@ -277,6 +308,7 @@ class SatTemplateParams:
 
 @dataclass
 class PsfPhotometryMethodParams:
+    """PsfPhotometryMethodParams."""
     name: str
     psf_type: str = "prf"
     phot_cutout_size: int = 15
@@ -292,6 +324,7 @@ class PsfPhotometryMethodParams:
 
 @dataclass
 class AperturePhotometryMethodParams:
+    """AperturePhotometryMethodParams."""
     name: str
     tar_ap: int = 3
     sky_in: int = 5
@@ -305,6 +338,7 @@ PhotometryMethodSpec = Union[PsfPhotometryMethodParams, AperturePhotometryMethod
 
 @dataclass
 class ForcedPhotometryParams:
+    """ForcedPhotometryParams."""
     methods: List[PhotometryMethodSpec] = field(default_factory=list)
     tile_nx: int = 4
     tile_ny: int = 4
@@ -314,6 +348,17 @@ _METHOD_NAME_RE = re.compile(r"^[a-z0-9_]+$")
 
 
 def _parse_method_name(raw: object, pipeline_idx: int, method_idx: int) -> str:
+    """Parse method name.
+    
+    Parameters
+    ----------
+    raw : object
+    pipeline_idx : int
+    method_idx : int
+    
+    Returns
+    -------
+    str"""
     name = str(raw).strip().lower()
     if not name or not _METHOD_NAME_RE.match(name):
         raise ValueError(
@@ -329,6 +374,18 @@ def _parse_psf_method(
     method_idx: int,
     stage_defaults: ForcedPhotometryParams,
 ) -> PsfPhotometryMethodParams:
+    """Parse psf method.
+    
+    Parameters
+    ----------
+    entry : dict
+    pipeline_idx : int
+    method_idx : int
+    stage_defaults : ForcedPhotometryParams
+    
+    Returns
+    -------
+    PsfPhotometryMethodParams"""
     unknown = set(entry.keys()) - _METHOD_PSF_KEYS
     if unknown:
         raise ValueError(
@@ -366,6 +423,17 @@ def _parse_aperture_method(
     pipeline_idx: int,
     method_idx: int,
 ) -> AperturePhotometryMethodParams:
+    """Parse aperture method.
+    
+    Parameters
+    ----------
+    entry : dict
+    pipeline_idx : int
+    method_idx : int
+    
+    Returns
+    -------
+    AperturePhotometryMethodParams"""
     unknown = set(entry.keys()) - _METHOD_APERTURE_KEYS
     if unknown:
         raise ValueError(
@@ -385,6 +453,7 @@ def _parse_aperture_method(
 
 @dataclass
 class KernelFitParams:
+    """KernelFitParams."""
     weighting_factor: float = 0.5
     phot_box_size: int = 4
     write_debug_fits: bool = True
@@ -409,16 +478,27 @@ class KernelFitParams:
 
 @dataclass
 class ConvolvedTemplatesParams:
+    """ConvolvedTemplatesParams."""
     pass
 
 
 @dataclass
 class KernelSubtractParams:
+    """KernelSubtractParams."""
     phot_box_size: int = 4
     kernel_subtract_n_jobs: Optional[int] = None
 
 
 def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
+    """Merge step params.
+    
+    Parameters
+    ----------
+    step_dict : dict
+    
+    Returns
+    -------
+    T"""
     if not step_dict:
         return cls()
     names = {f.name for f in fields(cls)}
@@ -428,11 +508,31 @@ def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
 
 
 def parse_shared_mask(stage: dict, pipeline_idx: int) -> SharedMaskParams:
+    """Parse shared mask.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    SharedMaskParams"""
     validate_stage_keys(stage, pipeline_idx, "shared_mask", SHARED_MASK_ALLOWED)
     return _merge_dataclass(SharedMaskParams, stage)
 
 
 def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
+    """Parse hotpants.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    HotpantsParams"""
     validate_stage_keys(stage, pipeline_idx, "hotpants", HOTPANTS_ALLOWED)
     hp = _merge_dataclass(HotpantsParams, stage)
     if "hotpants_n_jobs" in stage:
@@ -442,20 +542,52 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
 
 
 def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
+    """Parse epsf.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    EpsfParams"""
     validate_stage_keys(stage, pipeline_idx, "epsf", EPSF_ALLOWED)
     return _merge_dataclass(EpsfParams, stage)
 
 
 def parse_sat_template(stage: dict, pipeline_idx: int) -> SatTemplateParams:
+    """Parse sat template.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    SatTemplateParams"""
     validate_stage_keys(stage, pipeline_idx, "sat_template", SAT_TEMPLATE_ALLOWED)
     return _merge_dataclass(SatTemplateParams, stage)
 
 
 def parse_subtract(stage: dict, pipeline_idx: int) -> None:
+    """Parse subtract.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int"""
     validate_stage_keys(stage, pipeline_idx, "subtract", SUBTRACT_ALLOWED)
 
 
 def parse_background(stage: dict, pipeline_idx: int):
+    """Parse background.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int"""
     from syndiff_pipeline.difference_imaging.stages.background.pipeline import (
         BackgroundParams,
         BackgroundStepSpatialParams,
@@ -516,6 +648,16 @@ def parse_background(stage: dict, pipeline_idx: int):
 
 
 def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryParams:
+    """Parse forced photometry.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    ForcedPhotometryParams"""
     validate_stage_keys(
         stage, pipeline_idx, "forced_photometry", FORCED_PHOTOMETRY_ALLOWED
     )
@@ -597,6 +739,16 @@ def kernel_fit_params_to_hotpants(kf: KernelFitParams) -> HotpantsParams:
 
 
 def parse_kernel_fit(stage: dict, pipeline_idx: int) -> KernelFitParams:
+    """Parse kernel fit.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    KernelFitParams"""
     validate_stage_keys(stage, pipeline_idx, "kernel_fit", KERNEL_FIT_ALLOWED)
     return _merge_dataclass(KernelFitParams, stage)
 
@@ -604,6 +756,16 @@ def parse_kernel_fit(stage: dict, pipeline_idx: int) -> KernelFitParams:
 def parse_convolved_templates(
     stage: dict, pipeline_idx: int
 ) -> ConvolvedTemplatesParams:
+    """Parse convolved templates.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    ConvolvedTemplatesParams"""
     validate_stage_keys(
         stage, pipeline_idx, "convolved_templates", CONVOLVED_TEMPLATES_ALLOWED
     )
@@ -611,6 +773,16 @@ def parse_convolved_templates(
 
 
 def parse_kernel_subtract(stage: dict, pipeline_idx: int) -> KernelSubtractParams:
+    """Parse kernel subtract.
+    
+    Parameters
+    ----------
+    stage : dict
+    pipeline_idx : int
+    
+    Returns
+    -------
+    KernelSubtractParams"""
     validate_stage_keys(
         stage, pipeline_idx, "kernel_subtract", KERNEL_SUBTRACT_ALLOWED
     )

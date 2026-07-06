@@ -121,6 +121,15 @@ def write_background_removal_animation(
     cbar.set_label(cbar_label)
 
     def _title(fi: int) -> str:
+        """Title.
+        
+        Parameters
+        ----------
+        fi : int
+        
+        Returns
+        -------
+        str"""
         subsampled = Full_n > n
         parts = [
             f"Frame {fi + 1}/{n} (subsampled from {Full_n})"
@@ -136,6 +145,11 @@ def write_background_removal_animation(
     ax.set_ylabel("y (crop px)")
 
     def _update(fi: int):
+        """Update.
+        
+        Parameters
+        ----------
+        fi : int"""
         im.set_data(cube[fi])
         ax.set_title(_title(fi))
         return (im,)

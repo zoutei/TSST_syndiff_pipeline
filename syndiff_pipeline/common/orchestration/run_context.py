@@ -14,6 +14,7 @@ from syndiff_pipeline.common.orchestration.targets import Target, load_targets
 
 @dataclass
 class RunContext:
+    """RunContext."""
     run_id: str
     run_dir: Path
     cfg: RunnerConfig
@@ -22,6 +23,15 @@ class RunContext:
 
 
 def _load_meta(run_directory: Path) -> dict:
+    """Load meta.
+    
+    Parameters
+    ----------
+    run_directory : Path
+    
+    Returns
+    -------
+    dict"""
     meta_path = logs.run_meta_path(run_directory)
     if not meta_path.is_file():
         return {}
@@ -29,6 +39,11 @@ def _load_meta(run_directory: Path) -> dict:
 
 
 def _validate_frozen_inputs(run_directory: Path) -> None:
+    """Validate frozen inputs.
+    
+    Parameters
+    ----------
+    run_directory : Path"""
     cfg_path = logs.run_config_path(run_directory)
     targets_path = logs.run_targets_path(run_directory)
     if not cfg_path.is_file() or not targets_path.is_file():
@@ -44,6 +59,17 @@ def resolve_run_context(
     run_id: str | None = None,
     runs_root: str | None = None,
 ) -> RunContext:
+    """Resolve run context.
+    
+    Parameters
+    ----------
+    run_dir : str | Path | None, optional, default ``None``
+    run_id : str | None, optional, default ``None``
+    runs_root : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    RunContext"""
     if run_dir is not None:
         rd = Path(run_dir).expanduser().resolve()
     elif run_id and runs_root:

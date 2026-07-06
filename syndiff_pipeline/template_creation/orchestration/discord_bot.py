@@ -36,6 +36,7 @@ def _channel_matches(message, channel_id: int) -> bool:
 
 
 def _require_discord():
+    """Require discord."""
     try:
         import discord
     except ImportError as exc:
@@ -50,6 +51,11 @@ class PipelineDiscordBot:
     """Reply to channel messages with live progress + status grid."""
 
     def __init__(self, deployment_path: str | Path):
+        """Init.
+        
+        Parameters
+        ----------
+        deployment_path : str | Path"""
         self._deployment_path = Path(deployment_path).expanduser().resolve()
         deployment = load_deployment_file(self._deployment_path)
         self._workspace_root = str(
@@ -63,6 +69,15 @@ class PipelineDiscordBot:
         )
 
     def _build_status_reply(self, message_text: str) -> list[str]:
+        """Build status reply.
+        
+        Parameters
+        ----------
+        message_text : str
+        
+        Returns
+        -------
+        list[str]"""
         from syndiff_pipeline.common.orchestration.notifications import (
             resolve_run_ids_for_status_request,
         )
@@ -76,6 +91,7 @@ class PipelineDiscordBot:
         )
 
     def run(self) -> None:
+        """Run."""
         discord = _require_discord()
         if not self._token:
             raise SystemExit(
@@ -97,6 +113,7 @@ class PipelineDiscordBot:
 
         @client.event
         async def on_ready():
+            """On ready."""
             nonlocal bot_user_id, listen_channel_id
             bot_user_id = client.user.id if client.user else None
             try:
@@ -143,6 +160,11 @@ class PipelineDiscordBot:
 
         @client.event
         async def on_message(message):
+            """On message.
+            
+            Parameters
+            ----------
+            message"""
             if message.author.bot:
                 return
             if listen_channel_id is not None and not _channel_matches(message, listen_channel_id):
@@ -188,6 +210,12 @@ def run_discord_bot(
     *,
     detached: bool = False,
 ) -> None:
+    """Run discord bot.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    detached : bool, optional, default ``False``"""
     path = Path(deployment_path).expanduser().resolve()
     load_deployment_file(path)
     workspace_root = str(load_workspace_root_from_deployment(path))
@@ -211,6 +239,15 @@ def run_discord_bot(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Main.
+    
+    Parameters
+    ----------
+    argv : list[str] | None, optional, default ``None``
+    
+    Returns
+    -------
+    int"""
     parser = argparse.ArgumentParser(description="SynDiff pipeline Discord bot")
     parser.add_argument(
         "--deployment",

@@ -17,6 +17,17 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS
 
 
 def _offset_match(a: float, b: float, tol: float = 1e-3) -> bool:
+    """Offset match.
+    
+    Parameters
+    ----------
+    a : float
+    b : float
+    tol : float, optional, default ``0.001``
+    
+    Returns
+    -------
+    bool"""
     return abs(float(a) - float(b)) <= max(1e-5, tol)
 
 
@@ -55,6 +66,16 @@ def find_template_by_offset(
 
 
 def resolve_template_dir(output_dir: str, *, run_id: str | None = None) -> str:
+    """Resolve template dir.
+    
+    Parameters
+    ----------
+    output_dir : str
+    run_id : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    str"""
     link = event_templates_symlink_path(output_dir, run_id=run_id)
     if link.is_symlink() or link.is_dir():
         return str(link.resolve())
@@ -116,6 +137,15 @@ def resolve_template_for_ffi(
 
 
 def convolved_template_basename(template_path: str) -> str:
+    """Convolved template basename.
+    
+    Parameters
+    ----------
+    template_path : str
+    
+    Returns
+    -------
+    str"""
     parsed = parse_syndiff_template_filename(template_path)
     if parsed is None:
         return f"convolved_template{PIPELINE_FITS_EXT}"

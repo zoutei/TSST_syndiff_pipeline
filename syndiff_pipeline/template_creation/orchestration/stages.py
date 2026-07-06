@@ -11,12 +11,26 @@ if TYPE_CHECKING:
 
 
 def _ps1_process_effective_deps(stages) -> tuple[str, ...]:
+    """Ps1 process effective deps.
+    
+    Parameters
+    ----------
+    stages
+    
+    Returns
+    -------
+    tuple[str, ...]"""
     if getattr(getattr(stages, "ps1_process", None), "ps1_source", "zarr") == "stream":
         return ("mapping",)
     return ("ps1_download",)
 
 
 def _condor_resources_for_mapping(cfg):
+    """Condor resources for mapping.
+    
+    Parameters
+    ----------
+    cfg"""
     from syndiff_pipeline.common.orchestration import condor
 
     params = cfg.stages.mapping
@@ -29,6 +43,11 @@ def _condor_resources_for_mapping(cfg):
 
 
 def _condor_resources_for_ps1_process(cfg):
+    """Condor resources for ps1 process.
+    
+    Parameters
+    ----------
+    cfg"""
     from syndiff_pipeline.common.orchestration import condor
 
     params = cfg.stages.ps1_process
@@ -50,12 +69,34 @@ def _make_template_stage(
     effective_deps=None,
     condor_resources=None,
 ) -> StageSpec:
+    """Make template stage.
+    
+    Parameters
+    ----------
+    name : str
+    short_name : str
+    deps : tuple[str, ...]
+    pool : str | None, optional, default ``None``
+    default_executor : str, optional, default ``'local'``
+    effective_deps, optional, default ``None``
+    condor_resources, optional, default ``None``
+    
+    Returns
+    -------
+    StageSpec"""
     def execute(
         resolved: ResolvedTargetConfig,
         *,
         force_rerun: bool = False,
         progress_path: str | None = None,
     ):
+        """Execute.
+        
+        Parameters
+        ----------
+        resolved : ResolvedTargetConfig
+        force_rerun : bool, optional, default ``False``
+        progress_path : str | None, optional, default ``None``"""
         from syndiff_pipeline.template_creation.orchestration import dispatch as dispatch_impl
 
         return dispatch_impl._execute_template_stage(
@@ -66,6 +107,15 @@ def _make_template_stage(
         )
 
     def verify_complete(resolved: ResolvedTargetConfig) -> bool:
+        """Verify complete.
+        
+        Parameters
+        ----------
+        resolved : ResolvedTargetConfig
+        
+        Returns
+        -------
+        bool"""
         from syndiff_pipeline.template_creation.orchestration.verify import (
             stage_complete as _template_stage_complete,
         )
@@ -73,6 +123,11 @@ def _make_template_stage(
         return _template_stage_complete(resolved, name)
 
     def collect_artifacts(resolved: ResolvedTargetConfig):
+        """Collect artifacts.
+        
+        Parameters
+        ----------
+        resolved : ResolvedTargetConfig"""
         from syndiff_pipeline.template_creation.orchestration.verify import (
             collect_stage_artifacts as _collect_template_artifacts,
         )
@@ -80,6 +135,15 @@ def _make_template_stage(
         return _collect_template_artifacts(resolved, name)
 
     def config_fingerprint(resolved: ResolvedTargetConfig) -> str:
+        """Config fingerprint.
+        
+        Parameters
+        ----------
+        resolved : ResolvedTargetConfig
+        
+        Returns
+        -------
+        str"""
         from syndiff_pipeline.template_creation.orchestration.verify import (
             config_fingerprint as _template_config_fingerprint,
         )
@@ -87,6 +151,15 @@ def _make_template_stage(
         return _template_config_fingerprint(resolved, name)
 
     def stage_snapshot(resolved: ResolvedTargetConfig) -> dict:
+        """Stage snapshot.
+        
+        Parameters
+        ----------
+        resolved : ResolvedTargetConfig
+        
+        Returns
+        -------
+        dict"""
         from syndiff_pipeline.template_creation.orchestration.runner_config import config_snapshot
 
         snap = config_snapshot(resolved)
@@ -141,6 +214,15 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
 
 
 def resolve_template_context(ctx: StageRunContext) -> StageRunContext:
+    """Resolve template context.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    StageRunContext"""
     from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
 
     if ctx.template_resolved is not None:

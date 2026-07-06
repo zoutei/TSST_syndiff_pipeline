@@ -13,6 +13,15 @@ _SKIP_WS_CHILDREN = frozenset({"master", "templates", FFIS_WS_LABEL})
 
 
 def _normalize_workspace_run_id(run_id: str | None) -> str | None:
+    """Normalize workspace run id.
+    
+    Parameters
+    ----------
+    run_id : str | None
+    
+    Returns
+    -------
+    str | None"""
     if run_id is None:
         return None
     s = str(run_id).strip()

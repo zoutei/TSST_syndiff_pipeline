@@ -151,6 +151,21 @@ def _hotpants_loky_initializer(
     sci_bkg_ws: Optional[str] = None,
     force_rerun: bool = False,
 ) -> None:
+    """Hotpants loky initializer.
+    
+    Parameters
+    ----------
+    mask : np.ndarray
+    ref_stars_xy : np.ndarray
+    hp : HotpantsParams
+    template_path_map : dict
+    crop_bounds : dict
+    workspace_dirs : HotpantsWorkspaceDirs
+    round_id : int
+    legacy_bkg_sidecar : bool
+    sci_workspace_dir : Optional[str], optional, default ``None``
+    sci_bkg_ws : Optional[str], optional, default ``None``
+    force_rerun : bool, optional, default ``False``"""
     global _HOTPANTS_LOKY_PAYLOAD
     _HOTPANTS_LOKY_PAYLOAD = {
         "mask": mask,
@@ -453,6 +468,7 @@ def _serialize_substamp_details(details: Any) -> Optional[dict[str, np.ndarray]]
 
 
 def _get_hotpants_classes():
+    """Get hotpants classes."""
     try:
         from hotpants import Hotpants, HotpantsConfig
 
@@ -493,6 +509,16 @@ def build_hotpants_config(
     *,
     write_stamps: bool = True,
 ):
+    """Build hotpants config.
+    
+    Parameters
+    ----------
+    hp : HotpantsParams
+    diff_dir : str
+    convolved_dir : str
+    frame_stem : str
+    stamps_dir : Optional[str], optional, default ``None``
+    write_stamps : bool, optional, default ``True``"""
     _, HotpantsConfig = _get_hotpants_classes()
 
     rkernel, sigma_gauss, deg_fixe, ngauss = _kernel_sigma_deg_for_basis(hp)
@@ -600,6 +626,16 @@ def run_hotpants_frame(
 
 
 def _load_ffi_cropped(ffi_path: str, bounds: dict) -> tuple:
+    """Load ffi cropped.
+    
+    Parameters
+    ----------
+    ffi_path : str
+    bounds : dict
+    
+    Returns
+    -------
+    tuple"""
     x0, x1 = bounds["x_min"], bounds["x_max"]
     y0, y1 = bounds["y_min"], bounds["y_max"]
     with wcs_grouping.open_fits_memmap(ffi_path) as hdul:
@@ -616,6 +652,16 @@ class TemplateCoverageError(Exception):
 
 
 def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
+    """Load template cropped.
+    
+    Parameters
+    ----------
+    tmpl_path : str
+    bounds : dict
+    
+    Returns
+    -------
+    np.ndarray"""
     from syndiff_pipeline.common.template_coverage import (
         crop_bounds_subset_of_coverage,
         template_coverage_ffi_bounds,
@@ -712,6 +758,25 @@ def _process_one_frame(
     template_cache: Optional[dict] = None,
     force_rerun: bool = False,
 ):
+    """Process one frame.
+    
+    Parameters
+    ----------
+    ffi_path
+    product_id
+    group_id
+    hp : HotpantsParams
+    template_path_map
+    mask
+    crop_bounds
+    ref_stars_xy
+    dirs : HotpantsWorkspaceDirs
+    round_id : int
+    sci_bkg_ws : Optional[str], optional, default ``None``
+    legacy_diff_sidecar_bkg : bool, optional, default ``False``
+    sci_workspace_dir : Optional[str], optional, default ``None``
+    template_cache : Optional[dict], optional, default ``None``
+    force_rerun : bool, optional, default ``False``"""
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
 
@@ -989,6 +1054,11 @@ def hotpants_loop(
     )
 
     def _record_progress(result: dict) -> None:
+        """Record progress.
+        
+        Parameters
+        ----------
+        result : dict"""
         record_frame_progress(
             workspace_progress_path,
             cli_progress_path,
@@ -999,6 +1069,11 @@ def hotpants_loop(
         template_cache: dict = {}
 
         def _serial_worker(args):
+            """Serial worker.
+            
+            Parameters
+            ----------
+            args"""
             ffi_path, product_id, group_id = args
             if product_id is None:
                 return {"stem": None, "success": False, "error_msg": "not in wcs_table"}
@@ -1071,6 +1146,15 @@ def hotpants_loop(
 
 
 def _is_diff_sidecar_path(path: str) -> bool:
+    """Is diff sidecar path.
+    
+    Parameters
+    ----------
+    path : str
+    
+    Returns
+    -------
+    bool"""
     lower = path.lower()
     return lower.endswith(
         ("_bkg.fits.gz", "_stamps.fits.gz", "_bkg.fits", "_stamps.fits")
@@ -1105,6 +1189,7 @@ class SyndiffTemplateDiscoveryError(RuntimeError):
 
 @dataclass(frozen=True)
 class ParsedSyndiffTemplate:
+    """ParsedSyndiffTemplate."""
     sector: int
     camera: int
     ccd: int
@@ -1148,6 +1233,17 @@ def parse_syndiff_template_filename(
 
 
 def _syndiff_offsets_match(a: float, b: float, offset_threshold: float) -> bool:
+    """Syndiff offsets match.
+    
+    Parameters
+    ----------
+    a : float
+    b : float
+    offset_threshold : float
+    
+    Returns
+    -------
+    bool"""
     tol = max(1e-5, 0.01 * float(offset_threshold))
     return abs(float(a) - float(b)) <= tol
 
@@ -1208,6 +1304,15 @@ def _template_dir_has_syndiff_files(template_dir: str) -> bool:
 
 
 def _required_syndiff_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
+    """Required syndiff template groups.
+    
+    Parameters
+    ----------
+    wcs_table : pd.DataFrame
+    
+    Returns
+    -------
+    pd.DataFrame"""
     df = wcs_table.copy()
     if "wcs_ok" in df.columns:
         wok = df["wcs_ok"]

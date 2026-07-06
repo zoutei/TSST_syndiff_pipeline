@@ -176,7 +176,7 @@ Template and diff science code lives under `template_creation/processing/` and `
 | [`template_pipeline.md`](template_pipeline.md) | User guide: config, Condor, run lifecycle, troubleshooting |
 | [`template_runner_architecture.md`](template_runner_architecture.md) | Maintainer deep dive: scheduler, verify, recovery |
 | [`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md) | SQLite status transition matrix |
-| [`../config/`](../config/) | Site config examples |
+| [`../config/`](../../config/) | Site config examples |
 | [`README.md`](README.md) | Documentation index |
 
 ---

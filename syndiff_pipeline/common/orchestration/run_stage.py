@@ -33,10 +33,17 @@ _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
 
 def _configure_logging() -> None:
+    """Configure logging."""
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, force=True)
 
 
 def _lookup_target(ctx, target_label: str):
+    """Lookup target.
+    
+    Parameters
+    ----------
+    ctx
+    target_label : str"""
     for target in ctx.targets:
         if target.label() == target_label:
             return target
@@ -75,6 +82,15 @@ def _write_status(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Main.
+    
+    Parameters
+    ----------
+    argv : list[str] | None, optional, default ``None``
+    
+    Returns
+    -------
+    int"""
     parser = argparse.ArgumentParser(description="Run one pipeline stage")
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--stage", required=True)

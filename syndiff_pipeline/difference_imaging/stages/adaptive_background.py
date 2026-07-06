@@ -86,11 +86,22 @@ def _interpolate_angles(time_mjd, df):
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 def _make_odd(x):
+    """Make odd.
+    
+    Parameters
+    ----------
+    x"""
     x = max(int(x), 3)
     return x if x % 2 == 1 else x + 1
 
 
 def _get_segments(time, gap_thresh):
+    """Get segments.
+    
+    Parameters
+    ----------
+    time
+    gap_thresh"""
     dt = np.diff(time)
     median_dt = np.median(dt)
     breaks = np.where(dt > gap_thresh * median_dt)[0] + 1
@@ -231,6 +242,14 @@ def adaptive_medfilt_3d(
         data_metric = _block_reduce(data_filled, block_size) if block_size > 1 else data_filled
 
         def _compute_dev(cw, data_metric=data_metric, segments=segments, gw=gw):
+            """Compute dev.
+            
+            Parameters
+            ----------
+            cw
+            data_metric, optional, default ``data_metric``
+            segments, optional, default ``segments``
+            gw, optional, default ``gw``"""
             dev = np.zeros_like(data_metric)
             for s, e in segments:
                 seg = data_metric[s:e]
@@ -270,6 +289,16 @@ def adaptive_medfilt_3d(
 
         def _compute_norm(i_dev, bright_mask=bright_mask, segments=segments,
                           lnw=lnw, low_pct=low_pct, high_pct=high_pct):
+            """Compute norm.
+            
+            Parameters
+            ----------
+            i_dev
+            bright_mask, optional, default ``bright_mask``
+            segments, optional, default ``segments``
+            lnw, optional, default ``lnw``
+            low_pct, optional, default ``low_pct``
+            high_pct, optional, default ``high_pct``"""
             i, dev = i_dev
             scale_floor = max(np.nanpercentile(dev, 75), 1e-10)
             g_lo = np.zeros_like(dev)
@@ -307,6 +336,11 @@ def adaptive_medfilt_3d(
             lstd_var[s:e] = np.sqrt(np.maximum(m2 - m ** 2, 0))
 
     def _norm01(x):
+        """Norm01.
+        
+        Parameters
+        ----------
+        x"""
         lo, hi = np.nanpercentile(x, 1), np.nanpercentile(x, 99)
         return np.clip((x - lo) / (hi - lo + 1e-30), 0, 1)
 
@@ -381,6 +415,12 @@ def adaptive_medfilt_3d(
         seg_levels = np.unique(seg_wins)
 
         def _smooth_seg(w, seg=seg_data):
+            """Smooth seg.
+            
+            Parameters
+            ----------
+            w
+            seg, optional, default ``seg_data``"""
             return w, median_filter(seg, size=(w, 1, 1), mode='reflect')
 
         for w, smoothed_w in Parallel(n_jobs=n_jobs)(delayed(_smooth_seg)(w) for w in seg_levels):
@@ -570,6 +610,13 @@ def savgol_smooth_3d(data, time=None, gap_thresh=3.0, window_length=None, polyor
 
 
 def _iter_spatial_tiles(ny, nx, tile_size):
+    """Iter spatial tiles.
+    
+    Parameters
+    ----------
+    ny
+    nx
+    tile_size"""
     if tile_size <= 0 or tile_size >= max(ny, nx):
         yield 0, ny, 0, nx
         return
@@ -581,6 +628,11 @@ def _iter_spatial_tiles(ny, nx, tile_size):
 
 
 def _smooth_savgol_tile(args):
+    """Smooth savgol tile.
+    
+    Parameters
+    ----------
+    args"""
     block, time, gap_thresh, wl, polyorder, sigma_clip = args
     result, _, _ = _savgol_smooth_3d_core(
         block,
@@ -699,6 +751,17 @@ class AdaptiveBackground:
     """
 
     def __init__(self, data, time, sector, camera, data_path=None, n_jobs=-1, block_size=5):
+        """Init.
+        
+        Parameters
+        ----------
+        data
+        time
+        sector
+        camera
+        data_path, optional, default ``None``
+        n_jobs, optional, default ``-1``
+        block_size, optional, default ``5``"""
         self.data = np.asarray(data, dtype=np.float32)
         self.time = np.asarray(time, dtype=float)
         self.sector = int(sector)

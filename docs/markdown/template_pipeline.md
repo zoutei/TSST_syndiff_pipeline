@@ -10,7 +10,7 @@ syndiff diff submit     # diff only (verifies tess_dl + wcs handoff + downsample
 
 Monitoring verbs (`progress`, `status`, `retry`, …) are workspace-wide and work identically regardless of which preset started the run.
 
-For difference imaging stage lists and example YAMLs, see [`config/diff_config.yaml`](../config/diff_config.yaml) and [`config/example/`](../config/example/). Forked **pyhotpants** and **MOCPy** requirements are summarized in the [main README](../README.md#forked-dependencies).
+For difference imaging stage lists and example YAMLs, see [`config/diff_config.yaml`](../../config/diff_config.yaml) and [`config/example/`](../../config/example/). Forked **pyhotpants** and **MOCPy** requirements are summarized in the [main README](../../README.md#forked-dependencies).
 
 **Documentation index**: [`docs/README.md`](README.md)
 
@@ -86,7 +86,7 @@ This guide covers **orchestration** — how to configure and run `syndiff` acros
 | Orchestration | This file (`docs/template_pipeline.md`) | YAML config, scheduler, SQLite, Condor, CLI, logs |
 | Stage algorithms | [`docs/stages/`](stages/README.md) | PanCAKES mapping, PS1 convolution, downsampling internals |
 | Legacy standalone workflow | [`docs/stages/standalone_pipeline_overview.md`](stages/standalone_pipeline_overview.md) | Original `pipeline.py` + per-script CLI |
-| Diff imaging | [`config/example/`](../config/example/), [`config/diff_config.yaml`](../config/diff_config.yaml) | Hotpants → photometry after templates exist |
+| Diff imaging | [`config/example/`](../../config/example/), [`config/diff_config.yaml`](../../config/diff_config.yaml) | Hotpants → photometry after templates exist |
 
 ### Script → module → stage mapping
 
@@ -195,7 +195,7 @@ When you run a **stage subset**, dependencies outside the subset are satisfied i
 
 ## Installation
 
-See the [main README](../README.md#installation) for full install instructions (`pip install -e .`, conda env, forked dependencies).
+See the [main README](../../README.md#installation) for full install instructions (`pip install -e .`, conda env, forked dependencies).
 
 ```bash
 mamba activate syndiff   # recommended env name in this project
@@ -546,7 +546,7 @@ sector{SSSS}_camera{C}_ccd{K}[_x..._y...][_os{N}]/
 
 **Module**: `difference_imaging/orchestration/execute.py` (registry: `difference_imaging/orchestration/stages.py`)
 
-Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → background → forced photometry) after templates exist. Policy comes from the site [`diff_config.yaml`](../config/diff_config.yaml), referenced by `diff_config:` in `pipeline.yaml`; per-target copies are frozen under `per_target/<label>/diff_config.yaml` at launch.
+Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → background → forced photometry) after templates exist. Policy comes from the site [`diff_config.yaml`](../../config/diff_config.yaml), referenced by `diff_config:` in `pipeline.yaml`; per-target copies are frozen under `per_target/<label>/diff_config.yaml` at launch.
 
 **Outputs** (under `{workspace_root}/events/{target_label}/ws/`):
 

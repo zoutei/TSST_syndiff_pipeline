@@ -27,6 +27,7 @@ STACK_BASENAME = "stack"
 
 @dataclass(frozen=True)
 class FrameRecord:
+    """FrameRecord."""
     index: int
     product_id: str
     stem: str
@@ -36,6 +37,16 @@ class FrameRecord:
 
 
 def load_stack(dir_path: str, *, basename: str = STACK_BASENAME) -> np.ndarray:
+    """Load stack.
+    
+    Parameters
+    ----------
+    dir_path : str
+    basename : str, optional, default ``STACK_BASENAME``
+    
+    Returns
+    -------
+    np.ndarray"""
     npz_path = os.path.join(dir_path, f"{basename}.npz")
     npy_path = os.path.join(dir_path, f"{basename}.npy")
     if os.path.isfile(npz_path):
@@ -54,6 +65,13 @@ def load_stack(dir_path: str, *, basename: str = STACK_BASENAME) -> np.ndarray:
 
 
 def save_stack(stack: np.ndarray, dir_path: str, *, basename: str = STACK_BASENAME) -> None:
+    """Save stack.
+    
+    Parameters
+    ----------
+    stack : np.ndarray
+    dir_path : str
+    basename : str, optional, default ``STACK_BASENAME``"""
     os.makedirs(dir_path, exist_ok=True)
     arr = np.asarray(stack, dtype=np.float32)
     npz_path = os.path.join(dir_path, f"{basename}.npz")
@@ -102,6 +120,19 @@ def _row_from_paths(
     bkg_dir: Optional[str],
     bkg_label: Optional[str],
 ) -> FrameRecord:
+    """Row from paths.
+    
+    Parameters
+    ----------
+    product_id : str
+    diff_dir : str
+    diff_label : str
+    bkg_dir : Optional[str]
+    bkg_label : Optional[str]
+    
+    Returns
+    -------
+    FrameRecord"""
     diff_stem = workspace_frame_stem(product_id, diff_label)
     diff_path = resolve_pipeline_fits_path(diff_dir, diff_stem)
     ok = diff_path is not None
@@ -125,6 +156,18 @@ def build_frame_records(
     diff_dir: str,
     bkg_dir: Optional[str] = None,
 ) -> List[FrameRecord]:
+    """Build frame records.
+    
+    Parameters
+    ----------
+    ffi_paths : List[str]
+    wcs_table : pd.DataFrame
+    diff_dir : str
+    bkg_dir : Optional[str], optional, default ``None``
+    
+    Returns
+    -------
+    List[FrameRecord]"""
     path_to_group = {}
     if wcs_table is not None:
         col = "path" if "path" in wcs_table.columns else "filename"
@@ -226,6 +269,13 @@ def write_per_frame_fits(
     stack: np.ndarray,
     records: List[FrameRecord],
 ) -> None:
+    """Write per frame fits.
+    
+    Parameters
+    ----------
+    out_dir : str
+    stack : np.ndarray
+    records : List[FrameRecord]"""
     os.makedirs(out_dir, exist_ok=True)
     out_label = workspace_label_from_dir(out_dir)
     for i, rec in enumerate(records):

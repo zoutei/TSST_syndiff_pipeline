@@ -11,6 +11,15 @@ log = logging.getLogger(__name__)
 
 
 def _earth_moon_columns(df: pd.DataFrame) -> tuple[str, str]:
+    """Earth moon columns.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    
+    Returns
+    -------
+    tuple[str, str]"""
     for earth_col, moon_col in (
         ("Earth_Camera_Angle", "Moon_Camera_Angle"),
         ("earth_deg", "moon_deg"),
@@ -24,6 +33,16 @@ def _earth_moon_columns(df: pd.DataFrame) -> tuple[str, str]:
 
 
 def angle_score_series(df: pd.DataFrame, weighting_factor: float) -> pd.Series:
+    """Angle score series.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    weighting_factor : float
+    
+    Returns
+    -------
+    pd.Series"""
     earth_col, moon_col = _earth_moon_columns(df)
     earth = pd.to_numeric(df[earth_col], errors="coerce")
     moon = pd.to_numeric(df[moon_col], errors="coerce")
@@ -32,6 +51,15 @@ def angle_score_series(df: pd.DataFrame, weighting_factor: float) -> pd.Series:
 
 
 def _usable_manifest_rows(df: pd.DataFrame) -> pd.Series:
+    """Usable manifest rows.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    
+    Returns
+    -------
+    pd.Series"""
     mask = pd.Series(True, index=df.index)
     if "wcs_ok" in df.columns:
         mask &= df["wcs_ok"].astype(str).str.lower().isin({"true", "1", "yes", "t"})

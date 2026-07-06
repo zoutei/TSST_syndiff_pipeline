@@ -227,12 +227,31 @@ def list_local_ffis(ffi_dir: str, sector: int, camera: int, ccd: int) -> list:
 
 
 def _fetch_bytes(url: str, timeout: float) -> bytes:
+    """Fetch bytes.
+    
+    Parameters
+    ----------
+    url : str
+    timeout : float
+    
+    Returns
+    -------
+    bytes"""
     req = Request(url, headers={"User-Agent": _USER_AGENT})
     with urlopen(req, timeout=timeout) as resp:
         return resp.read()
 
 
 def _strip_shell_quote(s: str) -> str:
+    """Strip shell quote.
+    
+    Parameters
+    ----------
+    s : str
+    
+    Returns
+    -------
+    str"""
     s = s.strip()
     if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
         return s[1:-1]
@@ -409,6 +428,12 @@ def _execute_ffi_downloads(
     completed = 0
 
     def _record_result(basename: str, error: str | None) -> None:
+        """Record result.
+        
+        Parameters
+        ----------
+        basename : str
+        error : str | None"""
         nonlocal n_ok, n_err, completed, last_progress_log
         with lock:
             completed += 1
@@ -446,6 +471,20 @@ def _download_ffis_via_tesscurl(
     overwrite: bool,
     max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> list:
+    """Download ffis via tesscurl.
+    
+    Parameters
+    ----------
+    sector : int
+    camera : int
+    ccd : int
+    output_dir : str
+    overwrite : bool
+    max_workers : int, optional, default ``_DEFAULT_MAX_WORKERS``
+    
+    Returns
+    -------
+    list"""
     script_url = TESSCURL_SCRIPT_URL.format(sector=sector)
     log.info("Fetching tesscurl manifest %s ...", script_url)
     try:
@@ -524,6 +563,12 @@ def _download_ffis_via_tesscurl(
             gz_path = os.path.join(output_dir, spoc_ffi_gzip_basename(bn))
 
             def _download(url: str = url, gz_path: str = gz_path) -> None:
+                """Download.
+                
+                Parameters
+                ----------
+                url : str, optional, default ``url``
+                gz_path : str, optional, default ``gz_path``"""
                 _stream_url_to_gzip_fits(url, gz_path, _DOWNLOAD_TIMEOUT_FITS_S)
 
             tasks.append((bn, _download))
@@ -545,6 +590,20 @@ def _download_ffis_via_astroquery(
     overwrite: bool,
     max_workers: int = _DEFAULT_MAX_WORKERS,
 ) -> list:
+    """Download ffis via astroquery.
+    
+    Parameters
+    ----------
+    sector : int
+    camera : int
+    ccd : int
+    output_dir : str
+    overwrite : bool
+    max_workers : int, optional, default ``_DEFAULT_MAX_WORKERS``
+    
+    Returns
+    -------
+    list"""
     try:
         from astroquery.mast import Observations
     except ImportError as e:
@@ -671,6 +730,12 @@ def _download_ffis_via_astroquery(
                 row=row,
                 plain_path: str = plain_path,
             ) -> None:
+                """Download.
+                
+                Parameters
+                ----------
+                row, optional, default ``row``
+                plain_path : str, optional, default ``plain_path``"""
                 status, msg, _url = Observations.download_file(
                     row["dataURI"],
                     local_path=plain_path,
@@ -739,6 +804,7 @@ def download_ffis(
 
 
 def main():
+    """Main."""
     parser = argparse.ArgumentParser(
         description="Download TESS FFI calibrated images (tesscurl manifest + urllib by default).",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

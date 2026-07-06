@@ -23,16 +23,35 @@ log = logging.getLogger(__name__)
 
 
 def _pipeline():
+    """Pipeline."""
     from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
 
     return get_syndiff_pipeline()
 
 
 def parse_stage_list(stages_arg: str | None) -> List[str]:
+    """Parse stage list.
+    
+    Parameters
+    ----------
+    stages_arg : str | None
+    
+    Returns
+    -------
+    List[str]"""
     return _pipeline().parse_stage_list(stages_arg)
 
 
 def resolve_stage_name(stage: str) -> str:
+    """Resolve stage name.
+    
+    Parameters
+    ----------
+    stage : str
+    
+    Returns
+    -------
+    str"""
     return _pipeline().resolve_stage_name(stage)
 
 
@@ -45,6 +64,20 @@ def build_stage_command(
     launch_token: str,
     force_rerun: bool = False,
 ) -> List[str]:
+    """Build stage command.
+    
+    Parameters
+    ----------
+    run_id : str
+    stage : str
+    run_dir : str
+    target_label : str
+    launch_token : str
+    force_rerun : bool, optional, default ``False``
+    
+    Returns
+    -------
+    List[str]"""
     cmd = [
         sys.executable,
         "-m",
@@ -66,6 +99,15 @@ def build_stage_command(
 
 
 def _deployment_file_for_site(site_config_path: str) -> str:
+    """Deployment file for site.
+    
+    Parameters
+    ----------
+    site_config_path : str
+    
+    Returns
+    -------
+    str"""
     import yaml
 
     with Path(site_config_path).open(encoding="utf-8") as fh:
@@ -80,6 +122,14 @@ def _download_gaia_catalog(
     output_path: str,
     force_download: bool,
 ) -> None:
+    """Download gaia catalog.
+    
+    Parameters
+    ----------
+    site_config_path : str | None
+    tess_file : str
+    output_path : str
+    force_download : bool"""
     from syndiff_pipeline.template_creation.processing import pancakes
 
     if not site_config_path:
@@ -106,6 +156,15 @@ _MANIFEST_META_KEYS = ("template_dir_physical", "template_dir_symlink")
 
 
 def _manifest_meta_from_result(result: dict) -> dict[str, str] | None:
+    """Manifest meta from result.
+    
+    Parameters
+    ----------
+    result : dict
+    
+    Returns
+    -------
+    dict[str, str] | None"""
     meta = {key: str(result[key]) for key in _MANIFEST_META_KEYS if key in result}
     return meta or None
 
@@ -113,6 +172,15 @@ def _manifest_meta_from_result(result: dict) -> dict[str, str] | None:
 def _manifest_from_result(
     result: dict,
 ) -> tuple[int, int, list[str], dict[str, str] | None] | None:
+    """Manifest from result.
+    
+    Parameters
+    ----------
+    result : dict
+    
+    Returns
+    -------
+    tuple[int, int, list[str], dict[str, str] | None] | None"""
     if not isinstance(result, dict):
         return None
     if "expected_count" not in result or "produced_count" not in result:
@@ -316,6 +384,16 @@ def execute_stage(
 
 
 def stage_snapshot(resolved: ResolvedTargetConfig, stage: str) -> dict:
+    """Stage snapshot.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    stage : str
+    
+    Returns
+    -------
+    dict"""
     spec = _pipeline().get(stage)
     if spec is not None and spec.stage_snapshot is not None:
         return spec.stage_snapshot(resolved)

@@ -1,5 +1,7 @@
 # SynDiff Pipeline
 
+[![Docs](https://github.com/zoutei/TSST_syndiff_pipeline/actions/workflows/docs.yml/badge.svg)](https://zoutei.github.io/TSST_syndiff_pipeline/)
+
 TESS Full Frame Image (FFI) template building and difference-imaging pipeline for transient detection and forced photometry.
 
 > **This project has not been released.** All modules are under active development.
@@ -57,7 +59,7 @@ Used for: per-frame FFI vs PS1 template differencing, optional second-pass subtr
 The **mapping** (PanCAKES) stage requires a **modified MOCPy** build with `MOC.filter_points_in_polygons` (Rust backend). Standard `pip install mocpy` does not include this API.
 
 - Source: [github.com/zoutei/mocpy_syndiff](https://github.com/zoutei/mocpy_syndiff/)
-- Install: follow that repository’s build instructions (Rust + `maturin develop --release`), or see [`docs/stages/mapping_pancakes.md`](docs/stages/mapping_pancakes.md) and [`docs/stages/standalone_pipeline_overview.md`](docs/stages/standalone_pipeline_overview.md#custom-mocpy-installation).
+- Install: follow that repository’s build instructions (Rust + `maturin develop --release`), or see [`docs/markdown/stages/mapping_pancakes.md`](docs/markdown/stages/mapping_pancakes.md) and [`docs/markdown/stages/standalone_pipeline_overview.md`](docs/markdown/stages/standalone_pipeline_overview.md#custom-mocpy-installation).
 
 ### Other external packages
 
@@ -157,18 +159,20 @@ After PS1 templates exist, the orchestrator **`diff`** stage runs the YAML-order
 | Site policy | `syndiff diff run --site config --targets t.csv --target-name 2020ut` | `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml` |
 | Materialized YAML | `python -m syndiff_pipeline.difference_imaging.orchestration.cli --config config/example/diff_config_a_prf.yaml` | Pre-built per-target YAML under [`config/example/`](config/example/) |
 
-See [`config/README.md`](config/README.md) for site layout. Outputs live under `{workspace_root}/events/{label}/ws/`; full directory reference: [`docs/storage_layout.md`](docs/storage_layout.md).
+See [`config/README.md`](config/README.md) for site layout. Outputs live under `{workspace_root}/events/{label}/ws/`; full directory reference: [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md).
 
 ---
 
 ## Documentation
 
+**Online docs:** https://zoutei.github.io/TSST_syndiff_pipeline/ (publish via Actions → docs → Run workflow)
+
 | Document | Contents |
 |----------|----------|
-| [`docs/README.md`](docs/README.md) | Documentation index |
-| [`docs/template_pipeline.md`](docs/template_pipeline.md) | `syndiff` orchestration, Condor, config, run lifecycle |
-| [`docs/syndiff_cli.md`](docs/syndiff_cli.md) | CLI noun/verb commands and stage modules |
-| [`docs/storage_layout.md`](docs/storage_layout.md) | `workspace_root`, `data_root`, on-disk layout |
-| [`docs/stages/`](docs/stages/README.md) | PanCAKES, PS1 process, downsample algorithms |
-| [`docs/cluster_smoke_checklist.md`](docs/cluster_smoke_checklist.md) | Cluster smoke test after setup |
+| [`docs/README.md`](docs/README.md) | Documentation index and HTML build instructions |
+| [`docs/markdown/template_pipeline.md`](docs/markdown/template_pipeline.md) | `syndiff` orchestration, Condor, config, run lifecycle |
+| [`docs/markdown/syndiff_cli.md`](docs/markdown/syndiff_cli.md) | CLI noun/verb commands and stage modules |
+| [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md) | `workspace_root`, `data_root`, on-disk layout |
+| [`docs/markdown/stages/`](docs/markdown/stages/README.md) | PanCAKES, PS1 process, downsample algorithms |
+| [`docs/markdown/cluster_smoke_checklist.md`](docs/markdown/cluster_smoke_checklist.md) | Cluster smoke test after setup |
 | [`config/`](config/) | Site configs and example diff YAMLs |

@@ -14,6 +14,16 @@ EXECUTION_VERBS = frozenset({"submit", "run"})
 
 
 def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
+    """Build execution parser.
+    
+    Parameters
+    ----------
+    preset : str
+    verb : str
+    
+    Returns
+    -------
+    argparse.ArgumentParser"""
     if preset not in PRESET_NAMES:
         raise ValueError(f"Unknown preset: {preset!r}")
     if verb not in EXECUTION_VERBS:
@@ -74,6 +84,11 @@ def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
 
 
 def _resolve_execution_config(args: argparse.Namespace) -> None:
+    """Resolve execution config.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace"""
     if args.config:
         return
     if args.site:
@@ -84,6 +99,16 @@ def _resolve_execution_config(args: argparse.Namespace) -> None:
 
 
 def _finalize_execution_args(preset: str, args: argparse.Namespace) -> argparse.Namespace:
+    """Finalize execution args.
+    
+    Parameters
+    ----------
+    preset : str
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    argparse.Namespace"""
     _resolve_execution_config(args)
     if args.stages:
         args.preset = None
@@ -142,6 +167,16 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
 
 
 def _dispatch_execution(preset: str, argv: list[str]) -> int:
+    """Dispatch execution.
+    
+    Parameters
+    ----------
+    preset : str
+    argv : list[str]
+    
+    Returns
+    -------
+    int"""
     if not argv:
         raise SystemExit(f"usage: syndiff {preset} submit|run ...")
     verb = argv[0]
@@ -168,6 +203,15 @@ def _dispatch_execution(preset: str, argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Main.
+    
+    Parameters
+    ----------
+    argv : list[str] | None, optional, default ``None``
+    
+    Returns
+    -------
+    int"""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     argv = list(sys.argv[1:] if argv is None else argv)
 

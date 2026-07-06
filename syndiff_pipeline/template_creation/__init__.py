@@ -1,0 +1,1 @@
+"""Package module ``syndiff_pipeline.template_creation``."""

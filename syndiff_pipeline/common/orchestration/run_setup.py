@@ -10,6 +10,7 @@ from syndiff_pipeline.common.orchestration.state import PipelineState
 
 @dataclass(frozen=True)
 class PostCreateRunSetupResult:
+    """PostCreateRunSetupResult."""
     stream_skipped: int
     not_selected: int
     superseded: int

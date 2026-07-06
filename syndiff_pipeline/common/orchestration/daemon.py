@@ -23,13 +23,30 @@ PROCESS_LOG_FORMAT = (
 
 
 class _ProcessIdentityFilter(logging.Filter):
+    """ProcessIdentityFilter (logging.Filter)."""
     def __init__(self, component: str, host: str, pid: int) -> None:
+        """Init.
+        
+        Parameters
+        ----------
+        component : str
+        host : str
+        pid : int"""
         super().__init__()
         self._component = component
         self._host = host
         self._pid = pid
 
     def filter(self, record: logging.LogRecord) -> bool:
+        """Filter.
+        
+        Parameters
+        ----------
+        record : logging.LogRecord
+        
+        Returns
+        -------
+        bool"""
         record.component = self._component
         record.host = self._host
         record.pid = self._pid
@@ -57,6 +74,7 @@ def configure_process_logging(
 
 @dataclass(frozen=True)
 class DaemonStatus:
+    """DaemonStatus."""
     alive: bool
     pid: int | None
     heartbeat_age_s: float | None
@@ -65,10 +83,25 @@ class DaemonStatus:
 
 
 def local_hostname() -> str:
+    """Local hostname.
+    
+    Returns
+    -------
+    str"""
     return socket.gethostname()
 
 
 def hosts_match(local: str, remote: str) -> bool:
+    """Hosts match.
+    
+    Parameters
+    ----------
+    local : str
+    remote : str
+    
+    Returns
+    -------
+    bool"""
     if local == remote:
         return True
     return local.startswith(remote) or remote.startswith(local)
@@ -82,6 +115,15 @@ def identity_on_local_host(host: str | None) -> bool:
 
 
 def is_process_alive(pid: int) -> bool:
+    """Is process alive.
+    
+    Parameters
+    ----------
+    pid : int
+    
+    Returns
+    -------
+    bool"""
     if pid <= 0:
         return False
     try:
@@ -127,20 +169,47 @@ def write_process_identity(
     *,
     host: str | None = None,
 ) -> None:
+    """Write process identity.
+    
+    Parameters
+    ----------
+    pid_path : str | Path
+    pid : int
+    host : str | None, optional, default ``None``"""
     recorded_host = host if host is not None else local_hostname()
     Path(pid_path).write_text(f"{recorded_host}\n{pid}\n", encoding="utf-8")
 
 
 def read_pid(pid_path: str | Path) -> Optional[int]:
+    """Read pid.
+    
+    Parameters
+    ----------
+    pid_path : str | Path
+    
+    Returns
+    -------
+    Optional[int]"""
     _, pid = read_process_identity(pid_path)
     return pid
 
 
 def write_pid(pid_path: str | Path, pid: int) -> None:
+    """Write pid.
+    
+    Parameters
+    ----------
+    pid_path : str | Path
+    pid : int"""
     write_process_identity(pid_path, pid)
 
 
 def remove_pid_file(pid_path: str | Path) -> None:
+    """Remove pid file.
+    
+    Parameters
+    ----------
+    pid_path : str | Path"""
     p = Path(pid_path)
     if p.is_file():
         try:
@@ -181,6 +250,16 @@ def daemon_lock(workspace_root: str | Path, *, blocking: bool = False) -> Iterat
 
 
 def spawn_detached_daemon(deployment_path: str | Path, daemon_log: str | Path) -> int:
+    """Spawn detached daemon.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    daemon_log : str | Path
+    
+    Returns
+    -------
+    int"""
     cmd = [
         sys.executable,
         "-m",
@@ -204,6 +283,12 @@ def spawn_detached_daemon(deployment_path: str | Path, daemon_log: str | Path) -
 
 
 def terminate_process_tree(pid: int, sig: int = signal.SIGTERM) -> None:
+    """Terminate process tree.
+    
+    Parameters
+    ----------
+    pid : int
+    sig : int, optional, default ``signal.SIGTERM``"""
     if not is_process_alive(pid):
         return
     try:
@@ -234,6 +319,16 @@ def wait_for_process_exit(
 
 
 def wait_for_daemon(workspace_root: str | Path, *, timeout_s: float = 10.0) -> bool:
+    """Wait for daemon.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    timeout_s : float, optional, default ``10.0``
+    
+    Returns
+    -------
+    bool"""
     deadline = time.monotonic() + timeout_s
     pid_path = logs.daemon_pid_path(workspace_root)
     while time.monotonic() < deadline:

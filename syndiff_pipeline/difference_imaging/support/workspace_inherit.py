@@ -14,16 +14,36 @@ log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class WorkspaceInheritSpec:
+    """WorkspaceInheritSpec."""
     from_run_id: str
     labels: tuple[str, ...] = ()
     root_artifacts: tuple[str, ...] = ()
 
 
 def _relative_symlink_target(parent_tree: str, name: str) -> str:
+    """Relative symlink target.
+    
+    Parameters
+    ----------
+    parent_tree : str
+    name : str
+    
+    Returns
+    -------
+    str"""
     return os.path.join("..", parent_tree, name)
 
 
 def _resolved_link_target(link_path: Path) -> Path | None:
+    """Resolved link target.
+    
+    Parameters
+    ----------
+    link_path : Path
+    
+    Returns
+    -------
+    Path | None"""
     if not link_path.is_symlink():
         return None
     try:
@@ -36,6 +56,13 @@ def _resolved_link_target(link_path: Path) -> Path | None:
 
 
 def _ensure_relative_symlink(link_path: Path, rel_target: str, expected_abs: Path) -> None:
+    """Ensure relative symlink.
+    
+    Parameters
+    ----------
+    link_path : Path
+    rel_target : str
+    expected_abs : Path"""
     if link_path.is_symlink():
         resolved = _resolved_link_target(link_path)
         if resolved == expected_abs.resolve():

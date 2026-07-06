@@ -79,6 +79,11 @@ DOWNSAMPLE_ALLOWED = frozenset(
 
 
 def _merge_dataclass(cls: Type, data: Dict[str, Any]):
+    """Merge dataclass.
+    
+    Parameters
+    ----------
+    data : Dict[str, Any]"""
     valid = {f.name for f in fields(cls)}
     unknown = set(data) - valid
     if unknown:
@@ -91,6 +96,13 @@ def _merge_dataclass(cls: Type, data: Dict[str, Any]):
 
 
 def validate_stage_keys(stage_dict: dict, allowed: FrozenSet[str], stage_name: str) -> None:
+    """Validate stage keys.
+    
+    Parameters
+    ----------
+    stage_dict : dict
+    allowed : FrozenSet[str]
+    stage_name : str"""
     unknown = set(stage_dict) - allowed
     if unknown:
         raise ValueError(f"Unknown keys in stages.{stage_name}: {sorted(unknown)}")
@@ -98,6 +110,7 @@ def validate_stage_keys(stage_dict: dict, allowed: FrozenSet[str], stage_name: s
 
 @dataclass
 class WcsGroupingStageParams:
+    """WcsGroupingStageParams."""
     offset_threshold: float = 0.01
     wcs_drift_savgol_window: int | None = 11
     wcs_drift_savgol_polyorder: int = 2
@@ -115,6 +128,7 @@ class WcsGroupingStageParams:
 
 @dataclass
 class MappingStageParams:
+    """MappingStageParams."""
     buffer: int = 200
     tess_buffer: int = 150
     pad_distance: int = 480
@@ -135,6 +149,7 @@ class MappingStageParams:
 
 @dataclass
 class Ps1DownloadStageParams:
+    """Ps1DownloadStageParams."""
     num_workers: int = 8
     use_local_files: bool = False
     local_data_path: str = "data/ps1_skycells"
@@ -144,6 +159,7 @@ class Ps1DownloadStageParams:
 
 @dataclass
 class Ps1ProcessStageParams:
+    """Ps1ProcessStageParams."""
     projections_limit: int | None = None
     psf_sigma: float = 60.0
     ps1_source: str = "zarr"
@@ -161,11 +177,13 @@ class Ps1ProcessStageParams:
 
 @dataclass
 class DiffStageParams:
+    """DiffStageParams."""
     executor: str = "condor"
 
 
 @dataclass
 class DownsampleStageParams:
+    """DownsampleStageParams."""
     ignore_mask_bits: list = None  # type: ignore[assignment]
     oversampling_factor: int = 1
     mapping_dir: str | None = None
@@ -177,17 +195,20 @@ class DownsampleStageParams:
     skycells_per_batch: int = 20
 
     def __post_init__(self):
+        """Post init."""
         if self.ignore_mask_bits is None:
             object.__setattr__(self, "ignore_mask_bits", [12])
 
 
 @dataclass
 class ResourcePoolParams:
+    """ResourcePoolParams."""
     max_concurrent: int = 1
 
 
 @dataclass
 class TemplateStageParams:
+    """TemplateStageParams."""
     wcs_grouping: WcsGroupingStageParams
     mapping: MappingStageParams
     ps1_download: Ps1DownloadStageParams
@@ -197,6 +218,15 @@ class TemplateStageParams:
 
 
 def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
+    """Parse stage params.
+    
+    Parameters
+    ----------
+    stages_raw : dict
+    
+    Returns
+    -------
+    TemplateStageParams"""
     stages_raw = stages_raw or {}
     wg = stages_raw.get("wcs_grouping", {}) or {}
     mp = stages_raw.get("mapping", {}) or {}

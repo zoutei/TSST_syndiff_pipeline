@@ -45,6 +45,18 @@ def save_epsf_stack_bundle(
     output_dir: str,
     round_id: int,
 ) -> str:
+    """Save epsf stack bundle.
+    
+    Parameters
+    ----------
+    stack : np.ndarray
+    ffi_stems : list
+    output_dir : str
+    round_id : int
+    
+    Returns
+    -------
+    str"""
     os.makedirs(output_dir, exist_ok=True)
     path = epsf_stack_bundle_base(output_dir, round_id) + ".npz"
     np.savez_compressed(
@@ -729,6 +741,15 @@ def fit_epsf_all_frames(diff_paths: list,
     tile_centers = None
 
     def _diff_path_to_pid(p: str) -> str:
+        """Diff path to pid.
+        
+        Parameters
+        ----------
+        p : str
+        
+        Returns
+        -------
+        str"""
         stem = strip_fits_suffix(Path(str(p)).name)
         parsed = parse_workspace_frame_stem(stem)
         if parsed is not None:

@@ -16,6 +16,15 @@ from typing import Any
 
 
 def _daemon_local_dir(workspace_root: str | Path) -> Path:
+    """Daemon local dir.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     from syndiff_pipeline.common.orchestration.workspace import state_db_path
 
     resolved = str(state_db_path(workspace_root))
@@ -24,10 +33,28 @@ def _daemon_local_dir(workspace_root: str | Path) -> Path:
 
 
 def verify_in_flight_path(workspace_root: str | Path) -> Path:
+    """Verify in flight path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _daemon_local_dir(workspace_root) / "verify_in_flight.json"
 
 
 def _normalize_run_entry(entry: Any) -> dict[str, Any]:
+    """Normalize run entry.
+    
+    Parameters
+    ----------
+    entry : Any
+    
+    Returns
+    -------
+    dict[str, Any]"""
     if isinstance(entry, dict):
         active = entry.get("active")
         if not isinstance(active, list):
@@ -43,6 +70,15 @@ def _normalize_run_entry(entry: Any) -> dict[str, Any]:
 
 
 def _load_payload(workspace_root: str | Path) -> dict[str, Any]:
+    """Load payload.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    dict[str, Any]"""
     path = verify_in_flight_path(workspace_root)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -97,10 +133,30 @@ def read_verify_pending(workspace_root: str | Path, run_id: str) -> int:
 
 
 def read_scan_queued(workspace_root: str | Path, run_id: str) -> int:
+    """Read scan queued.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    run_id : str
+    
+    Returns
+    -------
+    int"""
     return read_verify_pending(workspace_root, run_id)
 
 
 def read_scan_running(workspace_root: str | Path, run_id: str) -> int:
+    """Read scan running.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    run_id : str
+    
+    Returns
+    -------
+    int"""
     return read_verify_in_flight(workspace_root, run_id)
 
 
@@ -117,6 +173,11 @@ def read_verify_active_keys(
 
 
 def clear_verify_in_flight(workspace_root: str | Path) -> None:
+    """Clear verify in flight.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path"""
     verify_in_flight_path(workspace_root).unlink(missing_ok=True)
 
 

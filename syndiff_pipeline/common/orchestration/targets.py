@@ -18,6 +18,7 @@ EVENT_HEADER = frozenset({"id", "ra", "dec", "tess_coverage"})
 
 @dataclass(frozen=True)
 class Target:
+    """Target."""
     sector: int
     camera: int
     ccd: int
@@ -27,9 +28,19 @@ class Target:
     enabled: bool = True
 
     def scc_key(self) -> str:
+        """Scc key.
+        
+        Returns
+        -------
+        str"""
         return f"{self.sector}/{self.camera}/{self.ccd}"
 
     def label(self) -> str:
+        """Label.
+        
+        Returns
+        -------
+        str"""
         safe = re.sub(r"[^\w.-]+", "_", self.target_name.strip())
         return f"s{self.sector:04d}_c{self.camera}_k{self.ccd}_{safe}"
 
@@ -52,12 +63,31 @@ def parse_tess_coverage(value: str) -> List[tuple[int, int, int]]:
 
 
 def _parse_bool(value: str | None, default: bool = True) -> bool:
+    """Parse bool.
+    
+    Parameters
+    ----------
+    value : str | None
+    default : bool, optional, default ``True``
+    
+    Returns
+    -------
+    bool"""
     if value is None or str(value).strip() == "":
         return default
     return str(value).strip().lower() in {"1", "true", "yes", "y", "t"}
 
 
 def _target_name_from_event_id(event_id: str) -> str:
+    """Target name from event id.
+    
+    Parameters
+    ----------
+    event_id : str
+    
+    Returns
+    -------
+    str"""
     name = str(event_id or "").strip()
     if name.upper().startswith("SN "):
         name = name[3:].strip()
@@ -65,6 +95,15 @@ def _target_name_from_event_id(event_id: str) -> str:
 
 
 def _load_normalized_rows(rows: Sequence[dict]) -> List[Target]:
+    """Load normalized rows.
+    
+    Parameters
+    ----------
+    rows : Sequence[dict]
+    
+    Returns
+    -------
+    List[Target]"""
     out: List[Target] = []
     for row in rows:
         if not _parse_bool(row.get("enabled"), default=True):
@@ -84,6 +123,15 @@ def _load_normalized_rows(rows: Sequence[dict]) -> List[Target]:
 
 
 def _load_event_rows(rows: Sequence[dict]) -> List[Target]:
+    """Load event rows.
+    
+    Parameters
+    ----------
+    rows : Sequence[dict]
+    
+    Returns
+    -------
+    List[Target]"""
     out: List[Target] = []
     for row in rows:
         name = _target_name_from_event_id(row.get("id", row.get("ID", "")))
@@ -108,6 +156,15 @@ def _load_event_rows(rows: Sequence[dict]) -> List[Target]:
 
 
 def _read_csv_rows(path: Path) -> tuple[List[dict], frozenset[str]]:
+    """Read csv rows.
+    
+    Parameters
+    ----------
+    path : Path
+    
+    Returns
+    -------
+    tuple[List[dict], frozenset[str]]"""
     with path.open(newline="", encoding="utf-8") as fh:
         reader = csv.DictReader(fh)
         if reader.fieldnames is None:

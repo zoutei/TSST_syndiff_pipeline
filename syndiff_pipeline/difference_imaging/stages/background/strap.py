@@ -94,6 +94,11 @@ def fix_background_anomalies(
     disk = xr**2 + yr**2 <= dilate_r**2
 
     def _process(i):
+        """Process.
+        
+        Parameters
+        ----------
+        i"""
         frame = bkg[i].copy()
         excess = np.zeros(len(strap_cols))
 
@@ -121,6 +126,12 @@ def fix_background_anomalies(
         valid_mask = ~phot_mask
 
         def _block_sigma(r, box):
+            """Block sigma.
+            
+            Parameters
+            ----------
+            r
+            box"""
             sigma = np.full((NY, NX), np.inf, dtype=float)
             row_starts = [min(r0, NY - box) for r0 in range(0, NY, box)]
             col_starts = [min(c0, NX - box) for c0 in range(0, NX, box)]

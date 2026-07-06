@@ -46,6 +46,15 @@ class SitePaths:
 
     @classmethod
     def from_site_dir(cls, site_dir: str | Path) -> SitePaths:
+        """From site dir.
+        
+        Parameters
+        ----------
+        site_dir : str | Path
+        
+        Returns
+        -------
+        SitePaths"""
         root = Path(site_dir).expanduser().resolve()
         return cls(
             site_dir=root,
@@ -58,6 +67,7 @@ class SitePaths:
 
 @dataclass
 class CondorResources:
+    """CondorResources."""
     request_cpus: int = 8
     request_memory: int = 64_000
     requirements: str | None = "Memory >= 64000 && LoadAvg < 10"
@@ -80,6 +90,15 @@ class DiffSitePolicy:
 
 
 def _parse_deployment_file(raw: dict) -> str:
+    """Parse deployment file.
+    
+    Parameters
+    ----------
+    raw : dict
+    
+    Returns
+    -------
+    str"""
     explicit = str(raw.get("deployment_file", "")).strip()
     if explicit:
         return explicit
@@ -93,6 +112,15 @@ def _parse_deployment_file(raw: dict) -> str:
 
 
 def _parse_condor(raw: dict | None) -> CondorResources:
+    """Parse condor.
+    
+    Parameters
+    ----------
+    raw : dict | None
+    
+    Returns
+    -------
+    CondorResources"""
     raw = raw or {}
     return CondorResources(
         request_cpus=int(raw.get("request_cpus", 8)),
@@ -103,6 +131,15 @@ def _parse_condor(raw: dict | None) -> CondorResources:
 
 
 def _parse_per_event_force_targets(raw: Any) -> dict[str, list]:
+    """Parse per event force targets.
+    
+    Parameters
+    ----------
+    raw : Any
+    
+    Returns
+    -------
+    dict[str, list]"""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -159,6 +196,16 @@ def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
 
 
 def _deep_merge_dict(base: dict, override: dict) -> dict:
+    """Deep merge dict.
+    
+    Parameters
+    ----------
+    base : dict
+    override : dict
+    
+    Returns
+    -------
+    dict"""
     out = copy.deepcopy(base)
     for key, val in (override or {}).items():
         if isinstance(val, dict) and isinstance(out.get(key), dict):
@@ -169,6 +216,16 @@ def _deep_merge_dict(base: dict, override: dict) -> dict:
 
 
 def _target_override(policy: DiffSitePolicy, target: Target) -> dict:
+    """Target override.
+    
+    Parameters
+    ----------
+    policy : DiffSitePolicy
+    target : Target
+    
+    Returns
+    -------
+    dict"""
     for key in (target.scc_key(), f"{target.sector}/{target.camera}/{target.ccd}"):
         if key in policy.overrides:
             return policy.overrides[key]
@@ -178,6 +235,16 @@ def _target_override(policy: DiffSitePolicy, target: Target) -> dict:
 def _deployment_paths(
     deployment: dict, *, deployment_path: Path
 ) -> tuple[str, str, str]:
+    """Deployment paths.
+    
+    Parameters
+    ----------
+    deployment : dict
+    deployment_path : Path
+    
+    Returns
+    -------
+    tuple[str, str, str]"""
     workspace_root = require_deployment_path(
         deployment, "workspace_root", deployment_path=deployment_path
     )
@@ -196,6 +263,16 @@ def _deployment_paths(
 
 
 def _event_dir(workspace_root: str, target: Target) -> Path:
+    """Event dir.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    target : Target
+    
+    Returns
+    -------
+    Path"""
     return Path(workspace_root) / "events" / target.label()
 
 
@@ -206,6 +283,18 @@ def _gaia_catalog_path(
     event_dir: Path,
     catalog_root: str,
 ) -> Path:
+    """Gaia catalog path.
+    
+    Parameters
+    ----------
+    target : Target
+    data_root : Path
+    event_dir : Path
+    catalog_root : str
+    
+    Returns
+    -------
+    Path"""
     for rel in ("ws/gaia_catalog_pipeline.csv", "gaia_catalog_pipeline.csv"):
         pipeline_csv = event_dir / rel
         if pipeline_csv.is_file():

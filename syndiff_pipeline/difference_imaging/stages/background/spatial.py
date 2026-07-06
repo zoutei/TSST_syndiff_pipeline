@@ -17,6 +17,15 @@ log = logging.getLogger(__name__)
 
 
 def _effective_n_jobs(n_jobs: int) -> int:
+    """Effective n jobs.
+    
+    Parameters
+    ----------
+    n_jobs : int
+    
+    Returns
+    -------
+    int"""
     if n_jobs is None or n_jobs < 1:
         return multiprocessing.cpu_count()
     return int(n_jobs)
@@ -31,6 +40,20 @@ def _spatial_one_frame(
     exclude_percentile: float,
     exclude_straps: bool,
 ) -> np.ndarray:
+    """Spatial one frame.
+    
+    Parameters
+    ----------
+    frame : np.ndarray
+    mask : np.ndarray
+    box_size : int
+    filter_size : int
+    exclude_percentile : float
+    exclude_straps : bool
+    
+    Returns
+    -------
+    np.ndarray"""
     phot_mask = np.asarray(mask)
     if phot_mask.ndim == 3:
         phot_mask = phot_mask[0]

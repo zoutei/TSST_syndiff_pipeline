@@ -4,3 +4,10 @@ __pycache__/
 *.egg-info/
 deployment.yaml
 **/deployment.yaml
+
+
+##DO NOT COMMIT GITIGNORE BELOW THIS LINE
+config/example/
+scripts/
+dev/
+docs/_build/

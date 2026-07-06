@@ -1,3 +1,4 @@
+"""Package module ``syndiff_pipeline.template_creation.processing.correct_saturation``."""
 import logging
 from concurrent.futures import ThreadPoolExecutor
 

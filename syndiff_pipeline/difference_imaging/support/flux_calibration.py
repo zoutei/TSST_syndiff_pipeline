@@ -70,6 +70,11 @@ def kernel_sum_at_center(
 
 
 def validate_kernel_sum(kernel_sum: float) -> None:
+    """Validate kernel sum.
+    
+    Parameters
+    ----------
+    kernel_sum : float"""
     if not np.isfinite(kernel_sum) or float(kernel_sum) <= 0.0:
         raise ValueError(f"invalid kernel_sum={kernel_sum!r}")
 
@@ -153,10 +158,28 @@ def stamp_diff_calib_metadata(
 
 
 def phot_calib_csv_path(meta_dir: str) -> str:
+    """Phot calib csv path.
+    
+    Parameters
+    ----------
+    meta_dir : str
+    
+    Returns
+    -------
+    str"""
     return os.path.join(meta_dir, PHOT_CALIB_CSV_BASENAME)
 
 
 def build_phot_calib_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build phot calib rows.
+    
+    Parameters
+    ----------
+    results : list[dict[str, Any]]
+    
+    Returns
+    -------
+    list[dict[str, Any]]"""
     rows: list[dict[str, Any]] = []
     for res in results:
         product_id = res.get("ffi_product_id") or res.get("product_id")
@@ -195,6 +218,15 @@ def write_phot_calib_table(meta_dir: str, results: list[dict[str, Any]]) -> str:
 
 
 def load_phot_calib_table(meta_dir: str) -> Optional[pd.DataFrame]:
+    """Load phot calib table.
+    
+    Parameters
+    ----------
+    meta_dir : str
+    
+    Returns
+    -------
+    Optional[pd.DataFrame]"""
     path = phot_calib_csv_path(meta_dir)
     if not os.path.isfile(path):
         return None
@@ -254,6 +286,16 @@ def apply_kernel_calibration(
         )
 
         def _lookup(product_id: str, column: str) -> float:
+            """Lookup.
+            
+            Parameters
+            ----------
+            product_id : str
+            column : str
+            
+            Returns
+            -------
+            float"""
             if not product_id or product_id not in calib.index:
                 return float("nan")
             val = calib.at[product_id, column]

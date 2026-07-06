@@ -20,6 +20,15 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
 
 
 def _diff_site_config_path(ctx: StageRunContext) -> Path:
+    """Diff site config path.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    Path"""
     from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
         resolve_diff_site_config_path,
     )
@@ -28,14 +37,41 @@ def _diff_site_config_path(ctx: StageRunContext) -> Path:
 
 
 def _event_dir_for_target(ctx: StageRunContext) -> Path:
+    """Event dir for target.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    Path"""
     return Path(ctx.runner_cfg.workspace_root) / "events" / ctx.target.label()
 
 
 def _frozen_diff_config_path(ctx: StageRunContext) -> Path:
+    """Frozen diff config path.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    Path"""
     return logs.run_dir(ctx.runs_root, ctx.run_id) / "per_target" / ctx.target_label / "diff_config.yaml"
 
 
 def _diff_config_fingerprint(ctx: StageRunContext) -> str:
+    """Diff config fingerprint.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    str"""
     from syndiff_pipeline.difference_imaging.orchestration.workspace_lock import (
         diff_config_fingerprint,
     )
@@ -44,6 +80,11 @@ def _diff_config_fingerprint(ctx: StageRunContext) -> str:
 
 
 def execute_diff_stage(ctx: StageRunContext):
+    """Execute diff stage.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext"""
     from syndiff_pipeline.difference_imaging.orchestration.execute import run_config_pipeline
 
     site_path = _diff_site_config_path(ctx)
@@ -64,11 +105,29 @@ def execute_diff_stage(ctx: StageRunContext):
 
 
 def _verify_diff(ctx: StageRunContext) -> bool:
+    """Verify diff.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    bool"""
     cfg = frozen_diff_config_for_context(ctx)
     return diff_workspace_complete(cfg, _event_dir_for_target(ctx))
 
 
 def _collect_diff_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
+    """Collect diff artifacts.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    tuple[int, int, list[str]]"""
     cfg = frozen_diff_config_for_context(ctx)
     event_dir = _event_dir_for_target(ctx)
     artifacts = collect_diff_workspace_artifacts(cfg, event_dir)
@@ -78,6 +137,11 @@ def _collect_diff_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
 
 
 def _diff_condor_resources(cfg):
+    """Diff condor resources.
+    
+    Parameters
+    ----------
+    cfg"""
     from syndiff_pipeline.common.orchestration import condor
 
     policy = load_diff_site_policy(cfg.diff_config_path)
@@ -91,6 +155,15 @@ def _diff_condor_resources(cfg):
 
 
 def _diff_stage_snapshot(ctx: StageRunContext) -> dict:
+    """Diff stage snapshot.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    dict"""
     event_dir = _event_dir_for_target(ctx)
     return {
         "sector": ctx.target.sector,
@@ -112,6 +185,19 @@ def write_diff_manifest(
     expected_count: int,
     produced_count: int,
 ) -> dict:
+    """Write diff manifest.
+    
+    Parameters
+    ----------
+    manifest_path
+    ctx : StageRunContext
+    artifacts : list[str]
+    expected_count : int
+    produced_count : int
+    
+    Returns
+    -------
+    dict"""
     from datetime import datetime, timezone
 
     from syndiff_pipeline.template_creation.orchestration.verify import MANIFEST_SCHEMA_VERSION

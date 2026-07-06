@@ -36,6 +36,7 @@ _WEBHOOK_TIMEOUT_S = 5.0
 
 @dataclass(frozen=True)
 class NotificationEvents:
+    """NotificationEvents."""
     run_started: bool = True
     run_completed: bool = True
     run_failed: bool = True
@@ -52,18 +53,29 @@ class NotificationEvents:
 
 @dataclass(frozen=True)
 class DiscordBotConfig:
+    """DiscordBotConfig."""
     enabled: bool = False
     channel_id: str = ""
 
 
 @dataclass(frozen=True)
 class NotificationConfig:
+    """NotificationConfig."""
     enabled: bool = False
     events: NotificationEvents = field(default_factory=NotificationEvents)
     bot: DiscordBotConfig = field(default_factory=DiscordBotConfig)
 
 
 def parse_notification_config(raw: dict | None) -> NotificationConfig:
+    """Parse notification config.
+    
+    Parameters
+    ----------
+    raw : dict | None
+    
+    Returns
+    -------
+    NotificationConfig"""
     raw = raw or {}
     events_raw = raw.get("events") or {}
     events = NotificationEvents(
@@ -93,6 +105,16 @@ def parse_notification_config(raw: dict | None) -> NotificationConfig:
 
 
 def _load_deployment(config_path: str | Path, deployment_file: str) -> dict:
+    """Load deployment.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    
+    Returns
+    -------
+    dict"""
     path = Path(config_path).expanduser().resolve()
     deployment_path = path.parent / deployment_file
     if not deployment_path.is_file():
@@ -106,6 +128,16 @@ def _load_deployment(config_path: str | Path, deployment_file: str) -> dict:
 
 
 def load_webhook_url(config_path: str | Path, deployment_file: str) -> str | None:
+    """Load webhook url.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    
+    Returns
+    -------
+    str | None"""
     file_url = str(
         _load_deployment(config_path, deployment_file).get("discord_webhook_url", "")
     ).strip()
@@ -113,6 +145,16 @@ def load_webhook_url(config_path: str | Path, deployment_file: str) -> str | Non
 
 
 def load_bot_token(config_path: str | Path, deployment_file: str) -> str | None:
+    """Load bot token.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    
+    Returns
+    -------
+    str | None"""
     token = str(
         _load_deployment(config_path, deployment_file).get("discord_bot_token", "")
     ).strip()
@@ -120,6 +162,16 @@ def load_bot_token(config_path: str | Path, deployment_file: str) -> str | None:
 
 
 def load_channel_id(config_path: str | Path, deployment_file: str) -> str | None:
+    """Load channel id.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    
+    Returns
+    -------
+    str | None"""
     channel_id = str(
         _load_deployment(config_path, deployment_file).get("discord_channel_id", "")
     ).strip()
@@ -132,6 +184,17 @@ def resolve_webhook_url(
     deployment_file: str,
     source_config_path: str | Path | None = None,
 ) -> str | None:
+    """Resolve webhook url.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    source_config_path : str | Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    str | None"""
     for candidate in (config_path, source_config_path):
         if not candidate:
             continue
@@ -147,6 +210,17 @@ def resolve_bot_token(
     deployment_file: str,
     source_config_path: str | Path | None = None,
 ) -> str | None:
+    """Resolve bot token.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    source_config_path : str | Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    str | None"""
     for candidate in (config_path, source_config_path):
         if not candidate:
             continue
@@ -163,6 +237,18 @@ def resolve_channel_id(
     config_channel_id: str = "",
     source_config_path: str | Path | None = None,
 ) -> str | None:
+    """Resolve channel id.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str
+    config_channel_id : str, optional, default ``''``
+    source_config_path : str | Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    str | None"""
     if config_channel_id.strip():
         return config_channel_id.strip()
     for candidate in (config_path, source_config_path):
@@ -175,6 +261,12 @@ def resolve_channel_id(
 
 
 def post_discord_webhook(url: str, content: str) -> None:
+    """Post discord webhook.
+    
+    Parameters
+    ----------
+    url : str
+    content : str"""
     payload = json.dumps({"content": content[: _DISCORD_MAX_CONTENT]}).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -190,10 +282,16 @@ def post_discord_webhook(url: str, content: str) -> None:
 
 
 def _utc_header() -> str:
+    """Utc header.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 class Notifier:
+    """Notifier."""
     def __init__(
         self,
         state: PipelineState,
@@ -204,6 +302,16 @@ class Notifier:
         deployment_file: str = "deployment.yaml",
         source_config_path: str | Path | None = None,
     ):
+        """Init.
+        
+        Parameters
+        ----------
+        state : PipelineState
+        cfg : NotificationConfig
+        config_path : str | Path
+        workspace_root : str
+        deployment_file : str, optional, default ``'deployment.yaml'``
+        source_config_path : str | Path | None, optional, default ``None``"""
         self._state = state
         self._cfg = cfg
         self._config_path = Path(config_path)
@@ -217,6 +325,11 @@ class Notifier:
         self._webhook_url: str | None = None
 
     def _webhook(self) -> str | None:
+        """Webhook.
+        
+        Returns
+        -------
+        str | None"""
         if self._webhook_url is None:
             self._webhook_url = (
                 resolve_webhook_url(
@@ -229,6 +342,13 @@ class Notifier:
         return self._webhook_url or None
 
     def _send(self, run_id: str, event_key: str, content: str | Sequence[str]) -> None:
+        """Send.
+        
+        Parameters
+        ----------
+        run_id : str
+        event_key : str
+        content : str | Sequence[str]"""
         if not self._cfg.enabled:
             return
         url = self._webhook()
@@ -254,6 +374,15 @@ class Notifier:
         stages: list[str],
         force_rerun: bool = False,
     ) -> None:
+        """Notify run started.
+        
+        Parameters
+        ----------
+        run_id : str
+        run_dir : str | Path
+        target_labels : list[str]
+        stages : list[str]
+        force_rerun : bool, optional, default ``False``"""
         if not self._cfg.events.run_started:
             return
         body = format_run_started_message(
@@ -272,6 +401,13 @@ class Notifier:
         *,
         outcome: str,
     ) -> None:
+        """Notify run completed.
+        
+        Parameters
+        ----------
+        run_id : str
+        runs_root : str
+        outcome : str"""
         if outcome == "success" and not self._cfg.events.run_completed:
             return
         if outcome == "failed" and not self._cfg.events.run_failed:
@@ -294,6 +430,13 @@ class Notifier:
         self._send(run_id, f"run:{outcome}", body)
 
     def notify_run_stalled(self, run_id: str, runs_root: str, *, stall_reason: str) -> None:
+        """Notify run stalled.
+        
+        Parameters
+        ----------
+        run_id : str
+        runs_root : str
+        stall_reason : str"""
         if not self._cfg.events.run_stalled:
             return
         header = f"[{run_id}] run_stalled ({_utc_header()})"
@@ -308,12 +451,23 @@ class Notifier:
         self._send(run_id, f"run:stalled:{_utc_header()}", body)
 
     def notify_run_resumed(self, run_id: str) -> None:
+        """Notify run resumed.
+        
+        Parameters
+        ----------
+        run_id : str"""
         if not self._cfg.events.run_resumed:
             return
         header = f"[{run_id}] run_resumed ({_utc_header()})"
         self._send(run_id, f"run:resumed:{_utc_header()}", header)
 
     def notify_run_canceled(self, run_id: str, runs_root: str) -> None:
+        """Notify run canceled.
+        
+        Parameters
+        ----------
+        run_id : str
+        runs_root : str"""
         if not self._cfg.events.run_canceled:
             return
         header = f"[{run_id}] run_canceled ({_utc_header()})"
@@ -336,6 +490,15 @@ class Notifier:
         stage: str | None = None,
         reset_downstream: bool | None = None,
     ) -> None:
+        """Notify run retried.
+        
+        Parameters
+        ----------
+        run_id : str
+        runs_root : str
+        target_label : str | None, optional, default ``None``
+        stage : str | None, optional, default ``None``
+        reset_downstream : bool | None, optional, default ``None``"""
         if not self._cfg.events.run_retried:
             return
         header = f"[{run_id}] run_retried ({_utc_header()})"
@@ -367,6 +530,17 @@ class Notifier:
         finished_at: str,
         error_tail: str | None = None,
     ) -> None:
+        """Notify stage outcome.
+        
+        Parameters
+        ----------
+        run_id : str
+        runs_root : str
+        target_label : str
+        stage : str
+        outcome : str
+        finished_at : str
+        error_tail : str | None, optional, default ``None``"""
         if outcome == "success" and not self._cfg.events.stage_completed:
             return
         if outcome == "failed" and not self._cfg.events.stage_failed:
@@ -405,6 +579,11 @@ class Notifier:
         self._send(run_id, f"stage:{target_label}:{stage}:{outcome}:{finished_at}", body)
 
     def notify_daemon_unhealthy(self, *, detail: str) -> None:
+        """Notify daemon unhealthy.
+        
+        Parameters
+        ----------
+        detail : str"""
         if not self._cfg.events.daemon_unhealthy:
             return
         header = f"[supervisor] daemon_unhealthy ({_utc_header()})\n{detail}"
@@ -602,6 +781,16 @@ def send_run_started_notification(
 
 
 def notifier_for_context(state: PipelineState, ctx) -> Notifier | None:
+    """Notifier for context.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    ctx
+    
+    Returns
+    -------
+    Notifier | None"""
     cfg = getattr(ctx.cfg, "notifications", None)
     if cfg is None:
         return None

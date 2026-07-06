@@ -17,6 +17,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class BackgroundStepSpatialParams:
+    """BackgroundStepSpatialParams."""
     enabled: bool = True
     box_size: int = 16
     filter_size: int = 3
@@ -28,6 +29,7 @@ class BackgroundStepSpatialParams:
 
 @dataclass
 class BackgroundStepTemporalParams:
+    """BackgroundStepTemporalParams."""
     enabled: bool = True
     method: str = "savgol"
     savgol_window: Optional[int] = None
@@ -43,6 +45,7 @@ class BackgroundStepTemporalParams:
 
 @dataclass
 class BackgroundStepStrapParams:
+    """BackgroundStepStrapParams."""
     enabled: bool = True
     qe_floor: float = 1.001
     fix_anomalies: bool = True
@@ -51,6 +54,7 @@ class BackgroundStepStrapParams:
 
 @dataclass
 class BackgroundParams:
+    """BackgroundParams."""
     recombine_inputs: bool = True
     write_per_frame_fits: bool = True
     write_stack: bool = True
@@ -67,6 +71,16 @@ def btjd_for_records(
     wcs_table: pd.DataFrame,
     records: List[io.FrameRecord],
 ) -> np.ndarray:
+    """Btjd for records.
+    
+    Parameters
+    ----------
+    wcs_table : pd.DataFrame
+    records : List[io.FrameRecord]
+    
+    Returns
+    -------
+    np.ndarray"""
     from syndiff_pipeline.difference_imaging.support.ffi_naming import (
         parse_workspace_frame_stem,
         tess_product_id_from_ffi_path,
@@ -97,6 +111,15 @@ def _save_intermediate(
     write_per_frame_fits: bool,
     write_stack: bool,
 ) -> None:
+    """Save intermediate.
+    
+    Parameters
+    ----------
+    stack : np.ndarray
+    records : List[io.FrameRecord]
+    ws_path : str
+    write_per_frame_fits : bool
+    write_stack : bool"""
     os.makedirs(ws_path, exist_ok=True)
     if write_stack:
         io.save_stack(stack, ws_path)

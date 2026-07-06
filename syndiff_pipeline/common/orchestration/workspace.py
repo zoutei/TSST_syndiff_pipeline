@@ -12,6 +12,15 @@ CONTROL_DIR_NAME = "control"
 
 
 def normalize_workspace_root(workspace_root: str | Path) -> Path:
+    """Normalize workspace root.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(workspace_root).expanduser().resolve()
 
 
@@ -21,6 +30,15 @@ def control_root(workspace_root: str | Path) -> Path:
 
 
 def ensure_control_root(workspace_root: str | Path) -> Path:
+    """Ensure control root.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     root = control_root(workspace_root)
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -32,10 +50,25 @@ def state_db_path(workspace_root: str | Path) -> Path:
 
 
 def runs_root(workspace_root: str | Path) -> Path:
+    """Runs root.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return normalize_workspace_root(workspace_root) / "runs"
 
 
 def record_deployment_path(workspace_root: str | Path, deployment_path: str | Path) -> None:
+    """Record deployment path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    deployment_path : str | Path"""
     ensure_control_root(workspace_root)
     path = logs.workspace_deployment_path(workspace_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -43,6 +76,15 @@ def record_deployment_path(workspace_root: str | Path, deployment_path: str | Pa
 
 
 def load_recorded_deployment_path(workspace_root: str | Path) -> Path | None:
+    """Load recorded deployment path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path | None"""
     record_path = logs.workspace_deployment_path(workspace_root)
     if not record_path.is_file():
         return None

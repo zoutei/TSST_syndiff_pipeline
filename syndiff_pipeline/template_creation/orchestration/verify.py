@@ -34,6 +34,7 @@ class AbsenceProbeResult(Enum):
 
 @dataclass
 class VerifyResult:
+    """VerifyResult."""
     stage: str
     ok: bool
     message: str
@@ -58,6 +59,17 @@ def _diff_stage_context(
     *,
     meta: dict | None = None,
 ) -> "StageRunContext":
+    """Diff stage context.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    runner_cfg : RunnerConfig | None, optional, default ``None``
+    meta : dict | None, optional, default ``None``
+    
+    Returns
+    -------
+    'StageRunContext'"""
     from syndiff_pipeline.common.orchestration.spec import StageRunContext
 
     cfg = runner_cfg
@@ -79,6 +91,17 @@ def diff_config_fingerprint(
     *,
     meta: dict | None = None,
 ) -> str:
+    """Diff config fingerprint.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    runner_cfg : RunnerConfig
+    meta : dict | None, optional, default ``None``
+    
+    Returns
+    -------
+    str"""
     from syndiff_pipeline.difference_imaging.orchestration.stages import _diff_config_fingerprint
 
     return _diff_config_fingerprint(_diff_stage_context(resolved, runner_cfg, meta=meta))
@@ -133,6 +156,16 @@ def _downsample_manifest_meta(
     resolved: ResolvedTargetConfig,
     meta: dict | None,
 ) -> dict | None:
+    """Downsample manifest meta.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    meta : dict | None
+    
+    Returns
+    -------
+    dict | None"""
     if meta and "template_dir_physical" in meta and "template_dir_symlink" in meta:
         return meta
     from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
@@ -326,6 +359,15 @@ def write_stable_manifest(
 
 
 def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify tess ffi download.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    VerifyResult"""
     from syndiff_pipeline.common.download import (
         expected_ffi_basenames,
         list_local_ffis,
@@ -381,6 +423,15 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify wcs grouping.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    VerifyResult"""
     job_path = Path(resolved.event_dir) / "cluster_template_job.json"
     if not job_path.is_file():
         return VerifyResult("wcs_grouping", False, "Missing cluster_template_job.json", str(job_path))
@@ -395,6 +446,15 @@ def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify mapping.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    VerifyResult"""
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
@@ -418,6 +478,11 @@ _PS1_DOWNLOAD_BANDS = ("r", "i", "z", "y")
 
 
 def _ps1_download_expected_array_names() -> list[str]:
+    """Ps1 download expected array names.
+    
+    Returns
+    -------
+    list[str]"""
     names: list[str] = []
     for band in _PS1_DOWNLOAD_BANDS:
         names.extend([band, f"{band}_mask", f"{band}_wt"])
@@ -425,6 +490,15 @@ def _ps1_download_expected_array_names() -> list[str]:
 
 
 def _projection_from_skycell_name(skycell_name: str) -> str | None:
+    """Projection from skycell name.
+    
+    Parameters
+    ----------
+    skycell_name : str
+    
+    Returns
+    -------
+    str | None"""
     try:
         return skycell_name.split(".")[1]
     except (IndexError, AttributeError):
@@ -432,6 +506,15 @@ def _projection_from_skycell_name(skycell_name: str) -> str | None:
 
 
 def _expected_ps1_download_skycells(resolved: ResolvedTargetConfig) -> list[str]:
+    """Expected ps1 download skycells.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    list[str]"""
     from syndiff_pipeline.template_creation.processing.csv_utils import get_all_padding_cells, load_csv_data
 
     csv_path = _mapping_csv_path(resolved)
@@ -507,6 +590,15 @@ def _ps1_download_skycell_complete(zarr_path: Path, skycell_name: str) -> bool:
 
 
 def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify ps1 download.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    VerifyResult"""
     zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
     if not zarr_path.exists():
         return VerifyResult(
@@ -550,6 +642,15 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
+    """Mapping csv path.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    Path"""
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
@@ -567,6 +668,15 @@ def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
 
 
 def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
+    """Convolved zarr path.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    Path"""
     t = resolved.target
     return (
         Path(resolved.data_root)
@@ -576,10 +686,28 @@ def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
 
 
 def ps1_process_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
+    """Ps1 process removed stars csv path.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    Path"""
     return Path(str(_convolved_zarr_path(resolved)).replace(".zarr", "_removed_stars.csv"))
 
 
 def event_dir_ps1_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
+    """Event dir ps1 removed stars csv path.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    Path"""
     from syndiff_pipeline.template_creation.processing.downsample import (
         PS1_REMOVED_STARS_CSV_FILENAME,
     )
@@ -599,6 +727,15 @@ def clear_downsample_event_artifacts(resolved: ResolvedTargetConfig) -> list[str
 
 
 def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
+    """Clear ps1 process artifacts.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    list[str]"""
     removed: list[str] = []
     for path in (_convolved_zarr_path(resolved), ps1_process_removed_stars_csv_path(resolved)):
         if path.is_dir():
@@ -626,6 +763,15 @@ def _skycell_name(entry) -> str:
 
 
 def expected_ps1_process_skycells(resolved: ResolvedTargetConfig) -> list[str]:
+    """Expected ps1 process skycells.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    list[str]"""
     from syndiff_pipeline.template_creation.processing.csv_utils import load_csv_data
     from syndiff_pipeline.template_creation.processing.ps1_process import expected_convolved_skycells
 
@@ -680,6 +826,15 @@ def _store_has_any_data_array(zarr_path: Path) -> bool:
 
 
 def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify ps1 process.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    VerifyResult"""
     zarr_path = _convolved_zarr_path(resolved)
     if not zarr_path.exists():
         return VerifyResult("ps1_process", False, "Convolved zarr missing", str(zarr_path))
@@ -803,6 +958,15 @@ def expected_downsample_fits_paths(resolved: ResolvedTargetConfig) -> list[Path]
 
 
 def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify downsample.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    VerifyResult"""
     t = resolved.target
     try:
         basenames, base = _downsample_expected_basenames(resolved)
@@ -854,6 +1018,17 @@ def verify_diff(
     *,
     meta: dict | None = None,
 ) -> VerifyResult:
+    """Verify diff.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    runner_cfg : RunnerConfig | None, optional, default ``None``
+    meta : dict | None, optional, default ``None``
+    
+    Returns
+    -------
+    VerifyResult"""
     from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
         diff_workspace_complete,
         diff_workspace_root,
@@ -1016,6 +1191,18 @@ def verify_stage(
     *,
     meta: dict | None = None,
 ) -> VerifyResult:
+    """Verify stage.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    stage : str
+    runner_cfg : RunnerConfig | None, optional, default ``None``
+    meta : dict | None, optional, default ``None``
+    
+    Returns
+    -------
+    VerifyResult"""
     fn = VERIFY_FUNCS.get(stage)
     if fn is None:
         raise ValueError(f"Unknown stage: {stage!r}")
@@ -1173,6 +1360,18 @@ def verify_target(
     *,
     meta: dict | None = None,
 ) -> List[VerifyResult]:
+    """Verify target.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    runner_cfg : RunnerConfig
+    stages : Optional[List[str]], optional, default ``None``
+    meta : dict | None, optional, default ``None``
+    
+    Returns
+    -------
+    List[VerifyResult]"""
     if stages is None:
         from syndiff_pipeline.pipeline_spec import STAGE_NAMES
 
@@ -1181,6 +1380,17 @@ def verify_target(
 
 
 def verify_all(cfg: RunnerConfig, targets: List[Target], stages: Optional[List[str]] = None) -> List[VerifyResult]:
+    """Verify all.
+    
+    Parameters
+    ----------
+    cfg : RunnerConfig
+    targets : List[Target]
+    stages : Optional[List[str]], optional, default ``None``
+    
+    Returns
+    -------
+    List[VerifyResult]"""
     out: List[VerifyResult] = []
     for t in targets:
         resolved = resolve_config(t, cfg)

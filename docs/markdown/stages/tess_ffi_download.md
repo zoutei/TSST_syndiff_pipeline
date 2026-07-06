@@ -109,7 +109,7 @@ download_ffis(sector=t.sector, camera=t.camera, ccd=t.ccd, output_dir=out_dir)
 | [`syndiff_pipeline/template_creation/orchestration/verify.py`](../../syndiff_pipeline/template_creation/orchestration/verify.py) | `verify_tess_ffi_download` — completeness check |
 | [`syndiff_pipeline/template_creation/orchestration/stage_progress.py`](../../syndiff_pipeline/template_creation/orchestration/stage_progress.py) | Parses `FFI download progress: N/M` from logs |
 | [`syndiff_pipeline/template_creation/orchestration/runner_config.py`](../../syndiff_pipeline/template_creation/orchestration/runner_config.py) | Resolves `ffi_dir` from site config |
-| [`docs/storage_layout.md`](../storage_layout.md) | Canonical directory tree |
+| [`markdown/storage_layout.md`](../storage_layout.md) | Canonical directory tree |
 | [`tests/test_download_ffis.py`](../../tests/test_download_ffis.py) | Unit tests for gzip paths, streaming, parallelism |
 
 ---
@@ -617,6 +617,6 @@ compress_spoc_ffi_to_gzip("/path/to/tess…_ffic.fits")
 
 ## Related documentation
 
-- [Storage layout (`docs/storage_layout.md`)](../storage_layout.md) — full `{data_root}` tree
+- [Storage layout (`markdown/storage_layout.md`)](../storage_layout.md) — full `{data_root}` tree
 - [FFI naming for pipeline outputs (`ffi_naming.py`)](../../syndiff_pipeline/difference_imaging/support/ffi_naming.py) — per-workspace science FITS basenames
 - [Unit tests (`tests/test_download_ffis.py`)](../../tests/test_download_ffis.py)

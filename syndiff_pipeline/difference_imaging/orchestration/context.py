@@ -25,22 +25,59 @@ class PipelineInvocationContext:
 
     @classmethod
     def from_config(cls, cfg: SynDiffConfig) -> PipelineInvocationContext:
+        """From config.
+        
+        Parameters
+        ----------
+        cfg : SynDiffConfig
+        
+        Returns
+        -------
+        PipelineInvocationContext"""
         mp = resolve_manifest_path(cfg.output_dir, cfg.manifest or None)
         return cls(cfg=cfg, manifest_path=mp)
 
     @property
     def workspace_run_id(self) -> str | None:
+        """Workspace run id.
+        
+        Returns
+        -------
+        str | None"""
         return normalize_workspace_run_id(getattr(self.cfg, "workspace_run_id", None))
 
     def workspace_root_path(self) -> str:
+        """Workspace root path.
+        
+        Returns
+        -------
+        str"""
         return workspace_root(self.cfg.output_dir, run_id=self.workspace_run_id)
 
     def workspace(self, label: str) -> str:
+        """Workspace.
+        
+        Parameters
+        ----------
+        label : str
+        
+        Returns
+        -------
+        str"""
         return workspace_dir(
             self.cfg.output_dir, label, run_id=self.workspace_run_id
         )
 
     def workspace_artifact(self, basename: str) -> str:
+        """Workspace artifact.
+        
+        Parameters
+        ----------
+        basename : str
+        
+        Returns
+        -------
+        str"""
         return workspace_artifact_path(
             self.cfg.output_dir, basename, run_id=self.workspace_run_id
         )

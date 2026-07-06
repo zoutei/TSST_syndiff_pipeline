@@ -28,6 +28,16 @@ _LEGACY_PATH_KEYS = frozenset(
 def deployment_path_for_config(
     config_path: str | Path, deployment_file: str = "deployment.yaml"
 ) -> Path:
+    """Deployment path for config.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str, optional, default ``'deployment.yaml'``
+    
+    Returns
+    -------
+    Path"""
     return Path(config_path).expanduser().resolve().parent / deployment_file
 
 
@@ -50,12 +60,31 @@ def load_deployment_file(deployment_path: str | Path) -> dict:
 
 
 def load_workspace_root_from_deployment(deployment_path: str | Path) -> Path:
+    """Load workspace root from deployment.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    
+    Returns
+    -------
+    Path"""
     path = Path(deployment_path).expanduser().resolve()
     deployment = load_deployment_file(path)
     return Path(require_deployment_path(deployment, "workspace_root", deployment_path=path))
 
 
 def load_deployment(config_path: str | Path, deployment_file: str = "deployment.yaml") -> dict:
+    """Load deployment.
+    
+    Parameters
+    ----------
+    config_path : str | Path
+    deployment_file : str, optional, default ``'deployment.yaml'``
+    
+    Returns
+    -------
+    dict"""
     path = deployment_path_for_config(config_path, deployment_file)
     if not path.is_file():
         raise FileNotFoundError(
@@ -73,6 +102,12 @@ def load_deployment(config_path: str | Path, deployment_file: str = "deployment.
 
 
 def warn_legacy_config_paths(raw: dict, *, config_path: Path) -> None:
+    """Warn legacy config paths.
+    
+    Parameters
+    ----------
+    raw : dict
+    config_path : Path"""
     for key in _LEGACY_PATH_KEYS:
         if raw.get(key):
             log.warning(
@@ -83,6 +118,17 @@ def warn_legacy_config_paths(raw: dict, *, config_path: Path) -> None:
 
 
 def require_deployment_path(deployment: dict, key: str, *, deployment_path: Path) -> str:
+    """Require deployment path.
+    
+    Parameters
+    ----------
+    deployment : dict
+    key : str
+    deployment_path : Path
+    
+    Returns
+    -------
+    str"""
     value = str(deployment.get(key, "")).strip()
     if not value:
         raise ValueError(f"deployment.yaml requires {key} ({deployment_path})")

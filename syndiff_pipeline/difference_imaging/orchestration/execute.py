@@ -125,6 +125,15 @@ def _subtract_load_plane(
 
 
 def _records_to_stem_rows(records: list) -> list:
+    """Records to stem rows.
+    
+    Parameters
+    ----------
+    records : list
+    
+    Returns
+    -------
+    list"""
     return [
         {
             "ffi_product_id": r.product_id,
@@ -339,14 +348,41 @@ def _load_template_handoff(
 
 
 def _cfg_ffi_leaf(cfg: SynDiffConfig) -> str:
+    """Cfg ffi leaf.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    str"""
     return nested_ffi_dir(cfg.sector, cfg.camera, cfg.ccd, root=cfg.ffi_dir)
 
 
 def _sorted_local_ffis(cfg: SynDiffConfig) -> list:
+    """Sorted local ffis.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    list"""
     return sorted(list_local_ffis(_cfg_ffi_leaf(cfg), cfg.sector, cfg.camera, cfg.ccd))
 
 
 def _ffi_paths_for_processing(cfg: SynDiffConfig) -> list:
+    """Ffi paths for processing.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    list"""
     all_sorted = _sorted_local_ffis(cfg)
     return wcs_grouping.select_ffis_with_valid_target_wcs(
         all_sorted,
@@ -364,6 +400,17 @@ def _load_gaia_catalog(
 ) -> Optional[pd.DataFrame]:
     # When diff_config overrides the template ROI, always load the source catalog
     # so ensure_gaia_crop_xy can reproject; skip a cached pipeline CSV from another crop.
+    """Load gaia catalog.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    output_dir : str
+    ws_root : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    Optional[pd.DataFrame]"""
     prefer_source_catalog = wcs_grouping.diff_crop_explicitly_configured(cfg)
     if ws_root and not prefer_source_catalog:
         pipeline_csv = os.path.join(ws_root, GAIA_CATALOG_PIPELINE_BASENAME)
@@ -384,6 +431,18 @@ def _ensure_gaia_crop(
     crop_bounds: dict,
     cfg: SynDiffConfig,
 ) -> pd.DataFrame:
+    """Ensure gaia crop.
+    
+    Parameters
+    ----------
+    gaia_df : pd.DataFrame
+    ref_ffi_path : str
+    crop_bounds : dict
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    pd.DataFrame"""
     return wcs_grouping.ensure_gaia_crop_xy(
         gaia_df,
         ref_ffi_path,
@@ -393,6 +452,15 @@ def _ensure_gaia_crop(
 
 
 def _load_tile_centers_json(ws_root: str) -> Optional[list]:
+    """Load tile centers json.
+    
+    Parameters
+    ----------
+    ws_root : str
+    
+    Returns
+    -------
+    Optional[list]"""
     path = os.path.join(ws_root, "tile_centers.json")
     if not os.path.exists(path):
         return None
@@ -402,6 +470,12 @@ def _load_tile_centers_json(ws_root: str) -> Optional[list]:
 
 
 def _save_tile_centers(tile_centers: list, ws_root: str) -> None:
+    """Save tile centers.
+    
+    Parameters
+    ----------
+    tile_centers : list
+    ws_root : str"""
     path = os.path.join(ws_root, "tile_centers.json")
     with open(path, "w") as fh:
         json.dump(tile_centers, fh)
@@ -457,6 +531,16 @@ def _ensure_shared_mask_loaded(
     ws_root: str,
     shared_mask: Optional[np.ndarray],
 ) -> np.ndarray:
+    """Ensure shared mask loaded.
+    
+    Parameters
+    ----------
+    ws_root : str
+    shared_mask : Optional[np.ndarray]
+    
+    Returns
+    -------
+    np.ndarray"""
     if shared_mask is not None:
         return shared_mask
     sm_path = resolve_pipeline_artifact_path(ws_root, SHARED_MASK_FITS_BASENAME)
@@ -474,6 +558,16 @@ def _ensure_ref_stars_loaded(
     ws_root: str,
     ref_stars: Optional[pd.DataFrame],
 ) -> pd.DataFrame:
+    """Ensure ref stars loaded.
+    
+    Parameters
+    ----------
+    ws_root : str
+    ref_stars : Optional[pd.DataFrame]
+    
+    Returns
+    -------
+    pd.DataFrame"""
     if ref_stars is not None:
         return ref_stars
     rs_path = os.path.join(ws_root, HOTPANTS_SUBSTAMP_STARS_BASENAME)
@@ -523,6 +617,14 @@ def _ensure_template_paths_for_kernel(
     crop_bounds: dict,
     offset_threshold: float,
 ) -> None:
+    """Ensure template paths for kernel.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    wcs_table : pd.DataFrame
+    crop_bounds : dict
+    offset_threshold : float"""
     try:
         hotpants_runner.ensure_template_paths_from_syndiff_or_group_dirs(
             cfg,
@@ -548,6 +650,17 @@ def _warn_if_forced_target_outside_crop(
     dec: float,
     tag: str,
 ) -> None:
+    """Warn if forced target outside crop.
+    
+    Parameters
+    ----------
+    target_x : float
+    target_y : float
+    crop_bounds : dict
+    phot_cutout_size : int
+    ra : float
+    dec : float
+    tag : str"""
     sh = crop_bounds.get("shape")
     if not sh or len(sh) != 2:
         return
@@ -581,6 +694,14 @@ def run_config_pipeline(
     diff_log_path: str | None = None,
     force_rerun: bool = False,
 ) -> None:
+    """Run config pipeline.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    validate_only : bool, optional, default ``False``
+    diff_log_path : str | None, optional, default ``None``
+    force_rerun : bool, optional, default ``False``"""
     validate_pipeline(cfg)
     if validate_only:
         log.info("Pipeline configuration is valid.")
@@ -1292,6 +1413,16 @@ def run_config_pipeline(
                 )
 
             def _plot_path(method_name: str, extra_name: Optional[str]) -> str:
+                """Plot path.
+                
+                Parameters
+                ----------
+                method_name : str
+                extra_name : Optional[str]
+                
+                Returns
+                -------
+                str"""
                 pdir = _pipeline_plots_root(cfg)
                 os.makedirs(pdir, exist_ok=True)
                 return _forced_photometry_lightcurve_plot_path(
@@ -1337,6 +1468,16 @@ def run_config_pipeline(
     log.info("Config pipeline complete. Outputs: %s", ws_root)
 
 def _load_group_epsf_from_dir(output_dir: str, subdir: str = "group_epsf") -> dict:
+    """Load group epsf from dir.
+    
+    Parameters
+    ----------
+    output_dir : str
+    subdir : str, optional, default ``'group_epsf'``
+    
+    Returns
+    -------
+    dict"""
     d = {}
     sub = os.path.join(output_dir, subdir)
     if not os.path.isdir(sub):
@@ -1355,6 +1496,19 @@ def _load_removed_stars_in_crop(
     *,
     force_reproject: bool = False,
 ) -> pd.DataFrame:
+    """Load removed stars in crop.
+    
+    Parameters
+    ----------
+    removed_stars_csv : str
+    crop_bounds : dict
+    gaia_df : Optional[pd.DataFrame]
+    ref_ffi_path : str | None, optional, default ``None``
+    force_reproject : bool, optional, default ``False``
+    
+    Returns
+    -------
+    pd.DataFrame"""
     if (
         gaia_df is not None
         and not force_reproject

@@ -37,10 +37,28 @@ log = logging.getLogger(__name__)
 
 
 def convolved_templates_csv_path(ws_dir: str) -> str:
+    """Convolved templates csv path.
+    
+    Parameters
+    ----------
+    ws_dir : str
+    
+    Returns
+    -------
+    str"""
     return os.path.join(ws_dir, CONVOLVED_TEMPLATES_CSV_BASENAME)
 
 
 def load_convolved_templates_table(ws_dir: str) -> pd.DataFrame:
+    """Load convolved templates table.
+    
+    Parameters
+    ----------
+    ws_dir : str
+    
+    Returns
+    -------
+    pd.DataFrame"""
     path = convolved_templates_csv_path(ws_dir)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Missing convolved templates manifest: {path}")
@@ -48,6 +66,15 @@ def load_convolved_templates_table(ws_dir: str) -> pd.DataFrame:
 
 
 def _unique_template_entries(template_paths: dict[int, str]) -> list[dict]:
+    """Unique template entries.
+    
+    Parameters
+    ----------
+    template_paths : dict[int, str]
+    
+    Returns
+    -------
+    list[dict]"""
     seen: set[tuple[float, float]] = set()
     rows: list[dict] = []
     for group_id, tmpl_path in sorted(template_paths.items()):

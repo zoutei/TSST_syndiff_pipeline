@@ -67,6 +67,11 @@ _HEARTBEAT_FATAL_AFTER_S = 90.0
 
 
 def _ensure_discord_bot_on_startup(workspace_root: str) -> None:
+    """Ensure discord bot on startup.
+    
+    Parameters
+    ----------
+    workspace_root : str"""
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
         ensure_discord_bot_for_workspace_root,
     )
@@ -104,6 +109,12 @@ def _age_seconds(iso_ts: str | None) -> float:
 
 
 def _handle_signal(signum, frame):
+    """Handle signal.
+    
+    Parameters
+    ----------
+    signum
+    frame"""
     global _shutdown
     log.warning("Received signal %s — shutting down supervisor gracefully", signum)
     _shutdown = True
@@ -154,6 +165,13 @@ def _supervisor_heartbeat_loop(
 
 
 def _write_summary(state: pstate.PipelineState, run_id: str, runs_root: str) -> None:
+    """Write summary.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    runs_root : str"""
     counts = state.count_by_status(run_id)
     summary = {"run_id": run_id, "counts": counts, "updated_at": pstate._utc_now()}
     logs.write_json_atomic(logs.summary_json_path(runs_root, run_id), summary)
@@ -190,6 +208,12 @@ def _write_summary(state: pstate.PipelineState, run_id: str, runs_root: str) -> 
 
 
 def _load_run_context(state: pstate.PipelineState, run_id: str):
+    """Load run context.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str"""
     run = state.get_run(run_id)
     if not run:
         return None
@@ -208,6 +232,18 @@ def _load_run_context(state: pstate.PipelineState, run_id: str):
 def _read_status_file(
     runs_root: str, run_id: str, target_label: str, stage: str
 ) -> dict | None:
+    """Read status file.
+    
+    Parameters
+    ----------
+    runs_root : str
+    run_id : str
+    target_label : str
+    stage : str
+    
+    Returns
+    -------
+    dict | None"""
     return logs.read_json(logs.stage_status_path(runs_root, run_id, target_label, stage))
 
 
@@ -232,6 +268,18 @@ def _notify_stage_outcome(
     finished_at: str,
     error_tail: str | None = None,
 ) -> None:
+    """Notify stage outcome.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    target_label : str
+    stage : str
+    outcome : str
+    runs_root : str
+    finished_at : str
+    error_tail : str | None, optional, default ``None``"""
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
@@ -259,6 +307,15 @@ def _notify_run_retried(
     stage: str | None = None,
     reset_downstream: bool | None = None,
 ) -> None:
+    """Notify run retried.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    target_label : str | None, optional, default ``None``
+    stage : str | None, optional, default ``None``
+    reset_downstream : bool | None, optional, default ``None``"""
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
@@ -277,6 +334,13 @@ def _notify_run_retried(
 
 
 def _notify_run_canceled(state: pstate.PipelineState, run_id: str, running_before) -> None:
+    """Notify run canceled.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    running_before"""
     ctx = _load_run_context(state, run_id)
     if ctx is None:
         return
@@ -334,6 +398,17 @@ def _finalize_stage(
     exit_code: int,
     log_path: str | None = None,
 ) -> None:
+    """Finalize stage.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    target_label : str
+    stage : str
+    runs_root : str
+    exit_code : int
+    log_path : str | None, optional, default ``None``"""
     log_path = log_path or str(logs.target_log_path(runs_root, run_id, target_label, stage))
     exit_code = _effective_exit_code(exit_code, log_path)
     error_tail = logs.read_log_tail(log_path, 20) if exit_code != 0 else ""
@@ -577,12 +652,23 @@ def reconcile_running_stages(
 
 
 def _pipeline_spec():
+    """Pipeline spec."""
     from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
 
     return get_syndiff_pipeline()
 
 
 def _blocking_depth(stage: str, memo: dict[str, int] | None = None) -> int:
+    """Blocking depth.
+    
+    Parameters
+    ----------
+    stage : str
+    memo : dict[str, int] | None, optional, default ``None``
+    
+    Returns
+    -------
+    int"""
     memo = memo if memo is not None else {}
     if stage in memo:
         return memo[stage]
@@ -611,18 +697,29 @@ def _verify_outcome_still_applicable(state: pstate.PipelineState, key: VerifyTas
 
 
 def _verify_worker():
+    """Verify worker."""
     from syndiff_pipeline.common.orchestration.verify_worker import try_get_verify_worker
 
     return try_get_verify_worker()
 
 
 def _cancel_verify_run(run_id: str) -> None:
+    """Cancel verify run.
+    
+    Parameters
+    ----------
+    run_id : str"""
     worker = _verify_worker()
     if worker is not None:
         worker.cancel_run(run_id)
 
 
 def _cancel_verify_keys(keys: list[VerifyTaskKey]) -> None:
+    """Cancel verify keys.
+    
+    Parameters
+    ----------
+    keys : list[VerifyTaskKey]"""
     worker = _verify_worker()
     if worker is not None:
         worker.cancel_keys(keys)
@@ -757,6 +854,15 @@ def _iter_verify_candidates(
             )
 
     def _sort_key(item: tuple) -> tuple:
+        """Sort key.
+        
+        Parameters
+        ----------
+        item : tuple
+        
+        Returns
+        -------
+        tuple"""
         key, status, _resolved, _mp, _sp = item
         return (
             0 if status == pstate.STATUS_PENDING else 1,
@@ -1003,6 +1109,14 @@ def _schedule_external_and_pending_skips(
 def _cancel_verify_for_retry(
     run_id: str, target_label: str, stage: str, *, reset_downstream: bool
 ) -> None:
+    """Cancel verify for retry.
+    
+    Parameters
+    ----------
+    run_id : str
+    target_label : str
+    stage : str
+    reset_downstream : bool"""
     from syndiff_pipeline.common.orchestration.verify_worker import VerifyTaskKey
 
     stages = [stage] + (
@@ -1023,10 +1137,32 @@ def _global_pool_running(state: pstate.PipelineState) -> dict[str, int]:
 
 
 def _pool_capacity(pool_running: dict[str, int], pool_name: str, pool_cfg) -> int:
+    """Pool capacity.
+    
+    Parameters
+    ----------
+    pool_running : dict[str, int]
+    pool_name : str
+    pool_cfg
+    
+    Returns
+    -------
+    int"""
     return max(0, pool_cfg.max_concurrent - pool_running.get(pool_name, 0))
 
 
 def _stall_reasons(state: pstate.PipelineState, run_id: str, ctx) -> List[str]:
+    """Stall reasons.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    ctx
+    
+    Returns
+    -------
+    List[str]"""
     reasons: List[str] = []
     cfg = ctx.cfg
     pool_running = _global_pool_running(state)
@@ -1214,6 +1350,13 @@ def _launch_force_overrides(
 
 
 def _tick_run(state: pstate.PipelineState, run_id: str, ctx) -> None:
+    """Tick run.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str
+    ctx"""
     run = state.get_run(run_id) or {}
     force_rerun = bool(run.get("force_rerun"))
     from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
@@ -1515,11 +1658,22 @@ def _terminate_job(job) -> None:
 
 
 def _terminate_run_jobs(state: pstate.PipelineState, run_id: str) -> None:
+    """Terminate run jobs.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState
+    run_id : str"""
     for job in state.running_stage_runs(run_id):
         _terminate_job(job)
 
 
 def _apply_commands(state: pstate.PipelineState) -> None:
+    """Apply commands.
+    
+    Parameters
+    ----------
+    state : pstate.PipelineState"""
     for cmd in state.fetch_pending_commands():
         args = json.loads(cmd.args_json or "{}")
         try:
@@ -1655,6 +1809,15 @@ def _apply_commands(state: pstate.PipelineState) -> None:
 
 
 def run_supervisor_daemon(workspace_root: str) -> int:
+    """Run supervisor daemon.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    int"""
     daemon.configure_process_logging("supervisor")
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
@@ -1807,6 +1970,15 @@ def run_scheduler(
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Main.
+    
+    Parameters
+    ----------
+    argv : list[str] | None, optional, default ``None``
+    
+    Returns
+    -------
+    int"""
     parser = argparse.ArgumentParser(description="Template pipeline supervisor")
     parser.add_argument("--daemon", action="store_true", help="Run global supervisor daemon")
     parser.add_argument(

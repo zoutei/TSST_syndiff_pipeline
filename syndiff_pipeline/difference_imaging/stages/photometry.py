@@ -340,6 +340,12 @@ class create_psf:
     """
 
     def __init__(self, prf, size: int):
+        """Init.
+        
+        Parameters
+        ----------
+        prf
+        size : int"""
         self.prf       = prf
         self.size      = size
         self.source_x  = 0.0
@@ -352,6 +358,13 @@ class create_psf:
         self.image_residual = None
 
     def source(self, shiftx=0.0, shifty=0.0, ext_shift=None):
+        """Source.
+        
+        Parameters
+        ----------
+        shiftx, optional, default ``0.0``
+        shifty, optional, default ``0.0``
+        ext_shift, optional, default ``None``"""
         if ext_shift is None:
             ext_shift = [0, 0]
         centx_s = self.cent + shiftx
@@ -363,6 +376,14 @@ class create_psf:
         self.psf = psf / np.nansum(psf)
 
     def minimize_position(self, coeff, image, error, ext_shift):
+        """Minimize position.
+        
+        Parameters
+        ----------
+        coeff
+        image
+        error
+        ext_shift"""
         self.source_x = coeff[0]
         self.source_y = coeff[1]
         self.source(shiftx=self.source_x, shifty=self.source_y, ext_shift=ext_shift)
@@ -370,6 +391,15 @@ class create_psf:
         return np.nansum(diff / error)
 
     def psf_position(self, image, error=None, limx=0.8, limy=0.8, ext_shift=None):
+        """Psf position.
+        
+        Parameters
+        ----------
+        image
+        error, optional, default ``None``
+        limx, optional, default ``0.8``
+        limy, optional, default ``0.8``
+        ext_shift, optional, default ``None``"""
         if error is None:
             error = np.ones_like(image)
         if ext_shift is None:
@@ -391,6 +421,16 @@ class create_psf:
 
     def minimize_psf_flux(self, coeff, image, error=None, surface=True,
                            order=2, kernel=None):
+        """Minimize psf flux.
+        
+        Parameters
+        ----------
+        coeff
+        image
+        error, optional, default ``None``
+        surface, optional, default ``True``
+        order, optional, default ``2``
+        kernel, optional, default ``None``"""
         if surface:
             x  = np.arange(image.shape[1])
             y  = np.arange(image.shape[0])
@@ -406,6 +446,16 @@ class create_psf:
 
     def psf_flux(self, image, error=None, ext_shift=None, surface=True,
                  poly_order=3, kernel=None):
+        """Psf flux.
+        
+        Parameters
+        ----------
+        image
+        error, optional, default ``None``
+        ext_shift, optional, default ``None``
+        surface, optional, default ``True``
+        poly_order, optional, default ``3``
+        kernel, optional, default ``None``"""
         if error is None:
             error = np.ones_like(image)
         if self.psf is None:
@@ -657,6 +707,15 @@ def _extract_cutout(image: np.ndarray, x: float, y: float, size: int) -> np.ndar
 
 
 def _aperture_cutout_size(method: AperturePhotometryMethodParams) -> int:
+    """Aperture cutout size.
+    
+    Parameters
+    ----------
+    method : AperturePhotometryMethodParams
+    
+    Returns
+    -------
+    int"""
     if method.aperture_cutout_size is not None:
         return int(method.aperture_cutout_size)
     return int(method.sky_out) + 2
@@ -892,6 +951,7 @@ def _run_aperture_photometry_multi(
     tqdm_base = f"aperture {method.name} {output_label}" if track_progress else "aperture"
 
     def _record_epoch() -> None:
+        """Record epoch."""
         if workspace_progress_path:
             record_epoch_progress(workspace_progress_path, cli_progress_path)
 
@@ -1039,6 +1099,15 @@ def _locator_bundle_for_parallel(prf_or_epsf, phot, cfg, crop_bounds, target_x, 
 
 
 def _locator_from_bundle(bundle: tuple) -> Any:
+    """Locator from bundle.
+    
+    Parameters
+    ----------
+    bundle : tuple
+    
+    Returns
+    -------
+    Any"""
     kind = bundle[0]
     if kind == "epsf":
         _, arr, os_factor = bundle
@@ -1228,6 +1297,11 @@ def _forced_phot_multi_flux_worker(
     ) = task
 
     def _nan_record() -> dict:
+        """Nan record.
+        
+        Returns
+        -------
+        dict"""
         return {
             "btjd": btjd,
             "flux": np.nan,
@@ -1665,6 +1739,7 @@ def _run_forced_photometry_single(
     tqdm_base = f"photometry {output_label}" if track_progress else "photometry"
 
     def _record_epoch() -> None:
+        """Record epoch."""
         if workspace_progress_path:
             record_epoch_progress(workspace_progress_path, cli_progress_path)
 
@@ -2040,6 +2115,7 @@ def run_forced_photometry_multi(
     tqdm_base = f"photometry {output_label}" if track_progress else "photometry"
 
     def _record_epoch() -> None:
+        """Record epoch."""
         if workspace_progress_path:
             record_epoch_progress(workspace_progress_path, cli_progress_path)
 

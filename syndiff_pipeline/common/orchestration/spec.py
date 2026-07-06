@@ -34,6 +34,7 @@ class StageRunContext:
 
 @dataclass(frozen=True)
 class StageSpec:
+    """StageSpec."""
     name: str
     short_name: str
     deps: Tuple[str, ...]
@@ -48,11 +49,29 @@ class StageSpec:
     stage_snapshot: Optional[Callable[..., dict]] = None
 
     def deps_for(self, resolved: Any) -> Tuple[str, ...]:
+        """Deps for.
+        
+        Parameters
+        ----------
+        resolved : Any
+        
+        Returns
+        -------
+        Tuple[str, ...]"""
         if self.effective_deps is not None and resolved is not None:
             return self.effective_deps(resolved)
         return self.deps
 
     def resolve_executor(self, cfg: Any) -> str:
+        """Resolve executor.
+        
+        Parameters
+        ----------
+        cfg : Any
+        
+        Returns
+        -------
+        str"""
         stages = getattr(cfg, "stages", None)
         if stages is not None:
             if self.name == "mapping":
@@ -66,29 +85,68 @@ class StageSpec:
 
 @dataclass(frozen=True)
 class PipelineSpec:
+    """PipelineSpec."""
     name: str
     stages: Tuple[StageSpec, ...]
 
     @property
     def stage_names(self) -> Tuple[str, ...]:
+        """Stage names.
+        
+        Returns
+        -------
+        Tuple[str, ...]"""
         return tuple(s.name for s in self.stages)
 
     def stage_short_names(self) -> Dict[str, str]:
+        """Stage short names.
+        
+        Returns
+        -------
+        Dict[str, str]"""
         return {s.name: s.short_name for s in self.stages}
 
     def stage_deps(self) -> Dict[str, List[str]]:
+        """Stage deps.
+        
+        Returns
+        -------
+        Dict[str, List[str]]"""
         return {s.name: list(s.deps) for s in self.stages}
 
     def stage_pools(self) -> Dict[str, str]:
+        """Stage pools.
+        
+        Returns
+        -------
+        Dict[str, str]"""
         return {s.name: s.pool for s in self.stages if s.pool}
 
     def get(self, name: str) -> StageSpec | None:
+        """Get.
+        
+        Parameters
+        ----------
+        name : str
+        
+        Returns
+        -------
+        StageSpec | None"""
         for spec in self.stages:
             if spec.name == name:
                 return spec
         return None
 
     def require(self, name: str) -> StageSpec:
+        """Require.
+        
+        Parameters
+        ----------
+        name : str
+        
+        Returns
+        -------
+        StageSpec"""
         spec = self.get(name)
         if spec is None:
             raise KeyError(f"Unknown stage: {name!r}")
@@ -112,18 +170,50 @@ class PipelineSpec:
         )
 
     def parse_stage_list(self, stages_arg: str | None) -> List[str]:
+        """Parse stage list.
+        
+        Parameters
+        ----------
+        stages_arg : str | None
+        
+        Returns
+        -------
+        List[str]"""
         if not stages_arg or not str(stages_arg).strip():
             return list(self.stage_names)
         names = [s.strip() for s in str(stages_arg).split(",") if s.strip()]
         return [self.resolve_stage_name(n) for n in names]
 
     def stages_in_pool(self, pool: str) -> List[str]:
+        """Stages in pool.
+        
+        Parameters
+        ----------
+        pool : str
+        
+        Returns
+        -------
+        List[str]"""
         return [s.name for s in self.stages if s.pool == pool]
 
     def unpooled_stages(self) -> List[str]:
+        """Unpooled stages.
+        
+        Returns
+        -------
+        List[str]"""
         return [s.name for s in self.stages if not s.pool]
 
     def upstream_stages_for(self, active_stages: Sequence[str]) -> frozenset[str]:
+        """Upstream stages for.
+        
+        Parameters
+        ----------
+        active_stages : Sequence[str]
+        
+        Returns
+        -------
+        frozenset[str]"""
         required: set[str] = set()
         stack = list(active_stages)
         deps_map = self.stage_deps()
@@ -136,6 +226,16 @@ class PipelineSpec:
         return frozenset(required)
 
     def effective_stage_deps(self, stage: str, stages=None) -> List[str]:
+        """Effective stage deps.
+        
+        Parameters
+        ----------
+        stage : str
+        stages, optional, default ``None``
+        
+        Returns
+        -------
+        List[str]"""
         spec = self.get(stage)
         if spec is None:
             return []
@@ -144,6 +244,15 @@ class PipelineSpec:
         return list(spec.deps)
 
     def downstream_stages(self, stage: str) -> List[str]:
+        """Downstream stages.
+        
+        Parameters
+        ----------
+        stage : str
+        
+        Returns
+        -------
+        List[str]"""
         out: set[str] = set()
         deps_map = self.stage_deps()
         changed = True
@@ -158,6 +267,15 @@ class PipelineSpec:
         return [s for s in self.stage_names if s in out]
 
     def run_stage_closure(self, active_stages: Sequence[str]) -> frozenset[str]:
+        """Run stage closure.
+        
+        Parameters
+        ----------
+        active_stages : Sequence[str]
+        
+        Returns
+        -------
+        frozenset[str]"""
         return frozenset(set(active_stages) | self.upstream_stages_for(active_stages))
 
     def artifact_verify_closure(self, active_stages: Sequence[str]) -> frozenset[str]:
@@ -172,4 +290,13 @@ class PipelineSpec:
         return self.run_stage_closure(active_stages)
 
     def direct_dependents(self, stage: str) -> List[str]:
+        """Direct dependents.
+        
+        Parameters
+        ----------
+        stage : str
+        
+        Returns
+        -------
+        List[str]"""
         return [s.name for s in self.stages if stage in s.deps]

@@ -100,6 +100,11 @@ _ARRAYS_PER_SKYCELL = len(_PS1_BANDS) * 3
 
 
 def expected_array_names() -> list[str]:
+    """Expected array names.
+    
+    Returns
+    -------
+    list[str]"""
     names: list[str] = []
     for band in _PS1_BANDS:
         names.extend([band, f"{band}_mask", f"{band}_wt"])
@@ -108,6 +113,7 @@ def expected_array_names() -> list[str]:
 
 @dataclass
 class ArrayWriteItem:
+    """ArrayWriteItem."""
     projection_id: str
     skycell_name: str
     array_name: str
@@ -118,6 +124,7 @@ class ArrayWriteItem:
 
 @dataclass
 class _WriteBatch:
+    """WriteBatch."""
     items: list[ArrayWriteItem]
     done: threading.Event = field(default_factory=threading.Event)
     written: bool = False
@@ -127,17 +134,32 @@ class SkycellProgress:
     """Thread-safe counter for skycell start/finish progress lines."""
 
     def __init__(self, total: int) -> None:
+        """Init.
+        
+        Parameters
+        ----------
+        total : int"""
         self.total = total
         self._lock = threading.Lock()
         self._started = 0
         self._finished = 0
 
     def mark_started(self) -> tuple[int, int]:
+        """Mark started.
+        
+        Returns
+        -------
+        tuple[int, int]"""
         with self._lock:
             self._started += 1
             return self._started, self.total
 
     def mark_finished(self) -> tuple[int, int]:
+        """Mark finished.
+        
+        Returns
+        -------
+        tuple[int, int]"""
         with self._lock:
             self._finished += 1
             return self._finished, self.total
@@ -147,11 +169,25 @@ class LogProgressCallback(Callback):
     """Log aggregate Dask progress when stdout is not a TTY (pipeline log files)."""
 
     def __init__(self, total: int) -> None:
+        """Init.
+        
+        Parameters
+        ----------
+        total : int"""
         self.total = total
         self.completed = 0
         self._start_time = time.monotonic()
 
     def _posttask(self, key, result, dsk, state, id):  # noqa: ARG002
+        """Posttask.
+        
+        Parameters
+        ----------
+        key
+        result
+        dsk
+        state
+        id"""
         self.completed += 1
         elapsed = time.monotonic() - self._start_time
         logging.info(
@@ -218,6 +254,19 @@ def count_complete_arrays(
     lock_file: Path,
     overwrite: bool = False,
 ) -> int:
+    """Count complete arrays.
+    
+    Parameters
+    ----------
+    root : zarr.Group
+    projection_id : str
+    skycell_name : str
+    lock_file : Path
+    overwrite : bool, optional, default ``False``
+    
+    Returns
+    -------
+    int"""
     return sum(
         1 for complete in skycell_array_status(root, projection_id, skycell_name, lock_file, overwrite).values() if complete
     )
@@ -437,6 +486,17 @@ def fetch_skycell_bands_masks_and_headers(
     headers_weight_data: dict = {}
 
     def _fetch_one(task_band: str, data_type: str, _array_name: str) -> Optional[tuple[str, str, str, np.ndarray, str]]:
+        """Fetch one.
+        
+        Parameters
+        ----------
+        task_band : str
+        data_type : str
+        _array_name : str
+        
+        Returns
+        -------
+        Optional[tuple[str, str, str, np.ndarray, str]]"""
         result = download_and_process_band(
             skycell_name_parts,
             task_band,
@@ -581,6 +641,12 @@ class ZarrWriter:
     """Background consumer that serializes batched Zarr writes under one lock."""
 
     def __init__(self, root: zarr.Group, lock_file: Path) -> None:
+        """Init.
+        
+        Parameters
+        ----------
+        root : zarr.Group
+        lock_file : Path"""
         self._root = root
         self._lock_file = lock_file
         self._queue: queue.Queue[_WriteBatch | object] = queue.Queue(maxsize=_WRITE_QUEUE_MAXSIZE)
@@ -601,6 +667,11 @@ class ZarrWriter:
         return batch.written
 
     def close(self, drain: bool = True) -> None:
+        """Close.
+        
+        Parameters
+        ----------
+        drain : bool, optional, default ``True``"""
         if self._closed:
             return
         self._closed = True
@@ -619,6 +690,7 @@ class ZarrWriter:
         self._thread.join()
 
     def _run(self) -> None:
+        """Run."""
         while True:
             batch = self._queue.get()
             if batch is _WRITE_SENTINEL:
@@ -785,6 +857,17 @@ def download_and_store_skycell(
         return
 
     def _download_one(task_band: str, data_type: str, array_name: str) -> Optional[ArrayWriteItem]:
+        """Download one.
+        
+        Parameters
+        ----------
+        task_band : str
+        data_type : str
+        array_name : str
+        
+        Returns
+        -------
+        Optional[ArrayWriteItem]"""
         result = download_and_process_band(
             skycell_name_parts,
             task_band,
@@ -857,6 +940,22 @@ def _process_one_skycell(
     local_data_path: Optional[Path],
     overwrite: bool,
 ) -> int:
+    """Process one skycell.
+    
+    Parameters
+    ----------
+    skycell_name : str
+    root : zarr.Group
+    lock_file : Path
+    progress : SkycellProgress
+    writer : ZarrWriter
+    use_local_files : bool
+    local_data_path : Optional[Path]
+    overwrite : bool
+    
+    Returns
+    -------
+    int"""
     if shutdown_requested:
         logging.info("Shutdown requested, stopping skycell processing")
         return 0
@@ -885,6 +984,15 @@ def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path
         skycells_bag = db.from_sequence(skycells)
 
         def process_skycell(skycell_name: str) -> int:
+            """Process skycell.
+            
+            Parameters
+            ----------
+            skycell_name : str
+            
+            Returns
+            -------
+            int"""
             return _process_one_skycell(
                 skycell_name,
                 root,

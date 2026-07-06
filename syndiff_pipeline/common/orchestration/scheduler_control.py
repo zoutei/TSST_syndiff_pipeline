@@ -23,6 +23,7 @@ DEFAULT_STOP_KILL_WAIT_S = 5.0
 
 @dataclass(frozen=True)
 class EnsureDaemonResult:
+    """EnsureDaemonResult."""
     spawned: bool
     pid: int | None
     host: str | None = None
@@ -30,6 +31,7 @@ class EnsureDaemonResult:
 
 @dataclass(frozen=True)
 class StopDaemonResult:
+    """StopDaemonResult."""
     pid: int | None
     was_running: bool
     stopped: bool
@@ -38,6 +40,15 @@ class StopDaemonResult:
 
 
 def _parse_heartbeat(value: str | None) -> datetime | None:
+    """Parse heartbeat.
+    
+    Parameters
+    ----------
+    value : str | None
+    
+    Returns
+    -------
+    datetime | None"""
     if not value:
         return None
     try:
@@ -47,6 +58,15 @@ def _parse_heartbeat(value: str | None) -> datetime | None:
 
 
 def _local_heartbeat_age_s(workspace_root: str) -> float | None:
+    """Local heartbeat age s.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    float | None"""
     path = logs.daemon_heartbeat_file(workspace_root)
     try:
         text = path.read_text(encoding="utf-8").strip()
@@ -63,6 +83,15 @@ def _local_heartbeat_age_s(workspace_root: str) -> float | None:
 
 
 def _db_heartbeat_age_s(workspace_root: str) -> float | None:
+    """Db heartbeat age s.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    float | None"""
     state = PipelineState(str(state_db_path(workspace_root)))
     row = state.get_supervisor_status()
     if not row:
@@ -76,6 +105,15 @@ def _db_heartbeat_age_s(workspace_root: str) -> float | None:
 
 
 def daemon_heartbeat_age_s(workspace_root: str) -> float | None:
+    """Daemon heartbeat age s.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    float | None"""
     local = _local_heartbeat_age_s(workspace_root)
     if local is not None:
         return local
@@ -83,10 +121,24 @@ def daemon_heartbeat_age_s(workspace_root: str) -> float | None:
 
 
 def _local_heartbeat_exists(workspace_root: str) -> bool:
+    """Local heartbeat exists.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    bool"""
     return logs.daemon_heartbeat_file(workspace_root).is_file()
 
 
 def _clear_daemon_liveness(workspace_root: str) -> None:
+    """Clear daemon liveness.
+    
+    Parameters
+    ----------
+    workspace_root : str"""
     try:
         logs.daemon_heartbeat_file(workspace_root).unlink(missing_ok=True)
     except OSError:
@@ -114,6 +166,15 @@ def get_supervisor_host(workspace_root: str) -> str | None:
 
 
 def _supervisor_pid_identity(workspace_root: str) -> tuple[str | None, int | None]:
+    """Supervisor pid identity.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    tuple[str | None, int | None]"""
     pid_path = logs.daemon_pid_path(workspace_root)
     host, pid = daemon.read_process_identity(pid_path)
     if host or pid:
@@ -137,6 +198,16 @@ def daemon_is_alive(
     *,
     stale_after_s: float = DEFAULT_HEARTBEAT_STALE_S,
 ) -> bool:
+    """Daemon is alive.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    stale_after_s : float, optional, default ``DEFAULT_HEARTBEAT_STALE_S``
+    
+    Returns
+    -------
+    bool"""
     host, pid = _supervisor_pid_identity(workspace_root)
     if daemon.is_local_process_alive(host, pid):
         age = daemon_heartbeat_age_s(workspace_root)
@@ -157,6 +228,16 @@ def daemon_is_wedged(
     *,
     stale_after_s: float = DEFAULT_HEARTBEAT_STALE_S,
 ) -> bool:
+    """Daemon is wedged.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    stale_after_s : float, optional, default ``DEFAULT_HEARTBEAT_STALE_S``
+    
+    Returns
+    -------
+    bool"""
     host, pid = daemon.read_process_identity(logs.daemon_pid_path(workspace_root))
     if not daemon.is_local_process_alive(host, pid):
         return False
@@ -165,6 +246,15 @@ def daemon_is_wedged(
 
 
 def _remote_supervisor_running_message(workspace_root: str) -> str:
+    """Remote supervisor running message.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    str"""
     host = get_supervisor_host(workspace_root) or "unknown"
     _host, pid = _supervisor_pid_identity(workspace_root)
     local = daemon.local_hostname()
@@ -191,6 +281,15 @@ def warn_if_daemon_host_mismatch(workspace_root: str) -> None:
 
 
 def daemon_status(workspace_root: str) -> daemon.DaemonStatus:
+    """Daemon status.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    
+    Returns
+    -------
+    daemon.DaemonStatus"""
     host, pid = _supervisor_pid_identity(workspace_root)
     age = daemon_heartbeat_age_s(workspace_root)
     alive = daemon_is_alive(workspace_root)
@@ -210,6 +309,16 @@ def _resolve_deployment_for_spawn(
     workspace_root: str,
     deployment_path: str | Path | None,
 ) -> Path:
+    """Resolve deployment for spawn.
+    
+    Parameters
+    ----------
+    workspace_root : str
+    deployment_path : str | Path | None
+    
+    Returns
+    -------
+    Path"""
     if deployment_path is not None:
         return Path(deployment_path).expanduser().resolve()
     recorded = load_recorded_deployment_path(workspace_root)
