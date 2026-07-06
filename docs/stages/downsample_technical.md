@@ -159,7 +159,7 @@ data/
 │
 └── shifted_downsampled/                         ← default output_base
     └── sectorNNNN_cameraN_ccdN[_xX0-X1_yY0-Y1][_osN]/
-        └── syndiff_template_sNNNN_N_N[_roi][_osN]_dx0.000_dy0.000.fits
+        └── syndiff_template_sNNNN_N_N[_roi][_osN]_dx0.000_dy0.000.fits.gz
 ```
 
 All three path roots (`mapping_dir`, `convolved_dir`, `output_base`) can be overridden independently via CLI flags.
@@ -325,7 +325,7 @@ Iterates over all `(dx, dy)` offsets and writes one multi-extension FITS file pe
 - Constructs the HDU list: `PRIMARY` (no data) + `FLUX_SUM` + `COUNT` + `MASK`.
 - Builds the output filename with optional ROI and oversampling suffixes:
   ```
-  syndiff_template_sNNNN_N_N[_xX0-X1_yY0-Y1][_osN]_dxD.DDD_dyD.DDD.fits
+  syndiff_template_sNNNN_N_N[_xX0-X1_yY0-Y1][_osN]_dxD.DDD_dyD.DDD.fits.gz
   ```
   The ROI suffix is omitted when the ROI covers the full image with `x_min=0, y_min=0`.
 - Writes with `overwrite=True`.
@@ -554,7 +554,7 @@ To derive a clean average, divide `FLUX_SUM` by `(COUNT - MASK)` — though note
 | 8 | −0.0508 | −0.1114 |
 | 9 | −0.0506 | −0.1120 |
 
-These offsets represent calibrated pointing dithers for specific TESS exposures. The offset `(0.0, 0.0)` always serves as the reference (no-shift) template.
+These hard-coded offsets are **legacy CLI defaults only** (historical pointing dithers for one dataset). In the orchestrated pipeline, the offset list is always the unique `(group_dx, group_dy)` pairs from `cluster_template_job.json` written by `wcs_grouping`; `(0.0, 0.0)` corresponds to the reference FFI's group.
 
 ---
 
