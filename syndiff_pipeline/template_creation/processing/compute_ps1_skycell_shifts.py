@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Package module ``syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts``."""
 import argparse
 from pathlib import Path
 
@@ -28,6 +29,15 @@ RELEVANT_WCS_KEYS = [
 
 
 def load_tess_wcs(tess_fits_path: Path) -> tuple[WCS, tuple[int, int]]:
+    """Load tess wcs.
+    
+    Parameters
+    ----------
+    tess_fits_path : Path
+    
+    Returns
+    -------
+    tuple[WCS, tuple[int, int]]"""
     from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
 
     with open_fits_memmap(tess_fits_path) as hdul:
@@ -78,6 +88,15 @@ def load_tess_wcs(tess_fits_path: Path) -> tuple[WCS, tuple[int, int]]:
 
 
 def build_ps1_wcs(row: pd.Series) -> tuple[WCS, tuple[int, int]]:
+    """Build ps1 wcs.
+    
+    Parameters
+    ----------
+    row : pd.Series
+    
+    Returns
+    -------
+    tuple[WCS, tuple[int, int]]"""
     header_dict = {k: row[k] for k in RELEVANT_WCS_KEYS if k in row}
     # astropy expects integers for NAXIS
     header_dict["NAXIS1"] = int(header_dict["NAXIS1"])  # type: ignore[index]
@@ -97,6 +116,20 @@ def compute_ps1_shift_for_skycell(
     ps1_wcs: WCS,
 ) -> tuple[float, float]:
     # Use the skycell center as evaluation point: map to TESS pixel, then perturb in TESS pixel space
+    """Compute ps1 shift for skycell.
+    
+    Parameters
+    ----------
+    tess_wcs : WCS
+    dx_tess_pix : float
+    dy_tess_pix : float
+    sky_ra_deg : float
+    sky_dec_deg : float
+    ps1_wcs : WCS
+    
+    Returns
+    -------
+    tuple[float, float]"""
     from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
 
     sc = SkyCoord(sky_ra_deg * u.deg, sky_dec_deg * u.deg, frame="icrs")
@@ -114,6 +147,7 @@ def compute_ps1_shift_for_skycell(
 
 
 def main():
+    """Main."""
     parser = argparse.ArgumentParser(description="Compute per-PS1 skycell pixel shifts from a small TESS pixel offset using WCS transforms.")
     parser.add_argument("--tess-fits", required=True, type=Path, help="Path to the TESS FITS file with WCS")
     parser.add_argument("--skycell-csv", required=True, type=Path, help="CSV with PS1 skycell WCS info")

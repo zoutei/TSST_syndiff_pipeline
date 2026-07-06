@@ -712,6 +712,37 @@ def main(
     removed_stars_csv: str | Path | None = None,
 ) -> dict:
     # Resolve base paths (allow overrides)
+    """Main.
+    
+    Parameters
+    ----------
+    sector : int, optional, default ``20``
+    camera : int, optional, default ``3``
+    ccd : int, optional, default ``3``
+    offsets : np.ndarray, optional, default ``np.array([[0.0, 0.0]])``
+    ignore_mask_bits : list[int], optional, default ``[12]``
+    data_root : str | Path, optional, default ``'data'``
+    mapping_dir : str | Path | None, optional, default ``None``
+    convolved_dir : str | Path | None, optional, default ``None``
+    output_base : str | Path | None, optional, default ``None``
+    x_min : int | None, optional, default ``None``
+    y_min : int | None, optional, default ``None``
+    x_max : int | None, optional, default ``None``
+    y_max : int | None, optional, default ``None``
+    oversampling_factor : int, optional, default ``1``
+    reference_ffi_basename_expected : str | None, optional, default ``None``
+    cluster_job_json_path : str | None, optional, default ``None``
+    allow_reference_ffi_mismatch : bool, optional, default ``False``
+    progress_path : str | Path | None, optional, default ``None``
+    n_jobs : int, optional, default ``16``
+    skycells_per_batch : int, optional, default ``20``
+    event_dir : str | Path | None, optional, default ``None``
+    write_ps1_removed_stars_csv : bool, optional, default ``True``
+    removed_stars_csv : str | Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    dict"""
     data_root = Path(data_root)
     if mapping_dir is None:
         mapping_root = data_root / "skycell_pixel_mapping"

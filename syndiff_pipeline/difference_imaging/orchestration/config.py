@@ -249,6 +249,15 @@ def _sanitize_forced_lightcurve_name(name: str) -> str:
 
 
 def _forced_target_position_mode(item: dict) -> str:
+    """Forced target position mode.
+    
+    Parameters
+    ----------
+    item : dict
+    
+    Returns
+    -------
+    str"""
     has_sky = "ra" in item and "dec" in item
     has_offset = "dx" in item and "dy" in item
     has_fixed = "x" in item and "y" in item
@@ -323,6 +332,15 @@ def normalize_additional_forced_targets(raw: Any) -> List[Dict[str, Any]]:
 
 
 def _cfg_to_dict(cfg: SynDiffConfig) -> dict:
+    """Cfg to dict.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    dict"""
     d = asdict(cfg)
     # Convert None to null-friendly representation (yaml.dump handles None as null)
     return d

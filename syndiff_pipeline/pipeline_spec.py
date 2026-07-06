@@ -13,6 +13,11 @@ _PIPELINE: PipelineSpec | None = None
 
 @lru_cache
 def get_syndiff_pipeline() -> PipelineSpec:
+    """Get syndiff pipeline.
+    
+    Returns
+    -------
+    PipelineSpec"""
     from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGES
     from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
 
@@ -23,6 +28,11 @@ def get_syndiff_pipeline() -> PipelineSpec:
 
 
 def _pipeline() -> PipelineSpec:
+    """Pipeline.
+    
+    Returns
+    -------
+    PipelineSpec"""
     global _PIPELINE
     if _PIPELINE is None:
         _PIPELINE = get_syndiff_pipeline()
@@ -30,6 +40,15 @@ def _pipeline() -> PipelineSpec:
 
 
 def get_stage_spec(stage: str) -> StageSpec | None:
+    """Get stage spec.
+    
+    Parameters
+    ----------
+    stage : str
+    
+    Returns
+    -------
+    StageSpec | None"""
     return _pipeline().get(stage)
 
 
@@ -46,6 +65,24 @@ def build_stage_context(
     force_rerun: bool = False,
     progress_path: str | None = None,
 ) -> StageRunContext:
+    """Build stage context.
+    
+    Parameters
+    ----------
+    run_id : str
+    runs_root : str
+    target_label : str
+    target
+    runner_cfg
+    stage : str
+    meta : dict | None, optional, default ``None``
+    template_resolved, optional, default ``None``
+    force_rerun : bool, optional, default ``False``
+    progress_path : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    StageRunContext"""
     ctx = StageRunContext(
         run_id=run_id,
         runs_root=runs_root,
@@ -63,6 +100,16 @@ def build_stage_context(
 
 
 def stage_snapshot(ctx: StageRunContext, stage: str) -> dict:
+    """Stage snapshot.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    stage : str
+    
+    Returns
+    -------
+    dict"""
     spec = _pipeline().require(stage)
     if stage != "diff":
         ctx = resolve_template_context(ctx)
@@ -72,6 +119,16 @@ def stage_snapshot(ctx: StageRunContext, stage: str) -> dict:
 
 
 def config_fingerprint(ctx: StageRunContext, stage: str) -> str:
+    """Config fingerprint.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    stage : str
+    
+    Returns
+    -------
+    str"""
     spec = _pipeline().require(stage)
     if stage != "diff":
         ctx = resolve_template_context(ctx)
@@ -79,18 +136,46 @@ def config_fingerprint(ctx: StageRunContext, stage: str) -> str:
 
 
 def stage_names() -> tuple[str, ...]:
+    """Stage names.
+    
+    Returns
+    -------
+    tuple[str, ...]"""
     return _pipeline().stage_names
 
 
 def stage_short_names() -> dict[str, str]:
+    """Stage short names.
+    
+    Returns
+    -------
+    dict[str, str]"""
     return _pipeline().stage_short_names()
 
 
 def resolve_stage_name(name: str) -> str:
+    """Resolve stage name.
+    
+    Parameters
+    ----------
+    name : str
+    
+    Returns
+    -------
+    str"""
     return _pipeline().resolve_stage_name(name)
 
 
 def __getattr__(name: str) -> Any:
+    """Getattr.
+    
+    Parameters
+    ----------
+    name : str
+    
+    Returns
+    -------
+    Any"""
     pipeline = _pipeline()
     if name == "SYNDIFF_PIPELINE":
         return pipeline

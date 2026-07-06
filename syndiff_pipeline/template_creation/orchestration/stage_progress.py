@@ -15,6 +15,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class StageProgress:
+    """StageProgress."""
     text: str
     kind: str  # "fraction" | "phase" | "elapsed"
 
@@ -68,6 +69,16 @@ _MAX_TAIL_SCAN_BYTES = 4 * 1024 * 1024
 
 
 def _read_tail_bytes(log_path: Path, nbytes: int) -> str:
+    """Read tail bytes.
+    
+    Parameters
+    ----------
+    log_path : Path
+    nbytes : int
+    
+    Returns
+    -------
+    str"""
     try:
         size = log_path.stat().st_size
         with log_path.open("rb") as fh:
@@ -79,6 +90,16 @@ def _read_tail_bytes(log_path: Path, nbytes: int) -> str:
 
 
 def _tail_text(log_path: Path, *, tail_bytes: int = _TAIL_CHUNK_BYTES) -> str:
+    """Tail text.
+    
+    Parameters
+    ----------
+    log_path : Path
+    tail_bytes : int, optional, default ``_TAIL_CHUNK_BYTES``
+    
+    Returns
+    -------
+    str"""
     return _read_tail_bytes(log_path, tail_bytes)
 
 
@@ -110,6 +131,16 @@ def _scan_tail_text(
 
 
 def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    """Last match.
+    
+    Parameters
+    ----------
+    pattern : re.Pattern[str]
+    text : str
+    
+    Returns
+    -------
+    re.Match[str] | None"""
     last: re.Match[str] | None = None
     for match in pattern.finditer(text):
         last = match
@@ -117,6 +148,15 @@ def _last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
 
 
 def _phase_from_text(text: str) -> StageProgress | None:
+    """Phase from text.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     last_line = ""
     for line in text.splitlines():
         stripped = line.strip()
@@ -129,6 +169,15 @@ def _phase_from_text(text: str) -> StageProgress | None:
 
 
 def _parse_ps1_download(text: str) -> StageProgress | None:
+    """Parse ps1 download.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     match = _last_match(_RE_PS1_DL_FINISHED, text)
     if match:
         return StageProgress(f"{match.group(1)}/{match.group(2)}", "fraction")
@@ -142,6 +191,15 @@ def _parse_ps1_download(text: str) -> StageProgress | None:
 
 
 def _parse_ps1_process(text: str) -> StageProgress | None:
+    """Parse ps1 process.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     match = _last_match(_RE_PS1_PR_PROJ_ROW_PROGRESS, text)
     if match:
         p_done, p_total, r_done, r_total = match.groups()
@@ -172,6 +230,15 @@ def _parse_ps1_process(text: str) -> StageProgress | None:
 
 
 def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
+    """Parse downsample sidecar.
+    
+    Parameters
+    ----------
+    log_path : Path
+    
+    Returns
+    -------
+    StageProgress | None"""
     from syndiff_pipeline.template_creation.processing.downsample_progress import progress_path_for_log, read_progress
 
     data = read_progress(progress_path_for_log(log_path))
@@ -200,6 +267,15 @@ def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
 
 
 def _parse_downsample(text: str) -> StageProgress | None:
+    """Parse downsample.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     skycells_match = _last_match(_RE_DOWN_SKYCELLS, text)
     batches_match = _last_match(_RE_DOWN_BATCHES, text)
     completed_count = len(_RE_DOWN_COMPLETED.findall(text))
@@ -226,6 +302,15 @@ def _parse_downsample(text: str) -> StageProgress | None:
 
 
 def _parse_tess_ffi_download(text: str) -> StageProgress | None:
+    """Parse tess ffi download.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     match = _last_match(_RE_TESS_PROGRESS, text)
     if match:
         return StageProgress(f"{match.group(1)}/{match.group(2)}", "fraction")
@@ -244,16 +329,43 @@ def _parse_tess_ffi_download(text: str) -> StageProgress | None:
 
 
 def _parse_mapping(text: str) -> StageProgress | None:
+    """Parse mapping.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     return _phase_from_text(text)
 
 
 def _parse_wcs_grouping(text: str) -> StageProgress | None:
+    """Parse wcs grouping.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     if text.strip():
         return StageProgress("running", "phase")
     return None
 
 
 def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
+    """Parse diff sidecar.
+    
+    Parameters
+    ----------
+    log_path : Path
+    
+    Returns
+    -------
+    StageProgress | None"""
     from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
         format_progress_text as format_hotpants_progress,
         progress_path_for_diff_log as hotpants_sidecar_path,
@@ -286,6 +398,15 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
 
 
 def _parse_diff(text: str) -> StageProgress | None:
+    """Parse diff.
+    
+    Parameters
+    ----------
+    text : str
+    
+    Returns
+    -------
+    StageProgress | None"""
     match = _last_match(_RE_HOTPANTS_FRAMES, text)
     if match:
         label, done, total = match.groups()
@@ -294,6 +415,15 @@ def _parse_diff(text: str) -> StageProgress | None:
 
 
 def _elapsed_progress(started_at: str | None) -> StageProgress | None:
+    """Elapsed progress.
+    
+    Parameters
+    ----------
+    started_at : str | None
+    
+    Returns
+    -------
+    StageProgress | None"""
     if not started_at:
         return None
     try:

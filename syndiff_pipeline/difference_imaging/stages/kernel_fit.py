@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class KernelFitResult:
+    """KernelFitResult."""
     min_bg_ffi_path: str
     product_id: str
     angle_score: float
@@ -73,14 +74,41 @@ class KernelFitResult:
 
 
 def kernel_fit_meta_path(output_dir: str) -> str:
+    """Kernel fit meta path.
+    
+    Parameters
+    ----------
+    output_dir : str
+    
+    Returns
+    -------
+    str"""
     return os.path.join(output_dir, KERNEL_FIT_META_BASENAME)
 
 
 def kernel_r2_npz_path(output_dir: str) -> str:
+    """Kernel r2 npz path.
+    
+    Parameters
+    ----------
+    output_dir : str
+    
+    Returns
+    -------
+    str"""
     return os.path.join(output_dir, KERNEL_R2_NPZ_BASENAME)
 
 
 def load_kernel_fit_meta(output_dir: str) -> dict:
+    """Load kernel fit meta.
+    
+    Parameters
+    ----------
+    output_dir : str
+    
+    Returns
+    -------
+    dict"""
     path = kernel_fit_meta_path(output_dir)
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Missing kernel fit metadata: {path}")
@@ -100,6 +128,23 @@ def _run_hotpants_round(
     frame_stem: str,
     collect_kernel_params: bool = True,
 ) -> tuple[dict, Any]:
+    """Run hotpants round.
+    
+    Parameters
+    ----------
+    sci : np.ndarray
+    err : np.ndarray
+    template : np.ndarray
+    mask : np.ndarray
+    ref_stars_xy : np.ndarray
+    hp : HotpantsParams
+    work_dir : str
+    frame_stem : str
+    collect_kernel_params : bool, optional, default ``True``
+    
+    Returns
+    -------
+    tuple[dict, Any]"""
     os.makedirs(work_dir, exist_ok=True)
     hp_config = build_hotpants_config(
         hp=hp,

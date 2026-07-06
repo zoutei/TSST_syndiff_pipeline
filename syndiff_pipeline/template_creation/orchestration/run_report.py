@@ -40,6 +40,19 @@ def format_progress_lines(
     workspace_root: str | None = None,
     include_running_detail: bool = True,
 ) -> list[str]:
+    """Format progress lines.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    run_id : str
+    runs_root : str
+    workspace_root : str | None, optional, default ``None``
+    include_running_detail : bool, optional, default ``True``
+    
+    Returns
+    -------
+    list[str]"""
     from syndiff_pipeline.common.orchestration.verify_status import read_verify_run_status
 
     counts = state.count_by_status(run_id)
@@ -93,6 +106,17 @@ def format_status_grid(
     *,
     workspace_root: str | None = None,
 ) -> list[str]:
+    """Format status grid.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    run_id : str
+    workspace_root : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    list[str]"""
     rows = state.list_stage_runs(run_id)
     by_target: dict[str, list] = {}
     for r in rows:
@@ -103,6 +127,15 @@ def format_status_grid(
     stage_order = {name: i for i, name in enumerate(names)}
 
     def _stage_sort_key(row) -> int:
+        """Stage sort key.
+        
+        Parameters
+        ----------
+        row
+        
+        Returns
+        -------
+        int"""
         return stage_order.get(row.stage, len(names))
 
     active_stages = state.get_active_stages(run_id)
@@ -137,6 +170,19 @@ def _format_stage_status_short(
     active_stages: list[str] | None = None,
     verifying_keys: set[tuple[str, str]] | None = None,
 ) -> str:
+    """Format stage status short.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    run_id : str
+    row
+    active_stages : list[str] | None, optional, default ``None``
+    verifying_keys : set[tuple[str, str]] | None, optional, default ``None``
+    
+    Returns
+    -------
+    str"""
     from syndiff_pipeline.pipeline_spec import stage_short_names
 
     short = stage_short_names().get(row.stage, row.stage)
@@ -173,6 +219,18 @@ def format_target_status_line(
     *,
     workspace_root: str | None = None,
 ) -> str | None:
+    """Format target status line.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    run_id : str
+    target_label : str
+    workspace_root : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    str | None"""
     rows = [r for r in state.list_stage_runs(run_id) if r.target_label == target_label]
     if not rows:
         return None
@@ -279,6 +337,15 @@ def format_run_report_messages(
 
 
 def _continuation_header(header: str) -> str:
+    """Continuation header.
+    
+    Parameters
+    ----------
+    header : str
+    
+    Returns
+    -------
+    str"""
     first = header.split("\n", 1)[0]
     if "]" in first:
         return f"{first[: first.index(']') + 1]} status grid (continued)"
@@ -286,10 +353,29 @@ def _continuation_header(header: str) -> str:
 
 
 def _line_chars(lines: list[str]) -> int:
+    """Line chars.
+    
+    Parameters
+    ----------
+    lines : list[str]
+    
+    Returns
+    -------
+    int"""
     return sum(len(line) + 1 for line in lines)
 
 
 def pack_message_lines(lines: list[str], *, max_chars: int) -> list[str]:
+    """Pack message lines.
+    
+    Parameters
+    ----------
+    lines : list[str]
+    max_chars : int
+    
+    Returns
+    -------
+    list[str]"""
     if max_chars <= 0:
         return []
     messages: list[str] = []
@@ -320,6 +406,16 @@ def pack_message_lines(lines: list[str], *, max_chars: int) -> list[str]:
 
 
 def _truncate_grid(grid: list[str], *, max_chars: int) -> list[str]:
+    """Truncate grid.
+    
+    Parameters
+    ----------
+    grid : list[str]
+    max_chars : int
+    
+    Returns
+    -------
+    list[str]"""
     if max_chars <= 0:
         return ["  … (status grid omitted)"]
     out: list[str] = []

@@ -34,7 +34,7 @@ On submit, the orchestrator copies policy into the workspace:
 - `{workspace_root}/runs/{run_id}/config.yaml` — frozen orchestrator
 - `{workspace_root}/runs/{run_id}/per_target/{label}/diff_config.yaml` — frozen per-target diff
 
-See [docs/storage_layout.md](../docs/storage_layout.md).
+See [docs/markdown/storage_layout.md](../docs/markdown/storage_layout.md).
 
 ## `forced_photometry` methods
 
@@ -94,4 +94,4 @@ Inserted after `kernel_subtract` in [`diff_config_single_kernel.yaml`](diff_conf
 - **Multi-kernel:** `hotpants` uses `inputs.bkg: ks_b_s`; photometry stays on `hp_d`.
 - **Resume:** [`diff_config_multi_kernel_resume.yaml`](diff_config_multi_kernel_resume.yaml) inherits `ks_b` + `ks_d`, runs background smooth, then Hotpants.
 
-Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifacts, and performance notes: [docs/stages/background.md](../docs/stages/background.md).
+Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifacts, and performance notes: [docs/markdown/stages/background.md](../docs/markdown/stages/background.md).

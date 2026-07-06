@@ -37,11 +37,26 @@ _KERNEL_SUBTRACT_LOKY: Optional[dict[str, Any]] = None
 
 
 def _kernel_subtract_loky_initializer(payload: dict[str, Any]) -> None:
+    """Kernel subtract loky initializer.
+    
+    Parameters
+    ----------
+    payload : dict[str, Any]"""
     global _KERNEL_SUBTRACT_LOKY
     _KERNEL_SUBTRACT_LOKY = payload
 
 
 def _load_convolved_crop(path: str, crop_bounds: dict) -> np.ndarray:
+    """Load convolved crop.
+    
+    Parameters
+    ----------
+    path : str
+    crop_bounds : dict
+    
+    Returns
+    -------
+    np.ndarray"""
     from astropy.io import fits
 
     ox = int(crop_bounds["x_min"])
@@ -56,6 +71,15 @@ def _load_convolved_crop(path: str, crop_bounds: dict) -> np.ndarray:
 
 
 def _process_one_frame(task: tuple) -> dict:
+    """Process one frame.
+    
+    Parameters
+    ----------
+    task : tuple
+    
+    Returns
+    -------
+    dict"""
     global _KERNEL_SUBTRACT_LOKY
     if _KERNEL_SUBTRACT_LOKY is None:
         return {

@@ -47,14 +47,41 @@ def diff_config_fingerprint(cfg: SynDiffConfig) -> str:
 
 
 def _fingerprint_path(ws_root: str | Path) -> Path:
+    """Fingerprint path.
+    
+    Parameters
+    ----------
+    ws_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(ws_root) / DIFF_CONFIG_FINGERPRINT_BASENAME
 
 
 def _snapshot_path(ws_root: str | Path) -> Path:
+    """Snapshot path.
+    
+    Parameters
+    ----------
+    ws_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(ws_root) / DIFF_CONFIG_SNAPSHOT_BASENAME
 
 
 def _read_stored_fingerprint(ws_root: str | Path) -> str | None:
+    """Read stored fingerprint.
+    
+    Parameters
+    ----------
+    ws_root : str | Path
+    
+    Returns
+    -------
+    str | None"""
     path = _fingerprint_path(ws_root)
     if not path.is_file():
         return None
@@ -89,6 +116,15 @@ def assert_workspace_config_lock(ws_root: str | Path, cfg: SynDiffConfig) -> Non
 
 
 def _cfg_to_dict(cfg: SynDiffConfig) -> dict:
+    """Cfg to dict.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    dict"""
     from dataclasses import asdict
 
     return asdict(cfg)

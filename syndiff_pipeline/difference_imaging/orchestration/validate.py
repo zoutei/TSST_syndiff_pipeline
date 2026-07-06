@@ -31,6 +31,15 @@ STAGE_KINDS = frozenset(
 
 
 def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
+    """Outputs for stage.
+    
+    Parameters
+    ----------
+    stage : dict[str, Any]
+    
+    Returns
+    -------
+    list[str]"""
     kind = stage.get("kind")
     if kind == "hotpants":
         o = stage.get("output") or {}
@@ -61,6 +70,16 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
 
 
 def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
+    """Inputs refs.
+    
+    Parameters
+    ----------
+    stage : dict[str, Any]
+    idx : int
+    
+    Returns
+    -------
+    list[str]"""
     kind = stage.get("kind")
     inp = stage.get("inputs") or {}
     refs = []
@@ -124,6 +143,11 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
 
 
 def validate_pipeline(cfg: SynDiffConfig) -> None:
+    """Validate pipeline.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig"""
     if not cfg.pipeline:
         raise ValueError(
             "Config has an empty ``pipeline`` list. Add a ``pipeline:`` section "

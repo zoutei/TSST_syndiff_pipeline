@@ -19,6 +19,15 @@ log = logging.getLogger(__name__)
 
 
 def _norm_bkg_vector_path(p: Optional[str]) -> Optional[str]:
+    """Norm bkg vector path.
+    
+    Parameters
+    ----------
+    p : Optional[str]
+    
+    Returns
+    -------
+    Optional[str]"""
     if p is None or (isinstance(p, str) and not str(p).strip()):
         return None
     return str(p)

@@ -421,6 +421,27 @@ def calculate_radec_corners_numba(buffer, naxis1, naxis2, crval1, crval2, crpix1
 @jit(nopython=True)
 def calculate_radec_corners_shift_numba(buffer_large, buffer_small, buffer_normal, cell_x, cell_y, naxis1, naxis2, crval1, crval2, crpix1, crpix2, pc1_1, pc1_2, pc2_1, pc2_2, cdelt1, cdelt2):
     # Check array shapes
+    """Calculate radec corners shift numba.
+    
+    Parameters
+    ----------
+    buffer_large
+    buffer_small
+    buffer_normal
+    cell_x
+    cell_y
+    naxis1
+    naxis2
+    crval1
+    crval2
+    crpix1
+    crpix2
+    pc1_1
+    pc1_2
+    pc2_1
+    pc2_2
+    cdelt1
+    cdelt2"""
     if not (naxis1.shape == naxis2.shape == crval1.shape == crval2.shape == crpix1.shape == crpix2.shape == pc1_1.shape == pc1_2.shape == pc2_1.shape == pc2_2.shape == cdelt1.shape == cdelt2.shape):
         raise ValueError("All input arrays must have the same shape")
 
@@ -678,6 +699,14 @@ def calculate_radec_corners(dataframe_skycells, buffer=120):
 
 
 def calculate_radec_corners_shift(dataframe_skycells, buffer_large=450, buffer_small=20, buffer_normal=200):
+    """Calculate radec corners shift.
+    
+    Parameters
+    ----------
+    dataframe_skycells
+    buffer_large, optional, default ``450``
+    buffer_small, optional, default ``20``
+    buffer_normal, optional, default ``200``"""
     return calculate_radec_corners_shift_numba(
         buffer_large,
         buffer_small,
@@ -1578,6 +1607,11 @@ def ensure_gaia_login(gaia_credentials_file=None):
 
 
 def _gaia_transient_error(exc):
+    """Gaia transient error.
+    
+    Parameters
+    ----------
+    exc"""
     msg = str(exc).lower()
     return "408" in msg or "timeout" in msg or "aborted" in msg
 

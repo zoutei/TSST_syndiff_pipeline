@@ -43,6 +43,7 @@ def run_pipeline(cfg, *, validate_only: bool = False):
 
 
 def main():
+    """Main."""
     parser = argparse.ArgumentParser(
         description="SynDiff TESS FFI difference imaging pipeline.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,

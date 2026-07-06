@@ -44,6 +44,16 @@ def crop_local_to_ds9_xy(x_crop: float, y_crop: float) -> tuple[float, float]:
 def _representative_crop_xy(
     target_xy: np.ndarray, ref_idx: Optional[int]
 ) -> tuple[float, float]:
+    """Representative crop xy.
+    
+    Parameters
+    ----------
+    target_xy : np.ndarray
+    ref_idx : Optional[int]
+    
+    Returns
+    -------
+    tuple[float, float]"""
     arr = np.asarray(target_xy, dtype=np.float64)
     if ref_idx is not None and 0 <= ref_idx < len(arr):
         x, y = float(arr[ref_idx, 0]), float(arr[ref_idx, 1])

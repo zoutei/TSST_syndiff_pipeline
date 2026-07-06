@@ -503,12 +503,22 @@ def _make_star_record(row, seg_id: int, reason: str) -> dict:
     """Build a unified removed-star record from a catalog row namedtuple."""
 
     def _safe_float(val):
+        """Safe float.
+        
+        Parameters
+        ----------
+        val"""
         try:
             return float(val)
         except (TypeError, ValueError):
             return float("nan")
 
     def _source_id_for_record(val):
+        """Source id for record.
+        
+        Parameters
+        ----------
+        val"""
         if val is None:
             return -1
         try:

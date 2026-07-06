@@ -38,6 +38,16 @@ log = logging.getLogger(__name__)
 
 
 def _resolve_path(base_dir: Path, value: str | None) -> str | None:
+    """Resolve path.
+    
+    Parameters
+    ----------
+    base_dir : Path
+    value : str | None
+    
+    Returns
+    -------
+    str | None"""
     if value is None or str(value).strip() == "":
         return None
     p = Path(os.path.expanduser(str(value)))
@@ -47,6 +57,15 @@ def _resolve_path(base_dir: Path, value: str | None) -> str | None:
 
 
 def parse_deployment_file(raw: dict) -> str:
+    """Parse deployment file.
+    
+    Parameters
+    ----------
+    raw : dict
+    
+    Returns
+    -------
+    str"""
     explicit = str(raw.get("deployment_file", "")).strip()
     if explicit:
         return explicit
@@ -61,6 +80,7 @@ def parse_deployment_file(raw: dict) -> str:
 
 @dataclass
 class RunnerConfig:
+    """RunnerConfig."""
     deployment_file: str = "deployment.yaml"
     data_root: str = ""
     ffi_dir: str = ""
@@ -83,6 +103,11 @@ class RunnerConfig:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     def runs_dir(self) -> str:
+        """Runs dir.
+        
+        Returns
+        -------
+        str"""
         return self.runs_root or str(runs_root(self.workspace_root))
 
     def stage_executor(self, stage: str) -> str:
@@ -96,6 +121,15 @@ class RunnerConfig:
 
 
 def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
+    """Parse resources.
+    
+    Parameters
+    ----------
+    raw : dict | None
+    
+    Returns
+    -------
+    Dict[str, ResourcePoolParams]"""
     raw = raw or {}
     out: Dict[str, ResourcePoolParams] = {}
     for name, spec in raw.items():
@@ -117,6 +151,16 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
 def _paths_from_deployment(
     deployment: dict, *, deployment_path: Path
 ) -> tuple[str, str, str, str, str, str]:
+    """Paths from deployment.
+    
+    Parameters
+    ----------
+    deployment : dict
+    deployment_path : Path
+    
+    Returns
+    -------
+    tuple[str, str, str, str, str, str]"""
     handoff = require_deployment_path(deployment, "workspace_root", deployment_path=deployment_path)
     data = require_deployment_path(deployment, "data_root", deployment_path=deployment_path)
     ffi_override = str(deployment.get("ffi_dir", "")).strip()
@@ -133,6 +177,17 @@ def _paths_from_deployment(
 
 
 def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> RunnerConfig:
+    """Build runner config.
+    
+    Parameters
+    ----------
+    raw : dict
+    config_path : Path
+    base_dir : Path
+    
+    Returns
+    -------
+    RunnerConfig"""
     warn_legacy_config_paths(raw, config_path=config_path)
     deployment_file = parse_deployment_file(raw)
     notifications = parse_notification_config(raw.get("notifications"))
@@ -180,6 +235,15 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
 
 
 def load_runner_config(yaml_path: str | Path) -> RunnerConfig:
+    """Load runner config.
+    
+    Parameters
+    ----------
+    yaml_path : str | Path
+    
+    Returns
+    -------
+    RunnerConfig"""
     path = Path(yaml_path).expanduser().resolve()
     with path.open(encoding="utf-8") as fh:
         raw: dict = yaml.safe_load(fh) or {}
@@ -203,6 +267,16 @@ def resolve_workspace_root(config_path: str | Path) -> Path:
 
 
 def _normalize_override_paths(overrides: Dict[str, dict], base_dir: Path) -> Dict[str, dict]:
+    """Normalize override paths.
+    
+    Parameters
+    ----------
+    overrides : Dict[str, dict]
+    base_dir : Path
+    
+    Returns
+    -------
+    Dict[str, dict]"""
     out: Dict[str, dict] = {}
     for key, spec in (overrides or {}).items():
         spec = copy.deepcopy(spec or {})
@@ -280,6 +354,12 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
 
 
 def write_runner_config(cfg: RunnerConfig, yaml_path: str | Path) -> None:
+    """Write runner config.
+    
+    Parameters
+    ----------
+    cfg : RunnerConfig
+    yaml_path : str | Path"""
     path = Path(yaml_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
@@ -349,6 +429,13 @@ def _is_materialized_config(raw: dict) -> bool:
 
 
 def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Path) -> None:
+    """Resolve stage path fields.
+    
+    Parameters
+    ----------
+    cfg : RunnerConfig
+    stages_raw : dict
+    base_dir : Path"""
     path_keys_by_stage = {
         "wcs_grouping": ("bkg_vector_path",),
         "ps1_download": ("local_data_path",),
@@ -368,6 +455,7 @@ def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Pa
 
 @dataclass
 class ResolvedTargetConfig:
+    """ResolvedTargetConfig."""
     target: Target
     data_root: str
     ffi_dir: str
@@ -381,6 +469,16 @@ class ResolvedTargetConfig:
 
 
 def _deep_merge_dict(base: dict, override: dict) -> dict:
+    """Deep merge dict.
+    
+    Parameters
+    ----------
+    base : dict
+    override : dict
+    
+    Returns
+    -------
+    dict"""
     out = copy.deepcopy(base)
     for key, val in (override or {}).items():
         if isinstance(val, dict) and isinstance(out.get(key), dict):
@@ -396,6 +494,17 @@ def resolve_config(
     *,
     config_path: str | Path | None = None,
 ) -> ResolvedTargetConfig:
+    """Resolve config.
+    
+    Parameters
+    ----------
+    target : Target
+    cfg : RunnerConfig
+    config_path : str | Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    ResolvedTargetConfig"""
     merged_stages_raw: dict = {
         "wcs_grouping": cfg.stages.wcs_grouping.__dict__,
         "mapping": cfg.stages.mapping.__dict__,
@@ -433,6 +542,15 @@ def resolve_config(
 
 
 def config_snapshot(resolved: ResolvedTargetConfig) -> Dict[str, Any]:
+    """Config snapshot.
+    
+    Parameters
+    ----------
+    resolved : ResolvedTargetConfig
+    
+    Returns
+    -------
+    Dict[str, Any]"""
     t = resolved.target
     return {
         "sector": t.sector,

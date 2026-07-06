@@ -71,6 +71,15 @@ def frozen_diff_config_for_verify(
 
 
 def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
+    """Frozen diff config for context.
+    
+    Parameters
+    ----------
+    ctx : StageRunContext
+    
+    Returns
+    -------
+    SynDiffConfig"""
     return frozen_diff_config_for_verify(
         resolve_diff_site_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg),
         ctx.target,
@@ -79,12 +88,31 @@ def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
 
 
 def diff_workspace_root(cfg: SynDiffConfig, event_dir: str | Path) -> Path:
+    """Diff workspace root.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    event_dir : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(
         workspace_root(str(event_dir), run_id=getattr(cfg, "workspace_run_id", None))
     )
 
 
 def _last_executable_stage(cfg: SynDiffConfig) -> dict | None:
+    """Last executable stage.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    
+    Returns
+    -------
+    dict | None"""
     _, _, stages = split_pipeline(cfg.pipeline)
     if not stages:
         return None
@@ -92,6 +120,16 @@ def _last_executable_stage(cfg: SynDiffConfig) -> dict | None:
 
 
 def _label_dir_has_files(ws_dir: Path, label: str) -> bool:
+    """Label dir has files.
+    
+    Parameters
+    ----------
+    ws_dir : Path
+    label : str
+    
+    Returns
+    -------
+    bool"""
     d = ws_dir / label
     if not d.is_dir():
         return False
@@ -99,6 +137,16 @@ def _label_dir_has_files(ws_dir: Path, label: str) -> bool:
 
 
 def _label_dir_has_fits(ws_dir: Path, label: str) -> bool:
+    """Label dir has fits.
+    
+    Parameters
+    ----------
+    ws_dir : Path
+    label : str
+    
+    Returns
+    -------
+    bool"""
     d = ws_dir / label
     if not d.is_dir():
         return False
@@ -108,6 +156,16 @@ def _label_dir_has_fits(ws_dir: Path, label: str) -> bool:
 
 
 def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
+    """Final stage complete.
+    
+    Parameters
+    ----------
+    cfg : SynDiffConfig
+    ws_dir : Path
+    
+    Returns
+    -------
+    bool"""
     stage = _last_executable_stage(cfg)
     if stage is None:
         return False

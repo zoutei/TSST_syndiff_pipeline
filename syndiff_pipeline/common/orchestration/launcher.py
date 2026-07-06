@@ -14,37 +14,58 @@ if TYPE_CHECKING:
 
 
 class StageJobHandle(Protocol):
-    def poll(self) -> int | None: ...
+    """StageJobHandle (Protocol)."""
 
-    def terminate(self) -> None: ...
+    def poll(self) -> int | None:
+        """Return exit code if the job finished, else ``None``."""
+        ...
+
+    def terminate(self) -> None:
+        """Signal the job to stop."""
+        ...
 
 
 @dataclass
 class LocalJobHandle:
+    """LocalJobHandle."""
     proc: subprocess.Popen
 
     def poll(self) -> int | None:
+        """Poll.
+        
+        Returns
+        -------
+        int | None"""
         return self.proc.poll()
 
     def terminate(self) -> None:
+        """Terminate."""
         if self.proc.poll() is None:
             self.proc.terminate()
 
 
 @dataclass
 class CondorJobHandle:
+    """CondorJobHandle."""
     cluster_id: int
     submit_epoch: float
 
     def poll(self) -> int | None:
+        """Poll.
+        
+        Returns
+        -------
+        int | None"""
         return condor.poll_cluster(self.cluster_id, submitted_at=self.submit_epoch)
 
     def terminate(self) -> None:
+        """Terminate."""
         condor.remove_cluster(self.cluster_id)
 
 
 @dataclass(frozen=True)
 class LaunchDescriptor:
+    """LaunchDescriptor."""
     executor: str
     native_id: int
     launch_token: str

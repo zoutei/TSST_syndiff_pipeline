@@ -35,6 +35,7 @@ DEFAULT_STOP_KILL_WAIT_S = 5.0
 
 @dataclass(frozen=True)
 class EnsureDiscordBotResult:
+    """EnsureDiscordBotResult."""
     enabled: bool
     spawned: bool
     pid: int | None
@@ -44,6 +45,7 @@ class EnsureDiscordBotResult:
 
 @dataclass(frozen=True)
 class DiscordBotStatus:
+    """DiscordBotStatus."""
     enabled: bool
     alive: bool
     pid: int | None
@@ -53,6 +55,7 @@ class DiscordBotStatus:
 
 @dataclass(frozen=True)
 class DiscordBotLocateResult:
+    """DiscordBotLocateResult."""
     cli_host: str
     pid_file_host: str | None
     pid_file_pid: int | None
@@ -79,6 +82,16 @@ def _channel_id_from_deployment(
     *,
     config_channel_id: str = "",
 ) -> str | None:
+    """Channel id from deployment.
+    
+    Parameters
+    ----------
+    deployment : dict
+    config_channel_id : str, optional, default ``''``
+    
+    Returns
+    -------
+    str | None"""
     if config_channel_id.strip():
         return config_channel_id.strip()
     channel_id = str(deployment.get("discord_channel_id", "")).strip()
@@ -90,6 +103,16 @@ def _bot_configured_from_deployment(
     *,
     config_channel_id: str = "",
 ) -> tuple[bool, str | None]:
+    """Bot configured from deployment.
+    
+    Parameters
+    ----------
+    deployment : dict
+    config_channel_id : str, optional, default ``''``
+    
+    Returns
+    -------
+    tuple[bool, str | None]"""
     token = str(deployment.get("discord_bot_token", "")).strip()
     if not token:
         return False, "no bot token configured"
@@ -157,10 +180,25 @@ def discover_discord_bot_pids(workspace_root: str | Path) -> list[int]:
 
 
 def _discord_bot_pid_identity(workspace_root: str | Path) -> tuple[str | None, int | None]:
+    """Discord bot pid identity.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    tuple[str | None, int | None]"""
     return daemon.read_process_identity(logs.discord_bot_pid_path(workspace_root))
 
 
 def _log_bot_control(workspace_root: str | Path, message: str) -> None:
+    """Log bot control.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    message : str"""
     try:
         logs.append_discord_bot_control_log(workspace_root, message)
     except OSError:
@@ -168,6 +206,16 @@ def _log_bot_control(workspace_root: str | Path, message: str) -> None:
 
 
 def _remote_discord_bot_message(host: str, pid: int | None) -> str:
+    """Remote discord bot message.
+    
+    Parameters
+    ----------
+    host : str
+    pid : int | None
+    
+    Returns
+    -------
+    str"""
     pid_text = f" (pid={pid})" if pid else ""
     local = daemon.local_hostname()
     return (
@@ -177,6 +225,15 @@ def _remote_discord_bot_message(host: str, pid: int | None) -> str:
 
 
 def discord_bot_is_alive(workspace_root: str | Path) -> bool:
+    """Discord bot is alive.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    bool"""
     host, pid = _discord_bot_pid_identity(workspace_root)
     if not pid:
         return False
@@ -190,6 +247,16 @@ def discord_bot_status(
     *,
     site_config_path: str | Path | None = None,
 ) -> DiscordBotStatus:
+    """Discord bot status.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    site_config_path : str | Path | None, optional, default ``None``
+    
+    Returns
+    -------
+    DiscordBotStatus"""
     deploy_path = Path(deployment_path).expanduser().resolve()
     deployment = load_deployment_file(deploy_path)
     workspace_root = str(load_workspace_root_from_deployment(deploy_path))
@@ -257,6 +324,16 @@ def spawn_detached_discord_bot(
     deployment_path: str | Path,
     bot_log: str | Path,
 ) -> int:
+    """Spawn detached discord bot.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    bot_log : str | Path
+    
+    Returns
+    -------
+    int"""
     cmd = [
         sys.executable,
         "-m",
@@ -285,6 +362,16 @@ def wait_for_discord_bot(
     *,
     timeout_s: float = DEFAULT_START_WAIT_S,
 ) -> bool:
+    """Wait for discord bot.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    timeout_s : float, optional, default ``DEFAULT_START_WAIT_S``
+    
+    Returns
+    -------
+    bool"""
     deadline = time.monotonic() + timeout_s
     pid_path = logs.discord_bot_pid_path(workspace_root)
     while time.monotonic() < deadline:
@@ -304,6 +391,15 @@ def record_discord_bot_site_config(workspace_root: str | Path, config_path: str 
 
 
 def _load_recorded_site_config(workspace_root: str | Path) -> Path | None:
+    """Load recorded site config.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path | None"""
     record_path = logs.discord_bot_site_config_path(workspace_root)
     if not record_path.is_file():
         return None
@@ -320,6 +416,13 @@ def _terminate_pids(
     term_timeout_s: float = DEFAULT_STOP_TERM_TIMEOUT_S,
     kill_wait_s: float = DEFAULT_STOP_KILL_WAIT_S,
 ) -> None:
+    """Terminate pids.
+    
+    Parameters
+    ----------
+    pids : list[int]
+    term_timeout_s : float, optional, default ``DEFAULT_STOP_TERM_TIMEOUT_S``
+    kill_wait_s : float, optional, default ``DEFAULT_STOP_KILL_WAIT_S``"""
     for pid in pids:
         if not daemon.is_process_alive(pid):
             continue
@@ -339,6 +442,14 @@ def _terminate_discord_bots_for_handoff(
     term_timeout_s: float = DEFAULT_STOP_TERM_TIMEOUT_S,
     kill_wait_s: float = DEFAULT_STOP_KILL_WAIT_S,
 ) -> None:
+    """Terminate discord bots for handoff.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    exclude : set[int] | None, optional, default ``None``
+    term_timeout_s : float, optional, default ``DEFAULT_STOP_TERM_TIMEOUT_S``
+    kill_wait_s : float, optional, default ``DEFAULT_STOP_KILL_WAIT_S``"""
     skip = exclude or set()
     pids = [pid for pid in discover_discord_bot_pids(workspace_root) if pid not in skip]
     _terminate_pids(pids, term_timeout_s=term_timeout_s, kill_wait_s=kill_wait_s)
@@ -348,6 +459,16 @@ def _ensure_discord_bot_running_locked(
     deployment_path: Path,
     workspace_root: str | Path,
 ) -> EnsureDiscordBotResult:
+    """Ensure discord bot running locked.
+    
+    Parameters
+    ----------
+    deployment_path : Path
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    EnsureDiscordBotResult"""
     pid_path = logs.discord_bot_pid_path(workspace_root)
     host, pid = daemon.read_process_identity(pid_path)
     if pid and host and not daemon.identity_on_local_host(host):
@@ -471,6 +592,16 @@ def _scan_log_for_identity(
     *,
     max_lines: int = 3000,
 ) -> tuple[str | None, int | None, str | None]:
+    """Scan log for identity.
+    
+    Parameters
+    ----------
+    path : Path
+    max_lines : int, optional, default ``3000``
+    
+    Returns
+    -------
+    tuple[str | None, int | None, str | None]"""
     if not path.is_file():
         return None, None, None
     try:

@@ -205,6 +205,15 @@ def master_root(output_dir: str, *, run_id: str | None = None) -> str:
 
 
 def _abs_path(path: str) -> str:
+    """Abs path.
+    
+    Parameters
+    ----------
+    path : str
+    
+    Returns
+    -------
+    str"""
     return os.path.abspath(os.path.expanduser(path))
 
 
@@ -257,10 +266,28 @@ def _ensure_abs_symlink(link_path: str, target_path: str) -> bool:
 
 
 def _is_hotpants_stamps_workspace_label(label: str) -> bool:
+    """Is hotpants stamps workspace label.
+    
+    Parameters
+    ----------
+    label : str
+    
+    Returns
+    -------
+    bool"""
     return label.endswith(HOTPANTS_STAMPS_WS_SUFFIX)
 
 
 def _is_hotpants_stamps_fits_basename(name: str) -> bool:
+    """Is hotpants stamps fits basename.
+    
+    Parameters
+    ----------
+    name : str
+    
+    Returns
+    -------
+    bool"""
     lower = name.lower()
     return lower.endswith(HOTPANTS_STAMPS_FITS_SUFFIX) or lower.endswith(
         LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX

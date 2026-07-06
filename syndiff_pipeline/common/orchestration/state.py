@@ -69,15 +69,30 @@ CMD_FORCE_LAUNCH = "force_launch"
 
 
 def _utc_now() -> str:
+    """Utc now.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _utc_after(seconds: float) -> str:
+    """Utc after.
+    
+    Parameters
+    ----------
+    seconds : float
+    
+    Returns
+    -------
+    str"""
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
 
 
 @dataclass
 class StageRunRow:
+    """StageRunRow."""
     run_id: str
     target_label: str
     stage: str
@@ -108,6 +123,7 @@ def _stage_run_from_row(row: sqlite3.Row | dict) -> StageRunRow:
 
 @dataclass
 class CommandRow:
+    """CommandRow."""
     id: int
     run_id: str
     kind: str
@@ -116,6 +132,11 @@ class CommandRow:
     processed_at: str | None
 
     def args(self) -> dict:
+        """Args.
+        
+        Returns
+        -------
+        dict"""
         if not self.args_json:
             return {}
         try:
@@ -125,12 +146,26 @@ class CommandRow:
 
 
 def _default_pipeline() -> PipelineSpec:
+    """Default pipeline.
+    
+    Returns
+    -------
+    PipelineSpec"""
     from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
 
     return get_syndiff_pipeline()
 
 
 def _pipeline_spec(spec: PipelineSpec | None = None) -> PipelineSpec:
+    """Pipeline spec.
+    
+    Parameters
+    ----------
+    spec : PipelineSpec | None, optional, default ``None``
+    
+    Returns
+    -------
+    PipelineSpec"""
     return spec if spec is not None else _default_pipeline()
 
 
@@ -234,7 +269,14 @@ def artifact_verify_needed(
 
 
 class PipelineState:
+    """PipelineState."""
     def __init__(self, db_path: str | Path, *, pipeline_spec: PipelineSpec | None = None):
+        """Init.
+        
+        Parameters
+        ----------
+        db_path : str | Path
+        pipeline_spec : PipelineSpec | None, optional, default ``None``"""
         self.db_path = str(Path(db_path).expanduser().resolve())
         self.pipeline_spec = pipeline_spec or _default_pipeline()
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -242,6 +284,11 @@ class PipelineState:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
+        """Conn.
+        
+        Returns
+        -------
+        Iterator[sqlite3.Connection]"""
         conn = sqlite3.connect(self.db_path, timeout=60)
         conn.row_factory = sqlite3.Row
         # journal_mode is persisted in the DB header (set once in _init_schema);
@@ -257,6 +304,7 @@ class PipelineState:
             conn.close()
 
     def _init_schema(self) -> None:
+        """Init schema."""
         with self._conn() as conn:
             # Set the durable journal mode exactly once. WAL persists in the
             # header, so later connections inherit it without re-issuing.
@@ -343,18 +391,47 @@ class PipelineState:
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+        """Ensure column.
+        
+        Parameters
+        ----------
+        conn : sqlite3.Connection
+        table : str
+        column : str
+        decl : str"""
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     def list_active_runs(self) -> List[dict]:
+        """List active runs.
+        
+        Returns
+        -------
+        List[dict]"""
         return self.active_runs()
 
     def get_active_stages(self, run_id: str) -> List[str]:
+        """Get active stages.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[str]"""
         stages = self.selected_stages(run_id)
         return stages or list(self.pipeline_spec.stage_names)
 
     def set_run_status(self, run_id: str, status: str, *, stall_reason: str | None = None) -> None:
+        """Set run status.
+        
+        Parameters
+        ----------
+        run_id : str
+        status : str
+        stall_reason : str | None, optional, default ``None``"""
         with self._conn() as conn:
             if stall_reason is not None:
                 conn.execute(
@@ -365,6 +442,15 @@ class PipelineState:
                 conn.execute("UPDATE runs SET status = ? WHERE run_id = ?", (status, run_id))
 
     def running_jobs(self, run_id: str) -> List[StageRunRow]:
+        """Running jobs.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[StageRunRow]"""
         return self.running_stage_runs(run_id)
 
     def requeue_running_stage(
@@ -376,20 +462,53 @@ class PipelineState:
         error_tail: str | None = None,
         backoff_s: float = 0.0,
     ) -> None:
+        """Requeue running stage.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        error_tail : str | None, optional, default ``None``
+        backoff_s : float, optional, default ``0.0``"""
         self.requeue_to_ready(
             run_id, target_label, stage, error_tail=error_tail, backoff_s=backoff_s
         )
 
     def is_artifact_verified(self, run_id: str, target_label: str, stage: str) -> bool:
+        """Is artifact verified.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        
+        Returns
+        -------
+        bool"""
         return self.external_verify_complete(run_id, target_label, stage)
 
     def cache_artifact_verified(
         self, run_id: str, target_label: str, stage: str, *, path: str = ""
     ) -> None:
+        """Cache artifact verified.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        path : str, optional, default ``''``"""
         del path
         self.cache_external_check(run_id, target_label, stage, complete=True)
 
     def new_launch_token(self) -> str:
+        """New launch token.
+        
+        Returns
+        -------
+        str"""
         return str(uuid.uuid4())
 
     def try_atomic_claim(
@@ -404,6 +523,22 @@ class PipelineState:
         log_path: str,
         submit_epoch: float | None = None,
     ) -> bool:
+        """Try atomic claim.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        launch_token : str
+        executor : str
+        native_id : int
+        log_path : str
+        submit_epoch : float | None, optional, default ``None``
+        
+        Returns
+        -------
+        bool"""
         if not self.claim_ready(run_id, target_label, stage, launch_token):
             return False
         self.set_launch_descriptor(
@@ -420,6 +555,16 @@ class PipelineState:
     def promote_stages(
         self, run_id: str, target_stages: Dict[str, object] | None = None
     ) -> int:
+        """Promote stages.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_stages : Dict[str, object] | None, optional, default ``None``
+        
+        Returns
+        -------
+        int"""
         promoted = 0
         run = self.get_run(run_id) or {}
         active_stages = set(self.get_active_stages(run_id))
@@ -464,6 +609,17 @@ class PipelineState:
         return promoted
 
     def fetch_ready_batch(self, run_id: str, pool: str, limit: int) -> List[StageRunRow]:
+        """Fetch ready batch.
+        
+        Parameters
+        ----------
+        run_id : str
+        pool : str
+        limit : int
+        
+        Returns
+        -------
+        List[StageRunRow]"""
         stages_in_pool = self.pipeline_spec.stages_in_pool(pool)
         if not stages_in_pool:
             return []
@@ -504,6 +660,14 @@ class PipelineState:
     def set_force_launch(
         self, run_id: str, target_label: str, stage: str, *, enabled: bool
     ) -> None:
+        """Set force launch.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        enabled : bool"""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE stage_runs SET force_launch = ? "
@@ -512,6 +676,13 @@ class PipelineState:
             )
 
     def clear_force_launch(self, run_id: str, target_label: str, stage: str) -> None:
+        """Clear force launch.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         self.set_force_launch(run_id, target_label, stage, enabled=False)
 
     def fetch_force_launch_ready(self, run_id: str) -> List[StageRunRow]:
@@ -532,6 +703,13 @@ class PipelineState:
     def reset_stages_for_force_rerun(
         self, run_id: str, target_labels: Sequence[str], stages: Sequence[str]
     ) -> None:
+        """Reset stages for force rerun.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_labels : Sequence[str]
+        stages : Sequence[str]"""
         with self._conn() as conn:
             for label in target_labels:
                 for stage in stages:
@@ -549,6 +727,15 @@ class PipelineState:
                     )
 
     def list_failed_stage_runs(self, run_id: str) -> List[StageRunRow]:
+        """List failed stage runs.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[StageRunRow]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM stage_runs WHERE run_id = ? AND status = ? "
@@ -558,6 +745,15 @@ class PipelineState:
             return [_stage_run_from_row(r) for r in rows]
 
     def list_retryable_stage_runs(self, run_id: str) -> List[StageRunRow]:
+        """List retryable stage runs.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[StageRunRow]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM stage_runs WHERE run_id = ? AND status IN (?, ?, ?, ?) "
@@ -569,24 +765,69 @@ class PipelineState:
     def insert_command(
         self, kind: str, *, run_id: str | None = None, args: dict | None = None
     ) -> int:
+        """Insert command.
+        
+        Parameters
+        ----------
+        kind : str
+        run_id : str | None, optional, default ``None``
+        args : dict | None, optional, default ``None``
+        
+        Returns
+        -------
+        int"""
         if not run_id:
             raise ValueError("run_id required for command intents")
         return self.enqueue_command(run_id, kind, args)
 
     def fetch_pending_commands(self, limit: int = 50) -> List[CommandRow]:
+        """Fetch pending commands.
+        
+        Parameters
+        ----------
+        limit : int, optional, default ``50``
+        
+        Returns
+        -------
+        List[CommandRow]"""
         return self.fetch_unprocessed_commands()[:limit]
 
     def apply_cancel_run(self, run_id: str) -> dict[str, int]:
+        """Apply cancel run.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        dict[str, int]"""
         counts = self.cancel_run_stages(run_id)
         self.set_run_status(run_id, RUN_CANCELED)
         return {"canceled": counts["running"], "blocked": counts["other"]}
 
     def apply_retry_run(self, run_id: str, *, reset_downstream: bool = True) -> int:
+        """Apply retry run.
+        
+        Parameters
+        ----------
+        run_id : str
+        reset_downstream : bool, optional, default ``True``
+        
+        Returns
+        -------
+        int"""
         total = self.reopen_failed_canceled(run_id)
         self.set_run_status(run_id, RUN_RUNNING)
         return total
 
     def set_selected_stages(self, run_id: str, stages: Sequence[str]) -> None:
+        """Set selected stages.
+        
+        Parameters
+        ----------
+        run_id : str
+        stages : Sequence[str]"""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE runs SET stages = ? WHERE run_id = ?",
@@ -622,6 +863,14 @@ class PipelineState:
         *,
         reset_downstream: bool = True,
     ) -> None:
+        """Apply retry stage.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        reset_downstream : bool, optional, default ``True``"""
         row = self.get_stage_run(run_id, target_label, stage)
         if row and row.status == STATUS_RUNNING:
             self.requeue_to_ready(
@@ -638,6 +887,11 @@ class PipelineState:
         self.set_run_status(run_id, RUN_RUNNING)
 
     def update_supervisor_heartbeat(self, pid: int) -> None:
+        """Update supervisor heartbeat.
+        
+        Parameters
+        ----------
+        pid : int"""
         import socket
 
         host = socket.gethostname()
@@ -647,9 +901,15 @@ class PipelineState:
             self.heartbeat_daemon(pid)
 
     def get_supervisor_status(self) -> dict | None:
+        """Get supervisor status.
+        
+        Returns
+        -------
+        dict | None"""
         return self.get_daemon()
 
     def clear_supervisor(self) -> None:
+        """Clear supervisor."""
         self.clear_daemon()
 
     # ------------------------------------------------------------------
@@ -705,6 +965,15 @@ class PipelineState:
                     )
 
     def _distinct_target_labels(self, run_id: str) -> List[str]:
+        """Distinct target labels.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[str]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT DISTINCT target_label FROM stage_runs WHERE run_id = ? "
@@ -772,6 +1041,13 @@ class PipelineState:
     def _clear_stage_skip_cache(
         self, run_id: str, target_label: str, stage: str
     ) -> None:
+        """Clear stage skip cache.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         with self._conn() as conn:
             conn.execute(
                 "DELETE FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
@@ -788,6 +1064,13 @@ class PipelineState:
     def _reopen_not_selected_stage(
         self, run_id: str, target_label: str, stage: str
     ) -> None:
+        """Reopen not selected stage.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         self._clear_stage_skip_cache(run_id, target_label, stage)
         self.update_stage_status(run_id, target_label, stage, STATUS_PENDING)
 
@@ -867,6 +1150,13 @@ class PipelineState:
     def _clear_external_check(
         self, run_id: str, target_label: str, stage: str
     ) -> None:
+        """Clear external check.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         with self._conn() as conn:
             conn.execute(
                 "DELETE FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
@@ -875,11 +1165,29 @@ class PipelineState:
             )
 
     def get_run(self, run_id: str) -> dict | None:
+        """Get run.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        dict | None"""
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             return dict(row) if row else None
 
     def list_runs(self, limit: int = 20) -> List[dict]:
+        """List runs.
+        
+        Parameters
+        ----------
+        limit : int, optional, default ``20``
+        
+        Returns
+        -------
+        List[dict]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?", (limit,)
@@ -887,6 +1195,11 @@ class PipelineState:
             return [dict(r) for r in rows]
 
     def active_runs(self) -> List[dict]:
+        """Active runs.
+        
+        Returns
+        -------
+        List[dict]"""
         placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
         with self._conn() as conn:
             rows = conn.execute(
@@ -896,20 +1209,56 @@ class PipelineState:
             return [dict(r) for r in rows]
 
     def set_paused(self, run_id: str, paused: bool) -> None:
+        """Set paused.
+        
+        Parameters
+        ----------
+        run_id : str
+        paused : bool"""
         with self._conn() as conn:
             conn.execute("UPDATE runs SET paused = ? WHERE run_id = ?", (int(paused), run_id))
 
     def is_paused(self, run_id: str) -> bool:
+        """Is paused.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        bool"""
         with self._conn() as conn:
             row = conn.execute("SELECT paused FROM runs WHERE run_id = ?", (run_id,)).fetchone()
             return bool(row and row["paused"])
 
     def selected_stages(self, run_id: str) -> List[str]:
+        """Selected stages.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[str]"""
         run = self.get_run(run_id) or {}
         raw = run.get("stages") or ""
         return [s for s in raw.split(",") if s]
 
     def get_run_target(self, run_id: str, sector: int, camera: int, ccd: int) -> dict | None:
+        """Get run target.
+        
+        Parameters
+        ----------
+        run_id : str
+        sector : int
+        camera : int
+        ccd : int
+        
+        Returns
+        -------
+        dict | None"""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM targets WHERE run_id = ? AND sector = ? AND camera = ? AND ccd = ?",
@@ -921,6 +1270,17 @@ class PipelineState:
     # Stage row read / write
     # ------------------------------------------------------------------
     def get_stage_run(self, run_id: str, target_label: str, stage: str) -> StageRunRow | None:
+        """Get stage run.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        
+        Returns
+        -------
+        StageRunRow | None"""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT * FROM stage_runs WHERE run_id = ? AND target_label = ? AND stage = ?",
@@ -929,6 +1289,15 @@ class PipelineState:
             return _stage_run_from_row(row) if row else None
 
     def list_stage_runs(self, run_id: str) -> List[StageRunRow]:
+        """List stage runs.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        List[StageRunRow]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM stage_runs WHERE run_id = ? ORDER BY target_label, stage",
@@ -937,6 +1306,15 @@ class PipelineState:
             return [_stage_run_from_row(r) for r in rows]
 
     def running_stage_runs(self, run_id: str | None = None) -> List[StageRunRow]:
+        """Running stage runs.
+        
+        Parameters
+        ----------
+        run_id : str | None, optional, default ``None``
+        
+        Returns
+        -------
+        List[StageRunRow]"""
         with self._conn() as conn:
             if run_id is None:
                 rows = conn.execute(
@@ -967,6 +1345,24 @@ class PipelineState:
         claimed_at: str | None = None,
         submit_epoch: float | None = None,
     ) -> None:
+        """Update stage status.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        status : str
+        started_at : str | None, optional, default ``None``
+        finished_at : str | None, optional, default ``None``
+        exit_code : int | None, optional, default ``None``
+        log_path : str | None, optional, default ``None``
+        error_tail : str | None, optional, default ``None``
+        executor : str | None, optional, default ``None``
+        native_id : int | None, optional, default ``None``
+        launch_token : str | None, optional, default ``None``
+        claimed_at : str | None, optional, default ``None``
+        submit_epoch : float | None, optional, default ``None``"""
         fields = ["status = ?"]
         values: list = [status]
         for col, val in (
@@ -993,6 +1389,15 @@ class PipelineState:
             conn.execute(sql, values)
 
     def count_by_status(self, run_id: str) -> Dict[str, int]:
+        """Count by status.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        Dict[str, int]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT status, COUNT(*) AS n FROM stage_runs WHERE run_id = ? GROUP BY status",
@@ -1099,6 +1504,13 @@ class PipelineState:
     # Promotion / blocking / requeue
     # ------------------------------------------------------------------
     def clear_launch_fields(self, run_id: str, target_label: str, stage: str) -> None:
+        """Clear launch fields.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE stage_runs SET executor = NULL, native_id = NULL, launch_token = NULL, "
@@ -1108,14 +1520,35 @@ class PipelineState:
             )
 
     def mark_ready(self, run_id: str, target_label: str, stage: str) -> None:
+        """Mark ready.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         self.update_stage_status(run_id, target_label, stage, STATUS_READY)
 
     def mark_skipped(self, run_id: str, target_label: str, stage: str) -> None:
+        """Mark skipped.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str"""
         self.update_stage_status(
             run_id, target_label, stage, STATUS_SKIPPED, finished_at=_utc_now(), exit_code=0
         )
 
     def block_downstream(self, run_id: str, target_label: str, failed_stage: str) -> None:
+        """Block downstream.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        failed_stage : str"""
         with self._conn() as conn:
             for stage in self.pipeline_spec.downstream_stages(failed_stage):
                 conn.execute(
@@ -1266,6 +1699,17 @@ class PipelineState:
     # External -> skipped completeness cache
     # ------------------------------------------------------------------
     def external_verify_complete(self, run_id: str, target_label: str, stage: str) -> bool:
+        """External verify complete.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        
+        Returns
+        -------
+        bool"""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT path FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
@@ -1275,6 +1719,17 @@ class PipelineState:
             return row is not None and row["path"] == "1"
 
     def external_verify_attempted(self, run_id: str, target_label: str, stage: str) -> bool:
+        """External verify attempted.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        
+        Returns
+        -------
+        bool"""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT 1 FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
@@ -1290,6 +1745,14 @@ class PipelineState:
     def cache_external_check(
         self, run_id: str, target_label: str, stage: str, *, complete: bool
     ) -> None:
+        """Cache external check.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        complete : bool"""
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO artifacts "
@@ -1299,6 +1762,14 @@ class PipelineState:
             )
 
     def cache_skip_reason(self, run_id: str, target_label: str, stage: str, reason: str) -> None:
+        """Cache skip reason.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        reason : str"""
         with self._conn() as conn:
             conn.execute(
                 "INSERT OR REPLACE INTO artifacts "
@@ -1308,6 +1779,17 @@ class PipelineState:
             )
 
     def get_skip_reason(self, run_id: str, target_label: str, stage: str) -> str | None:
+        """Get skip reason.
+        
+        Parameters
+        ----------
+        run_id : str
+        target_label : str
+        stage : str
+        
+        Returns
+        -------
+        str | None"""
         with self._conn() as conn:
             row = conn.execute(
                 "SELECT path FROM artifacts WHERE run_id = ? AND target_label = ? AND stage = ? "
@@ -1333,6 +1815,17 @@ class PipelineState:
     # Commands (CLI -> daemon intents)
     # ------------------------------------------------------------------
     def enqueue_command(self, run_id: str, kind: str, args: dict | None = None) -> int:
+        """Enqueue command.
+        
+        Parameters
+        ----------
+        run_id : str
+        kind : str
+        args : dict | None, optional, default ``None``
+        
+        Returns
+        -------
+        int"""
         with self._conn() as conn:
             cur = conn.execute(
                 "INSERT INTO commands (run_id, kind, args_json, created_at) VALUES (?, ?, ?, ?)",
@@ -1341,6 +1834,11 @@ class PipelineState:
             return int(cur.lastrowid)
 
     def fetch_unprocessed_commands(self) -> List[CommandRow]:
+        """Fetch unprocessed commands.
+        
+        Returns
+        -------
+        List[CommandRow]"""
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM commands WHERE processed_at IS NULL ORDER BY id"
@@ -1348,6 +1846,11 @@ class PipelineState:
             return [CommandRow(**dict(r)) for r in rows]
 
     def mark_command_processed(self, command_id: int) -> None:
+        """Mark command processed.
+        
+        Parameters
+        ----------
+        command_id : int"""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE commands SET processed_at = ? WHERE id = ?",
@@ -1358,6 +1861,12 @@ class PipelineState:
     # Daemon registry / heartbeat
     # ------------------------------------------------------------------
     def set_daemon_running(self, pid: int, host: str) -> None:
+        """Set daemon running.
+        
+        Parameters
+        ----------
+        pid : int
+        host : str"""
         now = _utc_now()
         with self._conn() as conn:
             conn.execute(
@@ -1369,6 +1878,11 @@ class PipelineState:
             )
 
     def heartbeat_daemon(self, pid: int) -> None:
+        """Heartbeat daemon.
+        
+        Parameters
+        ----------
+        pid : int"""
         with self._conn() as conn:
             conn.execute(
                 "UPDATE daemon SET last_heartbeat = ?, pid = ? WHERE id = 1",
@@ -1376,11 +1890,17 @@ class PipelineState:
             )
 
     def get_daemon(self) -> dict | None:
+        """Get daemon.
+        
+        Returns
+        -------
+        dict | None"""
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM daemon WHERE id = 1").fetchone()
             return dict(row) if row else None
 
     def clear_daemon(self) -> None:
+        """Clear daemon."""
         with self._conn() as conn:
             conn.execute("DELETE FROM daemon WHERE id = 1")
 

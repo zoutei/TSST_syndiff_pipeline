@@ -40,10 +40,21 @@ def progress_path_for_diff_log(log_path: Path | str) -> Path:
 
 
 def _utc_now_iso() -> str:
+    """Utc now iso.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _write_locked(path: Path, payload: dict[str, Any]) -> None:
+    """Write locked.
+    
+    Parameters
+    ----------
+    path : Path
+    payload : dict[str, Any]"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -84,6 +95,11 @@ def mark_frame_done(path: Path | str, *, success: bool) -> None:
     """Increment frame counters (atomic replace; safe on NFS)."""
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         total = int(state.get("frames_total", 0))
         done = int(state.get("frames_done", 0)) + 1
         if total > 0:
@@ -104,6 +120,11 @@ def set_progress_phase(path: Path | str, phase: str) -> None:
     path = Path(path)
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         state["phase"] = phase
 
     if path.is_file():

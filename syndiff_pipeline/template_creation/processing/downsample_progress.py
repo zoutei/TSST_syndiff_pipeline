@@ -18,10 +18,24 @@ def progress_path_for_log(log_path: Path | str) -> Path:
 
 
 def _utc_now_iso() -> str:
+    """Utc now iso.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _sum_batch_done(batches: dict[str, Any]) -> int:
+    """Sum batch done.
+    
+    Parameters
+    ----------
+    batches : dict[str, Any]
+    
+    Returns
+    -------
+    int"""
     total = 0
     for entry in batches.values():
         if isinstance(entry, dict):
@@ -30,6 +44,12 @@ def _sum_batch_done(batches: dict[str, Any]) -> int:
 
 
 def _write_locked(path: Path, payload: dict[str, Any]) -> None:
+    """Write locked.
+    
+    Parameters
+    ----------
+    path : Path
+    payload : dict[str, Any]"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -37,6 +57,12 @@ def _write_locked(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _update_locked(path: Path, mutator) -> None:
+    """Update locked.
+    
+    Parameters
+    ----------
+    path : Path
+    mutator"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
@@ -89,6 +115,11 @@ def set_progress_phase(
     path = Path(path)
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         state["phase"] = phase
         if total_skycells is not None:
             state["total_skycells"] = int(total_skycells)
@@ -119,6 +150,11 @@ def mark_skycell_done(path: Path | str, batch_idx: int) -> None:
     key = str(batch_idx)
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         batches = state.setdefault("batches", {})
         entry = batches.setdefault(key, {"size": 0, "done": 0})
         size = int(entry.get("size", 0))

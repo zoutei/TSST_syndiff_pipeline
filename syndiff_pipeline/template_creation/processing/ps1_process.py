@@ -156,6 +156,7 @@ class ProcessingState:
     next_cell_locations: dict[str, tuple[int, int, int, int]] = None
 
     def __post_init__(self):
+        """Post init."""
         if self.current_masks is None:
             self.current_masks = {}
         if self.next_masks is None:

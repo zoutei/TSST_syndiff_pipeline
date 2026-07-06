@@ -409,6 +409,15 @@ def smooth_wcs_drift_savgol(
 
 
 def _wcs_ok_mask(wok: pd.Series) -> pd.Series:
+    """Wcs ok mask.
+    
+    Parameters
+    ----------
+    wok : pd.Series
+    
+    Returns
+    -------
+    pd.Series"""
     return wok.apply(lambda x: x is True or str(x).lower() in ("true", "1"))
 
 
@@ -867,6 +876,15 @@ def write_cluster_template_job_json(
         ``shape`` ``[ny, nx]`` for downstream reload without separate crop JSON.
     """
     def _json_val(x: Any) -> Union[int, float, str]:
+        """Json val.
+        
+        Parameters
+        ----------
+        x : Any
+        
+        Returns
+        -------
+        Union[int, float, str]"""
         if isinstance(x, (np.integer, int)):
             return int(x)
         if isinstance(x, (np.floating, float)):

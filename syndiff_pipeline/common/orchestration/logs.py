@@ -15,26 +15,77 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 def _utc_now_iso() -> str:
+    """Utc now iso.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def runs_root(cfg_runs_root: str) -> Path:
+    """Runs root.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    
+    Returns
+    -------
+    Path"""
     return Path(cfg_runs_root).expanduser().resolve()
 
 
 def run_dir(cfg_runs_root: str, run_id: str) -> Path:
+    """Run dir.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    
+    Returns
+    -------
+    Path"""
     return runs_root(cfg_runs_root) / run_id
 
 
 def run_config_path(run_directory: str | Path) -> Path:
+    """Run config path.
+    
+    Parameters
+    ----------
+    run_directory : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(run_directory).expanduser().resolve() / "config.yaml"
 
 
 def run_targets_path(run_directory: str | Path) -> Path:
+    """Run targets path.
+    
+    Parameters
+    ----------
+    run_directory : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(run_directory).expanduser().resolve() / "targets.csv"
 
 
 def run_meta_path(run_directory: str | Path) -> Path:
+    """Run meta path.
+    
+    Parameters
+    ----------
+    run_directory : str | Path
+    
+    Returns
+    -------
+    Path"""
     return Path(run_directory).expanduser().resolve() / "run_meta.json"
 
 
@@ -65,6 +116,17 @@ def materialize_run_inputs(
 
 
 def ensure_run_layout(cfg_runs_root: str, run_id: str, meta: dict) -> Path:
+    """Ensure run layout.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    meta : dict
+    
+    Returns
+    -------
+    Path"""
     rd = run_dir(cfg_runs_root, run_id)
     rd.mkdir(parents=True, exist_ok=True)
     (rd / "per_target").mkdir(exist_ok=True)
@@ -82,6 +144,13 @@ def ensure_run_layout(cfg_runs_root: str, run_id: str, meta: dict) -> Path:
 
 
 def update_run_meta(cfg_runs_root: str, run_id: str, patch: dict) -> None:
+    """Update run meta.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    patch : dict"""
     rd = run_dir(cfg_runs_root, run_id)
     meta_path = rd / "run_meta.json"
     meta = {}
@@ -95,14 +164,50 @@ def update_run_meta(cfg_runs_root: str, run_id: str, patch: dict) -> None:
 
 
 def target_log_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
+    """Target log path.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    target_label : str
+    stage : str
+    
+    Returns
+    -------
+    Path"""
     return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.log"
 
 
 def stage_status_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
+    """Stage status path.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    target_label : str
+    stage : str
+    
+    Returns
+    -------
+    Path"""
     return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.status.json"
 
 
 def stage_manifest_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
+    """Stage manifest path.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    target_label : str
+    stage : str
+    
+    Returns
+    -------
+    Path"""
     return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.manifest.json"
 
 
@@ -118,20 +223,56 @@ def stable_stage_manifest_path(cfg_runs_root: str, target_label: str, stage: str
 
 
 def _control_dir(workspace_root: str | Path) -> Path:
+    """Control dir.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     from syndiff_pipeline.common.orchestration.workspace import control_root
 
     return control_root(workspace_root)
 
 
 def daemon_lock_path(workspace_root: str | Path) -> Path:
+    """Daemon lock path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _control_dir(workspace_root) / "daemon.lock"
 
 
 def daemon_pid_path(workspace_root: str | Path) -> Path:
+    """Daemon pid path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _control_dir(workspace_root) / "daemon.pid"
 
 
 def daemon_log_path(workspace_root: str | Path) -> Path:
+    """Daemon log path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _control_dir(workspace_root) / "daemon.log"
 
 
@@ -151,14 +292,41 @@ def daemon_heartbeat_file(workspace_root: str | Path) -> Path:
 
 
 def discord_bot_lock_path(workspace_root: str | Path) -> Path:
+    """Discord bot lock path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _control_dir(workspace_root) / "discord_bot.lock"
 
 
 def discord_bot_pid_path(workspace_root: str | Path) -> Path:
+    """Discord bot pid path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _control_dir(workspace_root) / "discord_bot.pid"
 
 
 def discord_bot_log_path(workspace_root: str | Path) -> Path:
+    """Discord bot log path.
+    
+    Parameters
+    ----------
+    workspace_root : str | Path
+    
+    Returns
+    -------
+    Path"""
     return _control_dir(workspace_root) / "discord_bot.log"
 
 
@@ -189,14 +357,40 @@ def workspace_deployment_path(workspace_root: str | Path) -> Path:
 
 
 def summary_csv_path(cfg_runs_root: str, run_id: str) -> Path:
+    """Summary csv path.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    
+    Returns
+    -------
+    Path"""
     return run_dir(cfg_runs_root, run_id) / "summary.csv"
 
 
 def summary_json_path(cfg_runs_root: str, run_id: str) -> Path:
+    """Summary json path.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    
+    Returns
+    -------
+    Path"""
     return run_dir(cfg_runs_root, run_id) / "summary.json"
 
 
 def write_json_atomic(path: Path, payload: dict) -> None:
+    """Write json atomic.
+    
+    Parameters
+    ----------
+    path : Path
+    payload : dict"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -204,6 +398,15 @@ def write_json_atomic(path: Path, payload: dict) -> None:
 
 
 def read_json(path: Path) -> dict | None:
+    """Read json.
+    
+    Parameters
+    ----------
+    path : Path
+    
+    Returns
+    -------
+    dict | None"""
     if not path.is_file():
         return None
     try:
@@ -213,6 +416,16 @@ def read_json(path: Path) -> dict | None:
 
 
 def _format_header(stage: str, snapshot: Dict[str, Any]) -> str:
+    """Format header.
+    
+    Parameters
+    ----------
+    stage : str
+    snapshot : Dict[str, Any]
+    
+    Returns
+    -------
+    str"""
     lines = [
         "=" * 72,
         f"STAGE: {stage}",
@@ -225,6 +438,17 @@ def _format_header(stage: str, snapshot: Dict[str, Any]) -> str:
 
 
 def _format_footer(duration_s: float, exit_code: int, error_tail: str = "") -> str:
+    """Format footer.
+    
+    Parameters
+    ----------
+    duration_s : float
+    exit_code : int
+    error_tail : str, optional, default ``''``
+    
+    Returns
+    -------
+    str"""
     lines = [
         "-" * 72,
         f"Finished: {_utc_now_iso()}",
@@ -240,6 +464,15 @@ def _format_footer(duration_s: float, exit_code: int, error_tail: str = "") -> s
 
 @contextmanager
 def stage_log(cfg_runs_root: str, run_id: str, target_label: str, stage: str, snapshot: dict):
+    """Stage log.
+    
+    Parameters
+    ----------
+    cfg_runs_root : str
+    run_id : str
+    target_label : str
+    stage : str
+    snapshot : dict"""
     log_path = target_log_path(cfg_runs_root, run_id, target_label, stage)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     t0 = time.monotonic()
@@ -284,6 +517,17 @@ def stage_log(cfg_runs_root: str, run_id: str, target_label: str, stage: str, sn
 
 
 def read_log_tail(path: str | Path, n_lines: int = 40, *, max_bytes: int = 65536) -> str:
+    """Read log tail.
+    
+    Parameters
+    ----------
+    path : str | Path
+    n_lines : int, optional, default ``40``
+    max_bytes : int, optional, default ``65536``
+    
+    Returns
+    -------
+    str"""
     p = Path(path)
     if not p.is_file():
         return ""

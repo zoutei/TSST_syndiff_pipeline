@@ -297,6 +297,11 @@ def load_group_templates(output_dir: str, round_id: int = 1) -> tuple:
     sat_tmpl_native, sat_tmpl_hr : dict {group_id: 2D ndarray}
     """
     def _load(sub):
+        """Load.
+        
+        Parameters
+        ----------
+        sub"""
         d = {}
         subdir = os.path.join(output_dir, sub)
         for path in iter_pipeline_fits_paths(subdir):

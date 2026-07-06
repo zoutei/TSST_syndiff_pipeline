@@ -34,6 +34,7 @@ _DRAIN_POLL_S = 0.05
 
 @dataclass(frozen=True)
 class VerifyTaskKey:
+    """VerifyTaskKey."""
     run_id: str
     target_label: str
     stage: str
@@ -41,6 +42,7 @@ class VerifyTaskKey:
 
 @dataclass(frozen=True)
 class VerifyTask:
+    """VerifyTask."""
     key: VerifyTaskKey
     manifest_path: str
     stable_path: str
@@ -51,12 +53,14 @@ class VerifyTask:
 
 @dataclass(frozen=True)
 class BackfillTask:
+    """BackfillTask."""
     manifest_path: str
     stable_path: str
 
 
 @dataclass(frozen=True)
 class VerifyOutcome:
+    """VerifyOutcome."""
     key: VerifyTaskKey
     complete: bool
     stable_path: str
@@ -65,6 +69,11 @@ class VerifyOutcome:
 
 
 def _run_backfill_task(task: BackfillTask) -> None:
+    """Run backfill task.
+    
+    Parameters
+    ----------
+    task : BackfillTask"""
     try:
         copy_manifest_to_stable(task.manifest_path, task.stable_path)
     except Exception as exc:  # noqa: BLE001 - backfill is best-effort
@@ -77,6 +86,15 @@ def _run_backfill_task(task: BackfillTask) -> None:
 
 
 def _run_verify_task(task: VerifyTask) -> VerifyOutcome:
+    """Run verify task.
+    
+    Parameters
+    ----------
+    task : VerifyTask
+    
+    Returns
+    -------
+    VerifyOutcome"""
     try:
         complete = stage_complete(
             task.resolved,
@@ -125,7 +143,13 @@ def _run_verify_task(task: VerifyTask) -> VerifyOutcome:
 
 
 class ArtifactVerifyWorker:
+    """ArtifactVerifyWorker."""
     def __init__(self, *, max_workers: int = _DEFAULT_MAX_WORKERS) -> None:
+        """Init.
+        
+        Parameters
+        ----------
+        max_workers : int, optional, default ``_DEFAULT_MAX_WORKERS``"""
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="artifact-verify",
@@ -135,6 +159,15 @@ class ArtifactVerifyWorker:
         self._lock = threading.Lock()
 
     def schedule(self, tasks: Iterable[VerifyTask]) -> int:
+        """Schedule.
+        
+        Parameters
+        ----------
+        tasks : Iterable[VerifyTask]
+        
+        Returns
+        -------
+        int"""
         scheduled = 0
         with self._lock:
             for task in tasks:
@@ -155,16 +188,43 @@ class ArtifactVerifyWorker:
         return scheduled
 
     def is_in_flight(self, key: VerifyTaskKey) -> bool:
+        """Is in flight.
+        
+        Parameters
+        ----------
+        key : VerifyTaskKey
+        
+        Returns
+        -------
+        bool"""
         with self._lock:
             return key in self._in_flight
 
     def in_flight_count(self, run_id: str | None = None) -> int:
+        """In flight count.
+        
+        Parameters
+        ----------
+        run_id : str | None, optional, default ``None``
+        
+        Returns
+        -------
+        int"""
         with self._lock:
             if run_id is None:
                 return len(self._in_flight)
             return sum(1 for key in self._in_flight if key.run_id == run_id)
 
     def in_flight_keys(self, run_id: str | None = None) -> list[VerifyTaskKey]:
+        """In flight keys.
+        
+        Parameters
+        ----------
+        run_id : str | None, optional, default ``None``
+        
+        Returns
+        -------
+        list[VerifyTaskKey]"""
         with self._lock:
             keys = list(self._in_flight.keys())
         if run_id is not None:
@@ -184,6 +244,15 @@ class ArtifactVerifyWorker:
         return cancelled
 
     def cancel_run(self, run_id: str) -> int:
+        """Cancel run.
+        
+        Parameters
+        ----------
+        run_id : str
+        
+        Returns
+        -------
+        int"""
         with self._lock:
             keys = [key for key in self._in_flight if key.run_id == run_id]
         return self.cancel_keys(keys)
@@ -218,6 +287,16 @@ class ArtifactVerifyWorker:
         *,
         run_id: str | None,
     ) -> int:
+        """Drain once.
+        
+        Parameters
+        ----------
+        apply : Callable[[VerifyOutcome], int]
+        run_id : str | None
+        
+        Returns
+        -------
+        int"""
         done: list[tuple[VerifyTaskKey, Future[VerifyOutcome]]] = []
         with self._lock:
             for key, fut in self._in_flight.items():
@@ -252,6 +331,11 @@ class ArtifactVerifyWorker:
         return applied
 
     def shutdown(self, *, wait: bool = True) -> None:
+        """Shutdown.
+        
+        Parameters
+        ----------
+        wait : bool, optional, default ``True``"""
         self._executor.shutdown(wait=wait, cancel_futures=not wait)
         with self._lock:
             self._in_flight.clear()
@@ -272,6 +356,11 @@ def init_verify_worker(max_workers: int = _DEFAULT_MAX_WORKERS) -> ArtifactVerif
 
 
 def get_verify_worker() -> ArtifactVerifyWorker:
+    """Get verify worker.
+    
+    Returns
+    -------
+    ArtifactVerifyWorker"""
     return init_verify_worker()
 
 
@@ -295,6 +384,11 @@ def verify_in_flight_count(run_id: str | None = None) -> int:
 
 
 def shutdown_verify_worker(*, wait: bool = True) -> None:
+    """Shutdown verify worker.
+    
+    Parameters
+    ----------
+    wait : bool, optional, default ``True``"""
     global _worker
     with _worker_lock:
         if _worker is not None:

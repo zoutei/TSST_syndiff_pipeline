@@ -33,10 +33,25 @@ def is_workspace_inherit_entry(entry: Any) -> bool:
 
 
 def is_pipeline_preamble_entry(entry: Any) -> bool:
+    """Is pipeline preamble entry.
+    
+    Parameters
+    ----------
+    entry : Any
+    
+    Returns
+    -------
+    bool"""
     return is_external_workspaces_entry(entry) or is_workspace_inherit_entry(entry)
 
 
 def validate_external_entry_keys(entry: dict, idx: int) -> None:
+    """Validate external entry keys.
+    
+    Parameters
+    ----------
+    entry : dict
+    idx : int"""
     extra = set(entry.keys()) - _EXTERNAL_ENTRY_ALLOWED_KEYS
     if extra:
         raise ValueError(
@@ -45,6 +60,16 @@ def validate_external_entry_keys(entry: dict, idx: int) -> None:
 
 
 def parse_external_workspace_labels(entry: dict, idx: int) -> list[str]:
+    """Parse external workspace labels.
+    
+    Parameters
+    ----------
+    entry : dict
+    idx : int
+    
+    Returns
+    -------
+    list[str]"""
     validate_external_entry_keys(entry, idx)
     raw = entry.get(EXTERNAL_WORKSPACES_KEY)
     if raw is None:
@@ -65,6 +90,17 @@ def parse_external_workspace_labels(entry: dict, idx: int) -> list[str]:
 
 
 def _parse_string_list(raw: Any, *, pipeline_idx: int, field: str) -> list[str]:
+    """Parse string list.
+    
+    Parameters
+    ----------
+    raw : Any
+    pipeline_idx : int
+    field : str
+    
+    Returns
+    -------
+    list[str]"""
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -84,6 +120,16 @@ def _parse_string_list(raw: Any, *, pipeline_idx: int, field: str) -> list[str]:
 
 
 def parse_workspace_inherit_spec(entry: dict, idx: int) -> WorkspaceInheritSpec:
+    """Parse workspace inherit spec.
+    
+    Parameters
+    ----------
+    entry : dict
+    idx : int
+    
+    Returns
+    -------
+    WorkspaceInheritSpec"""
     extra = set(entry.keys()) - {WORKSPACE_INHERIT_KEY}
     if extra:
         raise ValueError(

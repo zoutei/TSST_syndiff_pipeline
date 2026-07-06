@@ -24,10 +24,21 @@ def progress_path_for_diff_log(log_path: Path | str) -> Path:
 
 
 def _utc_now_iso() -> str:
+    """Utc now iso.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _write_locked(path: Path, payload: dict[str, Any]) -> None:
+    """Write locked.
+    
+    Parameters
+    ----------
+    path : Path
+    payload : dict[str, Any]"""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -35,6 +46,12 @@ def _write_locked(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _update_locked(path: Path, mutator) -> None:
+    """Update locked.
+    
+    Parameters
+    ----------
+    path : Path
+    mutator"""
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+", encoding="utf-8") as fh:
         fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
@@ -83,6 +100,11 @@ def mark_epoch_done(path: Path | str) -> None:
     """Increment ``epochs_done`` under an exclusive file lock."""
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         total = int(state.get("epochs_total", 0))
         done = int(state.get("epochs_done", 0)) + 1
         if total > 0:
@@ -96,6 +118,11 @@ def reset_epochs_done(path: Path | str, *, phase: str) -> None:
     """Reset the epoch counter and set lifecycle phase (e.g. cutouts → flux)."""
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         state["epochs_done"] = 0
         state["phase"] = phase
 
@@ -107,6 +134,11 @@ def set_progress_phase(path: Path | str, phase: str) -> None:
     path = Path(path)
 
     def mutator(state: dict[str, Any]) -> None:
+        """Mutator.
+        
+        Parameters
+        ----------
+        state : dict[str, Any]"""
         state["phase"] = phase
 
     if path.is_file():
@@ -153,6 +185,17 @@ def init_progress_pair(
     epochs_total: int,
     phase: str = "flux",
 ) -> None:
+    """Init progress pair.
+    
+    Parameters
+    ----------
+    workspace_path : Path | str
+    cli_path : Path | str | None
+    output_label : str
+    diffs_input : str
+    n_sources : int
+    epochs_total : int
+    phase : str, optional, default ``'flux'``"""
     kwargs = {
         "output_label": output_label,
         "diffs_input": diffs_input,
@@ -169,6 +212,12 @@ def record_epoch_progress(
     workspace_path: Path | str,
     cli_path: Path | str | None,
 ) -> None:
+    """Record epoch progress.
+    
+    Parameters
+    ----------
+    workspace_path : Path | str
+    cli_path : Path | str | None"""
     mark_epoch_done(workspace_path)
     if cli_path is not None:
         mark_epoch_done(cli_path)
@@ -179,6 +228,13 @@ def set_progress_phase_pair(
     cli_path: Path | str | None,
     phase: str,
 ) -> None:
+    """Set progress phase pair.
+    
+    Parameters
+    ----------
+    workspace_path : Path | str
+    cli_path : Path | str | None
+    phase : str"""
     set_progress_phase(workspace_path, phase)
     if cli_path is not None:
         set_progress_phase(cli_path, phase)
@@ -190,6 +246,13 @@ def reset_epochs_done_pair(
     *,
     phase: str,
 ) -> None:
+    """Reset epochs done pair.
+    
+    Parameters
+    ----------
+    workspace_path : Path | str
+    cli_path : Path | str | None
+    phase : str"""
     reset_epochs_done(workspace_path, phase=phase)
     if cli_path is not None:
         reset_epochs_done(cli_path, phase=phase)

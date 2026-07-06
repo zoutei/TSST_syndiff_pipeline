@@ -55,6 +55,11 @@ PRESET_NAMES = frozenset({"all", "template", "diff"})
 
 
 def _template_stage_names() -> list[str]:
+    """Template stage names.
+    
+    Returns
+    -------
+    list[str]"""
     from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
 
     return [spec.name for spec in TEMPLATE_STAGES]
@@ -72,6 +77,15 @@ def preset_stages(preset: str) -> list[str]:
 
 
 def _resolve_single_stage(stage: str) -> str:
+    """Resolve single stage.
+    
+    Parameters
+    ----------
+    stage : str
+    
+    Returns
+    -------
+    str"""
     try:
         return dispatch.resolve_stage_name(stage)
     except ValueError as exc:
@@ -79,6 +93,15 @@ def _resolve_single_stage(stage: str) -> str:
 
 
 def _resolve_stages_arg(args: argparse.Namespace) -> tuple[list[str], str]:
+    """Resolve stages arg.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    tuple[list[str], str]"""
     if getattr(args, "stages", None):
         active = dispatch.parse_stage_list(args.stages)
         return active, args.stages
@@ -91,6 +114,16 @@ def _resolve_stages_arg(args: argparse.Namespace) -> tuple[list[str], str]:
 
 
 def _discord_bot_config_path(args: argparse.Namespace, ctx: RunContext | None = None) -> Path | None:
+    """Discord bot config path.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    ctx : RunContext | None, optional, default ``None``
+    
+    Returns
+    -------
+    Path | None"""
     if getattr(args, "config", None):
         return Path(args.config).expanduser().resolve()
     if ctx is not None:
@@ -106,6 +139,12 @@ def _ensure_discord_bot(
     *,
     site_config_path: str | Path | None = None,
 ):
+    """Ensure discord bot.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    site_config_path : str | Path | None, optional, default ``None``"""
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import ensure_discord_bot_running
 
     return ensure_discord_bot_running(
@@ -120,6 +159,13 @@ def _print_discord_bot_status(
     *,
     site_config_path: str | Path | None = None,
 ) -> None:
+    """Print discord bot status.
+    
+    Parameters
+    ----------
+    deployment_path : str | Path
+    result
+    site_config_path : str | Path | None, optional, default ``None``"""
     if result is None:
         print("Discord bot: starting with supervisor (see daemon.log)")
         return
@@ -140,6 +186,15 @@ def _print_discord_bot_status(
 
 
 def _resolve_site_paths(args: argparse.Namespace) -> SitePaths | None:
+    """Resolve site paths.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    SitePaths | None"""
     site = getattr(args, "site", None)
     if site:
         return SitePaths.from_site_dir(site)
@@ -147,6 +202,11 @@ def _resolve_site_paths(args: argparse.Namespace) -> SitePaths | None:
 
 
 def _resolve_config_from_site(args: argparse.Namespace) -> None:
+    """Resolve config from site.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace"""
     if getattr(args, "config", None):
         return
     site_paths = _resolve_site_paths(args)
@@ -155,6 +215,15 @@ def _resolve_config_from_site(args: argparse.Namespace) -> None:
 
 
 def _resolve_deployment_from_site(args: argparse.Namespace) -> Path | None:
+    """Resolve deployment from site.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    Path | None"""
     if getattr(args, "deployment", None):
         return None
     site_paths = _resolve_site_paths(args)
@@ -170,6 +239,11 @@ def _resolve_deployment_from_site(args: argparse.Namespace) -> Path | None:
 
 
 def _patch_local_diff_executor(run_directory: Path) -> None:
+    """Patch local diff executor.
+    
+    Parameters
+    ----------
+    run_directory : Path"""
     cfg_path = logs.run_config_path(run_directory)
     cfg = load_runner_config(cfg_path)
     cfg.stages.diff.executor = "local"
@@ -177,10 +251,25 @@ def _patch_local_diff_executor(run_directory: Path) -> None:
 
 
 def _default_run_id() -> str:
+    """Default run id.
+    
+    Returns
+    -------
+    str"""
     return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
 
 
 def _resolve_run_id(cfg, run_id: str | None) -> str:
+    """Resolve run id.
+    
+    Parameters
+    ----------
+    cfg
+    run_id : str | None
+    
+    Returns
+    -------
+    str"""
     if run_id:
         return run_id
     latest = logs.runs_root(cfg.runs_dir()) / "latest"
@@ -193,6 +282,15 @@ def _resolve_run_id(cfg, run_id: str | None) -> str:
 
 
 def _resolve_latest_run_id_from_handoff(handoff: str | Path) -> str:
+    """Resolve latest run id from handoff.
+    
+    Parameters
+    ----------
+    handoff : str | Path
+    
+    Returns
+    -------
+    str"""
     root = runs_root(handoff)
     latest = root / "latest"
     if latest.is_symlink():
@@ -204,6 +302,15 @@ def _resolve_latest_run_id_from_handoff(handoff: str | Path) -> str:
 
 
 def _resolve_handoff_from_args(args: argparse.Namespace) -> str:
+    """Resolve handoff from args.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    str"""
     deployment = getattr(args, "deployment", None)
     if deployment:
         path = Path(deployment).expanduser().resolve()
@@ -228,6 +335,15 @@ def _resolve_handoff_from_args(args: argparse.Namespace) -> str:
 
 
 def _resolve_deployment_from_args(args: argparse.Namespace) -> Path:
+    """Resolve deployment from args.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    Path"""
     deployment = getattr(args, "deployment", None)
     if deployment:
         path = Path(deployment).expanduser().resolve()
@@ -258,6 +374,15 @@ def _resolve_deployment_from_args(args: argparse.Namespace) -> Path:
 
 
 def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
+    """Resolve run from args.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    RunContext"""
     if getattr(args, "run_dir", None):
         return resolve_run_context(
             run_dir=args.run_dir,
@@ -286,6 +411,17 @@ def _resolve_run_ids_for_monitoring(
     *,
     run_id: str | None = None,
 ) -> list[str]:
+    """Resolve run ids for monitoring.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    handoff : str
+    run_id : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    list[str]"""
     if run_id:
         return [run_id]
     active = state.active_runs()
@@ -295,6 +431,15 @@ def _resolve_run_ids_for_monitoring(
 
 
 def _monitoring_mode(args: argparse.Namespace) -> bool:
+    """Monitoring mode.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    bool"""
     return not getattr(args, "run_dir", None) and not getattr(args, "run_id", None)
 
 
@@ -310,6 +455,23 @@ def _prepare_run_directory(
     source_diff_config_path: str | None = None,
     workspace_run_id: str | None = None,
 ) -> Path:
+    """Prepare run directory.
+    
+    Parameters
+    ----------
+    source_config : str
+    source_targets : str
+    run_id : str
+    runs_root : str
+    stages : list[str]
+    detach : bool
+    force_rerun : bool
+    source_diff_config_path : str | None, optional, default ``None``
+    workspace_run_id : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    Path"""
     run_directory = logs.run_dir(runs_root, run_id)
     run_directory.mkdir(parents=True, exist_ok=True)
     (run_directory / "per_target").mkdir(exist_ok=True)
@@ -338,10 +500,26 @@ def _prepare_run_directory(
 
 
 def _run_context_from_directory(run_directory: Path, run_id: str) -> RunContext:
+    """Run context from directory.
+    
+    Parameters
+    ----------
+    run_directory : Path
+    run_id : str
+    
+    Returns
+    -------
+    RunContext"""
     return resolve_run_context(run_dir=run_directory, run_id=run_id)
 
 
 def _reject_duplicate_run_id(state: PipelineState, run_id: str) -> None:
+    """Reject duplicate run id.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    run_id : str"""
     if state.get_run(run_id) is not None:
         raise SystemExit(
             f"Run {run_id!r} already exists. Choose a new --run-id for submit, "
@@ -350,6 +528,15 @@ def _reject_duplicate_run_id(state: PipelineState, run_id: str) -> None:
 
 
 def cmd_submit(args: argparse.Namespace) -> int:
+    """Cmd submit.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.common.orchestration.targets import load_targets
 
     cfg = load_runner_config(args.config)
@@ -446,6 +633,15 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    """Cmd run.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.common.orchestration.scheduler import run_scheduler
     from syndiff_pipeline.common.orchestration.targets import load_targets
 
@@ -487,6 +683,14 @@ def _print_status_for_run(
     workspace_root: str,
     multi_run: bool,
 ) -> None:
+    """Print status for run.
+    
+    Parameters
+    ----------
+    state : PipelineState
+    run_id : str
+    workspace_root : str
+    multi_run : bool"""
     from syndiff_pipeline.template_creation.orchestration.run_report import format_status_grid
     from syndiff_pipeline.common.orchestration.verify_status import read_verify_run_status
 
@@ -509,6 +713,15 @@ def _print_status_for_run(
 
 
 def cmd_status(args: argparse.Namespace) -> int:
+    """Cmd status.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     if _monitoring_mode(args):
         handoff = _resolve_handoff_from_args(args)
         warn_if_daemon_host_mismatch(handoff)
@@ -518,6 +731,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         )
 
         def _print_once():
+            """Print once."""
             multi = len(run_ids) > 1
             for run_id in run_ids:
                 _print_status_for_run(
@@ -573,6 +787,15 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_progress(args: argparse.Namespace) -> int:
+    """Cmd progress.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.template_creation.orchestration.run_report import (
         format_progress_lines,
         format_run_status_header,
@@ -617,6 +840,15 @@ def cmd_progress(args: argparse.Namespace) -> int:
 
 
 def cmd_runs(args: argparse.Namespace) -> int:
+    """Cmd runs.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     handoff = _resolve_handoff_from_args(args)
     state = PipelineState(str(state_db_path(handoff)))
     alive = daemon_is_alive(handoff)
@@ -629,6 +861,15 @@ def cmd_runs(args: argparse.Namespace) -> int:
 
 
 def cmd_notify_test(args: argparse.Namespace) -> int:
+    """Cmd notify test.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     ctx = _resolve_run_from_args(args)
     state = PipelineState(ctx.cfg.state_db_path)
     from syndiff_pipeline.common.orchestration.notifications import (
@@ -655,6 +896,15 @@ def cmd_notify_test(args: argparse.Namespace) -> int:
 
 
 def cmd_active(args: argparse.Namespace) -> int:
+    """Cmd active.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     handoff = _resolve_handoff_from_args(args)
     state = PipelineState(str(state_db_path(handoff)))
     found = False
@@ -673,6 +923,15 @@ def cmd_active(args: argparse.Namespace) -> int:
 
 
 def cmd_show(args: argparse.Namespace) -> int:
+    """Cmd show.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     ctx = _resolve_run_from_args(args)
     meta_path = logs.run_meta_path(ctx.run_dir)
     if meta_path.is_file():
@@ -683,6 +942,15 @@ def cmd_show(args: argparse.Namespace) -> int:
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
+    """Cmd logs.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     ctx = _resolve_run_from_args(args)
     if args.target and args.stage:
         stage = _resolve_single_stage(args.stage)
@@ -701,6 +969,15 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
+    """Cmd verify.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
     from syndiff_pipeline.common.orchestration.targets import find_target, load_targets
     from syndiff_pipeline.template_creation.orchestration.verify import persist_completion_manifests, verify_stage
@@ -835,6 +1112,15 @@ def cmd_reconcile_manifests(args: argparse.Namespace) -> int:
 
 
 def cmd_retry(args: argparse.Namespace) -> int:
+    """Cmd retry.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.common.orchestration.targets import find_target_for_run
 
     ctx = _resolve_run_from_args(args)
@@ -887,6 +1173,15 @@ def cmd_retry(args: argparse.Namespace) -> int:
 
 
 def cmd_launch(args: argparse.Namespace) -> int:
+    """Cmd launch.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.common.orchestration.targets import find_target_for_run
 
     if not args.scc or not args.stage:
@@ -941,6 +1236,15 @@ def cmd_launch(args: argparse.Namespace) -> int:
 
 
 def cmd_pause(args: argparse.Namespace) -> int:
+    """Cmd pause.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     ctx = _resolve_run_from_args(args)
     warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
     PipelineState(ctx.cfg.state_db_path).insert_command("pause", run_id=ctx.run_id)
@@ -949,6 +1253,15 @@ def cmd_pause(args: argparse.Namespace) -> int:
 
 
 def cmd_resume(args: argparse.Namespace) -> int:
+    """Cmd resume.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     ctx = _resolve_run_from_args(args)
     warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
     state = PipelineState(ctx.cfg.state_db_path)
@@ -958,6 +1271,15 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def cmd_kill(args: argparse.Namespace) -> int:
+    """Cmd kill.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     ctx = _resolve_run_from_args(args)
     warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
     state = PipelineState(ctx.cfg.state_db_path)
@@ -968,6 +1290,15 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def cmd_discord_bot(args: argparse.Namespace) -> int:
+    """Cmd discord bot.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.template_creation.orchestration.discord_bot import run_discord_bot
 
     deploy_path = _resolve_deployment_from_args(args)
@@ -976,6 +1307,15 @@ def cmd_discord_bot(args: argparse.Namespace) -> int:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
+    """Cmd daemon.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    int"""
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
         discord_bot_status_for_handoff,
         ensure_discord_bot_for_workspace_root,
@@ -1075,6 +1415,11 @@ def cmd_daemon(args: argparse.Namespace) -> int:
 
 
 def _add_site_scope(sp: argparse.ArgumentParser) -> None:
+    """Add site scope.
+    
+    Parameters
+    ----------
+    sp : argparse.ArgumentParser"""
     sp.add_argument(
         "--site",
         default=None,
@@ -1083,6 +1428,11 @@ def _add_site_scope(sp: argparse.ArgumentParser) -> None:
 
 
 def _add_workspace_scope(sp: argparse.ArgumentParser) -> None:
+    """Add workspace scope.
+    
+    Parameters
+    ----------
+    sp : argparse.ArgumentParser"""
     _add_site_scope(sp)
     sp.add_argument(
         "--deployment",
@@ -1092,6 +1442,11 @@ def _add_workspace_scope(sp: argparse.ArgumentParser) -> None:
 
 
 def _add_run_scope(sp: argparse.ArgumentParser) -> None:
+    """Add run scope.
+    
+    Parameters
+    ----------
+    sp : argparse.ArgumentParser"""
     sp.add_argument("--run-dir", default=None, help="Full run directory path (frozen config/targets)")
     sp.add_argument(
         "--run-id",
@@ -1106,6 +1461,11 @@ def _add_run_scope(sp: argparse.ArgumentParser) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Build parser.
+    
+    Returns
+    -------
+    argparse.ArgumentParser"""
     p = argparse.ArgumentParser(prog="syndiff", description="SynDiff pipeline")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -1274,6 +1634,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Main.
+    
+    Parameters
+    ----------
+    argv : list[str] | None, optional, default ``None``
+    
+    Returns
+    -------
+    int"""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)

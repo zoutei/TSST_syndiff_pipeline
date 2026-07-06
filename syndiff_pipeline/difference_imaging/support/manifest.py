@@ -33,6 +33,16 @@ def manifest_path_from_output_dir(output_dir: str, manifest_abspath: str | None 
 
 
 def load_frame_manifest(output_dir: str, manifest_path: str | None = None) -> pd.DataFrame:
+    """Load frame manifest.
+    
+    Parameters
+    ----------
+    output_dir : str
+    manifest_path : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    pd.DataFrame"""
     path = manifest_path_from_output_dir(output_dir, manifest_path)
     if not os.path.isfile(path):
         raise FileNotFoundError(
@@ -45,6 +55,17 @@ def load_frame_manifest(output_dir: str, manifest_path: str | None = None) -> pd
 def save_frame_manifest(
     df: pd.DataFrame, output_dir: str, manifest_path: str | None = None
 ) -> str:
+    """Save frame manifest.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    output_dir : str
+    manifest_path : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    str"""
     path = manifest_path_from_output_dir(output_dir, manifest_path)
     parent = os.path.dirname(path)
     if parent:
@@ -54,6 +75,16 @@ def save_frame_manifest(
 
 
 def manifest_csv_exists(output_dir: str, manifest_path: str | None = None) -> bool:
+    """Manifest csv exists.
+    
+    Parameters
+    ----------
+    output_dir : str
+    manifest_path : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    bool"""
     return os.path.isfile(manifest_path_from_output_dir(output_dir, manifest_path))
 
 
@@ -73,6 +104,16 @@ def _ensure_manifest_text_column(
 
 
 def _ensure_hotpants_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
+    """Ensure hotpants columns.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    round_id : int
+    
+    Returns
+    -------
+    pd.DataFrame"""
     df = df.copy()
     cols = (
         (f"hotpants_r{round_id}_ok", pd.NA),
@@ -88,6 +129,16 @@ def _ensure_hotpants_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
 
 
 def _ensure_hotpants_label_columns(df: pd.DataFrame, label: str) -> pd.DataFrame:
+    """Ensure hotpants label columns.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    label : str
+    
+    Returns
+    -------
+    pd.DataFrame"""
     df = df.copy()
     safe = sanitize_workspace_label(label)
     for c, init in (
@@ -103,6 +154,16 @@ def _ensure_hotpants_label_columns(df: pd.DataFrame, label: str) -> pd.DataFrame
 
 
 def _ensure_epsf_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
+    """Ensure epsf columns.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    round_id : int
+    
+    Returns
+    -------
+    pd.DataFrame"""
     df = df.copy()
     for c, init in (
         (f"epsf_r{round_id}_ok", pd.NA),
@@ -118,6 +179,17 @@ def _ensure_epsf_columns(df: pd.DataFrame, round_id: int) -> pd.DataFrame:
 def manifest_has_hotpants_status(
     output_dir: str, round_id: int, manifest_path: str | None = None
 ) -> bool:
+    """Manifest has hotpants status.
+    
+    Parameters
+    ----------
+    output_dir : str
+    round_id : int
+    manifest_path : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    bool"""
     path = manifest_path_from_output_dir(output_dir, manifest_path)
     if not os.path.isfile(path):
         return False
@@ -128,6 +200,17 @@ def manifest_has_hotpants_status(
 def manifest_has_hotpants_label(
     output_dir: str, label: str, manifest_path: str | None = None
 ) -> bool:
+    """Manifest has hotpants label.
+    
+    Parameters
+    ----------
+    output_dir : str
+    label : str
+    manifest_path : str | None, optional, default ``None``
+    
+    Returns
+    -------
+    bool"""
     path = manifest_path_from_output_dir(output_dir, manifest_path)
     if not os.path.isfile(path):
         return False
@@ -165,6 +248,18 @@ def apply_hotpants_results(
     results: list,
     round_id: int,
 ) -> pd.DataFrame:
+    """Apply hotpants results.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    ffi_paths : list
+    results : list
+    round_id : int
+    
+    Returns
+    -------
+    pd.DataFrame"""
     df = _ensure_hotpants_columns(df, round_id)
     ok_col = f"hotpants_r{round_id}_ok"
     err_col = f"hotpants_r{round_id}_error"
@@ -316,6 +411,17 @@ def ordered_photometry_diff_paths(
     output_dir: str,
     source: str,
 ) -> list:
+    """Ordered photometry diff paths.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+    output_dir : str
+    source : str
+    
+    Returns
+    -------
+    list"""
     src = source.lower().strip()
     if src not in ("final", "r1", "r2"):
         raise ValueError(

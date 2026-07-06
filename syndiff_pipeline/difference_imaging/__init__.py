@@ -1,0 +1,1 @@
+"""Package module ``syndiff_pipeline.difference_imaging``."""

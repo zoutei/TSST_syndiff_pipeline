@@ -29,6 +29,11 @@ def parallel_map_with_optional_tqdm(
         parallel_kwargs["initargs"] = initargs
 
     def _collect(results_iter):
+        """Collect.
+        
+        Parameters
+        ----------
+        results_iter"""
         out = []
         for item in results_iter:
             if on_result is not None:

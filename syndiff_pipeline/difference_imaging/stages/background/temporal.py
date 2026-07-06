@@ -17,6 +17,15 @@ log = logging.getLogger(__name__)
 
 
 def _sanitize_btjd(btjd: np.ndarray) -> np.ndarray:
+    """Sanitize btjd.
+    
+    Parameters
+    ----------
+    btjd : np.ndarray
+    
+    Returns
+    -------
+    np.ndarray"""
     t = np.asarray(btjd, dtype=float)
     if np.isnan(t).all():
         return np.arange(len(t), dtype=float)
