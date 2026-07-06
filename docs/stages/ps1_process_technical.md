@@ -75,16 +75,16 @@ flowchart TD
         CSV --> TaskBuild
     end
 
-    subgraph stage1 [Stage 1 - Reader Threads x2]
+    subgraph stage1 [Stage 1 - Ingest Threads xN (default 16)]
         TQ["task_queue\nFIFO"]
-        RW1["reader_worker 1"]
-        RW2["reader_worker 2"]
+        RW1["ingest_worker 1"]
+        RW2["ingest_worker N"]
         TQ --> RW1 & RW2
         ZarrIn --> RW1 & RW2
     end
 
     subgraph stage15 [Stage 1.5 - Band Combiner Threads x4]
-        RCQ["raw_cell_queue\nmaxsize=6"]
+        RCQ["raw_cell_queue\nmaxsize=max(6, 2xN)"]
         BC1["band_combiner_worker 1"]
         BC2["band_combiner_worker 2"]
         BC3["band_combiner_worker 3"]
@@ -134,7 +134,7 @@ flowchart TD
 ```
 
 The five stages run concurrently:
-- **Stage 1** (2 reader threads): I/O-bound zarr reads, produces raw bundles ~1.6 GB each
+- **Stage 1** (`num_ingest_workers` ingest threads, default 16): I/O-bound reads (zarr, or direct PS1 download in stream mode), produces raw bundles ~1.6 GB each
 - **Stage 1.5** (4 band combiner threads): CPU-bound NumPy band combination, compresses 1.6 GB → ~0.4 GB per cell
 - **Stage 2** (1 coordinator thread + N PPE processes): CPU-bound SEP source extraction only
 - **Stage 3** (main thread): sequential sliding-window assembly, padding, convolution
@@ -197,22 +197,22 @@ After putting all tasks in `task_queue`, `None` signals are sent to terminate th
 
 ---
 
-## 4. Stage 1 — Reader Workers
+## 4. Stage 1 — Ingest Workers
 
-**Two `reader_worker` threads** consume from `task_queue`. Each task is either a 4-tuple (regular cell) or a 5-tuple with task type (padding source):
+**`num_ingest_workers` `ingest_worker` threads** (default **16**; `reader_worker` remains as a backward-compatible alias) consume from `task_queue`. Each task is either a 4-tuple (regular cell) or a 5-tuple with task type (padding source):
 
 ```python
 (skycell_id, projection, row_id, x_coord)               # regular
 (skycell_id, projection, -1, 0, "padding_source")        # padding
 ```
 
-For each task the reader:
+For each task the ingest worker:
 
-1. **Checks `band_cache`** (regular tasks only): if already processed and cached, emits a lightweight `"regular_cache_hit"` bundle — no zarr I/O.
-2. **Opens the zarr store** and calls `load_skycell_bands_masks_and_headers()` — reads r, i, z, y band arrays, mask arrays, variance arrays, and FITS header strings.
+1. **Checks `band_cache`** (regular tasks only): if already processed and cached, emits a lightweight `"regular_cache_hit"` bundle — no I/O.
+2. **Loads the four bands** — in the default `ps1_source: "zarr"` mode via `load_skycell_bands_masks_and_headers()` (r, i, z, y band arrays, mask arrays, variance arrays, FITS header strings); in `ps1_source: "stream"` mode by downloading the skycell FITS files directly (no shared Zarr store required).
 3. **Puts a `raw_bundle`** onto `raw_cell_queue` with all the loaded arrays plus task type metadata.
 
-`raw_cell_queue` has `maxsize=6` (down from 20), holding at most ~9.6 GB of raw data at any one time. Two readers are sufficient since the downstream band combiners process bundles quickly.
+`raw_cell_queue` has `maxsize = max(6, 2 × num_ingest_workers)` (32 at the default worker count). The many ingest threads exist to hide network/disk latency; the queue bound provides the memory backstop.
 
 ---
 
@@ -235,13 +235,7 @@ For each raw bundle (carrying r, i, z, y band arrays, masks, variance maps, and 
 | `raw_bundle` (in `raw_cell_queue`) | ~1.6 GB (4 bands × data + mask + weight) |
 | `reduced_bundle` (in `combined_raw_queue`) | ~0.4 GB (combined_image + mask + uncert) |
 
-With `raw_cell_queue` maxsize=6 and `combined_raw_queue` maxsize=12, the maximum in-queue memory is:
-
-```
-6 × 1.6 GB + 12 × 0.4 GB = 9.6 GB + 4.8 GB = 14.4 GB
-```
-
-This is less than half of the former ~48 GB peak.
+With `raw_cell_queue` maxsize `max(6, 2 × num_ingest_workers)` and `combined_raw_queue` maxsize 12, the theoretical in-queue peak at the default 16 ingest workers is `32 × 1.6 GB + 12 × 0.4 GB`; in practice ingest rarely keeps the raw queue full because band combination drains it in ~4 s per cell. The coordinator's memory-fraction guard (§16) is the hard backstop.
 
 ### Passthrough behaviour
 
@@ -338,11 +332,13 @@ Uses [SEP](https://sep.readthedocs.io/) (Source Extractor as a Python library):
 1. Identifies bright-star pixels: `data > nanmedian(uncert) × sigma_mask (50)`.
 2. Calls `sep.extract()` with `sigma=2.5` to detect sources, producing a segmentation map.
 3. Sets all non-source, non-bright-star pixels to zero (background suppression).
-4. **If `--remove-saturated-stars`**: uses the PS1 saturation mask bits (`0x0020 AND 0x1000`), expands object footprints via distance transform, identifies SEP segments overlapping saturated pixels, and sets those pixels to zero. Records removed star properties (centroid, flux, size, etc.) for output to a CSV.
+4. **If `remove_saturated_stars`** (`band_utils.remove_background`), two segment-removal passes run. The segmentation map is first extended into masked/gap pixels with a distance transform so catalog stars sitting under the bright-star mask still land on a segment.
+   - **Primary (catalog) pass**: Gaia stars projected into the skycell (`project_gaia_to_skycell()`, using the mapping-stage Gaia catalog with `tess_mag` computed from G/BP/RP) are matched to SEP segments; every segment containing a star with `tess_mag < bright_star_mag_threshold` (default 13.0) is **zeroed in its entirety** (no interpolation). Both the bright star (`removal_reason="catalog_bright_star"`) and any fainter Gaia stars sharing the segment (`"catalog_neighbor"`) are recorded.
+   - **Secondary (quality-flag) pass**: PS1 saturation mask bits (`0x0020` and `0x1000`) identify additional saturated segments not already removed; these are also zeroed, recorded as `"quality_flag_star"` (Gaia star found in the segment) or `"quality_flag_no_star"` (SEP-only, `source_id=-1`).
 
-### Enriching star records
+### Removed-star records
 
-Removed star pixel coordinates are converted to RA/Dec using the FITS WCS from the cell's `headers_data`. Each record includes: SEP shape parameters, `skycell_id`, `ra`, `dec`.
+Each record already carries `ra`/`dec` from the Gaia catalog (no WCS back-projection needed); `skycell_id` is attached after the removal call. Full column set: `source_id`, `ra`, `dec`, `pixel_x`, `pixel_y`, `tess_mag`, `phot_g/bp/rp_mean_mag`, `seg_centroid_x/y`, `seg_flux`, `segment_id`, `removal_reason`, `skycell_id`. All records are accumulated and written to **`{convolved_zarr_path}_removed_stars.csv`** at the end of the run; `downsample` later dedups and projects them to crop-local coordinates as `events/{label}/ps1_removed_stars.csv`.
 
 ### Shared memory output
 
@@ -539,7 +535,7 @@ Both fallback paths use this single function:
 
 ## 13. Stage 4 — Saver Worker
 
-`saver_worker` runs as a **daemon thread**. It receives `processed_bundle` dicts from `results_queue` and calls `zarr_utils.save_convolved_results()` to write the convolved cell arrays into the output Zarr store, keyed by `(projection, row_id, skycell_id)`.
+`saver_worker` runs as a **daemon thread**. It receives `processed_bundle` dicts from `results_queue` and calls `zarr_utils.save_convolved_results()` to write into the output Zarr store as **flat root-level arrays named `{skycell_name}_data`** (float32, NaN fill) **and `{skycell_name}_mask`** (uint16, the *pre-convolution* `combined_mask`), zstd-compressed with ≤1024² chunks. Weights are not written in the standard flow.
 
 `results_queue` has `maxsize=3`, which provides backpressure — if the saver is slow, the main thread will block on `results_queue.put()`, naturally throttling the pipeline.
 
@@ -557,17 +553,11 @@ Previous versions of the pipeline were vulnerable to the Linux OOM killer termin
 
 ### Layer 1: Queue size limits on raw data
 
-`raw_cell_queue` is capped at `maxsize=6` (down from 20). With ~1.6 GB per raw bundle, this limits raw-bundle queue memory to ~9.6 GB.
+`raw_cell_queue` is capped at `maxsize = max(6, 2 × num_ingest_workers)` (32 at the default 16 ingest workers). With ~1.6 GB per raw bundle, this bounds raw-bundle queue memory.
 
 ### Layer 2: Band compression before subprocesses
 
-`band_combiner_worker` threads consume raw bundles and output ~0.4 GB combined bundles to `combined_raw_queue` (maxsize=12). The total in-queue peak across both queues is:
-
-```
-6 × 1.6 GB + 12 × 0.4 GB = 9.6 + 4.8 = ~14.4 GB
-```
-
-Previously: `20 × 1.6 GB = ~32 GB` in `raw_cell_queue` alone, plus subprocess memory.
+`band_combiner_worker` threads consume raw bundles and output ~0.4 GB combined bundles to `combined_raw_queue` (maxsize=12), so subprocesses never see raw 4-band bundles. Previously raw bundles went straight to subprocess workers (`20 × 1.6 GB = ~32 GB` in-queue plus subprocess memory).
 
 ### Layer 3: Runtime memory pressure guard
 
@@ -587,7 +577,7 @@ The coordinator polls `psutil.virtual_memory().available` every iteration. If av
 
 | Mechanism | Effect |
 |---|---|
-| `raw_cell_queue maxsize=6` | Backpressure on readers — caps raw in-flight memory at ~9.6 GB |
+| `raw_cell_queue maxsize=max(6, 2×ingest)` | Backpressure on ingest workers — bounds raw in-flight memory |
 | `combined_raw_queue maxsize=12` | Backpressure on band combiners — caps combined in-flight memory at ~4.8 GB |
 | `combined_cell_queue maxsize=30` | Backpressure on coordinator — prevents SEP results from filling RAM |
 | `results_queue maxsize=3` | Backpressure on main thread — prevents convolved results piling up if saver is slow |
@@ -603,8 +593,8 @@ The coordinator polls `psutil.virtual_memory().available` every iteration. If av
 
 | Name | Type | maxsize | Direction | Purpose |
 |---|---|---|---|---|
-| `task_queue` | `queue.Queue` | unbounded | Startup → Readers | Ordered task tuples (cell name, projection, row, x, type) |
-| `raw_cell_queue` | `queue.Queue` | 6 | Readers → Band Combiners | Raw zarr-loaded band bundles (~1.6 GB each) |
+| `task_queue` | `queue.Queue` | unbounded | Startup → Ingest workers | Ordered task tuples (cell name, projection, row, x, type) |
+| `raw_cell_queue` | `queue.Queue` | max(6, 2×ingest) | Ingest workers → Band Combiners | Raw band bundles (~1.6 GB each) |
 | `combined_raw_queue` | `queue.Queue` | 12 | Band Combiners → Coordinator | Pre-combined bundles (~0.4 GB each) |
 | `combined_cell_queue` | `queue.Queue` | 30 | Coordinator → Main thread | Fully processed cell bundles (SEP complete) |
 | `results_queue` | `queue.Queue` | 3 | Main thread → Saver | Convolved row results |
@@ -627,7 +617,7 @@ All queues use `queue.Queue` (threading) rather than `multiprocessing.Queue`. Th
 | `GATHER_TIMEOUT_SECONDS` | 180 s | Max wait since last cell arrival before manual fallback |
 | `MAX_TOTAL_PENDING_WORK` | 30 | PPE active tasks + combined queue size cap |
 | `MIN_AVAILABLE_MEMORY_FRACTION` | 0.15 | RAM fraction below which coordinator pauses submissions |
-| `num_readers` | 2 | Zarr reader thread count (fixed) |
+| `num_ingest_workers` | 16 (configurable) | Ingest thread count (zarr or stream mode) |
 | `num_band_combiners` | 4 | Band combiner thread count (fixed) |
 | `num_source_extractors` | dynamic | SEP subprocess count: `min(ncpus // 2, available_gb // 4)` |
 | `band weights` | r=0.238, i=0.344, z=0.283, y=0.135 | PS1 band combination weights |
@@ -647,10 +637,11 @@ python process_ps1.py SECTOR CAMERA CCD [OPTIONS]
 | `ccd` | TESS CCD number (1–4) |
 | `--data-root DIR` | Root directory for data (default: `data`) |
 | `--limit N` | Process only the first N projections (useful for testing) |
-| `--psf-sigma FLOAT` | Gaussian PSF sigma in pixels (default: 40.0) |
-| `--enable-saturation-correction` | Apply Gaia-catalog-based saturation correction |
-| `--remove-saturated-stars` | Use SEP to detect, remove, and record saturated stars |
-| `--catalog-path PATH` | Override default Gaia catalog path |
+| `--psf-sigma FLOAT` | Gaussian PSF sigma in pixels (default: **60.0**; the convolution kernel is truncated at radius 470 px in `convolution_utils`) |
+| `--enable-saturation-correction` | Apply Gaia-catalog-based saturation correction (**orchestrated runs default this to `true`**) |
+| `--remove-saturated-stars` | Zero out bright/saturated star segments and record them to `{convolved_zarr}_removed_stars.csv` (see §7); uses the Gaia catalog for the primary pass |
+| `--catalog-path PATH` | Override default Gaia catalog path (catalog is used by both saturation correction and star removal) |
+| `--ps1-source {zarr,stream}` | `zarr` (default) reads the shared PS1 Zarr; `stream` downloads skycell FITS on the fly (no shared store needed) |
 
 **Expected directory structure:**
 

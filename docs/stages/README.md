@@ -8,12 +8,12 @@ These documents describe the **science algorithms** behind each template pipelin
 |----------|-------|---------------|----------------|
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
 | [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
-| — | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
+| [WCS grouping](wcs_grouping.md) | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
 | [Multi-offset downsample](downsample_technical.md) | `downsample` | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
-| [Unified background stage](background.md) | `background` | — | `difference_imaging/stages/background/` |
-| — | `diff` | — | `difference_imaging/orchestration/execute.py` (see [`config/diff_config.yaml`](../../config/diff_config.yaml)) |
+| [Diff pipeline internals](diff_pipeline.md) | `diff` | — | `difference_imaging/orchestration/execute.py` + `difference_imaging/stages/` |
+| [Unified background stage](background.md) | `background` (diff sub-stage) | — | `difference_imaging/stages/background/` |
 
 ## PS1 download (no separate deep-dive)
 
@@ -31,19 +31,13 @@ There is no legacy `syndiff/` script — **`tess_ffi_download`** fetches sector 
 
 ## WCS grouping (runner-only)
 
-There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the SynDiff template runner. It uses `syndiff_pipeline.common.wcs_grouping` via `template_creation/orchestration/handoff.py` to:
+There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the SynDiff template runner. See the [WCS grouping deep-dive](wcs_grouping.md) for drift measurement, smoothing, reference-FFI selection, template groups, crop bounds, and output schemas. Downsample reads crop bounds and offset list from `cluster_template_job.json`.
 
-1. Select FFIs where the transient has valid WCS
-2. Smooth pixel drift and assign template offset groups
-3. Write `cluster_template_job.json`, `wcs_drift_template_debug.png`, and `syndiff_ffi_frames.csv` under `{workspace_root}/events/{target_label}/`
+## Diff imaging
 
-Downsample reads crop bounds and offset list from `cluster_template_job.json`.
+**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
 
-## Diff imaging (orchestration docs)
-
-There is no single algorithm deep-dive for the entire diff stack — **`diff`** runs the config-driven pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml) (Hotpants, kernel subtract, background smooth, photometry, etc.). Stage lists, SCC overrides, and Condor settings are documented in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
-
-**Stage-specific diff algorithms:**
+**Sub-stage deep-dives:**
 
 | Document | Stage |
 |----------|-------|

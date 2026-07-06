@@ -27,11 +27,16 @@ docs/
 └── stages/
     ├── README.md                 ← index + script/module mapping
     ├── standalone_pipeline_overview.md   ← legacy single-FFI pipeline.py workflow
-    ├── mapping_pancakes.md       ← PanCAKES v2 (TESS↔PS1 pixel mapping)
-    ├── ps1_process_technical.md  ← sliding-window convolution architecture
+    ├── tess_ffi_download.md      ← FFI download stage
+    ├── wcs_grouping.md           ← drift measurement, template groups, reference FFI, crop
+    ├── mapping_pancakes.md       ← PanCAKES (TESS↔PS1 pixel mapping) + Gaia download
+    ├── ps1_process_technical.md  ← sliding-window convolution architecture + star removal
     ├── downsample_technical.md   ← multi-offset downsampling onto TESS grid
-    └── phot_bkg_temporal_smooth.md  ← Savitzky–Golay temporal smooth of ks_b (kernel_subtract bkg)
+    ├── diff_pipeline.md          ← diff internal sub-stages, kernels, photometry
+    └── background.md             ← Savitzky–Golay temporal smooth of ks_b (kernel_subtract bkg)
 ```
+
+**Improvement plans** (design docs, not yet implemented) live under [`.cursor/plans/`](../.cursor/plans/): spatially varying WCS drift templates, and target-star-removed templates for exoplanet light curves.
 
 The stage deep-dives were originally maintained in the standalone [`syndiff`](../../syndiff/) research repository (`README_pancakes.md`, `README_process_ps1.md`, `README_downsample_offset.md`). They are copied here so this release is self-contained.
 
