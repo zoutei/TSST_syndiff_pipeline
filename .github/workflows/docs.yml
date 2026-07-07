@@ -23,7 +23,9 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -e ".[docs]" --no-deps
+        run: |
+          pip install "sphinx>=7.0" "myst-parser>=3.0" "pydata-sphinx-theme>=0.15" "sphinx-autodoc-typehints>=2.0"
+          pip install -e . --no-deps
 
       - name: Build Sphinx HTML
         env:

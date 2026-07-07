@@ -7,7 +7,10 @@
 
 ```bash
 mamba activate syndiff
-pip install -e ".[docs]" --no-deps
+pip install -e ".[docs]"          # local: installs Sphinx + hotpants
+# CI-style lightweight build (no hotpants):
+# pip install "sphinx>=7.0" "myst-parser>=3.0" "pydata-sphinx-theme>=0.15" "sphinx-autodoc-typehints>=2.0"
+# pip install -e . --no-deps
 cd docs/sphinx && make html
 ```
 
