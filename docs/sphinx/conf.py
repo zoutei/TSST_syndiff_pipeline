@@ -61,7 +61,25 @@ autodoc_default_options = {
     "show-inheritance": True,
 }
 autodoc_typehints = "description"
+# Mock third-party imports so autodoc can build without the full pipeline runtime
+# (numpy, astropy, hotpants, MOCPy, etc.). Docstrings are read from source only.
 autodoc_mock_imports = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "astropy",
+    "matplotlib",
+    "yaml",
+    "zarr",
+    "numba",
+    "shapely",
+    "joblib",
+    "tqdm",
+    "requests",
+    "filelock",
+    "dask",
+    "dask_image",
+    "psutil",
     "mocpy",
     "hotpants",
     "discord",
@@ -74,6 +92,7 @@ autodoc_mock_imports = [
     "astroquery",
     "photutils",
     "skimage",
+    "PRF",
 ]
 
 intersphinx_mapping = {

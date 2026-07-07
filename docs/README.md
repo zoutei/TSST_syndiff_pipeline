@@ -7,9 +7,11 @@
 
 ```bash
 mamba activate syndiff
-pip install -e ".[docs]"
+pip install -e ".[docs]" --no-deps
 cd docs/sphinx && make html
 ```
+
+The docs build mocks third-party imports (numpy, astropy, hotpants, …) so the full pipeline runtime is not required — same as GitHub Actions CI.
 
 Output: `docs/_build/html/index.html` (user guide + API reference).
 
