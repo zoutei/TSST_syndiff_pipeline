@@ -4,11 +4,27 @@ from __future__ import annotations
 
 import os
 import sys
+import warnings
 from pathlib import Path
 
 DOCS_ROOT = Path(__file__).resolve().parent.parent
 REPO_ROOT = DOCS_ROOT.parent
 sys.path.insert(0, str(REPO_ROOT))
+
+# autodoc_mock_imports replaces packages with MagicMocks; warning categories like
+# astropy.wcs.FITSFixedWarning are then not real classes and break filterwarnings
+# at import time. Skip invalid categories during the docs build only.
+_filterwarnings = warnings.filterwarnings
+
+
+def _safe_filterwarnings(*args, **kwargs):
+    category = kwargs.get("category")
+    if category is not None and not isinstance(category, type):
+        return
+    _filterwarnings(*args, **kwargs)
+
+
+warnings.filterwarnings = _safe_filterwarnings
 
 project = "syndiff-pipeline"
 copyright = "2026, SynDiff contributors"
@@ -22,7 +38,6 @@ extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
     "sphinx.ext.intersphinx",
-    "sphinx_autodoc_typehints",
 ]
 
 templates_path = ["_templates"]
@@ -60,9 +75,7 @@ autodoc_default_options = {
     "members": True,
     "show-inheritance": True,
 }
-autodoc_typehints = "description"
-# Mock third-party imports so autodoc can build without the full pipeline runtime
-# (numpy, astropy, hotpants, MOCPy, etc.). Docstrings are read from source only.
+# Mock third-party imports so autodoc can build without the full pipeline runtime.
 autodoc_mock_imports = [
     "numpy",
     "pandas",
