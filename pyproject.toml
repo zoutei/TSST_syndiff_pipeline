@@ -18,6 +18,11 @@ docs = [
   "sphinx>=7.0",
   "myst-parser>=3.0",
   "pydata-sphinx-theme>=0.15",
+  "numpy",
+  "scipy",
+  "pandas",
+  "matplotlib",
+  "astropy",
 ]
 
 [project.scripts]

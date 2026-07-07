@@ -75,13 +75,9 @@ autodoc_default_options = {
     "members": True,
     "show-inheritance": True,
 }
-# Mock third-party imports so autodoc can build without the full pipeline runtime.
+# Mock heavy/unavailable runtime deps; numpy/scipy/pandas/matplotlib/astropy are
+# installed in CI because autodoc imports modules that use them at import time.
 autodoc_mock_imports = [
-    "numpy",
-    "pandas",
-    "scipy",
-    "astropy",
-    "matplotlib",
     "yaml",
     "zarr",
     "numba",
