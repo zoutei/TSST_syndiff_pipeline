@@ -23,9 +23,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: |
-          pip install -e ".[docs]"
-          pip install numpy pandas astropy scipy matplotlib pyyaml zarr numba shapely joblib
+        run: pip install -e ".[docs]" --no-deps
 
       - name: Build Sphinx HTML
         env:
