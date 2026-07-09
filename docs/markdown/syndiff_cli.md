@@ -5,7 +5,7 @@ This document explains **what each `syndiff` command and internal module does**.
 `syndiff` is the single console entry point (`pyproject.toml` → `syndiff_pipeline/cli.py`). Commands use a **noun/verb** structure:
 
 ```text
-syndiff <noun> <verb>     # execution presets
+syndiff <noun> <verb>     # execution presets (all|template|diff|star)
 syndiff <verb>            # monitoring, control, verify, daemon
 ```
 
@@ -33,8 +33,26 @@ syndiff <verb>            # monitoring, control, verify, daemon
 | **`syndiff template run`** | Template stages | Foreground template-only debug. |
 | **`syndiff diff submit`** | `diff` | Diff only; upstream template stages start `external` and are skipped when artifacts verify on disk. |
 | **`syndiff diff run`** | `diff` (one target) | Foreground diff for `--target-name` (no daemon/DB). Supports `--validate-only`. |
+| **`syndiff star submit`** | `star` | Supervised batch over enabled rows in `star_targets.csv` (Condor or `--local`). |
+| **`syndiff star run`** | — | Foreground single-SCC star run (`--target-name` required; no daemon/DB). See [star_lightcurves.md](star_lightcurves.md). |
 
-Common flags: `--site DIR` (loads `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`; `pipeline.yaml` may set `diff_config: diff_config.yaml`), `--config`, `--deployment`, `--targets`, `--run-id`, `--stages` (override preset), `--force-rerun`, `--local` (on `syndiff diff submit` or `syndiff all submit`: patches the frozen run config so `stages.diff.executor` is `local` instead of Condor).
+Common flags (template/diff/all presets): `--site DIR` (loads `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`; `pipeline.yaml` may set `diff_config: diff_config.yaml`), `--config`, `--deployment`, `--targets`, `--run-id`, `--stages` (override preset), `--force-rerun`, `--local` (on `syndiff diff submit` or `syndiff all submit`: patches the frozen run config so `stages.diff.executor` is `local` instead of Condor).
+
+**`syndiff star` flags** (`--site` required for both verbs):
+
+| Flag | `submit` | `run` | Description |
+|------|----------|-------|-------------|
+| `--star-config` | yes | yes | Star policy YAML (default: `<site>/star_config.yaml`) |
+| `--star-targets` | yes | yes | Star targets CSV (default: `<site>/star_targets_example.csv`) |
+| `--workspace-run-id` | yes | yes | Output suffix under `events/{label}/star_{id}/` |
+| `--config` | yes | — | Orchestrator `pipeline.yaml` (default: `<site>/pipeline.yaml`) |
+| `--run-id` | yes | — | Unique run name (must not already exist) |
+| `--force-rerun` | yes | — | Ignore existing star artifacts for this run |
+| `--local` | yes | — | Patch frozen config so `stages.star.executor` is `local` |
+| `--target-name` | — | yes | SCC key (`20/3/2`) or full label from `star_targets.csv` |
+| `--targets`, `--stars-file`, `--baseline-*`, `--cutout-size`, … | — | yes | Foreground overrides; see `syndiff star run --help` |
+
+`star submit` materializes the run directory (frozen `star_config.yaml` + targets), registers the `star` stage in SQLite, and ensures the supervisor daemon — same pattern as `template submit`.
 
 **`--local` (submit only):** After materializing the run directory, the CLI rewrites frozen `config.yaml` to set `stages.diff.executor: local`. Use this for cluster smoke tests or when Condor is unavailable; template stages still follow their normal executors.
 
@@ -72,7 +90,7 @@ syndiff retry \
 
 | Command | What it does |
 |---------|--------------|
-| **`syndiff progress`** | Aggregate stage counts; optional per-task detail from stage logs / `downsample.progress.json`. |
+| **`syndiff progress`** | Aggregate stage counts; optional per-task detail from stage logs and progress sidecars (`downsample.progress.json`, `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json` beside `diff.log`). For Condor stages, detail lines also show queue state from `condor_q` (`condor idle cN.0`, `condor running cN.0`, `condor held cN.0`, or `condor unsubmitted` before a cluster id is recorded). Use `--no-detail` for summary-only output. |
 | **`syndiff status`** | Per-target stage grid (`tess_dl`, `wcs`, `map`, `ps1_dl`, `ps1_pr`, `down`, `diff`). `--watch` for live refresh. |
 | **`syndiff show`** | Dump `run_meta.json`. |
 | **`syndiff logs`** / **`syndiff tail`** | Daemon log or `per_target/<label>/<stage>.log`. |
@@ -83,7 +101,7 @@ syndiff retry \
 |---------|--------------|
 | **`syndiff runs`** | List recent runs from SQLite. |
 | **`syndiff active`** | Running/stalled runs + supervisor health. |
-| **`syndiff daemon start\|stop\|status`** | Supervisor lifecycle (normally auto-started by `submit`). |
+| **`syndiff daemon start\|stop\|status`** | Supervisor lifecycle (normally auto-started by `submit`). Ownership is recorded in `control/daemon.lease` (cross-host source of truth). `daemon stop` works from any host via `control/daemon.stop`. |
 
 ### Run control
 
@@ -107,7 +125,8 @@ Insert **command intents** into SQLite; the supervisor applies them on the next 
 | Command | What it does |
 |---------|--------------|
 | **`syndiff notify test`** | Discord preview (`--dry-run` prints locally). |
-| **`syndiff discord bot`** | Foreground status-reply bot (normally auto-started). |
+
+There is **no** `syndiff discord bot` CLI. When `notifications.bot.enabled` is true and token/channel are configured, the status-reply bot runs **in-process inside the supervisor daemon** (started on `submit` / `daemon start`). Check `syndiff daemon status` (`discord_bot.expected_in_process`). Legacy detached bot processes are cleaned up on supervisor start.
 
 ---
 
@@ -139,7 +158,7 @@ tess_ffi_download → wcs_grouping → mapping → ps1_download → ps1_process 
 | **`common/orchestration/run_stage.py`** | `python -m syndiff_pipeline.common.orchestration.run_stage --run-id … --stage …` | Single target + stage worker. Writes log + `*.status.json`, runs spec-driven `execute_stage()`, writes manifests. |
 | **`common/orchestration/scheduler.py`** | `--daemon --deployment …` | Supervisor loop: verify, promote, launch, reconcile. |
 | **`common/orchestration/condor_wrapper.sh`** | HTCondor `executable` | Parameterized conda activation + `exec` of `run_stage.py`. |
-| **`template_creation/.../discord_bot.py`** | `syndiff discord bot` | On-demand status replies. |
+| **`template_creation/.../discord_bot.py`** | In-process inside supervisor daemon | On-demand status replies when `notifications.bot.enabled`. |
 
 ---
 
@@ -153,7 +172,8 @@ Template and diff science code lives under `template_creation/processing/` and `
 
 | Module | Role |
 |--------|------|
-| `syndiff_pipeline/cli.py` | Noun/verb CLI entry; delegates to `common/orchestration/cli.py`. |
+| `syndiff_pipeline/cli.py` | Noun/verb CLI entry; delegates to `common/orchestration/cli.py` and `star/cli.py`. |
+| `star/cli.py` | `syndiff star submit|run` — host-star light curves. |
 | `common/orchestration/cli.py` | Monitoring, control, verify, daemon verbs. |
 | `common/orchestration/spec.py` | `StageSpec` / `PipelineSpec`. |
 | `pipeline_spec.py` | Composed 7-stage SynDiff DAG. |

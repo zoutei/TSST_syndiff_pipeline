@@ -150,6 +150,8 @@ class TestCondorGraceAcrossRestart(unittest.TestCase):
             self.assertEqual(row.status, STATUS_RUNNING)
 
     def test_missing_cluster_past_grace_is_failed(self):
+        from syndiff_pipeline.common.orchestration import stage_liveness
+
         cluster_id = 888_002
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -160,10 +162,259 @@ class TestCondorGraceAcrossRestart(unittest.TestCase):
             with unittest.mock.patch.object(
                 condor, "query_clusters", return_value={cluster_id: (None, None)}
             ):
+                for _ in range(stage_liveness.CONDOR_POLL_MISS_FAIL_THRESHOLD - 1):
+                    counts = reconcile_running_stages(state, "run_a", ctx)
+                    self.assertEqual(counts["failed"], 0)
                 counts = reconcile_running_stages(state, "run_a", ctx)
             row = state.get_stage_run("run_a", label, "ps1_process")
             self.assertEqual(counts["failed"], 1)
             self.assertEqual(row.status, STATUS_FAILED)
+
+
+class TestCondorRestartRobustness(unittest.TestCase):
+    def _target(self) -> Target:
+        return Target(
+            sector=20,
+            camera=3,
+            ccd=3,
+            target_ra=210.0,
+            target_dec=81.0,
+            target_name="2020ut",
+        )
+
+    def _claimed_diff_run(self, tmp: Path, cluster_id: int, *, submit_epoch: float):
+        target = self._target()
+        state, run_dir = _minimal_condor_run(tmp, target)
+        label = target.label()
+        runs_root = tmp / "runs"
+        log_path = logs.target_log_path(str(runs_root), "run_a", label, "ps1_process")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("processing\n", encoding="utf-8")
+        artifacts = condor.condor_artifact_paths(str(runs_root), "run_a", label, "ps1_process")
+        artifacts["clusters"].write_text(f"{cluster_id}\n", encoding="utf-8")
+        state.update_stage_status("run_a", label, "ps1_process", STATUS_READY)
+        state.try_atomic_claim(
+            "run_a",
+            label,
+            "ps1_process",
+            launch_token=state.new_launch_token(),
+            executor="condor",
+            native_id=cluster_id,
+            log_path=str(log_path),
+            submit_epoch=submit_epoch,
+        )
+        ctx = resolve_run_context(run_dir=run_dir)
+        return state, ctx, label, log_path
+
+    def test_active_log_defers_missing_cluster_failure(self):
+        cluster_id = 888_010
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            past = time.time() - condor.poll_grace_seconds() - 1.0
+            state, ctx, label, log_path = self._claimed_diff_run(
+                tmp_path, cluster_id, submit_epoch=past
+            )
+            os.utime(log_path, (time.time(), time.time()))
+            with unittest.mock.patch.object(
+                condor, "query_clusters", return_value={cluster_id: (None, None)}
+            ):
+                counts = reconcile_running_stages(state, "run_a", ctx)
+            row = state.get_stage_run("run_a", label, "ps1_process")
+            self.assertEqual(counts["still_running"], 1)
+            self.assertEqual(counts["failed"], 0)
+            self.assertEqual(row.status, STATUS_RUNNING)
+
+    def test_missing_cluster_fails_after_poll_miss_threshold(self):
+        from syndiff_pipeline.common.orchestration import stage_liveness
+
+        cluster_id = 888_011
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            past = time.time() - condor.poll_grace_seconds() - 1.0
+            state, ctx, label, log_path = self._claimed_diff_run(
+                tmp_path, cluster_id, submit_epoch=past
+            )
+            old = time.time() - stage_liveness.STAGE_OUTPUT_ACTIVE_S - 10.0
+            os.utime(log_path, (old, old))
+            with unittest.mock.patch.object(
+                condor, "query_clusters", return_value={cluster_id: (None, None)}
+            ):
+                for _ in range(stage_liveness.CONDOR_POLL_MISS_FAIL_THRESHOLD - 1):
+                    counts = reconcile_running_stages(state, "run_a", ctx)
+                    self.assertEqual(counts["failed"], 0)
+                counts = reconcile_running_stages(state, "run_a", ctx)
+            row = state.get_stage_run("run_a", label, "ps1_process")
+            self.assertEqual(counts["failed"], 1)
+            self.assertEqual(row.status, STATUS_FAILED)
+
+    def test_reconcile_re_adopts_cluster_id_from_artifacts(self):
+        cluster_id = 888_012
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            target = self._target()
+            state, run_dir = _minimal_condor_run(tmp_path, target)
+            label = target.label()
+            runs_root = tmp_path / "runs"
+            log_path = logs.target_log_path(str(runs_root), "run_a", label, "ps1_process")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text("processing\n", encoding="utf-8")
+            artifacts = condor.condor_artifact_paths(str(runs_root), "run_a", label, "ps1_process")
+            artifacts["clusters"].write_text(f"{cluster_id}\n", encoding="utf-8")
+            state.update_stage_status("run_a", label, "ps1_process", STATUS_READY)
+            token = state.new_launch_token()
+            state.try_atomic_claim(
+                "run_a",
+                label,
+                "ps1_process",
+                launch_token=token,
+                executor="condor",
+                native_id=None,
+                log_path=str(log_path),
+                submit_epoch=time.time(),
+            )
+            ctx = resolve_run_context(run_dir=run_dir)
+            with unittest.mock.patch.object(
+                condor,
+                "query_clusters",
+                return_value={cluster_id: (condor._JOB_RUNNING, None)},
+            ):
+                counts = reconcile_running_stages(state, "run_a", ctx)
+            row = state.get_stage_run("run_a", label, "ps1_process")
+            self.assertEqual(counts["adopted"], 1)
+            self.assertEqual(row.native_id, cluster_id)
+            self.assertEqual(row.status, STATUS_RUNNING)
+
+
+def _real_disconnect_cycle(cluster_id: int, host: str, hhmmss: str) -> str:
+    """Build one disconnect->reconnect-failed->evicted cycle in the exact
+    format HTCondor writes to the user log (verified against a real
+    production log from plscience10.stsci.edu evictions)."""
+    cid = f"{cluster_id:03d}.000.000"
+    ts = f"2026-07-09 {hhmmss}"
+    return "\n".join(
+        [
+            f"022 ({cid}) {ts} Job disconnected, attempting to reconnect",
+            "    Socket between submit and execute hosts closed unexpectedly",
+            f"    Trying to reconnect to slot1_1@{host} "
+            f"<10.128.72.93:9618?addrs=10.128.72.93-9618&alias={host}&noUDP&sock=startd_2951_b811>",
+            "...",
+            f"024 ({cid}) {ts} Job reconnection failed",
+            "    Job not found at execution machine",
+            f"    Can not reconnect to slot1_1@{host}, rescheduling job",
+            "...",
+            f"004 ({cid}) {ts} Job was evicted.",
+            "\t(0) CPU times",
+            "\t\tUsr 0 00:00:00, Sys 0 00:00:00  -  Run Remote Usage",
+            "\t\tUsr 0 00:00:00, Sys 0 00:00:00  -  Run Local Usage",
+            "\t0  -  Run Bytes Sent By Job",
+            "\t0  -  Run Bytes Received By Job",
+            "\tJob not found at execution machine",
+            "...",
+        ]
+    )
+
+
+class TestCondorEvictionExclusion(unittest.TestCase):
+    _SAMPLE_LOG = (
+        _real_disconnect_cycle(5, "plscience10.stsci.edu", "16:59:20")
+        + "\n...\n"
+        + _real_disconnect_cycle(5, "plscience10.stsci.edu", "17:00:20")
+    )
+
+    def test_tally_execution_eviction_failures(self):
+        tallies = condor.tally_execution_eviction_failures(self._SAMPLE_LOG)
+        self.assertEqual(tallies, {"plscience10.stsci.edu": 2})
+
+    def test_merge_requirements_with_exclusions(self):
+        merged = condor.merge_requirements_with_exclusions(
+            "Memory >= 100000",
+            {"plscience10.stsci.edu"},
+        )
+        self.assertEqual(
+            merged,
+            '(Memory >= 100000) && Machine != "plscience10.stsci.edu"',
+        )
+
+    def test_submit_applies_bad_machine_exclusions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            submit_path = Path(tmp) / "job.submit"
+            artifacts = {
+                "stdout": Path(tmp) / "out",
+                "stderr": Path(tmp) / "err",
+                "log": Path(tmp) / "log",
+                "bad_machines": Path(tmp) / "bad.json",
+            }
+            condor.write_bad_machines(
+                artifacts["bad_machines"],
+                {"plscience10.stsci.edu"},
+            )
+            resources = condor.apply_bad_machine_exclusions(
+                condor.CondorResourceRequest(requirements="LoadAvg < 10"),
+                artifacts,
+            )
+            condor.write_submit_file(
+                submit_path,
+                ["echo", "hi"],
+                artifacts,
+                resources,
+            )
+            text = submit_path.read_text(encoding="utf-8")
+            self.assertIn('Machine != "plscience10.stsci.edu"', text)
+            self.assertIn("LoadAvg < 10", text)
+
+    def test_reconcile_requeues_on_eviction_loop(self):
+        cluster_id = 888_020
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            target = Target(
+                sector=20,
+                camera=3,
+                ccd=2,
+                target_ra=210.0,
+                target_dec=81.0,
+                target_name="s20_astrometry",
+            )
+            state, run_dir = _minimal_condor_run(tmp_path, target)
+            label = target.label()
+            runs_root = tmp_path / "runs"
+            log_path = logs.target_log_path(str(runs_root), "run_a", label, "star")
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            # Stale stage log so reconcile does not treat output as active.
+            log_path.write_text("starting\n", encoding="utf-8")
+            old = time.time() - 3600.0
+            os.utime(log_path, (old, old))
+            artifacts = condor.condor_artifact_paths(str(runs_root), "run_a", label, "star")
+            sample_log = (
+                _real_disconnect_cycle(cluster_id, "plscience10.stsci.edu", "16:59:20")
+                + "\n...\n"
+                + _real_disconnect_cycle(cluster_id, "plscience10.stsci.edu", "17:00:20")
+            )
+            artifacts["log"].write_text(sample_log, encoding="utf-8")
+            state.update_stage_status("run_a", label, "star", STATUS_READY)
+            state.try_atomic_claim(
+                "run_a",
+                label,
+                "star",
+                launch_token=state.new_launch_token(),
+                executor="condor",
+                native_id=cluster_id,
+                log_path=str(log_path),
+                submit_epoch=time.time(),
+            )
+            ctx = resolve_run_context(run_dir=run_dir)
+            with unittest.mock.patch.object(
+                condor,
+                "query_clusters",
+                return_value={cluster_id: (condor._JOB_IDLE, None)},
+            ), unittest.mock.patch.object(condor, "remove_cluster", return_value=True) as rm:
+                counts = reconcile_running_stages(state, "run_a", ctx)
+            row = state.get_stage_run("run_a", label, "star")
+            self.assertEqual(counts["requeued"], 1)
+            self.assertEqual(row.status, STATUS_READY)
+            rm.assert_called_once()
+            self.assertEqual(rm.call_args.args[0], cluster_id)
+            bad = condor.read_bad_machines(artifacts["bad_machines"])
+            self.assertIn("plscience10.stsci.edu", bad)
 
 
 class TestCondorHoldTimeoutConfig(unittest.TestCase):
