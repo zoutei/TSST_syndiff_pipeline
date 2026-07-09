@@ -6,8 +6,10 @@ Function-oriented approach for PS1 r,i,z,y band combination.
 
 import logging
 import multiprocessing
+from dataclasses import dataclass
 
 import numpy as np
+import pandas as pd
 import sep
 from astropy.io import fits
 
@@ -273,6 +275,107 @@ def process_skycell_bands(bands_data: dict[str, np.ndarray], masks_data: dict[st
     return combined_image, combined_mask, combined_uncert
 
 
+@dataclass
+class SepBackgroundResult:
+    """SEP extraction outputs used for background suppression and star removal."""
+
+    objects: np.ndarray
+    segmap: np.ndarray
+    mask_bright_stars: np.ndarray
+
+
+def build_sep_background_segmentation(
+    data: np.ndarray,
+    uncert: np.ndarray,
+    *,
+    sigma: float = 2.5,
+    sigma_mask: float = 50,
+    close_bright_mask: bool = False,
+) -> SepBackgroundResult:
+    """Run SEP source extraction with a bright-star mask.
+
+    Args:
+        data: Input image array.
+        uncert: Uncertainty map passed to SEP as ``err``.
+        sigma: SEP detection threshold.
+        sigma_mask: Bright-star masking threshold multiplier.
+        close_bright_mask: If True, morphologically close the bright-star mask.
+
+    Returns:
+        SepBackgroundResult with SEP objects, segmap, and bright-star mask.
+    """
+    mask_bright_stars = data > np.nanmedian(uncert) * sigma_mask
+    if close_bright_mask:
+        from scipy import ndimage
+
+        mask_bright_stars = ndimage.binary_closing(
+            mask_bright_stars, structure=np.ones((20, 20))
+        )
+
+    data_s = data.astype(data.dtype.newbyteorder("="))
+    uncert_s = uncert.astype(uncert.dtype.newbyteorder("="))
+    sep.set_extract_pixstack(10000000)
+    objects, segmap = sep.extract(
+        data_s, sigma, err=uncert_s, mask=mask_bright_stars, segmentation_map=True
+    )
+    return SepBackgroundResult(
+        objects=objects,
+        segmap=segmap,
+        mask_bright_stars=mask_bright_stars,
+    )
+
+
+def filled_segment_map(segmap: np.ndarray) -> np.ndarray:
+    """Fill zero-valued segmap pixels with the nearest segment id.
+
+    Args:
+        segmap: SEP segmentation map.
+
+    Returns:
+        Segmentation map with every pixel assigned to the nearest segment id.
+    """
+    from scipy import ndimage
+
+    has_id = segmap > 0
+    _, indices = ndimage.distance_transform_edt(~has_id, return_indices=True)
+    return segmap[indices[0], indices[1]]
+
+
+def catalog_segment_assignments(
+    gaia_catalog_pixels: pd.DataFrame,
+    filled_seg_map: np.ndarray,
+    mask_bright_stars: np.ndarray,
+    *,
+    segmap: np.ndarray,
+) -> pd.DataFrame:
+    """Assign each catalog row to a segment id via the filled segmap.
+
+    Args:
+        gaia_catalog_pixels: Gaia rows projected to skycell pixel coordinates.
+        filled_seg_map: Output of :func:`filled_segment_map`.
+        mask_bright_stars: Bright-star mask used during SEP extraction.
+        segmap: Raw SEP segmentation map (defines original segment pixels).
+
+    Returns:
+        Copy of ``gaia_catalog_pixels`` with a ``seg_id_cat`` column.
+    """
+    h, w = segmap.shape
+    has_id = segmap > 0
+    filled_seg_map_cat = np.where(has_id | mask_bright_stars, filled_seg_map, 0)
+
+    px_arr = np.clip(
+        np.round(gaia_catalog_pixels["pixel_x"].values).astype(int), 0, w - 1
+    )
+    py_arr = np.clip(
+        np.round(gaia_catalog_pixels["pixel_y"].values).astype(int), 0, h - 1
+    )
+    seg_ids_cat = filled_seg_map_cat[py_arr, px_arr]
+
+    cat_df = gaia_catalog_pixels.copy()
+    cat_df["seg_id_cat"] = seg_ids_cat
+    return cat_df
+
+
 def remove_background(
     data: np.ndarray,
     uncert: np.ndarray = None,
@@ -319,30 +422,24 @@ def remove_background(
     """
     removed_stars_list: list[dict] = []
     try:
-        ndimage = None
-        if remove_saturated_stars:
-            from scipy import ndimage
+        sep_result = build_sep_background_segmentation(
+            data,
+            uncert,
+            sigma=sigma,
+            sigma_mask=sigma_mask,
+            close_bright_mask=remove_saturated_stars,
+        )
+        objects = sep_result.objects
+        segmap = sep_result.segmap
+        mask_bright_stars = sep_result.mask_bright_stars
 
-        mask_bright_stars = data > np.nanmedian(uncert) * sigma_mask
-        if remove_saturated_stars:
-            mask_bright_stars = ndimage.binary_closing(mask_bright_stars, structure=np.ones((20, 20)))
-
-        data_s = data.astype(data.dtype.newbyteorder("="))
-        uncert_s = uncert.astype(uncert.dtype.newbyteorder("="))
-        sep.set_extract_pixstack(10000000)
-        objects, segmap = sep.extract(data_s, sigma, err=uncert_s, mask=mask_bright_stars, segmentation_map=True)
         data[np.logical_and(segmap == 0, ~mask_bright_stars)] = 0
 
         if not remove_saturated_stars:
             return data, removed_stars_list
 
-        H, W = data.shape
         has_id = segmap > 0
-
-        # Build the base distance-transform once; reused by both passes.
-        # For every pixel, filled_seg_map_base holds the nearest segment ID.
-        _, indices = ndimage.distance_transform_edt(~has_id, return_indices=True)
-        filled_seg_map_base = segmap[indices[0], indices[1]]
+        filled_seg_map_base = filled_segment_map(segmap)
 
         has_catalog = (
             gaia_catalog_pixels is not None
@@ -358,23 +455,27 @@ def remove_background(
         # PRIMARY PASS: catalog-based removal
         # ------------------------------------------------------------------
         if has_catalog:
-            # Extend segment assignment into bright-star-masked pixels so
-            # that catalog stars sitting under the bright-star mask still get
-            # assigned to the nearest SEP segment.
             filled_seg_map_cat = np.where(
                 has_id | mask_bright_stars, filled_seg_map_base, 0
             )
 
+            cat_df = catalog_segment_assignments(
+                gaia_catalog_pixels,
+                filled_seg_map_base,
+                mask_bright_stars,
+                segmap=segmap,
+            )
+            seg_ids_cat = cat_df["seg_id_cat"].values
             px_arr = np.clip(
-                np.round(gaia_catalog_pixels["pixel_x"].values).astype(int), 0, W - 1
+                np.round(gaia_catalog_pixels["pixel_x"].values).astype(int),
+                0,
+                data.shape[1] - 1,
             )
             py_arr = np.clip(
-                np.round(gaia_catalog_pixels["pixel_y"].values).astype(int), 0, H - 1
+                np.round(gaia_catalog_pixels["pixel_y"].values).astype(int),
+                0,
+                data.shape[0] - 1,
             )
-            seg_ids_cat = filled_seg_map_cat[py_arr, px_arr]
-
-            cat_df = gaia_catalog_pixels.copy()
-            cat_df["seg_id_cat"] = seg_ids_cat
 
             bright_mask = (
                 (seg_ids_cat > 0)
