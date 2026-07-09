@@ -278,9 +278,22 @@ class PipelineState:
         db_path : str | Path
         pipeline_spec : PipelineSpec | None, optional, default ``None``"""
         self.db_path = str(Path(db_path).expanduser().resolve())
-        self.pipeline_spec = pipeline_spec or _default_pipeline()
+        # Defer DAG composition until first use so daemon status / lease
+        # helpers can open SQLite without importing photutils/astropy/etc.
+        self._pipeline_spec: PipelineSpec | None = pipeline_spec
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
+
+    @property
+    def pipeline_spec(self) -> PipelineSpec:
+        """Composed stage DAG (loaded on first access)."""
+        if self._pipeline_spec is None:
+            self._pipeline_spec = _default_pipeline()
+        return self._pipeline_spec
+
+    @pipeline_spec.setter
+    def pipeline_spec(self, value: PipelineSpec | None) -> None:
+        self._pipeline_spec = value
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
@@ -1906,7 +1919,14 @@ class PipelineState:
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy re-exports of composed DAG constants for legacy import sites."""
+    """Lazy re-exports of composed DAG constants for legacy import sites.
+
+    Must not catch dunder lookups such as ``__path__``: the import machinery
+    probes those on every ``from … import …``, and loading the composed DAG
+    pulls in photutils/astropy (~seconds).
+    """
+    if name.startswith("_"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     pipeline = _default_pipeline()
     if name == "STAGE_NAMES":
         return pipeline.stage_names

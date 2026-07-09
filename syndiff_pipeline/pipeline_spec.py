@@ -6,7 +6,6 @@ from functools import lru_cache
 from typing import Any
 
 from syndiff_pipeline.common.orchestration.spec import PipelineSpec, StageRunContext, StageSpec
-from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
 
 _PIPELINE: PipelineSpec | None = None
 
@@ -19,11 +18,12 @@ def get_syndiff_pipeline() -> PipelineSpec:
     -------
     PipelineSpec"""
     from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGES
+    from syndiff_pipeline.star.orchestration.stages import STAR_STAGES
     from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
 
     return PipelineSpec(
         name="syndiff",
-        stages=TEMPLATE_STAGES + DIFF_STAGES,
+        stages=TEMPLATE_STAGES + DIFF_STAGES + STAR_STAGES,
     )
 
 
@@ -83,6 +83,8 @@ def build_stage_context(
     Returns
     -------
     StageRunContext"""
+    from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
+
     ctx = StageRunContext(
         run_id=run_id,
         runs_root=runs_root,
@@ -94,7 +96,7 @@ def build_stage_context(
         force_rerun=force_rerun,
         progress_path=progress_path,
     )
-    if stage != "diff":
+    if stage not in ("diff", "star"):
         return resolve_template_context(ctx)
     return ctx
 
@@ -110,8 +112,10 @@ def stage_snapshot(ctx: StageRunContext, stage: str) -> dict:
     Returns
     -------
     dict"""
+    from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
+
     spec = _pipeline().require(stage)
-    if stage != "diff":
+    if stage not in ("diff", "star"):
         ctx = resolve_template_context(ctx)
     if spec.stage_snapshot is not None:
         return spec.stage_snapshot(ctx)
@@ -129,8 +133,10 @@ def config_fingerprint(ctx: StageRunContext, stage: str) -> str:
     Returns
     -------
     str"""
+    from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
+
     spec = _pipeline().require(stage)
-    if stage != "diff":
+    if stage not in ("diff", "star"):
         ctx = resolve_template_context(ctx)
     return spec.config_fingerprint(ctx)
 
@@ -167,15 +173,13 @@ def resolve_stage_name(name: str) -> str:
 
 
 def __getattr__(name: str) -> Any:
-    """Getattr.
-    
-    Parameters
-    ----------
-    name : str
-    
-    Returns
-    -------
-    Any"""
+    """Lazy re-exports of composed DAG constants.
+
+    Ignore dunder probes (e.g. ``__path__``) so import machinery does not
+    force-load DIFF/STAR stage modules.
+    """
+    if name.startswith("_"):
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     pipeline = _pipeline()
     if name == "SYNDIFF_PIPELINE":
         return pipeline

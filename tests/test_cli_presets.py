@@ -164,9 +164,10 @@ class TestLocalSubmitPatch(unittest.TestCase):
                 ]
             )
             with mock.patch.object(orch_cli, "ensure_daemon_running"), mock.patch.object(
-                orch_cli, "_ensure_discord_bot", return_value=None
-            ), mock.patch.object(orch_cli, "record_deployment_path"), mock.patch.object(
-                orch_cli, "apply_post_create_run_setup", return_value=mock.Mock()
+                orch_cli, "record_deployment_path"
+            ), mock.patch(
+                "syndiff_pipeline.common.orchestration.run_setup.apply_post_create_run_setup",
+                return_value=mock.Mock(),
             ):
                 orch_cli.cmd_submit(args)
 

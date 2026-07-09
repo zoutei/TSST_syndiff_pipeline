@@ -5,21 +5,17 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import shutil
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from syndiff_pipeline.common.orchestration import condor, logs
-from syndiff_pipeline.template_creation.orchestration import dispatch
-from syndiff_pipeline.common.orchestration.run_context import RunContext, resolve_run_context
+from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
     load_workspace_root_from_deployment,
-)
-from syndiff_pipeline.template_creation.orchestration.runner_config import (
-    load_runner_config,
-    write_runner_config,
 )
 from syndiff_pipeline.common.orchestration.workspace import (
     discover_alive_workspace_roots,
@@ -36,9 +32,7 @@ from syndiff_pipeline.common.orchestration.scheduler_control import (
     stop_daemon,
     warn_if_daemon_host_mismatch,
 )
-from syndiff_pipeline.common.orchestration.run_setup import apply_post_create_run_setup
 from syndiff_pipeline.common.orchestration.state import (
-    STAGE_NAMES,
     STATUS_BLOCKED,
     STATUS_PENDING,
     STATUS_READY,
@@ -46,7 +40,10 @@ from syndiff_pipeline.common.orchestration.state import (
     TERMINAL_STATUSES,
     PipelineState,
 )
-from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
+
+if TYPE_CHECKING:
+    from syndiff_pipeline.common.orchestration.run_context import RunContext
+    from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
 
 log = logging.getLogger(__name__)
 
@@ -65,12 +62,19 @@ def _template_stage_names() -> list[str]:
     return [spec.name for spec in TEMPLATE_STAGES]
 
 
+def _stage_names() -> list[str]:
+    """Full composed stage list (loads DIFF/STAR specs on first use)."""
+    from syndiff_pipeline.pipeline_spec import stage_names
+
+    return list(stage_names())
+
+
 def preset_stages(preset: str) -> list[str]:
     """Return the stage list for a CLI execution preset."""
     if preset == "template":
         return _template_stage_names()
     if preset == "all":
-        return list(STAGE_NAMES)
+        return _stage_names()
     if preset == "diff":
         return [DIFF_STAGE]
     raise ValueError(f"Unknown preset: {preset!r}")
@@ -86,6 +90,8 @@ def _resolve_single_stage(stage: str) -> str:
     Returns
     -------
     str"""
+    from syndiff_pipeline.template_creation.orchestration import dispatch
+
     try:
         return dispatch.resolve_stage_name(stage)
     except ValueError as exc:
@@ -102,6 +108,8 @@ def _resolve_stages_arg(args: argparse.Namespace) -> tuple[list[str], str]:
     Returns
     -------
     tuple[list[str], str]"""
+    from syndiff_pipeline.template_creation.orchestration import dispatch
+
     if getattr(args, "stages", None):
         active = dispatch.parse_stage_list(args.stages)
         return active, args.stages
@@ -114,16 +122,7 @@ def _resolve_stages_arg(args: argparse.Namespace) -> tuple[list[str], str]:
 
 
 def _discord_bot_config_path(args: argparse.Namespace, ctx: RunContext | None = None) -> Path | None:
-    """Discord bot config path.
-    
-    Parameters
-    ----------
-    args : argparse.Namespace
-    ctx : RunContext | None, optional, default ``None``
-    
-    Returns
-    -------
-    Path | None"""
+    """Site config path used for Discord bot.enabled / channel overrides."""
     if getattr(args, "config", None):
         return Path(args.config).expanduser().resolve()
     if ctx is not None:
@@ -132,57 +131,6 @@ def _discord_bot_config_path(args: argparse.Namespace, ctx: RunContext | None = 
             return Path(source).expanduser().resolve()
         return logs.run_config_path(ctx.run_dir)
     return None
-
-
-def _ensure_discord_bot(
-    deployment_path: str | Path,
-    *,
-    site_config_path: str | Path | None = None,
-):
-    """Ensure discord bot.
-    
-    Parameters
-    ----------
-    deployment_path : str | Path
-    site_config_path : str | Path | None, optional, default ``None``"""
-    from syndiff_pipeline.template_creation.orchestration.discord_bot_control import ensure_discord_bot_running
-
-    return ensure_discord_bot_running(
-        deployment_path,
-        site_config_path=site_config_path,
-    )
-
-
-def _print_discord_bot_status(
-    deployment_path: str | Path,
-    result,
-    *,
-    site_config_path: str | Path | None = None,
-) -> None:
-    """Print discord bot status.
-    
-    Parameters
-    ----------
-    deployment_path : str | Path
-    result
-    site_config_path : str | Path | None, optional, default ``None``"""
-    if result is None:
-        print("Discord bot: starting with supervisor (see daemon.log)")
-        return
-    if not result.enabled:
-        return
-    handoff = str(load_workspace_root_from_deployment(deployment_path))
-    bot_log = logs.discord_bot_log_path(handoff)
-    if result.pid:
-        host_text = f" host={result.host!r}" if result.host else ""
-        print(f"Discord bot pid={result.pid} spawned={result.spawned}{host_text}")
-        print(f"  bot log: {bot_log}")
-    elif result.skipped_reason:
-        print(f"WARNING: Discord bot not running: {result.skipped_reason}")
-        print(f"  bot log: {bot_log}")
-    else:
-        print("WARNING: Discord bot not running (unknown reason)")
-        print(f"  bot log: {bot_log}")
 
 
 def _resolve_site_paths(args: argparse.Namespace) -> SitePaths | None:
@@ -195,6 +143,8 @@ def _resolve_site_paths(args: argparse.Namespace) -> SitePaths | None:
     Returns
     -------
     SitePaths | None"""
+    from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
+
     site = getattr(args, "site", None)
     if site:
         return SitePaths.from_site_dir(site)
@@ -244,6 +194,11 @@ def _patch_local_diff_executor(run_directory: Path) -> None:
     Parameters
     ----------
     run_directory : Path"""
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+        write_runner_config,
+    )
+
     cfg_path = logs.run_config_path(run_directory)
     cfg = load_runner_config(cfg_path)
     cfg.stages.diff.executor = "local"
@@ -383,6 +338,8 @@ def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
     Returns
     -------
     RunContext"""
+    from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+
     if getattr(args, "run_dir", None):
         return resolve_run_context(
             run_dir=args.run_dir,
@@ -453,6 +410,7 @@ def _prepare_run_directory(
     detach: bool,
     force_rerun: bool,
     source_diff_config_path: str | None = None,
+    source_star_config_path: str | None = None,
     workspace_run_id: str | None = None,
 ) -> Path:
     """Prepare run directory.
@@ -467,6 +425,7 @@ def _prepare_run_directory(
     detach : bool
     force_rerun : bool
     source_diff_config_path : str | None, optional, default ``None``
+    source_star_config_path : str | None, optional, default ``None``
     workspace_run_id : str | None, optional, default ``None``
     
     Returns
@@ -492,6 +451,12 @@ def _prepare_run_directory(
     }
     if source_diff_config_path:
         meta["source_diff_config_path"] = str(Path(source_diff_config_path).resolve())
+    if source_star_config_path:
+        meta["source_star_config_path"] = str(Path(source_star_config_path).resolve())
+        star_dest = run_directory / "star_config.yaml"
+        if not star_dest.is_file():
+            shutil.copy2(source_star_config_path, star_dest)
+        meta["star_config_path"] = str(star_dest.resolve())
     if workspace_run_id is not None and str(workspace_run_id).strip():
         meta["workspace_run_id"] = str(workspace_run_id).strip()
     logs.ensure_run_layout(runs_root, run_id, meta)
@@ -510,6 +475,8 @@ def _run_context_from_directory(run_directory: Path, run_id: str) -> RunContext:
     Returns
     -------
     RunContext"""
+    from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
+
     return resolve_run_context(run_dir=run_directory, run_id=run_id)
 
 
@@ -537,7 +504,9 @@ def cmd_submit(args: argparse.Namespace) -> int:
     Returns
     -------
     int"""
+    from syndiff_pipeline.common.orchestration.run_setup import apply_post_create_run_setup
     from syndiff_pipeline.common.orchestration.targets import load_targets
+    from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
 
     cfg = load_runner_config(args.config)
     targets = load_targets(args.targets)
@@ -601,10 +570,6 @@ def cmd_submit(args: argparse.Namespace) -> int:
     record_discord_bot_site_config(cfg.workspace_root, args.config)
     result = ensure_daemon_running(cfg.workspace_root, deployment_path=deploy_path)
     warn_if_daemon_host_mismatch(cfg.workspace_root)
-    if result.spawned:
-        bot_result = None
-    else:
-        bot_result = _ensure_discord_bot(deploy_path, site_config_path=args.config)
     daemon_log = logs.daemon_log_path(cfg.workspace_root)
 
     if cfg.notifications.enabled:
@@ -625,7 +590,6 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     print(f"Submitted run_id={run_id} supervisor_pid={result.pid}")
     print(f"  daemon log: {daemon_log}")
-    _print_discord_bot_status(deploy_path, bot_result, site_config_path=args.config)
     print("Monitor: syndiff progress")
     print("         syndiff status --watch")
     print(f"         syndiff progress --run-id {run_id}")
@@ -644,6 +608,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     int"""
     from syndiff_pipeline.common.orchestration.scheduler import run_scheduler
     from syndiff_pipeline.common.orchestration.targets import load_targets
+    from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
 
     if sys.stdout.isatty():
         print("Warning: foreground run blocks until complete; use 'submit' for detached runs.")
@@ -978,8 +943,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
     Returns
     -------
     int"""
-    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
     from syndiff_pipeline.common.orchestration.targets import find_target, load_targets
+    from syndiff_pipeline.template_creation.orchestration import dispatch
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+        resolve_config,
+    )
     from syndiff_pipeline.template_creation.orchestration.verify import persist_completion_manifests, verify_stage
 
     _resolve_config_from_site(args)
@@ -1004,7 +973,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if args.scc:
         t = find_target(targets, args.scc)
         targets = [t]
-    active = dispatch.parse_stage_list(args.stages) if args.stages else list(STAGE_NAMES)
+    active = dispatch.parse_stage_list(args.stages) if args.stages else _stage_names()
     runs_root = cfg.runs_dir()
     rc = 0
     for target in targets:
@@ -1040,8 +1009,12 @@ def cmd_reconcile_manifests(args: argparse.Namespace) -> int:
     a stable manifest for every stage that is already complete. Future runs then
     skip the on-disk scan entirely for those stages.
     """
-    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
     from syndiff_pipeline.common.orchestration.targets import find_target, load_targets
+    from syndiff_pipeline.template_creation.orchestration import dispatch
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+        resolve_config,
+    )
     from syndiff_pipeline.template_creation.orchestration.verify import (
         collect_stage_artifacts,
         stage_complete,
@@ -1065,7 +1038,7 @@ def cmd_reconcile_manifests(args: argparse.Namespace) -> int:
 
     if args.scc:
         targets = [find_target(targets, args.scc)]
-    active = dispatch.parse_stage_list(args.stages) if args.stages else list(STAGE_NAMES)
+    active = dispatch.parse_stage_list(args.stages) if args.stages else _stage_names()
     runs_root = cfg.runs_dir()
 
     written = 0
@@ -1160,15 +1133,13 @@ def cmd_retry(args: argparse.Namespace) -> int:
         )
 
         deploy_path = load_recorded_deployment_path(ctx.cfg.workspace_root)
-        result = ensure_daemon_running(
+        ensure_daemon_running(
             ctx.cfg.workspace_root,
             deployment_path=deploy_path,
         )
         bot_config = _discord_bot_config_path(args, ctx)
-        if bot_config is not None and deploy_path is not None:
+        if bot_config is not None:
             record_discord_bot_site_config(ctx.cfg.workspace_root, bot_config)
-            if not result.spawned:
-                _ensure_discord_bot(deploy_path, site_config_path=bot_config)
     return 0
 
 
@@ -1223,15 +1194,13 @@ def cmd_launch(args: argparse.Namespace) -> int:
         )
 
         deploy_path = load_recorded_deployment_path(ctx.cfg.workspace_root)
-        result = ensure_daemon_running(
+        ensure_daemon_running(
             ctx.cfg.workspace_root,
             deployment_path=deploy_path,
         )
         bot_config = _discord_bot_config_path(args, ctx)
-        if bot_config is not None and deploy_path is not None:
+        if bot_config is not None:
             record_discord_bot_site_config(ctx.cfg.workspace_root, bot_config)
-            if not result.spawned:
-                _ensure_discord_bot(deploy_path, site_config_path=bot_config)
     return 0
 
 
@@ -1284,25 +1253,10 @@ def cmd_kill(args: argparse.Namespace) -> int:
     warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
     state = PipelineState(ctx.cfg.state_db_path)
     state.insert_command("cancel", run_id=ctx.run_id)
+    from syndiff_pipeline.common.orchestration import condor
+
     condor.sweep_run_condor_audit_clusters(ctx.cfg.runs_dir(), ctx.run_id)
     print(f"Queued cancel for run {ctx.run_id}")
-    return 0
-
-
-def cmd_discord_bot(args: argparse.Namespace) -> int:
-    """Cmd discord bot.
-    
-    Parameters
-    ----------
-    args : argparse.Namespace
-    
-    Returns
-    -------
-    int"""
-    from syndiff_pipeline.template_creation.orchestration.discord_bot import run_discord_bot
-
-    deploy_path = _resolve_deployment_from_args(args)
-    run_discord_bot(deploy_path)
     return 0
 
 
@@ -1318,7 +1272,6 @@ def cmd_daemon(args: argparse.Namespace) -> int:
     int"""
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
         discord_bot_status_for_handoff,
-        ensure_discord_bot_for_workspace_root,
     )
 
     handoff = _resolve_handoff_from_args(args)
@@ -1334,43 +1287,25 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         except RuntimeError as exc:
             print(f"ERROR: {exc}", file=sys.stderr)
             return 1
-        if result.spawned:
-            bot_result = None
-        else:
-            bot_result = ensure_discord_bot_for_workspace_root(handoff)
         host_text = f" host={result.host!r}" if result.host else ""
         print(f"Supervisor pid={result.pid} spawned={result.spawned}{host_text}")
-        if bot_result is not None:
-            if bot_result.enabled and bot_result.pid:
-                print(f"Discord bot pid={bot_result.pid} spawned={bot_result.spawned}")
-            elif bot_result.skipped_reason:
-                print(f"WARNING: Discord bot not running: {bot_result.skipped_reason}")
-        elif result.spawned:
-            print("Discord bot: starting with supervisor (see daemon.log)")
-        else:
-            print("Discord bot not started (no recorded site config; submit a run first)")
+        if result.spawned:
+            print("Discord bot: starts in-process with supervisor when enabled (see daemon.log)")
         return 0
     if args.action == "stop":
-        from syndiff_pipeline.template_creation.orchestration.discord_bot_control import stop_discord_bot
-
         result = stop_daemon(handoff)
-        bot_stopped = stop_discord_bot(handoff)
-        if result.message:
+        if result.message and not result.stopped:
             print(f"ERROR: {result.message}", file=sys.stderr)
             return 1
         if not result.was_running:
-            if bot_stopped:
-                print("Supervisor was not running. Discord bot stopped.")
-            else:
-                print("Supervisor was not running.")
+            lock_text = " Stale daemon lock released." if result.lock_reclaimed else ""
+            print(f"Supervisor was not running.{lock_text}")
             return 0
         if result.stopped:
             if result.force_killed:
                 print(f"Supervisor pid={result.pid} stopped (SIGKILL).")
             else:
                 print(f"Supervisor pid={result.pid} stopped.")
-            if not bot_stopped:
-                print("WARNING: Discord bot did not stop cleanly.")
             return 0
         print(
             f"ERROR: Supervisor pid={result.pid} is still running "
@@ -1378,32 +1313,24 @@ def cmd_daemon(args: argparse.Namespace) -> int:
         )
         return 1
     if args.action == "status":
-        from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
-            locate_discord_bot,
-        )
-
         st = daemon_status(handoff)
-        bot = discord_bot_status_for_handoff(handoff)
-        loc = locate_discord_bot(handoff)
+        bot = discord_bot_status_for_handoff(handoff, daemon_alive=st.alive)
         bot_payload = {
             "enabled": bot.enabled,
-            "alive": bot.alive,
-            "pid": bot.pid,
-            "host": bot.host,
+            "expected_in_process": bot.expected_in_process,
             "skipped_reason": bot.skipped_reason,
-            "likely_host": loc.likely_host,
-            "likely_pid": loc.likely_pid,
-            "alive_on_this_host": loc.alive_here,
-            "hints": list(loc.hints),
         }
         print(
             json.dumps(
                 {
                     "alive": st.alive,
-                    "wedged": daemon_is_wedged(handoff),
+                    "wedged": st.wedged or daemon_is_wedged(handoff),
                     "pid": st.pid,
                     "host": st.host,
                     "heartbeat_age_s": st.heartbeat_age_s,
+                    "lease_generation": st.lease_generation,
+                    "lease_age_s": st.lease_age_s,
+                    "stop_pending": st.stop_pending,
                     "lock_held": st.lock_held,
                     "discord_bot": bot_payload,
                 },
@@ -1620,15 +1547,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the message after sending",
     )
     sp_test.set_defaults(func=cmd_notify_test)
-
-    sp = sub.add_parser("discord", help="Discord bot utilities")
-    discord_sub = sp.add_subparsers(dest="discord_action", required=True)
-    sp_bot = discord_sub.add_parser(
-        "bot",
-        help="Run bot that replies to channel messages with progress + status",
-    )
-    _add_workspace_scope(sp_bot)
-    sp_bot.set_defaults(func=cmd_discord_bot)
 
     return p
 
