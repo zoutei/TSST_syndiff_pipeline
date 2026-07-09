@@ -26,6 +26,10 @@ from syndiff_pipeline.difference_imaging.orchestration.stages import (
     DIFF_STAGE,
     write_diff_manifest,
 )
+from syndiff_pipeline.star.orchestration.stages import (
+    STAR_STAGE,
+    write_star_manifest,
+)
 
 log = logging.getLogger(__name__)
 
@@ -142,6 +146,22 @@ def main(argv: list[str] | None = None) -> int:
                 progress_path=str(diff_log_path),
             )
             snap = DIFF_STAGE.stage_snapshot(stage_ctx) if DIFF_STAGE.stage_snapshot else {}
+        elif args.stage == "star":
+            star_log_path = logs.target_log_path(
+                runs_root, args.run_id, args.target_label, args.stage
+            )
+            stage_ctx = build_stage_context(
+                run_id=args.run_id,
+                runs_root=runs_root,
+                target_label=args.target_label,
+                target=target,
+                runner_cfg=cfg,
+                stage=args.stage,
+                meta=dict(ctx.meta or {}),
+                force_rerun=args.force_rerun,
+                progress_path=str(star_log_path),
+            )
+            snap = STAR_STAGE.stage_snapshot(stage_ctx) if STAR_STAGE.stage_snapshot else {}
         else:
             resolved = resolve_config(target, cfg, config_path=source_config)
             snap = dispatch.stage_snapshot(resolved, args.stage)
@@ -201,6 +221,9 @@ def main(argv: list[str] | None = None) -> int:
             if args.stage == "diff":
                 assert stage_ctx is not None
                 manifest = DIFF_STAGE.execute(stage_ctx)
+            elif args.stage == "star":
+                assert stage_ctx is not None
+                manifest = STAR_STAGE.execute(stage_ctx)
             else:
                 assert resolved is not None
                 manifest = dispatch.execute_stage(
@@ -221,6 +244,9 @@ def main(argv: list[str] | None = None) -> int:
                 if args.stage == "diff":
                     assert stage_ctx is not None
                     manifest = DIFF_STAGE.collect_artifacts(stage_ctx)
+                elif args.stage == "star":
+                    assert stage_ctx is not None
+                    manifest = STAR_STAGE.collect_artifacts(stage_ctx)
                 else:
                     assert resolved is not None
                     manifest = collect_stage_artifacts(resolved, args.stage)
@@ -241,6 +267,16 @@ def main(argv: list[str] | None = None) -> int:
                 assert stage_ctx is not None
                 for manifest_dest in manifest_paths:
                     write_diff_manifest(
+                        manifest_dest,
+                        stage_ctx,
+                        artifacts,
+                        expected_count,
+                        produced_count,
+                    )
+            elif args.stage == "star":
+                assert stage_ctx is not None
+                for manifest_dest in manifest_paths:
+                    write_star_manifest(
                         manifest_dest,
                         stage_ctx,
                         artifacts,

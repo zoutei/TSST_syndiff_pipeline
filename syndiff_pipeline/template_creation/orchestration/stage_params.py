@@ -63,6 +63,7 @@ PS1_PROCESS_ALLOWED = frozenset(
     }
 )
 DIFF_ALLOWED = frozenset({"executor"})
+STAR_ALLOWED = frozenset({"executor"})
 DOWNSAMPLE_ALLOWED = frozenset(
     {
         "ignore_mask_bits",
@@ -182,6 +183,12 @@ class DiffStageParams:
 
 
 @dataclass
+class StarStageParams:
+    """StarStageParams."""
+    executor: str = "condor"
+
+
+@dataclass
 class DownsampleStageParams:
     """DownsampleStageParams."""
     ignore_mask_bits: list = None  # type: ignore[assignment]
@@ -215,6 +222,7 @@ class TemplateStageParams:
     ps1_process: Ps1ProcessStageParams
     downsample: DownsampleStageParams
     diff: DiffStageParams = field(default_factory=DiffStageParams)
+    star: StarStageParams = field(default_factory=StarStageParams)
 
 
 def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
@@ -234,12 +242,14 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
     pp = stages_raw.get("ps1_process", {}) or {}
     ds = stages_raw.get("downsample", {}) or {}
     df = stages_raw.get("diff", {}) or {}
+    st = stages_raw.get("star", {}) or {}
     validate_stage_keys(wg, WCS_GROUPING_ALLOWED, "wcs_grouping")
     validate_stage_keys(mp, MAPPING_ALLOWED, "mapping")
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
     validate_stage_keys(pp, PS1_PROCESS_ALLOWED, "ps1_process")
     validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
     validate_stage_keys(df, DIFF_ALLOWED, "diff")
+    validate_stage_keys(st, STAR_ALLOWED, "star")
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
     ps1_source = pp.get("ps1_source", "zarr")
@@ -249,6 +259,8 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
         raise ValueError("stages.mapping.executor must be 'local' or 'condor'")
     if df.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.diff.executor must be 'local' or 'condor'")
+    if st.get("executor", "condor") not in ("local", "condor"):
+        raise ValueError("stages.star.executor must be 'local' or 'condor'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),
@@ -256,4 +268,5 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
         ps1_process=_merge_dataclass(Ps1ProcessStageParams, pp),
         downsample=_merge_dataclass(DownsampleStageParams, ds),
         diff=_merge_dataclass(DiffStageParams, df),
+        star=_merge_dataclass(StarStageParams, st),
     )
