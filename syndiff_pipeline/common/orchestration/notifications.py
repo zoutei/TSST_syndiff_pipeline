@@ -14,17 +14,9 @@ from typing import TYPE_CHECKING, Sequence
 
 import yaml
 
-from syndiff_pipeline.template_creation.orchestration.run_report import (
-    format_progress_lines,
-    format_run_report,
-    format_run_report_messages,
-    format_run_status_header,
-    format_target_status_line,
-    pack_message_lines,
-)
 from syndiff_pipeline.common.orchestration import logs
+
 if TYPE_CHECKING:
-    from syndiff_pipeline.template_creation.orchestration.runner_config import NotificationConfig
     from syndiff_pipeline.common.orchestration.state import PipelineState
 
 log = logging.getLogger(__name__)
@@ -32,6 +24,13 @@ log = logging.getLogger(__name__)
 _DISCORD_MAX_CONTENT = 2000
 _DISCORD_PACK_MAX_CHARS = _DISCORD_MAX_CONTENT - 100
 _WEBHOOK_TIMEOUT_S = 5.0
+
+
+def _run_report():
+    """Lazy import of run_report formatters (pulls composed DAG / science stack)."""
+    from syndiff_pipeline.template_creation.orchestration import run_report
+
+    return run_report
 
 
 @dataclass(frozen=True)
@@ -419,7 +418,7 @@ class Notifier:
 
             refresh_verify_run_status(self._workspace_root, self._state, run_id)
         header = f"[{run_id}] run_{outcome} ({_utc_header()})"
-        body = format_run_report_messages(
+        body = _run_report().format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -440,7 +439,7 @@ class Notifier:
         if not self._cfg.events.run_stalled:
             return
         header = f"[{run_id}] run_stalled ({_utc_header()})"
-        body = format_run_report_messages(
+        body = _run_report().format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -471,7 +470,7 @@ class Notifier:
         if not self._cfg.events.run_canceled:
             return
         header = f"[{run_id}] run_canceled ({_utc_header()})"
-        body = format_run_report_messages(
+        body = _run_report().format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -509,7 +508,7 @@ class Notifier:
             header += f"\n{target_label} / {short}"
             if reset_downstream is not None:
                 header += f"\nreset_downstream: {str(reset_downstream).lower()}"
-        body = format_run_report_messages(
+        body = _run_report().format_run_report_messages(
             self._state,
             run_id,
             runs_root,
@@ -559,7 +558,7 @@ class Notifier:
             header += f"\nerror: {error_tail[:400]}"
         lines = [header, ""]
         lines.extend(
-            format_progress_lines(
+            _run_report().format_progress_lines(
                 self._state,
                 run_id,
                 runs_root,
@@ -567,7 +566,7 @@ class Notifier:
                 include_running_detail=True,
             )
         )
-        target_line = format_target_status_line(
+        target_line = _run_report().format_target_status_line(
             self._state,
             run_id,
             target_label,
@@ -575,7 +574,7 @@ class Notifier:
         )
         if target_line:
             lines.extend(["", target_line])
-        body = pack_message_lines(lines, max_chars=_DISCORD_PACK_MAX_CHARS)
+        body = _run_report().pack_message_lines(lines, max_chars=_DISCORD_PACK_MAX_CHARS)
         self._send(run_id, f"stage:{target_label}:{stage}:{outcome}:{finished_at}", body)
 
     def notify_daemon_unhealthy(self, *, detail: str) -> None:
@@ -587,7 +586,7 @@ class Notifier:
         if not self._cfg.events.daemon_unhealthy:
             return
         header = f"[supervisor] daemon_unhealthy ({_utc_header()})\n{detail}"
-        body = pack_message_lines([header], max_chars=_DISCORD_PACK_MAX_CHARS)
+        body = _run_report().pack_message_lines([header], max_chars=_DISCORD_PACK_MAX_CHARS)
         self._send("", f"daemon:unhealthy:{_utc_header()}", body)
 
 
@@ -662,9 +661,9 @@ def format_status_reply_messages(
             messages.append(f"Unknown run_id: {run_id}")
             continue
         root = run.get("runs_root") or runs_root
-        header = format_run_status_header(run_id, run, timestamp=_utc_header())
+        header = _run_report().format_run_status_header(run_id, run, timestamp=_utc_header())
         messages.extend(
-            format_run_report_messages(
+            _run_report().format_run_report_messages(
                 state,
                 run_id,
                 root,
@@ -704,7 +703,7 @@ def format_preview_message(
 ) -> str:
     """Read-only snapshot: progress summary + status grid (same shape as daemon alerts)."""
     header = f"[TEST] [{run_id}] {event_label} ({_utc_header()})"
-    return format_run_report(
+    return _run_report().format_run_report(
         state,
         run_id,
         runs_root,
@@ -737,7 +736,7 @@ def send_preview_notification(
             f"No Discord webhook URL found (set discord_webhook_url in {deployment_file} "
             "beside config)"
         )
-    messages = format_run_report_messages(
+    messages = _run_report().format_run_report_messages(
         state,
         ctx.run_id,
         ctx.cfg.runs_dir(),

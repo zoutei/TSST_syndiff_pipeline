@@ -8,7 +8,6 @@ import sys
 
 from syndiff_pipeline.common.orchestration import cli as orch_cli
 from syndiff_pipeline.common.orchestration.cli import PRESET_NAMES, preset_stages  # noqa: F401
-from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
 
 EXECUTION_VERBS = frozenset({"submit", "run"})
 
@@ -92,6 +91,8 @@ def _resolve_execution_config(args: argparse.Namespace) -> None:
     if args.config:
         return
     if args.site:
+        from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
+
         paths = SitePaths.from_site_dir(args.site)
         args.config = str(paths.template_config)
         return
@@ -220,14 +221,23 @@ def main(argv: list[str] | None = None) -> int:
             "usage: syndiff <noun> <verb> ...\n\n"
             "Execution presets:\n"
             "  syndiff all|template|diff submit|run --site SITE --targets TARGETS.csv\n\n"
+            "Host-star light curves:\n"
+            "  syndiff star submit --site SITE --star-targets STAR_TARGETS.csv\n"
+            "  syndiff star run --site SITE --star-targets STAR_TARGETS.csv "
+            "--target-name 20/3/2\n\n"
             "Monitoring & control:\n"
             "  syndiff status|progress|runs|active|show|logs|tail|retry|pause|resume|kill\n"
-            "  syndiff verify|reconcile-manifests|daemon|notify|discord\n\n"
+            "  syndiff verify|reconcile-manifests|daemon|notify\n\n"
             "Run: syndiff <command> --help"
         )
         return 0
 
     noun = argv[0]
+    if noun == "star":
+        from syndiff_pipeline.star.cli import main as star_main
+
+        return star_main(argv[1:])
+
     if noun in PRESET_NAMES:
         return _dispatch_execution(noun, argv[1:])
 
