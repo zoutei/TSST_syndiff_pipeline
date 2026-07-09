@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 from syndiff_pipeline.common.orchestration import daemon, logs
@@ -9,6 +12,10 @@ from syndiff_pipeline.common.orchestration.deployment import load_workspace_root
 
 DEFAULT_STATE_DB_NAME = "pipeline_state.sqlite"
 CONTROL_DIR_NAME = "control"
+DEFAULT_DEPLOYMENT_CANDIDATES = (
+    "config/deployment.yaml",
+    "./config/deployment.yaml",
+)
 
 
 def normalize_workspace_root(workspace_root: str | Path) -> Path:
@@ -75,6 +82,100 @@ def record_deployment_path(workspace_root: str | Path, deployment_path: str | Pa
     path.write_text(str(Path(deployment_path).expanduser().resolve()), encoding="utf-8")
 
 
+def handoff_cache_path() -> Path:
+    """User-local cache of the last resolved workspace + deployment."""
+    override = os.environ.get("SYNDIFF_HANDOFF_CACHE")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".cache" / "syndiff" / "handoff_cache.json"
+
+
+def record_handoff_cache(workspace_root: str | Path, deployment_path: str | Path) -> None:
+    """Persist workspace/deployment for fast bare CLI resolution."""
+    cache_path = handoff_cache_path()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "workspace_root": str(normalize_workspace_root(workspace_root)),
+        "deployment_path": str(Path(deployment_path).expanduser().resolve()),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    cache_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def load_handoff_cache() -> dict | None:
+    """Load cached handoff metadata, or ``None`` if missing/unreadable."""
+    cache_path = handoff_cache_path()
+    if not cache_path.is_file():
+        return None
+    try:
+        data = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not data.get("workspace_root"):
+        return None
+    return data
+
+
+def deployment_candidates() -> list[Path]:
+    """Deployment paths to try before scanning ``/proc``."""
+    candidates: list[Path] = []
+    env_deploy = os.environ.get("SYNDIFF_DEPLOYMENT")
+    if env_deploy:
+        candidates.append(Path(env_deploy).expanduser())
+    for rel in DEFAULT_DEPLOYMENT_CANDIDATES:
+        path = Path(rel).expanduser()
+        if path.is_file():
+            candidates.append(path.resolve())
+    cached = load_handoff_cache()
+    if cached:
+        dep = cached.get("deployment_path")
+        if dep:
+            path = Path(dep).expanduser()
+            if path.is_file():
+                candidates.append(path.resolve())
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in candidates:
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            unique.append(path)
+    return unique
+
+
+def resolve_handoff_fast(*, require_daemon: bool = True) -> str | None:
+    """Resolve workspace root via env/default/cache before ``/proc`` discovery."""
+    from syndiff_pipeline.common.orchestration.scheduler_control import daemon_is_alive
+
+    for deploy in deployment_candidates():
+        try:
+            handoff = load_workspace_root_from_deployment(deploy)
+        except (FileNotFoundError, OSError, ValueError):
+            continue
+        handoff_s = str(normalize_workspace_root(handoff))
+        if require_daemon and not daemon_is_alive(handoff_s):
+            continue
+        record_deployment_path(handoff_s, deploy)
+        record_handoff_cache(handoff_s, deploy)
+        return handoff_s
+
+    cached = load_handoff_cache()
+    if not cached:
+        return None
+    handoff = cached.get("workspace_root")
+    if not handoff:
+        return None
+    handoff_s = str(normalize_workspace_root(handoff))
+    if require_daemon and not daemon_is_alive(handoff_s):
+        return None
+    dep = cached.get("deployment_path")
+    if dep:
+        dep_path = Path(dep).expanduser()
+        if dep_path.is_file():
+            record_deployment_path(handoff_s, dep_path)
+    return handoff_s
+
+
 def load_recorded_deployment_path(workspace_root: str | Path) -> Path | None:
     """Load recorded deployment path.
     
@@ -95,13 +196,13 @@ def load_recorded_deployment_path(workspace_root: str | Path) -> Path | None:
     return path if path.is_file() else None
 
 
-def discover_alive_workspace_roots() -> list[Path]:
-    """Return workspace roots with a live supervisor daemon on this host."""
+def discover_alive_workspace_handoffs() -> list[tuple[Path, Path]]:
+    """Return ``(workspace_root, deployment_path)`` for live supervisors on this host."""
     proc = Path("/proc")
     if not proc.is_dir():
         return []
 
-    roots: list[Path] = []
+    handoffs: list[tuple[Path, Path]] = []
     for entry in proc.iterdir():
         if not entry.name.isdigit():
             continue
@@ -118,20 +219,25 @@ def discover_alive_workspace_roots() -> list[Path]:
             continue
         try:
             idx = parts.index("--deployment")
-            deploy = parts[idx + 1]
-            handoff = str(load_workspace_root_from_deployment(deploy))
+            deploy = Path(parts[idx + 1]).expanduser().resolve()
+            handoff = normalize_workspace_root(load_workspace_root_from_deployment(deploy))
         except (ValueError, IndexError, FileNotFoundError, OSError):
             continue
         pid = int(entry.name)
         if not daemon.is_process_alive(pid):
             continue
-        roots.append(normalize_workspace_root(handoff))
+        handoffs.append((handoff, deploy))
 
     seen: set[str] = set()
-    unique: list[Path] = []
-    for root in roots:
+    unique: list[tuple[Path, Path]] = []
+    for root, deploy in handoffs:
         key = str(root)
         if key not in seen:
             seen.add(key)
-            unique.append(root)
+            unique.append((root, deploy))
     return unique
+
+
+def discover_alive_workspace_roots() -> list[Path]:
+    """Return workspace roots with a live supervisor daemon on this host."""
+    return [root for root, _ in discover_alive_workspace_handoffs()]

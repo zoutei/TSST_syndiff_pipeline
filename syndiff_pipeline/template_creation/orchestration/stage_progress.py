@@ -47,6 +47,9 @@ _RE_TESS_TQDM_PCT = re.compile(r"(\d+)%\|")
 _RE_HOTPANTS_FRAMES = re.compile(
     r"hotpants \[(\w+)\] round \d+: (\d+)/(\d+) frames succeeded"
 )
+_RE_EPSF_FRAMES = re.compile(
+    r"ePSF \[(\w+)\] round \d+: (\d+)/(\d+) frames succeeded"
+)
 
 _PHASE_LINES = (
     ("Combining results", "combining"),
@@ -66,6 +69,8 @@ _PHASE_LINES = (
 
 _TAIL_CHUNK_BYTES = 65536
 _MAX_TAIL_SCAN_BYTES = 4 * 1024 * 1024
+_PROGRESS_CLI_MAX_TAIL_SCAN_BYTES = 512 * 1024
+PROGRESS_CLI_MAX_TAIL_SCAN_BYTES = _PROGRESS_CLI_MAX_TAIL_SCAN_BYTES
 
 
 def _read_tail_bytes(log_path: Path, nbytes: int) -> str:
@@ -366,6 +371,11 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
     Returns
     -------
     StageProgress | None"""
+    from syndiff_pipeline.difference_imaging.stages.epsf_progress import (
+        format_progress_text as format_epsf_progress,
+        progress_path_for_diff_log as epsf_sidecar_path,
+        read_progress_merged,
+    )
     from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
         format_progress_text as format_hotpants_progress,
         progress_path_for_diff_log as hotpants_sidecar_path,
@@ -377,11 +387,12 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
     )
 
     best: tuple[str, str, str] | None = None
-    for sidecar_path, format_fn in (
-        (hotpants_sidecar_path(log_path), format_hotpants_progress),
-        (photometry_sidecar_path(log_path), format_photometry_progress),
+    for sidecar_path, format_fn, read_fn in (
+        (hotpants_sidecar_path(log_path), format_hotpants_progress, read_progress),
+        (epsf_sidecar_path(log_path), format_epsf_progress, read_progress_merged),
+        (photometry_sidecar_path(log_path), format_photometry_progress, read_progress),
     ):
-        data = read_progress(sidecar_path)
+        data = read_fn(sidecar_path)
         if not data:
             continue
         text = format_fn(data)
@@ -411,6 +422,10 @@ def _parse_diff(text: str) -> StageProgress | None:
     if match:
         label, done, total = match.groups()
         return StageProgress(f"hotpants {label} complete {done}/{total}", "phase")
+    match = _last_match(_RE_EPSF_FRAMES, text)
+    if match:
+        label, done, total = match.groups()
+        return StageProgress(f"epsf {label} complete {done}/{total}", "phase")
     return _phase_from_text(text)
 
 

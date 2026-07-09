@@ -18,9 +18,12 @@ from syndiff_pipeline.common.orchestration.deployment import (
     load_workspace_root_from_deployment,
 )
 from syndiff_pipeline.common.orchestration.workspace import (
+    discover_alive_workspace_handoffs,
     discover_alive_workspace_roots,
     load_recorded_deployment_path,
     record_deployment_path,
+    record_handoff_cache,
+    resolve_handoff_fast,
     runs_root as runs_root,
     state_db_path,
 )
@@ -271,17 +274,28 @@ def _resolve_handoff_from_args(args: argparse.Namespace) -> str:
         path = Path(deployment).expanduser().resolve()
         handoff = load_workspace_root_from_deployment(path)
         record_deployment_path(handoff, path)
+        record_handoff_cache(handoff, path)
         return str(handoff)
 
     site_deploy = _resolve_deployment_from_site(args)
     if site_deploy is not None:
-        return str(load_workspace_root_from_deployment(site_deploy))
+        handoff = load_workspace_root_from_deployment(site_deploy)
+        record_deployment_path(handoff, site_deploy)
+        record_handoff_cache(handoff, site_deploy)
+        return str(handoff)
 
-    discovered = discover_alive_workspace_roots()
+    fast = resolve_handoff_fast(require_daemon=True)
+    if fast:
+        return fast
+
+    discovered = discover_alive_workspace_handoffs()
     if len(discovered) == 1:
-        return str(discovered[0])
+        root, deploy = discovered[0]
+        record_deployment_path(root, deploy)
+        record_handoff_cache(root, deploy)
+        return str(root)
     if len(discovered) > 1:
-        lines = "\n".join(f"  {p}" for p in discovered)
+        lines = "\n".join(f"  {p}" for p, _ in discovered)
         raise SystemExit(f"Multiple supervisors running; pass --deployment:\n{lines}")
     raise SystemExit(
         "No supervisor found. Start with: syndiff template submit --site ... "
