@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Optional, Tuple
 
 import numpy as np
@@ -27,6 +28,35 @@ def build_kernel_basis(hp: HotpantsParams) -> np.ndarray:
     shape = (size, size)
     basis_list = _calculate_kernel_basis(shape, sigma_gauss, deg_fixe)
     return np.stack([np.asarray(b, dtype=np.float64) for b in basis_list], axis=0)
+
+
+def load_frame_kernel(kernels_dir: str, product_id: str) -> tuple[np.ndarray, dict]:
+    """
+    Load a persisted per-frame kernel archive.
+
+    Returns ``(kernel_solution, hp_config_fields)`` where *hp_config_fields* can be
+    passed to ``HotpantsConfig(**hp_config_fields)`` for
+    :func:`convolve_template_with_kernel_solution`.
+    """
+    from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernel_npz_path
+
+    path = frame_kernel_npz_path(kernels_dir, product_id)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"frame kernel not found: {path}")
+    with np.load(path, allow_pickle=False) as data:
+        kernel_solution = np.asarray(data["kernel_solution"], dtype=np.float64).ravel()
+        hp_config_fields = {
+            "rkernel": int(data["rkernel"]),
+            "ko": int(data["ko"]),
+            "bgo": int(data["bgo"]),
+            "ngauss": int(data["ngauss"]),
+            "deg_fixe": [int(x) for x in np.asarray(data["deg_fixe"]).ravel()],
+            "sigma_gauss": [
+                float(x) for x in np.asarray(data["sigma_gauss"]).ravel()
+            ],
+            "use_pca": bool(int(data["use_pca"])),
+        }
+    return kernel_solution, hp_config_fields
 
 
 def convolve_template_with_kernel_solution(

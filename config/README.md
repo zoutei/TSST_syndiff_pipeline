@@ -6,8 +6,16 @@ This directory is the **config root** passed to `syndiff --site config`.
 
 | File | Role |
 |------|------|
-| `pipeline.yaml` | Orchestrator policy: 7-stage DAG params, resource pools, scheduler, notifications |
+| `pipeline.yaml` | Orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
 | `diff_config.yaml` | Site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor |
+| `diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, per-frame kernels) |
+| `diff_config_star_full_backfill.yaml` | One-time Hotpants backfill (`write_convolved` + `write_kernel_solutions`) for star |
+| `star_config.yaml` | Site star policy: baseline labels, photometry, `ps1_source`, SCC overrides |
+| `star_targets_example.csv` | Example star SCC registry for `syndiff star submit` |
+| `star_targets_full.csv` | Production star SCC registry |
+| `star_hosts/` | Per-event host star CSVs referenced from `star_targets` |
+| `pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
+| `pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
 | `deployment.yaml` | Gitignored: `workspace_root`, `data_root`, credentials (copy from `deployment.yaml.example`) |
 | `targets_example.csv` | Example targets list for `--targets` |
 
@@ -27,11 +35,33 @@ cp config/deployment.yaml.example config/deployment.yaml   # first time
 syndiff all submit --site config --targets config/targets_example.csv --run-id my_run
 ```
 
+**Host-star light curves** (after transient diff artifacts exist on disk):
+
+```bash
+syndiff star submit --site config \
+  --star-config config/star_config.yaml \
+  --star-targets config/star_targets_example.csv \
+  --run-id star_lc_run
+```
+
+See [docs/markdown/star_lightcurves.md](../docs/markdown/star_lightcurves.md) for prerequisites (`hp_c`, `hp_d_kernels`, `ks_b_s`), kernel backfill, and outputs.
+
+### Related orchestrator configs
+
+| File | Role |
+|------|------|
+| `pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry: `ps1_source: stream` in `ps1_process`, multi-kernel diff |
+| `pipeline_epsf_gepsf.yaml` | 2020ut gridded ePSF + gepsf forced photometry (diff-only submit) |
+
+These produce the transient baseline workspace that `syndiff star` reads. Pair with `diff_config_multi_kernel.yaml` or site `diff_config.yaml` as noted in each file's header comments.
+
 ## Runtime frozen configs
 
 On submit, the orchestrator copies policy into the workspace:
 
 - `{workspace_root}/runs/{run_id}/config.yaml` — frozen orchestrator
+- `{workspace_root}/runs/{run_id}/targets.csv` — frozen targets (`targets.csv` or `star_targets.csv`)
+- `{workspace_root}/runs/{run_id}/star_config.yaml` — frozen star policy (star submit only)
 - `{workspace_root}/runs/{run_id}/per_target/{label}/diff_config.yaml` — frozen per-target diff
 
 See [docs/markdown/storage_layout.md](../docs/markdown/storage_layout.md).
@@ -95,3 +125,9 @@ Inserted after `kernel_subtract` in [`diff_config_single_kernel.yaml`](diff_conf
 - **Resume:** [`diff_config_multi_kernel_resume.yaml`](diff_config_multi_kernel_resume.yaml) inherits `ks_b` + `ks_d`, runs background smooth, then Hotpants.
 
 Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifacts, and performance notes: [docs/markdown/stages/background.md](../docs/markdown/stages/background.md).
+
+## Hotpants: per-frame kernels for `syndiff star`
+
+Every active `hotpants` stage in site and example diff configs sets **`write_kernel_solutions: true`**, which writes one `{product_id}_kernel.npz` per FFI under `ws/hp_d_kernels/`. The star pipeline reads these (plus `hp_c` convolved templates and `ks_b_s`/`ks_b` photometry background) and does **not** re-run Hotpants.
+
+For a workspace that already has `hp_d` but no kernels (e.g. `multi_hp_temp_calib` before backfill), run a one-time Hotpants-only backfill with [`diff_config_star_full_backfill.yaml`](diff_config_star_full_backfill.yaml) (`write_convolved: true` + `write_kernel_solutions: true`). See [docs/markdown/stages/star_pipeline.md](../docs/markdown/stages/star_pipeline.md).

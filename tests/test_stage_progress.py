@@ -139,6 +139,50 @@ class TestReadLogProgress(unittest.TestCase):
         self.assertEqual(prog.text, "hotpants hp2_d complete 180/200")
         self.assertEqual(prog.kind, "phase")
 
+    def test_diff_epsf_sidecar(self):
+        log_path = self._write_log("diff.log", "Stage: epsf\n")
+        sidecar = log_path.parent / "diff.epsf.progress.json"
+        sidecar.write_text(
+            (
+                '{"epsf_label": "epsf_r1", "diffs_input": "hp_d", "round_id": 1, '
+                '"frames_total": 1188, "frames_done": 30, "frames_ok": 28, '
+                '"phase": "running", "updated_at": "2026-07-08T14:50:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "epsf epsf_r1 30/1188")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_epsf_log_fallback(self):
+        path = self._write_log(
+            "diff.log",
+            "ePSF [epsf_r1] round 1: 1100/1188 frames succeeded\n",
+        )
+        prog = read_log_progress(path, "diff")
+        self.assertEqual(prog.text, "epsf epsf_r1 complete 1100/1188")
+        self.assertEqual(prog.kind, "phase")
+
+    def test_diff_epsf_sidecar_merges_artifacts(self):
+        log_path = self._write_log("diff.log", "Stage: epsf\n")
+        sidecar = log_path.parent / "diff.epsf.progress.json"
+        ws = self.log_dir / "ws" / "epsf_r1"
+        ws.mkdir(parents=True)
+        (ws / "tess111_gridded_epsf.npz").write_bytes(b"x")
+        (ws / "tess222_gridded_epsf.npz").write_bytes(b"x")
+        sidecar.write_text(
+            (
+                '{"epsf_label": "epsf_r1", "diffs_input": "hp_d", "round_id": 1, '
+                '"frames_total": 1188, "frames_done": 1, "frames_ok": 1, '
+                f'"phase": "running", "output_dir": "{ws}", '
+                '"updated_at": "2026-07-08T14:50:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "epsf epsf_r1 2/1188")
+        self.assertEqual(prog.kind, "fraction")
+
     def test_diff_photometry_sidecar(self):
         log_path = self._write_log("diff.log", "Stage: forced_photometry\n")
         sidecar = log_path.parent / "diff.photometry.progress.json"
@@ -154,17 +198,46 @@ class TestReadLogProgress(unittest.TestCase):
         self.assertEqual(prog.text, "photometry lc_prf_on_diffs 120/842")
         self.assertEqual(prog.kind, "fraction")
 
+    def test_diff_centroids_sidecar(self):
+        log_path = self._write_log("diff.log", "Stage: centroids\n")
+        sidecar = log_path.parent / "diff.centroids.progress.json"
+        sidecar.write_text(
+            (
+                '{"centroids_label": "centroids_r1", "diffs_input": "hp_d", '
+                '"frames_total": 1188, "frames_done": 45, "frames_ok": 45, '
+                '"phase": "running", "updated_at": "2026-07-09T12:00:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "centroids centroids_r1 45/1188")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_centroids_log_fallback(self):
+        path = self._write_log(
+            "diff.log",
+            "centroids [centroids_r1]: 1100/1188 frames wrote _photresults.ecsv\n",
+        )
+        prog = read_log_progress(path, "diff")
+        self.assertEqual(prog.text, "centroids centroids_r1 complete 1100/1188")
+        self.assertEqual(prog.kind, "phase")
+
     def test_diff_separate_sidecars_from_shared_log_path(self):
-        """Hotpants and photometry must not share one CLI sidecar filename."""
+        """Hotpants, ePSF, centroids, and photometry must not share one CLI sidecar filename."""
         from syndiff_pipeline.difference_imaging.stages import (
+            centroids_progress as cp,
+            epsf_progress as ep,
             hotpants_progress as hp,
             photometry_progress as pp,
         )
 
         log_path = self._write_log("diff.log", "Stage: forced_photometry\n")
         hotpants_cli = hp.progress_path_for_diff_log(log_path)
+        epsf_cli = ep.progress_path_for_diff_log(log_path)
+        centroids_cli = cp.progress_path_for_diff_log(log_path)
         photometry_cli = pp.progress_path_for_diff_log(log_path)
-        self.assertNotEqual(hotpants_cli, photometry_cli)
+        cli_paths = [hotpants_cli, epsf_cli, centroids_cli, photometry_cli]
+        self.assertEqual(len(cli_paths), len(set(cli_paths)))
 
         ws_hp = self.log_dir / "ws" / "hp_m" / hp.PROGRESS_FILENAME
         ws_phot = self.log_dir / "ws" / "lc_prf_on_diffs" / pp.PROGRESS_FILENAME
