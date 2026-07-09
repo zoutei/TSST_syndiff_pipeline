@@ -50,6 +50,9 @@ _RE_HOTPANTS_FRAMES = re.compile(
 _RE_EPSF_FRAMES = re.compile(
     r"ePSF \[(\w+)\] round \d+: (\d+)/(\d+) frames succeeded"
 )
+_RE_CENTROIDS_FRAMES = re.compile(
+    r"centroids \[(\w+)\]: (\d+)/(\d+) frames wrote"
+)
 
 _PHASE_LINES = (
     ("Combining results", "combining"),
@@ -371,6 +374,11 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
     Returns
     -------
     StageProgress | None"""
+    from syndiff_pipeline.difference_imaging.stages.centroids_progress import (
+        format_progress_text as format_centroids_progress,
+        progress_path_for_diff_log as centroids_sidecar_path,
+        read_progress_merged as read_centroids_progress_merged,
+    )
     from syndiff_pipeline.difference_imaging.stages.epsf_progress import (
         format_progress_text as format_epsf_progress,
         progress_path_for_diff_log as epsf_sidecar_path,
@@ -390,6 +398,7 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
     for sidecar_path, format_fn, read_fn in (
         (hotpants_sidecar_path(log_path), format_hotpants_progress, read_progress),
         (epsf_sidecar_path(log_path), format_epsf_progress, read_progress_merged),
+        (centroids_sidecar_path(log_path), format_centroids_progress, read_centroids_progress_merged),
         (photometry_sidecar_path(log_path), format_photometry_progress, read_progress),
     ):
         data = read_fn(sidecar_path)
@@ -426,6 +435,10 @@ def _parse_diff(text: str) -> StageProgress | None:
     if match:
         label, done, total = match.groups()
         return StageProgress(f"epsf {label} complete {done}/{total}", "phase")
+    match = _last_match(_RE_CENTROIDS_FRAMES, text)
+    if match:
+        label, done, total = match.groups()
+        return StageProgress(f"centroids {label} complete {done}/{total}", "phase")
     return _phase_from_text(text)
 
 
