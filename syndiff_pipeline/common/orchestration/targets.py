@@ -190,6 +190,37 @@ def load_targets(path: str | Path) -> List[Target]:
     )
 
 
+def write_normalized_targets(path: str | Path, targets: Sequence[Target]) -> Path:
+    """Write orchestrator-compatible ``targets.csv`` for a run directory."""
+    p = Path(path).expanduser().resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "sector",
+        "camera",
+        "ccd",
+        "target_ra",
+        "target_dec",
+        "target_name",
+        "enabled",
+    ]
+    with p.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for t in targets:
+            writer.writerow(
+                {
+                    "sector": t.sector,
+                    "camera": t.camera,
+                    "ccd": t.ccd,
+                    "target_ra": t.target_ra,
+                    "target_dec": t.target_dec,
+                    "target_name": t.target_name,
+                    "enabled": "true" if t.enabled else "false",
+                }
+            )
+    return p
+
+
 def parse_scc(scc: str) -> tuple[int, int, int]:
     """Parse ``sector,camera,ccd`` or ``sector/camera/ccd``."""
     parts = re.split(r"[,/]", scc.strip())

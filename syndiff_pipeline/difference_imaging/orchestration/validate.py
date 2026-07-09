@@ -22,6 +22,7 @@ STAGE_KINDS = frozenset(
         "convolved_templates",
         "kernel_subtract",
         "epsf",
+        "centroids",
         "sat_template",
         "subtract",
         "background",
@@ -60,6 +61,7 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         return labels
     if kind in (
         "epsf",
+        "centroids",
         "sat_template",
         "subtract",
         "background",
@@ -113,6 +115,11 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
         d = inp.get("diffs")
         if d is not None and str(d).strip():
             refs.append(str(d).strip())
+    elif kind == "centroids":
+        for key in ("diffs", "epsf"):
+            v = inp.get(key)
+            if v is not None and str(v).strip():
+                refs.append(str(v).strip())
     elif kind == "sat_template":
         for key in ("diffs", "epsf"):
             v = inp.get(key)
@@ -277,6 +284,14 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                 raise ValueError(f"pipeline[{idx}] epsf: inputs.diffs required")
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] epsf: output label required")
+
+        if kind == "centroids":
+            inp = stage.get("inputs") or {}
+            for req in ("diffs", "epsf"):
+                if req not in inp:
+                    raise ValueError(f"pipeline[{idx}] centroids: inputs.{req} required")
+            if "output" not in stage or not str(stage["output"]).strip():
+                raise ValueError(f"pipeline[{idx}] centroids: output label required")
 
         if kind == "sat_template":
             inp = stage.get("inputs") or {}

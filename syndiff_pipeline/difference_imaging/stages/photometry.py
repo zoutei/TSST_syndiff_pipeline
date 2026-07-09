@@ -664,6 +664,192 @@ def resolve_tess_prf_localdatadir(cfg) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# ── Gridded ePSF photometry (photutils PSFPhotometry) ─────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _ffi_stem_from_diff_path(path: str) -> str:
+    from pathlib import Path
+
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        parse_workspace_frame_stem,
+        strip_fits_suffix,
+        tess_product_id_from_ffi_path,
+    )
+
+    stem = strip_fits_suffix(Path(str(path)).name)
+    parsed = parse_workspace_frame_stem(stem)
+    if parsed is not None:
+        return parsed[0]
+    return tess_product_id_from_ffi_path(stem) or stem
+
+
+def forced_phot_gridded_epoch(
+    image: np.ndarray,
+    gridded_model,
+    x: float,
+    y: float,
+    phot: PsfPhotometryMethodParams,
+    *,
+    error: np.ndarray | None = None,
+    mask: np.ndarray | None = None,
+) -> tuple[float, float, float, float]:
+    """
+    Forced PSF photometry at crop-local (x, y) using a per-frame GriddedPSFModel.
+
+    Returns flux, eflux, x_fit, y_fit.
+    """
+    from astropy.table import Table
+    from photutils.psf import PSFPhotometry
+
+    if not np.isfinite(x) or not np.isfinite(y):
+        return np.nan, np.nan, np.nan, np.nan
+
+    init_params = Table()
+    init_params["x_init"] = [float(x)]
+    init_params["y_init"] = [float(y)]
+
+    fit_shape = int(getattr(phot, "fit_shape", 11) or 11)
+    aperture_radius = float(getattr(phot, "aperture_radius", 2.0) or 2.0)
+    grouper_sep = float(getattr(phot, "psf_grouper_min_separation", 10.0) or 10.0)
+
+    err_use = error
+    if err_use is not None:
+        err_use = np.asarray(err_use, dtype=np.float64)
+        if err_use.shape != image.shape:
+            err_use = None
+        elif not np.any(np.isfinite(err_use) & (err_use > 0)):
+            err_use = None
+
+    try:
+        from photutils.psf import SourceGrouper
+
+        psf_phot = PSFPhotometry(
+            gridded_model,
+            fit_shape=fit_shape,
+            aperture_radius=aperture_radius,
+            grouper=SourceGrouper(min_separation=grouper_sep),
+            local_bkg_estimator=None,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            result = psf_phot(
+                np.asarray(image, dtype=np.float64),
+                error=err_use,
+                mask=mask,
+                init_params=init_params,
+            )
+        tab = result if hasattr(result, "colnames") else result.to_table()
+        flux = float(tab["flux_fit"][0])
+        if "flux_err" in tab.colnames:
+            eflux = float(tab["flux_err"][0])
+        elif "flux_unc" in tab.colnames:
+            eflux = float(tab["flux_unc"][0])
+        else:
+            eflux = np.nan
+        x_fit = float(tab["x_fit"][0]) if "x_fit" in tab.colnames else float(x)
+        y_fit = float(tab["y_fit"][0]) if "y_fit" in tab.colnames else float(y)
+        return flux, eflux, x_fit, y_fit
+    except Exception as exc:
+        log.debug("gridded PSF photometry failed at (%.2f, %.2f): %s", x, y, exc)
+        return np.nan, np.nan, np.nan, np.nan
+
+
+def _run_forced_photometry_gridded_single(
+    diff_paths: list,
+    target_xy: np.ndarray,
+    gridded_catalog,
+    wcs_table: pd.DataFrame,
+    cfg,
+    phot: PsfPhotometryMethodParams,
+    output_dir: str,
+    *,
+    lightcurve_csv_filename: Optional[str] = None,
+    lightcurve_plot_path: Optional[str] = None,
+    plot_title_suffix: Optional[str] = None,
+    plot_source_label: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_input: Optional[str] = None,
+    diff_log_path: Optional[str] = None,
+    diffs_dir: Optional[str] = None,
+) -> pd.DataFrame:
+    """Forced photometry with per-frame GriddedPSFModel (photutils)."""
+    from syndiff_pipeline.difference_imaging.support.flux_calibration import (
+        apply_zp_calibration_if_available,
+    )
+
+    csv_name = lightcurve_csv_filename or "lightcurve.csv"
+    txy = np.asarray(target_xy, dtype=np.float64)
+    n_epochs = len(diff_paths)
+    btjd_col = (
+        wcs_table["btjd"].values
+        if "btjd" in wcs_table.columns
+        else np.full(n_epochs, np.nan)
+    )
+    gid_col = (
+        wcs_table["group_id"].values
+        if "group_id" in wcs_table.columns
+        else np.zeros(n_epochs, int)
+    )
+
+    records = []
+    for i, path in enumerate(diff_paths):
+        tx_i, ty_i = float(txy[i, 0]), float(txy[i, 1])
+        rec = {
+            "btjd": btjd_col[i] if i < len(btjd_col) else np.nan,
+            "group_id": gid_col[i] if i < len(gid_col) else 0,
+            "filename": os.path.basename(path) if path else "",
+            "flux": np.nan,
+            "eflux": np.nan,
+            "x_fit": np.nan,
+            "y_fit": np.nan,
+        }
+        if path is None or not os.path.exists(path):
+            records.append(rec)
+            continue
+        stem = _ffi_stem_from_diff_path(path)
+        model = gridded_catalog.load_model(stem)
+        if model is None:
+            log.warning("  No gridded ePSF for %s", stem)
+            records.append(rec)
+            continue
+        try:
+            data, sigma = read_diff_primary_and_noise_sigma(path)
+        except Exception as exc:
+            log.warning("  Cannot read %s: %s", path, exc)
+            records.append(rec)
+            continue
+        flux, eflux, xf, yf = forced_phot_gridded_epoch(
+            data, model, tx_i, ty_i, phot, error=sigma
+        )
+        rec["flux"] = flux
+        rec["eflux"] = eflux
+        rec["x_fit"] = xf
+        rec["y_fit"] = yf
+        records.append(rec)
+
+    lc_df = pd.DataFrame(records)
+    if diffs_dir:
+        lc_df = apply_zp_calibration_if_available(lc_df, diffs_dir)
+    out_csv = os.path.join(output_dir, csv_name)
+    lc_df.to_csv(out_csv, index=False)
+    log.info("  gridded ePSF light curve saved to %s (%d epochs)", out_csv, len(lc_df))
+
+    if getattr(cfg, "pipeline_plots", False) and lightcurve_plot_path:
+        dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+        title = plot_title_suffix or output_label or "gridded ePSF"
+        if plot_source_label:
+            title = f"{title} · {plot_source_label}"
+        write_lightcurve_diagnostic_plot(
+            lc_df,
+            output_dir,
+            dpi=dpi,
+            title_line=title,
+            png_path=lightcurve_plot_path,
+        )
+    return lc_df
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ── Target pixel helpers ──────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -2457,6 +2643,7 @@ def run_forced_photometry_stage(
     diff_log_path: Optional[str] = None,
     plot_path_fn=None,
     diffs_dir: Optional[str] = None,
+    gridded_epsf_by_workspace: Optional[dict] = None,
 ) -> dict[str, List[pd.DataFrame]]:
     """
     Run every configured forced-photometry method (PSF and/or aperture).
@@ -2465,6 +2652,7 @@ def run_forced_photometry_stage(
     ``extra_name`` is ``None`` for the primary target.
     """
     results: dict[str, List[pd.DataFrame]] = {}
+    gridded_epsf_by_workspace = gridded_epsf_by_workspace or {}
     for method in phot_stage.methods:
         phot_targets: list[ForcedPhotTargetSpec] = []
         for target_xy, extra_name, tag, pt in target_specs:
@@ -2489,41 +2677,78 @@ def run_forced_photometry_stage(
 
         if isinstance(method, PsfPhotometryMethodParams):
             epsf_ws = method.epsf_workspace or stage_epsf_workspace
-            if method.psf_type == "prf":
-                over_size = 2 * method.psf_size + 1
-                n_tiles = len(tile_centers) if tile_centers else (
-                    method.tile_ny * method.tile_nx
-                )
-                epsf_for_phot = np.zeros((n_tiles, over_size**2))
-            else:
-                if not epsf_ws:
-                    raise ValueError(
-                        f"forced_photometry method {method.name!r}: psf_type 'epsf' "
-                        "requires inputs.epsf or per-method inputs.epsf"
-                    )
-                if epsf_ws not in epsf_by_workspace:
-                    raise ValueError(
-                        f"forced_photometry method {method.name!r}: ePSF workspace "
-                        f"{epsf_ws!r} not loaded"
-                    )
-                epsf_for_phot = epsf_by_workspace[epsf_ws]
-            dfs = run_forced_photometry_multi(
-                diff_paths=diff_paths,
-                targets=phot_targets,
-                epsf_r2_smooth=epsf_for_phot,
-                tile_centers=tile_centers,
-                wcs_table=wcs_table,
-                crop_bounds=crop_bounds,
-                cfg=cfg,
-                phot=method,
-                output_dir=output_dir,
-                ref_frame_index=ref_frame_index,
-                plot_title_suffix=plot_title_suffix,
-                output_label=output_label,
-                diffs_input=diffs_input,
-                diff_log_path=diff_log_path,
-                diffs_dir=diffs_dir,
+            use_gridded = (
+                method.psf_type == "epsf"
+                and epsf_ws
+                and epsf_ws in gridded_epsf_by_workspace
             )
+            if use_gridded:
+                catalog = gridded_epsf_by_workspace[epsf_ws]
+                dfs = []
+                for target_xy, extra_name, _tag, _pt in target_specs:
+                    csv_fname = lightcurve_csv_basename(
+                        method.name,
+                        extra_name,
+                        csv_basename_override=getattr(method, "csv_basename", None),
+                    )
+                    lc_plot_path = None
+                    if getattr(cfg, "pipeline_plots", False) and plot_path_fn is not None:
+                        lc_plot_path = plot_path_fn(method.name, extra_name)
+                    dfs.append(
+                        _run_forced_photometry_gridded_single(
+                            diff_paths=diff_paths,
+                            target_xy=target_xy,
+                            gridded_catalog=catalog,
+                            wcs_table=wcs_table,
+                            cfg=cfg,
+                            phot=method,
+                            output_dir=output_dir,
+                            lightcurve_csv_filename=csv_fname,
+                            lightcurve_plot_path=lc_plot_path,
+                            plot_title_suffix=plot_title_suffix,
+                            plot_source_label=extra_name or "primary",
+                            output_label=output_label,
+                            diffs_input=diffs_input,
+                            diff_log_path=diff_log_path,
+                            diffs_dir=diffs_dir,
+                        )
+                    )
+            else:
+                if method.psf_type == "prf":
+                    over_size = 2 * method.psf_size + 1
+                    n_tiles = len(tile_centers) if tile_centers else (
+                        method.tile_ny * method.tile_nx
+                    )
+                    epsf_for_phot = np.zeros((n_tiles, over_size**2))
+                else:
+                    if not epsf_ws:
+                        raise ValueError(
+                            f"forced_photometry method {method.name!r}: psf_type 'epsf' "
+                            "requires inputs.epsf or per-method inputs.epsf"
+                        )
+                    if epsf_ws not in epsf_by_workspace:
+                        raise ValueError(
+                            f"forced_photometry method {method.name!r}: ePSF workspace "
+                            f"{epsf_ws!r} not loaded"
+                        )
+                    epsf_for_phot = epsf_by_workspace[epsf_ws]
+                dfs = run_forced_photometry_multi(
+                    diff_paths=diff_paths,
+                    targets=phot_targets,
+                    epsf_r2_smooth=epsf_for_phot,
+                    tile_centers=tile_centers,
+                    wcs_table=wcs_table,
+                    crop_bounds=crop_bounds,
+                    cfg=cfg,
+                    phot=method,
+                    output_dir=output_dir,
+                    ref_frame_index=ref_frame_index,
+                    plot_title_suffix=plot_title_suffix,
+                    output_label=output_label,
+                    diffs_input=diffs_input,
+                    diff_log_path=diff_log_path,
+                    diffs_dir=diffs_dir,
+                )
         elif isinstance(method, AperturePhotometryMethodParams):
             dfs = _run_aperture_photometry_multi(
                 diff_paths=diff_paths,

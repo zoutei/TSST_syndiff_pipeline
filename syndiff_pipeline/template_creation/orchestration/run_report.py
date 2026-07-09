@@ -4,19 +4,168 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from syndiff_pipeline.common.orchestration import logs
-from syndiff_pipeline.template_creation.orchestration.stage_progress import read_log_progress
+from syndiff_pipeline.common.orchestration import logs, stage_liveness
+from syndiff_pipeline.template_creation.orchestration.stage_progress import (
+    PROGRESS_CLI_MAX_TAIL_SCAN_BYTES,
+    read_log_progress,
+)
 from syndiff_pipeline.common.orchestration.state import (
     SKIP_REASON_NOT_SELECTED,
     SKIP_REASON_STREAM,
     SKIP_REASON_SUPERSEDED,
+    STATUS_CANCELED,
+    STATUS_FAILED,
     STATUS_PENDING,
     STATUS_SKIPPED,
     stage_needs_artifact_verify_display,
 )
 
 if TYPE_CHECKING:
-    from syndiff_pipeline.common.orchestration.state import PipelineState
+    from syndiff_pipeline.common.orchestration.state import PipelineState, StageRunRow
+
+
+def _row_executor(row: StageRunRow, cfg) -> str | None:
+    """Resolve executor for a stage row (DB value or frozen config default)."""
+    if row.executor:
+        return row.executor
+    if cfg is not None:
+        return cfg.stage_executor(row.stage)
+    return None
+
+
+def _condor_status_for_rows(
+    running_rows: list[StageRunRow],
+    *,
+    runs_root: str,
+    run_id: str,
+    cfg=None,
+) -> dict[int, int | None]:
+    """Batch-query Condor JobStatus for running Condor stages."""
+    from syndiff_pipeline.common.orchestration import condor
+    from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
+
+    resolved_cfg = cfg
+    cluster_ids: list[int] = []
+    for row in running_rows:
+        executor = _row_executor(row, resolved_cfg)
+        if executor is None:
+            if resolved_cfg is None:
+                cfg_path = logs.run_config_path(logs.run_dir(runs_root, run_id))
+                if cfg_path.is_file():
+                    resolved_cfg = load_runner_config(cfg_path)
+            executor = _row_executor(row, resolved_cfg)
+        if executor != "condor" or row.native_id is None:
+            continue
+        cluster_ids.append(int(row.native_id))
+    if not cluster_ids:
+        return {}
+    try:
+        queried = condor.query_clusters_display(cluster_ids)
+        return {cluster_id: status for cluster_id, (status, _) in queried.items()}
+    except Exception:
+        return {}
+
+
+def _orphaned_active_stage_rows(
+    state: PipelineState,
+    run_id: str,
+    runs_root: str,
+    *,
+    cfg=None,
+) -> list:
+    """Failed/canceled Condor rows whose logs/sidecars still show live work."""
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+    )
+
+    resolved_cfg = cfg
+    rows = []
+    for row in state.list_stage_runs(run_id):
+        if row.status not in (STATUS_FAILED, STATUS_CANCELED):
+            continue
+        executor = _row_executor(row, resolved_cfg)
+        if executor is None:
+            if resolved_cfg is None:
+                cfg_path = logs.run_config_path(logs.run_dir(runs_root, run_id))
+                if cfg_path.is_file():
+                    resolved_cfg = load_runner_config(cfg_path)
+            executor = _row_executor(row, resolved_cfg)
+        if executor != "condor":
+            continue
+        log_path = row.log_path or str(
+            logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
+        )
+        if not stage_liveness.stage_output_recently_active(log_path, row.stage):
+            continue
+        rows.append(row)
+    return rows
+
+
+def _progress_detail_lines(
+    rows: list,
+    *,
+    runs_root: str,
+    run_id: str,
+    cfg,
+    cluster_status: dict[int, int | None],
+    orphan_note: bool = False,
+) -> list[str]:
+    from syndiff_pipeline.pipeline_spec import stage_short_names
+
+    lines: list[str] = []
+    for row in sorted(rows, key=lambda r: (r.target_label, r.stage)):
+        log_path = row.log_path or str(
+            logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
+        )
+        prog = read_log_progress(
+            log_path,
+            row.stage,
+            started_at=row.started_at,
+            max_scan_bytes=PROGRESS_CLI_MAX_TAIL_SCAN_BYTES,
+        )
+        short = stage_short_names().get(row.stage, row.stage)
+        condor_text = _condor_detail_text(row, cluster_status, cfg)
+        if not condor_text and row.native_id is None:
+            from syndiff_pipeline.common.orchestration import condor
+
+            cluster_id = condor.read_recorded_cluster_id(
+                runs_root, run_id, row.target_label, row.stage
+            )
+            if cluster_id is not None:
+                condor_text = condor.format_condor_job_suffix(
+                    int(cluster_id), cluster_status.get(int(cluster_id))
+                )
+        orphan_suffix = " (orphaned bookkeeping)" if orphan_note else ""
+        if prog:
+            extra = f" {condor_text}" if condor_text else ""
+            lines.append(f"  {row.target_label} {short}: {prog.text}{extra}{orphan_suffix}")
+        elif condor_text:
+            lines.append(
+                f"  {row.target_label} {short}: {condor_text} "
+                f"(no log progress yet){orphan_suffix}"
+            )
+        else:
+            lines.append(
+                f"  {row.target_label} {short}: (no log progress yet){orphan_suffix}"
+            )
+    return lines
+
+
+def _condor_detail_text(
+    row: StageRunRow,
+    cluster_status: dict[int, int | None],
+    cfg,
+) -> str | None:
+    """Condor queue detail for a running stage row, or None when not applicable."""
+    from syndiff_pipeline.common.orchestration import condor
+
+    executor = _row_executor(row, cfg)
+    if executor != "condor":
+        return None
+    if row.native_id is None:
+        return "condor unsubmitted"
+    suffix = condor.format_condor_job_suffix(int(row.native_id), cluster_status.get(int(row.native_id)))
+    return suffix or None
 
 
 def format_run_status_header(
@@ -79,24 +228,66 @@ def format_progress_lines(
     if not include_running_detail:
         return lines
 
+    from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
+
     running = state.running_stage_runs(run_id)
-    if not running:
+    orphaned = _orphaned_active_stage_rows(state, run_id, runs_root)
+    if not running and not orphaned:
         lines.append("  (no running tasks)")
         return lines
 
-    lines.append("")
-    for row in sorted(running, key=lambda r: (r.target_label, r.stage)):
-        log_path = row.log_path or str(
-            logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
-        )
-        prog = read_log_progress(log_path, row.stage, started_at=row.started_at)
-        from syndiff_pipeline.pipeline_spec import stage_short_names
+    cfg = None
+    all_rows = list(running) + list(orphaned)
+    if any(row.executor is None for row in all_rows):
+        cfg_path = logs.run_config_path(logs.run_dir(runs_root, run_id))
+        if cfg_path.is_file():
+            cfg = load_runner_config(cfg_path)
 
-        short = stage_short_names().get(row.stage, row.stage)
-        if prog:
-            lines.append(f"  {row.target_label} {short}: {prog.text}")
-        else:
-            lines.append(f"  {row.target_label} {short}: (no log progress yet)")
+    cluster_status = _condor_status_for_rows(
+        all_rows, runs_root=runs_root, run_id=run_id, cfg=cfg
+    )
+    from syndiff_pipeline.common.orchestration import condor
+
+    for row in orphaned:
+        if row.native_id is not None:
+            continue
+        cluster_id = condor.read_recorded_cluster_id(
+            runs_root, run_id, row.target_label, row.stage
+        )
+        if cluster_id is None or cluster_id in cluster_status:
+            continue
+        try:
+            queried = condor.query_clusters_display([int(cluster_id)])
+            cluster_status.update(
+                {cid: status for cid, (status, _) in queried.items()}
+            )
+        except Exception:
+            pass
+
+    lines.append("")
+    if running:
+        lines.extend(
+            _progress_detail_lines(
+                running,
+                runs_root=runs_root,
+                run_id=run_id,
+                cfg=cfg,
+                cluster_status=cluster_status,
+            )
+        )
+    if orphaned:
+        if running:
+            lines.append("")
+        lines.extend(
+            _progress_detail_lines(
+                orphaned,
+                runs_root=runs_root,
+                run_id=run_id,
+                cfg=cfg,
+                cluster_status=cluster_status,
+                orphan_note=True,
+            )
+        )
     return lines
 
 

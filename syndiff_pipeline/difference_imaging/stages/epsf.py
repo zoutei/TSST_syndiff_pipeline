@@ -1,16 +1,12 @@
 """
 epsf_fitting.py
 ===============
-Steps 4 & 10 of the SynDiff pipeline:
+Fit empirical PSFs (ePSF) on difference images with photutils, tiling each
+frame into tile_nx × tile_ny sub-regions and building a per-frame
+:class:`~photutils.psf.GriddedPSFModel`.
 
-  Fit an empirical PSF (ePSF) on each difference image using TGLC's
-  get_psf / fit_psf, tiling the image into tile_nx × tile_ny sub-regions.
-
-Also persists fitted stacks / repaired stacks (``epsf_r*_smooth.npz``), loads them for later stages,
-and writes per-template-group median ePSFs.
-
-Uses ``tglc.effective_psf`` (TGLC — TESS Gaia Light Curve toolkit).
-Install or clone TGLC and ensure ``tglc`` is importable (e.g. ``PYTHONPATH``).
+Persists per-frame ``*_gridded_epsf.npz`` archives, legacy smooth stacks for
+downstream stages, and per-template-group median ePSFs.
 """
 
 import logging
@@ -23,7 +19,6 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 from astropy.table import Table
-from joblib import Parallel, delayed
 
 from syndiff_pipeline.difference_imaging.support.ffi_naming import parse_workspace_frame_stem, strip_fits_suffix, tess_product_id_from_ffi_path
 
@@ -225,25 +220,127 @@ def load_epsf_smooth(output_dir: str, round_id: int) -> tuple:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── TGLC import helper ────────────────────────────────────────────────────────
+# ── Per-frame gridded ePSF fitting (photutils) ────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _get_tglc():
-    """Import tglc modules needed for ePSF fitting."""
+# shared_mask bit values used for ePSF star rejection (see masking.Source_mask):
+#   value 2 — very bright star crosses (Big_sat)
+#   value 4 — TESS straps
+# Catalog Gaia sources (value 1) must NOT be excluded — those are the ePSF stars.
+EPSF_SHARED_MASK_BITS = 2 | 4
+
+
+def _load_shared_mask_2d(shared_mask_path: str | None, shape: tuple[int, int]) -> np.ndarray | None:
+    """
+    Load boolean bad-pixel mask for ePSF star extraction, if available.
+
+    Only bits with values 2 and 4 (bright-star crosses and straps) are used.
+    Catalog-source bit 1 is ignored so Gaia ePSF stars are not removed.
+    """
+    if not shared_mask_path or not os.path.isfile(shared_mask_path):
+        return None
     try:
-        import tglc.ffi as tglc_ffi
-        from tglc.effective_psf import get_psf, fit_psf
-        return tglc_ffi, get_psf, fit_psf
-    except ImportError as exc:
-        raise ImportError(
-            "The ``tglc`` package is required for ePSF fitting. "
-            "Install TGLC or add its source tree to PYTHONPATH."
-        ) from exc
+        data = fits.getdata(shared_mask_path)
+        if data is None:
+            return None
+        mask = np.asarray(data)
+        if mask.shape != shape:
+            return None
+        return (mask.astype(np.int64) & EPSF_SHARED_MASK_BITS) != 0
+    except Exception as exc:
+        log.debug("shared mask for ePSF not loaded: %s", exc)
+        return None
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ── Gaia catalog preparation ──────────────────────────────────────────────────
-# ═══════════════════════════════════════════════════════════════════════════════
+def fit_epsf_all_frames(diff_paths: list,
+                         gaia_df: pd.DataFrame,
+                         col_corr_2d: np.ndarray,
+                         cfg,
+                         epsf,
+                         output_dir: str = None,
+                         round_id: int = 1,
+                         *,
+                         shared_mask_path: str | None = None,
+                         diff_log_path: str | None = None,
+                         epsf_label: str | None = None,
+                         diffs_input: str | None = None) -> tuple:
+    """
+    Fit gridded ePSF on every difference image in diff_paths.
+
+    Parameters
+    ----------
+    diff_paths  : list of str (FITS files from hotpants)
+    gaia_df     : pd.DataFrame (crop-local Gaia catalog)
+    col_corr_2d : 2D ndarray — legacy arg; mask uses shared_mask when given
+    cfg         : SynDiffConfig
+    epsf        : EpsfParams
+    output_dir  : str, optional
+    round_id    : int
+    shared_mask_path : optional path to shared_mask.fits for star masking
+
+    Returns
+    -------
+    epsf_stack, tile_centers, ffi_stems, epsf_ok
+    """
+    from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+    mask_2d = None
+    first_path = next((p for p in diff_paths if p and os.path.exists(p)), None)
+    if shared_mask_path and first_path:
+        shape = fits.getdata(first_path).shape
+        mask_2d = _load_shared_mask_2d(shared_mask_path, shape)
+    elif col_corr_2d is not None and first_path is None and col_corr_2d is not None:
+        mask_2d = col_corr_2d <= 0
+
+    if output_dir is None:
+        raise ValueError("fit_epsf_all_frames requires output_dir for gridded ePSF")
+
+    result = gridded_epsf.fit_gridded_epsf_all_frames(
+        diff_paths,
+        gaia_df,
+        cfg,
+        epsf,
+        output_dir,
+        mask_2d=mask_2d,
+        round_id=round_id,
+        diff_log_path=diff_log_path,
+        epsf_label=epsf_label,
+        diffs_input=diffs_input,
+    )
+    epsf_stack, tile_centers, ffi_stems, epsf_ok = result
+    save_epsf_stack_bundle(epsf_stack, ffi_stems, output_dir, round_id)
+    return epsf_stack, tile_centers, ffi_stems, epsf_ok
+
+
+def fit_epsf_tiled(diff_image: np.ndarray,
+                   gaia_df: pd.DataFrame,
+                   col_corr_2d: np.ndarray,
+                   cfg,
+                   epsf,
+                   frame_label: str = "") -> tuple:
+    """Fit gridded ePSF on a single difference image (test / debug helper)."""
+    from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+    mask_2d = None
+    if col_corr_2d is not None and col_corr_2d.shape == diff_image.shape:
+        mask_2d = col_corr_2d <= 0
+    _model, tile_centers, stack = gridded_epsf.build_gridded_psf_for_frame(
+        diff_image,
+        gaia_df,
+        epsf,
+        mask_2d=mask_2d,
+        frame_label=frame_label,
+    )
+    if stack is None:
+        n_tiles = epsf.tile_ny * epsf.tile_nx
+        over_size = 2 * epsf.psf_size + 1
+        return (
+            np.full((n_tiles, over_size ** 2), np.nan),
+            tile_centers,
+        )
+    flat = gridded_epsf.stack_from_gridded_cube(stack)
+    return flat, tile_centers
+
 
 def tess_mag_from_gaia_phot(
     g: np.ndarray, bp: np.ndarray, rp: np.ndarray
@@ -433,80 +530,12 @@ def build_median_mask_correction(median_mask_path: str,
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ── CustomSource (compatible with TGLC's get_psf / fit_psf) ──────────────────
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class CustomSource:
-    """
-    Minimal Source-compatible object for tglc.effective_psf.get_psf / fit_psf.
-
-    When source.__class__ is temporarily set to tglc.ffi.Source before calling
-    get_psf, the 6-DOF background model is enabled (uses source.mask for column
-    correction and source.gaia for star positions).
-
-    Tiled ePSF driver; same mathematics as standard TGLC/TGLC-FFI workflows.
-    """
-
-    PEDESTAL = 100.0  # counts added to lift background pixels for fitting
-
-    def __init__(self, image_tile: np.ndarray,
-                 gaia_tile: pd.DataFrame,
-                 col_corr_1d: np.ndarray,
-                 sector: int = 20):
-        """
-        Parameters
-        ----------
-        image_tile  : 2D array (tile_size, tile_size)
-        gaia_tile   : DataFrame with tess_flux_ratio, x_local, y_local, tess_mag
-                      (coordinates in tile-local pixels)
-        col_corr_1d : 1D array of length tile_size (column correction values)
-        sector      : int TESS sector
-        """
-        import numpy.ma as ma
-
-        h, w = image_tile.shape
-        if h != w:
-            raise ValueError(
-                "image_tile must be square for TGLC get_psf/fit_psf "
-                f"(got {h}×{w})"
-            )
-        if len(col_corr_1d) != w:
-            raise ValueError(
-                f"col_corr_1d length {len(col_corr_1d)} != tile width {w}"
-            )
-        self.size   = h
-        self.sector = sector
-        self.time   = np.array([0.0])
-
-        # Shift image by pedestal before fitting (absorbed by 6-DOF background)
-        self.flux = (image_tile + self.PEDESTAL)[np.newaxis, :, :].copy()
-
-        # mask: masked_array; .data = column correction, .mask = bad pixels
-        mask_data_2d = np.tile(col_corr_1d[:w], (h, 1))
-        bad_pix      = (mask_data_2d == 0)
-        self.mask    = ma.masked_array(mask_data_2d, mask=bad_pix)
-
-        # gaia: astropy Table with fields expected by get_psf
-        t = Table()
-        t["tess_flux_ratio"]        = np.array(gaia_tile["tess_flux_ratio"])
-        t["tess_mag"]               = np.array(gaia_tile["tess_mag"])
-        t[f"sector_{sector}_x"]     = np.array(gaia_tile["x_local"])
-        t[f"sector_{sector}_y"]     = np.array(gaia_tile["y_local"])
-        self.gaia = t
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
 # ── Tile machinery ────────────────────────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _make_tile_grid(ny: int, nx: int, tile_ny: int, tile_nx: int) -> list:
     """
     Return list of (r0, c0, tile_size) tuples for a square tile grid.
-
-    ``tile_size = min(ny // tile_ny, nx // tile_nx)`` so each tile is square,
-    as required by TGLC ``get_psf`` / ``fit_psf`` (they use ``source.size`` as
-    one side and assume ``height == width``). Uncovered strips at the image
-    right/top match the ePSF notebook ``make_tile_grid``.
     """
     tile_h = ny // tile_ny
     tile_w = nx // tile_nx
@@ -519,279 +548,3 @@ def _make_tile_grid(ny: int, nx: int, tile_ny: int, tile_nx: int) -> list:
             tiles.append((r0, c0, tile_size))
     return tiles
 
-
-def _build_tile_catalog(gaia_df: pd.DataFrame,
-                         r0: int, c0: int,
-                         tile_size: int,
-                         psf_size: int, os_factor: int,
-                         margin: int = None) -> pd.DataFrame:
-    """
-    Extract Gaia stars falling within (or near) the current tile and translate
-    to tile-local coordinates.
-    """
-    if margin is None:
-        margin = psf_size * os_factor
-
-    x_lo = c0 - margin
-    x_hi = c0 + tile_size + margin
-    y_lo = r0 - margin
-    y_hi = r0 + tile_size + margin
-
-    in_tile = (
-        (gaia_df["x"] >= x_lo) & (gaia_df["x"] < x_hi) &
-        (gaia_df["y"] >= y_lo) & (gaia_df["y"] < y_hi)
-    )
-    tile_cat = gaia_df[in_tile].copy()
-    tile_cat = tile_cat.rename(columns={"x": "x_local", "y": "y_local"})
-    tile_cat["x_local"] = tile_cat["x_local"] - c0
-    tile_cat["y_local"] = tile_cat["y_local"] - r0
-    return tile_cat.reset_index(drop=True)
-
-
-def _fit_one_tile(image: np.ndarray,
-                  gaia_df: pd.DataFrame,
-                  col_corr_2d: np.ndarray,
-                  r0: int, c0: int, tile_size: int,
-                  cfg,
-                  epsf,
-                  tglc_ffi, get_psf, fit_psf,
-                  diag: Optional[dict] = None) -> np.ndarray:
-    """
-    Fit ePSF for a single tile.
-
-    Returns
-    -------
-    1D ndarray of shape (over_size²,) — normalized ePSF coefficients,
-    or NaN array if fitting failed.
-    """
-    over_size = 2 * epsf.psf_size + 1
-    nan_epsf  = np.full(over_size ** 2, np.nan)
-
-    # Extract square tile (TGLC requires height == width)
-    tile_img    = image[r0:r0 + tile_size, c0:c0 + tile_size]
-    tile_corr   = col_corr_2d[r0:r0 + tile_size, c0:c0 + tile_size]
-    col_corr_1d = tile_corr[0, :]  # use first row as representative 1D correction
-
-    # Stars for this tile
-    tile_cat = _build_tile_catalog(
-        gaia_df, r0, c0, tile_size,
-        epsf.psf_size, epsf.epsf_oversample,
-    )
-    if len(tile_cat) < 3:
-        if diag is not None:
-            diag["n_starved"] = diag.get("n_starved", 0) + 1
-        return nan_epsf
-
-    # Ensure we have tess_flux_ratio
-    if "tess_flux_ratio" not in tile_cat.columns:
-        tile_cat = add_tess_flux_ratio(tile_cat)
-
-    source = CustomSource(tile_img, tile_cat, col_corr_1d, sector=cfg.sector)
-
-    try:
-        # Temporarily spoof class to enable 6-DOF background in get_psf
-        source.__class__ = tglc_ffi.Source
-        A, _star_info, _over_size, _xr, _yr = get_psf(
-            source, factor=epsf.epsf_oversample, psf_size=epsf.psf_size,
-        )
-        source.__class__ = CustomSource
-        e_psf_full = fit_psf(A, source, _over_size, power=0.8, time=0)
-    except Exception as exc:
-        source.__class__ = CustomSource
-        log.debug(f"  tile ({r0},{c0}) fit failed: {exc}")
-        if diag is not None:
-            diag["n_exc"] = diag.get("n_exc", 0) + 1
-            if diag.get("first_exc") is None:
-                diag["first_exc"] = str(exc)
-        return nan_epsf
-
-    if np.isnan(e_psf_full).any():
-        if diag is not None:
-            diag["n_nan_psf"] = diag.get("n_nan_psf", 0) + 1
-        return nan_epsf
-
-    # Extract just the PSF coefficients (first over_size² elements)
-    psf_coeffs = e_psf_full[:over_size ** 2]
-    norm = np.sum(psf_coeffs)
-    if norm > 0:
-        psf_coeffs = psf_coeffs / norm
-    return psf_coeffs
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ── Per-frame ePSF fitting ────────────────────────────────────────────────────
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def fit_epsf_tiled(diff_image: np.ndarray,
-                   gaia_df: pd.DataFrame,
-                   col_corr_2d: np.ndarray,
-                   cfg,
-                   epsf,
-                   frame_label: str = "") -> tuple:
-    """
-    Fit ePSF on one difference image using a tile_ny × tile_nx grid.
-
-    Parameters
-    ----------
-    diff_image  : 2D ndarray (ny_crop, nx_crop)
-    gaia_df     : pd.DataFrame with x, y (crop-local), tess_mag,
-                  tess_flux_ratio, phot_g/bp/rp columns
-    col_corr_2d : 2D ndarray (ny_crop, nx_crop) — column correction
-    cfg         : SynDiffConfig (``sector`` for TGLC ``CustomSource``)
-    epsf        : EpsfParams — tile grid and PSF stamp geometry
-    frame_label : str, optional — basename for logging (e.g. diff FITS name)
-
-    Returns
-    -------
-    epsf_tiles  : ndarray (n_tiles, over_size²) — one normalized ePSF per tile
-                  (NaN for failed tiles)
-    tile_centers: list of (cx, cy) in crop-local pixels
-    """
-    tglc_ffi, get_psf, fit_psf = _get_tglc()
-
-    gaia_df = add_tess_flux_ratio(gaia_df)
-
-    ny, nx = diff_image.shape
-    tiles = _make_tile_grid(ny, nx, epsf.tile_ny, epsf.tile_nx)
-    n_tiles = len(tiles)
-    over_size = 2 * epsf.psf_size + 1
-
-    epsf_tiles   = np.full((n_tiles, over_size ** 2), np.nan)
-    tile_centers = []
-
-    diag = {
-        "n_starved": 0,
-        "n_exc": 0,
-        "n_nan_psf": 0,
-        "first_exc": None,
-    }
-    n_ok = 0
-    for idx, (r0, c0, tile_size) in enumerate(tiles):
-        cx = c0 + tile_size / 2
-        cy = r0 + tile_size / 2
-        tile_centers.append((cx, cy))
-
-        coeffs = _fit_one_tile(
-            diff_image, gaia_df, col_corr_2d,
-            r0, c0, tile_size, cfg, epsf,
-            tglc_ffi, get_psf, fit_psf,
-            diag=diag,
-        )
-        epsf_tiles[idx] = coeffs
-        if not np.isnan(coeffs).all():
-            n_ok += 1
-
-    log.debug(f"  ePSF tiles: {n_ok}/{n_tiles} fitted")
-    if n_ok == 0:
-        suffix = f" ({frame_label})" if frame_label else ""
-        first = diag.get("first_exc")
-        extra = f' First TGLC error: "{first}"' if first else ""
-        log.warning(
-            "ePSF: all %d tiles failed%s — tiles with <3 Gaia stars: %d; "
-            "TGLC exceptions: %d; NaN PSF from fit_psf: %d.%s",
-            n_tiles,
-            suffix,
-            diag["n_starved"],
-            diag["n_exc"],
-            diag["n_nan_psf"],
-            extra,
-        )
-
-    # Fill failed tiles with median of successful ones
-    good_tiles = epsf_tiles[~np.isnan(epsf_tiles).any(axis=1)]
-    if len(good_tiles) > 0:
-        med = np.median(good_tiles, axis=0)
-        for idx in range(n_tiles):
-            if np.isnan(epsf_tiles[idx]).any():
-                epsf_tiles[idx] = med
-    return epsf_tiles, tile_centers
-
-
-def fit_epsf_all_frames(diff_paths: list,
-                         gaia_df: pd.DataFrame,
-                         col_corr_2d: np.ndarray,
-                         cfg,
-                         epsf,
-                         output_dir: str = None,
-                         round_id: int = 1) -> tuple:
-    """
-    Fit ePSF on every difference image in diff_paths.
-
-    Parameters
-    ----------
-    diff_paths  : list of str (FITS files from hotpants_runner)
-    gaia_df     : pd.DataFrame (crop-local Gaia catalog with tess_flux_ratio)
-    col_corr_2d : 2D ndarray  (column correction map for the crop)
-    cfg         : SynDiffConfig
-    output_dir  : str, optional — if given, saves epsf_stack_r{round_id}.npz
-    round_id    : int
-
-    Returns
-    -------
-    epsf_stack  : ndarray (n_frames, n_tiles, over_size²)
-    tile_centers: list of (cx, cy) [same for all frames — from first valid frame]
-    ffi_stems   : list of str — ``tess<digits>`` product id per row (axis-0 identity)
-    epsf_ok     : list of bool — True if difference image loaded and ePSF fitted
-    """
-    over_size = 2 * epsf.psf_size + 1
-    n_tiles   = epsf.tile_ny * epsf.tile_nx
-    n_frames  = len(diff_paths)
-
-    epsf_stack   = np.full((n_frames, n_tiles, over_size ** 2), np.nan)
-    tile_centers = None
-
-    def _diff_path_to_pid(p: str) -> str:
-        """Diff path to pid.
-        
-        Parameters
-        ----------
-        p : str
-        
-        Returns
-        -------
-        str"""
-        stem = strip_fits_suffix(Path(str(p)).name)
-        parsed = parse_workspace_frame_stem(stem)
-        if parsed is not None:
-            return parsed[0]
-        return tess_product_id_from_ffi_path(stem) or stem
-
-    ffi_stems    = [_diff_path_to_pid(p) for p in diff_paths]
-    epsf_ok      = []
-
-    for i, diff_path in enumerate(diff_paths):
-        if not os.path.exists(diff_path):
-            log.warning(f"  diff frame missing: {diff_path}")
-            epsf_ok.append(False)
-            continue
-        try:
-            diff_img = fits.getdata(diff_path).astype(np.float64)
-        except Exception as exc:
-            log.warning(f"  Cannot load {diff_path}: {exc}")
-            epsf_ok.append(False)
-            continue
-
-        tiles_i, centers_i = fit_epsf_tiled(
-            diff_img, gaia_df, col_corr_2d, cfg, epsf,
-            frame_label=os.path.basename(diff_path),
-        )
-        epsf_stack[i] = tiles_i
-        if tile_centers is None:
-            tile_centers = centers_i
-        epsf_ok.append(True)
-
-        if (i + 1) % 10 == 0 or i == n_frames - 1:
-            log.info(f"  ePSF round {round_id}: {i + 1}/{n_frames} frames done")
-
-    if tile_centers is None:
-        # Fallback: compute from grid geometry
-        ny, nx = col_corr_2d.shape
-        tiles = _make_tile_grid(ny, nx, epsf.tile_ny, epsf.tile_nx)
-        tile_centers = [
-            (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
-        ]
-
-    if output_dir:
-        save_epsf_stack_bundle(epsf_stack, ffi_stems, output_dir, round_id)
-
-    return epsf_stack, tile_centers, ffi_stems, epsf_ok

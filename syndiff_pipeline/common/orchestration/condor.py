@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shlex
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
 
@@ -16,12 +17,24 @@ log = logging.getLogger(__name__)
 
 _WRAPPER = Path(__file__).resolve().parent / "condor_wrapper.sh"
 
+_JOB_IDLE = 1
+_JOB_RUNNING = 2
 _JOB_REMOVED = 3
 _JOB_COMPLETED = 4
 _JOB_HELD = 5
 
 _POLL_GRACE_SECONDS = 120.0
 HOLD_TIMEOUT_S = 600.0
+_QUERY_RETRY_ATTEMPTS = 3
+_QUERY_RETRY_DELAY_S = 0.5
+CONDOR_EVICT_FAIL_THRESHOLD = 2
+
+_EVENT_HEADER_RE = re.compile(r"^\s*\d{3}\s+\((\d+)\.\d+\.\d+\)")
+_DISCONNECT_CYCLE_START_RE = re.compile(
+    r"Job disconnected, attempting to reconnect", re.IGNORECASE
+)
+_RECONNECT_TARGET_RE = re.compile(r"reconnect to\s+([^\s,<]+)", re.IGNORECASE)
+_NOT_FOUND_RE = re.compile(r"not found at execution machine", re.IGNORECASE)
 
 _submission_times: dict[int, float] = {}
 _held_times: dict[int, float] = {}
@@ -54,6 +67,25 @@ def poll_grace_seconds() -> float:
     return _POLL_GRACE_SECONDS
 
 
+def condor_status_label(status: int | None) -> str | None:
+    """Map HTCondor JobStatus to a short display label."""
+    if status == _JOB_IDLE:
+        return "idle"
+    if status == _JOB_RUNNING:
+        return "running"
+    if status == _JOB_HELD:
+        return "held"
+    return None
+
+
+def format_condor_job_suffix(cluster_id: int, status: int | None) -> str:
+    """Format a Condor queue-state suffix for progress detail (no leading space)."""
+    label = condor_status_label(status)
+    if label is None:
+        return ""
+    return f"condor {label} c{cluster_id}.0"
+
+
 def condor_artifact_paths(
     runs_root: str, run_id: str, target_label: str, stage: str
 ) -> dict[str, Path]:
@@ -78,7 +110,28 @@ def condor_artifact_paths(
         "submit": base / f"{stage}.condor.submit",
         "clusters": base / f"{stage}.condor.clusters",
         "hold": base / f"{stage}.condor.hold",
+        "poll_misses": base / f"{stage}.condor.poll_misses",
+        "bad_machines": base / f"{stage}.condor.bad_machines",
+        "eviction_state": base / f"{stage}.condor.eviction_state",
     }
+
+
+def read_recorded_cluster_id(
+    runs_root: str, run_id: str, target_label: str, stage: str
+) -> int | None:
+    """Read the last submitted cluster id from the durable ``*.condor.clusters`` file."""
+    path = condor_artifact_paths(runs_root, run_id, target_label, stage)["clusters"]
+    if not path.is_file():
+        return None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            return int(line)
+        except ValueError:
+            continue
+    return None
 
 
 def _read_hold_epoch(hold_path: Path) -> float | None:
@@ -257,6 +310,206 @@ def _record_cluster_submission(artifacts: dict[str, Path], cluster_id: int) -> N
         fh.write(f"{cluster_id}\n")
 
 
+def normalize_condor_host(host: str) -> str:
+    """Normalize a Condor slot host to a Machine attribute value."""
+    text = str(host or "").strip()
+    if "@" in text:
+        text = text.rsplit("@", 1)[-1]
+    return text
+
+
+def read_bad_machines(path: Path | str) -> set[str]:
+    p = Path(path)
+    if not p.is_file():
+        return set()
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return set()
+    hosts = payload.get("hosts") if isinstance(payload, dict) else payload
+    if not isinstance(hosts, list):
+        return set()
+    return {normalize_condor_host(str(host)) for host in hosts if str(host).strip()}
+
+
+def write_bad_machines(path: Path | str, hosts: set[str]) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    ordered = sorted(normalize_condor_host(host) for host in hosts if str(host).strip())
+    p.write_text(json.dumps({"hosts": ordered}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def add_bad_machine(path: Path | str, host: str) -> bool:
+    normalized = normalize_condor_host(host)
+    if not normalized:
+        return False
+    hosts = read_bad_machines(path)
+    if normalized in hosts:
+        return False
+    hosts.add(normalized)
+    write_bad_machines(path, hosts)
+    return True
+
+
+def merge_requirements_with_exclusions(
+    requirements: str | None,
+    bad_machines: set[str],
+) -> str | None:
+    if not bad_machines:
+        return requirements
+    exclusions = " && ".join(
+        f'Machine != "{host}"' for host in sorted(bad_machines)
+    )
+    base = (requirements or "True").strip() or "True"
+    return f"({base}) && {exclusions}"
+
+
+def tally_execution_eviction_failures(
+    log_text: str, cluster_id: int | None = None
+) -> dict[str, int]:
+    """Count disconnect -> reconnect-failed ("not found at execution machine")
+    cycles per execution host from a raw HTCondor user log.
+
+    The real HTCondor event sequence for a job that matches a broken/vanished
+    slot looks like::
+
+        022 (CID.P.S) ... Job disconnected, attempting to reconnect
+            Socket between submit and execute hosts closed unexpectedly
+            Trying to reconnect to slot1_1@bad-host.example.com <...>
+        ...
+        024 (CID.P.S) ... Job reconnection failed
+            Job not found at execution machine
+            Can not reconnect to slot1_1@bad-host.example.com, rescheduling job
+        ...
+        004 (CID.P.S) ... Job was evicted.
+            ...
+            Job not found at execution machine
+            ...
+
+    ``Job not found at execution machine`` appears twice per cycle (once under
+    the 024 event, once under the 004 event), so we count at most once per
+    cycle, keyed to the host named in the preceding "reconnect to" line. A new
+    "022 Job disconnected" line always starts a new cycle, which is essential
+    because the *same* bad host is usually reused across many consecutive
+    cycles.
+
+    Because a stage's Condor log file is appended across every retry/cluster
+    (the log path is stable per stage), *cluster_id* restricts the tally to
+    events belonging to that specific cluster, avoiding misattributing an
+    older, already-handled cluster's failures to a newly submitted one.
+    """
+    counts: dict[str, int] = {}
+    current_host: str | None = None
+    counted_for_cycle = False
+    active_cluster: int | None = None
+    target_cluster = int(cluster_id) if cluster_id is not None else None
+    for line in log_text.splitlines():
+        header = _EVENT_HEADER_RE.match(line)
+        if header:
+            try:
+                active_cluster = int(header.group(1))
+            except ValueError:
+                active_cluster = None
+        if target_cluster is not None and active_cluster != target_cluster:
+            continue
+        if _DISCONNECT_CYCLE_START_RE.search(line):
+            current_host = None
+            counted_for_cycle = False
+            continue
+        match = _RECONNECT_TARGET_RE.search(line)
+        if match:
+            current_host = normalize_condor_host(match.group(1))
+            continue
+        if current_host and not counted_for_cycle and _NOT_FOUND_RE.search(line):
+            counts[current_host] = counts.get(current_host, 0) + 1
+            counted_for_cycle = True
+    return counts
+
+
+def _read_eviction_state(path: Path) -> dict:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_eviction_state(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def eviction_requeue_host(
+    log_path: Path | str,
+    *,
+    cluster_id: int,
+    eviction_state_path: Path | str,
+    threshold: int = CONDOR_EVICT_FAIL_THRESHOLD,
+) -> str | None:
+    """Return a host to exclude when immediate-evict failures exceed *threshold*."""
+    path = Path(log_path)
+    if not path.is_file():
+        return None
+    tallies = tally_execution_eviction_failures(
+        path.read_text(encoding="utf-8", errors="replace"), cluster_id=cluster_id
+    )
+    if not tallies:
+        return None
+    state = _read_eviction_state(Path(eviction_state_path))
+    acted = state.get("acted_clusters")
+    if not isinstance(acted, dict):
+        acted = {}
+    cluster_key = str(int(cluster_id))
+    cluster_acted = acted.get(cluster_key)
+    if not isinstance(cluster_acted, dict):
+        cluster_acted = {}
+    for host, count in tallies.items():
+        if count < threshold:
+            continue
+        if int(cluster_acted.get(host, 0)) >= int(count):
+            continue
+        return host
+    return None
+
+
+def record_eviction_requeue(
+    eviction_state_path: Path | str,
+    *,
+    cluster_id: int,
+    host: str,
+    failure_count: int,
+) -> None:
+    path = Path(eviction_state_path)
+    state = _read_eviction_state(path)
+    acted = state.get("acted_clusters")
+    if not isinstance(acted, dict):
+        acted = {}
+    cluster_key = str(int(cluster_id))
+    cluster_acted = acted.get(cluster_key)
+    if not isinstance(cluster_acted, dict):
+        cluster_acted = {}
+    normalized = normalize_condor_host(host)
+    cluster_acted[normalized] = int(failure_count)
+    acted[cluster_key] = cluster_acted
+    state["acted_clusters"] = acted
+    _write_eviction_state(path, state)
+
+
+def apply_bad_machine_exclusions(
+    resources: CondorResourceRequest,
+    artifacts: dict[str, Path],
+) -> CondorResourceRequest:
+    bad = read_bad_machines(artifacts["bad_machines"])
+    if not bad:
+        return resources
+    merged = merge_requirements_with_exclusions(resources.requirements, bad)
+    if merged == resources.requirements:
+        return resources
+    return replace(resources, requirements=merged)
+
+
 def write_submit_file(
     submit_path: Path,
     cmd: Sequence[str],
@@ -311,6 +564,7 @@ def submit_job(
     """Submit one stage command to Condor; return (cluster id, wall-clock submit epoch)."""
     resources = resources or CondorResourceRequest()
     artifacts = condor_artifact_paths(runs_root, run_id, target_label, stage)
+    resources = apply_bad_machine_exclusions(resources, artifacts)
     write_submit_file(artifacts["submit"], cmd, artifacts, resources)
     proc = _run_condor(["condor_submit", str(artifacts["submit"])])
     match = re.search(r"submitted to cluster (\d+)", proc.stdout)
@@ -391,8 +645,64 @@ def _query_hold_reason(cluster_id: int) -> str | None:
     return line or None
 
 
+def _query_clusters_once(
+    unique_ids: list[int],
+) -> dict[int, tuple[int | None, int | None]]:
+    result: dict[int, tuple[int | None, int | None]] = {}
+    proc = _run_condor(
+        [
+            "condor_q",
+            *[str(cluster_id) for cluster_id in unique_ids],
+            "-af",
+            "ClusterId",
+            "JobStatus",
+            "ExitCode",
+        ],
+        check=False,
+    )
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            cluster_id = int(parts[0])
+        except ValueError:
+            continue
+        status, exit_code = _parse_status_exit(parts[1:])
+        if status is not None:
+            result[cluster_id] = (status, exit_code)
+    for cluster_id in unique_ids:
+        if cluster_id not in result:
+            result[cluster_id] = _query_history(cluster_id)
+    return result
+
+
 def query_clusters(cluster_ids: Sequence[int]) -> dict[int, tuple[int | None, int | None]]:
-    """Batch-query Condor for multiple cluster ids."""
+    """Batch-query Condor for multiple cluster ids (retries transient misses)."""
+    if not cluster_ids:
+        return {}
+    unique_ids = list(dict.fromkeys(int(cluster_id) for cluster_id in cluster_ids))
+    result: dict[int, tuple[int | None, int | None]] = {}
+    for attempt in range(_QUERY_RETRY_ATTEMPTS):
+        result = _query_clusters_once(unique_ids)
+        missing = [
+            cluster_id
+            for cluster_id in unique_ids
+            if result.get(cluster_id, (None, None))[0] is None
+        ]
+        if not missing or attempt + 1 >= _QUERY_RETRY_ATTEMPTS:
+            break
+        time.sleep(_QUERY_RETRY_DELAY_S)
+    return result
+
+
+def query_clusters_display(
+    cluster_ids: Sequence[int],
+) -> dict[int, tuple[int | None, int | None]]:
+    """Batch-query Condor queue state for progress display (no history fallback)."""
     if not cluster_ids:
         return {}
     unique_ids = list(dict.fromkeys(int(cluster_id) for cluster_id in cluster_ids))
@@ -424,7 +734,7 @@ def query_clusters(cluster_ids: Sequence[int]) -> dict[int, tuple[int | None, in
             result[cluster_id] = (status, exit_code)
     for cluster_id in unique_ids:
         if cluster_id not in result:
-            result[cluster_id] = _query_history(cluster_id)
+            result[cluster_id] = (None, None)
     return result
 
 
