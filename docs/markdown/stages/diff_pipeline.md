@@ -5,7 +5,7 @@
 
 The orchestrator sees a single stage `diff` (`orchestration/stages.py`, `deps=("downsample",)`, Condor pool `diff`). Internally it runs an **ordered YAML pipeline of sub-stages** (`orchestration/execute.py: run_config_pipeline()`), validated against `STAGE_KINDS` in `orchestration/validate.py`:
 
-`shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `sat_template`, `subtract`, `background`, `forced_photometry`
+`shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `centroids`, `sat_template`, `subtract`, `background`, `forced_photometry`
 
 Preamble entries (no `kind`, must precede the first stage): `external_workspaces`, `workspace_inherit`.
 
@@ -34,6 +34,8 @@ Per-FFI Hotpants: cropped science frame vs the PS1 template of that frame's WCS 
 
 Outputs (per YAML `output:` block): diffs `ws/{diffs}/tess{pid}_{diffs}.fits.gz` (PRIMARY + NOISE + MASK), optional convolved model, Hotpants background, and stamps. Production default (`config/diff_config.yaml`): `write_convolved: false`, `write_bkg: true`, `write_stamps: false`. Also appends Hotpants status columns to `syndiff_ffi_frames.csv`.
 
+When `write_kernel_solutions: true`, per-frame kernel vectors are persisted as `{diffs_label}_kernels/{product_id}_kernel.npz` (e.g. `hp_d_kernels/tess2020019142923_kernel.npz`) alongside the diffs workspace. Default is off; see §5.
+
 ### `kernel_fit` (`stages/kernel_fit.py`)
 
 Fits **one target-level kernel** on the minimum-background FFI: Hotpants pass 1 (`hp_bgo=3`) → photutils background removal → Hotpants pass 2 (`hp_bgo=0`), extracting the kernel solution. Writes `ws/{output}/kernel_r2.npz` (`kernel_solution`, `kernel_image`, `basis`, substamps) and `kernel_fit_meta.json`.
@@ -54,17 +56,50 @@ Unified background cube (spatial photutils, temporal Savitzky–Golay, strap cor
 
 Per-frame linear combination of workspace planes (or the virtual cropped `ffi` label), e.g. `expression: "ks_d + ks_b - ks_b_s"` → `ws/ks_d_s/`.
 
-### `epsf` (`stages/epsf.py`)
+### `epsf` (`stages/epsf.py`, `stages/gridded_epsf.py`)
 
-Tiled empirical PSF fitting on difference images; per-template-group median ePSF. Writes `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `tile_centers.json` (in `ws/` root; shared with `sat_template` and photometry).
+Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction rejects pixels flagged in `shared_mask` **only** for bits 2 and 4 (bright-star crosses and TESS straps); catalog-source bit 1 is ignored so Gaia ePSF stars are kept.
 
-### `sat_template` (`stages/sat_template.py`) — see §5
+Primary outputs under `ws/{output}/`:
+
+| Artifact | Description |
+|----------|-------------|
+| `{ffi_stem}_gridded_epsf.npz` | Per-frame `GriddedPSFModel` archive: `data` (grid cube), `grid_xypos`, `oversampling` |
+| `gridded_epsf_index.json` | `ffi_stem` → npz path mapping |
+| `epsf.progress.json` | Frame progress sidecar (also mirrored as `diff.epsf.progress.json` beside `diff.log`) |
+
+Legacy tile-stack bundles (for `sat_template` and tile-interpolated photometry) are still written: `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `group_epsf/group_epsf_{gid}.npz` (median gridded cube per WCS group). `tile_centers.json` is saved in `ws/` root (shared with `sat_template` and legacy ePSF photometry).
+
+Key YAML params: `tile_nx`, `tile_ny`, `epsf_oversample`, `psf_size`, `extract_size`, `min_stars_per_tile`, `mag_max_rp`, `epsf_maxiters`, `epsf_recentering_maxiters`, `epsf_n_jobs`.
+
+### `centroids` (`stages/centroids.py`)
+
+Gaia-star PSF photometry on difference images using per-frame `GriddedPSFModel` from an `epsf` workspace (`photutils.PSFPhotometry` with the same brightness pre-filter as ePSF fitting). Inputs: `diffs` (difference-image label), `epsf` (gridded ePSF workspace label).
+
+Outputs under `ws/{output}/`:
+
+| Artifact | Description |
+|----------|-------------|
+| `{ffi_stem}_photresults.ecsv` | Per-frame multi-star PSF photometry table (Gaia metadata + fitted positions/fluxes) |
+| `centroids_index.json` | `ffi_stem` → photresults path mapping |
+| `centroids.progress.json` | Frame progress sidecar (also mirrored as `diff.centroids.progress.json` beside `diff.log`) |
+| `centroids.progress.json` | Frame progress sidecar (also mirrored as `diff.centroids.progress.json` beside `diff.log`) |
+
+Key YAML params: `mag_max_rp`, `fit_shape`, `aperture_radius`, `psf_grouper_min_separation`, `centroids_n_jobs`.
+
+### `sat_template` (`stages/sat_template.py`) — see §6
 
 Builds per-group model images of bright stars as flux-scaled ePSF stamps: `ws/{output}/sat_tmpl_native_r1/group_{gid}.fits.gz` (2× oversampling path) and `sat_tmpl_hr_r1/group_{gid}.fits.gz` (9×).
 
 ### `forced_photometry` (`stages/photometry.py`)
 
-Forced PSF (`prf` official TESS PRF, or `epsf` from the epsf stage) and/or aperture photometry at the primary target and `additional_forced_targets`. Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_name}.csv`), plus diagnostic plots when `pipeline_plots: true`. If `ws/{diffs_m}/phot_calib.csv` exists, kernel-sum zero-point calibration columns (`kernel_ref`, calibrated `flux`, `tmag`, `flux_jy`) are added.
+Forced PSF and/or aperture photometry at the primary target and `additional_forced_targets`. PSF methods (`type: psf`) support:
+
+- `psf_type: prf` — official TESS PRF (`PRF.TESS_PRF`)
+- `psf_type: epsf` with `inputs.epsf` pointing at a gridded ePSF workspace — per-frame `GriddedPSFModel` via `photutils.PSFPhotometry` (e.g. method name `gepsf` in `config/diff_config_2020ut_epsf_gepsf.yaml`)
+- `psf_type: epsf` without gridded index — legacy tile-interpolated group ePSF from `epsf_r1_smooth.npz`
+
+Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_name}.csv`), plus diagnostic plots when `pipeline_plots: true`. If `ws/{diffs_m}/phot_calib.csv` exists, kernel-sum zero-point calibration columns (`kernel_ref`, calibrated `flux`, `tmag`, `flux_jy`) are added.
 
 ## 3. Production pipeline orders
 
@@ -74,6 +109,7 @@ Forced PSF (`prf` official TESS PRF, or `epsf` from the epsf stage) and/or apert
 | `config/diff_config_single_kernel.yaml` | `shared_mask` → `kernel_fit` → `convolved_templates` → `kernel_subtract` → `background` → `subtract` → `forced_photometry` |
 | `config/diff_config_multi_kernel.yaml` | same prefix → `background` → `hotpants` (round 2, `hp_bgo=0`) → `forced_photometry` |
 | `config/diff_config_multi_kernel_resume.yaml` | `workspace_inherit` → `background` → `hotpants` → `forced_photometry` |
+| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `workspace_inherit` (from `multi_hp_temp_calib`: `hp_d`, `hp_m`, shared mask, Gaia catalog, substamp stars) → `epsf` (3×3 grid) → `centroids` → `forced_photometry` (`gepsf`, `psf_type: epsf`) on `hp_d` |
 
 ## 4. Template resolution
 
@@ -93,10 +129,11 @@ This is the hook for swapping in modified templates: point `template_dir` (or th
 |----------|------|------------|
 | `ws/{diffs_m}/kernel_reconstruction.npz` | Hotpants **basis** stack + config scalars | No (one per hotpants pass) |
 | `ws/{diffs_m}/phot_calib.csv` | `kernel_sum`, `tess_zp` per FFI | Yes (scalars only) |
-| in-memory | Full per-frame `kernel_solution` vector | Yes — **discarded** after each frame |
+| in-memory (default) | Full per-frame `kernel_solution` vector | Yes — **discarded** after each frame |
+| `ws/{diffs_label}_kernels/{product_id}_kernel.npz` | Per-frame `kernel_solution` + Hotpants config scalars | Yes — only when `write_kernel_solutions: true` |
 | `ws/{kernel_fit}/kernel_r2.npz` | Target-level kernel from `kernel_fit` | One per target |
 
-**Per-frame Hotpants kernel vectors are deliberately not written** (see docstring at the top of `stages/hotpants.py`). Consequences:
+**Per-frame Hotpants kernel vectors are not written by default** (see docstring at the top of `stages/hotpants.py`). Set `write_kernel_solutions: true` on a `hotpants` stage to persist them under `{diffs_label}_kernels/`. Consequences:
 
 - "Convolve a new/modified template with the already-derived kernel" is only possible on the **kernel_fit path**: reuse `kernel_r2.npz`, re-run `convolved_templates` (with `skip_existing: false` or cleared outputs) → `kernel_subtract` → `forced_photometry`.
 - On the default hotpants-only path, changing a template requires re-running `hotpants` (new per-frame fits).
@@ -108,7 +145,17 @@ Intended purpose: model images of the **PS1-removed** (saturated) stars, per WCS
 1. **Star selection**: `execute.py: _load_removed_stars_in_crop()` returns the full Gaia catalog whenever `gaia_df` already carries crop-local `x`/`y` columns — which is always true after `shared_mask`. So in production runs `removed_stars_csv` (i.e. `events/{label}/ps1_removed_stars.csv` produced by downsample) is **ignored**, and the "sat" template contains *all* Gaia stars in the crop, not just removed ones.
 2. **Subtraction wiring**: outputs are per-group `group_{gid}.fits.gz`, but the `subtract` stage consumes per-frame `tess{pid}_{label}.fits.gz` planes. No code bridges the two; the example config `config/example/diff_config_b_epsf_sat_bkg.yaml` that pairs them is stale (it also references a removed `background_estimate` kind). `load_group_templates()` is unused outside the module.
 
-There is currently **no mechanism to subtract a single, chosen star from a template** — see `.cursor/plans/exoplanet_star_removed_template.plan.md` for the planned design.
+There is currently **no mechanism to subtract a single, chosen star from a template** via the main diff pipeline — see [host-star light curves](../star_lightcurves.md) and [star pipeline](star_pipeline.md) for the `syndiff star` workflow that builds per-host mini templates and star-only diff stamps from persisted per-frame Hotpants artifacts.
+
+### Downstream: host-star light curves
+
+The **`star`** stage reads baseline diff workspaces (not `hp_d` images directly):
+
+- `convolved` (e.g. `hp_c`) — per-frame convolved template windows
+- `{diffs}_kernels` — per-frame Hotpants kernels
+- `phot_bkg` (e.g. `ks_b_s` or `ks_b`) — photutils background subtracted in star stamps (**not** `hp_b`)
+
+Produce `ks_b` via `kernel_subtract`; smooth to `ks_b_s` with the `background` stage. Star config sets `baseline.phot_bkg` explicitly.
 
 ## 7. Config schema highlights
 
@@ -135,5 +182,5 @@ A frozen per-target copy of the effective config is written to `runs/.../per_tar
 | Template matching | `difference_imaging/support/template_resolution.py` |
 | Kernel fit / convolve / subtract | `difference_imaging/stages/kernel_fit.py`, `convolved_templates.py`, `kernel_subtract.py`, `kernel.py` |
 | Sat templates | `difference_imaging/stages/sat_template.py` |
-| Photometry / ePSF | `difference_imaging/stages/photometry.py`, `epsf.py` |
+| Photometry / ePSF / centroids | `difference_imaging/stages/photometry.py`, `epsf.py`, `gridded_epsf.py`, `centroids.py`, `epsf_progress.py` |
 | Paths / naming | `difference_imaging/support/paths.py`, `ffi_naming.py` |

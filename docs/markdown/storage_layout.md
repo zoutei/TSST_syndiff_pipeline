@@ -73,6 +73,8 @@ Only three top-level subtrees belong here long-term:
         {centroids_label}/         # e.g. centroids_r1
           {ffi_stem}_photresults.ecsv
           centroids_index.json
+          centroids.progress.json
+          centroids.progress.json
         {lc_label}/                # forced_photometry output; e.g. lc_gepsf_on_hp_diffs
           lightcurve_{method}.csv  # e.g. lightcurve_gepsf.csv
           lightcurve_{method}_{extra}.csv
@@ -107,6 +109,8 @@ Filesystem name comes from `workspace_tree_name()` in `difference_imaging/suppor
 | `{epsf_label}/group_epsf/group_epsf_{gid}.npz` | Optional median gridded cube per WCS group |
 | `{centroids_label}/*_photresults.ecsv` | Per-frame Gaia PSF photometry on diffs |
 | `{centroids_label}/centroids_index.json` | `ffi_stem` → photresults path index |
+| `{centroids_label}/centroids.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.centroids.progress.json` beside `diff.log`) |
+| `{centroids_label}/centroids.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.centroids.progress.json` beside `diff.log`) |
 | `{lc_label}/lightcurve_{method}.csv` | Forced photometry (e.g. `lc_gepsf_on_hp_diffs/lightcurve_gepsf.csv`) |
 | `{lc_label}/lightcurve_{method}_{extra}.csv` | Additional forced targets (`additional_forced_targets`) |
 
