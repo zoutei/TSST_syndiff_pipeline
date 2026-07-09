@@ -239,6 +239,25 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
             return False
         return any(epsf_dir.rglob("group_epsf_*.npy"))
 
+    if kind == "centroids":
+        label = str(stage["output"]).strip()
+        centroids_dir = ws_dir / label
+        if not centroids_dir.is_dir():
+            return False
+        from syndiff_pipeline.difference_imaging.stages.centroids import (
+            CENTROIDS_INDEX_BASENAME,
+            PHOTRESULTS_ECSV_SUFFIX,
+        )
+
+        index_path = centroids_dir / CENTROIDS_INDEX_BASENAME
+        if index_path.is_file():
+            import json
+
+            with open(index_path, encoding="utf-8") as fh:
+                index = json.load(fh)
+            return bool(index)
+        return any(centroids_dir.glob(f"*{PHOTRESULTS_ECSV_SUFFIX}"))
+
     if kind == "kernel_fit":
         label = str(stage.get("output", "")).strip()
         if not label:

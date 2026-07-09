@@ -219,7 +219,7 @@ class SynDiffConfig:
     canonical ``ws/``. Use for debug runs that must not touch production artifacts."""
 
     # ── Parallelism ───────────────────────────────────────────────────────────
-    n_jobs: int = 8
+    n_jobs: int = 16
     """Default worker count (joblib **loky**) for stages that read this global value:
     forced photometry, background stacking / adaptive temporal smoothing, etc.
     Per-stage overrides (e.g. ``hotpants_n_jobs`` on ``kind: hotpants``) win."""

@@ -68,7 +68,7 @@ class SitePaths:
 @dataclass
 class CondorResources:
     """CondorResources."""
-    request_cpus: int = 8
+    request_cpus: int = 16
     request_memory: int = 64_000
     requirements: str | None = "Memory >= 64000 && LoadAvg < 10"
     rank: str | None = "-LoadAvg"
@@ -123,7 +123,7 @@ def _parse_condor(raw: dict | None) -> CondorResources:
     CondorResources"""
     raw = raw or {}
     return CondorResources(
-        request_cpus=int(raw.get("request_cpus", 8)),
+        request_cpus=int(raw.get("request_cpus", 16)),
         request_memory=int(raw.get("request_memory", 64_000)),
         requirements=raw.get("requirements"),
         rank=raw.get("rank"),

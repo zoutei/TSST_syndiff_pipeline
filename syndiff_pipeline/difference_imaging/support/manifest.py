@@ -496,3 +496,21 @@ def ordered_diff_paths_for_workspace(
     return out
 
 
+def limit_diff_paths(diff_paths: list, max_ffis: int | None) -> tuple[list, list[int]]:
+    """
+    Keep the first ``max_ffis`` existing diff FITS paths (skip manifest holes).
+
+    Returns (paths, manifest_row_indices) aligned with each returned path.
+    """
+    all_indices = list(range(len(diff_paths)))
+    if max_ffis is None:
+        return diff_paths, all_indices
+    paths: list = []
+    indices: list[int] = []
+    for i, p in enumerate(diff_paths):
+        if p and os.path.isfile(p):
+            paths.append(p)
+            indices.append(i)
+            if len(paths) >= int(max_ffis):
+                break
+    return paths, indices
