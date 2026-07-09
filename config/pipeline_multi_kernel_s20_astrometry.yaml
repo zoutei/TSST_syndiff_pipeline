@@ -1,16 +1,23 @@
-# Orchestrator policy: template stages, resource pools, notifications.
-# Machine-specific paths live in deployment.yaml (copy deployment.yaml.example).
-# Targets are passed on the CLI via --targets (never embedded here).
+# Sector-20 astrometry / distortion mapping: multi-kernel diff, PS1 stream mode.
+#
+# ps1_source: stream fetches skycells during ps1_process (no ps1_skycells.zarr growth).
+# ps1_download is auto-skipped by the scheduler when ps1_source=stream.
+#
+# Submit without ps1_download (15 targets; 20/3/3 disabled in targets CSV):
+#   syndiff all submit \
+#     --config config/pipeline_multi_kernel_s20_astrometry.yaml \
+#     --deployment config/deployment.yaml \
+#     --targets config/targets_s20_astrometry.csv \
+#     --stages tess_ffi_download,wcs_grouping,mapping,ps1_process,downsample,diff \
+#     --run-id <run_id>
 deployment_file: deployment.yaml
-diff_config: diff_config_single_kernel.yaml
-star_config: star_config.yaml
+diff_config: diff_config_multi_kernel.yaml
 
 stages:
   wcs_grouping:
     offset_threshold: 0.01
     wcs_drift_savgol_window: 11
     wcs_drift_savgol_polyorder: 2
-    # Full-chip templates; use diff_config crop override for smaller differencing ROI.
     crop_mode: full
   mapping:
     oversampling_factor: 1
@@ -21,7 +28,7 @@ stages:
     num_workers: 8
     overwrite: false
   ps1_process:
-    ps1_source: zarr
+    ps1_source: stream
     remove_saturated_stars: true
     enable_saturation_correction: false
     psf_sigma: 40.0
@@ -30,8 +37,6 @@ stages:
     ignore_mask_bits: [12]
     oversampling_factor: 1
   diff:
-    executor: condor
-  star:
     executor: condor
 
 resources:
@@ -45,12 +50,11 @@ resources:
     max_concurrent: 4
   diff:
     max_concurrent: 6
-  star:
-    max_concurrent: 4
 
 scheduler:
   heartbeat_interval_s: 30.0
-  # condor_hold_timeout_s: 600.0  # remove held Condor jobs after N seconds (default 600)
+  verify_max_workers: 4
+  verify_budget_per_tick: 32
 
 notifications:
   enabled: true
@@ -69,9 +73,3 @@ notifications:
     daemon_unhealthy: true
   bot:
     enabled: true
-
-overrides:
-  "23/2/1":
-    stages:
-      ps1_process:
-        projections_limit: 1

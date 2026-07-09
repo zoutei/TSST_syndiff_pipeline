@@ -31,7 +31,8 @@ After templates exist, the **`diff`** stage runs a YAML-ordered pipeline ([`conf
 
 Optional steps you can add to the `pipeline:` list:
 
-- **Empirical PSF fitting** — tiled ePSF via TGLC (`epsf` stage; use with `psf_type: epsf`).
+- **Empirical PSF fitting** — tiled gridded ePSF via photutils (`epsf` stage; `GriddedPSFModel` with configurable `tile_nx`×`tile_ny`; use with `psf_type: epsf` in forced photometry for spatially varying **gepsf**).
+- **Gaia centroids** — PSF photometry on bright Gaia stars (`centroids` stage; outputs per-frame `*_photresults.ecsv`).
 - **Saturated star templates** — model and subtract bright saturated sources (`sat_template` + `subtract`).
 - **Background removal** — rough per-frame background, then adaptive temporal smoothing (`background_estimate` / `background_rough`, then `subtract` from the diffs).
 - **Second round of differencing** — run Hotpants again on background-subtracted science images for cleaner residuals (see commented blocks in [`config/diff_config.yaml`](config/diff_config.yaml) and [`config/example/diff_config_c_second_hotpants.yaml`](config/example/diff_config_c_second_hotpants.yaml)).
@@ -141,7 +142,7 @@ syndiff retry --deployment config/deployment.yaml --run-id batch_no5 \
 
 | Pattern | Examples |
 |---------|----------|
-| **Execute** | `syndiff all submit`, `syndiff template submit`, `syndiff diff submit`, `syndiff diff run --target-name …` |
+| **Execute** | `syndiff all submit`, `syndiff template submit`, `syndiff diff submit`, `syndiff diff run --target-name …`, `syndiff star submit` |
 | **Monitor** | `syndiff progress`, `syndiff status --watch`, `syndiff logs`, `syndiff tail` |
 | **Control** | `syndiff retry`, `syndiff pause`, `syndiff resume`, `syndiff kill` |
 | **Workspace** | `syndiff runs`, `syndiff active`, `syndiff daemon status`, `syndiff verify` |

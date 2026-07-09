@@ -1,0 +1,2 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+20,3,3,216.085042,76.593947,s20_astrometry,true
