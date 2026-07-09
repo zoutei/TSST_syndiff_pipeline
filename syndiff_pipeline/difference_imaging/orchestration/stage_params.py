@@ -114,6 +114,7 @@ HOTPANTS_ALLOWED = frozenset(
         "write_convolved",
         "write_bkg",
         "write_stamps",
+        "write_kernel_solutions",
     }
 )
 
@@ -126,6 +127,25 @@ EPSF_ALLOWED = frozenset(
         "tile_ny",
         "epsf_oversample",
         "psf_size",
+        "min_stars_per_tile",
+        "mag_max_rp",
+        "epsf_maxiters",
+        "epsf_recentering_maxiters",
+        "extract_size",
+        "epsf_n_jobs",
+    }
+)
+
+CENTROIDS_ALLOWED = frozenset(
+    {
+        "kind",
+        "inputs",
+        "output",
+        "mag_max_rp",
+        "fit_shape",
+        "aperture_radius",
+        "psf_grouper_min_separation",
+        "centroids_n_jobs",
     }
 )
 
@@ -168,6 +188,9 @@ _METHOD_PSF_KEYS = frozenset(
         "epsf_oversample",
         "tile_nx",
         "tile_ny",
+        "fit_shape",
+        "aperture_radius",
+        "psf_grouper_min_separation",
         "inputs",
         "csv_basename",
     }
@@ -284,15 +307,32 @@ class HotpantsParams:
     write_convolved: bool = True
     write_bkg: bool = True
     write_stamps: bool = True
+    write_kernel_solutions: bool = False
 
 
 @dataclass
 class EpsfParams:
     """EpsfParams."""
-    tile_nx: int = 4
-    tile_ny: int = 4
-    epsf_oversample: int = 2
+    tile_nx: int = 3
+    tile_ny: int = 3
+    epsf_oversample: int = 4
     psf_size: int = 11
+    min_stars_per_tile: int = 5
+    mag_max_rp: Optional[float] = 12.95
+    epsf_maxiters: int = 15
+    epsf_recentering_maxiters: int = 20
+    extract_size: Optional[int] = None
+    epsf_n_jobs: Optional[int] = None
+
+
+@dataclass
+class CentroidsParams:
+    """CentroidsParams."""
+    mag_max_rp: Optional[float] = 12.95
+    fit_shape: int = 11
+    aperture_radius: float = 2.0
+    psf_grouper_min_separation: float = 8.0
+    centroids_n_jobs: Optional[int] = None
 
 
 @dataclass
@@ -320,6 +360,9 @@ class PsfPhotometryMethodParams:
     tile_ny: int = 4
     epsf_workspace: Optional[str] = None
     csv_basename: Optional[str] = None
+    fit_shape: int = 11
+    aperture_radius: float = 2.0
+    psf_grouper_min_separation: float = 10.0
 
 
 @dataclass
@@ -553,7 +596,22 @@ def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
     -------
     EpsfParams"""
     validate_stage_keys(stage, pipeline_idx, "epsf", EPSF_ALLOWED)
-    return _merge_dataclass(EpsfParams, stage)
+    params = _merge_dataclass(EpsfParams, stage)
+    if params.mag_max_rp is None:
+        params = EpsfParams(**{**params.__dict__, "mag_max_rp": 12.95})
+    return params
+
+
+def parse_centroids(stage: dict, pipeline_idx: int) -> CentroidsParams:
+    """Parse centroids stage parameters."""
+    validate_stage_keys(stage, pipeline_idx, "centroids", CENTROIDS_ALLOWED)
+    params = _merge_dataclass(CentroidsParams, stage)
+    if params.mag_max_rp is None:
+        params = CentroidsParams(**{**params.__dict__, "mag_max_rp": 12.95})
+    if "centroids_n_jobs" in stage:
+        v = stage["centroids_n_jobs"]
+        params.centroids_n_jobs = None if v is None else int(v)
+    return params
 
 
 def parse_sat_template(stage: dict, pipeline_idx: int) -> SatTemplateParams:
@@ -821,6 +879,7 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "shared_mask": lambda: parse_shared_mask(stage, pipeline_idx),
         "hotpants": lambda: parse_hotpants(stage, pipeline_idx),
         "epsf": lambda: parse_epsf(stage, pipeline_idx),
+        "centroids": lambda: parse_centroids(stage, pipeline_idx),
         "sat_template": lambda: parse_sat_template(stage, pipeline_idx),
         "subtract": lambda: parse_subtract(stage, pipeline_idx),
         "background": lambda: parse_background(stage, pipeline_idx),

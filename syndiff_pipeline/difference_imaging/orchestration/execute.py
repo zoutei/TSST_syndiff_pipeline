@@ -4,6 +4,7 @@ Config-driven pipeline execution (YAML ``pipeline`` list).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -45,6 +46,7 @@ from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_csv_exists,
     manifest_path_from_output_dir,
     ordered_diff_paths_for_workspace,
+    limit_diff_paths,
     save_frame_manifest,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import HotpantsWorkspaceDirs
@@ -80,6 +82,7 @@ from syndiff_pipeline.difference_imaging.support.workspace_inherit import (
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     parse_background,
+    parse_centroids,
     parse_epsf,
     parse_forced_photometry,
     parse_hotpants,
@@ -1047,26 +1050,34 @@ def run_config_pipeline(
                 manifest_path,
                 run_id=ctx.workspace_run_id,
             )
+            if cfg.max_ffis is not None:
+                diff_paths, _epsf_rows = limit_diff_paths(diff_paths, cfg.max_ffis)
             if gaia_df is None:
                 gaia_df = _load_gaia_catalog(cfg, out, ws_root=ws_root)
             if gaia_df is None:
                 raise RuntimeError("epsf requires gaia_catalog.")
             gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
-            gaia_df_flux = epsf_fitting.add_tess_flux_ratio(gaia_df)
             col_corr_2d = epsf_fitting.build_median_mask_correction(
                 cfg.median_mask_path, cfg.camera, cfg.ccd, crop_bounds
             )
+            shared_mask_path = os.path.join(out, "shared_mask.fits")
+            if not os.path.isfile(shared_mask_path):
+                shared_mask_path = os.path.join(out, "shared_mask.fits.gz")
             ws_out = ctx.workspace(label_out)
             os.makedirs(ws_out, exist_ok=True)
             epsf_stack, tile_centers_new, ffi_stems, epsf_ok = (
                 epsf_fitting.fit_epsf_all_frames(
                     diff_paths,
-                    gaia_df_flux,
+                    gaia_df,
                     col_corr_2d,
                     cfg,
                     epsf_p,
                     ws_out,
                     round_id=1,
+                    shared_mask_path=shared_mask_path if os.path.isfile(shared_mask_path) else None,
+                    diff_log_path=diff_log_path,
+                    epsf_label=label_out,
+                    diffs_input=str(inp["diffs"]),
                 )
             )
             if tile_centers_new is not None:
@@ -1079,12 +1090,77 @@ def run_config_pipeline(
                 epsf_smooth, ws_out, round_id=1, ffi_stem=ffi_stems
             )
             group_ids = group_ids_from_ffi_stems(wcs_table, ffi_stems)
+            from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+            if gridded_epsf.workspace_has_gridded_epsf(ws_out):
+                gridded_epsf.compute_group_epsf_gridded(
+                    ws_out, group_ids, ffi_stems, epsf_ok
+                )
             epsf_fitting.compute_group_epsf(
                 epsf_smooth, group_ids, output_dir=ws_out
             )
 
             if tile_centers is not None:
                 _save_tile_centers(tile_centers, ws_root)
+
+            if getattr(cfg, "pipeline_plots", False):
+                from syndiff_pipeline.difference_imaging.support.plot import (
+                    write_gridded_epsf_workspace_plots,
+                )
+
+                crop_shape = None
+                if crop_bounds is not None and "shape" in crop_bounds:
+                    crop_shape = tuple(crop_bounds["shape"])
+                dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+                write_gridded_epsf_workspace_plots(
+                    ws_out,
+                    _pipeline_plots_root(cfg),
+                    epsf_label=label_out,
+                    dpi=dpi,
+                    crop_shape=crop_shape,
+                )
+
+        elif kind == "centroids":
+            centroids_p = parse_centroids(stage, idx)
+            inp = stage["inputs"]
+            label_out = stage["output"]
+            diff_paths = ordered_diff_paths_for_workspace(
+                wcs_table,
+                out,
+                inp["diffs"],
+                manifest_path,
+                run_id=ctx.workspace_run_id,
+            )
+            if cfg.max_ffis is not None:
+                diff_paths, _centroids_rows = limit_diff_paths(diff_paths, cfg.max_ffis)
+            if gaia_df is None:
+                gaia_df = _load_gaia_catalog(cfg, out, ws_root=ws_root)
+            if gaia_df is None:
+                raise RuntimeError("centroids requires gaia_catalog.")
+            gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
+            epsf_ws = ctx.workspace(inp["epsf"])
+            from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+            epsf_catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
+            if epsf_catalog is None:
+                raise RuntimeError(
+                    f"centroids requires gridded ePSF in workspace {inp['epsf']!r}"
+                )
+            ws_out = ctx.workspace(label_out)
+            os.makedirs(ws_out, exist_ok=True)
+            from syndiff_pipeline.difference_imaging.stages import centroids
+
+            centroids.run_centroids_all_frames(
+                diff_paths,
+                gaia_df,
+                epsf_catalog,
+                cfg,
+                centroids_p,
+                ws_out,
+                centroids_label=label_out,
+                diffs_input=str(inp["diffs"]),
+                diff_log_path=diff_log_path,
+            )
 
         elif kind == "sat_template":
             sat_p = parse_sat_template(stage, idx)
@@ -1272,8 +1348,21 @@ def run_config_pipeline(
                 manifest_path,
                 run_id=ctx.workspace_run_id,
             )
+            if cfg.max_ffis is not None:
+                paths_for_phot, phot_rows = limit_diff_paths(paths_for_phot, cfg.max_ffis)
+            else:
+                phot_rows = list(range(len(paths_for_phot)))
+            wcs_for_phot = wcs_table.iloc[phot_rows].reset_index(drop=True)
             ref_idx = wcs_grouping.ref_manifest_row_index(wcs_table, ref_ffi_path)
-            if ref_idx is None:
+            if ref_idx is not None and ref_idx in phot_rows:
+                ref_idx = phot_rows.index(ref_idx)
+            elif ref_idx is not None:
+                ref_idx = None
+                log.warning(
+                    "forced_photometry: reference FFI not in max_ffis subset; "
+                    "phot_snap='ref' may use (0,0) offsets."
+                )
+            elif ref_idx is None:
                 log.warning(
                     "forced_photometry: ref_ffi_path not found in manifest %r; "
                     "phot_snap='ref' may use (0,0) offsets.",
@@ -1294,13 +1383,20 @@ def run_config_pipeline(
                 ]
 
             epsf_by_workspace: dict[str, np.ndarray] = {}
+            gridded_epsf_by_workspace: dict = {}
             stage_epsf_ws = inp.get("epsf")
             if stage_epsf_ws:
                 epsf_ws = ctx.workspace(str(stage_epsf_ws).strip())
-                arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
-                if arr.ndim == 3:
-                    arr = np.nanmedian(arr, axis=0)
-                epsf_by_workspace[str(stage_epsf_ws).strip()] = arr
+                from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+                catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
+                if catalog is not None:
+                    gridded_epsf_by_workspace[str(stage_epsf_ws).strip()] = catalog
+                else:
+                    arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
+                    if arr.ndim == 3:
+                        arr = np.nanmedian(arr, axis=0)
+                    epsf_by_workspace[str(stage_epsf_ws).strip()] = arr
             for method in phot_params.methods:
                 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
                     PsfPhotometryMethodParams,
@@ -1308,12 +1404,18 @@ def run_config_pipeline(
 
                 if isinstance(method, PsfPhotometryMethodParams) and method.epsf_workspace:
                     ws_lab = method.epsf_workspace
-                    if ws_lab not in epsf_by_workspace:
+                    if ws_lab not in epsf_by_workspace and ws_lab not in gridded_epsf_by_workspace:
                         epsf_ws = ctx.workspace(ws_lab)
-                        arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
-                        if arr.ndim == 3:
-                            arr = np.nanmedian(arr, axis=0)
-                        epsf_by_workspace[ws_lab] = arr
+                        from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+                        catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
+                        if catalog is not None:
+                            gridded_epsf_by_workspace[ws_lab] = catalog
+                        else:
+                            arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
+                            if arr.ndim == 3:
+                                arr = np.nanmedian(arr, axis=0)
+                            epsf_by_workspace[ws_lab] = arr
 
             extras = list(getattr(cfg, "additional_forced_targets", None) or [])
             science = (float(cfg.target_ra), float(cfg.target_dec))
@@ -1324,6 +1426,7 @@ def run_config_pipeline(
                 crop_bounds,
                 manifest_science_ra_dec=science,
             )
+            primary_xy = primary_xy[phot_rows]
 
             target_specs: list[tuple] = [
                 (
@@ -1341,7 +1444,7 @@ def run_config_pipeline(
                 extra_xy = photometry.resolve_forced_target_xy(
                     pt,
                     primary_xy,
-                    wcs_table,
+                    wcs_for_phot,
                     crop_bounds,
                     manifest_science_ra_dec=science,
                 )
@@ -1434,11 +1537,12 @@ def run_config_pipeline(
                 target_specs=target_specs,
                 phot_stage=phot_params,
                 epsf_by_workspace=epsf_by_workspace,
+                gridded_epsf_by_workspace=gridded_epsf_by_workspace,
                 stage_epsf_workspace=(
                     str(stage_epsf_ws).strip() if stage_epsf_ws else None
                 ),
                 tile_centers=tile_centers,
-                wcs_table=wcs_table,
+                wcs_table=wcs_for_phot,
                 crop_bounds=crop_bounds,
                 cfg=cfg,
                 output_dir=phot_out,
@@ -1450,6 +1554,19 @@ def run_config_pipeline(
                 plot_path_fn=_plot_path,
                 diffs_dir=ctx.workspace(diff_label),
             )
+
+            if getattr(cfg, "pipeline_plots", False):
+                from syndiff_pipeline.difference_imaging.support.plot import (
+                    write_lightcurve_diagnostics_from_workspace,
+                )
+
+                dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+                write_lightcurve_diagnostics_from_workspace(
+                    phot_out,
+                    _pipeline_plots_root(cfg),
+                    lc_label=label_out,
+                    dpi=dpi,
+                )
 
         else:
             raise RuntimeError(f"Unhandled stage kind {kind!r}")
@@ -1485,6 +1602,16 @@ def _load_group_epsf_from_dir(output_dir: str, subdir: str = "group_epsf") -> di
     for path in sorted(glob.glob(os.path.join(sub, "group_epsf_*.npy"))):
         gid = int(os.path.basename(path).replace("group_epsf_", "").replace(".npy", ""))
         d[gid] = np.load(path)
+    for path in sorted(glob.glob(os.path.join(sub, "group_epsf_*.npz"))):
+        gid = int(os.path.basename(path).replace("group_epsf_", "").replace(".npz", ""))
+        z = np.load(path, allow_pickle=False)
+        try:
+            from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+            data = np.asarray(z["data"], dtype=np.float64)
+            d[gid] = gridded_epsf.stack_from_gridded_cube(data)
+        finally:
+            z.close()
     return d
 
 
