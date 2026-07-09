@@ -22,6 +22,15 @@ class RunContext:
     meta: dict
 
 
+@dataclass
+class RunControlContext:
+    """Frozen run directory metadata for control commands (no targets load)."""
+    run_id: str
+    run_dir: Path
+    cfg: RunnerConfig
+    meta: dict
+
+
 def _load_meta(run_directory: Path) -> dict:
     """Load meta.
     
@@ -38,17 +47,27 @@ def _load_meta(run_directory: Path) -> dict:
     return json.loads(meta_path.read_text(encoding="utf-8"))
 
 
+def _validate_frozen_config(run_directory: Path) -> None:
+    """Validate frozen config.yaml exists."""
+    cfg_path = logs.run_config_path(run_directory)
+    if not cfg_path.is_file():
+        raise SystemExit(
+            f"Run directory {run_directory} is missing frozen config.yaml. "
+            "Runs created before frozen snapshots require manual copy or a new submit."
+        )
+
+
 def _validate_frozen_inputs(run_directory: Path) -> None:
     """Validate frozen inputs.
     
     Parameters
     ----------
     run_directory : Path"""
-    cfg_path = logs.run_config_path(run_directory)
+    _validate_frozen_config(run_directory)
     targets_path = logs.run_targets_path(run_directory)
-    if not cfg_path.is_file() or not targets_path.is_file():
+    if not targets_path.is_file():
         raise SystemExit(
-            f"Run directory {run_directory} is missing frozen config.yaml or targets.csv. "
+            f"Run directory {run_directory} is missing frozen targets.csv. "
             "Runs created before frozen snapshots require manual copy or a new submit."
         )
 
@@ -93,5 +112,36 @@ def resolve_run_context(
         run_dir=rd,
         cfg=cfg,
         targets=targets,
+        meta=meta,
+    )
+
+
+def resolve_run_control_context(
+    *,
+    run_dir: str | Path | None = None,
+    run_id: str | None = None,
+    runs_root: str | None = None,
+) -> RunControlContext:
+    """Resolve run directory and config for control commands without loading targets."""
+    if run_dir is not None:
+        rd = Path(run_dir).expanduser().resolve()
+    elif run_id and runs_root:
+        rd = logs.run_dir(runs_root, run_id)
+    else:
+        raise SystemExit(
+            "Specify --run-dir, or --run-id with --deployment (or auto-discovered workspace)."
+        )
+
+    if not rd.is_dir():
+        raise SystemExit(f"Run directory not found: {rd}")
+
+    _validate_frozen_config(rd)
+    meta = _load_meta(rd)
+    resolved_run_id = meta.get("run_id") or run_id or rd.name
+    cfg = load_runner_config(logs.run_config_path(rd))
+    return RunControlContext(
+        run_id=resolved_run_id,
+        run_dir=rd,
+        cfg=cfg,
         meta=meta,
     )
