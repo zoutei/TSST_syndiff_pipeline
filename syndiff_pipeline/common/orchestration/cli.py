@@ -504,7 +504,16 @@ def _prepare_run_directory(
         star_dest = run_directory / "star_config.yaml"
         if not star_dest.is_file():
             shutil.copy2(source_star_config_path, star_dest)
-        meta["star_config_path"] = str(star_dest.resolve())
+        frozen_star = str(star_dest.resolve())
+        meta["star_config_path"] = frozen_star
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            load_runner_config,
+            write_runner_config,
+        )
+
+        rcfg = load_runner_config(config_path)
+        rcfg.star_config_path = frozen_star
+        write_runner_config(rcfg, config_path)
     if workspace_run_id is not None and str(workspace_run_id).strip():
         meta["workspace_run_id"] = str(workspace_run_id).strip()
     logs.ensure_run_layout(runs_root, run_id, meta)

@@ -19,7 +19,8 @@ or ``group_<id>/ps1_template.fits`` (see :func:`syndiff_pipeline.difference_imag
 
 Meta workspace (``ws/{prefix}_m/`` for diffs ``ws/{prefix}_d/``) holds
 ``hotpants.progress.json``, ``kernel_reconstruction.npz`` (shared basis stack),
-and ``phot_calib.csv``. Per-FFI kernel vectors are not written.
+and ``phot_calib.csv``. Per-FFI kernel vectors are optional
+(``write_kernel_solutions``) under ``{diffs_label}_kernels/``.
 See :func:`write_kernel_reconstruction_npz` and
 :func:`syndiff_pipeline.difference_imaging.support.paths.meta_workspace_dir_from_diffs_dir`.
 """
@@ -249,6 +250,52 @@ def stamps_dir_for_diffs_workspace(diff_dir: str) -> str:
     parent = os.path.dirname(d)
     base = os.path.basename(d)
     return os.path.join(parent, f"{base}_stamps")
+
+
+def frame_kernels_dir(diffs_dir: str) -> str:
+    """
+    Per-frame kernel NPZ files live next to the diffs workspace directory.
+
+    Sibling of *diffs_dir* with ``_kernels`` appended to its basename
+    (``hp_d`` → ``hp_d_kernels``, ``ks_d`` → ``ks_d_kernels``).
+    """
+    d = os.path.abspath(diffs_dir)
+    parent = os.path.dirname(d)
+    base = os.path.basename(d)
+    return os.path.join(parent, f"{base}_kernels")
+
+
+def frame_kernel_npz_path(kernels_dir: str, product_id: str) -> str:
+    """Path to one frame's persisted kernel archive."""
+    return os.path.join(kernels_dir, f"{product_id}_kernel.npz")
+
+
+def _hp_config_fields_for_kernel_persistence(hp_config) -> dict[str, Any]:
+    """Scalar/array HotpantsConfig fields needed to rebuild a :class:`KernelModel`."""
+    return {
+        "rkernel": np.int32(hp_config.rkernel),
+        "ko": np.int32(hp_config.ko),
+        "bgo": np.int32(hp_config.bgo),
+        "ngauss": np.int32(hp_config.ngauss),
+        "deg_fixe": np.asarray(hp_config.deg_fixe, dtype=np.int32),
+        "sigma_gauss": np.asarray(hp_config.sigma_gauss, dtype=np.float64),
+        "use_pca": np.int8(bool(getattr(hp_config, "use_pca", False))),
+    }
+
+
+def write_frame_kernel_npz(
+    kernels_dir: str,
+    product_id: str,
+    kernel_solution: np.ndarray,
+    hp_config,
+) -> str:
+    """Write per-frame ``kernel_solution`` and reconstruction fields. Returns path."""
+    path = frame_kernel_npz_path(kernels_dir, product_id)
+    os.makedirs(kernels_dir, exist_ok=True)
+    payload = _hp_config_fields_for_kernel_persistence(hp_config)
+    payload["kernel_solution"] = np.asarray(kernel_solution, dtype=np.float64).ravel()
+    np.savez_compressed(path, **payload)
+    return path
 
 
 def kernel_reconstruction_npz_path(diffs_dir: str) -> str:
@@ -858,7 +905,9 @@ def _process_one_frame(
         }
 
     diff_out_path = workspace_frame_fits_path(dirs.diffs, diff_stem)
-    conv_out_path = workspace_frame_fits_path(dirs.convolved, diff_stem)
+    conv_label = workspace_label_from_dir(dirs.convolved)
+    conv_stem = workspace_frame_stem(product_id, conv_label)
+    conv_out_path = workspace_frame_fits_path(dirs.convolved, conv_stem)
     hp_config = build_hotpants_config(
         hp=hp,
         diff_dir=dirs.diffs,
@@ -937,6 +986,21 @@ def _process_one_frame(
             result["kernel_sum"] = kernel_sum
         if tess_zp is not None:
             result["tess_zp"] = tess_zp
+        if hp.write_kernel_solutions:
+            k_arrays = result.get("kernel_params_arrays") or {}
+            ks = k_arrays.get("kernel_solution")
+            if ks is not None:
+                try:
+                    write_frame_kernel_npz(
+                        frame_kernels_dir(dirs.diffs),
+                        product_id,
+                        ks,
+                        hp_config,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Failed writing frame kernel for %s: %s", product_id, exc
+                    )
 
     result["stem"] = diff_stem
     result["ffi_product_id"] = product_id

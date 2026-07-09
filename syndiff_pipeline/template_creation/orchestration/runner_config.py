@@ -89,6 +89,7 @@ class RunnerConfig:
     state_db_path: str = ""
     skycell_wcs_csv: str = ""
     diff_config_path: str = ""
+    star_config_path: str = ""
     stages: TemplateStageParams = field(default_factory=lambda: parse_stage_params({}))
     resources: Dict[str, ResourcePoolParams] = field(
         default_factory=lambda: _parse_resources({})
@@ -145,6 +146,8 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out["ps1_process"] = ResourcePoolParams(max_concurrent=4)
     if "diff" not in out:
         out["diff"] = ResourcePoolParams(max_concurrent=2)
+    if "star" not in out:
+        out["star"] = ResourcePoolParams(max_concurrent=4)
     return out
 
 
@@ -206,6 +209,15 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
     if diff_site:
         diff_config_path = _resolve_path(base_dir, diff_site) or ""
 
+    star_site = str(
+        raw.get("star_config", "")
+        or raw.get("star_site_config", "")
+        or raw.get("star_config_path", "")
+    ).strip()
+    star_config_path = ""
+    if star_site:
+        star_config_path = _resolve_path(base_dir, star_site) or ""
+
     return RunnerConfig(
         deployment_file=deployment_file,
         data_root=data,
@@ -215,6 +227,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         state_db_path=db,
         skycell_wcs_csv=wcs,
         diff_config_path=diff_config_path,
+        star_config_path=star_config_path,
         stages=parse_stage_params(raw.get("stages", {})),
         resources=_parse_resources(raw.get("resources")),
         overrides=dict(raw.get("overrides", {}) or {}),
@@ -310,9 +323,12 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "ps1_process": asdict(cfg.stages.ps1_process),
         "downsample": asdict(cfg.stages.downsample),
         "diff": asdict(cfg.stages.diff),
+        "star": asdict(cfg.stages.star),
     }
     if cfg.diff_config_path:
         data["diff_config_path"] = cfg.diff_config_path
+    if cfg.star_config_path:
+        data["star_config_path"] = cfg.star_config_path
     data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
     data["scheduler"] = {
         "heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s,
@@ -389,6 +405,13 @@ def load_and_materialize_runner_config(
                 raw.get("diff_config_path")
                 or raw.get("diff_config")
                 or raw.get("diff_site_config"),
+            )
+            or "",
+            star_config_path=_resolve_path(
+                base,
+                raw.get("star_config_path")
+                or raw.get("star_config")
+                or raw.get("star_site_config"),
             )
             or "",
             stages=parse_stage_params(raw.get("stages", {})),

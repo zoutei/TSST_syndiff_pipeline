@@ -80,6 +80,8 @@ class StageSpec:
                 return stages.ps1_process.executor
             if self.name == "diff":
                 return stages.diff.executor
+            if self.name == "star":
+                return stages.star.executor
         return self.default_executor
 
 
@@ -287,6 +289,8 @@ class PipelineSpec:
         active = set(active_stages)
         if active == {"diff"}:
             return frozenset(active | DIFF_VERIFY_UPSTREAM)
+        if active == {"star"}:
+            return frozenset(active)
         return self.run_stage_closure(active_stages)
 
     def direct_dependents(self, stage: str) -> List[str]:

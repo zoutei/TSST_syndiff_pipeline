@@ -367,6 +367,287 @@ def precompute_shifts_for_offsets(
     return shift_results
 
 
+def _ignore_mask_from_bits(ignore_mask_bits: list[int] | None) -> int:
+    if ignore_mask_bits is None:
+        ignore_mask_bits = []
+    ignore_mask = 0
+    for bit in ignore_mask_bits:
+        ignore_mask |= 1 << bit
+    return ignore_mask
+
+
+def _process_skycell_registration_binning(
+    *,
+    ps1_assignment: np.ndarray,
+    ps1_data: np.ndarray,
+    ps1_mask: np.ndarray,
+    skycell_name: str,
+    offsets: np.ndarray,
+    shifts_dict: dict[tuple[float, float], pd.DataFrame],
+    base_tess_shape: tuple[int, int],
+    roi_bounds: tuple[int, int, int, int],
+    oversampling_factor: int,
+    ignore_mask: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
+    """Bin one skycell's in-memory (data, mask) into sparse TESS-pixel contributions."""
+    t_y, t_x = base_tess_shape
+    num_offsets = len(offsets)
+    x_min, y_min, x_max, y_max = roi_bounds
+
+    pind = ps1_assignment.ravel()
+    sort_ind = np.argsort(pind)
+
+    tess_pixels = np.unique(pind[np.isfinite(pind)]).astype(int)
+    tess_pixels = tess_pixels[tess_pixels >= 0]
+
+    if len(tess_pixels) == 0:
+        return None
+
+    breaks = np.where(np.diff(pind[sort_ind]) > 0)[0] + 1
+    breaks = np.append(breaks, len(sort_ind))
+
+    ps1_base = ps1_data
+    ps1_mask_base = ps1_mask
+
+    pixel_sums = np.zeros((len(tess_pixels), num_offsets), dtype=np.float32)
+    pixel_counts = np.zeros((len(tess_pixels), num_offsets), dtype=np.int32)
+    pixel_mask_counts = np.zeros((len(tess_pixels), num_offsets), dtype=np.int32)
+
+    for offset_idx, (dx, dy) in enumerate(offsets):
+        shift_df = shifts_dict[(dx, dy)]
+        row_idx = shift_df.index[shift_df["NAME"] == skycell_name].tolist()
+
+        if not row_idx:
+            continue
+
+        sx = shift_df.loc[row_idx[0], "shift_x"]
+        sy = shift_df.loc[row_idx[0], "shift_y"]
+
+        ps1_shifted = np.roll(ps1_base, (sy, sx), axis=(0, 1))
+        ps1_mask_shifted = np.roll(ps1_mask_base, (sy, sx), axis=(0, 1))
+
+        ps1_rav = ps1_shifted.ravel()[sort_ind]
+        ps1_mask_rav = ps1_mask_shifted.ravel()[sort_ind]
+
+        sums = np.zeros(len(breaks) - 1, dtype=np.float32)
+        counts = np.zeros(len(breaks) - 1, dtype=np.int32)
+        mask_counts = np.zeros(len(breaks) - 1, dtype=np.int32)
+
+        for i in range(len(breaks) - 1):
+            slice_data = ps1_rav[breaks[i] : breaks[i + 1]]
+            slice_mask = ps1_mask_rav[breaks[i] : breaks[i + 1]]
+
+            ignored_pixels = (slice_mask & ignore_mask) > 0
+
+            counts[i] = len(slice_data)
+            sums[i] = np.nansum(slice_data[~ignored_pixels])
+            mask_counts[i] = np.sum(slice_mask != 0)
+
+        pixel_sums[:, offset_idx] = sums
+        pixel_counts[:, offset_idx] = counts
+        pixel_mask_counts[:, offset_idx] = mask_counts
+
+    if oversampling_factor > 1:
+        os_width = t_x * oversampling_factor
+        y_os = tess_pixels // os_width
+        x_os = tess_pixels % os_width
+        y_base = y_os // oversampling_factor
+        x_base = x_os // oversampling_factor
+    else:
+        y_base = tess_pixels // t_x
+        x_base = tess_pixels % t_x
+
+    valid_mask = (
+        (0 <= y_base)
+        & (y_base < t_y)
+        & (0 <= x_base)
+        & (x_base < t_x)
+        & (x_base >= x_min)
+        & (x_base < x_max)
+        & (y_base >= y_min)
+        & (y_base < y_max)
+    )
+
+    if not np.any(valid_mask):
+        return None
+
+    return (
+        tess_pixels[valid_mask],
+        pixel_sums[valid_mask],
+        pixel_counts[valid_mask],
+        pixel_mask_counts[valid_mask],
+    )
+
+
+def _finalize_skycell_batch_results(
+    all_indices: list[np.ndarray],
+    all_sums: list[np.ndarray],
+    all_counts: list[np.ndarray],
+    all_mask_counts: list[np.ndarray],
+    num_offsets: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    if all_indices:
+        indices = np.concatenate(all_indices)
+        sums = np.vstack(all_sums)
+        counts = np.vstack(all_counts)
+        mask_counts = np.vstack(all_mask_counts)
+    else:
+        indices = np.array([], dtype=int)
+        sums = np.zeros((0, num_offsets), dtype=np.float32)
+        counts = np.zeros((0, num_offsets), dtype=np.int32)
+        mask_counts = np.zeros((0, num_offsets), dtype=np.int32)
+    return indices, sums, counts, mask_counts
+
+
+def _run_skycell_batch_core(
+    batch_idx: int,
+    reg_files: list[str],
+    skycell_names: list[str],
+    offsets: np.ndarray,
+    shifts_dict: dict[tuple[float, float], pd.DataFrame],
+    base_tess_shape: tuple[int, int],
+    roi_bounds: tuple[int, int, int, int],
+    oversampling_factor: int,
+    ignore_mask_bits: list[int] | None,
+    progress_path: str | Path | None,
+    load_ps1_arrays,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    num_offsets = len(offsets)
+    ignore_mask = _ignore_mask_from_bits(ignore_mask_bits)
+
+    all_indices: list[np.ndarray] = []
+    all_sums: list[np.ndarray] = []
+    all_counts: list[np.ndarray] = []
+    all_mask_counts: list[np.ndarray] = []
+
+    for reg_file, skycell_name in zip(reg_files, skycell_names):
+        try:
+            with fits.open(reg_file) as hdul:
+                ps1_assignment = hdul[1].data.astype(int)
+
+            try:
+                ps1_data, ps1_mask = load_ps1_arrays(skycell_name)
+                contribution = _process_skycell_registration_binning(
+                    ps1_assignment=ps1_assignment,
+                    ps1_data=ps1_data,
+                    ps1_mask=ps1_mask,
+                    skycell_name=skycell_name,
+                    offsets=offsets,
+                    shifts_dict=shifts_dict,
+                    base_tess_shape=base_tess_shape,
+                    roi_bounds=roi_bounds,
+                    oversampling_factor=oversampling_factor,
+                    ignore_mask=ignore_mask,
+                )
+                if contribution is not None:
+                    all_indices.append(contribution[0])
+                    all_sums.append(contribution[1])
+                    all_counts.append(contribution[2])
+                    all_mask_counts.append(contribution[3])
+            except Exception as e:
+                print(f"Error processing PS1 data for skycell {skycell_name}: {e}")
+                continue
+
+        except Exception as e:
+            print(f"Error processing registration for skycell {skycell_name}: {e}")
+        finally:
+            if progress_path is not None:
+                mark_downsample_skycell_done(progress_path, batch_idx)
+
+    print(f"Completed batch {batch_idx + 1}")
+    return _finalize_skycell_batch_results(
+        all_indices, all_sums, all_counts, all_mask_counts, num_offsets
+    )
+
+
+def combine_sparse_downsample_results(
+    batch_results: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]],
+    offsets: np.ndarray,
+    base_tess_shape: tuple[int, int],
+    roi_bounds: tuple[int, int, int, int],
+    oversampling_factor: int = 1,
+) -> np.ndarray:
+    """Merge sparse skycell-batch outputs into dense (num_offsets, 3, h, w) planes."""
+    x_min, y_min, x_max, y_max = roi_bounds
+    all_indices: list[np.ndarray] = []
+    all_sums: list[np.ndarray] = []
+    all_counts: list[np.ndarray] = []
+    all_mask_counts: list[np.ndarray] = []
+
+    for indices, sums, counts, mask_counts in batch_results:
+        if len(indices) > 0:
+            all_indices.append(indices)
+            all_sums.append(sums)
+            all_counts.append(counts)
+            all_mask_counts.append(mask_counts)
+
+    if not all_indices:
+        roi_h = y_max - y_min
+        roi_w = x_max - x_min
+        out_h = roi_h * oversampling_factor
+        out_w = roi_w * oversampling_factor
+        return np.zeros((len(offsets), 3, out_h, out_w), dtype=np.float32)
+
+    combined_indices = np.concatenate(all_indices)
+    combined_sums = np.vstack(all_sums)
+    combined_counts = np.vstack(all_counts)
+    combined_mask_counts = np.vstack(all_mask_counts)
+
+    if len(combined_indices) > len(np.unique(combined_indices)):
+        unique_indices, inverse_indices = np.unique(combined_indices, return_inverse=True)
+
+        unique_sums = np.zeros((len(unique_indices), len(offsets)), dtype=np.float32)
+        unique_counts = np.zeros((len(unique_indices), len(offsets)), dtype=np.int32)
+        unique_mask_counts = np.zeros((len(unique_indices), len(offsets)), dtype=np.int32)
+
+        np.add.at(unique_sums, inverse_indices, combined_sums)
+        np.add.at(unique_counts, inverse_indices, combined_counts)
+        np.add.at(unique_mask_counts, inverse_indices, combined_mask_counts)
+
+        combined_indices = unique_indices
+        combined_sums = unique_sums
+        combined_counts = unique_counts
+        combined_mask_counts = unique_mask_counts
+
+    roi_h = y_max - y_min
+    roi_w = x_max - x_min
+    out_h = roi_h * oversampling_factor
+    out_w = roi_w * oversampling_factor
+    combined_results = np.zeros((len(offsets), 3, out_h, out_w), dtype=np.float32)
+
+    for i, idx in enumerate(combined_indices):
+        if oversampling_factor > 1:
+            os_width = base_tess_shape[1] * oversampling_factor
+            y_os = idx // os_width
+            x_os = idx % os_width
+            y_base = y_os // oversampling_factor
+            x_base = x_os // oversampling_factor
+            sub_y = y_os % oversampling_factor
+            sub_x = x_os % oversampling_factor
+
+            if x_min <= x_base < x_max and y_min <= y_base < y_max:
+                out_y = (y_base - y_min) * oversampling_factor + sub_y
+                out_x = (x_base - x_min) * oversampling_factor + sub_x
+            else:
+                continue
+        else:
+            y_base = idx // base_tess_shape[1]
+            x_base = idx % base_tess_shape[1]
+            if x_min <= x_base < x_max and y_min <= y_base < y_max:
+                out_y = y_base - y_min
+                out_x = x_base - x_min
+            else:
+                continue
+
+        if 0 <= out_y < combined_results.shape[2] and 0 <= out_x < combined_results.shape[3]:
+            for offset_idx in range(len(offsets)):
+                combined_results[offset_idx, 0, out_y, out_x] = combined_sums[i, offset_idx]
+                combined_results[offset_idx, 1, out_y, out_x] = combined_counts[i, offset_idx]
+                combined_results[offset_idx, 2, out_y, out_x] = combined_mask_counts[i, offset_idx]
+
+    return combined_results
+
+
 def process_skycell_batch(
     batch_idx: int,
     reg_files: list[str],
@@ -390,151 +671,66 @@ def process_skycell_batch(
         - counts: Array of shape (len(indices), num_offsets) with count values
         - mask_counts: Array of shape (len(indices), num_offsets) with mask count values
     """
-    t_y, t_x = base_tess_shape
-    num_offsets = len(offsets)
-    x_min, y_min, x_max, y_max = roi_bounds
-
-    # Lists to collect values (will convert to arrays later)
-    all_indices = []
-    all_sums = []
-    all_counts = []
-    all_mask_counts = []
-
-    if ignore_mask_bits is None:
-        ignore_mask_bits = []
-
-    # Create mask for ignoring specific bits
-    ignore_mask = 0
-    for bit in ignore_mask_bits:
-        ignore_mask |= 1 << bit
     zarr_store = zarr.open(zarr_path, mode="r")
-    # Process each skycell in the batch
-    for sc_idx, (reg_file, skycell_name) in enumerate(zip(reg_files, skycell_names)):
-        try:
-            # Load registration mapping
-            with fits.open(reg_file) as hdul:
-                ps1_assignment = hdul[1].data.astype(int)
 
-            # Prepare for binning
-            pind = ps1_assignment.ravel()
-            sort_ind = np.argsort(pind)
+    def load_ps1_arrays(skycell_name: str) -> tuple[np.ndarray, np.ndarray]:
+        return load_zarr_data_for_skycell(skycell_name, zarr_store)
 
-            # Get valid TESS pixels
-            tess_pixels = np.unique(pind[np.isfinite(pind)]).astype(int)
-            tess_pixels = tess_pixels[tess_pixels >= 0]
+    return _run_skycell_batch_core(
+        batch_idx,
+        reg_files,
+        skycell_names,
+        offsets,
+        shifts_dict,
+        base_tess_shape,
+        roi_bounds,
+        oversampling_factor,
+        ignore_mask_bits,
+        progress_path,
+        load_ps1_arrays,
+    )
 
-            if len(tess_pixels) == 0:
-                continue
 
-            # Calculate breaks for binning
-            breaks = np.where(np.diff(pind[sort_ind]) > 0)[0] + 1
-            breaks = np.append(breaks, len(sort_ind))
+def process_skycell_batch_from_arrays(
+    batch_idx: int,
+    reg_files: list[str],
+    skycell_names: list[str],
+    arrays: dict[str, tuple[np.ndarray, np.ndarray]],
+    offsets: np.ndarray,
+    shifts_dict: dict[tuple[float, float], pd.DataFrame],
+    base_tess_shape: tuple[int, int],
+    roi_bounds: tuple[int, int, int, int],
+    oversampling_factor: int = 1,
+    ignore_mask_bits: list[int] | None = None,
+    progress_path: str | Path | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Process a batch of skycells from in-memory (data, mask) arrays.
 
-            # Try to load PS1 data from Zarr store
-            try:
-                # Load PS1 data and mask from Zarr
-                ps1_data, ps1_mask = load_zarr_data_for_skycell(skycell_name, zarr_store)
+    ``arrays`` maps skycell name (e.g. ``skycell.1234.567``) to
+    ``(data, mask)`` float32/uint32 arrays matching the Zarr layout.
+    """
 
-                ps1_base = ps1_data
-                ps1_mask_base = ps1_mask
+    def load_ps1_arrays(skycell_name: str) -> tuple[np.ndarray, np.ndarray]:
+        key = skycell_name if skycell_name.startswith("skycell.") else f"skycell.{skycell_name}"
+        if key not in arrays:
+            raise KeyError(f"Missing in-memory arrays for skycell {skycell_name!r}")
+        data, mask = arrays[key]
+        return np.asarray(data, dtype=np.float32), np.asarray(mask, dtype=np.uint32)
 
-                # Initialize arrays for each skycell's results
-                pixel_sums = np.zeros((len(tess_pixels), num_offsets), dtype=np.float32)
-                pixel_counts = np.zeros((len(tess_pixels), num_offsets), dtype=np.int32)
-                pixel_mask_counts = np.zeros((len(tess_pixels), num_offsets), dtype=np.int32)
-
-                # Process each offset
-                for offset_idx, (dx, dy) in enumerate(offsets):
-                    # Get shifts from precomputed values
-                    shift_df = shifts_dict[(dx, dy)]
-                    row_idx = shift_df.index[shift_df["NAME"] == skycell_name].tolist()
-
-                    if not row_idx:
-                        continue
-
-                    sx = shift_df.loc[row_idx[0], "shift_x"]
-                    sy = shift_df.loc[row_idx[0], "shift_y"]
-
-                    # Apply the shift (integer pixel shifts only - no interpolation)
-                    ps1_shifted = np.roll(ps1_base, (sy, sx), axis=(0, 1))
-                    ps1_mask_shifted = np.roll(ps1_mask_base, (sy, sx), axis=(0, 1))
-
-                    # Sort the shifted data
-                    ps1_rav = ps1_shifted.ravel()[sort_ind]
-                    ps1_mask_rav = ps1_mask_shifted.ravel()[sort_ind]
-
-                    # Compute sums for each TESS pixel
-                    sums = np.zeros(len(breaks) - 1, dtype=np.float32)
-                    counts = np.zeros(len(breaks) - 1, dtype=np.int32)
-                    mask_counts = np.zeros(len(breaks) - 1, dtype=np.int32)
-
-                    for i in range(len(breaks) - 1):
-                        slice_data = ps1_rav[breaks[i] : breaks[i + 1]]
-                        slice_mask = ps1_mask_rav[breaks[i] : breaks[i + 1]]
-
-                        # Count pixels that should be ignored based on mask bits
-                        ignored_pixels = (slice_mask & ignore_mask) > 0
-
-                        # Count all pixels for denominator
-                        counts[i] = len(slice_data)
-
-                        # Sum only non-masked pixels
-                        sums[i] = np.nansum(slice_data[~ignored_pixels])
-
-                        # Count masked pixels for reference
-                        mask_counts[i] = np.sum(slice_mask != 0)
-
-                    # Store the results for this offset
-                    pixel_sums[:, offset_idx] = sums
-                    pixel_counts[:, offset_idx] = counts
-                    pixel_mask_counts[:, offset_idx] = mask_counts
-
-                # Add all valid pixels from this skycell to our results
-                # Filter by valid base-scale TESS bounds + ROI bounds.
-                if oversampling_factor > 1:
-                    os_width = t_x * oversampling_factor
-                    y_os = tess_pixels // os_width
-                    x_os = tess_pixels % os_width
-                    y_base = y_os // oversampling_factor
-                    x_base = x_os // oversampling_factor
-                else:
-                    y_base = tess_pixels // t_x
-                    x_base = tess_pixels % t_x
-
-                valid_mask = (0 <= y_base) & (y_base < t_y) & (0 <= x_base) & (x_base < t_x) & (x_base >= x_min) & (x_base < x_max) & (y_base >= y_min) & (y_base < y_max)
-
-                if np.any(valid_mask):
-                    all_indices.append(tess_pixels[valid_mask])
-                    all_sums.append(pixel_sums[valid_mask])
-                    all_counts.append(pixel_counts[valid_mask])
-                    all_mask_counts.append(pixel_mask_counts[valid_mask])
-
-            except Exception as e:
-                print(f"Error processing PS1 data for skycell {skycell_name}: {e}")
-                continue
-
-        except Exception as e:
-            print(f"Error processing registration for skycell {skycell_name}: {e}")
-        finally:
-            if progress_path is not None:
-                mark_downsample_skycell_done(progress_path, batch_idx)
-
-    print(f"Completed batch {batch_idx + 1}")
-
-    # Convert lists to arrays
-    if all_indices:
-        indices = np.concatenate(all_indices)
-        sums = np.vstack(all_sums)
-        counts = np.vstack(all_counts)
-        mask_counts = np.vstack(all_mask_counts)
-    else:
-        # Return empty arrays if no data
-        indices = np.array([], dtype=int)
-        sums = np.zeros((0, num_offsets), dtype=np.float32)
-        counts = np.zeros((0, num_offsets), dtype=np.int32)
-        mask_counts = np.zeros((0, num_offsets), dtype=np.int32)
-
-    return indices, sums, counts, mask_counts
+    return _run_skycell_batch_core(
+        batch_idx,
+        reg_files,
+        skycell_names,
+        offsets,
+        shifts_dict,
+        base_tess_shape,
+        roi_bounds,
+        oversampling_factor,
+        ignore_mask_bits,
+        progress_path,
+        load_ps1_arrays,
+    )
 
 
 def create_syndiff_header(
@@ -934,83 +1130,14 @@ def main(
             progress_path, "combining", total_skycells=total_skycells
         )
     print("Combining results...")
-    all_indices = []
-    all_sums = []
-    all_counts = []
-    all_mask_counts = []
-
-    for indices, sums, counts, mask_counts in results:
-        if len(indices) > 0:
-            all_indices.append(indices)
-            all_sums.append(sums)
-            all_counts.append(counts)
-            all_mask_counts.append(mask_counts)
-
-    # Concatenate all results
-    if all_indices:
-        combined_indices = np.concatenate(all_indices)
-        combined_sums = np.vstack(all_sums)
-        combined_counts = np.vstack(all_counts)
-        combined_mask_counts = np.vstack(all_mask_counts)
-
-        # Handle duplicate pixels (from different skycells)
-        if len(combined_indices) > len(np.unique(combined_indices)):
-            # Find unique indices and their positions
-            unique_indices, inverse_indices = np.unique(combined_indices, return_inverse=True)
-
-            # Initialize arrays for the consolidated results
-            unique_sums = np.zeros((len(unique_indices), len(offsets)), dtype=np.float32)
-            unique_counts = np.zeros((len(unique_indices), len(offsets)), dtype=np.int32)
-            unique_mask_counts = np.zeros((len(unique_indices), len(offsets)), dtype=np.int32)
-
-            # Use np.add.at for efficient aggregation by index
-            np.add.at(unique_sums, inverse_indices, combined_sums)
-            np.add.at(unique_counts, inverse_indices, combined_counts)
-            np.add.at(unique_mask_counts, inverse_indices, combined_mask_counts)
-
-            # Replace with deduplicated arrays
-            combined_indices = unique_indices
-            combined_sums = unique_sums
-            combined_counts = unique_counts
-            combined_mask_counts = unique_mask_counts
-
-        # Convert from sparse representation to ROI output array
-        roi_h = y_max - y_min
-        roi_w = x_max - x_min
-        out_h = roi_h * oversampling_factor
-        out_w = roi_w * oversampling_factor
-        combined_results = np.zeros((len(offsets), 3, out_h, out_w), dtype=np.float32)
-
-        for i, idx in enumerate(combined_indices):
-            if oversampling_factor > 1:
-                os_width = base_shape[1] * oversampling_factor
-                y_os = idx // os_width
-                x_os = idx % os_width
-                y_base = y_os // oversampling_factor
-                x_base = x_os // oversampling_factor
-                sub_y = y_os % oversampling_factor
-                sub_x = x_os % oversampling_factor
-
-                if x_min <= x_base < x_max and y_min <= y_base < y_max:
-                    out_y = (y_base - y_min) * oversampling_factor + sub_y
-                    out_x = (x_base - x_min) * oversampling_factor + sub_x
-                else:
-                    continue
-            else:
-                y_base = idx // base_shape[1]
-                x_base = idx % base_shape[1]
-                if x_min <= x_base < x_max and y_min <= y_base < y_max:
-                    out_y = y_base - y_min
-                    out_x = x_base - x_min
-                else:
-                    continue
-
-            if 0 <= out_y < combined_results.shape[2] and 0 <= out_x < combined_results.shape[3]:
-                for offset_idx in range(len(offsets)):
-                    combined_results[offset_idx, 0, out_y, out_x] = combined_sums[i, offset_idx]
-                    combined_results[offset_idx, 1, out_y, out_x] = combined_counts[i, offset_idx]
-                    combined_results[offset_idx, 2, out_y, out_x] = combined_mask_counts[i, offset_idx]
-    else:
+    combined_results = combine_sparse_downsample_results(
+        results,
+        offsets,
+        base_shape,
+        roi_bounds,
+        oversampling_factor=oversampling_factor,
+    )
+    if not np.any(combined_results):
         raise RuntimeError("No PS1 convolved data loaded for any skycell")
 
     # Save outputs as FITS files

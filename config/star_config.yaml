@@ -1,0 +1,45 @@
+# Site policy for syndiff star (host-star light curves).
+# Consumes transient diff workspace artifacts; does not re-run Hotpants.
+deployment_file: deployment.yaml
+
+defaults:
+  cutout_size: 96
+  stamp_size: 24
+  kernel_margin_px: 470
+  ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
+  debug_plots: true
+  workspace_run_id: null      # null → events/{label}/star/
+  max_ffis: null
+  overwrite: false
+
+baseline:
+  workspace_run_id: none
+  diffs: hp_d
+  convolved: hp_c
+  phot_bkg: ks_b_s
+
+photometry:
+  methods:
+    - name: ap3
+      type: aperture
+      tar_ap: 3
+      sky_in: 5
+      sky_out: 9
+    - name: prf
+      type: psf
+      psf_type: prf
+
+condor:
+  request_cpus: 8
+  request_memory: 100000
+  requirements: 'Memory >= 100000 && LoadAvg < 10 && Machine != "plscience10.stsci.edu"'
+  rank: "-LoadAvg"
+
+overrides:
+  "20/3/2":
+    ps1_source: zarr_local_only
+    workspace_run_id: star_lc_full
+    overwrite: true
+    baseline:
+      workspace_run_id: star_full_lc
+      phot_bkg: ks_b_s

@@ -1,0 +1,124 @@
+# Host-star light curves (`syndiff star`)
+
+Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants.
+
+Configuration is separate from the transient pipeline: see [star_config.md](stages/star_config.md) and the technical deep-dive [star_pipeline.md](stages/star_pipeline.md).
+
+## Quick start
+
+**Foreground (one SCC):**
+
+```bash
+syndiff star run \
+  --site config \
+  --star-config config/star_config.yaml \
+  --star-targets config/star_targets_example.csv \
+  --target-name 20/3/2
+```
+
+**Batch (all enabled rows in `star_targets.csv`):**
+
+```bash
+syndiff star submit \
+  --site config \
+  --star-config config/star_config.yaml \
+  --star-targets config/star_targets_example.csv \
+  --run-id star_lc_2026q1
+```
+
+Use `--local` on submit for local executor instead of Condor. Monitor with `syndiff progress --run-id star_lc_2026q1`.
+
+## Prerequisites
+
+Transient template + diff must have completed for the baseline workspace referenced in `star_targets` / `star_config`. Star validates these on disk before processing hosts:
+
+| Artifact | Typical label | Stage |
+|----------|---------------|-------|
+| `cluster_template_job.json` | `events/{label}/` | `wcs_grouping` |
+| `syndiff_ffi_frames.csv` | `events/{label}/` | `wcs_grouping` |
+| `syndiff_template_*` | `templates_dir` | `downsample` |
+| Convolved template | `hp_c` | `hotpants` (`write_convolved: true`) |
+| Kernel solutions | `hp_d_kernels/*_kernel.npz` | `hotpants` (`write_kernel_solutions: true`) |
+| Photutils background | `ks_b_s` or `ks_b` | `kernel_subtract` + `background` |
+| Shared mask | `shared_mask.fits.gz` | `shared_mask` |
+| Mapping + Gaia catalog | `data_root/skycell_pixel_mapping/…`, `catalogs/…` | `mapping` |
+
+Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline workspace: `ws/` when `baseline.workspace_run_id: none`, else `ws_{run_id}/`.
+
+### Kernel backfill
+
+Older workspaces may have `hp_d` without `hp_d_kernels/`. Run a one-time Hotpants backfill:
+
+```bash
+syndiff diff run --site config \
+  --config config/diff_config_star_full_backfill.yaml \
+  --targets config/targets_example.csv \
+  --target-name 20/3/2
+```
+
+Then set `baseline.workspace_run_id: star_full_lc` (or your `workspace_run_id`) in `star_config` / `star_targets`. See [star_pipeline.md](stages/star_pipeline.md) and [`config/diff_config_star_full_backfill.yaml`](../config/diff_config_star_full_backfill.yaml).
+
+## Config files
+
+| File | Purpose |
+|------|---------|
+| `config/star_config.yaml` | Defaults, baseline labels, photometry methods, SCC overrides |
+| `config/star_targets_example.csv` | Example SCC registry + per-row baseline overrides |
+| `config/star_targets_full.csv` | Production SCC registry |
+| `config/star_hosts/*.csv` | Host lists (`tic_id` / `gaia_source_id`) |
+
+Merge order: **star_targets row > overrides > defaults**.
+
+Related transient orchestrators (produce the baseline diff workspace star reads):
+
+| File | Purpose |
+|------|---------|
+| `config/diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, kernels) |
+| `config/pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff (`ps1_source: stream`) |
+| `config/pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
+
+## `ps1_source`
+
+Controls how star loads PS1 skycells for mini-template isolation:
+
+| Mode | When to use |
+|------|-------------|
+| `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells.zarr` |
+| `zarr_local_only` | Batch runs after `ps1_download` populated the store |
+| `stream` | Always fetch from MAST (no zarr write); matches sector-20 stream template runs |
+
+## Photometry
+
+Methods come from `star_config.yaml` `photometry.methods` (default: `ap3` + `prf`). PRF uses TESS_PRF at the host's full-FFI pixel position (requires `PRF` package).
+
+CLI flags on `syndiff star run` override merged config: `--stars-file`, `--baseline-workspace-run-id`, `--baseline-diffs-label`, `--baseline-convolved-label`, `--baseline-phot-bkg-label`, `--cutout-size`, `--stamp-size`, `--ps1-source`, `--overwrite`, `--debug-plots`.
+
+## Outputs
+
+Under `events/{label}/star/` or `events/{label}/star_{workspace_run_id}/`:
+
+```text
+{gaia_source_id}/
+  identifier.json
+  host_gaia_row.csv
+  mini_templates/
+    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.gz
+  diff_stamps/
+    {product_id}.fits.gz
+  lightcurve_ap3_gaia_{id}.csv
+  lightcurve_prf_gaia_{id}.csv
+  plots/                         # when debug_plots: true
+batch_manifest.csv               # per-host status (ok | error | skipped_*)
+```
+
+## Stamp formula
+
+```text
+stamp = FFI - (conv_temp - S_conv) - phot_bkg
+```
+
+- `conv_temp` from `hp_c` (or `baseline.convolved`)
+- `S_conv` = mini star-template convolved with the per-frame Hotpants kernel from `hp_d_kernels/`
+- `phot_bkg` from `ks_b_s` (or `ks_b`)
+
+See [star_pipeline.md](stages/star_pipeline.md) for coordinate frames, module layout, and orchestration details.

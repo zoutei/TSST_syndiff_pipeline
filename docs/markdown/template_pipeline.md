@@ -300,7 +300,7 @@ syndiff tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
-`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `down: 45/84` from `per_target/<label>/downsample.progress.json`, `diff: epsf r1 12/48` from `per_target/<label>/diff.epsf.progress.json` beside `diff.log` — also `diff.hotpants.progress.json` and `diff.photometry.progress.json` when those phases are active). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
+`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `down: 45/84` from `per_target/<label>/downsample.progress.json`, `diff: epsf r1 12/48` from `per_target/<label>/diff.epsf.progress.json` beside `diff.log` — also `diff.hotpants.progress.json`, `diff.centroids.progress.json`, and `diff.photometry.progress.json` when those phases are active). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
 
 **Discord alerts** (optional): when `notifications.enabled: true` in config, the supervisor posts to a webhook on run/stage events. Messages include the same **progress** summary and **status** grid as the CLI. Preview without changing pipeline state:
 
@@ -565,7 +565,7 @@ Condor resource requests (`request_cpus`, `request_memory`, …) are defined in 
 
 **Verification**: frame manifest CSV present and at least one workspace label directory under `ws/` (excluding `master` and `templates`).
 
-**Progress sidecars**: during diff runs, workers update JSON mirrors beside `per_target/<label>/diff.log` — `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.photometry.progress.json`. `syndiff progress` reads the most recently updated sidecar via `stage_progress.py` (ePSF also merges live `*_gridded_epsf.npz` counts when `output_dir` is recorded).
+**Progress sidecars**: during diff runs, workers update JSON mirrors beside `per_target/<label>/diff.log` — `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json`. `syndiff progress` reads the most recently updated sidecar via `stage_progress.py` (ePSF and centroids also merge live artifact counts when `output_dir` is recorded).
 
 **Diff-only submit** (`syndiff diff submit`): upstream template stages outside the artifact-verify closure are marked **n/a** immediately. Only `tess_ffi_download`, `wcs_grouping`, and `downsample` are verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`) — not `mapping`, `ps1_download`, or `ps1_process`.
 
@@ -958,7 +958,7 @@ syndiff progress --run-dir /path/to/runs/batch_no5
 syndiff progress --no-detail   # summary only (for scripts)
 ```
 
-Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows`, `down: 45/84` from `downsample.progress.json`, or `diff: epsf r1 12/48` from `diff.epsf.progress.json` (plus `diff.hotpants.progress.json` / `diff.photometry.progress.json` when active). Parsed by `template_creation/orchestration/stage_progress.py`.
+Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows`, `down: 45/84` from `downsample.progress.json`, or `diff: epsf r1 12/48` from `diff.epsf.progress.json` (plus `diff.hotpants.progress.json`, `diff.centroids.progress.json`, and `diff.photometry.progress.json` when active). Parsed by `template_creation/orchestration/stage_progress.py`.
 
 #### `status`
 
