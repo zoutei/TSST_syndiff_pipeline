@@ -1,0 +1,79 @@
+# Full 2020ut gridded ePSF + gepsf forced photometry on inherited hp_d diffs.
+# ePSF: starpositioningscript.py flow + experiment B grid/oversample params.
+# Gaia pre-filter: phot_rp_mean_mag < 12.95 (reference script), crop-local x,y.
+# Parent hotpants workspace: ws_multi_hp_temp_calib (multi_hp_temp_calib).
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 64
+  workspace_run_id: multi_hp_temp_calib_epsf_2x2
+  pipeline_plots: true
+  crop_mode: target_box
+  crop_box_size: 1024
+  # max_ffis omitted → all manifest frames with valid hp_d FITS
+
+additional_forced_targets:
+  - name: offset_top
+    dx: 0
+    dy: -7
+  - name: offset_bottom
+    dx: 0
+    dy: 7
+  - name: offset_right
+    dx: 7
+    dy: 0
+  - name: offset_left
+    dx: -7
+    dy: 0
+
+pipeline:
+  - workspace_inherit:
+      from: multi_hp_temp_calib
+      labels: [hp_d, hp_m]
+      root_artifacts:
+        - shared_mask.fits
+        - gaia_catalog_pipeline.csv
+        - hotpants_substamp_stars.csv
+        - targets.reg
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    tile_nx: 2
+    tile_ny: 2
+    epsf_oversample: 4
+    psf_size: 11
+    extract_size: 11
+    min_stars_per_tile: 5
+    mag_max_rp: 12.95
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 64
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    mag_max_rp: 12.95
+    fit_shape: 11
+    aperture_radius: 2
+    psf_grouper_min_separation: 8
+    centroids_n_jobs: 64
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_gepsf_on_hp_diffs
+    methods:
+      - name: gepsf
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+
+condor:
+  request_cpus: 64
+  request_memory: 100000
+  requirements: "Memory >= 100000 && LoadAvg < 10"
+  rank: "-LoadAvg"

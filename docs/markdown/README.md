@@ -8,6 +8,7 @@ Documentation for the **syndiff-pipeline** open-source release.
 |----------|----------|----------|
 | [Main README](../../README.md) | All users | Project overview, pyhotpants + custom MOCPy, install, quick start |
 | [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, 7-stage DAG, Condor, config, workspace layout |
+| [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` filesystem reference |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
 | [Cluster smoke checklist](cluster_smoke_checklist.md) | Ops | Manual validation on HTCondor + NFS after setup |
@@ -33,7 +34,10 @@ docs/markdown/
     ├── ps1_process_technical.md  ← sliding-window convolution architecture + star removal
     ├── downsample_technical.md   ← multi-offset downsampling onto TESS grid
     ├── diff_pipeline.md          ← diff internal sub-stages, kernels, photometry
+    ├── star_pipeline.md          ← host-star branch (technical)
+    ├── star_config.md            ← star_config.yaml / star_targets schema
     └── background.md             ← Savitzky–Golay temporal smooth of ks_b (kernel_subtract bkg)
+├── star_lightcurves.md           ← host-star quick start (syndiff star)
 ```
 
 **Improvement plans** (design docs, not yet implemented) live under [`.cursor/plans/`](../../.cursor/plans/): spatially varying WCS drift templates, and target-star-removed templates for exoplanet light curves.
