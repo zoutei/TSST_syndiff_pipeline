@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import getpass
 import logging
+import os
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any
@@ -12,11 +15,21 @@ from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     load_workspace_root_from_deployment,
 )
-from syndiff_pipeline.common.orchestration.notifications import format_status_reply_messages
+from syndiff_pipeline.common.orchestration.notifications import (
+    _DISCORD_PACK_MAX_CHARS,
+    format_status_reply_messages,
+)
 from syndiff_pipeline.common.orchestration.state import PipelineState
 from syndiff_pipeline.common.orchestration.workspace import runs_root, state_db_path
+from syndiff_pipeline.template_creation.orchestration.run_report import pack_message_lines
 
 log = logging.getLogger(__name__)
+
+_CONDOR_SHELL_COMMANDS = frozenset(
+    {"condor_q", "condor_qn", "condor_status", "condor_status -tla"}
+)
+_CONDOR_SHELL_TIMEOUT_S = 30.0
+_CONDOR_SHELL_TIMEOUT_OVERRIDES = {"condor_status -tla": 60.0}
 
 
 def _channel_matches(message: Any, channel_id: int) -> bool:
@@ -31,6 +44,82 @@ def _channel_matches(message: Any, channel_id: int) -> bool:
     if parent is not None and getattr(parent, "id", None) == channel_id:
         return True
     return False
+
+
+def condor_shell_trigger(message_text: str) -> str | None:
+    """Return the Condor shell trigger when *message_text* is an exact command request."""
+    key = message_text.strip().lower()
+    if key in _CONDOR_SHELL_COMMANDS:
+        return key
+    return None
+
+
+def _condor_shell_argv(trigger: str) -> list[str]:
+    if trigger == "condor_q":
+        return ["condor_q"]
+    if trigger == "condor_qn":
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or getpass.getuser()
+        return [
+            "condor_q",
+            user,
+            "-af",
+            "ClusterId",
+            "ProcId",
+            "JobStatus",
+            "RemoteHost",
+        ]
+    if trigger == "condor_status":
+        return ["condor_status"]
+    if trigger == "condor_status -tla":
+        # -af:h hangs with SECMAN errors on some STScI nodes; -af works.
+        return ["condor_status", "-af", "Name", "TotalLoadAvg"]
+    raise ValueError(f"unknown condor shell trigger: {trigger!r}")
+
+
+def run_condor_shell_command(trigger: str, *, timeout_s: float | None = None) -> list[str]:
+    """Run a whitelisted Condor CLI command and return Discord-sized reply messages."""
+    argv = _condor_shell_argv(trigger)
+    if timeout_s is None:
+        timeout_s = _CONDOR_SHELL_TIMEOUT_OVERRIDES.get(trigger, _CONDOR_SHELL_TIMEOUT_S)
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except FileNotFoundError:
+        return [f"`{argv[0]}` not found on this host."]
+    except subprocess.TimeoutExpired:
+        return [f"`{trigger}` timed out after {timeout_s:.0f}s."]
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    body = stdout.rstrip()
+    if proc.returncode != 0:
+        err = stderr.rstrip()
+        if err and body:
+            body = f"{err}\n{body}"
+        elif err:
+            body = err
+        elif not body:
+            body = f"(exit {proc.returncode}, no output)"
+        else:
+            body = f"(exit {proc.returncode})\n{body}"
+    elif not body.strip():
+        body = stderr.rstrip() or "(no output)"
+
+    if trigger == "condor_status -tla" and body.strip() and proc.returncode == 0:
+        if not body.lstrip().startswith("Name"):
+            body = f"Name TotalLoadAvg\n{body}"
+
+    max_body = _DISCORD_PACK_MAX_CHARS - len(trigger) - 20
+    if len(body) > max_body:
+        body = body[: max_body - 20] + "\n… (truncated)"
+
+    header = f"**{trigger}**"
+    return pack_message_lines([header, f"```\n{body}\n```"], max_chars=_DISCORD_PACK_MAX_CHARS)
 
 
 def _require_discord():
@@ -156,11 +245,18 @@ class PipelineDiscordBot:
                 message.author,
                 getattr(message.channel, "name", message.channel.id),
             )
+            trigger = condor_shell_trigger(message.content)
             try:
-                replies = await asyncio.to_thread(self._build_status_reply, message.content)
+                if trigger is not None:
+                    replies = await asyncio.to_thread(run_condor_shell_command, trigger)
+                else:
+                    replies = await asyncio.to_thread(self._build_status_reply, message.content)
             except Exception:
-                log.exception("Failed to build status reply")
-                replies = ["Failed to read pipeline status (see bot logs)."]
+                log.exception("Failed to build Discord reply")
+                if trigger is not None:
+                    replies = [f"Failed to run `{trigger}` (see bot logs)."]
+                else:
+                    replies = ["Failed to read pipeline status (see bot logs)."]
             try:
                 for index, reply in enumerate(replies):
                     if index == 0:
