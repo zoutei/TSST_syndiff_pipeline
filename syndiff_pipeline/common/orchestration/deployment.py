@@ -41,9 +41,17 @@ def deployment_path_for_config(
     return Path(config_path).expanduser().resolve().parent / deployment_file
 
 
+def resolve_deployment_path(deployment_path: str | Path) -> Path:
+    """Resolve an explicit deployment path; directories map to deployment.yaml inside."""
+    path = Path(deployment_path).expanduser().resolve()
+    if path.is_dir():
+        return path / "deployment.yaml"
+    return path
+
+
 def load_deployment_file(deployment_path: str | Path) -> dict:
     """Load a deployment YAML file from an explicit path."""
-    path = Path(deployment_path).expanduser().resolve()
+    path = resolve_deployment_path(deployment_path)
     if not path.is_file():
         raise FileNotFoundError(
             f"Deployment file not found: {path}. "
