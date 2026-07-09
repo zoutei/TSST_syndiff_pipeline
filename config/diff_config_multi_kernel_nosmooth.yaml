@@ -1,6 +1,6 @@
-# Per-FFI Hotpants + photometry in a new workspace tree with inherited inputs.
-# Prerequisite: diff_config_single_kernel.yaml completed under ws_single_hp_kernel/.
-# Use: syndiff diff submit/run with --config config/diff_config_multi_kernel_resume.yaml
+# Resume multi-kernel diff without temporal background smoothing.
+# Inherits ks_b from ws_multi_hp_temp_calib; Hotpants R2 uses per-FFI photutils bkg directly.
+# Use: point run source_diff_config_path here, then syndiff retry --stage diff
 deployment_file: deployment.yaml
 
 defaults:
@@ -9,7 +9,7 @@ defaults:
   master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
-  workspace_run_id: multi_hp_kernel
+  workspace_run_id: multi_hp_nosmooth
 
 additional_forced_targets:
   - name: offset_top
@@ -27,28 +27,14 @@ additional_forced_targets:
 
 pipeline:
   - workspace_inherit:
-      from: single_hp_kernel
-      labels: [ks_b, ks_d]
+      from: multi_hp_temp_calib
+      labels: [ks_b]
       root_artifacts:
-        - shared_mask.fits
+        - shared_mask.fits.gz
         - hotpants_substamp_stars.csv
-  - kind: background
-    inputs:
-      bkg_in: ks_b
-    output: ks_b_s
-    recombine_inputs: false
-    steps:
-      spatial:
-        enabled: false
-      temporal:
-        enabled: true
-        method: savgol
-        tile_size: 256
-      strap:
-        enabled: false
   - kind: hotpants
     inputs:
-      bkg: ks_b_s
+      bkg: ks_b
     hp_sigma_gauss: [0.752, 1.88, 3.76]
     hp_ko: 2
     hp_bgo: 0

@@ -4,7 +4,7 @@
 deployment_file: deployment.yaml
 
 defaults:
-  n_jobs: 8
+  n_jobs: 16
   pipeline_plots: false
   master_fits_mirror: true
   crop_mode: target_box
@@ -93,7 +93,7 @@ pipeline:
         sky_out: 9
 
 condor:
-  request_cpus: 8
+  request_cpus: 16
   request_memory: 100000
   requirements: "Memory >= 100000 && LoadAvg < 10"
   rank: "-LoadAvg"

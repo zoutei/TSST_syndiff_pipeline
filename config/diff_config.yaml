@@ -3,7 +3,7 @@
 deployment_file: deployment.yaml
 
 defaults:
-  n_jobs: 8
+  n_jobs: 16
   pipeline_plots: false
   master_fits_mirror: true
   crop_mode: target_box
@@ -51,6 +51,7 @@ pipeline:
       diffs: hp_d
       convolved: hp_c
       bkg: hp_b
+    write_kernel_solutions: true
     write_convolved: false
     write_bkg: true
     write_stamps: false
@@ -127,7 +128,7 @@ pipeline:
     # template_dir: omit → events/{target}/ws/templates symlink after template downsample
 
 condor:
-  request_cpus: 8
+  request_cpus: 16
   request_memory: 100000
   requirements: "Memory >= 100000 && LoadAvg < 10"
   rank: "-LoadAvg"
