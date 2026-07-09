@@ -16,6 +16,8 @@ log = logging.getLogger(__name__)
 
 _WRAPPER = Path(__file__).resolve().parent / "condor_wrapper.sh"
 
+_JOB_IDLE = 1
+_JOB_RUNNING = 2
 _JOB_REMOVED = 3
 _JOB_COMPLETED = 4
 _JOB_HELD = 5
@@ -52,6 +54,25 @@ def poll_grace_seconds() -> float:
     -------
     float"""
     return _POLL_GRACE_SECONDS
+
+
+def condor_status_label(status: int | None) -> str | None:
+    """Map HTCondor JobStatus to a short display label."""
+    if status == _JOB_IDLE:
+        return "idle"
+    if status == _JOB_RUNNING:
+        return "running"
+    if status == _JOB_HELD:
+        return "held"
+    return None
+
+
+def format_condor_job_suffix(cluster_id: int, status: int | None) -> str:
+    """Format a Condor queue-state suffix for progress detail (no leading space)."""
+    label = condor_status_label(status)
+    if label is None:
+        return ""
+    return f"condor {label} c{cluster_id}.0"
 
 
 def condor_artifact_paths(
@@ -425,6 +446,45 @@ def query_clusters(cluster_ids: Sequence[int]) -> dict[int, tuple[int | None, in
     for cluster_id in unique_ids:
         if cluster_id not in result:
             result[cluster_id] = _query_history(cluster_id)
+    return result
+
+
+def query_clusters_display(
+    cluster_ids: Sequence[int],
+) -> dict[int, tuple[int | None, int | None]]:
+    """Batch-query Condor queue state for progress display (no history fallback)."""
+    if not cluster_ids:
+        return {}
+    unique_ids = list(dict.fromkeys(int(cluster_id) for cluster_id in cluster_ids))
+    result: dict[int, tuple[int | None, int | None]] = {}
+    proc = _run_condor(
+        [
+            "condor_q",
+            *[str(cluster_id) for cluster_id in unique_ids],
+            "-af",
+            "ClusterId",
+            "JobStatus",
+            "ExitCode",
+        ],
+        check=False,
+    )
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            cluster_id = int(parts[0])
+        except ValueError:
+            continue
+        status, exit_code = _parse_status_exit(parts[1:])
+        if status is not None:
+            result[cluster_id] = (status, exit_code)
+    for cluster_id in unique_ids:
+        if cluster_id not in result:
+            result[cluster_id] = (None, None)
     return result
 
 
