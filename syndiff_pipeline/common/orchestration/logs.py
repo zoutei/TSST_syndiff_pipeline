@@ -238,7 +238,7 @@ def _control_dir(workspace_root: str | Path) -> Path:
 
 
 def daemon_lock_path(workspace_root: str | Path) -> Path:
-    """Daemon lock path.
+    """Daemon lock path (best-effort same-host flock; lease is authoritative).
     
     Parameters
     ----------
@@ -248,6 +248,34 @@ def daemon_lock_path(workspace_root: str | Path) -> Path:
     -------
     Path"""
     return _control_dir(workspace_root) / "daemon.lock"
+
+
+def daemon_lease_path(workspace_root: str | Path) -> Path:
+    """Cross-host ownership lease (JSON under control/).
+
+    Parameters
+    ----------
+    workspace_root : str | Path
+
+    Returns
+    -------
+    Path
+    """
+    return _control_dir(workspace_root) / "daemon.lease"
+
+
+def daemon_stop_path(workspace_root: str | Path) -> Path:
+    """Cross-host stop request for the supervisor (JSON under control/).
+
+    Parameters
+    ----------
+    workspace_root : str | Path
+
+    Returns
+    -------
+    Path
+    """
+    return _control_dir(workspace_root) / "daemon.stop"
 
 
 def daemon_pid_path(workspace_root: str | Path) -> Path:

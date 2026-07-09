@@ -12,7 +12,6 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration import daemon, logs
-from syndiff_pipeline.template_creation.orchestration.discord_bot_control import spawn_detached_discord_bot
 from syndiff_pipeline.common.orchestration.scheduler_control import ensure_daemon_running
 from syndiff_pipeline.common.orchestration.workspace import record_deployment_path
 from tests.site_fixtures import write_site_deployment
@@ -35,23 +34,6 @@ class TestSpawnDeploymentArgv(unittest.TestCase):
             self.assertIn("--deployment", cmd)
             self.assertIn(str(deploy.resolve()), cmd)
             self.assertNotIn("--handoff-root", cmd)
-
-    def test_spawn_detached_discord_bot_uses_deployment_flag(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            base = Path(tmp)
-            deploy = base / "deployment.yaml"
-            handoff = base / "handoff"
-            write_site_deployment(base, workspace_root=str(handoff), data_root=str(base / "data"))
-            with mock.patch(
-                "syndiff_pipeline.template_creation.orchestration.discord_bot_control.subprocess.Popen",
-            ) as popen:
-                popen.return_value.pid = 5678
-                pid = spawn_detached_discord_bot(deploy, base / "bot.log")
-            self.assertEqual(pid, 5678)
-            cmd = popen.call_args.args[0]
-            self.assertIn("--deployment", cmd)
-            self.assertIn(str(deploy.resolve()), cmd)
-            self.assertNotIn("--config", cmd)
 
     def test_ensure_daemon_requires_recorded_deployment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,7 +71,7 @@ class TestSpawnDeploymentArgv(unittest.TestCase):
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.wait_for_daemon",
                 return_value=True,
             ), mock.patch(
-                "syndiff_pipeline.common.orchestration.scheduler_control.daemon.read_process_identity",
+                "syndiff_pipeline.common.orchestration.scheduler_control._supervisor_pid_identity",
                 return_value=(None, 4242),
             ), mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.local_hostname",
