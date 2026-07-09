@@ -880,6 +880,30 @@ class TestDaemonFlock(unittest.TestCase):
                 with daemon.daemon_lock(handoff, blocking=False) as fd2:
                     self.assertIsNone(fd2)
 
+    def test_reclaim_stale_daemon_lock_when_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = tmp
+            self.assertTrue(daemon.reclaim_stale_daemon_lock(handoff))
+
+    def test_reclaim_stale_daemon_lock_after_holder_exits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = tmp
+            with daemon.daemon_lock(handoff, blocking=True) as fd:
+                self.assertIsNotNone(fd)
+            self.assertTrue(daemon.reclaim_stale_daemon_lock(handoff))
+
+    def test_stop_daemon_reclaims_stale_lock_when_not_running(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = tmp
+            with daemon.daemon_lock(handoff, blocking=True) as fd:
+                self.assertIsNotNone(fd)
+            result = stop_daemon(handoff)
+            self.assertFalse(result.was_running)
+            self.assertTrue(result.stopped)
+            self.assertTrue(result.lock_reclaimed)
+            with daemon.daemon_lock(handoff, blocking=False) as fd:
+                self.assertIsNotNone(fd)
+
 
 class TestProcessIdentity(unittest.TestCase):
     def test_write_read_round_trip(self):
@@ -901,12 +925,22 @@ class TestProcessIdentity(unittest.TestCase):
 
 
 class TestCrossHostSupervisor(unittest.TestCase):
-    def test_daemon_is_alive_remote_pid_file_without_local_kill(self):
+    def test_daemon_is_alive_remote_fresh_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
             handoff = tmp
-            pid_path = logs.daemon_pid_path(handoff)
-            pid_path.parent.mkdir(parents=True, exist_ok=True)
-            daemon.write_process_identity(pid_path, 12345, host="submit01")
+            from syndiff_pipeline.common.orchestration import lease as lease_mod
+
+            now = "2099-01-01T00:00:00+00:00"
+            lease_mod.write_lease_atomic(
+                handoff,
+                lease_mod.Lease(
+                    host="submit01",
+                    pid=12345,
+                    generation=1,
+                    started_at=now,
+                    renewed_at=now,
+                ),
+            )
             with unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.local_hostname",
                 return_value="login02",
@@ -937,27 +971,39 @@ class TestCrossHostSupervisor(unittest.TestCase):
             self.assertIn("submit01", str(ctx.exception))
             self.assertIn("login02", str(ctx.exception))
 
-    def test_stop_daemon_refuses_remote_with_fresh_heartbeat(self):
+    def test_stop_daemon_writes_stop_for_remote_fresh_lease(self):
         with tempfile.TemporaryDirectory() as tmp:
             handoff = tmp
-            pid_path = logs.daemon_pid_path(handoff)
-            pid_path.parent.mkdir(parents=True, exist_ok=True)
-            daemon.write_process_identity(pid_path, 12345, host="submit01")
+            from syndiff_pipeline.common.orchestration import lease as lease_mod
+
+            now = "2099-01-01T00:00:00+00:00"
+            lease_mod.write_lease_atomic(
+                handoff,
+                lease_mod.Lease(
+                    host="submit01",
+                    pid=12345,
+                    generation=9,
+                    started_at=now,
+                    renewed_at=now,
+                ),
+            )
             with unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.local_hostname",
                 return_value="login02",
             ), unittest.mock.patch(
-                "syndiff_pipeline.common.orchestration.scheduler_control._db_heartbeat_age_s",
-                return_value=5.0,
-            ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.terminate_process_tree",
-            ) as terminate:
-                result = stop_daemon(handoff)
-            self.assertTrue(result.was_running)
-            self.assertFalse(result.stopped)
-            self.assertIsNotNone(result.message)
-            self.assertIn("submit01", result.message or "")
+            ) as terminate, unittest.mock.patch(
+                "syndiff_pipeline.common.orchestration.scheduler_control.lease.wait_until_lease_released",
+                return_value=True,
+            ):
+                result = stop_daemon(handoff, remote_wait_s=0.1)
+            self.assertTrue(result.stopped)
             terminate.assert_not_called()
+            # Stop file may already be cleared after confirmed release.
+            req = lease_mod.read_stop_request(handoff)
+            # Either cleared after success, or still present with target gen.
+            if req is not None:
+                self.assertEqual(req.target_generation, 9)
 
 
 class TestStopDaemon(unittest.TestCase):
@@ -981,7 +1027,7 @@ class TestStopDaemon(unittest.TestCase):
             pid_path.write_text("55555", encoding="utf-8")
             with unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.is_process_alive",
-                side_effect=[True, False],
+                side_effect=[True, True, False],
             ) as alive, unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.terminate_process_tree",
             ) as term, unittest.mock.patch(
@@ -1005,7 +1051,7 @@ class TestStopDaemon(unittest.TestCase):
             pid_path.write_text("66666", encoding="utf-8")
             with unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.is_process_alive",
-                side_effect=[True, False],
+                side_effect=[True, True, False],
             ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.terminate_process_tree",
             ) as term, unittest.mock.patch(
@@ -1056,7 +1102,7 @@ class TestStopDaemon(unittest.TestCase):
             )
             with unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.is_process_alive",
-                side_effect=[True, False],
+                side_effect=[True, True, False],
             ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.scheduler_control.daemon.terminate_process_tree",
             ), unittest.mock.patch(

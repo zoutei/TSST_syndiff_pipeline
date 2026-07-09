@@ -80,6 +80,10 @@ class DaemonStatus:
     heartbeat_age_s: float | None
     lock_held: bool
     host: str | None = None
+    lease_generation: int | None = None
+    lease_age_s: float | None = None
+    stop_pending: bool = False
+    wedged: bool = False
 
 
 def local_hostname() -> str:
@@ -115,16 +119,31 @@ def identity_on_local_host(host: str | None) -> bool:
 
 
 def is_process_alive(pid: int) -> bool:
-    """Is process alive.
-    
-    Parameters
-    ----------
-    pid : int
-    
-    Returns
-    -------
-    bool"""
+    """True when *pid* is a live (non-zombie) process on this host."""
     if pid <= 0:
+        return False
+    # Prefer /proc: distinguishes zombies (still in the process table) from live tasks.
+    stat_path = Path(f"/proc/{pid}/stat")
+    try:
+        raw = stat_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Fall back to signal 0 when /proc is unavailable.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    # Format: "pid (comm) state ..." — comm may contain spaces/parens, so split
+    # after the final ") ".
+    try:
+        state = raw.rsplit(")", 1)[1].lstrip().split(None, 1)[0]
+    except (IndexError, ValueError):
+        state = ""
+    if state in {"Z", "X"}:
         return False
     try:
         os.kill(pid, 0)
@@ -249,6 +268,51 @@ def daemon_lock(workspace_root: str | Path, *, blocking: bool = False) -> Iterat
         yield fd
 
 
+def _flock_holder_pid(lock_path: Path) -> int | None:
+    """Return the PID holding a POSIX flock on *lock_path*, if known."""
+    try:
+        st = lock_path.stat()
+        dev_ino = f"{st.st_dev:x}:{st.st_ino}"
+    except OSError:
+        return None
+    try:
+        with Path("/proc/locks").open(encoding="utf-8") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 7 or parts[1] != "POSIX" or parts[5] != dev_ino:
+                    continue
+                try:
+                    return int(parts[4])
+                except ValueError:
+                    continue
+    except OSError:
+        return None
+    return None
+
+
+def reclaim_stale_daemon_lock(workspace_root: str | Path) -> bool:
+    """Reclaim a daemon lock left behind after an unclean supervisor exit.
+
+    Returns True when the lock is free or was successfully reclaimed.
+    """
+    lock_path = logs.daemon_lock_path(workspace_root)
+    with daemon_lock(workspace_root, blocking=False) as fd:
+        if fd is not None:
+            return True
+
+    holder = _flock_holder_pid(lock_path)
+    if holder is not None and is_process_alive(holder):
+        return False
+
+    try:
+        lock_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+    with daemon_lock(workspace_root, blocking=False) as fd:
+        return fd is not None
+
+
 def spawn_detached_daemon(deployment_path: str | Path, daemon_log: str | Path) -> int:
     """Spawn detached daemon.
     
@@ -319,19 +383,15 @@ def wait_for_process_exit(
 
 
 def wait_for_daemon(workspace_root: str | Path, *, timeout_s: float = 10.0) -> bool:
-    """Wait for daemon.
-    
-    Parameters
-    ----------
-    workspace_root : str | Path
-    timeout_s : float, optional, default ``10.0``
-    
-    Returns
-    -------
-    bool"""
+    """Wait until a fresh local lease (or local pid) appears for *workspace_root*."""
+    from syndiff_pipeline.common.orchestration import lease as lease_mod
+
     deadline = time.monotonic() + timeout_s
     pid_path = logs.daemon_pid_path(workspace_root)
     while time.monotonic() < deadline:
+        owned = lease_mod.read_lease(workspace_root)
+        if owned is not None and owned.is_fresh() and owned.is_ours():
+            return True
         host, pid = read_process_identity(pid_path)
         if is_local_process_alive(host, pid):
             return True

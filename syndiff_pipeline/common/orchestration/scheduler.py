@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List
 
-from syndiff_pipeline.common.orchestration import condor, daemon, launcher, logs
+from syndiff_pipeline.common.orchestration import condor, daemon, launcher, lease, logs
 from syndiff_pipeline.common.orchestration.deployment import load_workspace_root_from_deployment
 from syndiff_pipeline.common.orchestration.workspace import record_deployment_path
 import syndiff_pipeline.common.orchestration.state as pstate
@@ -36,6 +36,7 @@ log = logging.getLogger(__name__)
 
 _shutdown = False
 _lock_fd: int | None = None
+_owned_lease: lease.Lease | None = None
 
 NONTERMINAL_STATUSES = frozenset(
     {
@@ -65,34 +66,43 @@ _SHUTDOWN_VERIFY_DRAIN_S = 5.0
 # jobs from durable status files) can take over.
 _HEARTBEAT_FATAL_AFTER_S = 90.0
 
+# If the NFS lease cannot be renewed for this long, exit so another host can
+# reclaim ownership after the lease goes stale.
+_LEASE_RENEW_FATAL_AFTER_S = lease.DEFAULT_LEASE_STALE_S
 
-def _ensure_discord_bot_on_startup(workspace_root: str) -> None:
-    """Ensure discord bot on startup.
-    
-    Parameters
-    ----------
-    workspace_root : str"""
+
+def _start_in_process_discord_bot(workspace_root: str):
+    """Start the Discord bot inside this supervisor process when configured."""
+    from syndiff_pipeline.template_creation.orchestration.discord_bot import (
+        InProcessDiscordBot,
+    )
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
-        ensure_discord_bot_for_workspace_root,
+        should_start_in_process_bot,
+    )
+
+    should_start, reason, deploy_path = should_start_in_process_bot(workspace_root)
+    if not should_start or deploy_path is None:
+        if reason:
+            log.info("Discord bot not started: %s", reason)
+        return None
+    bot = InProcessDiscordBot(deploy_path)
+    if bot.start():
+        return bot
+    if bot.skipped_reason:
+        log.warning("Discord bot not started: %s", bot.skipped_reason)
+    return None
+
+
+def _cleanup_legacy_bots_async(workspace_root: str) -> None:
+    """Best-effort orphan cleanup off the critical startup path."""
+    from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+        cleanup_legacy_detached_bots,
     )
 
     try:
-        result = ensure_discord_bot_for_workspace_root(workspace_root)
+        cleanup_legacy_detached_bots(workspace_root)
     except Exception:
-        log.warning("Discord bot startup ensure failed", exc_info=True)
-        return
-    if result is None:
-        return
-    if result.spawned and result.pid:
-        log.info(
-            "Started Discord bot host=%s pid=%s",
-            result.host or daemon.local_hostname(),
-            result.pid,
-        )
-    elif result.skipped_reason:
-        log.warning("Discord bot not running: %s", result.skipped_reason)
-    elif result.pid and result.host:
-        log.info("Discord bot already running host=%s pid=%s", result.host, result.pid)
+        log.warning("Legacy Discord bot cleanup failed", exc_info=True)
 
 
 def _age_seconds(iso_ts: str | None) -> float:
@@ -130,20 +140,40 @@ def _write_local_heartbeat(workspace_root: str) -> None:
 
 
 def _supervisor_heartbeat_loop(
-    state: pstate.PipelineState, workspace_root: str, pid: int, interval_s: float
+    state: pstate.PipelineState,
+    workspace_root: str,
+    pid: int,
+    interval_s: float,
+    owned_lease: lease.Lease,
 ) -> None:
-    """Keep liveness fresh while the main loop is busy launching stages.
+    """Keep local heartbeat + NFS lease fresh; honor stop requests and fencing.
 
-    The host-local heartbeat file is the authoritative liveness signal because
-    it does not depend on the (possibly wedged or full) NFS state DB. The DB
-    heartbeat is updated best-effort, for cross-tool visibility only.
+    The host-local heartbeat file detects a wedged local process independent of
+    NFS. The shared lease is the cross-host ownership signal.
     """
-    global _shutdown
+    global _shutdown, _owned_lease
     last_local_ok = time.monotonic()
+    last_lease_ok = time.monotonic()
+    current_lease = owned_lease
     while not _shutdown:
-        time.sleep(interval_s)
+        # Check stop / fencing frequently; sleep in short slices so remote stop
+        # is honored well under the full renew interval.
+        for _ in range(max(1, int(interval_s / 0.5))):
+            if _shutdown:
+                break
+            stop = lease.read_stop_request(workspace_root)
+            if lease.stop_targets_owner(stop, current_lease):
+                log.warning(
+                    "Stop request received (from=%s generation=%s) — shutting down",
+                    stop.requested_by_host if stop else "?",
+                    stop.target_generation if stop else None,
+                )
+                _shutdown = True
+                break
+            time.sleep(0.5)
         if _shutdown:
             break
+
         try:
             _write_local_heartbeat(workspace_root)
             last_local_ok = time.monotonic()
@@ -157,10 +187,33 @@ def _supervisor_heartbeat_loop(
                 )
                 _shutdown = True
                 break
+
+        try:
+            renewed = lease.renew_lease(workspace_root, current_lease, pid=pid)
+            if renewed is None:
+                log.error(
+                    "Lost lease ownership (generation=%s) — shutting down",
+                    current_lease.generation,
+                )
+                _shutdown = True
+                break
+            current_lease = renewed
+            _owned_lease = renewed
+            last_lease_ok = time.monotonic()
+        except Exception:
+            log.exception("Failed to renew ownership lease")
+            if time.monotonic() - last_lease_ok > _LEASE_RENEW_FATAL_AFTER_S:
+                log.error(
+                    "Lease renew failed for >%ss — exiting so another host can reclaim",
+                    _LEASE_RENEW_FATAL_AFTER_S,
+                )
+                _shutdown = True
+                break
+
         try:
             state.update_supervisor_heartbeat(pid)
         except Exception:
-            # DB heartbeat is best-effort; the local file is authoritative.
+            # DB heartbeat is best-effort; lease + local file are authoritative.
             log.warning("Failed to update DB heartbeat (best-effort)", exc_info=True)
 
 
@@ -208,12 +261,10 @@ def _write_summary(state: pstate.PipelineState, run_id: str, runs_root: str) -> 
 
 
 def _load_run_context(state: pstate.PipelineState, run_id: str):
-    """Load run context.
-    
-    Parameters
-    ----------
-    state : pstate.PipelineState
-    run_id : str"""
+    """Load run context for *run_id*, or None if the run cannot be loaded.
+
+    Never raises: a broken run directory must not take down the supervisor.
+    """
     run = state.get_run(run_id)
     if not run:
         return None
@@ -223,9 +274,10 @@ def _load_run_context(state: pstate.PipelineState, run_id: str):
         from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 
         return resolve_run_context(run_dir=run_dir, run_id=run_id)
-    except SystemExit as exc:
-        # Missing/broken run directory must not crash the supervisor; skip it.
-        log.error("Cannot load run context for %s: %s", run_id, exc)
+    except Exception as exc:
+        # Missing/broken run directory or bad targets.csv must not crash the
+        # supervisor; skip this run until it is fixed or canceled.
+        log.error("Cannot load run context for %s: %s", run_id, exc, exc_info=True)
         return None
 
 
@@ -911,26 +963,30 @@ def _collect_verify_status_by_run(
     by_run: dict[str, dict] = {}
     for run in runs:
         run_id = run["run_id"]
-        ctx = _load_run_context(state, run_id)
-        if ctx is None:
+        try:
+            ctx = _load_run_context(state, run_id)
+            if ctx is None:
+                by_run[run_id] = {"scan_running": 0, "scan_queued": 0, "active": []}
+                continue
+            force_rerun = bool((state.get_run(run_id) or {}).get("force_rerun"))
+            pending, in_flight = _verify_backlog(
+                state, run_id, ctx, force_rerun=force_rerun
+            )
+            active: list[list[str]] = []
+            if worker is not None:
+                active = [
+                    [key.target_label, key.stage]
+                    for key in worker.in_flight_keys(run_id)
+                ]
+            queued = max(0, pending - in_flight)
+            by_run[run_id] = {
+                "scan_running": in_flight,
+                "scan_queued": queued,
+                "active": active,
+            }
+        except Exception:
+            log.exception("Failed to collect verify status for run %s", run_id)
             by_run[run_id] = {"scan_running": 0, "scan_queued": 0, "active": []}
-            continue
-        force_rerun = bool((state.get_run(run_id) or {}).get("force_rerun"))
-        pending, in_flight = _verify_backlog(
-            state, run_id, ctx, force_rerun=force_rerun
-        )
-        active: list[list[str]] = []
-        if worker is not None:
-            active = [
-                [key.target_label, key.stage]
-                for key in worker.in_flight_keys(run_id)
-            ]
-        queued = max(0, pending - in_flight)
-        by_run[run_id] = {
-            "scan_running": in_flight,
-            "scan_queued": queued,
-            "active": active,
-        }
     return by_run
 
 
@@ -1818,41 +1874,68 @@ def run_supervisor_daemon(workspace_root: str) -> int:
     Returns
     -------
     int"""
+    global _shutdown, _lock_fd, _owned_lease
+    _shutdown = False
+    _owned_lease = None
+
     daemon.configure_process_logging("supervisor")
     signal.signal(signal.SIGTERM, _handle_signal)
     signal.signal(signal.SIGINT, _handle_signal)
 
-    global _lock_fd
-    # Non-blocking exclusive lock: a second daemon must fail to acquire and exit,
-    # not block forever waiting for the incumbent owner.
     from syndiff_pipeline.common.orchestration.workspace import state_db_path
 
     db_path = str(state_db_path(workspace_root))
-    with daemon.daemon_lock(workspace_root, blocking=False) as fd:
-        if fd is None:
-            log.info("Another supervisor already owns the lock; exiting.")
-            return 0
-        _lock_fd = fd
+    pid = os.getpid()
+    host = daemon.local_hostname()
 
-        pid_path = logs.daemon_pid_path(workspace_root)
-        pid = os.getpid()
-        host = daemon.local_hostname()
+    owned = lease.try_acquire_lease(workspace_root, host=host, pid=pid)
+    if owned is None:
+        log.info("Another supervisor already owns the lease; exiting.")
+        return 0
+    _owned_lease = owned
+    # Keep lease/stop files permanently present for NFS visibility.
+    lease.ensure_control_files(workspace_root)
+    log.info(
+        "Acquired supervisor lease generation=%s host=%s pid=%s",
+        owned.generation,
+        owned.host,
+        owned.pid,
+    )
+
+    # Best-effort same-host flock; lease is authoritative and must not be blocked
+    # by a stuck NFS flock.
+    lock_cm = daemon.daemon_lock(workspace_root, blocking=False)
+    fd = lock_cm.__enter__()
+    _lock_fd = fd
+    if fd is None:
+        log.warning(
+            "Could not acquire best-effort daemon.lock (lease still held); continuing"
+        )
+
+    discord_bot = None
+    pid_path = logs.daemon_pid_path(workspace_root)
+    try:
         daemon.write_process_identity(pid_path, pid, host=host)
         log.info("Supervisor started workspace=%s", workspace_root)
         state = pstate.PipelineState(db_path)
-        # Establish liveness immediately (local file is authoritative) before
-        # the first — potentially slow — scheduling pass begins.
         _write_local_heartbeat(workspace_root)
         state.update_supervisor_heartbeat(pid)
 
         heartbeat_thread = threading.Thread(
             target=_supervisor_heartbeat_loop,
-            args=(state, workspace_root, pid, _HEARTBEAT_INTERVAL_S),
+            args=(state, workspace_root, pid, _HEARTBEAT_INTERVAL_S, owned),
             name="supervisor-heartbeat",
             daemon=True,
         )
         heartbeat_thread.start()
-        _ensure_discord_bot_on_startup(workspace_root)
+        # Orphan /proc scan can be slow on large hosts — never block stop/heartbeat on it.
+        threading.Thread(
+            target=_cleanup_legacy_bots_async,
+            args=(workspace_root,),
+            name="legacy-bot-cleanup",
+            daemon=True,
+        ).start()
+        discord_bot = _start_in_process_discord_bot(workspace_root)
 
         try:
             while not _shutdown:
@@ -1904,7 +1987,15 @@ def run_supervisor_daemon(workspace_root: str) -> int:
 
                 shutdown_verify_worker(wait=_shutdown)
             log.info("Supervisor shutting down workspace=%s", workspace_root)
-            state.clear_supervisor()
+            if discord_bot is not None:
+                try:
+                    discord_bot.stop()
+                except Exception:
+                    log.warning("Discord bot stop failed", exc_info=True)
+            try:
+                state.clear_supervisor()
+            except Exception:
+                log.warning("Failed to clear supervisor row", exc_info=True)
             daemon.remove_pid_file(pid_path)
             try:
                 logs.daemon_heartbeat_file(workspace_root).unlink(missing_ok=True)
@@ -1914,6 +2005,16 @@ def run_supervisor_daemon(workspace_root: str) -> int:
                 clear_verify_in_flight(workspace_root)
             except OSError:
                 pass
+            gen = _owned_lease.generation if _owned_lease is not None else owned.generation
+            lease.clear_stop_request(workspace_root, only_generation=gen)
+            lease.release_lease(workspace_root, host=host, pid=pid, generation=gen)
+            _owned_lease = None
+    finally:
+        try:
+            lock_cm.__exit__(None, None, None)
+        except Exception:
+            pass
+        _lock_fd = None
     return 0
 
 

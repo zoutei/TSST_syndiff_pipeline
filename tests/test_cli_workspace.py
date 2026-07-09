@@ -143,8 +143,6 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                     notifications=mock.Mock(enabled=False),
                 )
             ), mock.patch.object(orch_cli, "ensure_daemon_running"), mock.patch.object(
-                orch_cli, "_ensure_discord_bot", return_value=None
-            ), mock.patch.object(
                 orch_cli, "record_deployment_path"
             ):
                 with self.assertRaises(SystemExit) as ctx:

@@ -1,15 +1,13 @@
-"""Discord bot for on-demand pipeline status replies."""
+"""Discord bot for on-demand pipeline status replies (runs inside the supervisor)."""
 
 from __future__ import annotations
 
-import argparse
 import asyncio
 import logging
-import os
-import sys
+import threading
 from pathlib import Path
+from typing import Any
 
-from syndiff_pipeline.common.orchestration import daemon, logs
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     load_workspace_root_from_deployment,
@@ -21,7 +19,7 @@ from syndiff_pipeline.common.orchestration.workspace import runs_root, state_db_
 log = logging.getLogger(__name__)
 
 
-def _channel_matches(message, channel_id: int) -> bool:
+def _channel_matches(message: Any, channel_id: int) -> bool:
     """True when *message* is in the configured channel or a thread under it."""
     ch = message.channel
     if ch.id == channel_id:
@@ -36,14 +34,9 @@ def _channel_matches(message, channel_id: int) -> bool:
 
 
 def _require_discord():
-    """Require discord."""
-    try:
-        import discord
-    except ImportError as exc:
-        raise SystemExit(
-            "discord.py is required for the Discord bot. Install with:\n"
-            "  pip install 'discord.py>=2.3'"
-        ) from exc
+    """Import discord.py or raise ImportError."""
+    import discord
+
     return discord
 
 
@@ -51,11 +44,6 @@ class PipelineDiscordBot:
     """Reply to channel messages with live progress + status grid."""
 
     def __init__(self, deployment_path: str | Path):
-        """Init.
-        
-        Parameters
-        ----------
-        deployment_path : str | Path"""
         self._deployment_path = Path(deployment_path).expanduser().resolve()
         deployment = load_deployment_file(self._deployment_path)
         self._workspace_root = str(
@@ -67,17 +55,10 @@ class PipelineDiscordBot:
         self._channel_id = (
             str(deployment.get("discord_channel_id", "")).strip() or None
         )
+        self._client: Any | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def _build_status_reply(self, message_text: str) -> list[str]:
-        """Build status reply.
-        
-        Parameters
-        ----------
-        message_text : str
-        
-        Returns
-        -------
-        list[str]"""
         from syndiff_pipeline.common.orchestration.notifications import (
             resolve_run_ids_for_status_request,
         )
@@ -90,16 +71,15 @@ class PipelineDiscordBot:
             workspace_root=self._workspace_root,
         )
 
-    def run(self) -> None:
-        """Run."""
+    def _build_client(self):
         discord = _require_discord()
         if not self._token:
-            raise SystemExit(
+            raise RuntimeError(
                 f"No Discord bot token found in {self._deployment_path} "
                 "(set discord_bot_token in deployment.yaml)"
             )
         if not self._channel_id:
-            raise SystemExit(
+            raise RuntimeError(
                 f"No Discord channel configured in {self._deployment_path}. "
                 "Set discord_channel_id in deployment.yaml."
             )
@@ -113,7 +93,6 @@ class PipelineDiscordBot:
 
         @client.event
         async def on_ready():
-            """On ready."""
             nonlocal bot_user_id, listen_channel_id
             bot_user_id = client.user.id if client.user else None
             try:
@@ -160,11 +139,6 @@ class PipelineDiscordBot:
 
         @client.event
         async def on_message(message):
-            """On message.
-            
-            Parameters
-            ----------
-            message"""
             if message.author.bot:
                 return
             if listen_channel_id is not None and not _channel_matches(message, listen_channel_id):
@@ -201,69 +175,109 @@ class PipelineDiscordBot:
                 except Exception:
                     log.exception("Failed to send Discord reply via channel.send")
 
+        self._client = client
+        return client
+
+    async def _async_run(self) -> None:
+        client = self._build_client()
+        assert self._token is not None
+        async with client:
+            await client.start(self._token)
+
+    def run_forever(self) -> None:
+        """Block the current thread running the Discord client until closed."""
         log.info("Starting Discord bot for %s", self._deployment_path)
-        client.run(self._token, log_handler=None)
-
-
-def run_discord_bot(
-    deployment_path: str | Path,
-    *,
-    detached: bool = False,
-) -> None:
-    """Run discord bot.
-    
-    Parameters
-    ----------
-    deployment_path : str | Path
-    detached : bool, optional, default ``False``"""
-    path = Path(deployment_path).expanduser().resolve()
-    load_deployment_file(path)
-    workspace_root = str(load_workspace_root_from_deployment(path))
-    pid_path = logs.discord_bot_pid_path(workspace_root)
-    if detached:
-        pid = os.getpid()
-        host = daemon.local_hostname()
-        daemon.write_process_identity(pid_path, pid, host=host)
-        log.info(
-            "Discord bot registered workspace=%s deployment=%s",
-            workspace_root,
-            path,
-        )
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         try:
-            PipelineDiscordBot(path).run()
+            self._loop.run_until_complete(self._async_run())
+        except Exception:
+            log.exception("Discord bot exited with error")
         finally:
-            log.info("Discord bot exiting workspace=%s", workspace_root)
-            daemon.remove_pid_file(pid_path)
-    else:
-        PipelineDiscordBot(path).run()
+            try:
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            self._loop.close()
+            self._loop = None
+            self._client = None
+
+    def request_stop(self) -> None:
+        """Ask the Discord client to close (thread-safe)."""
+        client = self._client
+        loop = self._loop
+        if client is None or loop is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(client.close(), loop)
+        except Exception:
+            log.warning("Failed to schedule Discord client close", exc_info=True)
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Main.
-    
-    Parameters
-    ----------
-    argv : list[str] | None, optional, default ``None``
-    
-    Returns
-    -------
-    int"""
-    parser = argparse.ArgumentParser(description="SynDiff pipeline Discord bot")
-    parser.add_argument(
-        "--deployment",
-        required=True,
-        help="Path to deployment.yaml",
-    )
-    parser.add_argument(
-        "--detached",
-        action="store_true",
-        help="Run as background worker (writes pid file; used by daemon start)",
-    )
-    args = parser.parse_args(argv)
-    daemon.configure_process_logging("discord-bot")
-    run_discord_bot(args.deployment, detached=args.detached)
-    return 0
+class InProcessDiscordBot:
+    """Supervisor-owned Discord bot running on a background thread."""
 
+    def __init__(self, deployment_path: str | Path):
+        self._deployment_path = Path(deployment_path).expanduser().resolve()
+        self._bot: PipelineDiscordBot | None = None
+        self._thread: threading.Thread | None = None
+        self._started = False
+        self.skipped_reason: str | None = None
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self) -> bool:
+        """Start the bot thread. Returns False when skipped or already running."""
+        if self.running:
+            return True
+        try:
+            bot = PipelineDiscordBot(self._deployment_path)
+        except Exception as exc:
+            self.skipped_reason = str(exc)
+            log.warning("Discord bot not started: %s", exc)
+            return False
+        if not bot._token:
+            self.skipped_reason = "no bot token configured"
+            return False
+        if not bot._channel_id:
+            self.skipped_reason = "no channel id configured"
+            return False
+        try:
+            _require_discord()
+        except ImportError:
+            self.skipped_reason = "discord.py not installed"
+            log.warning("Discord bot not started: discord.py not installed")
+            return False
+
+        self._bot = bot
+        self._thread = threading.Thread(
+            target=self._run_guarded,
+            name="discord-bot",
+            daemon=True,
+        )
+        self._thread.start()
+        self._started = True
+        self.skipped_reason = None
+        log.info("Discord bot thread started for %s", self._deployment_path)
+        return True
+
+    def _run_guarded(self) -> None:
+        assert self._bot is not None
+        try:
+            self._bot.run_forever()
+        except Exception:
+            log.exception("Discord bot thread crashed")
+
+    def stop(self, *, timeout_s: float = 5.0) -> None:
+        """Stop the bot thread and wait briefly for exit."""
+        if self._bot is not None:
+            self._bot.request_stop()
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=timeout_s)
+            if thread.is_alive():
+                log.warning("Discord bot thread did not exit within %.1fs", timeout_s)
+        self._thread = None
+        self._bot = None

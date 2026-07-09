@@ -6,7 +6,10 @@ This document describes the **orchestrated SynDiff pipeline** behind the `syndif
 syndiff all submit      # template stages → diff (full end-to-end)
 syndiff template submit # template stages only
 syndiff diff submit     # diff only (verifies tess_dl + wcs handoff + downsample; mapping/ps1 marked n/a)
+syndiff star submit     # host-star light curves only (star_targets.csv; prerequisites verified in stage)
 ```
+
+Host-star configuration and outputs: [star_lightcurves.md](star_lightcurves.md), [stages/star_pipeline.md](stages/star_pipeline.md).
 
 Monitoring verbs (`progress`, `status`, `retry`, …) are workspace-wide and work identically regardless of which preset started the run.
 
@@ -70,7 +73,7 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid** fo
 
 The runner is designed for **batch operation across many SCCs**:
 
-- A host-level **supervisor daemon** (single owner via flock) dequeues work for all active runs subject to resource-pool limits.
+- A host-level **supervisor daemon** (single owner per workspace via `control/daemon.lease` on NFS) dequeues work for all active runs subject to resource-pool limits.
 - Progress is tracked in **SQLite (WAL)** and on disk (logs, summaries, per-stage status/manifest files).
 - Stages can be run **subset-by-subset** (e.g. only `ps1_process,downsample`) when upstream artifacts already exist.
 - **`mapping`**, **`ps1_process`**, and **`diff`** can run on a shared **HTCondor** pool; other stages run as local subprocesses on the submit host (`wcs_grouping` is unpooled).
@@ -116,7 +119,7 @@ flowchart TB
         control[pause / resume / kill / retry]
     end
 
-    subgraph Daemon["Supervisor daemon (single host owner)"]
+    subgraph Daemon["Supervisor daemon (lease-guarded owner)"]
         pools[Resource pools]
         sqlite[(SQLite state DB + command intents)]
         skip[Manifest-first skip / verify]
@@ -297,7 +300,7 @@ syndiff tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
-`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `down: 45/84` for downsample skycell-weighted progress from `per_target/<label>/downsample.progress.json`). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
+`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `down: 45/84` from `per_target/<label>/downsample.progress.json`, `diff: epsf r1 12/48` from `per_target/<label>/diff.epsf.progress.json` beside `diff.log` — also `diff.hotpants.progress.json` and `diff.photometry.progress.json` when those phases are active). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
 
 **Discord alerts** (optional): when `notifications.enabled: true` in config, the supervisor posts to a webhook on run/stage events. Messages include the same **progress** summary and **status** grid as the CLI. Preview without changing pipeline state:
 
@@ -562,6 +565,8 @@ Condor resource requests (`request_cpus`, `request_memory`, …) are defined in 
 
 **Verification**: frame manifest CSV present and at least one workspace label directory under `ws/` (excluding `master` and `templates`).
 
+**Progress sidecars**: during diff runs, workers update JSON mirrors beside `per_target/<label>/diff.log` — `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.photometry.progress.json`. `syndiff progress` reads the most recently updated sidecar via `stage_progress.py` (ePSF also merges live `*_gridded_epsf.npz` counts when `output_dir` is recorded).
+
 **Diff-only submit** (`syndiff diff submit`): upstream template stages outside the artifact-verify closure are marked **n/a** immediately. Only `tess_ffi_download`, `wcs_grouping`, and `downsample` are verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`) — not `mapping`, `ps1_download`, or `ps1_process`.
 
 ---
@@ -675,19 +680,15 @@ Event notifications (except `run_started`) include the same **progress** summary
 
 1. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), enable **Message Content Intent**, invite it to your server with send/read permissions.
 2. Set `notifications.bot.enabled: true` and configure the channel ID (config or `deployment.yaml`).
-3. Install `discord.py`, then start the supervisor — the bot starts automatically when enabled:
+3. Install `discord.py`, then submit a run or start the supervisor — the bot starts **in-process** inside the daemon when enabled (no separate CLI or detached process):
 
 ```bash
 pip install 'discord.py>=2.3'   # or: pip install -e '.[discord]'
-syndiff daemon start --deployment config/deployment.yaml
+syndiff template submit --site config --targets my_targets.csv
+# or: syndiff daemon start --deployment config/deployment.yaml
 ```
 
-`submit` also ensures the bot is running. `daemon stop` stops both the supervisor and the bot. Check both with `daemon status`. For foreground debugging only:
-
-```bash
-syndiff discord bot --deployment config/deployment.yaml
-syndiff discord bot   # auto-discover when one workspace
-```
+`submit` starts the supervisor (and thus the in-process bot when enabled). `daemon stop` requests shutdown via `control/daemon.stop` (works from any host); the supervisor and bot exit together. Check with `syndiff daemon status` (`discord_bot.expected_in_process`). Legacy detached `discord_bot --detached` processes are terminated on supervisor start.
 
 Any message you post in the configured channel gets a reply with live `progress` + `status` (same format as event alerts). Include a `run_id` in the message to query a specific run; otherwise the bot reports all active runs (or the most recent run if none are active).
 
@@ -882,7 +883,6 @@ Commands fall into three scopes:
 | [`active`](#active) | workspace | Show running/stalled runs + daemon health |
 | [`daemon`](#daemon) | workspace | Start/stop/status supervisor daemon |
 | [`notify test`](#notify-test) | run | Send Discord preview (or `--dry-run`) |
-| [`discord bot`](#discord-bot) | site | Run status-reply bot in foreground |
 
 ---
 
@@ -916,8 +916,8 @@ syndiff template submit \
 1. Loads `deployment.yaml` beside `--config` for `workspace_root`, `data_root`, credentials.
 2. Materializes frozen `config.yaml` + `targets.csv` into `{workspace_root}/runs/<run_id>/`.
 3. Inserts run + per-target stage rows in `{workspace_root}/control/pipeline_state.sqlite`.
-4. Starts the supervisor daemon (if not already alive for this `workspace_root`).
-5. Starts the Discord bot when enabled: on supervisor startup if a new supervisor was spawned, otherwise immediately from `submit` (one bot per workspace, flock-guarded).
+4. Starts the supervisor daemon (if not already alive for this `workspace_root`; lease-guarded).
+5. The Discord status bot starts in-process inside the supervisor when enabled.
 6. Updates `{workspace_root}/runs/latest` → `<run_id>`.
 
 **Example** — PS1 stream mode (no shared Zarr; `ps1_download` skipped automatically). Set `stages.ps1_process.ps1_source: stream` in `pipeline.yaml` (see commented lines in the example file):
@@ -958,7 +958,7 @@ syndiff progress --run-dir /path/to/runs/batch_no5
 syndiff progress --no-detail   # summary only (for scripts)
 ```
 
-Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows` or `down: 45/84` from `downsample.progress.json`.
+Detail lines look like `s0023_c1_k3_2020ftl ps1_pr: 2/19 projections 5/10 rows`, `down: 45/84` from `downsample.progress.json`, or `diff: epsf r1 12/48` from `diff.epsf.progress.json` (plus `diff.hotpants.progress.json` / `diff.photometry.progress.json` when active). Parsed by `template_creation/orchestration/stage_progress.py`.
 
 #### `status`
 
@@ -1140,40 +1140,43 @@ syndiff reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
 
 ### Daemon and Discord
 
-**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running`. The Discord bot is started once per workspace: by the supervisor on its startup, or by the CLI when the supervisor was already running. There is no periodic bot health poll. Use `daemon stop` only when you intentionally want the workspace supervisor down (maintenance, host idle, debugging).
+**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running`. The Discord status bot runs **inside the supervisor process** when enabled (token + channel + `notifications.bot.enabled`).
+
+**Cross-host ownership:** `control/daemon.lease` is the authoritative source of truth for which host owns the workspace (renewed ~every 15s; stale after 120s). `daemon.lock` (flock) is best-effort only and never overrides lease decisions. On the supervisor host, liveness also checks that the lease PID is a live non-zombie process (`/proc` state), so a defunct owner is not treated as alive.
+
+**Remote stop:** `syndiff daemon stop` works from **any** machine — it writes `control/daemon.stop` targeting the current lease generation. On the owner host the CLI also sends SIGTERM/SIGKILL; remotely it waits for lease release.
 
 #### `daemon`
 
-**Purpose**: Control the host-level supervisor (one process per `workspace_root`, flock-guarded). Optional for normal workflow — prefer `submit`.
+**Purpose:** Control the host-level supervisor (one process per `workspace_root`, lease-guarded). Optional for normal workflow — prefer `submit`.
 
 ```bash
-# Start (Discord bot uses site config recorded from a prior submit)
+# Start
 syndiff daemon start --deployment config/deployment.yaml
 syndiff daemon start --site config
 
-# Stop supervisor + Discord bot
+# Stop supervisor (any host; owner honors daemon.stop)
 syndiff daemon stop --deployment ...
 
-# JSON status: alive, wedged, pid, heartbeat_age_s, discord_bot
+# JSON status: alive, wedged, pid, host, lease_*, stop_pending, discord_bot
 syndiff daemon status
 ```
 
 | Action | Notes |
 |--------|-------|
-| `start` | Starts supervisor; ensures Discord bot when supervisor was already running, otherwise bot starts with new supervisor |
-| `stop` | Stops supervisor and all Discord bots for this workspace |
-| `status` | JSON: supervisor liveness + Discord bot state |
+| `start` | Starts supervisor on this host when no fresh foreign lease exists; Discord bot starts in-process when enabled |
+| `stop` | Writes `daemon.stop`, waits for lease release (local SIGTERM/SIGKILL escalation when on owner host) |
+| `status` | JSON: supervisor liveness + lease fields + expected in-process bot state |
 
-Daemon and bot files on disk (under `control/`):
+Daemon files on disk (under `control/`):
 
 ```text
-{workspace_root}/control/daemon.pid
+{workspace_root}/control/daemon.lease      # cross-host ownership (authoritative)
+{workspace_root}/control/daemon.stop       # cross-host stop request
+{workspace_root}/control/daemon.pid        # legacy / supplemental identity
 {workspace_root}/control/daemon.log
-{workspace_root}/control/daemon.lock
+{workspace_root}/control/daemon.lock       # best-effort flock (not authoritative)
 {workspace_root}/control/pipeline_state.sqlite
-{workspace_root}/control/discord_bot.pid
-{workspace_root}/control/discord_bot.lock
-{workspace_root}/control/discord_bot.log
 {workspace_root}/control/discord_bot_config.path
 {workspace_root}/control/workspace_deployment.path
 ```
@@ -1191,17 +1194,6 @@ syndiff notify test --run-dir ... -v   # print message after sending
 ```
 
 Requires `discord_webhook_url` in `deployment.yaml` and `notifications.enabled: true`.
-
-#### `discord bot`
-
-**Purpose**: Run the on-demand status-reply bot in the **foreground** (normally started detached by `daemon start` or `submit`).
-
-```bash
-syndiff discord bot --deployment config/deployment.yaml
-syndiff discord bot --site config
-```
-
-Requires `discord_bot_token`, `discord_channel_id` (or `notifications.bot.channel_id`), and `discord.py` installed.
 
 ---
 
@@ -1259,7 +1251,7 @@ syndiff daemon status
 1. Creates `{runs_root}/{run_id}/` layout and `run_meta.json`.
 2. Copies source config and targets into the run directory as frozen `config.yaml` and `targets.csv`.
 3. Inserts run + full 7-stage DAG per target in SQLite (`pending` for selected stages, `external` for others).
-4. Ensures the host-level **supervisor daemon** is running (flock-guarded single owner).
+4. Ensures the host-level **supervisor daemon** is running (lease-guarded single owner).
 5. Symlinks `{runs_root}/latest` → `run_id`.
 
 ### Supervisor daemon loop
@@ -1322,7 +1314,9 @@ Host-level supervisor files live under `{workspace_root}/control/` (see [storage
 ```text
 {workspace_root}/control/
   pipeline_state.sqlite
-  daemon.lock
+  daemon.lease                 # cross-host ownership (authoritative)
+  daemon.stop                  # cross-host stop request
+  daemon.lock                  # best-effort flock
   daemon.pid
   daemon.log
 ```
