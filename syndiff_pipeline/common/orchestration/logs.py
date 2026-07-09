@@ -63,6 +63,11 @@ def run_config_path(run_directory: str | Path) -> Path:
     return Path(run_directory).expanduser().resolve() / "config.yaml"
 
 
+def run_star_targets_path(run_directory: str | Path) -> Path:
+    """Frozen star-target registry CSV (``star_targets.csv``) for ``syndiff star`` runs."""
+    return Path(run_directory).expanduser().resolve() / "star_targets.csv"
+
+
 def run_targets_path(run_directory: str | Path) -> Path:
     """Run targets path.
     

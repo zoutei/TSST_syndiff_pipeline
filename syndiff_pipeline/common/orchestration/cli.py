@@ -362,6 +362,40 @@ def _resolve_run_from_args(args: argparse.Namespace) -> RunContext:
     return resolve_run_context(run_id=run_id, runs_root=str(runs_root(handoff)))
 
 
+def _resolve_run_control_from_args(args: argparse.Namespace):
+    """Resolve run control context from args.
+    
+    Parameters
+    ----------
+    args : argparse.Namespace
+    
+    Returns
+    -------
+    RunControlContext"""
+    from syndiff_pipeline.common.orchestration.run_context import resolve_run_control_context
+
+    if getattr(args, "run_dir", None):
+        return resolve_run_control_context(
+            run_dir=args.run_dir,
+            run_id=getattr(args, "run_id", None),
+        )
+
+    run_id = getattr(args, "run_id", None)
+    if not run_id:
+        raise SystemExit("Specify --run-dir, or --run-id with --deployment.")
+
+    deployment = getattr(args, "deployment", None)
+    if deployment:
+        handoff = load_workspace_root_from_deployment(deployment)
+        return resolve_run_control_context(
+            run_id=run_id,
+            runs_root=str(runs_root(handoff)),
+        )
+
+    handoff = _resolve_handoff_from_args(args)
+    return resolve_run_control_context(run_id=run_id, runs_root=str(runs_root(handoff)))
+
+
 def _resolve_run_ids_for_monitoring(
     state: PipelineState,
     handoff: str,
@@ -1249,7 +1283,7 @@ def cmd_kill(args: argparse.Namespace) -> int:
     Returns
     -------
     int"""
-    ctx = _resolve_run_from_args(args)
+    ctx = _resolve_run_control_from_args(args)
     warn_if_daemon_host_mismatch(ctx.cfg.workspace_root)
     state = PipelineState(ctx.cfg.state_db_path)
     state.insert_command("cancel", run_id=ctx.run_id)
