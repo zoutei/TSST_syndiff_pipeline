@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List
 
-from syndiff_pipeline.common.orchestration import condor, daemon, launcher, lease, logs
+from syndiff_pipeline.common.orchestration import condor, daemon, launcher, lease, logs, stage_liveness
 from syndiff_pipeline.common.orchestration.deployment import load_workspace_root_from_deployment
 from syndiff_pipeline.common.orchestration.workspace import record_deployment_path
 import syndiff_pipeline.common.orchestration.state as pstate
@@ -116,6 +116,19 @@ def _age_seconds(iso_ts: str | None) -> float:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - ts).total_seconds()
+
+
+def _iso_to_epoch(iso_ts: str | None) -> float | None:
+    """Parse ISO-8601 timestamp to UTC epoch seconds."""
+    if not iso_ts:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(iso_ts).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts.timestamp()
 
 
 def _handle_signal(signum, frame):
@@ -558,10 +571,33 @@ def reconcile_running_stages(
         status_doc = _read_status_file(runs_root, run_id, job.target_label, job.stage)
 
         if executor == "condor":
+            artifacts = condor.condor_artifact_paths(
+                runs_root, run_id, job.target_label, job.stage
+            )
+            log_path = str(
+                logs.target_log_path(runs_root, run_id, job.target_label, job.stage)
+            )
             if native_id is None:
-                # Claimed but the cluster id was never recorded (daemon died
-                # between claim and submit). Requeue once past the grace window.
-                if _age_seconds(job.claimed_at) >= _LOCAL_START_GRACE_S:
+                adopted_id = condor.read_recorded_cluster_id(
+                    runs_root, run_id, job.target_label, job.stage
+                )
+                if adopted_id is not None:
+                    submit_epoch = job.submit_epoch
+                    if submit_epoch is None:
+                        submit_epoch = _iso_to_epoch(job.started_at)
+                    state.set_launch_descriptor(
+                        run_id,
+                        job.target_label,
+                        job.stage,
+                        executor="condor",
+                        native_id=int(adopted_id),
+                        submit_epoch=submit_epoch,
+                        log_path=log_path,
+                    )
+                    native_id = int(adopted_id)
+                    counts["adopted"] += 1
+                    cluster_status.update(condor.query_clusters([native_id]))
+                elif _age_seconds(job.claimed_at) >= _LOCAL_START_GRACE_S:
                     died_reason = "Condor stage claimed but never submitted; requeued"
                     if _requeue_or_fail_stage(
                         state,
@@ -577,13 +613,16 @@ def reconcile_running_stages(
                         counts["failed"] += 1
                 else:
                     counts["still_running"] += 1
-                continue
+                if native_id is None:
+                    continue
             # Wall-clock submit epoch (DB-persisted) drives the poll grace.
-            submit_epoch = job.submit_epoch if job.submit_epoch is not None else 0.0
+            submit_epoch = job.submit_epoch
+            if submit_epoch is None:
+                submit_epoch = _iso_to_epoch(job.started_at) or 0.0
             status, raw_exit = cluster_status.get(int(native_id), (None, None))
-            hold_path = condor.condor_artifact_paths(
-                runs_root, run_id, job.target_label, job.stage
-            )["hold"]
+            hold_path = artifacts["hold"]
+            if status is not None:
+                stage_liveness.clear_poll_misses(artifacts["poll_misses"])
             exit_code = condor.poll_cluster_status(
                 int(native_id),
                 status,
@@ -593,11 +632,82 @@ def reconcile_running_stages(
                 hold_path=hold_path,
             )
             if exit_code is None:
+                if status in (condor._JOB_IDLE, condor._JOB_RUNNING):
+                    eviction_host = condor.eviction_requeue_host(
+                        artifacts["log"],
+                        cluster_id=int(native_id),
+                        eviction_state_path=artifacts["eviction_state"],
+                    )
+                    if (
+                        eviction_host
+                        and not stage_liveness.stage_output_recently_active(
+                            log_path, job.stage
+                        )
+                    ):
+                        tallies = condor.tally_execution_eviction_failures(
+                            artifacts["log"].read_text(encoding="utf-8", errors="replace"),
+                            cluster_id=int(native_id),
+                        )
+                        failure_count = int(tallies.get(eviction_host, 0))
+                        condor.add_bad_machine(artifacts["bad_machines"], eviction_host)
+                        condor.record_eviction_requeue(
+                            artifacts["eviction_state"],
+                            cluster_id=int(native_id),
+                            host=eviction_host,
+                            failure_count=failure_count,
+                        )
+                        reason = (
+                            f"Condor immediate-evict loop on {eviction_host} "
+                            f"({failure_count} failures); excluded host and requeued"
+                        )
+                        log.warning(
+                            "Condor cluster %s evict loop on %s for %s / %s; requeueing",
+                            native_id,
+                            eviction_host,
+                            job.target_label,
+                            job.stage,
+                        )
+                        condor.remove_cluster(int(native_id), hold_path=hold_path)
+                        if _requeue_or_fail_stage(
+                            state,
+                            run_id,
+                            job,
+                            runs_root=runs_root,
+                            reason=reason,
+                            max_attempts=cfg.max_stage_attempts,
+                            requeue_backoff_s=cfg.requeue_backoff_s,
+                        ):
+                            counts["requeued"] += 1
+                        else:
+                            counts["failed"] += 1
+                        continue
                 counts["still_running"] += 1
                 continue
-            log_path = str(
-                logs.target_log_path(runs_root, run_id, job.target_label, job.stage)
-            )
+            if exit_code == 1 and status is None:
+                if stage_liveness.stage_output_recently_active(log_path, job.stage):
+                    stage_liveness.clear_poll_misses(artifacts["poll_misses"])
+                    log.info(
+                        "Condor cluster %s not visible but %s / %s output is active; "
+                        "keeping stage running",
+                        native_id,
+                        job.target_label,
+                        job.stage,
+                    )
+                    counts["still_running"] += 1
+                    continue
+                misses = stage_liveness.record_poll_miss(artifacts["poll_misses"])
+                if misses < stage_liveness.CONDOR_POLL_MISS_FAIL_THRESHOLD:
+                    log.warning(
+                        "Condor cluster %s not visible (miss %d/%d); deferring failure "
+                        "for %s / %s",
+                        native_id,
+                        misses,
+                        stage_liveness.CONDOR_POLL_MISS_FAIL_THRESHOLD,
+                        job.target_label,
+                        job.stage,
+                    )
+                    counts["still_running"] += 1
+                    continue
             _finalize_stage(
                 state,
                 run_id,
