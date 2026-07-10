@@ -13,6 +13,12 @@ data_root: /astro/armin/koji/syndiff/data
 gaia_username: ""
 gaia_password: ""
 
+# Astrometry sub-stage (diff pipeline): survey light curves and TNS
+# TNS_API_KEY: optional; improves TNS name resolution
+# ATLAS_CREDENTIALS_FILE: path to ATLAS forced-photometry credentials (default dev/atlas_config)
+# IRSA_CREDENTIALS_FILE: path to IRSA/ZTF credentials (default dev/irsa_config)
+# Optional per-stage overrides in diff_config.yaml: atlas_credentials_file, irsa_credentials_file
+
 # Discord notifications
 discord_webhook_url: ""
 discord_bot_token: ""

@@ -26,6 +26,8 @@ additional_forced_targets:
     dy: 0
 
 pipeline:
+  # Multi-survey astrometry refines target_ra/dec before differencing (writes ws*/astrometry_result.json).
+  - kind: astrometry
   # Template wcs_grouping + downsample must run first; diff loads handoff from
   # cluster_template_job.json, syndiff_ffi_frames.csv, and events/{target}/ws/templates
   - kind: shared_mask

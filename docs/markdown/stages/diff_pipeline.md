@@ -5,11 +5,11 @@
 
 The orchestrator sees a single stage `diff` (`orchestration/stages.py`, `deps=("downsample",)`, Condor pool `diff`). Internally it runs an **ordered YAML pipeline of sub-stages** (`orchestration/execute.py: run_config_pipeline()`), validated against `STAGE_KINDS` in `orchestration/validate.py`:
 
-`shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `centroids`, `sat_template`, `subtract`, `background`, `forced_photometry`
+`astrometry`, `shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `centroids`, `sat_template`, `subtract`, `background`, `forced_photometry`
 
 Preamble entries (no `kind`, must precede the first stage): `external_workspaces`, `workspace_inherit`.
 
-Required handoff from the template pipeline (all under `events/{label}/`): `cluster_template_job.json`, `syndiff_ffi_frames.csv`, and the `ws/templates` symlink to the downsampled `syndiff_template_*.fits.gz` files.
+Required handoff from the template pipeline (all under `events/{label}/`): `cluster_template_job.json`, `syndiff_ffi_frames.csv`, and the `ws/templates` symlink to the downsampled `syndiff_template_*.fits.gz` files. **Exception:** an astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff, DS9 regions at startup, and the master FITS mirror.
 
 ---
 
@@ -19,10 +19,42 @@ Required handoff from the template pipeline (all under `events/{label}/`): `clus
 - Per-sub-stage dirs: `ws/{label}/` where `label` comes from the stage's `output:` key (e.g. `hp_d`, `hp_c`, `hp_b`, `ep`, `lc_prf_on_diffs`).
 - Per-FFI FITS: `{tess_product_id}_{label}.fits.gz` (e.g. `tess2020019142923_hp_d.fits.gz`); see `support/ffi_naming.py`.
 - Root artifacts in `ws/`: `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `diff_config.yaml` (frozen copy), `tile_centers.json`.
+- Astrometry artifacts in the active workspace root (`ws/` or `ws_{workspace_run_id}/`): `astrometry_result.json`, optional `debug_plots/astrometry_mix.png` when `pipeline_plots: true`.
 - Meta workspace paired with a diffs label (`hp_d` → `hp_m`): `kernel_reconstruction.npz`, `phot_calib.csv`, `hotpants.progress.json`.
 - Optional flat mirror of all workspace FITS: `ws/master/` (symlinks, `master_fits_mirror: true`).
 
 ## 2. Sub-stages
+
+### `astrometry` (`stages/astrometry.py`)
+
+First sub-stage in the default `config/diff_config.yaml`. Resolves the transient position from ATLAS, ZTF (IRSA), Gaia alert, and TNS data using the notebook default algorithm (`survey_ivw` inverse-variance mix). Writes refined `ra_deg` / `dec_deg` to `astrometry_result.json` under the active workspace and updates `cfg.target_ra` / `cfg.target_dec` for downstream forced photometry and DS9 regions.
+
+Targets CSV may omit `target_ra` / `target_dec` (event-name-only rows); astrometry uses TNS/Fink as the search seed. When coordinates are present they are used as the seed but still overwritten by the refined mix.
+
+Optional YAML params: `sigma_mag_limit` (default 0.15), `clip_n_sigma` (default 3.0), `atlas_credentials_file`, `irsa_credentials_file`. Credentials may also come from env (`TNS_API_KEY`, `ATLAS_CREDENTIALS_FILE`, `IRSA_CREDENTIALS_FILE`).
+
+**Smoke test (astrometry only, no template handoff):**
+
+```bash
+mamba activate syndiff
+syndiff diff run \
+  --config config/diff_config_astrometry_only.yaml \
+  --deployment config/deployment.yaml \
+  --targets config/targets_example.csv \
+  --target-name s0100_c1_k2_2026gvk \
+  --workspace-run-id astrometry_smoke
+```
+
+**Full diff integration (astrometry + shared_mask + hotpants + forced_photometry):**
+
+```bash
+syndiff diff run --site config/ \
+  --targets config/targets_example.csv \
+  --target-name s0020_c3_k3_2020ut \
+  --workspace-run-id astrometry_integration_test
+```
+
+Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 
 ### `shared_mask` (`stages/masking.py`)
 
@@ -105,7 +137,8 @@ Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_na
 
 | Config | Order |
 |--------|-------|
-| `config/diff_config.yaml` (default) | `shared_mask` → `hotpants` → `forced_photometry` |
+| `config/diff_config.yaml` (default) | `astrometry` → `shared_mask` → `hotpants` → `forced_photometry` |
+| `config/diff_config_astrometry_only.yaml` | `astrometry` (smoke test; no template handoff) |
 | `config/diff_config_single_kernel.yaml` | `shared_mask` → `kernel_fit` → `convolved_templates` → `kernel_subtract` → `background` → `subtract` → `forced_photometry` |
 | `config/diff_config_multi_kernel.yaml` | same prefix → `background` → `hotpants` (round 2, `hp_bgo=0`) → `forced_photometry` |
 | `config/diff_config_multi_kernel_resume.yaml` | `workspace_inherit` → `background` → `hotpants` → `forced_photometry` |
