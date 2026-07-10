@@ -163,7 +163,12 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
     )
     if getattr(args, "workspace_run_id", None):
         cfg.workspace_run_id = str(args.workspace_run_id).strip()
-    run_pipeline(cfg, validate_only=bool(args.validate_only))
+        cfg.pipeline_plots = True
+    run_pipeline(
+        cfg,
+        validate_only=bool(args.validate_only),
+        force_rerun=bool(getattr(args, "force_rerun", False)),
+    )
     return 0
 
 

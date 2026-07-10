@@ -88,6 +88,17 @@ SHARED_MASK_ALLOWED = frozenset(
     }
 )
 
+ASTROMETRY_ALLOWED = frozenset(
+    {
+        "kind",
+        "sigma_mag_limit",
+        "clip_n_sigma",
+        "irsa_credentials_file",
+        "atlas_credentials_file",
+        "atlas_api_config_file",
+    }
+)
+
 HOTPANTS_ALLOWED = frozenset(
     {
         "kind",
@@ -269,6 +280,16 @@ KERNEL_SUBTRACT_ALLOWED = frozenset(
         "kernel_subtract_n_jobs",
     }
 )
+
+
+@dataclass
+class AstrometryParams:
+    """AstrometryParams."""
+    sigma_mag_limit: float = 0.15
+    clip_n_sigma: float = 3.0
+    irsa_credentials_file: Optional[str] = None
+    atlas_credentials_file: Optional[str] = None
+    atlas_api_config_file: Optional[str] = None
 
 
 @dataclass
@@ -548,6 +569,12 @@ def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
     kw = {n: step_dict[n] for n in names if n in step_dict}
     base = cls()
     return cls(**{**base.__dict__, **kw})  # type: ignore[arg-type]
+
+
+def parse_astrometry(stage: dict, pipeline_idx: int) -> AstrometryParams:
+    """Parse astrometry stage YAML."""
+    validate_stage_keys(stage, pipeline_idx, "astrometry", ASTROMETRY_ALLOWED)
+    return _merge_dataclass(AstrometryParams, stage)
 
 
 def parse_shared_mask(stage: dict, pipeline_idx: int) -> SharedMaskParams:
@@ -876,6 +903,7 @@ def upcoming_phot_cutout_size(pipeline: list, pipeline_idx: int) -> int:
 def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
     """Strict key allow-list for *kind* (no merge). Used from validate_pipeline."""
     parsers = {
+        "astrometry": lambda: parse_astrometry(stage, pipeline_idx),
         "shared_mask": lambda: parse_shared_mask(stage, pipeline_idx),
         "hotpants": lambda: parse_hotpants(stage, pipeline_idx),
         "epsf": lambda: parse_epsf(stage, pipeline_idx),

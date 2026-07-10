@@ -8,10 +8,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Sequence
 
+import math
+
 _TESS_COVERAGE_RE = re.compile(r"S(\d+)C(\d+)D(\d+)", re.IGNORECASE)
 
 NORMALIZED_HEADER = frozenset(
     {"sector", "camera", "ccd", "target_ra", "target_dec", "target_name", "enabled"}
+)
+NORMALIZED_HEADER_MIN = frozenset(
+    {"sector", "camera", "ccd", "target_name", "enabled"}
 )
 EVENT_HEADER = frozenset({"id", "ra", "dec", "tess_coverage"})
 
@@ -43,6 +48,13 @@ class Target:
         str"""
         safe = re.sub(r"[^\w.-]+", "_", self.target_name.strip())
         return f"s{self.sector:04d}_c{self.camera}_k{self.ccd}_{safe}"
+
+    def coords_missing(self) -> bool:
+        """True when seed RA/Dec were not provided in the targets CSV."""
+        return not (
+            math.isfinite(self.target_ra)
+            and math.isfinite(self.target_dec)
+        )
 
 
 def parse_tess_coverage(value: str) -> List[tuple[int, int, int]]:
@@ -94,6 +106,12 @@ def _target_name_from_event_id(event_id: str) -> str:
     return name or "unknown"
 
 
+def _parse_optional_coord(value: str | None) -> float:
+    if value is None or str(value).strip() == "":
+        return float("nan")
+    return float(value)
+
+
 def _load_normalized_rows(rows: Sequence[dict]) -> List[Target]:
     """Load normalized rows.
     
@@ -113,8 +131,8 @@ def _load_normalized_rows(rows: Sequence[dict]) -> List[Target]:
                 sector=int(row["sector"]),
                 camera=int(row["camera"]),
                 ccd=int(row["ccd"]),
-                target_ra=float(row["target_ra"]),
-                target_dec=float(row["target_dec"]),
+                target_ra=_parse_optional_coord(row.get("target_ra")),
+                target_dec=_parse_optional_coord(row.get("target_dec")),
                 target_name=str(row["target_name"]).strip(),
                 enabled=True,
             )
@@ -180,13 +198,13 @@ def load_targets(path: str | Path) -> List[Target]:
     rows, fields = _read_csv_rows(p)
     if EVENT_HEADER.issubset(fields) and "sector" not in fields:
         return _load_event_rows(rows)
-    if NORMALIZED_HEADER.issubset(fields):
+    if NORMALIZED_HEADER.issubset(fields) or NORMALIZED_HEADER_MIN.issubset(fields):
         return _load_normalized_rows(rows)
-    missing_norm = sorted(NORMALIZED_HEADER - fields)
+    missing_min = sorted(NORMALIZED_HEADER_MIN - fields)
     missing_evt = sorted(EVENT_HEADER - fields)
     raise ValueError(
         f"Unrecognized CSV header in {p}. "
-        f"Need normalized columns (missing {missing_norm}) or event catalog (missing {missing_evt})."
+        f"Need normalized columns (missing {missing_min}) or event catalog (missing {missing_evt})."
     )
 
 
