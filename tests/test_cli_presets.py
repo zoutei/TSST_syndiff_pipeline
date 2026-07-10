@@ -15,7 +15,6 @@ import yaml
 
 from syndiff_pipeline.common.orchestration import cli as orch_cli
 from syndiff_pipeline.common.orchestration.cli import DIFF_STAGE, preset_stages
-from syndiff_pipeline.pipeline_spec import STAGE_NAMES
 from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
 from syndiff_pipeline.cli import build_execution_parser, main, parse_execution_argv
 from syndiff_pipeline.cli import preset_stages as entry_preset_stages
@@ -27,8 +26,9 @@ class TestPresetStageLists(unittest.TestCase):
         self.assertEqual(preset_stages("template"), expected)
 
     def test_all_preset_matches_full_dag(self):
-        self.assertEqual(preset_stages("all"), list(STAGE_NAMES))
-        self.assertIn(DIFF_STAGE, preset_stages("all"))
+        expected = [spec.name for spec in TEMPLATE_STAGES] + [DIFF_STAGE]
+        self.assertEqual(preset_stages("all"), expected)
+        self.assertNotIn("star", preset_stages("all"))
 
     def test_diff_preset_is_diff_only(self):
         self.assertEqual(preset_stages("diff"), [DIFF_STAGE])

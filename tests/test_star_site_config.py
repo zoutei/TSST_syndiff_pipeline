@@ -16,6 +16,8 @@ from syndiff_pipeline.star.site_config import (
     load_star_site_policy,
     load_star_targets,
     normalize_ps1_source,
+    normalize_photometry_methods,
+    required_epsf_workspaces,
     resolve_star_run_config,
 )
 
@@ -67,6 +69,67 @@ overrides:
             self.assertEqual(run_cfg.baseline.phot_bkg, "row_ks")
             self.assertEqual(run_cfg.ps1_source, "zarr_download")
             self.assertEqual(run_cfg.stars_file, str(hosts.resolve()))
+
+    def test_gepsf_requires_inputs_epsf(self):
+        with self.assertRaisesRegex(ValueError, "inputs.epsf"):
+            normalize_photometry_methods(
+                [
+                    {
+                        "name": "gepsf",
+                        "type": "psf",
+                        "psf_type": "epsf",
+                    }
+                ]
+            )
+
+    def test_epsf_output_must_match_photometry_inputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            site = Path(tmpdir)
+            policy_path = site / "star_config.yaml"
+            policy_path.write_text(
+                """
+epsf:
+  enabled: true
+  output: epsf_r2
+photometry:
+  methods:
+    - name: gepsf
+      type: psf
+      psf_type: epsf
+      inputs:
+        epsf: epsf_r1
+""".strip(),
+                encoding="utf-8",
+            )
+            hosts = site / "hosts.csv"
+            hosts.write_text("tic_id,gaia_source_id,label\n1,,\n", encoding="utf-8")
+            targets_path = site / "star_targets.csv"
+            targets_path.write_text(
+                "sector,camera,ccd,target_name,stars_file,baseline_workspace_run_id,"
+                "baseline_diffs,baseline_convolved,phot_bkg,enabled\n"
+                f"20,3,2,s20_astrometry,{hosts},,,,,true\n",
+                encoding="utf-8",
+            )
+            policy = load_star_site_policy(policy_path)
+            rows = load_star_targets(targets_path, site_dir=site)
+            row = find_star_target_row(rows, "20/3/2")
+            with self.assertRaisesRegex(ValueError, "inputs.epsf='epsf_r1'"):
+                resolve_star_run_config(policy, row, site_dir=site)
+
+    def test_explicit_epsf_wiring_normalized(self):
+        methods = normalize_photometry_methods(
+            [
+                {
+                    "name": "gepsf",
+                    "type": "psf",
+                    "psf_type": "epsf",
+                    "inputs": {"epsf": "epsf_r1"},
+                }
+            ]
+        )
+        self.assertEqual(required_epsf_workspaces(methods), ["epsf_r1"])
+        self.assertEqual(methods[0]["epsf_workspace"], "epsf_r1")
+        self.assertEqual(methods[0]["inputs"]["epsf"], "epsf_r1")
 
 
 if __name__ == "__main__":

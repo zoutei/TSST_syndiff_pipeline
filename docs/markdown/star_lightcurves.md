@@ -50,19 +50,25 @@ Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline wor
 Older workspaces may have `hp_d` without `hp_d_kernels/`. Run a one-time Hotpants backfill:
 
 ```bash
-syndiff diff run --site config \
+syndiff diff run \
   --config config/diff_config_star_full_backfill.yaml \
+  --deployment config/deployment.yaml \
   --targets config/targets_example.csv \
   --target-name 20/3/2
 ```
 
-Then set `baseline.workspace_run_id: star_full_lc` (or your `workspace_run_id`) in `star_config` / `star_targets`. See [star_pipeline.md](stages/star_pipeline.md) and [`config/diff_config_star_full_backfill.yaml`](../config/diff_config_star_full_backfill.yaml).
+`--config` is the diff policy only when `--site` is omitted; with `--site`,
+foreground diff always reads `<site>/diff_config.yaml`. Then set
+`baseline.workspace_run_id: star_full_lc` (or your `workspace_run_id`) in
+`star_config` / `star_targets`. See [star_pipeline.md](stages/star_pipeline.md)
+and [`config/diff_config_star_full_backfill.yaml`](../../config/diff_config_star_full_backfill.yaml).
 
 ## Config files
 
 | File | Purpose |
 |------|---------|
 | `config/star_config.yaml` | Defaults, baseline labels, photometry methods, SCC overrides |
+| `config/star_config_epsf_gepsf.yaml` | Example/verification policy for baseline gridded-ePSF fitting and gepsf stamp photometry |
 | `config/star_targets_example.csv` | Example SCC registry + per-row baseline overrides |
 | `config/star_targets_full.csv` | Production SCC registry |
 | `config/star_hosts/*.csv` | Host lists (`tic_id` / `gaia_source_id`) |
@@ -84,12 +90,27 @@ Controls how star loads PS1 skycells for mini-template isolation:
 | Mode | When to use |
 |------|-------------|
 | `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells.zarr` |
-| `zarr_local_only` | Batch runs after `ps1_download` populated the store |
+| `zarr_local_only` | Batch runs with a pre-populated star cache, or with `ps1_zarr_path` pointed at the `ps1_download` store |
 | `stream` | Always fetch from MAST (no zarr write); matches sector-20 stream template runs |
+
+The default star cache is `{data_root}/ps1_skycells.zarr`, while template
+`ps1_download` writes
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. To make
+`zarr_local_only` reuse the template cache, set top-level `ps1_zarr_path` in
+`star_config.yaml` to the latter path.
 
 ## Photometry
 
-Methods come from `star_config.yaml` `photometry.methods` (default: `ap3` + `prf`). PRF uses TESS_PRF at the host's full-FFI pixel position (requires `PRF` package).
+Methods come from `star_config.yaml` `photometry.methods` (default: `ap3` +
+`prf`). PRF uses TESS_PRF at the host's full-FFI pixel position (requires the
+`PRF` package).
+
+For spatially varying empirical-PSF photometry, add a method with `type: psf`,
+`psf_type: epsf`, and required `inputs.epsf: <label>`. If the baseline
+workspace does not already contain that catalog, add an enabled `epsf` block
+whose `output` matches the label; `epsf.inputs.diffs` optionally chooses the
+source baseline diffs. Star then fits the matching per-frame model on each
+diff stamp. See `config/star_config_epsf_gepsf.yaml`.
 
 CLI flags on `syndiff star run` override merged config: `--stars-file`, `--baseline-workspace-run-id`, `--baseline-diffs-label`, `--baseline-convolved-label`, `--baseline-phot-bkg-label`, `--cutout-size`, `--stamp-size`, `--ps1-source`, `--overwrite`, `--debug-plots`.
 

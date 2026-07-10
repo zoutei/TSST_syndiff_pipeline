@@ -43,7 +43,6 @@ Only three top-level subtrees belong here long-term:
     {target_label}/                # e.g. s0023_c1_k3_2020ftl
       cluster_template_job.json    # wcs_grouping handoff
       syndiff_ffi_frames.csv       # frame manifest
-      wcs_drift_template_debug.png
       ps1_removed_stars.csv        # crop-local Gaia (downsample)
       ws/                          # canonical diff workspace tree (no workspace_run_id)
       ws_{workspace_run_id}/       # namespaced tree when diff_config sets workspace_run_id
@@ -51,6 +50,7 @@ Only three top-level subtrees belong here long-term:
         templates/                 # symlink → {data_root}/shifted_downsampled/... (after downsample)
         master/                    # flat FITS mirror + tess_ffi link (diff stage)
         debug_plots/               # PNG diagnostics when pipeline_plots: true
+          wcs_drift_template_debug.png
         shared_mask.fits.gz        # ws-root artifacts (see diff workspace table below)
         hotpants_substamp_stars.csv
         gaia_catalog_pipeline.csv
@@ -73,7 +73,6 @@ Only three top-level subtrees belong here long-term:
         {centroids_label}/         # e.g. centroids_r1
           {ffi_stem}_photresults.ecsv
           centroids_index.json
-          centroids.progress.json
           centroids.progress.json
         {lc_label}/                # forced_photometry output; e.g. lc_gepsf_on_hp_diffs
           lightcurve_{method}.csv  # e.g. lightcurve_gepsf.csv
@@ -109,7 +108,6 @@ Filesystem name comes from `workspace_tree_name()` in `difference_imaging/suppor
 | `{epsf_label}/group_epsf/group_epsf_{gid}.npz` | Optional median gridded cube per WCS group |
 | `{centroids_label}/*_photresults.ecsv` | Per-frame Gaia PSF photometry on diffs |
 | `{centroids_label}/centroids_index.json` | `ffi_stem` → photresults path index |
-| `{centroids_label}/centroids.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.centroids.progress.json` beside `diff.log`) |
 | `{centroids_label}/centroids.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.centroids.progress.json` beside `diff.log`) |
 | `{lc_label}/lightcurve_{method}.csv` | Forced photometry (e.g. `lc_gepsf_on_hp_diffs/lightcurve_gepsf.csv`) |
 | `{lc_label}/lightcurve_{method}_{extra}.csv` | Additional forced targets (`additional_forced_targets`) |
@@ -174,6 +172,9 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
     sector_{SSSS}/camera_{C}/ccd_{K}/
       tess_s{SSSS}_{C}_{K}_master_skycells_list.csv
       ...
+  catalogs/                        # mapping-stage Gaia DR3 catalogs
+    sector_{SSSS}/camera_{C}/ccd_{K}/
+      gaia_catalog_s{SSSS}_{C}_{K}.csv
   ps1_skycells_zarr/
     ps1_skycells.zarr                # ps1_download (shared store; lock file alongside)
     ps1_skycells.zarr.lock
@@ -191,9 +192,15 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
 |---------|-------|
 | `tess_ffi/` | `tess_ffi_download` |
 | `skycell_pixel_mapping/` | `mapping` |
+| `catalogs/` | `mapping` (Gaia DR3) |
 | `ps1_skycells_zarr/` | `ps1_download` |
 | `convolved_results/` | `ps1_process` |
 | `shifted_downsampled/` | `downsample` |
+
+The two PS1 Zarr paths have the same internal schema but are separate defaults.
+`ps1_download` owns `ps1_skycells_zarr/ps1_skycells.zarr`; `syndiff star`
+owns `ps1_skycells.zarr`. Set `ps1_zarr_path` in `star_config.yaml` to the
+former when star should reuse the template-stage cache.
 
 After `downsample`, the orchestrator creates `events/{label}/ws/templates` (or `ws_{workspace_run_id}/templates`) as a symlink to the physical template directory under `{data_root}/shifted_downsampled/…` (the sector/camera/CCD/crop subtree containing `syndiff_template_*.fits.gz`). Diff imaging resolves templates via this symlink (or an explicit `paths.template_dir` override in `diff_config.yaml`) and writes science products under the active workspace tree (see **Diff workspace trees** above).
 

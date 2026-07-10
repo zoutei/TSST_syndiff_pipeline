@@ -13,26 +13,32 @@ tess_ffi_download → … → downsample → diff  (transient/supernova)
                                     star   (host TIC/Gaia stars)
 ```
 
-Star runs are configured separately from transient `targets.csv` via [`star_config.yaml`](../../config/star_config.yaml) and [`star_targets.csv`](../../config/star_targets_example.csv).
+Star runs are configured separately from transient `targets.csv` via [`star_config.yaml`](../../../config/star_config.yaml) and [`star_targets.csv`](../../../config/star_targets_example.csv).
 
 ## Package layout
 
 | Module | Role |
 |--------|------|
-| [`cli.py`](../../syndiff_pipeline/star/cli.py) | `syndiff star submit|run` argument parsing and run setup |
-| [`runner.py`](../../syndiff_pipeline/star/runner.py) | Per-host loop: resolve → mini-templates → stamps → photometry → `batch_manifest.csv` |
-| [`diff_runner.py`](../../syndiff_pipeline/star/diff_runner.py) | Per-frame stamp: `FFI − (conv_temp − S_conv) − phot_bkg` using persisted kernels |
-| [`star_segments.py`](../../syndiff_pipeline/star/star_segments.py) | PS1 skycell lookup, SEP isolation, blend flag, mini-template orchestration |
-| [`mini_downsample.py`](../../syndiff_pipeline/star/mini_downsample.py) | Gaussian convolution of star-only cutout + sparse downsampling to TESS grid |
-| [`windowed_photometry.py`](../../syndiff_pipeline/star/windowed_photometry.py) | Forced aperture / PRF photometry on small diff stamps |
-| [`hosts.py`](../../syndiff_pipeline/star/hosts.py) | Parse `star_hosts/*.csv` (`tic_id` / `gaia_source_id`) |
-| [`context.py`](../../syndiff_pipeline/star/context.py) | Event context, baseline label resolution, prerequisite validation |
-| [`site_config.py`](../../syndiff_pipeline/star/site_config.py) | Load/merge `star_config.yaml` + `star_targets.csv` |
-| [`identifiers.py`](../../syndiff_pipeline/star/identifiers.py) | TIC/Gaia resolution, `identifier.json` |
-| [`ps1_cache.py`](../../syndiff_pipeline/star/ps1_cache.py) | `ps1_source` modes: zarr read, cache-on-miss, MAST stream |
-| [`orchestration/stages.py`](../../syndiff_pipeline/star/orchestration/stages.py) | HTCondor `star` stage spec (pool `star`, 8 CPU / 32 GB) |
+| [`cli.py`](../../../syndiff_pipeline/star/cli.py) | `syndiff star submit|run` argument parsing and run setup |
+| [`runner.py`](../../../syndiff_pipeline/star/runner.py) | Per-host loop: resolve → mini-templates → stamps → photometry → `batch_manifest.csv` |
+| [`diff_runner.py`](../../../syndiff_pipeline/star/diff_runner.py) | Per-frame stamp: `FFI − (conv_temp − S_conv) − phot_bkg` using persisted kernels |
+| [`star_segments.py`](../../../syndiff_pipeline/star/star_segments.py) | PS1 skycell lookup, SEP isolation, blend flag, mini-template orchestration |
+| [`mini_downsample.py`](../../../syndiff_pipeline/star/mini_downsample.py) | Gaussian convolution of star-only cutout + sparse downsampling to TESS grid |
+| [`windowed_photometry.py`](../../../syndiff_pipeline/star/windowed_photometry.py) | Forced aperture / PRF photometry on small diff stamps |
+| [`hosts.py`](../../../syndiff_pipeline/star/hosts.py) | Parse `star_hosts/*.csv` (`tic_id` / `gaia_source_id`) |
+| [`context.py`](../../../syndiff_pipeline/star/context.py) | Event context, baseline label resolution, prerequisite validation |
+| [`site_config.py`](../../../syndiff_pipeline/star/site_config.py) | Load/merge `star_config.yaml` + `star_targets.csv` |
+| [`identifiers.py`](../../../syndiff_pipeline/star/identifiers.py) | TIC/Gaia resolution, `identifier.json` |
+| [`ps1_cache.py`](../../../syndiff_pipeline/star/ps1_cache.py) | `ps1_source` modes: zarr read, cache-on-miss, MAST stream |
+| [`epsf_runner.py`](../../../syndiff_pipeline/star/epsf_runner.py) | Build/reuse gridded ePSFs on baseline diffs for gepsf stamp photometry |
+| [`orchestration/stages.py`](../../../syndiff_pipeline/star/orchestration/stages.py) | HTCondor `star` stage spec (pool `star`; site default 8 CPU / 100 GB) |
 
 ## Per-host workflow
+
+Before the host loop, each `psf_type: epsf` method resolves its required
+baseline catalog from `inputs.epsf`. An enabled `epsf` block can build a
+missing catalog; its `output` must match the referenced label. Without a build
+block, the catalog must already exist.
 
 For each host in the row's `stars_file`:
 
@@ -82,6 +88,7 @@ Kernels are read from `{baseline.diffs}_kernels/` (e.g. `hp_d_kernels/{product_i
 | Photutils background (`ks_b_s` / `ks_b`) | same workspace | `kernel_subtract` + optional `background` |
 | Kernel solutions | `{diffs}_kernels/*_kernel.npz` | `hotpants` with `write_kernel_solutions: true` |
 | `shared_mask.fits.gz` | workspace root | `shared_mask` |
+| `{inputs.epsf}/gridded_epsf_index.json` + per-frame NPZ | baseline workspace; optionally built by matching `epsf.output` | star `epsf_runner` or prior diff `epsf` stage |
 | Mapping CSV + master FITS | `data_root/skycell_pixel_mapping/…` | `mapping` |
 | Gaia catalog CSV | `data_root/catalogs/…` | `mapping` |
 
@@ -89,7 +96,7 @@ Baseline workspace path: `events/{label}/ws/` when `baseline.workspace_run_id: n
 
 ### Kernel backfill
 
-Workspaces that completed Hotpants before `write_kernel_solutions` was enabled have `hp_d` and `hp_c` but no `hp_d_kernels/`. Run a one-time backfill with [`diff_config_star_full_backfill.yaml`](../../config/diff_config_star_full_backfill.yaml):
+Workspaces that completed Hotpants before `write_kernel_solutions` was enabled have `hp_d` and `hp_c` but no `hp_d_kernels/`. Run a one-time backfill with [`diff_config_star_full_backfill.yaml`](../../../config/diff_config_star_full_backfill.yaml):
 
 - `workspace_inherit` from the existing multi-kernel workspace (`ks_b_s`, `shared_mask`, …)
 - Single `hotpants` stage with `write_convolved: true` and `write_kernel_solutions: true`
@@ -107,6 +114,10 @@ Implemented in `ps1_cache.py`; same Zarr layout as `ps1_download`:
 {data_root}/ps1_skycells.zarr/{projection}/{skycell}/{band, band_mask, band_wt}
 ```
 
+The schema is shared, but the default paths are not: template `ps1_download`
+writes `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. To reuse that store,
+set top-level `ps1_zarr_path` in `star_config.yaml` to its full path.
+
 | Mode | Behavior |
 |------|----------|
 | `zarr_local_only` | Read shared store only; fail on miss |
@@ -115,7 +126,12 @@ Implemented in `ps1_cache.py`; same Zarr layout as `ps1_download`:
 
 Optional `ps1_zarr_path` in `star_config.yaml` overrides the default store location. Legacy CLI values: `zarr` → `zarr_download`, `download` → `stream`.
 
-For batch star runs after a normal `ps1_download` stage, prefer `zarr_local_only`. For sector-wide astrometry campaigns that used `ps1_source: stream` in template processing (see [`pipeline_multi_kernel_s20_astrometry.yaml`](../../config/pipeline_multi_kernel_s20_astrometry.yaml)), star can use `stream` or pre-populated zarr.
+For batch star runs after a normal `ps1_download` stage, point `ps1_zarr_path`
+at that stage's store and prefer `zarr_local_only`. Without the override,
+pre-populate the star-specific default store or use `zarr_download`. For
+sector-wide astrometry campaigns that used `ps1_source: stream` in template
+processing (see [`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml)),
+star can use `stream` or a pre-populated Zarr store.
 
 ## Outputs per Gaia host
 
@@ -152,7 +168,11 @@ Orchestrator verify requires every row `status=ok`.
 
 ## Photometry
 
-Methods from `star_config.yaml` `photometry.methods`. Default: `ap3` (aperture) + `prf` (TESS_PRF at host full-FFI position; requires `PRF` package).
+Methods from `star_config.yaml` `photometry.methods`. Default: `ap3`
+(aperture) + `prf` (TESS_PRF at host full-FFI position; requires `PRF`
+package). `psf_type: epsf` performs gepsf fitting on each star stamp using the
+per-frame catalog named by required `inputs.epsf`. Add a matching `epsf` block
+only when star must build that catalog.
 
 **Aperture CSV columns:** `btjd`, `flux`, `flux_wo_sky`, `sky`, `eflux`, `filename`, `group_id`, `xmin`, `ymin`, `host_x`, `host_y`
 
@@ -162,12 +182,13 @@ Methods from `star_config.yaml` `photometry.methods`. Default: `ap3` (aperture) 
 
 | File | Role |
 |------|------|
-| [`star_config.yaml`](../../config/star_config.yaml) | Site star policy |
-| [`star_targets_example.csv`](../../config/star_targets_example.csv) | Example SCC registry |
-| [`diff_config_star_full_backfill.yaml`](../../config/diff_config_star_full_backfill.yaml) | One-time Hotpants kernel + convolved backfill |
-| [`diff_config_multi_kernel.yaml`](../../config/diff_config_multi_kernel.yaml) | Production multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, kernels) |
-| [`pipeline_multi_kernel_s20_astrometry.yaml`](../../config/pipeline_multi_kernel_s20_astrometry.yaml) | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
-| [`pipeline_epsf_gepsf.yaml`](../../config/pipeline_epsf_gepsf.yaml) | 2020ut ePSF/gepsf diff-only orchestrator (transient LC recipe; star uses separate `star_config`) |
+| [`star_config.yaml`](../../../config/star_config.yaml) | Site star policy |
+| [`star_config_epsf_gepsf.yaml`](../../../config/star_config_epsf_gepsf.yaml) | Gridded-ePSF verification policy |
+| [`star_targets_example.csv`](../../../config/star_targets_example.csv) | Example SCC registry |
+| [`diff_config_star_full_backfill.yaml`](../../../config/diff_config_star_full_backfill.yaml) | One-time Hotpants kernel + convolved backfill |
+| [`diff_config_multi_kernel.yaml`](../../../config/diff_config_multi_kernel.yaml) | Production multi-kernel diff (`hp_d`, `ks_b_s`, kernels); committed config does not write `hp_c` |
+| [`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml) | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
+| [`pipeline_epsf_gepsf.yaml`](../../../config/pipeline_epsf_gepsf.yaml) | 2020ut ePSF/gepsf diff-only orchestrator (transient LC recipe; star uses separate `star_config`) |
 
 ## Orchestration
 

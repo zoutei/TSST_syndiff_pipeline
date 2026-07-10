@@ -1,6 +1,10 @@
 # SynDiff unified pipeline (`syndiff`)
 
-This document describes the **orchestrated SynDiff pipeline** behind the `syndiff` CLI. One supervisor daemon and one SQLite state DB schedule a **seven-stage DAG**: six template-building stages (TESS FFIs + PS1 → `syndiff_template_*.fits.gz`) and a `diff` stage (Hotpants, ePSF, background, forced photometry). CLI presets select stage subsets:
+This document describes the **orchestrated SynDiff pipeline** behind the
+`syndiff` CLI. One supervisor daemon and one SQLite state DB know about eight
+registered stages: a seven-stage template+diff DAG, plus the independent
+`star` branch for host-star light curves from an existing event. CLI presets
+select stage subsets:
 
 ```text
 syndiff all submit      # template stages → diff (full end-to-end)
@@ -71,18 +75,27 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid** fo
 6. **Downsample** — combine convolved skycells at multiple sub-pixel offsets → `syndiff_template_*.fits.gz`.
 7. **Diff** — run the config-driven difference-imaging pipeline; outputs under `{workspace_root}/events/{label}/ws/`.
 
+The separately submitted **star** branch verifies those completed artifacts,
+then writes host-star products under `events/{label}/star*/`; it does not
+re-run Hotpants.
+
 The runner is designed for **batch operation across many SCCs**:
 
 - A host-level **supervisor daemon** (single owner per workspace via `control/daemon.lease` on NFS) dequeues work for all active runs subject to resource-pool limits.
 - Progress is tracked in **SQLite (WAL)** and on disk (logs, summaries, per-stage status/manifest files).
 - Stages can be run **subset-by-subset** (e.g. only `ps1_process,downsample`) when upstream artifacts already exist.
-- **`mapping`**, **`ps1_process`**, and **`diff`** can run on a shared **HTCondor** pool; other stages run as local subprocesses on the submit host (`wcs_grouping` is unpooled).
+- **`mapping`**, **`ps1_process`**, **`diff`**, and **`star`** can run on a
+  shared **HTCondor** pool; other stages run as local subprocesses on the
+  submit host (`wcs_grouping` is unpooled).
 
 ---
 
 ## Documentation layers and code lineage
 
-This guide covers **orchestration** — how to configure and run `syndiff` across many targets. The **algorithms** behind each stage are documented separately because they were developed and originally documented in the standalone [`syndiff`](../../syndiff/) research repository before being integrated into `syndiff_pipeline`.
+This guide covers **orchestration** — how to configure and run `syndiff`
+across many targets. The stage **algorithms** are documented separately under
+`docs/markdown/stages/`; those references were vendored from the earlier
+standalone research workflow.
 
 | Layer | Location | What it covers |
 |-------|----------|----------------|
@@ -102,6 +115,7 @@ This guide covers **orchestration** — how to configure and run `syndiff` acros
 | `process_ps1.py` | `template_creation/processing/ps1_process.py` | `ps1_process` |
 | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` | `downsample` |
 | — | `difference_imaging/orchestration/execute.py` | `diff` |
+| — | `star/runner.py` | `star` |
 
 The runner adds capabilities not present in the standalone scripts: **multi-target batching**, **WCS drift grouping** for transients, **artifact verification**, **force-rerun cleanup**, **pause/kill/retry**, and **HTCondor** for `mapping` and `ps1_process`.
 
@@ -138,6 +152,7 @@ flowchart TB
         s5[ps1_process]
         s6[downsample]
         s7[diff]
+        s8[star]
     end
 
     submit --> Daemon
@@ -152,6 +167,7 @@ flowchart TB
     condor --> s3
     condor --> s5
     condor --> s7
+    condor --> s8
     Stages --> sqlite
 ```
 
@@ -166,6 +182,7 @@ flowchart TB
 | `ps1_process` | **condor** | `ps1_process` | Whole-node jobs; configurable |
 | `downsample` | local | `cpu_light` | Reads convolved Zarr + mapping |
 | `diff` | **condor** (or `local` with `--local`) | `diff` | Config-driven Hotpants → photometry; outputs in `events/{label}/ws/` |
+| `star` | **condor** (or `local` with `--local`) | `star` | Separate submission; verifies completed event artifacts and writes `events/{label}/star*/` |
 
 **Stage dependency graph**
 
@@ -433,7 +450,7 @@ Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` using the share
 |------|-------------|
 | `syndiff_ffi_frames.csv` | Per-FFI WCS drift, template group IDs |
 | `cluster_template_job.json` | Reference FFI, crop bounds, offsets for downsample |
-| `wcs_drift_template_debug.png` | WCS drift, template groups, and Earth/Moon angles vs time |
+| `ws/debug_plots/wcs_drift_template_debug.png` | WCS drift, template groups, and Earth/Moon angles vs time |
 
 **Verification**: valid `cluster_template_job.json` with existing `reference_ffi_path`.
 
@@ -1589,7 +1606,8 @@ Template handoff (`cluster_template_job.json`, `syndiff_ffi_frames.csv`, `ws/tem
 
 ## Stage algorithm deep-dives
 
-For maintainers and algorithm reviewers, full step-by-step technical references (originally in `../syndiff/`) are vendored under [`docs/stages/`](stages/README.md):
+For maintainers and algorithm reviewers, full step-by-step technical
+references are vendored under [`docs/markdown/stages/`](stages/README.md):
 
 | Stage | Document | Highlights |
 |-------|----------|------------|
@@ -1639,8 +1657,7 @@ For maintainers and algorithm reviewers, full step-by-step technical references 
 | `config/deployment.yaml.example` | Deployment paths + credentials template |
 | `config/targets_example.csv` | Normalized multi-target CSV |
 | `resources/skycell_wcs.csv` | Bundled PS1 SkyCells WCS table |
-| `docs/stages/` | Algorithm deep-dives (from `../syndiff/` step READMEs) |
-| `../syndiff/run.sh` | Historical per-SCC command log (reference only) |
+| `docs/markdown/stages/` | Vendored algorithm deep-dives |
 
 ---
 

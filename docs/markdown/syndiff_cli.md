@@ -15,7 +15,7 @@ syndiff <verb>            # monitoring, control, verify, daemon
 
 - [Execution presets (nouns)](#execution-presets-nouns)
 - [Monitoring and control verbs](#monitoring-and-control-verbs)
-- [Pipeline stages (7-stage DAG)](#pipeline-stages-7-stage-dag)
+- [Pipeline stages (main DAG + star branch)](#pipeline-stages-main-dag--star-branch)
 - [Internal worker entry points](#internal-worker-entry-points)
 - [Science modules](#science-modules)
 - [Orchestration modules](#orchestration-modules)
@@ -36,7 +36,14 @@ syndiff <verb>            # monitoring, control, verify, daemon
 | **`syndiff star submit`** | `star` | Supervised batch over enabled rows in `star_targets.csv` (Condor or `--local`). |
 | **`syndiff star run`** | — | Foreground single-SCC star run (`--target-name` required; no daemon/DB). See [star_lightcurves.md](star_lightcurves.md). |
 
-Common flags (template/diff/all presets): `--site DIR` (loads `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`; `pipeline.yaml` may set `diff_config: diff_config.yaml`), `--config`, `--deployment`, `--targets`, `--run-id`, `--stages` (override preset), `--force-rerun`, `--local` (on `syndiff diff submit` or `syndiff all submit`: patches the frozen run config so `stages.diff.executor` is `local` instead of Condor).
+Common flags (template/diff/all presets): `--site DIR`, `--config`,
+`--deployment`, `--targets`, `--run-id`, `--stages` (override preset),
+`--force-rerun`, and `--local`. Supervised submit reads `pipeline.yaml` and
+the `diff_config:` it names. Foreground `syndiff diff run --site DIR` always
+reads `<site>/diff_config.yaml`; to choose another diff policy, omit `--site`
+and pass `--config <diff.yaml> --deployment <deployment.yaml>`. On
+`diff submit` or `all submit`, `--local` patches the frozen config so
+`stages.diff.executor` is local.
 
 **`syndiff star` flags** (`--site` required for both verbs):
 
@@ -54,7 +61,10 @@ Common flags (template/diff/all presets): `--site DIR` (loads `pipeline.yaml` + 
 
 `star submit` materializes the run directory (frozen `star_config.yaml` + targets), registers the `star` stage in SQLite, and ensures the supervisor daemon — same pattern as `template submit`.
 
-**`--local` (submit only):** After materializing the run directory, the CLI rewrites frozen `config.yaml` to set `stages.diff.executor: local`. Use this for cluster smoke tests or when Condor is unavailable; template stages still follow their normal executors.
+**`--local` (submit only):** For `diff` / `all`, the CLI rewrites frozen
+`config.yaml` to set `stages.diff.executor: local`; for `star`, it sets
+`stages.star.executor: local`. Other selected stages keep their configured
+executors.
 
 **`syndiff diff submit` verify closure:** Only `tess_ffi_download`, `wcs_grouping`, and `downsample` are artifact-verified on disk (`DIFF_VERIFY_UPSTREAM`). `mapping`, `ps1_download`, and `ps1_process` are marked **n/a** without scanning. See [`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md#diff-only-artifact-verify-closure).
 
@@ -91,7 +101,7 @@ syndiff retry \
 | Command | What it does |
 |---------|--------------|
 | **`syndiff progress`** | Aggregate stage counts; optional per-task detail from stage logs and progress sidecars (`downsample.progress.json`, `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json` beside `diff.log`). For Condor stages, detail lines also show queue state from `condor_q` (`condor idle cN.0`, `condor running cN.0`, `condor held cN.0`, or `condor unsubmitted` before a cluster id is recorded). Use `--no-detail` for summary-only output. |
-| **`syndiff status`** | Per-target stage grid (`tess_dl`, `wcs`, `map`, `ps1_dl`, `ps1_pr`, `down`, `diff`). `--watch` for live refresh. |
+| **`syndiff status`** | Per-target stage grid (`tess_dl`, `wcs`, `map`, `ps1_dl`, `ps1_pr`, `down`, `diff`, `star` as applicable). `--watch` for live refresh. |
 | **`syndiff show`** | Dump `run_meta.json`. |
 | **`syndiff logs`** / **`syndiff tail`** | Daemon log or `per_target/<label>/<stage>.log`. |
 
@@ -130,12 +140,19 @@ There is **no** `syndiff discord bot` CLI. When `notifications.bot.enabled` is t
 
 ---
 
-## Pipeline stages (7-stage DAG)
+## Pipeline stages (main DAG + star branch)
 
 ```text
 tess_ffi_download → wcs_grouping → mapping → ps1_download → ps1_process → downsample → diff
                                       └──────────────── downsample also needs wcs_grouping
+
+completed template + diff artifacts ──verify──→ star
 ```
+
+The composed registry contains eight stages. `all` selects the seven-stage
+template+diff DAG. `star` is submitted separately with `star_targets.csv`; its
+stage spec has no SQLite dependency edges because it validates the existing
+event artifacts when it starts.
 
 | Stage | Module | What it does |
 |-------|--------|--------------|
@@ -146,8 +163,10 @@ tess_ffi_download → wcs_grouping → mapping → ps1_download → ps1_process 
 | **`ps1_process`** | `template_creation/.../ps1_process.py` | Convolution onto TESS grid (defaults to Condor). |
 | **`downsample`** | `template_creation/.../downsample.py` | Multi-offset template FITS + `ps1_removed_stars.csv` in `event_dir`. |
 | **`diff`** | `difference_imaging/.../execute.py` | Config-driven Hotpants → photometry; outputs in `events/{label}/ws/`. |
+| **`star`** | `star/runner.py` | Host-star mini-templates, kernel-reused stamps, and light curves under `events/{label}/star*/`. |
 
-**Executors**: `mapping`, `ps1_process`, and `diff` can run on HTCondor; other stages are local subprocesses on the submit host.
+**Executors**: `mapping`, `ps1_process`, `diff`, and `star` can run on
+HTCondor; other stages are local subprocesses on the submit host.
 
 ---
 
@@ -176,13 +195,14 @@ Template and diff science code lives under `template_creation/processing/` and `
 | `star/cli.py` | `syndiff star submit|run` — host-star light curves. |
 | `common/orchestration/cli.py` | Monitoring, control, verify, daemon verbs. |
 | `common/orchestration/spec.py` | `StageSpec` / `PipelineSpec`. |
-| `pipeline_spec.py` | Composed 7-stage SynDiff DAG. |
+| `pipeline_spec.py` | Composed registry: seven-stage template+diff DAG plus independent `star`. |
 | `common/orchestration/state.py` | SQLite schema, status machine, promotion, attempts/backoff. |
 | `common/orchestration/scheduler.py` | Supervisor tick, verify scheduling, launch, stall detection. |
 | `common/orchestration/condor.py` | Submit, batched poll, held-job handling. |
 | `common/orchestration/launcher.py` | Local `Popen` vs Condor submit. |
 | `template_creation/orchestration/stages.py` | Template stage registry. |
 | `difference_imaging/orchestration/stages.py` | `diff` stage registry. |
+| `star/orchestration/stages.py` | Independent `star` stage registry and artifact verifier. |
 | `difference_imaging/orchestration/site_config.py` | Resolve/freeze per-target diff config from site folder. |
 | `template_creation/orchestration/verify.py` | On-disk verifiers + completion manifests. |
 | `template_creation/orchestration/runner_config.py` | YAML load, `event_dir` = `events/{label}/`, path resolution. |

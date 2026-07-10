@@ -8,9 +8,10 @@ This directory is the **config root** passed to `syndiff --site config`.
 |------|------|
 | `pipeline.yaml` | Orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
 | `diff_config.yaml` | Site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor |
-| `diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, per-frame kernels) |
+| `diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `ks_b_s`, per-frame kernels; `write_convolved: false`) |
 | `diff_config_star_full_backfill.yaml` | One-time Hotpants backfill (`write_convolved` + `write_kernel_solutions`) for star |
 | `star_config.yaml` | Site star policy: baseline labels, photometry, `ps1_source`, SCC overrides |
+| `star_config_epsf_gepsf.yaml` | Star gridded-ePSF build/reuse and gepsf photometry example |
 | `star_targets_example.csv` | Example star SCC registry for `syndiff star submit` |
 | `star_targets_full.csv` | Production star SCC registry |
 | `star_hosts/` | Per-event host star CSVs referenced from `star_targets` |
@@ -24,9 +25,14 @@ This directory is the **config root** passed to `syndiff --site config`.
 | Path | When to use | Command |
 |------|-------------|---------|
 | **Site policy** | Normal debugging with live `diff_config.yaml` | `syndiff diff run --site config --targets targets_example.csv --target-name 2020ut` |
+| **Alternate diff policy** | Foreground run with a selected diff YAML | `syndiff diff run --config diff_config_star_full_backfill.yaml --deployment deployment.yaml --targets targets_example.csv --target-name 20/3/2` |
 | **Materialized YAML** | Frozen per-target config with absolute paths | `python -m syndiff_pipeline.difference_imaging.orchestration.cli --config example/diff_config_a_prf.yaml` |
 
-Materialized examples live under `example/diff_config_*.yaml`; legacy names are in `example/legacy/recipe_*.yaml` (read-only reference).
+With `--site`, foreground diff always reads `<site>/diff_config.yaml`; the
+`diff_config:` selected by `pipeline.yaml` is used by supervised submit. Omit
+`--site` and pass `--config` + `--deployment` to choose another foreground
+diff policy. Materialized examples live under `example/diff_config_*.yaml`;
+legacy names are in `example/legacy/recipe_*.yaml` (read-only reference).
 
 ## Supervised pipeline
 

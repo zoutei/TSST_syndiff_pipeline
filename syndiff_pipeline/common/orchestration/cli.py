@@ -77,7 +77,9 @@ def preset_stages(preset: str) -> list[str]:
     if preset == "template":
         return _template_stage_names()
     if preset == "all":
-        return _stage_names()
+        # ``star`` is a separate branch with its own target/config schemas and
+        # must only be launched through ``syndiff star``.
+        return _template_stage_names() + [DIFF_STAGE]
     if preset == "diff":
         return [DIFF_STAGE]
     raise ValueError(f"Unknown preset: {preset!r}")
