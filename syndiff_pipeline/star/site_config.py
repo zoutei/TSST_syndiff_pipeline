@@ -48,6 +48,25 @@ class StarBaselineConfig:
 
 
 @dataclass
+class StarEpsfConfig:
+    """Gridded ePSF fitting on baseline diff images before gepsf photometry."""
+
+    enabled: bool = False
+    diffs: str | None = None
+    output: str = "epsf_r1"
+    tile_nx: int = 2
+    tile_ny: int = 2
+    epsf_oversample: int = 4
+    psf_size: int = 11
+    extract_size: int | None = 11
+    min_stars_per_tile: int = 5
+    mag_max_rp: float | None = 12.95
+    epsf_maxiters: int = 15
+    epsf_recentering_maxiters: int = 20
+    epsf_n_jobs: int | None = 8
+
+
+@dataclass
 class StarCondorConfig:
     """HTCondor resource request for the star stage."""
 
@@ -65,6 +84,7 @@ class StarSitePolicy:
     defaults: dict = field(default_factory=dict)
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry: dict = field(default_factory=dict)
+    epsf: dict = field(default_factory=dict)
     overrides: dict = field(default_factory=dict)
     condor: StarCondorConfig = field(default_factory=StarCondorConfig)
     config_path: str = ""
@@ -100,6 +120,7 @@ class StarRunConfig:
     overwrite: bool = False
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry_methods: list[dict] = field(default_factory=list)
+    epsf: StarEpsfConfig | None = None
     stars_file: str = ""
     ps1_zarr_path: str | None = None
 
@@ -154,6 +175,84 @@ def _deep_merge_dict(base: dict, override: dict) -> dict:
     return out
 
 
+def _method_inputs(method: dict) -> dict:
+    raw = method.get("inputs") or {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def epsf_workspace_from_method(method: dict) -> str | None:
+    """Return the ePSF workspace label from a photometry method ``inputs.epsf``."""
+    label = _optional_str(_method_inputs(method).get("epsf"))
+    return label
+
+
+def required_epsf_workspaces(methods: list[dict]) -> list[str]:
+    """Unique ePSF workspace labels referenced by ``psf_type: epsf`` methods."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for method in methods:
+        mtype = str(method.get("type", "")).strip().lower()
+        if mtype not in ("psf", "prf"):
+            continue
+        if str(method.get("psf_type", "prf")).strip().lower() != "epsf":
+            continue
+        label = epsf_workspace_from_method(method)
+        if not label:
+            name = str(method.get("name", "?"))
+            raise ValueError(
+                f"photometry method {name!r} has psf_type epsf but no inputs.epsf"
+            )
+        if label not in seen:
+            seen.add(label)
+            out.append(label)
+    return out
+
+
+def normalize_photometry_methods(methods: list[dict]) -> list[dict]:
+    """Validate photometry methods and normalize ``inputs`` blocks."""
+    normalized: list[dict] = []
+    for method in methods:
+        entry = copy.deepcopy(method)
+        mtype = str(entry.get("type", "")).strip().lower()
+        if mtype in ("psf", "prf") and str(entry.get("psf_type", "prf")).strip().lower() == "epsf":
+            label = epsf_workspace_from_method(entry)
+            if not label:
+                name = str(entry.get("name", "?"))
+                raise ValueError(
+                    f"photometry method {name!r} has psf_type epsf but no inputs.epsf"
+                )
+            entry["epsf_workspace"] = label
+        normalized.append(entry)
+    return normalized
+
+
+def _parse_star_epsf(raw: dict | None) -> StarEpsfConfig | None:
+    raw = raw or {}
+    if not raw:
+        return None
+    enabled = bool(raw.get("enabled", True))
+    if not enabled:
+        return None
+    inputs = raw.get("inputs") or {}
+    diffs = _optional_str(inputs.get("diffs")) if isinstance(inputs, dict) else None
+    extract_size = raw.get("extract_size")
+    return StarEpsfConfig(
+        enabled=True,
+        diffs=diffs,
+        output=str(raw.get("output", "epsf_r1")).strip() or "epsf_r1",
+        tile_nx=int(raw.get("tile_nx", 2)),
+        tile_ny=int(raw.get("tile_ny", 2)),
+        epsf_oversample=int(raw.get("epsf_oversample", 4)),
+        psf_size=int(raw.get("psf_size", 11)),
+        extract_size=int(extract_size) if extract_size not in (None, "") else None,
+        min_stars_per_tile=int(raw.get("min_stars_per_tile", 5)),
+        mag_max_rp=float(raw["mag_max_rp"]) if raw.get("mag_max_rp") not in (None, "") else 12.95,
+        epsf_maxiters=int(raw.get("epsf_maxiters", 15)),
+        epsf_recentering_maxiters=int(raw.get("epsf_recentering_maxiters", 20)),
+        epsf_n_jobs=int(raw["epsf_n_jobs"]) if raw.get("epsf_n_jobs") not in (None, "") else None,
+    )
+
+
 def _parse_star_condor(raw: dict | None) -> StarCondorConfig:
     raw = raw or {}
     mem = int(raw.get("request_memory", 100_000))
@@ -176,6 +275,7 @@ def load_star_site_policy(path: str | Path) -> StarSitePolicy:
     baseline_raw = raw.get("baseline") or {}
     baseline = _parse_baseline_block(baseline_raw, fallback=StarBaselineConfig())
     photometry = dict(raw.get("photometry") or {})
+    epsf = dict(raw.get("epsf") or {})
     overrides = dict(raw.get("overrides") or {})
     ps1_zarr = _optional_str(raw.get("ps1_zarr_path"))
     return StarSitePolicy(
@@ -184,6 +284,7 @@ def load_star_site_policy(path: str | Path) -> StarSitePolicy:
         defaults=defaults,
         baseline=baseline,
         photometry=photometry,
+        epsf=epsf,
         overrides=overrides,
         condor=_parse_star_condor(raw.get("condor")),
         config_path=str(config_path),
@@ -283,11 +384,21 @@ def resolve_star_run_config(
         baseline.phot_bkg = star_target_row.phot_bkg
 
     photometry_block = merged_defaults.pop("photometry", None) or policy.photometry or {}
+    epsf_block = merged_defaults.pop("epsf", None) or policy.epsf or {}
     methods = list(photometry_block.get("methods") or [])
     if not methods:
         methods = [
             {"name": "ap3", "type": "aperture", "tar_ap": 3, "sky_in": 5, "sky_out": 9},
         ]
+    methods = normalize_photometry_methods(methods)
+    epsf_cfg = _parse_star_epsf(epsf_block)
+    if epsf_cfg is not None:
+        for label in required_epsf_workspaces(methods):
+            if label != epsf_cfg.output:
+                raise ValueError(
+                    f"photometry references inputs.epsf={label!r} but epsf.output "
+                    f"is {epsf_cfg.output!r}; add a matching epsf block or align labels"
+                )
 
     ps1_source = normalize_ps1_source(merged_defaults.get("ps1_source", "zarr_download"))
     workspace_run_id = _optional_str(merged_defaults.get("workspace_run_id"))
@@ -305,6 +416,7 @@ def resolve_star_run_config(
         overwrite=bool(merged_defaults.get("overwrite", False)),
         baseline=baseline,
         photometry_methods=methods,
+        epsf=epsf_cfg,
         stars_file=star_target_row.stars_file,
         ps1_zarr_path=policy.ps1_zarr_path,
     )
@@ -329,6 +441,7 @@ def write_frozen_star_config(policy: StarSitePolicy, dest: str | Path) -> Path:
             "phot_bkg": policy.baseline.phot_bkg,
         },
         "photometry": policy.photometry,
+        "epsf": policy.epsf,
         "overrides": policy.overrides,
     }
     if policy.ps1_zarr_path:

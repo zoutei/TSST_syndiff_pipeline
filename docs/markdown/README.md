@@ -1,13 +1,13 @@
 # SynDiff documentation
 
-Documentation for the **syndiff-pipeline** open-source release.
+Documentation for the unreleased **syndiff-pipeline** project.
 
 ## Start here
 
 | Document | Audience | Contents |
 |----------|----------|----------|
 | [Main README](../../README.md) | All users | Project overview, pyhotpants + custom MOCPy, install, quick start |
-| [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, 7-stage DAG, Condor, config, workspace layout |
+| [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, seven-stage template+diff DAG, independent star branch, Condor, config, workspace layout |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` filesystem reference |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
@@ -40,9 +40,12 @@ docs/markdown/
 ├── star_lightcurves.md           ← host-star quick start (syndiff star)
 ```
 
-**Improvement plans** (design docs, not yet implemented) live under [`.cursor/plans/`](../../.cursor/plans/): spatially varying WCS drift templates, and target-star-removed templates for exoplanet light curves.
+**Improvement plans** live under [`.cursor/plans/`](../../.cursor/plans/).
+The spatially varying WCS template plan remains a design; the historical
+target-star plan is superseded by the implemented `syndiff star` branch.
 
-The stage deep-dives were originally maintained in the standalone [`syndiff`](../../syndiff/) research repository (`README_pancakes.md`, `README_process_ps1.md`, `README_downsample_offset.md`). They are copied here so this release is self-contained.
+The stage deep-dives originated in an earlier standalone research workflow and
+are vendored here so this repository is self-contained.
 
 ## Code lineage
 
@@ -56,7 +59,11 @@ The stage deep-dives were originally maintained in the standalone [`syndiff`](..
 | — | `common/download.py` | `tess_ffi_download` |
 | — | `difference_imaging/orchestration/execute.py` | `diff` |
 
-The **`syndiff` orchestrator** adds WCS grouping for transient targets, a unified 7-stage DAG (template + diff), SQLite bookkeeping, resource pools, detached scheduling, artifact verification, and HTCondor for `mapping`, `ps1_process`, and `diff`. The core science algorithms match the standalone scripts.
+The **`syndiff` orchestrator** adds WCS grouping for transient targets, a
+seven-stage template+diff DAG plus an independent `star` branch, SQLite
+bookkeeping, resource pools, detached scheduling, artifact verification, and
+HTCondor for `mapping`, `ps1_process`, `diff`, and `star`. The core template
+science algorithms match the standalone scripts.
 
 ## Example diff configs
 

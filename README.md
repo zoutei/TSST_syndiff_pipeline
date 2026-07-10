@@ -12,6 +12,10 @@ TESS Full Frame Image (FFI) template building and difference-imaging pipeline fo
 
 SynDiff is an end-to-end pipeline for TESS Full Frame Image (FFI) transient work: it builds PS1-based templates on the TESS pixel grid, then runs difference imaging and forced photometry at a science target. The unified **`syndiff`** CLI runs template creation first, then difference imaging — either end-to-end or one phase at a time.
 
+An independent **`star`** branch can then use a completed template+diff
+workspace to produce TIC/Gaia host-star light curves without re-running
+Hotpants.
+
 ### Template creation (TESS FFIs + PS1 → `syndiff_template_*.fits`)
 
 1. **FFI download** — bulk download of calibrated TESS FFIs from MAST.
@@ -34,7 +38,7 @@ Optional steps you can add to the `pipeline:` list:
 - **Empirical PSF fitting** — tiled gridded ePSF via photutils (`epsf` stage; `GriddedPSFModel` with configurable `tile_nx`×`tile_ny`; use with `psf_type: epsf` in forced photometry for spatially varying **gepsf**).
 - **Gaia centroids** — PSF photometry on bright Gaia stars (`centroids` stage; outputs per-frame `*_photresults.ecsv`).
 - **Saturated star templates** — model and subtract bright saturated sources (`sat_template` + `subtract`).
-- **Background removal** — rough per-frame background, then adaptive temporal smoothing (`background_estimate` / `background_rough`, then `subtract` from the diffs).
+- **Background removal** — the unified `background` stage composes spatial, temporal, and strap corrections before optional `subtract`.
 - **Second round of differencing** — run Hotpants again on background-subtracted science images for cleaner residuals (see commented blocks in [`config/diff_config.yaml`](config/diff_config.yaml) and [`config/example/diff_config_c_second_hotpants.yaml`](config/example/diff_config_c_second_hotpants.yaml)).
 
 Run the full workflow with `syndiff all submit`, template building only with `syndiff template submit`, or diff only (when upstream artifacts already exist) with `syndiff diff submit`.
@@ -151,13 +155,20 @@ syndiff retry --deployment config/deployment.yaml --run-id batch_no5 \
 
 ## Difference imaging (config-driven)
 
-After PS1 templates exist, the orchestrator **`diff`** stage runs the YAML-ordered pipeline in [`config/diff_config.yaml`](config/diff_config.yaml) (`shared_mask`, `hotpants`, `epsf`, `background_*`, `forced_photometry`, …). WCS handoff and templates come from template creation (`cluster_template_job.json`, `syndiff_ffi_frames.csv`, `events/{label}/ws/templates`).
+After PS1 templates exist, the orchestrator **`diff`** stage runs a YAML-ordered
+diff policy (`shared_mask`, `hotpants`, `epsf`, `background`,
+`forced_photometry`, …). Foreground `--site config` uses
+[`config/diff_config.yaml`](config/diff_config.yaml); supervised submit uses
+the `diff_config:` path selected by `pipeline.yaml`. WCS handoff and templates
+come from template creation (`cluster_template_job.json`,
+`syndiff_ffi_frames.csv`, `events/{label}/ws/templates`).
 
 **Two foreground paths** (no daemon):
 
 | Path | Command | Config source |
 |------|---------|---------------|
-| Site policy | `syndiff diff run --site config --targets t.csv --target-name 2020ut` | `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml` |
+| Site policy | `syndiff diff run --site config --targets t.csv --target-name 2020ut` | `diff_config.yaml` + `deployment.yaml` |
+| Alternate diff policy | `syndiff diff run --config config/other_diff.yaml --deployment config/deployment.yaml --targets t.csv --target-name 2020ut` | Explicit diff policy + deployment |
 | Materialized YAML | `python -m syndiff_pipeline.difference_imaging.orchestration.cli --config config/example/diff_config_a_prf.yaml` | Pre-built per-target YAML under [`config/example/`](config/example/) |
 
 See [`config/README.md`](config/README.md) for site layout. Outputs live under `{workspace_root}/events/{label}/ws/`; full directory reference: [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md).
@@ -174,6 +185,7 @@ See [`config/README.md`](config/README.md) for site layout. Outputs live under `
 | [`docs/markdown/template_pipeline.md`](docs/markdown/template_pipeline.md) | `syndiff` orchestration, Condor, config, run lifecycle |
 | [`docs/markdown/syndiff_cli.md`](docs/markdown/syndiff_cli.md) | CLI noun/verb commands and stage modules |
 | [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md) | `workspace_root`, `data_root`, on-disk layout |
+| [`docs/markdown/star_lightcurves.md`](docs/markdown/star_lightcurves.md) | Host-star quick start, prerequisites, and outputs |
 | [`docs/markdown/stages/`](docs/markdown/stages/README.md) | PanCAKES, PS1 process, downsample algorithms |
 | [`docs/markdown/cluster_smoke_checklist.md`](docs/markdown/cluster_smoke_checklist.md) | Cluster smoke test after setup |
 | [`config/`](config/) | Site configs and example diff YAMLs |

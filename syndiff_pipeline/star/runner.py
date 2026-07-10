@@ -24,6 +24,7 @@ from syndiff_pipeline.star.diff_runner import (
     compute_star_only_stamp_for_frame,
     write_star_diff_stamp,
 )
+from syndiff_pipeline.star.epsf_runner import ensure_star_epsf_catalog
 from syndiff_pipeline.star.hosts import load_star_hosts_file
 from syndiff_pipeline.star.identifiers import (
     ResolvedHost,
@@ -32,7 +33,11 @@ from syndiff_pipeline.star.identifiers import (
     write_identifier_json,
 )
 from syndiff_pipeline.star.plots import write_lightcurve_debug_png
-from syndiff_pipeline.star.site_config import StarRunConfig
+from syndiff_pipeline.star.site_config import (
+    StarRunConfig,
+    epsf_workspace_from_method,
+    required_epsf_workspaces,
+)
 from syndiff_pipeline.star.star_segments import isolate_and_write_mini_templates
 from syndiff_pipeline.star.windowed_photometry import run_windowed_forced_photometry
 
@@ -150,8 +155,10 @@ def _resolve_photometry_methods(
     methods: list[dict],
     x_ref: float,
     y_ref: float,
+    epsf_catalogs: dict[str, object] | None = None,
 ) -> list[dict]:
     resolved: list[dict] = []
+    catalogs = epsf_catalogs or {}
     for method in methods:
         if str(method.get("type", "")).strip().lower() in ("psf", "prf"):
             psf_type = str(method.get("psf_type", "prf")).strip().lower()
@@ -159,6 +166,22 @@ def _resolve_photometry_methods(
                 prf_method = _build_prf_method(ctx, x_ref, y_ref)
                 prf_method["name"] = str(method.get("name", "prf"))
                 resolved.append(prf_method)
+                continue
+            if psf_type == "epsf":
+                label = epsf_workspace_from_method(method) or method.get("epsf_workspace")
+                if not label:
+                    raise ValueError(
+                        f"method {method.get('name')!r} requires inputs.epsf"
+                    )
+                catalog = catalogs.get(str(label))
+                if catalog is None:
+                    raise ValueError(
+                        f"method {method.get('name')!r} references inputs.epsf={label!r} "
+                        "but no gridded ePSF catalog was loaded for that label"
+                    )
+                gepsf_method = dict(method)
+                gepsf_method["gridded_catalog"] = catalog
+                resolved.append(gepsf_method)
                 continue
         resolved.append(dict(method))
     return resolved
@@ -186,6 +209,18 @@ def run_star_pipeline(
     manifest_rows: list[dict] = []
     product_ids = _load_product_ids(ctx, max_ffis=run_config.max_ffis)
     btjd_by_product_id = _load_product_id_btjd_map(ctx)
+
+    epsf_catalogs: dict[str, object] = {}
+    for label in required_epsf_workspaces(run_config.photometry_methods):
+        build_cfg = run_config.epsf if run_config.epsf is not None and run_config.epsf.output == label else None
+        epsf_catalogs[label] = ensure_star_epsf_catalog(
+            ctx,
+            label,
+            build_cfg=build_cfg,
+            diffs_label=build_cfg.diffs if build_cfg is not None else None,
+            overwrite=run_config.overwrite,
+            max_ffis=run_config.max_ffis,
+        )
 
     for request in requests:
         host: ResolvedHost | None = None
@@ -316,6 +351,7 @@ def run_star_pipeline(
             methods=run_config.photometry_methods,
             x_ref=x_ref,
             y_ref=y_ref,
+            epsf_catalogs=epsf_catalogs,
         )
 
         lightcurve_paths: list[str] = []

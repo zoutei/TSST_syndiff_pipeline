@@ -10,6 +10,7 @@ markdown/README
 markdown/template_pipeline
 markdown/storage_layout
 markdown/syndiff_cli
+markdown/star_lightcurves
 markdown/cluster_smoke_checklist
 markdown/stages/README
 markdown/stages/tess_ffi_download
@@ -19,6 +20,8 @@ markdown/stages/standalone_pipeline_overview
 markdown/stages/ps1_process_technical
 markdown/stages/downsample_technical
 markdown/stages/diff_pipeline
+markdown/stages/star_pipeline
+markdown/stages/star_config
 markdown/stages/background
 ```
 

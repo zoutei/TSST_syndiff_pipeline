@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -10,10 +11,12 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.stages.photometry import (
+    PsfPhotometryMethodParams,
     _build_aperture_masks,
     _tessreduce_error_plane,
     aperture_flux_on_cutout,
     create_psf,
+    forced_phot_gridded_epoch,
 )
 from syndiff_pipeline.star.identifiers import ResolvedHost
 
@@ -76,6 +79,49 @@ def aperture_flux_on_stamp(
         "flux_with_sky": float(flux),
         "flux_wo_sky": float(flux_wo_sky),
         "eflux": float(eflux),
+    }
+
+
+def _stamp_product_id(stamp_path: str) -> str:
+    stem = Path(str(stamp_path)).name
+    if stem.endswith(".fits.gz"):
+        stem = stem[: -len(".fits.gz")]
+    elif stem.endswith(".fits"):
+        stem = stem[: -len(".fits")]
+    return stem
+
+
+def _gepsf_params_from_method(method: dict) -> PsfPhotometryMethodParams:
+    return PsfPhotometryMethodParams(
+        name=str(method.get("name", "gepsf")),
+        psf_type="epsf",
+        fit_shape=int(method.get("fit_shape", 11)),
+        aperture_radius=float(method.get("aperture_radius", 2.0)),
+        psf_grouper_min_separation=float(method.get("psf_grouper_min_separation", 10.0)),
+    )
+
+
+def gepsf_flux_on_stamp(
+    stamp: np.ndarray,
+    host_xy: tuple[float, float],
+    gridded_model,
+    *,
+    phot_params: PsfPhotometryMethodParams,
+) -> dict:
+    """Fit a per-frame GriddedPSFModel on a small star diff stamp."""
+    flux, eflux, x_fit, y_fit = forced_phot_gridded_epoch(
+        stamp,
+        gridded_model,
+        float(host_xy[0]),
+        float(host_xy[1]),
+        phot_params,
+    )
+    return {
+        "flux": float(flux),
+        "flux_err": float(eflux),
+        "eflux": float(eflux),
+        "x_fit": float(x_fit),
+        "y_fit": float(y_fit),
     }
 
 
@@ -271,6 +317,44 @@ def run_windowed_forced_photometry(
                     )
                 )
             elif mtype in {"psf", "prf"}:
+                psf_type = str(method.get("psf_type", "prf")).strip().lower()
+                if psf_type == "epsf":
+                    catalog = method.get("gridded_catalog")
+                    if catalog is None:
+                        raise ValueError(
+                            f"method {method_name!r} (psf_type=epsf) requires "
+                            "'gridded_catalog' in the method dict"
+                        )
+                    ffi_stem = _stamp_product_id(stamp_path)
+                    gridded_model = catalog.load_model(ffi_stem)
+                    if gridded_model is None:
+                        nan_rec = {
+                            "btjd": btjd,
+                            "flux": np.nan,
+                            "eflux": np.nan,
+                            "filename": stamp_path,
+                            "group_id": gid,
+                        }
+                        records.append(nan_rec)
+                        continue
+                    phot_params = _gepsf_params_from_method(method)
+                    result = gepsf_flux_on_stamp(
+                        stamp,
+                        host_xy,
+                        gridded_model,
+                        phot_params=phot_params,
+                    )
+                    records.append(
+                        _psf_record(
+                            stamp_path,
+                            header,
+                            result,
+                            btjd=btjd,
+                            group_id=gid,
+                        )
+                    )
+                    continue
+
                 epsf_model = method.get("epsf_model")
                 if epsf_model is None:
                     raise ValueError(
