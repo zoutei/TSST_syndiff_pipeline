@@ -748,25 +748,60 @@ def run_config_pipeline(
     kernel_fit_hp: Optional[HotpantsParams] = None
     convolved_ws: Optional[str] = None
 
-    wcs_table, crop_bounds, ref_ffi_path, pipeline_offset_threshold = (
-        _load_template_handoff(cfg, out, manifest_path)
+    from syndiff_pipeline.difference_imaging.stages.astrometry import (
+        load_astrometry_coords,
+        pipeline_needs_template_handoff,
+        run_astrometry_stage,
     )
 
-    write_targets_ds9_regions(
-        ws_root,
-        target_ra=float(cfg.target_ra),
-        target_dec=float(cfg.target_dec),
-        target_name=str(getattr(cfg, "target_name", "") or Path(out).name),
-        sector=int(cfg.sector),
-        camera=int(cfg.camera),
-        ccd=int(cfg.ccd),
-        additional_forced_targets=getattr(cfg, "additional_forced_targets", None) or [],
-        wcs_table=wcs_table,
-        crop_bounds=crop_bounds,
-        ref_ffi_path=ref_ffi_path,
+    needs_handoff = pipeline_needs_template_handoff(cfg.pipeline)
+    has_astrometry = any(
+        isinstance(s, dict) and s.get("kind") == "astrometry" for s in cfg.pipeline
     )
+    wcs_table: Optional[pd.DataFrame] = None
+    crop_bounds: Optional[dict] = None
+    ref_ffi_path: Optional[str] = None
+    pipeline_offset_threshold = 0.01
 
-    if getattr(cfg, "master_fits_mirror", True):
+    if needs_handoff:
+        wcs_table, crop_bounds, ref_ffi_path, pipeline_offset_threshold = (
+            _load_template_handoff(cfg, out, manifest_path)
+        )
+
+    coords = load_astrometry_coords(ws_root)
+    if coords is not None:
+        cfg.target_ra, cfg.target_dec = coords
+
+    ds9_regions_written = False
+
+    def _maybe_write_targets_ds9_regions() -> None:
+        nonlocal ds9_regions_written
+        if ds9_regions_written or not needs_handoff:
+            return
+        if wcs_table is None or crop_bounds is None or not ref_ffi_path:
+            return
+        if cfg.target_ra is None or cfg.target_dec is None:
+            log.warning("target_ra/target_dec not set; skipping targets.reg.")
+            return
+        write_targets_ds9_regions(
+            ws_root,
+            target_ra=float(cfg.target_ra),
+            target_dec=float(cfg.target_dec),
+            target_name=str(getattr(cfg, "target_name", "") or Path(out).name),
+            sector=int(cfg.sector),
+            camera=int(cfg.camera),
+            ccd=int(cfg.ccd),
+            additional_forced_targets=getattr(cfg, "additional_forced_targets", None) or [],
+            wcs_table=wcs_table,
+            crop_bounds=crop_bounds,
+            ref_ffi_path=ref_ffi_path,
+        )
+        ds9_regions_written = True
+
+    if needs_handoff and not has_astrometry:
+        _maybe_write_targets_ds9_regions()
+
+    if needs_handoff and getattr(cfg, "master_fits_mirror", True):
         try:
             link_master_workspace(
                 out,
@@ -782,6 +817,11 @@ def run_config_pipeline(
         kind = stage["kind"]
         log.info("=" * 70)
         log.info("Stage: %s", kind)
+
+        if kind == "astrometry":
+            run_astrometry_stage(cfg, stage, ws_root, force_rerun=force_rerun)
+            _maybe_write_targets_ds9_regions()
+            continue
 
         if kind == "shared_mask":
             sm = parse_shared_mask(stage, idx)

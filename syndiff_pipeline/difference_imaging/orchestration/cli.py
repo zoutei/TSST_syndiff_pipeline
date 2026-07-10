@@ -25,7 +25,7 @@ from syndiff_pipeline.difference_imaging.orchestration.config import add_config_
 log = logging.getLogger(__name__)
 
 
-def run_pipeline(cfg, *, validate_only: bool = False):
+def run_pipeline(cfg, *, validate_only: bool = False, force_rerun: bool = False):
     """
     Run SynDiff according to *cfg*.
 
@@ -39,7 +39,7 @@ def run_pipeline(cfg, *, validate_only: bool = False):
         )
     from syndiff_pipeline.difference_imaging.orchestration.execute import run_config_pipeline
 
-    run_config_pipeline(cfg, validate_only=validate_only)
+    run_config_pipeline(cfg, validate_only=validate_only, force_rerun=force_rerun)
 
 
 def main():
