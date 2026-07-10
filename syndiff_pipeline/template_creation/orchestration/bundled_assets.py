@@ -39,3 +39,14 @@ def tess_straps_csv() -> Path:
             "Ensure syndiff_pipeline/resources/tess_straps.csv is present."
         )
     return path
+
+
+def gaia_alerts_csv() -> Path:
+    """Gaia Photometric Science Alerts index shipped with the repository."""
+    path = _PACKAGE_ROOT / "resources" / "gaia_alerts.csv"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Missing bundled resource: {path}. "
+            "Ensure syndiff_pipeline/resources/gaia_alerts.csv is present."
+        )
+    return path
