@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 
@@ -11,7 +12,12 @@ from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.common.orchestration.spec import StageRunContext, StageSpec
 from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
 from syndiff_pipeline.star.context import StarPrerequisiteError, load_event_context
-from syndiff_pipeline.star.runner import run_star_pipeline, star_output_root, verify_star_batch_manifest
+from syndiff_pipeline.star.runner import (
+    resolve_star_host_root,
+    run_star_pipeline,
+    star_output_root,
+    verify_star_batch_manifest,
+)
 from syndiff_pipeline.star.site_config import (
     find_star_target_row,
     load_star_site_policy,
@@ -20,6 +26,8 @@ from syndiff_pipeline.star.site_config import (
     resolve_star_run_config,
     write_frozen_star_config,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _frozen_star_config_path(ctx: StageRunContext) -> Path:
@@ -61,7 +69,11 @@ def _resolve_star_run(ctx: StageRunContext):
     run_config = resolve_star_run_config(policy, star_row, site_dir=site_dir)
     workspace_run_id = (ctx.meta or {}).get("workspace_run_id")
     if workspace_run_id is not None and str(workspace_run_id).strip():
-        run_config.workspace_run_id = str(workspace_run_id).strip()
+        log.warning(
+            "run_meta workspace_run_id=%r is deprecated and ignored; "
+            "star outputs always land in {baseline_ws}/host_star/",
+            workspace_run_id,
+        )
     return policy, star_row, run_config, site_dir
 
 
@@ -79,7 +91,7 @@ def execute_star_stage(ctx: StageRunContext):
     )
     manifest_path = run_star_pipeline(event_ctx, run_config=run_config, validate=True)
     artifacts = [str(manifest_path)]
-    host_root = star_output_root(event_ctx, run_config.workspace_run_id)
+    host_root = star_output_root(event_ctx)
     if host_root.is_dir():
         artifacts.extend(str(p) for p in sorted(host_root.rglob("lightcurve_*.csv")))
     expected = max(len(artifacts), 1)
@@ -96,8 +108,8 @@ def _verify_star(ctx: StageRunContext) -> bool:
             star_run_config=run_config,
             star_target_row=_star_row,
         )
-        manifest_path = star_output_root(event_ctx, run_config.workspace_run_id) / "batch_manifest.csv"
-        return verify_star_batch_manifest(manifest_path)
+        host_root = resolve_star_host_root(event_ctx, run_config.workspace_run_id)
+        return verify_star_batch_manifest(host_root / "batch_manifest.csv")
     except (StarPrerequisiteError, KeyError, ValueError, FileNotFoundError):
         return False
 
@@ -110,7 +122,7 @@ def _collect_star_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
         star_run_config=run_config,
         star_target_row=star_row,
     )
-    host_root = star_output_root(event_ctx, run_config.workspace_run_id)
+    host_root = resolve_star_host_root(event_ctx, run_config.workspace_run_id)
     artifacts: list[str] = []
     manifest_path = host_root / "batch_manifest.csv"
     if manifest_path.is_file():

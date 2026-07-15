@@ -135,7 +135,7 @@ star can use `stream` or a pre-populated Zarr store.
 
 ## Outputs per Gaia host
 
-Root: `events/{label}/star/` or `events/{label}/star_{workspace_run_id}/`.
+Root: `{baseline_ws}/host_star/` (e.g. `ws_star_full_lc/host_star/`). Legacy sibling trees `events/{label}/star/` / `star_{id}/` remain readable for verify.
 
 ```text
 {gaia_source_id}/

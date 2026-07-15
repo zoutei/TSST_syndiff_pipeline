@@ -8,7 +8,6 @@ defaults:
   kernel_margin_px: 470
   ps1_source: zarr_local_only
   debug_plots: true
-  workspace_run_id: star_lc_epsf
   max_ffis: null
   overwrite: true
 

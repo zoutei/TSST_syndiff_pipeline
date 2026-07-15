@@ -79,7 +79,10 @@ def _load_star_run_bundle(args: argparse.Namespace):
     star_row = find_star_target_row(star_rows, args.target_name)
     run_config = resolve_star_run_config(policy, star_row, site_dir=paths.site_dir)
     if args.workspace_run_id is not None:
-        run_config.workspace_run_id = str(args.workspace_run_id).strip() or None
+        logger.warning(
+            "--workspace-run-id is deprecated and ignored; "
+            "star outputs always land in {baseline_ws}/host_star/"
+        )
     if args.cutout_size is not None:
         run_config.cutout_size = int(args.cutout_size)
     if args.stamp_size is not None:
@@ -136,8 +139,13 @@ def cmd_submit(args: argparse.Namespace) -> int:
         detach=True,
         force_rerun=bool(args.force_rerun),
         source_star_config_path=str(star_config_path),
-        workspace_run_id=getattr(args, "workspace_run_id", None),
+        workspace_run_id=None,
     )
+    if getattr(args, "workspace_run_id", None) is not None:
+        logger.warning(
+            "--workspace-run-id is deprecated and ignored; "
+            "star outputs always land in {baseline_ws}/host_star/"
+        )
 
     from syndiff_pipeline.common.orchestration.targets import write_normalized_targets
 
@@ -246,7 +254,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--workspace-run-id",
         default=None,
-        help="Suffix for star outputs under events/{label}/star_{id}/",
+        help=(
+            "Deprecated and ignored. Star outputs always land in "
+            "{baseline_ws}/host_star/"
+        ),
     )
 
     submit = sub.add_parser(

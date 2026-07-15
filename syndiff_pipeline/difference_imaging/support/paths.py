@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 WORKSPACE_SUBDIR = "ws"
 MASTER_SUBDIR = "master"
+HOST_STAR_WS_LABEL = "host_star"
 DEFAULT_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
 HOTPANTS_SUBSTAMP_STARS_BASENAME = "hotpants_substamp_stars.csv"
 TARGETS_DS9_REGION_BASENAME = "targets.reg"
@@ -65,6 +66,7 @@ from syndiff_pipeline.common.orchestration.event_ws_symlinks import (  # noqa: E
 
 __all__ = [
     "FFIS_WS_LABEL",
+    "HOST_STAR_WS_LABEL",
     "TEMPLATES_WS_LABEL",
     "ensure_event_ffis_symlink",
     "ensure_event_templates_symlink",
@@ -345,7 +347,7 @@ def link_master_workspace(
     refreshed = _prune_master_stamp_symlinks(m_root)
 
     for label in sorted(os.listdir(ws_root)):
-        if label in (MASTER_SUBDIR, TEMPLATES_WS_LABEL, FFIS_WS_LABEL):
+        if label in (MASTER_SUBDIR, TEMPLATES_WS_LABEL, FFIS_WS_LABEL, HOST_STAR_WS_LABEL):
             continue
         if _is_hotpants_stamps_workspace_label(label):
             continue
