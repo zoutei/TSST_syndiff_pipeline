@@ -8,7 +8,6 @@ defaults:
   kernel_margin_px: 470
   ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
   debug_plots: true
-  workspace_run_id: null      # null → events/{label}/star/
   max_ffis: null
   overwrite: false
 
@@ -38,7 +37,6 @@ condor:
 overrides:
   "20/3/2":
     ps1_source: zarr_local_only
-    workspace_run_id: star_lc_full
     overwrite: true
     baseline:
       workspace_run_id: star_full_lc

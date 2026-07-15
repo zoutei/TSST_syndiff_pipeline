@@ -51,7 +51,7 @@ and pass `--config <diff.yaml> --deployment <deployment.yaml>`. On
 |------|----------|-------|-------------|
 | `--star-config` | yes | yes | Star policy YAML (default: `<site>/star_config.yaml`) |
 | `--star-targets` | yes | yes | Star targets CSV (default: `<site>/star_targets_example.csv`) |
-| `--workspace-run-id` | yes | yes | Output suffix under `events/{label}/star_{id}/` |
+| `--workspace-run-id` | yes | yes | Deprecated and ignored; star outputs always land in `{baseline_ws}/host_star/` |
 | `--config` | yes | — | Orchestrator `pipeline.yaml` (default: `<site>/pipeline.yaml`) |
 | `--run-id` | yes | — | Unique run name (must not already exist) |
 | `--force-rerun` | yes | — | Ignore existing star artifacts for this run |
@@ -163,7 +163,7 @@ event artifacts when it starts.
 | **`ps1_process`** | `template_creation/.../ps1_process.py` | Convolution onto TESS grid (defaults to Condor). |
 | **`downsample`** | `template_creation/.../downsample.py` | Multi-offset template FITS + `ps1_removed_stars.csv` in `event_dir`. |
 | **`diff`** | `difference_imaging/.../execute.py` | Config-driven Hotpants → photometry; outputs in `events/{label}/ws/`. |
-| **`star`** | `star/runner.py` | Host-star mini-templates, kernel-reused stamps, and light curves under `events/{label}/star*/`. |
+| **`star`** | `star/runner.py` | Host-star mini-templates, kernel-reused stamps, and light curves under `{baseline_ws}/host_star/`. |
 
 **Executors**: `mapping`, `ps1_process`, `diff`, and `star` can run on
 HTCondor; other stages are local subprocesses on the submit host.

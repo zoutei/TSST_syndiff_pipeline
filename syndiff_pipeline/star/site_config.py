@@ -115,7 +115,7 @@ class StarRunConfig:
     kernel_margin_px: int = 470
     ps1_source: str = "zarr_download"
     debug_plots: bool = True
-    workspace_run_id: str | None = None
+    workspace_run_id: str | None = None  # deprecated; unused for writes
     max_ffis: int | None = None
     overwrite: bool = False
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
@@ -402,6 +402,12 @@ def resolve_star_run_config(
 
     ps1_source = normalize_ps1_source(merged_defaults.get("ps1_source", "zarr_download"))
     workspace_run_id = _optional_str(merged_defaults.get("workspace_run_id"))
+    if workspace_run_id is not None:
+        log.warning(
+            "star defaults/overrides workspace_run_id=%r is deprecated and ignored; "
+            "star outputs always land in {baseline_ws}/host_star/",
+            workspace_run_id,
+        )
     max_ffis_raw = merged_defaults.get("max_ffis")
     max_ffis = int(max_ffis_raw) if max_ffis_raw not in (None, "") else None
 
@@ -411,6 +417,7 @@ def resolve_star_run_config(
         kernel_margin_px=int(merged_defaults.get("kernel_margin_px", 470)),
         ps1_source=ps1_source,
         debug_plots=bool(merged_defaults.get("debug_plots", True)),
+        # Deprecated: kept for legacy verify fallback of old star_{id}/ trees.
         workspace_run_id=workspace_run_id,
         max_ffis=max_ffis,
         overwrite=bool(merged_defaults.get("overwrite", False)),

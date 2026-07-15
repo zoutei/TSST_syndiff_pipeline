@@ -9,10 +9,7 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
-from syndiff_pipeline.difference_imaging.support.paths import (
-    DEFAULT_MANIFEST_BASENAME,
-    normalize_workspace_run_id,
-)
+from syndiff_pipeline.difference_imaging.support.paths import DEFAULT_MANIFEST_BASENAME
 from syndiff_pipeline.star.context import (
     StarEventContext,
     StarPrerequisiteError,
@@ -43,13 +40,44 @@ from syndiff_pipeline.star.windowed_photometry import run_windowed_forced_photom
 
 logger = logging.getLogger(__name__)
 
+HOST_STAR_SUBDIR = "host_star"
 
-def star_output_root(ctx: StarEventContext, workspace_run_id: str | None) -> Path:
+
+def star_output_root(ctx: StarEventContext) -> Path:
+    """Return ``{baseline_ws}/host_star`` for star-branch outputs."""
+    return Path(ctx.baseline_workspace_dir) / HOST_STAR_SUBDIR
+
+
+def legacy_star_output_root(
+    ctx: StarEventContext, workspace_run_id: str | None
+) -> Path | None:
+    """Return pre-``host_star`` sibling path ``events/{label}/star[_id]/`` if any.
+
+    Used only for backward-compatible verify of runs that wrote under the old
+    layout. New runs always write via :func:`star_output_root`.
+    """
+    from syndiff_pipeline.difference_imaging.support.paths import (
+        normalize_workspace_run_id,
+    )
+
     event = Path(ctx.event_dir)
     run_id = normalize_workspace_run_id(workspace_run_id)
     if run_id:
         return event / f"star_{run_id}"
     return event / "star"
+
+
+def resolve_star_host_root(
+    ctx: StarEventContext, workspace_run_id: str | None = None
+) -> Path:
+    """Prefer ``host_star/``; fall back to legacy sibling when only that exists."""
+    host_root = star_output_root(ctx)
+    if (host_root / "batch_manifest.csv").is_file():
+        return host_root
+    legacy = legacy_star_output_root(ctx, workspace_run_id)
+    if legacy is not None and (legacy / "batch_manifest.csv").is_file():
+        return legacy
+    return host_root
 
 
 def _mini_template_fits_paths(mini_paths: list[str]) -> dict[tuple[float, float], str]:
@@ -203,7 +231,7 @@ def run_star_pipeline(
         raise ValueError("stars_file is required")
 
     requests = load_star_hosts_file(hosts_path)
-    star_root = star_output_root(ctx, run_config.workspace_run_id)
+    star_root = star_output_root(ctx)
     star_root.mkdir(parents=True, exist_ok=True)
 
     manifest_rows: list[dict] = []

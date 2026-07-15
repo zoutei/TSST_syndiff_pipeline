@@ -28,12 +28,11 @@ defaults:
   kernel_margin_px: 470
   ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
   debug_plots: true
-  workspace_run_id: null      # null → events/{label}/star/
   max_ffis: null              # truncate manifest for debug runs
   overwrite: false
 
 baseline:
-  workspace_run_id: none      # ws/ vs ws_{id}/
+  workspace_run_id: none      # ws/ vs ws_{id}/; star writes to {baseline_ws}/host_star/
   diffs: hp_d                 # locates {diffs}_kernels/
   convolved: hp_c
   phot_bkg: ks_b_s            # subtract from raw FFI (NOT hp_b)
@@ -90,15 +89,16 @@ overrides:
 | `kernel_margin_px` | 470 | Convolution margin around stamp (Hotpants kernel extent) |
 | `ps1_source` | `zarr_download` | PS1 skycell ingest mode (see below) |
 | `debug_plots` | `true` | Write segment / downsample / LC debug PNGs |
-| `workspace_run_id` | `null` | Star output suffix: `star/` vs `star_{id}/` |
 | `max_ffis` | `null` | Limit frames processed (debug) |
 | `overwrite` | `false` | Recompute existing stamps |
+
+Deprecated: `defaults.workspace_run_id` (formerly named sibling `star_{id}/` trees). Ignored for writes; still used only to locate legacy manifests during verify.
 
 ### `baseline.*` labels
 
 | Key | Example | Purpose |
 |-----|---------|---------|
-| `workspace_run_id` | `star_full_lc` | Baseline diff under `ws_{id}/` (`none` → `ws/`) |
+| `workspace_run_id` | `star_full_lc` | Baseline diff under `ws_{id}/` (`none` → `ws/`); star outputs go in `{baseline_ws}/host_star/` |
 | `diffs` | `hp_d` | Hotpants diffs label; kernels at `hp_d_kernels/` |
 | `convolved` | `hp_c` | Per-frame convolved template windows |
 | `phot_bkg` | `ks_b_s` or `ks_b` | Photutils background subtracted in stamp |
@@ -202,6 +202,9 @@ After kernel/convolved backfill (`diff_config_star_full_backfill.yaml`):
 ```text
 ws_star_full_lc/            # baseline.workspace_run_id: star_full_lc
   hp_d/, hp_c/, hp_d_kernels/, ks_b_s/
+  host_star/                # syndiff star outputs (nested in baseline ws)
+    batch_manifest.csv
+    {gaia_source_id}/...
 ```
 
 Set matching `baseline_workspace_run_id` in `star_targets` or `star_config.overrides`.

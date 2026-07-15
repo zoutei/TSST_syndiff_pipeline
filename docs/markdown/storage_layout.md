@@ -24,8 +24,8 @@ Example paths (adjust for your site):
 | **event dir** | `{workspace_root}/events/{target_label}/` — handoff JSON + diff outputs for one target |
 | **run dir** | `{workspace_root}/runs/{run_id}/` — frozen config and per-run stage sidecars |
 | **control dir** | `{workspace_root}/control/` — orchestrator-only files (SQLite, daemon, Discord) |
-| **workspace tree** | `events/{label}/ws/` (canonical) or `events/{label}/ws_{workspace_run_id}/` — diff sub-pipeline artifacts |
-| **workspace_run_id** | Namespaces diff (`ws_{id}/`) and star (`star_{id}/`) output trees when set in `diff_config` / `star_config` |
+| **workspace tree** | `events/{label}/ws/` (canonical) or `events/{label}/ws_{workspace_run_id}/` — diff sub-pipeline artifacts (and star outputs under `host_star/`) |
+| **workspace_run_id** | Namespaces the diff workspace tree (`ws_{id}/`) when set in `diff_config` / `star_config.baseline` |
 
 Deprecated in prose: *handoff root*, *template_handoffs* (old path name).
 
@@ -77,26 +77,25 @@ Only three top-level subtrees belong here long-term:
         {lc_label}/                # forced_photometry output; e.g. lc_gepsf_on_hp_diffs
           lightcurve_{method}.csv  # e.g. lightcurve_gepsf.csv
           lightcurve_{method}_{extra}.csv
-      star/                        # default host-star outputs (syndiff star)
-      star_{workspace_run_id}/       # namespaced star outputs (star_config workspace_run_id)
-        batch_manifest.csv
-        {gaia_source_id}/
-          identifier.json
-          host_gaia_row.csv
-          mini_templates/
-          diff_stamps/
-          lightcurve_{method}_gaia_{id}.csv
-          plots/                   # when debug_plots: true
+        host_star/                 # syndiff star outputs (nested in baseline ws)
+          batch_manifest.csv
+          {gaia_source_id}/
+            identifier.json
+            host_gaia_row.csv
+            mini_templates/
+            diff_stamps/
+            lightcurve_{method}_gaia_{id}.csv
+            plots/                 # when debug_plots: true
 ```
 
 ### Diff workspace trees (`ws/` / `ws_{workspace_run_id}/`)
 
-Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.gz` (`support/ffi_naming.py`).
+Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.gz` (`support/ffi_naming.py`). Star-branch outputs live under `host_star/` inside the baseline workspace (not a sibling `star_*` tree).
 
 | Path (under active `ws*` tree) | Stage / role |
 |--------------------------------|--------------|
 | `templates/` | Symlink to downsampled `syndiff_template_*.fits.gz` (or `paths.template_dir` override) |
-| `master/` | Flat basename symlinks to all workspace FITS + optional `tess_ffi` link (`master_fits_mirror`) |
+| `master/` | Flat basename symlinks to all workspace FITS + optional `tess_ffi` link (`master_fits_mirror`); skips `host_star/` |
 | `debug_plots/` | Diagnostic PNGs when `pipeline_plots: true` (ePSF montages, light-curve figures, background GIFs) |
 | `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `tile_centers.json` | `shared_mask`, ePSF, `sat_template`, legacy photometry |
 | `{diffs_label}/` | Hotpants or `kernel_subtract` difference images (e.g. `hp_d/`) |
@@ -111,6 +110,9 @@ Filesystem name comes from `workspace_tree_name()` in `difference_imaging/suppor
 | `{centroids_label}/centroids.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.centroids.progress.json` beside `diff.log`) |
 | `{lc_label}/lightcurve_{method}.csv` | Forced photometry (e.g. `lc_gepsf_on_hp_diffs/lightcurve_gepsf.csv`) |
 | `{lc_label}/lightcurve_{method}_{extra}.csv` | Additional forced targets (`additional_forced_targets`) |
+| `host_star/` | Host-star light curves (`syndiff star`): per-Gaia stamps, mini-templates, LCs |
+
+**Legacy:** older star runs wrote sibling trees `events/{label}/star/` or `star_{id}/`. Verify still accepts those when `host_star/batch_manifest.csv` is absent.
 
 **`workspace_inherit`** (`difference_imaging/support/workspace_inherit.py`): preamble entry that symlinks selected labels and root artifacts from a parent `ws_{from_run_id}/` into a child `ws_{run_id}/` without modifying the parent tree. Relative links look like `../ws_{from_run_id}/{label}`. Typical inherited labels: `hp_d`, `hp_m`; typical root artifacts: `shared_mask.fits`, `gaia_catalog_pipeline.csv`, `hotpants_substamp_stars.csv`, `targets.reg`.
 
