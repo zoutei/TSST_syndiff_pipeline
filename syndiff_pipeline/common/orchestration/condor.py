@@ -87,7 +87,12 @@ def format_condor_job_suffix(cluster_id: int, status: int | None) -> str:
 
 
 def condor_artifact_paths(
-    runs_root: str, run_id: str, target_label: str, stage: str
+    runs_root: str,
+    run_id: str,
+    target_label: str,
+    stage: str,
+    *,
+    mkdir: bool = True,
 ) -> dict[str, Path]:
     """Condor artifact paths.
     
@@ -97,12 +102,15 @@ def condor_artifact_paths(
     run_id : str
     target_label : str
     stage : str
+    mkdir : bool, optional, default ``True``
+        When ``False``, paths are returned without creating directories (read-only use).
     
     Returns
     -------
     dict[str, Path]"""
     base = Path(runs_root) / run_id / "per_target" / target_label
-    base.mkdir(parents=True, exist_ok=True)
+    if mkdir:
+        base.mkdir(parents=True, exist_ok=True)
     return {
         "stdout": base / f"{stage}.condor.stdout",
         "stderr": base / f"{stage}.condor.stderr",
@@ -120,7 +128,9 @@ def read_recorded_cluster_id(
     runs_root: str, run_id: str, target_label: str, stage: str
 ) -> int | None:
     """Read the last submitted cluster id from the durable ``*.condor.clusters`` file."""
-    path = condor_artifact_paths(runs_root, run_id, target_label, stage)["clusters"]
+    path = condor_artifact_paths(
+        runs_root, run_id, target_label, stage, mkdir=False
+    )["clusters"]
     if not path.is_file():
         return None
     for line in path.read_text(encoding="utf-8").splitlines():

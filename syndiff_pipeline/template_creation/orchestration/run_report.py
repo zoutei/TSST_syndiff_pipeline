@@ -112,6 +112,7 @@ def _progress_detail_lines(
 ) -> list[str]:
     from syndiff_pipeline.pipeline_spec import stage_short_names
 
+    short_names = stage_short_names()
     lines: list[str] = []
     for row in sorted(rows, key=lambda r: (r.target_label, r.stage)):
         log_path = row.log_path or str(
@@ -123,7 +124,7 @@ def _progress_detail_lines(
             started_at=row.started_at,
             max_scan_bytes=PROGRESS_CLI_MAX_TAIL_SCAN_BYTES,
         )
-        short = stage_short_names().get(row.stage, row.stage)
+        short = short_names.get(row.stage, row.stage)
         condor_text = _condor_detail_text(row, cluster_status, cfg)
         if not condor_text and row.native_id is None:
             from syndiff_pipeline.common.orchestration import condor

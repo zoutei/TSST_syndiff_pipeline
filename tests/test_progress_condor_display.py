@@ -215,5 +215,25 @@ class TestProgressCondorDisplay(unittest.TestCase):
             self.assertTrue(any("condor idle c3.0" in line for line in lines))
 
 
+class TestStageShortNamesLightweight(unittest.TestCase):
+    def test_stage_short_names_avoids_heavy_stage_imports(self):
+        import sys
+
+        heavy = (
+            "syndiff_pipeline.difference_imaging.orchestration.stages",
+            "syndiff_pipeline.star.orchestration.stages",
+        )
+        before = set(sys.modules)
+        from syndiff_pipeline.pipeline_spec import stage_short_names
+
+        names = stage_short_names()
+        for mod in heavy:
+            if mod not in before:
+                self.assertNotIn(mod, sys.modules)
+        self.assertEqual(names["downsample"], "down")
+        self.assertEqual(names["diff"], "diff")
+        self.assertEqual(names["star"], "star")
+
+
 if __name__ == "__main__":
     unittest.main()

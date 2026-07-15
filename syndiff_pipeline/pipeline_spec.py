@@ -8,6 +8,14 @@ from typing import Any
 from syndiff_pipeline.common.orchestration.spec import PipelineSpec, StageRunContext, StageSpec
 
 _PIPELINE: PipelineSpec | None = None
+_STAGE_SHORT_NAMES: dict[str, str] | None = None
+
+# Display-only short names for CLI progress/notifications. Kept in sync with
+# TEMPLATE_STAGES + diff/star without importing heavy stage modules.
+_STATIC_STAGE_SHORT_NAMES: dict[str, str] = {
+    "diff": "diff",
+    "star": "star",
+}
 
 
 @lru_cache
@@ -151,12 +159,15 @@ def stage_names() -> tuple[str, ...]:
 
 
 def stage_short_names() -> dict[str, str]:
-    """Stage short names.
-    
-    Returns
-    -------
-    dict[str, str]"""
-    return _pipeline().stage_short_names()
+    """Stage short names without loading diff/star stage modules."""
+    global _STAGE_SHORT_NAMES
+    if _STAGE_SHORT_NAMES is None:
+        from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
+
+        names = {spec.name: spec.short_name for spec in TEMPLATE_STAGES}
+        names.update(_STATIC_STAGE_SHORT_NAMES)
+        _STAGE_SHORT_NAMES = names
+    return _STAGE_SHORT_NAMES
 
 
 def resolve_stage_name(name: str) -> str:
@@ -186,7 +197,7 @@ def __getattr__(name: str) -> Any:
     if name == "STAGE_NAMES":
         return pipeline.stage_names
     if name == "STAGE_SHORT_NAMES":
-        return pipeline.stage_short_names()
+        return stage_short_names()
     if name == "STAGE_DEPS":
         return pipeline.stage_deps()
     if name == "STAGE_POOL":
