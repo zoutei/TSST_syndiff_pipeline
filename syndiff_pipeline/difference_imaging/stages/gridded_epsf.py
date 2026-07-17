@@ -64,6 +64,8 @@ def _init_gridded_epsf_worker(
     output_dir: str,
     mask_2d: np.ndarray | None,
     skip_existing: bool = True,
+    mask_catalog=None,
+    btjd_by_stem: dict | None = None,
 ) -> None:
     """Load shared ePSF inputs once per loky worker (see starpositioningscript)."""
     _suppress_photutils_epsf_noise()
@@ -75,8 +77,21 @@ def _init_gridded_epsf_worker(
             "output_dir": output_dir,
             "mask_2d": mask_2d,
             "skip_existing": bool(skip_existing),
+            "mask_catalog": mask_catalog,
+            "btjd_by_stem": btjd_by_stem or {},
         }
     )
+
+
+def _resolve_epsf_frame_mask(ctx: dict, ffi_stem: str) -> np.ndarray | None:
+    """Per-FFI ePSF reject mask from MaskCatalog (preferred) or static fallback."""
+    catalog = ctx.get("mask_catalog")
+    if catalog is not None:
+        from syndiff_pipeline.masking.bits import epsf_reject_mask
+
+        btjd = ctx.get("btjd_by_stem", {}).get(ffi_stem)
+        return epsf_reject_mask(catalog.mask_at(btjd, which="full"))
+    return ctx.get("mask_2d")
 
 
 def _configure_blas_threads(n_workers: int) -> None:
@@ -552,9 +567,9 @@ def _fit_one_frame_task(
     gaia_df = ctx["gaia_df"]
     epsf_params = ctx["epsf_params"]
     output_dir = ctx["output_dir"]
-    mask_2d = ctx.get("mask_2d")
 
     ffi_stem = _diff_path_to_stem(diff_path) if diff_path else f"frame_{frame_idx}"
+    mask_2d = _resolve_epsf_frame_mask(ctx, ffi_stem)
     out_path = gridded_epsf_npz_path(output_dir, ffi_stem)
     if ctx.get("skip_existing", True) and _is_valid_gridded_epsf_npz(out_path):
         return frame_idx, ffi_stem, True, None, None, True
@@ -594,6 +609,8 @@ def fit_gridded_epsf_all_frames(
     output_dir: str,
     *,
     mask_2d: np.ndarray | None = None,
+    mask_catalog=None,
+    btjd_by_stem: dict | None = None,
     round_id: int = 1,
     diff_log_path: str | None = None,
     epsf_label: str | None = None,
@@ -602,6 +619,10 @@ def fit_gridded_epsf_all_frames(
 ) -> tuple[np.ndarray, list[tuple[float, float]], list[str], list[bool]]:
     """
     Fit gridded ePSF on every difference image (thread-parallel over frames).
+
+    When ``mask_catalog`` is provided, each frame resolves an ePSF reject mask
+    via in-memory ``mask_at(btjd)`` (no static-mask FITS I/O per frame).
+    ``mask_2d`` remains a static fallback when no catalog is available.
 
     Returns
     -------
@@ -669,8 +690,15 @@ def fit_gridded_epsf_all_frames(
             workspace_progress_path, cli_progress_path, success=_ok
         )
 
-    worker_initargs = (gaia_df, epsf_params, output_dir, mask_2d, skip_existing)
-
+    worker_initargs = (
+        gaia_df,
+        epsf_params,
+        output_dir,
+        mask_2d,
+        skip_existing,
+        mask_catalog,
+        btjd_by_stem or {},
+    )
     results: list[tuple] = []
     if n_workers <= 1 or n_frames <= 1:
         _init_gridded_epsf_worker(*worker_initargs)
