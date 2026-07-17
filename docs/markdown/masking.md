@@ -57,6 +57,10 @@ Resolve order ([`resolve_mask_settings`](../../syndiff_pipeline/masking/settings
 3. Site `{site_dir}/mask_settings.yaml` (sibling of `diff_config.yaml`)
 4. Packaged code defaults (`MaskSettings()` — empirical; TNS/asteroids **enabled**)
 
+Because step 2 wins over the site file, editing site `mask_settings.yaml`
+alone does **not** change an existing workspace until you remove/replace
+`{ws}/mask_settings.yaml` (or force-rerun `shared_mask`).
+
 Copy [`config/mask_settings.example.yaml`](../../config/mask_settings.example.yaml)
 to site `mask_settings.yaml` when you want non-default maglims / style / TNS /
 asteroids.
@@ -74,8 +78,12 @@ defaults). Prefer editing `mask_settings.yaml`.
 selection** only: `ref_mag_min` / `ref_mag_max` / `ref_isolation_*` /
 `ref_separation_px`.
 
-On `shared_mask` execute, effective YAML is frozen to `{ws}/mask_settings.yaml`.
-On submit, if the site file exists it is also copied to `runs/{run_id}/mask_settings.yaml`.
+Two freeze locations (do not confuse them):
+
+- `{ws}/mask_settings.yaml` — **effective** settings written on `shared_mask`
+  execute (includes any stage-path YAML and legacy stage-key overrides).
+- `runs/{run_id}/mask_settings.yaml` — on submit, a copy of the **site** sibling
+  only (audit trail; not post-override effective settings).
 
 ## Artifacts
 
