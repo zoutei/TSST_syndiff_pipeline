@@ -424,7 +424,21 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
         )
 
     templates_path = Path(ctx.templates_dir)
-    if not _dir_has_glob(str(templates_path), "syndiff_template_*"):
+    field_mode = str(ctx.cluster_job.get("geometry_mode") or "linear").lower() == "field"
+    if field_mode:
+        # Field mode: the "templates_dir" is the SCC field store; require its
+        # manifest + the per-event group-shift schedule instead of linear FITS.
+        if not (templates_path / "template_manifest.json").is_file():
+            missing.append(
+                f"no field template_manifest.json under {templates_path}; "
+                "run template downsample (geometry_mode: field) for this event"
+            )
+        if not (Path(ctx.event_dir) / "template_group_shifts.parquet").is_file():
+            missing.append(
+                f"template_group_shifts.parquet missing under {ctx.event_dir}; "
+                "run field template downsample for this event"
+            )
+    elif not _dir_has_glob(str(templates_path), "syndiff_template_*"):
         missing.append(
             f"no syndiff_template_* files under {templates_path}; "
             "run template downsample for this event"

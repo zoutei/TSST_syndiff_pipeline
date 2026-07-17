@@ -52,6 +52,68 @@ def convolve_star_only_cutout(
     return np.asarray(convolved, dtype=np.float32), (y0, x0)
 
 
+def build_field_star_shifts(
+    group_shifts_df: pd.DataFrame,
+    group_ids: list[int],
+    involved_skycells: list[str],
+) -> tuple[np.ndarray, dict[tuple[float, float], pd.DataFrame], dict[int, int]]:
+    """Build star-binning ``(offsets, shifts_dict, group_to_index)`` from the
+    field ``template_group_shifts`` (columns ``group_id, skycell, sx_int, sy_int``).
+
+    "Use the new mapping": instead of the linear target-anchored offset model,
+    each group's per-skycell integer shifts drive the same star-only binning.
+    Because the star ROI covers only a few skycells, groups whose shifts over
+    ``involved_skycells`` are identical collapse to one mini-template — so the
+    star still produces a handful of templates, not one per global group.
+
+    Returns
+    -------
+    offsets : (n_sig, 2) float pseudo-keys (index encoded in column 0)
+    shifts_dict : {(idx, 0.0) -> DataFrame(NAME, shift_x, shift_y)}
+    group_to_index : {group_id -> offset row index}
+    """
+    involved = [str(s) for s in involved_skycells]
+    gs = group_shifts_df[group_shifts_df["skycell"].astype(str).isin(involved)]
+
+    sig_to_index: dict[tuple, int] = {}
+    offset_rows: list[list[float]] = []
+    shift_frames: list[pd.DataFrame] = []
+    group_to_index: dict[int, int] = {}
+
+    for gid in group_ids:
+        sub = gs[gs["group_id"] == int(gid)]
+        shift_map = {
+            str(r.skycell): (int(r.sx_int), int(r.sy_int))
+            for r in sub.itertuples(index=False)
+        }
+        sig = tuple((s, shift_map.get(s, (0, 0))) for s in involved)
+        if sig not in sig_to_index:
+            idx = len(offset_rows)
+            sig_to_index[sig] = idx
+            offset_rows.append([float(idx), 0.0])
+            shift_frames.append(
+                pd.DataFrame(
+                    {
+                        "NAME": involved,
+                        "shift_x": [shift_map.get(s, (0, 0))[0] for s in involved],
+                        "shift_y": [shift_map.get(s, (0, 0))[1] for s in involved],
+                    }
+                )
+            )
+        group_to_index[int(gid)] = sig_to_index[sig]
+
+    offsets = (
+        np.array(offset_rows, dtype=float)
+        if offset_rows
+        else np.zeros((0, 2), dtype=float)
+    )
+    shifts_dict = {
+        (float(offsets[i, 0]), float(offsets[i, 1])): shift_frames[i]
+        for i in range(len(offset_rows))
+    }
+    return offsets, shifts_dict, group_to_index
+
+
 def downsample_star_arrays(
     *,
     arrays: dict[str, tuple[np.ndarray, np.ndarray]],

@@ -14,12 +14,14 @@ from astropy.wcs import WCS
 
 from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
 from syndiff_pipeline.star.context import (
+    DEFAULT_MANIFEST_BASENAME,
     StarEventContext,
     full_ffi_to_crop_local,
     resolve_host_full_ffi_xy,
 )
 from syndiff_pipeline.star.identifiers import ResolvedHost
 from syndiff_pipeline.star.mini_downsample import (
+    build_field_star_shifts,
     convolve_star_only_cutout,
     downsample_star_arrays,
     write_star_mini_templates,
@@ -553,12 +555,29 @@ def isolate_and_write_mini_templates(
             "error": "no_valid_segments",
         }
 
-    offsets = offsets_from_cluster_job_payload(ctx.cluster_job)
-    tess_wcs, _ = load_tess_wcs(Path(ctx.master_mapping_fits))
     involved_names = list(convolved_arrays.keys())
-    skycell_df = _load_skycell_csv(ctx)
-    skycell_df = skycell_df[skycell_df["NAME"].isin(involved_names)].reset_index(drop=True)
-    shifts_dict = precompute_shifts_for_offsets(tess_wcs, skycell_df, offsets)
+    field_mode = str(ctx.cluster_job.get("geometry_mode") or "linear").lower() == "field"
+    group_to_index: dict[int, int] | None = None
+    if field_mode:
+        # Use the new field mapping: per-skycell integer shifts per group_id from
+        # template_group_shifts drive the SAME star-only binning, deduped to the
+        # distinct local shift signatures over the star's few skycells.
+        gsf = pd.read_parquet(Path(ctx.event_dir) / "template_group_shifts.parquet")
+        frames = pd.read_csv(Path(ctx.event_dir) / DEFAULT_MANIFEST_BASENAME)
+        group_ids = sorted(
+            {int(g) for g in frames["group_id"].tolist() if pd.notna(g) and int(g) >= 0}
+        )
+        offsets, shifts_dict, group_to_index = build_field_star_shifts(
+            gsf, group_ids, involved_names
+        )
+    else:
+        offsets = offsets_from_cluster_job_payload(ctx.cluster_job)
+        tess_wcs, _ = load_tess_wcs(Path(ctx.master_mapping_fits))
+        skycell_df = _load_skycell_csv(ctx)
+        skycell_df = skycell_df[skycell_df["NAME"].isin(involved_names)].reset_index(
+            drop=True
+        )
+        shifts_dict = precompute_shifts_for_offsets(tess_wcs, skycell_df, offsets)
 
     reg_files = []
     skycell_names = []
@@ -613,6 +632,31 @@ def isolate_and_write_mini_templates(
         host_identifier_metadata=host_metadata,
     )
 
+    # Field mode: persist group_id -> mini-template path (via the deduped
+    # signature index) so the star diff runner can look up a frame's mini
+    # template by its group_id instead of a linear (dx, dy) offset.
+    field_group_to_template: dict[int, str] | None = None
+    if field_mode and group_to_index is not None:
+        import json as _json
+
+        field_group_to_template = {
+            int(gid): mini_paths[idx]
+            for gid, idx in group_to_index.items()
+            if 0 <= idx < len(mini_paths)
+        }
+        (Path(output_dir) / "star_mini_template_index.json").write_text(
+            _json.dumps(
+                {
+                    "schema_version": 1,
+                    "geometry_mode": "field",
+                    "group_to_template": {
+                        str(k): v for k, v in field_group_to_template.items()
+                    },
+                }
+            )
+            + "\n"
+        )
+
     x_local, y_local = full_ffi_to_crop_local(ctx, *host_xy_full)
     roi_bounds_crop = (
         roi_bounds_full[0] - x_min_crop,
@@ -639,6 +683,7 @@ def isolate_and_write_mini_templates(
         "host_gaia_source_id": int(host.gaia_source_id),
         "skycells": skycell_summaries,
         "mini_template_paths": mini_paths,
+        "field_group_to_template": field_group_to_template,
         "plot_paths": plot_paths,
         "roi_bounds": roi_bounds_crop,
         "debug_offset": (dx, dy),
