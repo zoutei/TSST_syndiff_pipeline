@@ -1,0 +1,32 @@
+# Empirical mask geometry from multi-FFI final_diff median stacks
+# (thresh |Δ|=0.5). Circles: T ≥ 9. Crosses: T < 9 (Gaia ∪ BSC for T < 7).
+# Radii for T 13–18 used by TNS / asteroid radius_from_mag; hybrid bright
+# painter only applies circles for 9 ≤ mag < bright_maglim.
+
+circle_bins:
+  # [mag_hi, mag_lo, radius_px]
+  - [18.0, 17.0, 2]
+  - [17.0, 16.0, 3]
+  - [16.0, 15.0, 3]
+  - [15.0, 14.0, 4]
+  - [14.0, 13.0, 4]
+  - [13.0, 12.0, 6]
+  - [12.0, 11.0, 7]
+  - [11.0, 10.0, 8]
+  - [10.0, 9.0, 9]
+
+# Cross geometry thresholds (mag_max inclusive upper edge of bin).
+# body / length / width in pixels before scale.
+cross_bins:
+  - {mag_max: 4.0, body: 38.0, length: 97.0, width: 11.0}
+  - {mag_max: 5.0, body: 29.0, length: 61.0, width: 11.0}
+  - {mag_max: 6.0, body: 24.0, length: 45.0, width: 7.0}
+  - {mag_max: 7.0, body: 20.0, length: 34.0, width: 5.0}
+  - {mag_max: 8.0, body: 13.0, length: 19.0, width: 5.0}
+  - {mag_max: 9.0, body: 10.0, length: 15.0, width: 3.0}
+
+circle_mag_min: 9.0
+cross_mag_max: 9.0
+faint_radius: 2
+default_radius: 4
+v_to_t: 0.671

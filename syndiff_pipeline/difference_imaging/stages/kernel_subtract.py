@@ -92,6 +92,8 @@ def _process_one_frame(task: tuple) -> dict:
     p = _KERNEL_SUBTRACT_LOKY
     crop_bounds = p["crop_bounds"]
     shared_mask = p["shared_mask"]
+    mask_catalog = p.get("mask_catalog")
+    btjd_by_product_id = p.get("btjd_by_product_id") or {}
     convolved_table = p["convolved_table"]
     phot_box_size = p["phot_box_size"]
     diffs_dir = p["diffs_dir"]
@@ -114,6 +116,8 @@ def _process_one_frame(task: tuple) -> dict:
         }
 
     try:
+        from syndiff_pipeline.masking.bits import full_mask_bool
+
         group_dx, group_dy, _ = resolve_template_for_ffi(
             output_dir, manifest, ffi_path
         )
@@ -125,9 +129,16 @@ def _process_one_frame(task: tuple) -> dict:
                 f"FFI shape {ffi.shape} != convolved template {convolved.shape}"
             )
 
+        if mask_catalog is not None:
+            frame_mask = full_mask_bool(
+                mask_catalog.mask_at(btjd_by_product_id.get(product_id), which="full")
+            )
+        else:
+            frame_mask = shared_mask
+
         diff_raw = ffi - convolved
         phot_bkg = photutils_background_masked(
-            diff_raw, shared_mask, box_size=phot_box_size
+            diff_raw, frame_mask, box_size=phot_box_size
         )
 
         header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
@@ -169,11 +180,31 @@ def kernel_subtract_loop(
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
     n_jobs: int = 1,
+    mask_catalog=None,
 ) -> list[dict]:
     """Run algebraic diff + photutils background for each FFI."""
     os.makedirs(diffs_dir, exist_ok=True)
     if bkg_dir:
         os.makedirs(bkg_dir, exist_ok=True)
+
+    btjd_by_product_id: dict = {}
+    btjd_col = None
+    if manifest is not None:
+        for c in ("btjd", "BTJD", "tjd", "TJD", "jd", "JD"):
+            if c in manifest.columns:
+                btjd_col = c
+                break
+        if btjd_col is not None:
+            for _, row in manifest.iterrows():
+                pid = tess_product_id_from_ffi_path(
+                    str(row.get("ffi_path", row.get("path", "")))
+                )
+                if pid is None:
+                    continue
+                try:
+                    btjd_by_product_id[pid] = float(row[btjd_col])
+                except (TypeError, ValueError):
+                    pass
 
     payload = {
         "crop_bounds": crop_bounds,
@@ -186,6 +217,8 @@ def kernel_subtract_loop(
         "bkg_label": bkg_label,
         "output_dir": output_dir,
         "manifest": manifest,
+        "mask_catalog": mask_catalog,
+        "btjd_by_product_id": btjd_by_product_id,
     }
 
     tasks = [(ffi_path,) for ffi_path in ffi_paths]

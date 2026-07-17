@@ -410,6 +410,8 @@ def resolve_diff_config(
         sector=target.sector,
         camera=target.camera,
         ccd=target.ccd,
+        data_root=str(data_root_path.resolve()),
+        site_config_dir=str(Path(site_dir).expanduser().resolve()),
         **optional_paths,
     )
     for key, val in merged_defaults.items():

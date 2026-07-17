@@ -101,6 +101,12 @@ class SynDiffConfig:
     the bundled ``syndiff_pipeline/resources/bsc5/catalog`` is used for
     bright-star saturation crosses in ``shared_mask``."""
 
+    data_root: str = ""
+    """SCC-wide data root (deployment ``data_root``). Used for TNS / asteroid catalogs."""
+
+    site_config_dir: str = ""
+    """Site config directory (for resolving ``mask_settings.yaml``)."""
+
     # ── Template paths: filled from template-pipeline handoff ─────────────────
     template_paths: dict = field(default_factory=dict)
     """Mapping group_id → absolute path of the PS1 template FITS for that group.
@@ -370,6 +376,8 @@ _PATH_FIELDS = (
     "ref_ffi_path",
     "template_dir",
     "manifest",
+    "data_root",
+    "site_config_dir",
 )
 
 

@@ -223,19 +223,18 @@ def load_epsf_smooth(output_dir: str, round_id: int) -> tuple:
 # ── Per-frame gridded ePSF fitting (photutils) ────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# shared_mask bit values used for ePSF star rejection (see masking.Source_mask):
-#   value 2 — very bright star crosses (Big_sat)
-#   value 4 — TESS straps
-# Catalog Gaia sources (value 1) must NOT be excluded — those are the ePSF stars.
-EPSF_SHARED_MASK_BITS = 2 | 4
+# shared_mask bits ignored for ePSF star rejection: BRIGHT_CAT | SAT_CROSS (1|2).
+# Any other set bit rejects (straps, edges, PS1, faint squares, TNS, asteroids).
+from syndiff_pipeline.masking.bits import EPSF_IGNORE_BITS, epsf_reject_mask
+
+EPSF_SHARED_MASK_BITS = EPSF_IGNORE_BITS  # legacy name; now means "ignored" bits
 
 
 def _load_shared_mask_2d(shared_mask_path: str | None, shape: tuple[int, int]) -> np.ndarray | None:
     """
     Load boolean bad-pixel mask for ePSF star extraction, if available.
 
-    Only bits with values 2 and 4 (bright-star crosses and straps) are used.
-    Catalog-source bit 1 is ignored so Gaia ePSF stars are not removed.
+    Ignores bits 1|2 (bright catalog / sat crosses); rejects on any other bit.
     """
     if not shared_mask_path or not os.path.isfile(shared_mask_path):
         return None
@@ -246,7 +245,7 @@ def _load_shared_mask_2d(shared_mask_path: str | None, shape: tuple[int, int]) -
         mask = np.asarray(data)
         if mask.shape != shape:
             return None
-        return (mask.astype(np.int64) & EPSF_SHARED_MASK_BITS) != 0
+        return epsf_reject_mask(mask)
     except Exception as exc:
         log.debug("shared mask for ePSF not loaded: %s", exc)
         return None

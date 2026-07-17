@@ -40,26 +40,18 @@ def _spatial_one_frame(
     exclude_percentile: float,
     exclude_straps: bool,
 ) -> np.ndarray:
-    """Spatial one frame.
-    
-    Parameters
-    ----------
-    frame : np.ndarray
-    mask : np.ndarray
-    box_size : int
-    filter_size : int
-    exclude_percentile : float
-    exclude_straps : bool
-    
-    Returns
-    -------
-    np.ndarray"""
-    phot_mask = np.asarray(mask)
-    if phot_mask.ndim == 3:
-        phot_mask = phot_mask[0]
-    if exclude_straps:
-        phot_mask = phot_mask.copy()
-        phot_mask[(phot_mask.astype(np.int64) & 4) > 0] = 8
+    """Spatial one frame."""
+    from syndiff_pipeline.masking.bits import full_mask_bool
+
+    raw = np.asarray(mask)
+    if raw.ndim == 3:
+        raw = raw[0]
+    if raw.dtype == bool:
+        phot_mask = raw.copy()
+    else:
+        phot_mask = full_mask_bool(raw)
+        if exclude_straps:
+            phot_mask = phot_mask | ((raw.astype(np.int64) & 4) > 0)
     return photutils_background_masked(
         frame,
         phot_mask,
@@ -92,10 +84,16 @@ def spatial_step(
 
     if nj == 1 or t < 2:
         for i in range(t):
-            out[i] = _spatial_one_frame(flux_cube[i], mask, **kw)
+            m_i = mask[i] if np.asarray(mask).ndim == 3 else mask
+            out[i] = _spatial_one_frame(flux_cube[i], m_i, **kw)
         return out.astype(np.float32)
 
     frames = Parallel(n_jobs=nj)(
-        delayed(_spatial_one_frame)(flux_cube[i], mask, **kw) for i in range(t)
+        delayed(_spatial_one_frame)(
+            flux_cube[i],
+            mask[i] if np.asarray(mask).ndim == 3 else mask,
+            **kw,
+        )
+        for i in range(t)
     )
     return np.asarray(frames, dtype=np.float32)

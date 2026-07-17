@@ -1,0 +1,116 @@
+"""Hybrid empirical shared mask stamps."""
+
+import numpy as np
+import pandas as pd
+
+from syndiff_pipeline.masking import bits
+from syndiff_pipeline.masking.settings import MaskSettings, SharedMaskSettings
+from syndiff_pipeline.masking.shared import build_static_mask, make_shared_mask
+
+
+def _settings(**kwargs):
+    shared = SharedMaskSettings(
+        style="empirical",
+        include_straps=False,
+        include_edges=False,
+        ps1_min_hit_count=0,
+        **kwargs,
+    )
+    return MaskSettings(shared=shared)
+
+
+def test_hybrid_stamp_table():
+    image = np.zeros((80, 80), dtype=np.float64)
+    crop = {"x_min": 100, "x_max": 180, "y_min": 100, "y_max": 180, "shape": (80, 80)}
+    gaia = pd.DataFrame(
+        {
+            "x": [20.0, 40.0, 60.0, 70.0],
+            "y": [20.0, 40.0, 60.0, 70.0],
+            "mag": [11.0, 6.0, 15.0, 19.0],
+        }
+    )
+    mask = build_static_mask(
+        image,
+        gaia,
+        crop,
+        settings=_settings(),
+        straps_csv="/nonexistent/straps.csv",
+    )
+    # mag 11 → bit 1
+    assert mask[20, 20] & bits.BRIGHT_CAT
+    assert not (mask[20, 20] & bits.SAT_CROSS)
+    # mag 6 → 1|2
+    assert mask[40, 40] & bits.BRIGHT_CAT
+    assert mask[40, 40] & bits.SAT_CROSS
+    # mag 15 → bit 32
+    assert mask[60, 60] & bits.FAINT_CAT
+    assert not (mask[60, 60] & bits.BRIGHT_CAT)
+    # mag 19 → none
+    assert mask[70, 70] == 0
+
+
+def test_bsc_cross_only():
+    image = np.zeros((80, 80), dtype=np.float64)
+    crop = {"x_min": 0, "x_max": 80, "y_min": 0, "y_max": 80, "shape": (80, 80)}
+    gaia = pd.DataFrame({"x": [10.0], "y": [10.0], "mag": [12.0]})
+    # Without real FFI, inject BSC via monkeypatch of _project_bsc
+    import syndiff_pipeline.masking.shared as shared_mod
+
+    bsc = pd.DataFrame({"x": [50.0], "y": [50.0], "vmag": [5.0]})
+    orig = shared_mod._project_bsc
+    shared_mod._project_bsc = lambda *a, **k: bsc
+    try:
+        mask = build_static_mask(
+            image,
+            gaia,
+            crop,
+            settings=_settings(),
+            straps_csv="/nonexistent/straps.csv",
+            ref_ffi_path="/tmp/fake.fits",
+        )
+    finally:
+        shared_mod._project_bsc = orig
+    assert mask[50, 50] & bits.SAT_CROSS
+    assert mask[50, 50] & bits.BRIGHT_CAT
+
+
+def test_tessreduce_no_bit32():
+    image = np.zeros((60, 60), dtype=np.float64)
+    crop = {"x_min": 0, "x_max": 60, "y_min": 0, "y_max": 60, "shape": (60, 60)}
+    gaia = pd.DataFrame({"x": [30.0], "y": [30.0], "mag": [15.0]})
+    settings = MaskSettings(
+        shared=SharedMaskSettings(
+            style="tessreduce",
+            include_straps=False,
+            include_edges=False,
+            ps1_min_hit_count=0,
+            bright_maglim=18.0,
+        )
+    )
+    mask = build_static_mask(
+        image,
+        gaia,
+        crop,
+        settings=settings,
+        straps_csv="/nonexistent/straps.csv",
+    )
+    assert not (mask & bits.FAINT_CAT).any()
+    # tessreduce maglim includes 15 → bit 1 squares
+    assert (mask & bits.BRIGHT_CAT).any()
+
+
+def test_make_shared_mask_legacy_basename(tmp_path):
+    image = np.zeros((40, 40), dtype=np.float64)
+    crop = {"x_min": 0, "x_max": 40, "y_min": 0, "y_max": 40, "shape": (40, 40)}
+    gaia = pd.DataFrame({"x": [20.0], "y": [20.0], "mag": [12.0]})
+    mask = make_shared_mask(
+        image,
+        gaia,
+        crop,
+        straps_csv="/nonexistent/straps.csv",
+        strapsize=0,
+        output_dir=str(tmp_path),
+        ps1_min_hit_count=0,
+    )
+    assert (tmp_path / "shared_mask.fits.gz").is_file()
+    assert mask.dtype == np.int16

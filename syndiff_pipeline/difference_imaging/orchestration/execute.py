@@ -155,17 +155,30 @@ def _run_background_stage(
     ctx: PipelineInvocationContext,
     ws_root: str,
     shared_mask: Optional[np.ndarray],
+    mask_catalog,
     wcs_table: pd.DataFrame,
     processing_ffi_paths: list,
     out: str,
-) -> np.ndarray:
-    """Execute unified ``background`` stage; returns updated shared_mask array."""
+    crop_bounds: Optional[dict] = None,
+) -> tuple:
+    """Execute unified ``background`` stage; returns (shared_mask, mask_catalog)."""
     params = parse_background(stage, idx)
     inp = stage.get("inputs") or {}
     label_out = str(stage["output"]).strip()
     out_ws = ctx.workspace(label_out)
     os.makedirs(out_ws, exist_ok=True)
     shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+    mask_catalog = _ensure_mask_catalog_loaded(
+        ws_root,
+        mask_catalog,
+        shared_mask,
+        crop_bounds=crop_bounds,
+        data_root=_infer_data_root(cfg) or None,
+        sector=int(cfg.sector) if cfg.sector is not None else None,
+        camera=int(cfg.camera) if cfg.camera is not None else None,
+        ccd=int(cfg.ccd) if cfg.ccd is not None else None,
+    )
+    shared_mask = mask_catalog.static
 
     diff_label = str(inp.get("diffs") or "").strip()
     bkg_label = str(inp.get("bkg") or "").strip()
@@ -198,10 +211,18 @@ def _run_background_stage(
             records, recombine_inputs=params.recombine_inputs
         )
 
+    # Per-frame full mask when asteroid intervals are loaded; else static 2D.
+    spatial_mask = shared_mask
+    if mask_catalog is not None and mask_catalog.has_temporal():
+        btjds = background.btjd_for_records(wcs_table, records)
+        spatial_mask = np.empty((len(records),) + shared_mask.shape, dtype=np.int16)
+        for i, btjd in enumerate(btjds):
+            spatial_mask[i] = mask_catalog.mask_at(btjd, which="full")
+
     stack = background.run_background_pipeline(
         params=params,
         records=records,
-        mask=shared_mask,
+        mask=spatial_mask,
         wcs_table=wcs_table,
         sector=int(cfg.sector),
         camera=int(cfg.camera),
@@ -228,7 +249,7 @@ def _run_background_stage(
         cbar_label=f"Background ({label_out})",
     )
     log.info("  background: wrote stack under %s shape=%s", out_ws, stack.shape)
-    return shared_mask
+    return shared_mask, mask_catalog
 
 
 def _pipeline_plots_root(cfg: SynDiffConfig) -> str:
@@ -557,6 +578,105 @@ def _ensure_shared_mask_loaded(
     )
 
 
+def _ensure_mask_catalog_loaded(
+    ws_root: str,
+    mask_catalog,
+    shared_mask: Optional[np.ndarray],
+    *,
+    crop_bounds: Optional[dict] = None,
+    asteroid_intervals=None,
+    asteroid_times=None,
+    data_root: str | None = None,
+    sector: int | None = None,
+    camera: int | None = None,
+    ccd: int | None = None,
+    intervals_dir: str | None = None,
+):
+    """Load MaskCatalog from memory or workspace FITS (+ SCC asteroid sidecars)."""
+    from syndiff_pipeline.masking.asteroids import (
+        convert_intervals_to_crop_local,
+        load_asteroid_products,
+    )
+    from syndiff_pipeline.masking.catalog import MaskCatalog
+    from syndiff_pipeline.masking.settings import default_asteroid_intervals_dir
+    from syndiff_pipeline.masking.tns import TRANSIENT_FIXED_BASENAME
+
+    def _attach_asteroids(static, tns_table, iv, tm):
+        if iv is None or crop_bounds is None:
+            return MaskCatalog(
+                static=static,
+                tns_table=tns_table,
+                asteroid_intervals=None,
+                asteroid_times=tm,
+                crop_bounds=crop_bounds,
+            )
+        if "y" in iv.columns and "x" in iv.columns:
+            crop_iv = iv
+        else:
+            crop_iv = convert_intervals_to_crop_local(iv, crop_bounds, static.shape)
+        return MaskCatalog(
+            static=static,
+            tns_table=tns_table,
+            asteroid_intervals=crop_iv,
+            asteroid_times=tm,
+            crop_bounds=crop_bounds,
+        )
+
+    def _load_scc_asteroids():
+        if asteroid_intervals is not None:
+            return asteroid_intervals, asteroid_times
+        if not data_root or sector is None or camera is None or ccd is None:
+            return None, None
+        root = (
+            Path(intervals_dir)
+            if intervals_dir
+            else default_asteroid_intervals_dir(data_root, sector, camera, ccd)
+        )
+        return load_asteroid_products(root)
+
+    if mask_catalog is not None:
+        if mask_catalog.has_temporal():
+            return mask_catalog
+        iv, tm = _load_scc_asteroids()
+        if iv is None:
+            return mask_catalog
+        return _attach_asteroids(
+            mask_catalog.static, mask_catalog.tns_table, iv, tm
+        )
+
+    static = _ensure_shared_mask_loaded(ws_root, shared_mask)
+    tns_table = None
+    tns_path = Path(ws_root) / TRANSIENT_FIXED_BASENAME
+    if tns_path.is_file():
+        tns_table = pd.read_parquet(tns_path)
+    iv, tm = _load_scc_asteroids()
+    return _attach_asteroids(static, tns_table, iv, tm)
+
+
+def _infer_data_root(cfg: SynDiffConfig) -> str:
+    if getattr(cfg, "data_root", None) and str(cfg.data_root).strip():
+        return str(cfg.data_root)
+    ffi = Path(cfg.ffi_dir) if cfg.ffi_dir else None
+    if ffi is not None and ffi.name == "tess_ffi":
+        return str(ffi.parent)
+    gaia = Path(cfg.gaia_catalog) if cfg.gaia_catalog else None
+    if gaia is not None:
+        for p in gaia.parents:
+            if p.name == "catalogs":
+                return str(p.parent)
+    return ""
+
+
+def _mask_catalog_scc_kwargs(cfg: SynDiffConfig) -> dict:
+    """Common SCC asteroid-load kwargs for Hotpants/kernel/background resume."""
+    return {
+        "data_root": _infer_data_root(cfg) or None,
+        "sector": int(cfg.sector) if cfg.sector is not None else None,
+        "camera": int(cfg.camera) if cfg.camera is not None else None,
+        "ccd": int(cfg.ccd) if cfg.ccd is not None else None,
+    }
+
+
 def _ensure_ref_stars_loaded(
     ws_root: str,
     ref_stars: Optional[pd.DataFrame],
@@ -741,6 +861,7 @@ def run_config_pipeline(
     write_immutable_workspace_config_snapshot(ctx, cfg)
 
     shared_mask = None
+    mask_catalog = None
     ref_stars: Optional[pd.DataFrame] = None
     gaia_df: Optional[pd.DataFrame] = None
     tile_centers = None
@@ -865,14 +986,24 @@ def run_config_pipeline(
                     ref_template_path,
                 )
 
-            shared_mask = masking.make_shared_mask(
+            from syndiff_pipeline.masking.api import generate_shared_mask_catalog
+
+            data_root = _infer_data_root(cfg)
+            site_dir = getattr(cfg, "site_config_dir", None) or None
+            plots_dir = None
+            if getattr(cfg, "pipeline_plots", False):
+                plots_dir = os.path.join(_pipeline_plots_root(cfg), "masks")
+
+            mask_catalog = generate_shared_mask_catalog(
                 ref_image=ref_crop,
                 gaia_df=gaia_mask_df,
                 crop_bounds=crop_bounds,
+                ws_root=ws_root,
+                data_root=data_root or out,
+                sector=int(cfg.sector),
+                camera=int(cfg.camera),
+                ccd=int(cfg.ccd),
                 straps_csv=cfg.straps_csv,
-                maglim=sm.gaia_mag_bright,
-                strapsize=sm.strapsize,
-                output_dir=ws_root,
                 ref_ffi_path=ref_ffi_path,
                 bsc_catalog_path=cfg.bsc_catalog or None,
                 nx=ffi_nx,
@@ -881,8 +1012,15 @@ def run_config_pipeline(
                 x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
                 y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
                 template_path=ref_template_path,
+                stage_mask_settings=sm.mask_settings,
+                site_dir=site_dir,
+                gaia_mag_bright=sm.gaia_mag_bright,
+                strapsize=sm.strapsize,
                 ps1_min_hit_count=int(sm.ps1_min_hit_count),
+                wcs_table=wcs_table,
+                write_plots_dir=plots_dir,
             )
+            shared_mask = mask_catalog.static
             ref_stars = masking.select_hotpants_ref_stars(
                 gaia_df=gaia_mask_df,
                 crop_bounds=crop_bounds,
@@ -906,6 +1044,14 @@ def run_config_pipeline(
                     "cluster_template_job.json in output_dir)."
                 )
             shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+            mask_catalog = _ensure_mask_catalog_loaded(
+                ws_root,
+                mask_catalog,
+                shared_mask,
+                crop_bounds=crop_bounds,
+                **_mask_catalog_scc_kwargs(cfg),
+            )
+            shared_mask = mask_catalog.static
             if ref_stars is None:
                 rs_path = os.path.join(ws_root, HOTPANTS_SUBSTAMP_STARS_BASENAME)
                 if not os.path.isfile(rs_path):
@@ -971,6 +1117,7 @@ def run_config_pipeline(
                 science=sci_label,
                 diff_log_path=diff_log_path,
                 force_rerun=force_rerun,
+                mask_catalog=mask_catalog,
             )
             n_ok = sum(1 for r in results if r.get("success"))
             if n_ok == 0:
@@ -996,6 +1143,14 @@ def run_config_pipeline(
                     "kernel_fit requires wcs_table and crop_bounds from template handoff."
                 )
             shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+            mask_catalog = _ensure_mask_catalog_loaded(
+                ws_root,
+                mask_catalog,
+                shared_mask,
+                crop_bounds=crop_bounds,
+                **_mask_catalog_scc_kwargs(cfg),
+            )
+            shared_mask = mask_catalog.static
             ref_stars = _ensure_ref_stars_loaded(ws_root, ref_stars)
             ref_stars_xy = ref_stars[["x", "y"]].to_numpy(dtype=np.float64)
             hp = kernel_fit_params_to_hotpants(kf_params)
@@ -1012,6 +1167,7 @@ def run_config_pipeline(
                 params=kf_params,
                 artifact_dir=kernel_fit_ws,
                 debug_ws_dir=kernel_fit_ws,
+                mask_catalog=mask_catalog,
             )
 
         elif kind == "convolved_templates":
@@ -1045,6 +1201,14 @@ def run_config_pipeline(
                     "kernel_subtract requires wcs_table and crop_bounds from template handoff."
                 )
             shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+            mask_catalog = _ensure_mask_catalog_loaded(
+                ws_root,
+                mask_catalog,
+                shared_mask,
+                crop_bounds=crop_bounds,
+                **_mask_catalog_scc_kwargs(cfg),
+            )
+            shared_mask = mask_catalog.static
             inp = stage.get("inputs") or {}
             conv_label = str(inp["convolved"]).strip()
             conv_ws = convolved_ws or ctx.workspace(conv_label)
@@ -1073,6 +1237,7 @@ def run_config_pipeline(
                 bkg_dir=bkg_dir,
                 bkg_label=bkg_l,
                 n_jobs=n_jobs,
+                mask_catalog=mask_catalog,
             )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l
@@ -1100,9 +1265,9 @@ def run_config_pipeline(
             col_corr_2d = epsf_fitting.build_median_mask_correction(
                 cfg.median_mask_path, cfg.camera, cfg.ccd, crop_bounds
             )
-            shared_mask_path = os.path.join(out, "shared_mask.fits")
+            shared_mask_path = os.path.join(ws_root, SHARED_MASK_FITS_BASENAME)
             if not os.path.isfile(shared_mask_path):
-                shared_mask_path = os.path.join(out, "shared_mask.fits.gz")
+                shared_mask_path = os.path.join(ws_root, "shared_mask.fits")
             ws_out = ctx.workspace(label_out)
             os.makedirs(ws_out, exist_ok=True)
             epsf_stack, tile_centers_new, ffi_stems, epsf_ok = (
@@ -1341,16 +1506,18 @@ def run_config_pipeline(
                 )
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg)
-            shared_mask = _run_background_stage(
+            shared_mask, mask_catalog = _run_background_stage(
                 stage=stage,
                 idx=idx,
                 cfg=cfg,
                 ctx=ctx,
                 ws_root=ws_root,
                 shared_mask=shared_mask,
+                mask_catalog=mask_catalog,
                 wcs_table=wcs_table,
                 processing_ffi_paths=processing_ffi_paths,
                 out=out,
+                crop_bounds=crop_bounds,
             )
 
         elif kind == "forced_photometry":

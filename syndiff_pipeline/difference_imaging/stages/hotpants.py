@@ -151,22 +151,10 @@ def _hotpants_loky_initializer(
     sci_workspace_dir: Optional[str] = None,
     sci_bkg_ws: Optional[str] = None,
     force_rerun: bool = False,
+    mask_catalog=None,
+    btjd_by_product_id: Optional[dict] = None,
 ) -> None:
-    """Hotpants loky initializer.
-    
-    Parameters
-    ----------
-    mask : np.ndarray
-    ref_stars_xy : np.ndarray
-    hp : HotpantsParams
-    template_path_map : dict
-    crop_bounds : dict
-    workspace_dirs : HotpantsWorkspaceDirs
-    round_id : int
-    legacy_bkg_sidecar : bool
-    sci_workspace_dir : Optional[str], optional, default ``None``
-    sci_bkg_ws : Optional[str], optional, default ``None``
-    force_rerun : bool, optional, default ``False``"""
+    """Hotpants loky initializer (MaskCatalog + cadence lookup installed once per worker)."""
     global _HOTPANTS_LOKY_PAYLOAD
     _HOTPANTS_LOKY_PAYLOAD = {
         "mask": mask,
@@ -181,6 +169,8 @@ def _hotpants_loky_initializer(
         "sci_bkg_ws": sci_bkg_ws,
         "force_rerun": force_rerun,
         "template_cache": {},
+        "mask_catalog": mask_catalog,
+        "btjd_by_product_id": btjd_by_product_id or {},
     }
 
 
@@ -215,7 +205,10 @@ def _hotpants_loky_run_task(
         sci_workspace_dir=p.get("sci_workspace_dir"),
         template_cache=p.get("template_cache"),
         force_rerun=bool(p.get("force_rerun")),
+        mask_catalog=p.get("mask_catalog"),
+        btjd=p.get("btjd_by_product_id", {}).get(product_id),
     )
+
 
 
 @dataclass
@@ -788,6 +781,15 @@ def _load_sci_bkg_crop(
     return bkg
 
 
+def _resolve_hotpants_mask_array(mask, mask_catalog, btjd) -> np.ndarray:
+    """Prefer MaskCatalog.mask_at(full); fall back to static ndarray."""
+    from syndiff_pipeline.masking.bits import full_mask_bool
+
+    if mask_catalog is not None:
+        return full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
+    return np.asarray(mask) > 0 if np.asarray(mask).dtype != bool else np.asarray(mask)
+
+
 def _process_one_frame(
     ffi_path,
     product_id,
@@ -804,26 +806,10 @@ def _process_one_frame(
     sci_workspace_dir: Optional[str] = None,
     template_cache: Optional[dict] = None,
     force_rerun: bool = False,
+    mask_catalog=None,
+    btjd=None,
 ):
-    """Process one frame.
-    
-    Parameters
-    ----------
-    ffi_path
-    product_id
-    group_id
-    hp : HotpantsParams
-    template_path_map
-    mask
-    crop_bounds
-    ref_stars_xy
-    dirs : HotpantsWorkspaceDirs
-    round_id : int
-    sci_bkg_ws : Optional[str], optional, default ``None``
-    legacy_diff_sidecar_bkg : bool, optional, default ``False``
-    sci_workspace_dir : Optional[str], optional, default ``None``
-    template_cache : Optional[dict], optional, default ``None``
-    force_rerun : bool, optional, default ``False``"""
+    """Process one frame."""
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
 
@@ -853,8 +839,6 @@ def _process_one_frame(
                 "error_msg": f"missing science FITS {sci_stem}",
             }
         sci_crop = fits.getdata(sp).astype(np.float64)
-        # Use the same cropped noise map as a raw-FFI pass. All-zero i_error makes
-        # Hotpants weights degenerate and often triggers LUDCMP / clipped-stamp failures.
         _, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
         err_crop = np.asarray(err_crop, dtype=np.float64)
         if err_crop.shape != sci_crop.shape:
@@ -917,11 +901,13 @@ def _process_one_frame(
         write_stamps=hp.write_stamps,
     )
 
+    mask_array = _resolve_hotpants_mask_array(mask, mask_catalog, btjd)
+
     result = run_hotpants_frame(
         sci_array=sci_crop,
         sci_err_array=err_crop,
         tmpl_array=tmpl_crop,
-        mask_array=mask,
+        mask_array=mask_array,
         ref_stars_xy=ref_stars_xy,
         hp_config=hp_config,
         collect_kernel_params=True,
@@ -1030,6 +1016,7 @@ def hotpants_loop(
     science: str = "ffi",
     diff_log_path: Optional[str] = None,
     force_rerun: bool = False,
+    mask_catalog=None,
 ) -> list:
     """
     Run hotpants over all FFIs in parallel.
@@ -1040,6 +1027,9 @@ def hotpants_loop(
     When ``sci_workspace_dir`` is set, each frame's science array is read from
     ``{sci_workspace_dir}/{stem}.fits`` (crop-sized), e.g. from a prior ``subtract``
     stage, instead of cropping the raw FFI.
+
+    ``mask_catalog`` (optional): when provided, each frame uses
+    ``mask_at(btjd, which="full")`` for ``i_mask``.
     """
     if workspace_dirs is None:
         diff_base = os.path.join(output_dir, f"diff_r{round_id}")
@@ -1072,6 +1062,13 @@ def hotpants_loop(
     ref_stars_xy = ref_stars_df[["x", "y"]].values
     path_to_row = wcs_grouping.manifest_path_row_index(wcs_table)
 
+    btjd_by_product_id: dict = {}
+    btjd_col = None
+    for c in ("btjd", "BTJD", "tjd", "TJD", "jd", "JD"):
+        if c in wcs_table.columns:
+            btjd_col = c
+            break
+
     tasks = []
     for i, ffi_path in enumerate(ffi_paths):
         row_idx = path_to_row.get(wcs_grouping.canonical_fits_path_key(ffi_path))
@@ -1086,6 +1083,11 @@ def hotpants_loop(
             tasks.append((ffi_path, None, 0))
             continue
         group_id = int(row.get("group_id", 0))
+        if btjd_col is not None:
+            try:
+                btjd_by_product_id[product_id] = float(row[btjd_col])
+            except (TypeError, ValueError):
+                pass
         tasks.append((ffi_path, product_id, group_id))
 
     n_workers = resolve_effective_n_jobs(
@@ -1157,6 +1159,8 @@ def hotpants_loop(
                 sci_workspace_dir=sci_workspace_dir,
                 template_cache=template_cache,
                 force_rerun=force_rerun,
+                mask_catalog=mask_catalog,
+                btjd=btjd_by_product_id.get(product_id),
             )
 
         results = []
@@ -1188,6 +1192,8 @@ def hotpants_loop(
                 sci_workspace_dir,
                 sci_bkg_ws,
                 force_rerun,
+                mask_catalog,
+                btjd_by_product_id,
             ),
             on_result=_record_progress,
         )

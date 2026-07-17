@@ -10,10 +10,20 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "hotpants>=0.1.1",
+  "numba>=0.59",
 ]
 
 [project.optional-dependencies]
 discord = ["discord.py>=2.3"]
+# Asteroid mask *generation* only (consumption of SCC parquet needs none of these).
+# sbident is not on PyPI — install the git URL explicitly as well, e.g.:
+#   pip install "syndiff-pipeline[asteroids]"
+#   pip install git+https://github.com/bengebre/sbident
+asteroids = [
+  "tess-ephem>=0.6",
+  "astroquery>=0.4",
+  "sbident @ git+https://github.com/bengebre/sbident.git",
+]
 docs = [
   "sphinx>=7.0",
   "myst-parser>=3.0",
@@ -34,7 +44,13 @@ include = ["syndiff_pipeline*"]
 
 [tool.setuptools.package-data]
 "syndiff_pipeline.common.orchestration" = ["condor_wrapper.sh"]
-"syndiff_pipeline.resources" = ["skycell_wcs.csv", "README.md"]
+"syndiff_pipeline.resources" = [
+  "skycell_wcs.csv",
+  "README.md",
+  "mask_geometry.yaml",
+  "tns/.gitkeep",
+  "tess_straps.csv",
+]
 
 [tool.pyright]
 executionEnvironments = [
