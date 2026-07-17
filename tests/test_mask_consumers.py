@@ -1,10 +1,10 @@
-"""Consumer helpers: Hotpants full mask + strap source bits 1|32."""
+"""Consumer helpers: Hotpants mask (ignore bit 32) + strap source bits 1|32."""
 
 import numpy as np
 import pandas as pd
 
 from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.bits import full_mask_bool, strap_source_mask
+from syndiff_pipeline.masking.bits import strap_source_mask
 from syndiff_pipeline.difference_imaging.stages.hotpants import _resolve_hotpants_mask_array
 from syndiff_pipeline.masking.catalog import MaskCatalog
 
@@ -17,12 +17,23 @@ def test_hotpants_helper_static_ndarray():
     assert out[1, 1]
 
 
+def test_hotpants_helper_ignores_faint_cat_static():
+    m = np.zeros((4, 4), dtype=np.int16)
+    m[0, 0] = bits.FAINT_CAT
+    m[1, 1] = bits.BRIGHT_CAT
+    out = _resolve_hotpants_mask_array(m, None, None)
+    assert not out[0, 0]
+    assert out[1, 1]
+
+
 def test_hotpants_helper_catalog_full():
     static = np.zeros((5, 5), dtype=np.int16)
     static[0, 0] = bits.BRIGHT_CAT
+    static[0, 1] = bits.FAINT_CAT
     cat = MaskCatalog(static=static)
     out = _resolve_hotpants_mask_array(static, cat, None)
     assert out[0, 0]
+    assert not out[0, 1]
     assert not out[1, 1]
 
 
