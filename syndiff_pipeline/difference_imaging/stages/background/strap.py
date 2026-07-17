@@ -24,13 +24,15 @@ def calc_qe_strap_correction(
     qe_floor: float = 1.001,
 ) -> np.ndarray:
     """Multiplicative QE map from strap columns vs background (TESSreduce _calc_qe)."""
+    from syndiff_pipeline.masking.bits import strap_column_mask, strap_source_mask
+
     time = deepcopy(time_mjd)
     mask2d = mask[0] if mask.ndim == 3 else mask
-    strap_data = flux * ((mask2d.astype(np.int64) & 4) > 0)
+    strap_data = flux * strap_column_mask(mask2d)
     if mask.ndim == 3:
-        src = (mask[:, :, :] & 1) > 0
+        src = strap_source_mask(mask)
     else:
-        src = (mask2d.astype(np.int64) & 1) > 0
+        src = strap_source_mask(mask2d)
     strap_data = np.where(src, 0.0, strap_data)
 
     qe = strap_data / bkg
@@ -78,14 +80,15 @@ def fix_background_anomalies(
 ):
     """Fix column offsets and transients in a background cube (TESSreduce helpers)."""
     from photutils.background import Background2D, MedianBackground
+    from syndiff_pipeline.masking.bits import strap_column_mask, strap_source_mask
 
     T, NY, NX = bkg.shape
     mask2d = mask[0] if mask.ndim == 3 else mask
-    strap = (mask2d.astype(np.int64) & 4).astype(bool)
+    strap = strap_column_mask(mask2d)
     good_cols = np.where(~strap.any(axis=0))[0]
     strap_cols = np.where(strap.any(axis=0))[0]
     has_straps = len(strap_cols) > 0 and len(good_cols) > 0
-    phot_mask = strap | ((mask2d.astype(np.int64) & 1).astype(bool))
+    phot_mask = strap | strap_source_mask(mask2d)
 
     eff_box = min(box_size, min(NY, NX) // 2)
     eff_box = max(eff_box, 4)

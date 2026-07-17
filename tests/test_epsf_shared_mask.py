@@ -1,4 +1,4 @@
-"""ePSF shared_mask loading uses only bright-star (2) and strap (4) bits."""
+"""ePSF shared_mask: ignore bits 1|2; reject 4/8/16/32/64/128; bit2 alone → keep."""
 
 from __future__ import annotations
 
@@ -16,32 +16,36 @@ from syndiff_pipeline.difference_imaging.stages.epsf import (
     EPSF_SHARED_MASK_BITS,
     _load_shared_mask_2d,
 )
+from syndiff_pipeline.masking.bits import EPSF_IGNORE_BITS
 
 
-def test_epsf_shared_mask_bits_are_bright_and_strap():
-    assert EPSF_SHARED_MASK_BITS == (2 | 4)
+def test_epsf_ignore_bits_are_bright_and_cross():
+    assert EPSF_SHARED_MASK_BITS == EPSF_IGNORE_BITS == (1 | 2)
 
 
-def test_load_shared_mask_ignores_catalog_bit(tmp_path):
-    """Bit value 1 (catalog Gaia) must not exclude ePSF stars."""
+def test_load_shared_mask_epsf_policy(tmp_path):
     shape = (8, 8)
     raw = np.zeros(shape, dtype=np.int16)
-    raw[0, 0] = 1  # catalog only
-    raw[0, 1] = 2  # bright cross
-    raw[0, 2] = 4  # strap
-    raw[0, 3] = 3  # catalog | bright
-    raw[0, 4] = 5  # catalog | strap
-    raw[0, 5] = 8  # edge dead zone — ignored for ePSF
+    raw[0, 0] = 1  # bright cat — keep
+    raw[0, 1] = 2  # sat cross alone — keep
+    raw[0, 2] = 3  # 1|2 — keep
+    raw[0, 3] = 4  # strap — reject
+    raw[0, 4] = 8  # edge — reject
+    raw[0, 5] = 16  # PS1 — reject
+    raw[0, 6] = 32  # faint — reject
+    raw[0, 7] = 64  # TNS — reject
+    raw[1, 0] = 128  # asteroid — reject
     path = tmp_path / "shared_mask.fits"
     fits.writeto(path, raw, overwrite=True)
 
     mask = _load_shared_mask_2d(str(path), shape)
     assert mask is not None
-    assert mask.dtype == bool
-    assert bool(mask[0, 0]) is False  # catalog-only ignored
-    assert bool(mask[0, 1]) is True
-    assert bool(mask[0, 2]) is True
-    assert bool(mask[0, 3]) is True  # has bit value 2
-    assert bool(mask[0, 4]) is True  # has bit value 4
-    assert bool(mask[0, 5]) is False  # edge bit ignored
-    assert bool(mask[1, 1]) is False
+    assert bool(mask[0, 0]) is False
+    assert bool(mask[0, 1]) is False
+    assert bool(mask[0, 2]) is False
+    assert bool(mask[0, 3]) is True
+    assert bool(mask[0, 4]) is True
+    assert bool(mask[0, 5]) is True
+    assert bool(mask[0, 6]) is True
+    assert bool(mask[0, 7]) is True
+    assert bool(mask[1, 0]) is True

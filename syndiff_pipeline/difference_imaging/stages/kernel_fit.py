@@ -177,6 +177,7 @@ def run_kernel_fit(
     artifact_dir: Optional[str] = None,
     debug_ws_dir: Optional[str] = None,
     skip_existing: bool = True,
+    mask_catalog=None,
 ) -> KernelFitResult:
     """
     Fit PSF kernel on angle-ranked min-background FFI through HP1 + phot + HP2.
@@ -184,6 +185,8 @@ def run_kernel_fit(
     Kernel NPZ and metadata are written under *artifact_dir* (typically
     ``ws/kernel_fit/``), not the event root.
     """
+    from syndiff_pipeline.masking.bits import full_mask_bool
+
     meta_root = artifact_dir or debug_ws_dir or output_dir
     os.makedirs(meta_root, exist_ok=True)
     meta_path = kernel_fit_meta_path(meta_root)
@@ -228,10 +231,35 @@ def run_kernel_fit(
     template = _load_template_cropped(template_path, crop_bounds)
     header = wcs_grouping.crop_ffi_header(min_bg_path, crop_bounds)
 
-    if ffi.shape != shared_mask.shape:
+    btjd = None
+    for c in ("btjd", "BTJD", "tjd", "TJD", "jd", "JD"):
+        if c in manifest.columns:
+            try:
+                row = manifest.loc[
+                    manifest.apply(
+                        lambda r: tess_product_id_from_ffi_path(
+                            str(r.get("ffi_path", r.get("path", "")))
+                        )
+                        == product_id,
+                        axis=1,
+                    )
+                ]
+                if len(row):
+                    btjd = float(row.iloc[0][c])
+            except Exception:
+                pass
+            break
+
+    if mask_catalog is not None:
+        frame_mask = full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
+    else:
+        frame_mask = shared_mask
+
+    if ffi.shape != np.asarray(frame_mask).shape:
         raise ValueError(
-            f"FFI shape {ffi.shape} != shared_mask shape {shared_mask.shape}"
+            f"FFI shape {ffi.shape} != shared_mask shape {np.asarray(frame_mask).shape}"
         )
+
 
     basis = build_kernel_basis(hp)
     with tempfile.TemporaryDirectory(prefix="kernel_fit_") as work_root:
@@ -239,7 +267,7 @@ def run_kernel_fit(
             sci=ffi,
             err=err,
             template=template,
-            mask=shared_mask,
+            mask=frame_mask,
             ref_stars_xy=ref_stars_xy,
             hp=hp,
             work_dir=os.path.join(work_root, "hp1"),
@@ -252,7 +280,7 @@ def run_kernel_fit(
             )
 
         phot_bkg_hp1 = photutils_background_masked(
-            hp1["diff"], shared_mask, box_size=params.phot_box_size
+            hp1["diff"], frame_mask, box_size=params.phot_box_size
         )
         hp1_bkg = hp1["bkg"] if hp1.get("bkg") is not None else 0.0
         sci_clean = ffi - hp1_bkg - phot_bkg_hp1
@@ -262,7 +290,7 @@ def run_kernel_fit(
             sci=sci_clean,
             err=err,
             template=template,
-            mask=shared_mask,
+            mask=frame_mask,
             ref_stars_xy=ref_stars_xy,
             hp=hp2_params,
             work_dir=os.path.join(work_root, "hp2"),

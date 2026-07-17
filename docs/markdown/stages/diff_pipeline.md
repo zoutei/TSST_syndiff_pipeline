@@ -56,9 +56,17 @@ syndiff diff run --site config/ \
 
 Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 
-### `shared_mask` (`stages/masking.py`)
+### `shared_mask` (`stages/masking.py` → `syndiff_pipeline.masking`)
 
-Builds the shared bitmask (Gaia magnitude bins, bright-star crosses, BSC, TESS straps, optional PS1 coverage from the reference template when `ps1_min_hit_count > 0`) and selects isolated Hotpants reference stars (mag 13.5–14.5 default). Writes `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`.
+Builds the shared bitmask and selects isolated Hotpants reference stars.
+**Default style is empirical** (see [masking.md](../masking.md)): T&lt;13 empirical
+circles/crosses (bits 1/2; Gaia ∪ BSC for crosses), 13≤T&lt;18 TESSreduce squares
+(bit 32), straps/edges/PS1 (4/8/16), optional TNS (64) and per-cadence asteroids
+(128 via `MaskCatalog`). Rollback: site `mask_settings.yaml` with
+`shared.style: tessreduce` (bits 1/2/4/8/16 only).
+
+Writes `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`,
+`gaia_catalog_pipeline.csv`, frozen `mask_settings.yaml`. See [masking.md](../masking.md).
 
 ### `hotpants` (`stages/hotpants.py`)
 
@@ -90,7 +98,7 @@ Per-frame linear combination of workspace planes (or the virtual cropped `ffi` l
 
 ### `epsf` (`stages/epsf.py`, `stages/gridded_epsf.py`)
 
-Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction rejects pixels flagged in `shared_mask` **only** for bits 2 and 4 (bright-star crosses and TESS straps); catalog-source bit 1 is ignored so Gaia ePSF stars are kept.
+Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction loads `ws/shared_mask.fits.gz` and **ignores bits 1|2** (bright catalog / saturation crosses) so T&lt;13 Gaia ePSF stars are kept; any other set bit (4/8/16/32/64/128) rejects. See [masking.md](../masking.md).
 
 Primary outputs under `ws/{output}/`:
 
