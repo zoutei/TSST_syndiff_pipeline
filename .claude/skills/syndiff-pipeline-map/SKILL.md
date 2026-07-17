@@ -32,6 +32,22 @@ verified from an existing event workspace.
 
 Orchestration (scheduler, SQLite state, Condor, verify): `docs/markdown/template_pipeline.md`, `docs/markdown/template_runner_architecture.md`. Read the relevant deep-dive doc before editing a stage.
 
+## Site config layout (`config/`)
+
+| File | Git | Owns |
+|------|-----|------|
+| `pipeline.yaml` | committed | Template policy: stages, pools, notifications |
+| `diff_config.yaml` | committed | Diff sub-pipeline: `defaults` (crop/n_jobs/plots) + `pipeline:` stage knobs. **Omit stage keys that match dataclass defaults.** |
+| `mask_settings.yaml` | optional | Mask geometry/policy (empirical/tessreduce, maglims, TNS, asteroids). Sibling of `diff_config`; **not** embedded in `diff_config`. Bare `- kind: shared_mask` uses site file or packaged defaults. |
+| `star_config.yaml` | committed | Star-branch policy |
+| `deployment.yaml` | **gitignored** | `workspace_root`, `data_root`, Gaia + Discord credentials (copy from `deployment.yaml.example`) |
+
+Targets are always passed on the CLI (`--targets` / `--star-targets`), never embedded in config.
+
+Frozen copies: each run freezes effective template config under `runs/{run_id}/`; each diff workspace freezes a **slim** `ws/diff_config.yaml` (`cfg_to_snapshot_dict` — empties/defaults/bundled straps|BSC paths omitted) plus `ws/mask_settings.yaml` after `shared_mask`. Check the frozen copies when debugging, not only site YAML defaults.
+
+Deep dive: `docs/markdown/stages/diff_pipeline.md` §0 (config ownership), `docs/markdown/masking.md`.
+
 ## Artifact map
 
 Two roots: `data_root` (SCC-wide, shared across targets) and `workspace_root` (per-target events). See `docs/markdown/storage_layout.md`.
@@ -81,6 +97,7 @@ Set top-level `ps1_zarr_path` in `star_config.yaml` to reuse the latter.
 3. **Coordinates**: crop bounds are `[min, max)` in full-FFI 0-based pixels; diff-stage x/y are **crop-local**. `ensure_gaia_crop_xy` converts. Mixing these silently misplaces stars.
 4. **Template filenames are the API**: `syndiff_template_s{S}_{C}_{K}[_x..._y...][_osN]_dx{±D.DDD}_dy{±D.DDD}.fits.gz`; the diff stage matches manifest `group_dx/dy` to filename dx/dy (tolerance `0.01 × offset_threshold`). Swapping templates = pointing `template_dir` at a dir with identical filenames.
 5. **Kernels**: Hotpants kernels are not persisted by default, but `write_kernel_solutions: true` writes one `{diffs_label}_kernels/{product_id}_kernel.npz` per frame (required by `star`). The separate `kernel_fit` path persists one target-level reusable kernel (`kernel_r2.npz`) for `convolved_templates` → `kernel_subtract`.
+5b. **Hotpants ignores FAINT_CAT (bit 32)** via `hotpants_mask_bool`; ePSF ignores `1|2|32`. Mask policy lives in `mask_settings.yaml`, not `diff_config` stage keys.
 6. **Verify gates are thin**: mapping = CSV exists; templates = files parse. Partially stale artifacts pass verify — delete outputs when inputs changed.
 7. **FFI files may be `.fits` or `.fits.gz`** — always resolve both (helpers exist in `common/download.py`).
 8. **`sat_template` is broken for its stated purpose**: it uses the full Gaia catalog (not `removed_stars_csv`) and its per-group outputs aren't consumable by `subtract`. Don't build on it without reading `docs/markdown/stages/diff_pipeline.md` §6.

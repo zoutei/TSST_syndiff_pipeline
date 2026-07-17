@@ -156,8 +156,10 @@ def apply_stage_overrides(
     ps1_min_hit_count: int | None = None,
 ) -> MaskSettings:
     """
-    Stage keys override corresponding settings fields (BC for committed diffs
-    that only set stage keys).
+    Apply explicit shared_mask stage overrides onto resolved mask settings.
+
+    Prefer ``mask_settings.yaml`` for these knobs. Pass ``None`` to leave a
+    field unchanged (do not pass SharedMaskParams dataclass defaults).
     """
     shared = SharedMaskSettings(**asdict(settings.shared))
     if gaia_mag_bright is not None:

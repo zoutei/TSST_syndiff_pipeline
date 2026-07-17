@@ -89,9 +89,6 @@ class SynDiffConfig:
     if the loaded Gaia catalog lacks crop-local ``x``/``y`` (normally satisfied
     by ``gaia_catalog``)."""
 
-    median_mask_path: str = ""
-    """Path to TGLC ``median_mask.fits`` (bad-pixel / background mask)."""
-
     straps_csv: str = ""
     """Path to ``tess_straps.csv`` (detector strap columns). When empty, the bundled
     ``syndiff_pipeline/resources/tess_straps.csv`` is used."""
@@ -337,19 +334,138 @@ def normalize_additional_forced_targets(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
+# Always keep these in frozen/saved YAML even when they match dataclass defaults
+# (identity / layout fields needed to interpret a snapshot).
+_SNAPSHOT_ALWAYS_KEEP = frozenset(
+    {
+        "pipeline",
+        "sector",
+        "camera",
+        "ccd",
+        "target_ra",
+        "target_dec",
+        "target_name",
+        "output_dir",
+        "ffi_dir",
+        "data_root",
+        "gaia_catalog",
+        "template_dir",
+        "workspace_run_id",
+        "site_config_dir",
+    }
+)
+
+
+def _bundled_path_values() -> set[str]:
+    """Absolute paths that mean 'use packaged default' and should be omitted."""
+    out: set[str] = set()
+    try:
+        from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
+            bright_star_catalog_path,
+            tess_straps_csv,
+        )
+
+        out.add(str(tess_straps_csv().resolve()))
+        out.add(str(bright_star_catalog_path().resolve()))
+    except Exception:
+        pass
+    return out
+
+
+def _is_empty_snapshot_value(value: Any) -> bool:
+    if value is None:
+        return True
+    if value == "":
+        return True
+    if value == {} or value == []:
+        return True
+    return False
+
+
+def _slim_pipeline_stage(stage: Any) -> Any:
+    """Drop stage keys that match the stage dataclass defaults (keep kind + wiring)."""
+    if not isinstance(stage, dict) or "kind" not in stage:
+        return stage
+    kind = stage.get("kind")
+    from syndiff_pipeline.difference_imaging.orchestration import stage_params as sp
+
+    params_cls = {
+        "shared_mask": sp.SharedMaskParams,
+        "hotpants": sp.HotpantsParams,
+        "epsf": sp.EpsfParams,
+        "astrometry": sp.AstrometryParams,
+        "centroids": sp.CentroidsParams,
+        "kernel_fit": sp.KernelFitParams,
+        "kernel_subtract": sp.KernelSubtractParams,
+        "convolved_templates": sp.ConvolvedTemplatesParams,
+        "sat_template": sp.SatTemplateParams,
+        "forced_photometry": sp.ForcedPhotometryParams,
+    }.get(kind)
+    # Always keep structural wiring keys even if somehow default-like.
+    keep_always = frozenset(
+        {"kind", "inputs", "output", "science", "methods", "steps", "mask_settings"}
+    )
+    if params_cls is None:
+        return dict(stage)
+    defaults = asdict(params_cls())
+    slim: dict[str, Any] = {}
+    for k, v in stage.items():
+        if k in keep_always:
+            slim[k] = v
+            continue
+        if k in defaults and v == defaults[k]:
+            continue
+        slim[k] = v
+    return slim
+
+
+def cfg_to_snapshot_dict(cfg: SynDiffConfig) -> dict:
+    """
+    Serialize *cfg* for human-readable frozen / saved YAML.
+
+    Omits empty values, fields equal to ``SynDiffConfig`` defaults (except
+    identity/layout keys), and bundled ``straps_csv`` / ``bsc_catalog`` paths.
+    Still flat SynDiffConfig keys so ``load_config`` accepts both slim and legacy dumps.
+    """
+    defaults = asdict(SynDiffConfig())
+    raw = asdict(cfg)
+    bundled = _bundled_path_values()
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key == "pipeline":
+            out[key] = [_slim_pipeline_stage(st) for st in (value or [])]
+            continue
+        if key in ("straps_csv", "bsc_catalog") and value:
+            try:
+                if str(Path(str(value)).expanduser().resolve()) in bundled:
+                    continue
+            except OSError:
+                pass
+        if key not in _SNAPSHOT_ALWAYS_KEEP:
+            if _is_empty_snapshot_value(value):
+                continue
+            if key in defaults and value == defaults[key]:
+                continue
+        elif _is_empty_snapshot_value(value) and key not in (
+            "pipeline",
+            "sector",
+            "camera",
+            "ccd",
+        ):
+            # Keep numeric sector/camera/ccd always; drop empty path strings.
+            if key in ("ffi_dir", "output_dir", "gaia_catalog", "template_dir",
+                       "data_root", "site_config_dir", "workspace_run_id",
+                       "target_name") and value == "":
+                continue
+            if value is None and key in ("target_ra", "target_dec"):
+                continue
+        out[key] = value
+    return out
+
+
 def _cfg_to_dict(cfg: SynDiffConfig) -> dict:
-    """Cfg to dict.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    
-    Returns
-    -------
-    dict"""
-    d = asdict(cfg)
-    # Convert None to null-friendly representation (yaml.dump handles None as null)
-    return d
+    """Alias for :func:`cfg_to_snapshot_dict` (legacy name)."""
+    return cfg_to_snapshot_dict(cfg)
 
 
 def resolve_config_path(value: Optional[str], base: Path) -> Optional[str]:
@@ -370,7 +486,6 @@ _PATH_FIELDS = (
     "output_dir",
     "gaia_catalog",
     "removed_stars_csv",
-    "median_mask_path",
     "straps_csv",
     "bsc_catalog",
     "ref_ffi_path",
@@ -454,7 +569,6 @@ def load_config(yaml_path: str) -> SynDiffConfig:
         "output_dir",
         "gaia_catalog",
         "removed_stars_csv",
-        "median_mask_path",
         "straps_csv",
         "bsc_catalog",
         "template_dir",
@@ -468,7 +582,6 @@ def load_config(yaml_path: str) -> SynDiffConfig:
         "output_dir",
         "gaia_catalog",
         "removed_stars_csv",
-        "median_mask_path",
         "straps_csv",
         "bsc_catalog",
         "ref_ffi_path",

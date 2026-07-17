@@ -25,6 +25,7 @@ syndiff star run --site config/ --star-targets {star_targets.csv} --target-name 
 ```
 
 - `--site DIR` loads `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`.
+- Optional sibling `mask_settings.yaml` owns mask policy (not required in `diff_config`; bare `- kind: shared_mask` uses site file or packaged defaults). See `docs/markdown/masking.md`.
 - `star` additionally loads `star_config.yaml` and a separate `star_targets.csv`; it verifies an existing template+diff workspace rather than depending on the main DAG in SQLite.
 - `--local` on submit rewrites the frozen run config so `stages.diff.executor: local` (Condor bypass for smoke tests).
 - `--local` on `star submit` instead rewrites `stages.star.executor: local`.
@@ -48,7 +49,10 @@ Run-control verbs (`retry`, `pause`, `kill`, `logs`, `tail`, `show`) take `--run
 
 1. **Per-stage log**: `{workspace_root}/runs/{run_id}/per_target/{target_label}/{stage}.log` (e.g. `mapping.log`, `diff.log`). Condor stderr lands alongside.
 2. **Daemon log**: `syndiff logs` (supervisor scheduling decisions, verify results, Condor submit errors).
-3. **Run metadata**: `runs/{run_id}/run_meta.json` + frozen `config.yaml` / per-target `diff_config.yaml` (the *effective* config for that target — check here before assuming YAML defaults applied).
+3. **Run / workspace metadata**:
+   - `runs/{run_id}/run_meta.json` + frozen `config.yaml` / per-target `diff_config.yaml`
+   - Event workspace slim freeze: `events/{label}/ws[_id]/diff_config.yaml` (`cfg_to_snapshot_dict` — empties/defaults omitted) and `…/mask_settings.yaml` after `shared_mask`
+   - Check frozen copies before assuming site YAML defaults applied. Config ownership: `docs/markdown/stages/diff_pipeline.md` §0.
 4. **State DB**: `{workspace_root}/control/pipeline_state.sqlite`; `syndiff runs` / `syndiff active` list runs and supervisor health. Status semantics: `docs/markdown/pipeline_state_machine_reference.md`.
 5. **Event artifacts**: `{workspace_root}/events/{label}/` — `cluster_template_job.json`, `syndiff_ffi_frames.csv`, `ws/…`, and `star[_workspace_run_id]/batch_manifest.csv` (see the syndiff-pipeline-map skill for the artifact map).
 

@@ -1,6 +1,8 @@
 # Site mask policy (copy to site config/mask_settings.yaml).
+# Sibling of diff_config.yaml — do NOT embed these knobs in diff_config.
 # Default style is empirical (behavior change vs TESSreduce-only masks).
 # Set shared.style: tessreduce to keep legacy bit layout (1/2/4/8/16 only).
+# Resolve: stage mask_settings path → ws/mask_settings.yaml → this file → packaged defaults.
 geometry_file: null
 shared:
   style: empirical          # or tessreduce
