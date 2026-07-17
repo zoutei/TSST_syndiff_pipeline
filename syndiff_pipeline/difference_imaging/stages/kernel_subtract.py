@@ -114,10 +114,22 @@ def _process_one_frame(task: tuple) -> dict:
         }
 
     try:
-        group_dx, group_dy, _ = resolve_template_for_ffi(
-            output_dir, manifest, ffi_path
-        )
-        conv_path = lookup_convolved_path(convolved_table, group_dx, group_dy)
+        if bool(p.get("field_mode", False)):
+            from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
+                lookup_convolved_path_by_group_id,
+            )
+            from syndiff_pipeline.difference_imaging.support.template_resolution import (
+                group_id_for_ffi,
+            )
+
+            conv_path = lookup_convolved_path_by_group_id(
+                convolved_table, group_id_for_ffi(manifest, ffi_path)
+            )
+        else:
+            group_dx, group_dy, _ = resolve_template_for_ffi(
+                output_dir, manifest, ffi_path
+            )
+            conv_path = lookup_convolved_path(convolved_table, group_dx, group_dy)
         ffi, _ = _load_ffi_cropped(ffi_path, crop_bounds)
         convolved = _load_convolved_crop(conv_path, crop_bounds)
         if ffi.shape != convolved.shape:
@@ -169,8 +181,13 @@ def kernel_subtract_loop(
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
     n_jobs: int = 1,
+    field_mode: bool = False,
 ) -> list[dict]:
-    """Run algebraic diff + photutils background for each FFI."""
+    """Run algebraic diff + photutils background for each FFI.
+
+    ``field_mode`` keys the convolved-template lookup by ``group_id`` (field
+    geometry) instead of the linear ``(group_dx, group_dy)`` offsets.
+    """
     os.makedirs(diffs_dir, exist_ok=True)
     if bkg_dir:
         os.makedirs(bkg_dir, exist_ok=True)
@@ -186,6 +203,7 @@ def kernel_subtract_loop(
         "bkg_label": bkg_label,
         "output_dir": output_dir,
         "manifest": manifest,
+        "field_mode": bool(field_mode),
     }
 
     tasks = [(ffi_path,) for ffi_path in ffi_paths]

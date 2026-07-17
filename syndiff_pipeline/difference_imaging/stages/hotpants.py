@@ -151,28 +151,24 @@ def _hotpants_loky_initializer(
     sci_workspace_dir: Optional[str] = None,
     sci_bkg_ws: Optional[str] = None,
     force_rerun: bool = False,
+    field_mode_context: Optional[Any] = None,
 ) -> None:
-    """Hotpants loky initializer.
-    
-    Parameters
-    ----------
-    mask : np.ndarray
-    ref_stars_xy : np.ndarray
-    hp : HotpantsParams
-    template_path_map : dict
-    crop_bounds : dict
-    workspace_dirs : HotpantsWorkspaceDirs
-    round_id : int
-    legacy_bkg_sidecar : bool
-    sci_workspace_dir : Optional[str], optional, default ``None``
-    sci_bkg_ws : Optional[str], optional, default ``None``
-    force_rerun : bool, optional, default ``False``"""
+    """Hotpants loky initializer."""
     global _HOTPANTS_LOKY_PAYLOAD
+    template_loader = None
+    if field_mode_context is not None:
+        from syndiff_pipeline.difference_imaging.support.template_resolution import (
+            build_field_mode_template_loader,
+        )
+
+        template_loader = build_field_mode_template_loader(
+            field_mode_context, crop_bounds
+        )
     _HOTPANTS_LOKY_PAYLOAD = {
         "mask": mask,
         "ref_stars_xy": ref_stars_xy,
         "hp": hp,
-        "template_path_map": template_path_map,
+        "template_path_map": template_path_map or {},
         "crop_bounds": crop_bounds,
         "workspace_dirs": workspace_dirs,
         "round_id": round_id,
@@ -181,6 +177,7 @@ def _hotpants_loky_initializer(
         "sci_bkg_ws": sci_bkg_ws,
         "force_rerun": force_rerun,
         "template_cache": {},
+        "template_loader": template_loader,
     }
 
 
@@ -214,6 +211,7 @@ def _hotpants_loky_run_task(
         legacy_diff_sidecar_bkg=p["legacy_bkg_sidecar"],
         sci_workspace_dir=p.get("sci_workspace_dir"),
         template_cache=p.get("template_cache"),
+        template_loader=p.get("template_loader"),
         force_rerun=bool(p.get("force_rerun")),
     )
 
@@ -803,6 +801,7 @@ def _process_one_frame(
     legacy_diff_sidecar_bkg: bool = False,
     sci_workspace_dir: Optional[str] = None,
     template_cache: Optional[dict] = None,
+    template_loader: Optional[Any] = None,
     force_rerun: bool = False,
 ):
     """Process one frame.
@@ -823,6 +822,9 @@ def _process_one_frame(
     legacy_diff_sidecar_bkg : bool, optional, default ``False``
     sci_workspace_dir : Optional[str], optional, default ``None``
     template_cache : Optional[dict], optional, default ``None``
+    template_loader : Optional[Callable[[int], np.ndarray]], optional
+        When set (field mode), load via ``template_loader(group_id)`` instead of
+        ``template_path_map``.
     force_rerun : bool, optional, default ``False``"""
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
@@ -874,8 +876,8 @@ def _process_one_frame(
         sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, product_id, sci_crop.shape)
         sci_crop = sci_crop - sci_bkg
 
-    tmpl_path = template_path_map.get(group_id)
-    if tmpl_path is None:
+    tmpl_path = template_path_map.get(group_id) if template_path_map else None
+    if template_loader is None and tmpl_path is None:
         log.error("No template for group_id=%s; frame %s skipped.", group_id, product_id)
         return {
             "stem": diff_stem,
@@ -887,6 +889,20 @@ def _process_one_frame(
 
     if template_cache is not None and group_id in template_cache:
         tmpl_crop = template_cache[group_id]
+    elif template_loader is not None:
+        try:
+            tmpl_crop = template_loader(int(group_id))
+        except Exception as exc:
+            log.error("template_loader failed for group_id=%s: %s", group_id, exc)
+            return {
+                "stem": diff_stem,
+                "ffi_product_id": product_id,
+                "group_id": group_id,
+                "success": False,
+                "error_msg": f"template_loader failed: {exc}",
+            }
+        if template_cache is not None:
+            template_cache[group_id] = tmpl_crop
     else:
         tmpl_crop = _load_template_cropped(tmpl_path, crop_bounds)
         if template_cache is not None:
@@ -1030,6 +1046,7 @@ def hotpants_loop(
     science: str = "ffi",
     diff_log_path: Optional[str] = None,
     force_rerun: bool = False,
+    field_mode_context: Optional[Any] = None,
 ) -> list:
     """
     Run hotpants over all FFIs in parallel.
@@ -1131,6 +1148,15 @@ def hotpants_loop(
 
     if n_workers == 1:
         template_cache: dict = {}
+        template_loader = None
+        if field_mode_context is not None:
+            from syndiff_pipeline.difference_imaging.support.template_resolution import (
+                build_field_mode_template_loader,
+            )
+
+            template_loader = build_field_mode_template_loader(
+                field_mode_context, crop_bounds
+            )
 
         def _serial_worker(args):
             """Serial worker.
@@ -1146,7 +1172,7 @@ def hotpants_loop(
                 product_id=product_id,
                 group_id=group_id,
                 hp=hp,
-                template_path_map=template_path_map,
+                template_path_map=template_path_map or {},
                 mask=mask,
                 crop_bounds=crop_bounds,
                 ref_stars_xy=ref_stars_xy,
@@ -1156,6 +1182,7 @@ def hotpants_loop(
                 legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
                 sci_workspace_dir=sci_workspace_dir,
                 template_cache=template_cache,
+                template_loader=template_loader,
                 force_rerun=force_rerun,
             )
 
@@ -1188,6 +1215,7 @@ def hotpants_loop(
                 sci_workspace_dir,
                 sci_bkg_ws,
                 force_rerun,
+                field_mode_context,
             ),
             on_result=_record_progress,
         )
