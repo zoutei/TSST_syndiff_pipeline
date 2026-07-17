@@ -82,6 +82,8 @@ class StageSpec:
                 return stages.diff.executor
             if self.name == "star":
                 return stages.star.executor
+            if self.name == "downsample":
+                return stages.downsample.executor
         return self.default_executor
 
 

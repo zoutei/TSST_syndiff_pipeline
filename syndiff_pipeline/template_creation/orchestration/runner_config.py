@@ -414,7 +414,9 @@ def load_and_materialize_runner_config(
                 or raw.get("star_site_config"),
             )
             or "",
-            stages=parse_stage_params(raw.get("stages", {})),
+            # Frozen configs may contain keys from newer feature branches;
+            # drop unknowns so progress/status tools stay usable on main.
+            stages=parse_stage_params(raw.get("stages", {}), strict=False),
             resources=_parse_resources(raw.get("resources")),
             overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
             scheduler_heartbeat_interval_s=float(

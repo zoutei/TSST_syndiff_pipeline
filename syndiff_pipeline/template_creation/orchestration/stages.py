@@ -59,6 +59,22 @@ def _condor_resources_for_ps1_process(cfg):
     )
 
 
+def _condor_resources_for_downsample(cfg):
+    """Condor resources for downsample."""
+    from syndiff_pipeline.common.orchestration import condor
+
+    params = cfg.stages.downsample
+    disk_mb = getattr(params, "condor_request_disk", None)
+    request_disk_kb = None if disk_mb is None else int(disk_mb) * 1024
+    return condor.CondorResourceRequest(
+        request_cpus=params.condor_request_cpus,
+        request_memory_mb=params.condor_request_memory,
+        request_disk_kb=request_disk_kb,
+        requirements=params.condor_requirements,
+        rank=params.condor_rank,
+    )
+
+
 def _make_template_stage(
     name: str,
     short_name: str,
@@ -209,6 +225,7 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
         "down",
         ("wcs_grouping", "mapping", "ps1_process"),
         pool="cpu_light",
+        condor_resources=_condor_resources_for_downsample,
     ),
 )
 

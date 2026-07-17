@@ -347,6 +347,9 @@ def _execute_template_stage(
             skycells_per_batch=ds.skycells_per_batch,
             event_dir=resolved.event_dir,
             write_ps1_removed_stars_csv=True,
+            log_level=ds.log_level,
+            stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
+            checkpoint_skycells=ds.checkpoint_skycells,
         )
         from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
             ensure_event_templates_symlink,
