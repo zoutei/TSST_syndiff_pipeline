@@ -65,7 +65,31 @@ def _write_distortion_era_frozen_config(
 
 
 class TestFrozenConfigCompat(unittest.TestCase):
-    def test_strict_parse_rejects_distortion_keys(self):
+    def test_strict_parse_accepts_geometry_mode(self):
+        stages = parse_stage_params(
+            {
+                "wcs_grouping": {
+                    "geometry_mode": "field",
+                    "grouping_quantum_ps1_px": 1.0,
+                },
+                "downsample": {
+                    "geometry_mode": "field",
+                    "materialize_fits": False,
+                    "hybrid_R": 1,
+                    "apply_hybrid_exact": True,
+                    "include_abutting_border_exact": True,
+                    "rebuild_field_store": False,
+                },
+            }
+        )
+        self.assertEqual(stages.wcs_grouping.geometry_mode, "field")
+        self.assertEqual(stages.downsample.geometry_mode, "field")
+        self.assertFalse(stages.downsample.materialize_fits)
+        self.assertTrue(stages.downsample.apply_hybrid_exact)
+        self.assertTrue(stages.downsample.include_abutting_border_exact)
+        self.assertFalse(stages.downsample.rebuild_field_store)
+
+    def test_strict_parse_rejects_unknown_drift_field_block(self):
         with self.assertRaises(ValueError) as ctx:
             parse_stage_params(
                 {
@@ -76,7 +100,7 @@ class TestFrozenConfigCompat(unittest.TestCase):
                     }
                 }
             )
-        self.assertIn("geometry_mode", str(ctx.exception))
+        self.assertIn("drift_field", str(ctx.exception))
 
     def test_nonstrict_parse_drops_unknown_keys(self):
         stages = parse_stage_params(
@@ -87,14 +111,16 @@ class TestFrozenConfigCompat(unittest.TestCase):
                     "drift_field": {"grid_nx": 5},
                     "grouping_quantum_ps1_px": 1.0,
                 },
-                "downsample": {"materialize_templates": False, "n_jobs": 8},
+                "downsample": {"materialize_fits": False, "n_jobs": 8},
                 "skycell_remap": {"executor": "condor"},
                 "diff": {"executor": "condor"},
             },
             strict=False,
         )
         self.assertEqual(stages.wcs_grouping.offset_threshold, 0.02)
+        self.assertEqual(stages.wcs_grouping.geometry_mode, "field")
         self.assertEqual(stages.downsample.n_jobs, 8)
+        self.assertFalse(stages.downsample.materialize_fits)
         self.assertEqual(stages.diff.executor, "condor")
 
     def test_load_runner_config_accepts_distortion_era_frozen(self):

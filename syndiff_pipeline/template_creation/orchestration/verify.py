@@ -716,14 +716,140 @@ def event_dir_ps1_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path
 
 
 def clear_downsample_event_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
-    """Remove event-dir artifacts written by the downsample stage."""
+    """Remove event-dir artifacts written by the downsample stage.
+
+    Never deletes the shared SCC ``field_templates/`` store. Field mode may
+    rewrite event-local schedule/group sidecars on the next run; SCC contribs
+    are reused unless ``stages.downsample.rebuild_field_store: true``.
+    """
     removed: list[str] = []
+    event = Path(resolved.event_dir)
     csv_path = event_dir_ps1_removed_stars_csv_path(resolved)
-    if csv_path.is_file():
-        csv_path.unlink()
-        removed.append(str(csv_path))
-        log.info("Force rerun: removed file %s", csv_path)
+    candidates = [
+        csv_path,
+        event / "template_group_shifts.parquet",
+        event / "template_group_shifts.json",
+        event / "shift_schedule.npz",
+        event / "shift_schedule.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            path.unlink()
+            removed.append(str(path))
+            log.info("Force rerun: removed file %s", path)
     return removed
+
+
+def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
+    """Path to mapping's master TESS→skycell FITS for this SCC."""
+    t = resolved.target
+    suffix = ""
+    os_factor = resolved.stages.mapping.oversampling_factor
+    mapping_root = Path(resolved.mapping_root)
+    if os_factor > 1:
+        mapping_root = mapping_root / f"oversampling_{os_factor}"
+        suffix = f"_os{os_factor}"
+    return (
+        mapping_root
+        / f"sector_{t.sector:04d}"
+        / f"camera_{t.camera}"
+        / f"ccd_{t.ccd}"
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}.fits.gz"
+    )
+
+
+def _geometry_mode_for_resolved(resolved: ResolvedTargetConfig) -> str:
+    job = Path(resolved.event_dir) / "cluster_template_job.json"
+    if job.is_file():
+        try:
+            import json
+
+            payload = json.loads(job.read_text())
+            mode = payload.get("geometry_mode")
+            if mode:
+                return str(mode).lower()
+        except Exception:
+            pass
+    return str(
+        getattr(resolved.stages.wcs_grouping, "geometry_mode", None)
+        or getattr(resolved.stages.downsample, "geometry_mode", None)
+        or "linear"
+    ).lower()
+
+
+def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify SCC field_templates store for geometry_mode: field."""
+    from syndiff_pipeline.template_creation.processing.field_templates import (
+        field_templates_root,
+        verify_field_store,
+    )
+
+    t = resolved.target
+    ds = resolved.stages.downsample
+    store = field_templates_root(
+        resolved.data_root,
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=ds.oversampling_factor,
+    )
+    # The SCC store is shared across events; each event records exactly the
+    # crop-filtered keys it required in field_contrib_keys.json (written only
+    # after a successful build). Verify against THAT — not the full-chip
+    # template_group_shifts, which would false-fail every cropped run.
+    marker = Path(resolved.event_dir) / "field_contrib_keys.json"
+    if not marker.is_file():
+        return VerifyResult(
+            "downsample",
+            False,
+            "Field downsample incomplete: missing field_contrib_keys.json marker",
+            str(store),
+        )
+    import json
+
+    try:
+        keys_payload = json.loads(marker.read_text())
+        required = [
+            (str(k[0]), int(k[1]), int(k[2])) for k in keys_payload.get("keys", [])
+        ]
+    except Exception as exc:
+        return VerifyResult(
+            "downsample", False, f"Unreadable field_contrib_keys.json: {exc}", str(store)
+        )
+    result = verify_field_store(
+        store, required_keys=required, require_nonempty=False
+    )
+    if not result["ok"]:
+        return VerifyResult(
+            "downsample",
+            False,
+            f"Field store incomplete: {'; '.join(result['reasons'])}",
+            str(store),
+        )
+    if required:
+        from syndiff_pipeline.template_creation.processing.field_templates import (
+            contrib_path,
+            load_contrib,
+        )
+
+        nonempty = 0
+        for skycell, sx_i, sy_i in required:
+            p = contrib_path(store, skycell, sx_i, sy_i)
+            if p.is_file() and len(load_contrib(p)["indices"]) > 0:
+                nonempty += 1
+        if nonempty == 0:
+            return VerifyResult(
+                "downsample",
+                False,
+                f"Field store has {len(required)} keys but all contribs empty",
+                str(store),
+            )
+    return VerifyResult(
+        "downsample",
+        True,
+        f"Field store OK ({store.name})",
+        str(store),
+    )
 
 
 def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
@@ -958,15 +1084,10 @@ def expected_downsample_fits_paths(resolved: ResolvedTargetConfig) -> list[Path]
 
 
 def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
-    """Verify downsample.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    VerifyResult"""
+    """Verify downsample (linear offset FITS or field SCC store)."""
+    if _geometry_mode_for_resolved(resolved) == "field":
+        return verify_downsample_field_mode(resolved)
+
     t = resolved.target
     try:
         basenames, base = _downsample_expected_basenames(resolved)
