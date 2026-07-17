@@ -12,14 +12,14 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.asteroids import (
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.asteroids import (
     ASTEROID_FFI_TIMES_BASENAME,
     convert_intervals_to_crop_local,
     resolve_cadence_from_btjd,
 )
-from syndiff_pipeline.masking.bits import full_mask_bool
-from syndiff_pipeline.masking.tns import TRANSIENT_FIXED_BASENAME
+from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
+from syndiff_pipeline.difference_imaging.masking.tns import TRANSIENT_FIXED_BASENAME
 
 log = logging.getLogger(__name__)
 

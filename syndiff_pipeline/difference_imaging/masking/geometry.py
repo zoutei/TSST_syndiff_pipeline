@@ -365,7 +365,7 @@ def big_sat_empirical(
 
 def warmup_numba() -> None:
     """Trigger JIT compile once."""
-    from syndiff_pipeline.masking.faint_star_squares import paint_squares
+    from syndiff_pipeline.difference_imaging.masking.faint_star_squares import paint_squares
 
     geo = load_geometry()
     m = np.zeros((32, 32), dtype=np.uint8)

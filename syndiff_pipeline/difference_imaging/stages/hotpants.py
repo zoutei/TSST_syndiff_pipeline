@@ -786,7 +786,7 @@ def _resolve_hotpants_mask_array(mask, mask_catalog, btjd) -> np.ndarray:
 
     Ignores bit 32 (``FAINT_CAT``) so dense Gaia faint squares do not wipe substamps.
     """
-    from syndiff_pipeline.masking.bits import hotpants_mask_bool
+    from syndiff_pipeline.difference_imaging.masking.bits import hotpants_mask_bool
 
     if mask_catalog is not None:
         return hotpants_mask_bool(mask_catalog.mask_at(btjd, which="full"))

@@ -226,7 +226,7 @@ def load_epsf_smooth(output_dir: str, round_id: int) -> tuple:
 # Static-mask bits ignored for ePSF star rejection:
 # BRIGHT_CAT | SAT_CROSS | FAINT_CAT (1|2|32) — all catalog star stamps incl. crosses.
 # Any other set bit rejects (straps, edges, PS1, TNS, asteroids).
-from syndiff_pipeline.masking.bits import EPSF_IGNORE_BITS, epsf_reject_mask
+from syndiff_pipeline.difference_imaging.masking.bits import EPSF_IGNORE_BITS, epsf_reject_mask
 
 EPSF_SHARED_MASK_BITS = EPSF_IGNORE_BITS  # legacy name; means "ignored" bits
 EPSF_STATIC_MASK_BITS = EPSF_IGNORE_BITS

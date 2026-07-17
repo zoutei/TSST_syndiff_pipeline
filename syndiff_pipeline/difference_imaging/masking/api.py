@@ -9,9 +9,9 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking.asteroids import ensure_asteroid_products
-from syndiff_pipeline.masking.catalog import MaskCatalog
-from syndiff_pipeline.masking.settings import (
+from syndiff_pipeline.difference_imaging.masking.asteroids import ensure_asteroid_products
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.settings import (
     MaskSettings,
     apply_stage_overrides,
     default_asteroid_intervals_dir,
@@ -19,8 +19,8 @@ from syndiff_pipeline.masking.settings import (
     resolve_mask_settings,
     write_mask_settings,
 )
-from syndiff_pipeline.masking.shared import build_static_mask
-from syndiff_pipeline.masking.tns import (
+from syndiff_pipeline.difference_imaging.masking.shared import build_static_mask
+from syndiff_pipeline.difference_imaging.masking.tns import (
     ensure_tns_public_csv,
     load_or_build_transient_fixed,
 )
@@ -148,7 +148,7 @@ def generate_shared_mask_catalog(
     )
 
     if write_plots_dir is not None:
-        from syndiff_pipeline.masking.plots import write_mask_debug_plots
+        from syndiff_pipeline.difference_imaging.masking.plots import write_mask_debug_plots
 
         write_mask_debug_plots(catalog, write_plots_dir)
 

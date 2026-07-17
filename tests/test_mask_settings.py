@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from syndiff_pipeline.masking.settings import (
+from syndiff_pipeline.difference_imaging.masking.settings import (
     DEFAULT_TNS_PUBLIC_ZIP_URL,
     DEFAULT_TESS_ORBIT_TIMES_URL,
     MaskSettings,

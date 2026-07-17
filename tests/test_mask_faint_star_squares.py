@@ -6,14 +6,14 @@ import numpy as np
 import pandas as pd
 from scipy.signal import fftconvolve
 
-from syndiff_pipeline.masking.faint_star_squares import (
+from syndiff_pipeline.difference_imaging.masking.faint_star_squares import (
     _BIN_KEYS,
     _MAG_HI,
     _MAG_LO,
     _SIZE_BASE,
     faint_star_squares,
 )
-from syndiff_pipeline.masking.geometry import size_limit
+from syndiff_pipeline.difference_imaging.masking.geometry import size_limit
 
 
 def _faint_star_squares_fft(
@@ -85,6 +85,6 @@ def test_faint_star_squares_even_odd_single_star():
 
 
 def test_gaia_auto_mask_alias():
-    from syndiff_pipeline.masking.tessreduce_squares import gaia_auto_mask
+    from syndiff_pipeline.difference_imaging.masking.tessreduce_squares import gaia_auto_mask
 
     assert gaia_auto_mask is faint_star_squares
