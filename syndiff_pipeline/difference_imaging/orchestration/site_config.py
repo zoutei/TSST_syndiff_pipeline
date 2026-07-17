@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,6 +26,7 @@ from syndiff_pipeline.difference_imaging.orchestration.config import (
     save_config,
 )
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
+    event_field_templates_symlink_path,
     event_templates_symlink_path,
 )
 
@@ -310,16 +312,46 @@ def _gaia_catalog_path(
     )
 
 
+def event_geometry_mode(event_dir: str | Path) -> str:
+    """Read ``geometry_mode`` from the event's ``cluster_template_job.json``.
+
+    Returns ``"linear"`` when the job is missing, unreadable, or does not stamp
+    a mode (linear payloads never stamp it). Lower-cased.
+    """
+    job = Path(event_dir) / "cluster_template_job.json"
+    if job.is_file():
+        try:
+            mode = json.loads(job.read_text()).get("geometry_mode")
+            if mode:
+                return str(mode).lower()
+        except Exception:
+            pass
+    return "linear"
+
+
 def resolve_event_template_dir(event_dir: str | Path) -> str:
-    """Resolve physical template directory via ``events/{target}/ws/templates`` symlink."""
+    """Resolve physical template directory via the event ``ws`` symlink.
+
+    Only prefers the field-mode ``ws/field_templates`` SCC store when the event
+    is actually ``geometry_mode: field`` (per ``cluster_template_job.json``), so
+    a stale/leftover ``ws/field_templates`` symlink cannot hijack a linear event.
+    Otherwise resolves the linear ``ws/templates`` symlink.
+    """
+    if event_geometry_mode(event_dir) == "field":
+        field_link = event_field_templates_symlink_path(event_dir)
+        if field_link.is_symlink() or field_link.is_dir():
+            resolved = field_link.resolve()
+            if resolved.is_dir():
+                return str(resolved)
     link = event_templates_symlink_path(event_dir)
     if link.is_symlink():
         resolved = link.resolve()
         if resolved.is_dir():
             return str(resolved)
     raise FileNotFoundError(
-        f"Missing or broken templates symlink {link}. "
-        "Run template pipeline downsample to create ws/templates."
+        f"Missing or broken templates symlink {link} (and no field_templates "
+        "store). Run template pipeline downsample to create ws/templates or "
+        "ws/field_templates."
     )
 
 
