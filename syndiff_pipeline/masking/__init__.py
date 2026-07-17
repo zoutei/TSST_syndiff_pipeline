@@ -25,7 +25,17 @@ from syndiff_pipeline.masking.settings import (
     resolve_mask_settings,
 )
 from syndiff_pipeline.masking.shared import Cat_mask, build_static_mask, make_shared_mask
-
+from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
+from syndiff_pipeline.masking.ffi_mask import (
+    btjd_for_ffi_id,
+    load_catalog_for_event,
+    mask_array_for_ffi_id,
+    normalize_ffi_product_id,
+    select_asteroid_active_ffi_ids,
+    select_begin_mid_end_ffi_ids,
+    write_mask_fits_for_ffi,
+    write_sector_sample_mask_fits,
+)
 __all__ = [
     "ASTEROID",
     "BRIGHT_CAT",
@@ -42,12 +52,21 @@ __all__ = [
     "Cat_mask",
     "MaskCatalog",
     "MaskSettings",
+    "btjd_for_ffi_id",
     "build_static_mask",
     "epsf_reject_mask",
+    "faint_star_squares",
     "full_mask_bool",
+    "load_catalog_for_event",
     "load_mask_settings",
     "make_shared_mask",
+    "mask_array_for_ffi_id",
+    "normalize_ffi_product_id",
     "resolve_mask_settings",
+    "select_asteroid_active_ffi_ids",
+    "select_begin_mid_end_ffi_ids",
     "strap_column_mask",
     "strap_source_mask",
+    "write_mask_fits_for_ffi",
+    "write_sector_sample_mask_fits",
 ]

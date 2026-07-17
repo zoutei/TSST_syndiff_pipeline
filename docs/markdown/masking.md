@@ -1,8 +1,12 @@
-# Shared masking (empirical / TESSreduce / TNS / asteroids)
+# Static masking (empirical / TESSreduce / TNS / asteroids)
 
-Default shared-mask style is **empirical** (behavior change on upgrade). Set
+Default **static** mask style is **empirical** (behavior change on upgrade). Set
 `shared.style: tessreduce` in site `mask_settings.yaml` to keep the old
 TESSreduce-only bit layout (bits 1/2/4/8/16 only; no 32/64/128).
+
+The on-disk artifact is still named `shared_mask.fits.gz` (pipeline stage kind
+`shared_mask`) for backward compatibility; it stores only the **static** layer.
+Per-FFI temporal bits (asteroids) are applied in memory via `MaskCatalog.mask_at`.
 
 ## Package
 
@@ -14,6 +18,7 @@ Code lives in [`syndiff_pipeline/masking/`](../../syndiff_pipeline/masking/):
 | `geometry.py` | Packaged `mask_geometry.yaml` radii / crosses (numba painters) |
 | `settings.py` | `MaskSettings` load/resolve/freeze |
 | `shared.py` | Hybrid `build_static_mask` + tessreduce `make_shared_mask` / `Cat_mask` |
+| `faint_star_squares.py` | Mag-binned square stamps (bit 32 `FAINT_CAT`; numba) |
 | `tns.py` | Public CSV ensure + `transient_fixed` + bit 64 |
 | `asteroids.py` | SCC intervals load/generate + bit 128 |
 | `asteroid_discover.py` | `sbident` discover + MIT orbit-times auto-download |
@@ -32,7 +37,7 @@ re-exports public names for backward compatibility.
 | 4 | `STRAP` | Strap columns |
 | 8 | `EDGE` | Detector dead zones |
 | 16 | `PS1` | Template COUNT &lt; threshold |
-| 32 | `FAINT_CAT` | TESSreduce squares; `bright_maglim` ≤ T &lt; `faint_maglim` (18) |
+| 32 | `FAINT_CAT` | `faint_star_squares` (numba mag-binned squares); `bright_maglim` ≤ T &lt; `faint_maglim` (18) |
 | 64 | `TNS` | Circles from `transient_fixed` (usually static) |
 | 128 | `ASTEROID` | Per-cadence only — never in static FITS |
 
@@ -56,7 +61,7 @@ On submit, if the site file exists it is also copied to `runs/{run_id}/mask_sett
 
 | Artifact | Location |
 |----------|----------|
-| `shared_mask.fits.gz` | event `ws/` (int16 static; may include bit 64) |
+| `shared_mask.fits.gz` | event `ws/` — **static** int16 bitmask (may include bit 64; never bit 128). Pipeline stage kind remains `shared_mask` for BC. |
 | `mask_settings.yaml` | event `ws/` (frozen effective) |
 | `transient_fixed.parquet` | event `ws/` |
 | TNS public CSV | `{data_root}/catalogs/tns/tns_public_objects.csv` |
@@ -74,16 +79,32 @@ cat.mask_at(time, which="full"|"static"|"temporal", out=None, as_bool=False)
 - `which="full"`: static copy then OR bit 128 for active cadence.
 - Asteroid row/col are **1-based full-FFI**; converted to crop-local once on load.
 
+### Per-FFI mask FITS helper
+
+```python
+from syndiff_pipeline.masking import (
+    load_catalog_for_event,
+    write_mask_fits_for_ffi,
+    write_sector_sample_mask_fits,
+)
+
+cat = load_catalog_for_event(".../ws", crop_bounds=crop, data_root=data_root, sector=20, camera=3, ccd=3)
+write_mask_fits_for_ffi(cat, "tess2020007215923", "mask.fits", wcs_table=manifest)
+# or begin / mid / end of sector:
+write_sector_sample_mask_fits(cat, manifest, "out_dir/")
+```
+
+`ffi_id` may be a product id (`tess…`), bare digits, or an FFI path/basename.
 ## Consumers
 
 | Stage | Predicate |
 |-------|-----------|
 | Hotpants / kernel_fit / kernel_subtract / spatial bkg | `full_mask_bool(mask_at(..., which="full"))` |
 | Strap QE / phot_mask | source bits `1\|32`; strap bit `4` |
-| ePSF / star ePSF | ignore `1\|2`; reject any other set bit |
+| ePSF / star ePSF | ignore all star stamps `1\|2\|32` (bright / crosses / faint squares); reject any other set bit via per-FFI `mask_at` |
 
-Hotpants loky workers install the catalog once and resolve BTJD→cadence per frame.
-ePSF loads `ws_root/shared_mask.fits.gz` (not the event `out/` root).
+Hotpants and ePSF loky workers install the catalog once and resolve BTJD→mask per frame (no static-mask FITS I/O per frame).
+On-disk artifact remains `shared_mask.fits.gz` (static layer only; bit 128 never written there).
 
 ## Graceful degrade
 
@@ -111,5 +132,5 @@ pip install git+https://github.com/bengebre/sbident
 
 1. One empirical `syndiff diff run` with defaults (TNS+asteroids on).
 2. Compare Hotpants residuals vs a tessreduce rollback (`style: tessreduce`).
-3. Confirm ePSF still gets T&lt;13 stars (bits 1|2 ignored).
+3. Confirm ePSF keeps catalog stars (bits 1|2|32 ignored) and rejects straps/TNS/asteroids.
 4. Spot-check `debug_plots/masks/` including bits 64/128 on a known SCC.
