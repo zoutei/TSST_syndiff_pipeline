@@ -482,6 +482,7 @@ def run_field_downsample_scc(
     hybrid_R: int = 1,
     include_abutting_border_exact: bool = True,
     rebuild_field_store: bool = False,
+    stage_regmaps_to_scratch: bool | None = None,
 ) -> dict[str, Any]:
     """
     Build/reuse the SCC field store and point the event at it.
@@ -603,6 +604,38 @@ def run_field_downsample_scc(
             len(allowed),
         )
 
+    # Condor parity: stage the ROI skycell regmaps to local scratch so workers
+    # read them off local disk instead of shared NFS (auto-enabled on Condor).
+    from syndiff_pipeline.template_creation.processing.downsample import (
+        resolve_stage_regmaps_to_scratch,
+        stage_regmap_files_to_scratch,
+    )
+
+    scratch_regmaps: dict[str, str] = {}
+    if resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch):
+        sky_reg: list[tuple[str, str]] = []
+        for sc in sorted({k[0] for k in keys}):
+            try:
+                sky_reg.append(
+                    (sc, str(_find_regmap(mapping_root, sector, camera, ccd, sc,
+                                          oversampling_factor=oversampling_factor)))
+                )
+            except FileNotFoundError:
+                continue
+        if sky_reg:
+            local_paths, scratch_dir, n_staged, elapsed = stage_regmap_files_to_scratch(
+                [p for _, p in sky_reg],
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                oversampling_factor=oversampling_factor,
+            )
+            scratch_regmaps = {sc: lp for (sc, _), lp in zip(sky_reg, local_paths)}
+            log.info(
+                "Staged %d/%d ROI regmaps to scratch %s in %.1fs",
+                n_staged, len(sky_reg), scratch_dir, elapsed,
+            )
+
     frames_df = pd.read_csv(event_dir / "syndiff_ffi_frames.csv")
     skycell_row_cache: dict[str, pd.Series] = {}
 
@@ -624,7 +657,7 @@ def run_field_downsample_scc(
             return "skip"
         if out.is_file() and rebuild_field_store:
             out.unlink()
-        reg = _find_regmap(
+        reg = scratch_regmaps.get(skycell) or _find_regmap(
             mapping_root,
             sector,
             camera,
@@ -754,7 +787,12 @@ def run_field_downsample_scc(
         import os as _os
 
         hybrid_cap = int(_os.environ.get("SYNDIFF_HYBRID_MAX_JOBS", "24"))
-        n_jobs_eff = min(n_jobs_eff, max(1, hybrid_cap))
+        # Also clamp to the CPUs actually available (a Condor slot's cgroup
+        # cpuset) so a hybrid run cannot oversubscribe its request_cpus.
+        avail = len(_os.sched_getaffinity(0)) if hasattr(_os, "sched_getaffinity") else (
+            _os.cpu_count() or hybrid_cap
+        )
+        n_jobs_eff = min(n_jobs_eff, max(1, hybrid_cap), max(1, avail))
     if n_jobs_eff == 1 or len(key_list) <= 1:
         statuses = [_one(s, x, y) for s, x, y in key_list]
     else:
