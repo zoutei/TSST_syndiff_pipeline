@@ -21,10 +21,10 @@ Site authoring is intentionally split:
 |------|------|
 | `diff_config.yaml` `defaults:` / top-level | Multi-stage knobs: crop, `n_jobs`, `max_ffis`, `workspace_run_id`, `pipeline_plots*`, `master_fits_mirror`, `additional_forced_targets` |
 | `diff_config.yaml` `pipeline:` `kind:` blocks | Stage-only knobs. **Omit keys that match dataclass defaults** in `stage_params.py` |
-| `mask_settings.yaml` (optional sibling) | Mask geometry/policy (style, maglims, straps/edges/PS1, TNS, asteroids). **Not** embedded in `diff_config` |
+| `mask_settings.yaml` (optional sibling) | Mask geometry/policy (style, maglims, strap/edge/PS1 *policy*, TNS, asteroids). **Not** embedded in `diff_config` |
 | `deployment.yaml` | `workspace_root`, `data_root`, credentials |
 
-`- kind: shared_mask` does **not** require a `mask_settings:` path. Resolve order is stage path → `{ws}/mask_settings.yaml` → site `mask_settings.yaml` → packaged defaults. See [masking.md](../masking.md).
+`- kind: shared_mask` does **not** require a `mask_settings:` path. Resolve order is stage path → `{ws}/mask_settings.yaml` → site `mask_settings.yaml` → packaged defaults. An existing `{ws}/mask_settings.yaml` wins over later site edits until removed/replaced. See [masking.md](../masking.md).
 
 Frozen `{ws}/diff_config.yaml` is a **slim snapshot** (`cfg_to_snapshot_dict`): empties, SynDiffConfig defaults, and bundled `straps_csv`/`bsc_catalog` paths are omitted; pipeline stages drop keys equal to their param-dataclass defaults. Legacy full dumps still load via `load_config`.
 
@@ -124,7 +124,7 @@ Per-frame linear combination of workspace planes (or the virtual cropped `ffi` l
 
 ### `epsf` (`stages/epsf.py`, `stages/gridded_epsf.py`)
 
-Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction loads `ws/shared_mask.fits.gz` and **ignores bits 1|2** (bright catalog / saturation crosses) so T&lt;13 Gaia ePSF stars are kept; any other set bit (4/8/16/32/64/128) rejects. See [masking.md](../masking.md).
+Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction uses per-FFI `mask_at` and **ignores bits 1|2|32** (bright catalog / saturation crosses / faint squares) so Gaia ePSF stars are kept; any other set bit (4/8/16/64/128) rejects. See [masking.md](../masking.md).
 
 Primary outputs under `ws/{output}/`:
 
