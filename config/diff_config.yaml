@@ -1,5 +1,11 @@
 # Site diff policy. Paths resolve from deployment.yaml + per-target layout.
 # Targets are passed on the CLI via --targets (never embedded here).
+#
+# Ownership:
+#   defaults: / top-level — multi-stage knobs (crop, n_jobs, plots, workspace_run_id)
+#   pipeline kind: — stage-only knobs (omit keys that match dataclass defaults)
+#   mask_settings.yaml (sibling; optional) — mask geometry/policy (NOT embedded here)
+# Frozen ws/diff_config.yaml is a slim snapshot (empties/defaults/bundled paths omitted).
 deployment_file: deployment.yaml
 
 defaults:
@@ -26,38 +32,21 @@ additional_forced_targets:
     dy: 0
 
 pipeline:
-  # Multi-survey astrometry refines target_ra/dec before differencing (writes ws*/astrometry_result.json).
   - kind: astrometry
-  # Template wcs_grouping + downsample must run first; diff loads handoff from
-  # cluster_template_job.json, syndiff_ffi_frames.csv, and events/{target}/ws/templates
   - kind: shared_mask
   - kind: hotpants
     science: ffi
-    # Gaussian kernel widths (px); middle value sets rkernel/rss via int(2.5 * sigma[1])
+    # Only non-default / wiring keys; other hp_* use HotpantsParams defaults.
     hp_sigma_gauss: [0.752, 1.88, 3.76]
-    hp_ko: 2
-    hp_bgo: 3
-    hp_nstampx: 10
-    hp_nstampy: 10
-    hp_nss: 100
-    hp_ngauss: 3
-    hp_deg_fixe: [6, 4, 2]
     hp_kf_spread_mask1: 0.0
-    hp_ks: 3.0
-    hp_kfm: 0.75
-    hp_fitthresh: 5.0
-    hp_stat_sig: 3.0
-    hp_force_convolve: "t"
-    hp_normalize: "t"
-    output:
-      diffs: hp_d
-      convolved: hp_c
-      bkg: hp_b
     write_kernel_solutions: true
     write_convolved: false
     write_bkg: true
     write_stamps: false
-  # - external_workspaces: [hp_d]
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
   - kind: forced_photometry
     inputs:
       diffs: hp_d
@@ -71,63 +60,6 @@ pipeline:
         tar_ap: 3
         sky_in: 5
         sky_out: 9
-  # - kind: background
-  #   inputs:
-  #     diffs: hp_d
-  #     bkg: hp_b
-  #   output: bkg_final
-  #   recombine_inputs: true
-  #   steps:
-  #     spatial: { enabled: true, box_size: 16, exclude_straps: true }
-  #     temporal: { enabled: true, method: savgol, tile_size: 256 }
-  #     strap: { enabled: true, qe_floor: 1.001, fix_anomalies: true }
-  # - kind: subtract
-  #   inputs:
-  #     expression: "hp_d - bkg_final"
-  #   output: diffs_minus_bkg
-  # - kind: forced_photometry
-  #   inputs:
-  #     diffs: diffs_minus_bkg
-  #   output: lc_prf_after_bkg
-  #   methods:
-  #     - name: prf
-  #       type: psf
-  #       psf_type: prf
-  # - kind: subtract
-  #   inputs:
-  #     expression: "ffi - bkg_rough - hp_b"
-  #   output: ffi_wo_bkg
-  # - kind: hotpants
-  #   science: ffi_wo_bkg
-  #   output:
-  #     diffs: hp2_d
-  #     convolved: hp2_c
-  #     bkg: hp2_b
-  # - kind: forced_photometry
-  #   inputs:
-  #     diffs: hp2_d
-  #   psf_type: prf
-  #   output: lc_prf_on_diffs_loop2
-
-# Per-event extras — keyed by target label from targets CSV.
-# One ra/dec example + one fixed x/y example for 2020ut.
-# per_event_force_targets:
-#   s0020_c3_k3_2020ut:
-#     - name: bottom
-#       ra: 210.2696410
-#       dec: 81.8743734
-#     - name: fixed_pixel_check
-#       x: 512.0
-#       y: 600.0
-
-# overrides:
-#   # 2020ut (sector 20 / camera 3 / ccd 3): full-FFI templates + 1024×1024 diff ROI on target.
-#   "20/3/3":
-#     defaults:
-#       # n_jobs: 12
-#       crop_mode: target_box
-#       crop_box_size: 1024
-    # template_dir: omit → events/{target}/ws/templates symlink after template downsample
 
 condor:
   request_cpus: 16

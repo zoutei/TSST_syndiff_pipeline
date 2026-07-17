@@ -155,7 +155,6 @@ def ensure_star_epsf_catalog(
     epsf_stack, _tile_centers, ffi_stems, epsf_ok = epsf_fitting.fit_epsf_all_frames(
         diff_paths,
         gaia_df,
-        None,
         cfg,
         epsf_params,
         out_dir,

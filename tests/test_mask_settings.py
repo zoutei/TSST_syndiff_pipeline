@@ -61,6 +61,13 @@ def test_stage_overrides_bc():
     assert s2.shared.ps1_min_hit_count == 100
 
 
+def test_stage_overrides_none_leaves_settings():
+    s = mask_settings_from_dict({"shared": {"bright_maglim": 11.0, "strapsize": 9}})
+    s2 = apply_stage_overrides(s, gaia_mag_bright=None, strapsize=None)
+    assert s2.shared.bright_maglim == 11.0
+    assert s2.shared.strapsize == 9
+
+
 def test_write_omits_default_download_url(tmp_path):
     path = write_mask_settings(MaskSettings(), tmp_path / "out.yaml")
     raw = yaml.safe_load(path.read_text())
