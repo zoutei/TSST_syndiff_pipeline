@@ -25,7 +25,7 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
 from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
 from syndiff_pipeline.difference_imaging.support.paths import (
     DEFAULT_MANIFEST_BASENAME,
-    SHARED_MASK_FITS_BASENAME,
+    STATIC_MASK_FITS_BASENAME,
     normalize_workspace_run_id,
     workspace_dir,
 )
@@ -460,10 +460,10 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "re-run the baseline hotpants stage with write_kernel_solutions: true"
         )
 
-    shared_mask = Path(ctx.baseline_workspace_dir) / SHARED_MASK_FITS_BASENAME
-    if not shared_mask.is_file():
+    static_mask = Path(ctx.baseline_workspace_dir) / STATIC_MASK_FITS_BASENAME
+    if not static_mask.is_file():
         missing.append(
-            f"shared_mask.fits.gz missing at {shared_mask}; "
+            f"static mask ({STATIC_MASK_FITS_BASENAME}) missing at {static_mask}; "
             "run the shared_mask diff stage for this event"
         )
 

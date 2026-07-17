@@ -21,19 +21,27 @@ from syndiff_pipeline.difference_imaging.support.manifest import (
     DEFAULT_MANIFEST_BASENAME,
     ordered_diff_paths_for_workspace,
 )
-from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
+from syndiff_pipeline.difference_imaging.support.paths import (
+    DEFAULT_MANIFEST_BASENAME,
+    STATIC_MASK_FITS_BASENAME,
+)
+from syndiff_pipeline.masking.ffi_mask import load_catalog_for_event
 from syndiff_pipeline.star.context import StarEventContext
 from syndiff_pipeline.star.site_config import StarEpsfConfig
 
 logger = logging.getLogger(__name__)
 
 
-def _shared_mask_path(baseline_workspace_dir: str) -> str | None:
-    for name in (SHARED_MASK_FITS_BASENAME, "shared_mask.fits"):
+def _static_mask_path(baseline_workspace_dir: str) -> str | None:
+    for name in (STATIC_MASK_FITS_BASENAME, "shared_mask.fits", "static_mask.fits.gz"):
         path = os.path.join(baseline_workspace_dir, name)
         if os.path.isfile(path):
             return path
     return None
+
+
+# Backward-compatible alias
+_shared_mask_path = _static_mask_path
 
 
 def epsf_workspace_dir(ctx: StarEventContext, epsf_label: str) -> str:
@@ -123,7 +131,17 @@ def ensure_star_epsf_catalog(
         epsf_n_jobs=build_cfg.epsf_n_jobs,
     )
     cfg = SimpleNamespace(n_jobs=build_cfg.epsf_n_jobs or 8)
-    shared_mask_path = _shared_mask_path(ctx.baseline_workspace_dir)
+    mask_catalog = load_catalog_for_event(
+        ctx.baseline_workspace_dir,
+        crop_bounds=ctx.crop_bounds,
+        data_root=ctx.data_root,
+        sector=int(ctx.sector),
+        camera=int(ctx.camera),
+        ccd=int(ctx.ccd),
+    )
+    static_mask_path = None if mask_catalog is not None else _static_mask_path(
+        ctx.baseline_workspace_dir
+    )
 
     os.makedirs(out_dir, exist_ok=True)
     logger.info(
@@ -142,7 +160,9 @@ def ensure_star_epsf_catalog(
         epsf_params,
         out_dir,
         round_id=1,
-        shared_mask_path=shared_mask_path,
+        mask_catalog=mask_catalog,
+        static_mask_path=static_mask_path,
+        wcs_table=manifest,
         epsf_label=build_cfg.output,
         diffs_input=resolved_diffs,
     )

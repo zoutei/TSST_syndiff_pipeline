@@ -27,7 +27,9 @@ HOST_STAR_WS_LABEL = "host_star"
 DEFAULT_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
 HOTPANTS_SUBSTAMP_STARS_BASENAME = "hotpants_substamp_stars.csv"
 TARGETS_DS9_REGION_BASENAME = "targets.reg"
-SHARED_MASK_FITS_BASENAME = "shared_mask.fits.gz"
+# On-disk static bitmask (int16). Basename kept for backward compatibility.
+STATIC_MASK_FITS_BASENAME = "shared_mask.fits.gz"
+SHARED_MASK_FITS_BASENAME = STATIC_MASK_FITS_BASENAME  # alias
 GAIA_CATALOG_PIPELINE_BASENAME = "gaia_catalog_pipeline.csv"
 DIFF_CONFIG_SNAPSHOT_BASENAME = "diff_config.yaml"
 

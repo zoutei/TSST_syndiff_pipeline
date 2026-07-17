@@ -1,4 +1,4 @@
-"""Shared-mask bit layout and consumer predicates."""
+"""Static-mask bit layout and consumer predicates."""
 
 from __future__ import annotations
 
@@ -13,12 +13,18 @@ FAINT_CAT = 32
 TNS = 64
 ASTEROID = 128
 
-EPSF_IGNORE_BITS = BRIGHT_CAT | SAT_CROSS  # 1 | 2
+# ePSF may use catalog stars (bright circles, sat crosses, faint squares).
+EPSF_IGNORE_BITS = BRIGHT_CAT | SAT_CROSS | FAINT_CAT  # 1 | 2 | 32
 STRAP_SOURCE_BITS = BRIGHT_CAT | FAINT_CAT  # 1 | 32
 
 
 def epsf_reject_mask(mask: np.ndarray) -> np.ndarray:
-    """True where ePSF should reject (any bit except BRIGHT_CAT / SAT_CROSS)."""
+    """
+    True where ePSF should reject a pixel for star selection.
+
+    Ignores all star stamps (bits 1|2|32: bright / crosses / faint squares).
+    Rejects straps, edges, PS1 holes, TNS, asteroids, and any other set bit.
+    """
     return (np.asarray(mask).astype(np.int64) & ~EPSF_IGNORE_BITS) != 0
 
 
