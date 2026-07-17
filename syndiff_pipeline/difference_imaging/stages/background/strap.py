@@ -24,7 +24,7 @@ def calc_qe_strap_correction(
     qe_floor: float = 1.001,
 ) -> np.ndarray:
     """Multiplicative QE map from strap columns vs background (TESSreduce _calc_qe)."""
-    from syndiff_pipeline.masking.bits import strap_column_mask, strap_source_mask
+    from syndiff_pipeline.difference_imaging.masking.bits import strap_column_mask, strap_source_mask
 
     time = deepcopy(time_mjd)
     mask2d = mask[0] if mask.ndim == 3 else mask
@@ -80,7 +80,7 @@ def fix_background_anomalies(
 ):
     """Fix column offsets and transients in a background cube (TESSreduce helpers)."""
     from photutils.background import Background2D, MedianBackground
-    from syndiff_pipeline.masking.bits import strap_column_mask, strap_source_mask
+    from syndiff_pipeline.difference_imaging.masking.bits import strap_column_mask, strap_source_mask
 
     T, NY, NX = bkg.shape
     mask2d = mask[0] if mask.ndim == 3 else mask

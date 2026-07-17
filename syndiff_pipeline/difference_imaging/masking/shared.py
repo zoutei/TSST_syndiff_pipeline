@@ -12,20 +12,20 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.detector import (
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.detector import (
     detector_edge_mask,
     ps1_coverage_mask,
     resolve_straps_csv,
 )
-from syndiff_pipeline.masking.geometry import (
+from syndiff_pipeline.difference_imaging.masking.geometry import (
     big_sat_empirical,
     gaia_circle_mask,
     load_geometry,
 )
-from syndiff_pipeline.masking.settings import MaskSettings
-from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
-from syndiff_pipeline.masking.tessreduce_squares import Big_sat, Strap_mask
+from syndiff_pipeline.difference_imaging.masking.settings import MaskSettings
+from syndiff_pipeline.difference_imaging.masking.faint_star_squares import faint_star_squares
+from syndiff_pipeline.difference_imaging.masking.tessreduce_squares import Big_sat, Strap_mask
 
 log = logging.getLogger(__name__)
 
@@ -338,7 +338,7 @@ def build_static_mask(
         and len(tns_table)
         and settings.tns.include_in_static_fits
     ):
-        from syndiff_pipeline.masking.tns import paint_tns_bit
+        from syndiff_pipeline.difference_imaging.masking.tns import paint_tns_bit
 
         mask = paint_tns_bit(mask, tns_table, crop_bounds)
 

@@ -25,7 +25,7 @@ syndiff star run --site config/ --star-targets {star_targets.csv} --target-name 
 ```
 
 - `--site DIR` loads `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`.
-- Optional sibling `mask_settings.yaml` owns mask policy (not required in `diff_config`; bare `- kind: shared_mask` uses site file or packaged defaults). See `docs/markdown/masking.md`.
+- Optional sibling `mask_settings.yaml` owns mask policy (not required in `diff_config`; bare `- kind: shared_mask` uses site file or packaged defaults). Library code: `syndiff_pipeline.difference_imaging.masking` (diff/star only; not template creation). See `docs/markdown/masking.md`.
 - `star` additionally loads `star_config.yaml` and a separate `star_targets.csv`; it verifies an existing template+diff workspace rather than depending on the main DAG in SQLite.
 - `--local` on submit rewrites the frozen run config so `stages.diff.executor: local` (Condor bypass for smoke tests).
 - `--local` on `star submit` instead rewrites `stages.star.executor: local`.

@@ -17,8 +17,8 @@ from syndiff_pipeline.difference_imaging.stages.epsf import (
     _load_static_mask_2d,
     epsf_reject_mask_at,
 )
-from syndiff_pipeline.masking.bits import EPSF_IGNORE_BITS
-from syndiff_pipeline.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.bits import EPSF_IGNORE_BITS
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
 
 
 def test_epsf_ignore_bits_are_all_stars():

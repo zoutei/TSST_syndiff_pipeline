@@ -27,8 +27,10 @@ verified from an existing event workspace.
 | `ps1_download` | `template_creation/processing/ps1_download.py` | `docs/markdown/stages/README.md` |
 | `ps1_process` | `template_creation/processing/ps1_process.py`, `band_utils.py` | `docs/markdown/stages/ps1_process_technical.md` |
 | `downsample` | `template_creation/processing/downsample.py` | `docs/markdown/stages/downsample_technical.md` |
-| `diff` (internal sub-pipeline) | `difference_imaging/orchestration/execute.py` + `difference_imaging/stages/` | `docs/markdown/stages/diff_pipeline.md` |
+| `diff` (internal sub-pipeline) | `difference_imaging/orchestration/execute.py` + `difference_imaging/stages/` + `difference_imaging/masking/` | `docs/markdown/stages/diff_pipeline.md`, `docs/markdown/masking.md` |
 | `star` (host-star light curves) | `star/runner.py`, `star/epsf_runner.py`, `star/orchestration/stages.py` | `docs/markdown/star_lightcurves.md`, `docs/markdown/stages/star_pipeline.md` |
+
+Mask library code lives under **`difference_imaging/masking/`** (consumers: diff stages + star ePSF). Template creation does **not** import it.
 
 Orchestration (scheduler, SQLite state, Condor, verify): `docs/markdown/template_pipeline.md`, `docs/markdown/template_runner_architecture.md`. Read the relevant deep-dive doc before editing a stage.
 
@@ -97,7 +99,7 @@ Set top-level `ps1_zarr_path` in `star_config.yaml` to reuse the latter.
 3. **Coordinates**: crop bounds are `[min, max)` in full-FFI 0-based pixels; diff-stage x/y are **crop-local**. `ensure_gaia_crop_xy` converts. Mixing these silently misplaces stars.
 4. **Template filenames are the API**: `syndiff_template_s{S}_{C}_{K}[_x..._y...][_osN]_dx{±D.DDD}_dy{±D.DDD}.fits.gz`; the diff stage matches manifest `group_dx/dy` to filename dx/dy (tolerance `0.01 × offset_threshold`). Swapping templates = pointing `template_dir` at a dir with identical filenames.
 5. **Kernels**: Hotpants kernels are not persisted by default, but `write_kernel_solutions: true` writes one `{diffs_label}_kernels/{product_id}_kernel.npz` per frame (required by `star`). The separate `kernel_fit` path persists one target-level reusable kernel (`kernel_r2.npz`) for `convolved_templates` → `kernel_subtract`.
-5b. **Hotpants ignores FAINT_CAT (bit 32)** via `hotpants_mask_bool`; ePSF ignores `1|2|32`. Mask policy lives in `mask_settings.yaml`, not `diff_config` stage keys.
+5b. **Hotpants ignores FAINT_CAT (bit 32)** via `hotpants_mask_bool`; ePSF ignores `1|2|32`. Mask policy lives in `mask_settings.yaml`, not `diff_config` stage keys. Implementation: `syndiff_pipeline.difference_imaging.masking` (not a top-level package).
 6. **Verify gates are thin**: mapping = CSV exists; templates = files parse. Partially stale artifacts pass verify — delete outputs when inputs changed.
 7. **FFI files may be `.fits` or `.fits.gz`** — always resolve both (helpers exist in `common/download.py`).
 8. **`sat_template` is broken for its stated purpose**: it uses the full Gaia catalog (not `removed_stars_csv`) and its per-group outputs aren't consumable by `subtract`. Don't build on it without reading `docs/markdown/stages/diff_pipeline.md` §6.

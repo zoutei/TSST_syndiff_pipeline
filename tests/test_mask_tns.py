@@ -3,9 +3,9 @@
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.settings import DEFAULT_TNS_PUBLIC_ZIP_URL
-from syndiff_pipeline.masking.tns import build_transient_fixed, paint_tns_bit
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.settings import DEFAULT_TNS_PUBLIC_ZIP_URL
+from syndiff_pipeline.difference_imaging.masking.tns import build_transient_fixed, paint_tns_bit
 
 
 def test_default_tns_url():

@@ -185,7 +185,7 @@ def run_kernel_fit(
     Kernel NPZ and metadata are written under *artifact_dir* (typically
     ``ws/kernel_fit/``), not the event root.
     """
-    from syndiff_pipeline.masking.bits import full_mask_bool
+    from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
 
     meta_root = artifact_dir or debug_ws_dir or output_dir
     os.makedirs(meta_root, exist_ok=True)

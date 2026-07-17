@@ -41,7 +41,7 @@ def _spatial_one_frame(
     exclude_straps: bool,
 ) -> np.ndarray:
     """Spatial one frame."""
-    from syndiff_pipeline.masking.bits import full_mask_bool
+    from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
 
     raw = np.asarray(mask)
     if raw.ndim == 3:

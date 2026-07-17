@@ -3,9 +3,9 @@
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.settings import MaskSettings, SharedMaskSettings
-from syndiff_pipeline.masking.shared import build_static_mask, make_shared_mask
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.settings import MaskSettings, SharedMaskSettings
+from syndiff_pipeline.difference_imaging.masking.shared import build_static_mask, make_shared_mask
 
 
 def _settings(**kwargs):
@@ -54,7 +54,7 @@ def test_bsc_cross_only():
     crop = {"x_min": 0, "x_max": 80, "y_min": 0, "y_max": 80, "shape": (80, 80)}
     gaia = pd.DataFrame({"x": [10.0], "y": [10.0], "mag": [12.0]})
     # Without real FFI, inject BSC via monkeypatch of _project_bsc
-    import syndiff_pipeline.masking.shared as shared_mod
+    import syndiff_pipeline.difference_imaging.masking.shared as shared_mod
 
     bsc = pd.DataFrame({"x": [50.0], "y": [50.0], "vmag": [5.0]})
     orig = shared_mod._project_bsc

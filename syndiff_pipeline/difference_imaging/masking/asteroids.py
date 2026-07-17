@@ -9,8 +9,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking.geometry import load_geometry, radius_from_mag
-from syndiff_pipeline.masking.settings import default_asteroid_intervals_dir
+from syndiff_pipeline.difference_imaging.masking.geometry import load_geometry, radius_from_mag
+from syndiff_pipeline.difference_imaging.masking.settings import default_asteroid_intervals_dir
 
 log = logging.getLogger(__name__)
 
@@ -330,7 +330,7 @@ def _load_or_discover_candidates(
         )
         return None
 
-    from syndiff_pipeline.masking.asteroid_discover import discover_candidates
+    from syndiff_pipeline.difference_imaging.masking.asteroid_discover import discover_candidates
 
     log.info(
         "Running asteroid discover (sbident) for s%s c%s ccd%s → %s",

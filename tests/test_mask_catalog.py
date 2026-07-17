@@ -3,9 +3,9 @@
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.asteroids import convert_intervals_to_crop_local
-from syndiff_pipeline.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.asteroids import convert_intervals_to_crop_local
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
 
 
 def test_mask_at_static_full_temporal():

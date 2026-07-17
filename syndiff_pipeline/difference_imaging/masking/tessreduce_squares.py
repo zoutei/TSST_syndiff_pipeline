@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from scipy.signal import fftconvolve
 
-from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
-from syndiff_pipeline.masking.geometry import size_limit
+from syndiff_pipeline.difference_imaging.masking.faint_star_squares import faint_star_squares
+from syndiff_pipeline.difference_imaging.masking.geometry import size_limit
 
 log = logging.getLogger(__name__)
 

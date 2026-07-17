@@ -1,6 +1,6 @@
 """Shared-mask package: empirical / TESSreduce bits, TNS, asteroids, MaskCatalog."""
 
-from syndiff_pipeline.masking.bits import (
+from syndiff_pipeline.difference_imaging.masking.bits import (
     ASTEROID,
     BRIGHT_CAT,
     EDGE,
@@ -18,17 +18,17 @@ from syndiff_pipeline.masking.bits import (
     strap_column_mask,
     strap_source_mask,
 )
-from syndiff_pipeline.masking.catalog import MaskCatalog
-from syndiff_pipeline.masking.settings import (
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.settings import (
     DEFAULT_TNS_PUBLIC_ZIP_URL,
     DEFAULT_TESS_ORBIT_TIMES_URL,
     MaskSettings,
     load_mask_settings,
     resolve_mask_settings,
 )
-from syndiff_pipeline.masking.shared import Cat_mask, build_static_mask, make_shared_mask
-from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
-from syndiff_pipeline.masking.ffi_mask import (
+from syndiff_pipeline.difference_imaging.masking.shared import Cat_mask, build_static_mask, make_shared_mask
+from syndiff_pipeline.difference_imaging.masking.faint_star_squares import faint_star_squares
+from syndiff_pipeline.difference_imaging.masking.ffi_mask import (
     btjd_for_ffi_id,
     load_catalog_for_event,
     mask_array_for_ffi_id,

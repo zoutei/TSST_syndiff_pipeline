@@ -75,7 +75,7 @@ syndiff diff run --site config/ \
 
 Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 
-### `shared_mask` (`stages/masking.py` → `syndiff_pipeline.masking`)
+### `shared_mask` (`stages/masking.py` → `syndiff_pipeline.difference_imaging.masking`)
 
 Builds the shared bitmask and selects isolated Hotpants reference stars.
 **Default style is empirical** (see [masking.md](../masking.md)): T&lt;13 empirical

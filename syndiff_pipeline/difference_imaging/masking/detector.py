@@ -51,7 +51,7 @@ def strap_mask(
     size: int = 6,
 ) -> np.ndarray:
     """TESS strap columns (bit 4), empirical convention (half-width strip)."""
-    from syndiff_pipeline.masking.tessreduce_squares import Strap_mask
+    from syndiff_pipeline.difference_imaging.masking.tessreduce_squares import Strap_mask
 
     # Prefer TESSreduce Strap_mask for identical dilation behavior
     return Strap_mask(image, col_offset, straps_csv or "", size=size).astype(int)

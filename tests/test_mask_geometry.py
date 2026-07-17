@@ -1,6 +1,6 @@
 """Geometry YAML and radius helpers."""
 
-from syndiff_pipeline.masking.geometry import (
+from syndiff_pipeline.difference_imaging.masking.geometry import (
     cross_geometry_from_mag,
     empirical_circle_radius,
     load_geometry,

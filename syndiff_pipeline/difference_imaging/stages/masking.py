@@ -3,7 +3,7 @@ masking.py
 ==========
 ``shared_mask`` pipeline stage (thin re-exports + Hotpants ref-star selection).
 
-Mask painters and hybrid empirical builders live in ``syndiff_pipeline.masking``.
+Mask painters and hybrid empirical builders live in ``syndiff_pipeline.difference_imaging.masking``.
 This module re-exports public names for backward compatibility.
 """
 
@@ -22,11 +22,11 @@ from joblib import Parallel, delayed
 from scipy.interpolate import interp1d
 
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
-from syndiff_pipeline.masking.detector import detector_edge_mask, ps1_coverage_mask
-from syndiff_pipeline.masking.geometry import size_limit
-from syndiff_pipeline.masking.shared import Cat_mask, make_shared_mask
-from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
-from syndiff_pipeline.masking.tessreduce_squares import Big_sat, Strap_mask, gaia_auto_mask
+from syndiff_pipeline.difference_imaging.masking.detector import detector_edge_mask, ps1_coverage_mask
+from syndiff_pipeline.difference_imaging.masking.geometry import size_limit
+from syndiff_pipeline.difference_imaging.masking.shared import Cat_mask, make_shared_mask
+from syndiff_pipeline.difference_imaging.masking.faint_star_squares import faint_star_squares
+from syndiff_pipeline.difference_imaging.masking.tessreduce_squares import Big_sat, Strap_mask, gaia_auto_mask
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 
