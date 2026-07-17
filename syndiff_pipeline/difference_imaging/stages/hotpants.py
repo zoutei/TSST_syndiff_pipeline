@@ -782,12 +782,18 @@ def _load_sci_bkg_crop(
 
 
 def _resolve_hotpants_mask_array(mask, mask_catalog, btjd) -> np.ndarray:
-    """Prefer MaskCatalog.mask_at(full); fall back to static ndarray."""
-    from syndiff_pipeline.masking.bits import full_mask_bool
+    """Prefer MaskCatalog.mask_at(full); fall back to static ndarray.
+
+    Ignores bit 32 (``FAINT_CAT``) so dense Gaia faint squares do not wipe substamps.
+    """
+    from syndiff_pipeline.masking.bits import hotpants_mask_bool
 
     if mask_catalog is not None:
-        return full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
-    return np.asarray(mask) > 0 if np.asarray(mask).dtype != bool else np.asarray(mask)
+        return hotpants_mask_bool(mask_catalog.mask_at(btjd, which="full"))
+    arr = np.asarray(mask)
+    if arr.dtype == bool:
+        return arr
+    return hotpants_mask_bool(arr)
 
 
 def _process_one_frame(
