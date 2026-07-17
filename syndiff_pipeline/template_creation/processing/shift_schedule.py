@@ -1,0 +1,614 @@
+"""
+shift_schedule.py
+==================
+Per-skycell PS1-pixel shift schedule and signature-based template grouping
+for distortion-aware templates: measures real per-frame WCS drift directly
+at each skycell center (no interpolation -- every skycell's own sky position
+is round-tripped through that frame's own WCS), Savitzky-Golay smooths each
+skycell's time series per orbit segment, converts the smoothed TESS-pixel
+drift to a hysteresis-rounded PS1-pixel shift schedule, and turns the
+schedule into signature-based template groups plus the frozen
+``template_group_shifts.parquet`` / ``template_groups.json`` handoff.
+
+Ports validated prototype logic into the package (per project policy, this
+module does not import from the scratch dirs):
+
+- vectorized TESS-drift -> PS1-shift conversion, the Savitzky-Golay-aware
+  fill pattern, hysteresis rounding, and RLE compression:
+  ``scripts/verify_seam_remap/01_shift_schedule.py``
+  (``compute_ps1_shift_vectorized``, ``hysteresis_round_series``,
+  ``build_rle_dataframe``).
+- quantized-shift cache keying:
+  ``scripts/verify_seam_remap/03_seam_remap.py``
+  (``quantize_shift``, ``encode_quantized_shift``).
+- per-orbit-segment Savitzky-Golay smoothing (``_split_orbit_segments``,
+  ``_sg_smooth_series``): relocated from the now-deleted
+  ``common/wcs_drift_field.py`` (the sparse anchor-grid interpolation layer
+  this module used to depend on -- measuring exact WCS drift at all ~1000
+  real skycell centers costs the same as a 30-point anchor grid once
+  per-frame WCS access is cache-backed, so the interpolation approximation
+  bought nothing and was deleted; see
+  ``dev/distortion_aware_template/layer1_interpolation_accuracy.ipynb``).
+
+See ``doc/distortion_aware_templates_implementation.md`` §1.2/§2.2 for the
+frozen parquet/JSON schema and module API this implements, and
+``doc/distortion_aware_templates_master_plan.md`` §4/§5 for the grouping-
+quantum-vs-cache-quantum and phase-vs-absolute-keying distinctions:
+the grouping quantum controls template *count*, the cache quantum controls
+per-skycell regmap *geometric accuracy* (independent knobs, may differ).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional, Sequence
+
+import numpy as np
+import pandas as pd
+from astropy.wcs import WCS
+from scipy.signal import savgol_filter
+
+from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
+    build_ps1_wcs,
+)
+
+log = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
+
+
+# ── Savitzky-Golay smoothing (relocated from common/wcs_drift_field.py) ────
+
+def _sg_smooth_series(
+    data: np.ndarray, valid: np.ndarray, window: int, polyorder: int
+) -> np.ndarray:
+    """
+    Savitzky-Golay smooth ``data`` along axis 0 at ``valid & isfinite`` entries;
+    other entries are left untouched (NaN stays NaN). Window is capped to the
+    number of valid samples and forced odd; returns ``data`` unchanged if fewer
+    than 3 valid samples remain after capping.
+    """
+    out = data.copy()
+    valid_idx = np.flatnonzero(valid & np.isfinite(data))
+    if len(valid_idx) < 3:
+        return out
+    wl = min(int(window), len(valid_idx) - (1 - len(valid_idx) % 2))
+    if wl < 3:
+        return out
+    if wl % 2 == 0:
+        wl -= 1
+    po = min(int(polyorder), wl - 1)
+    out[valid_idx] = savgol_filter(data[valid_idx], wl, po, mode="interp")
+    return out
+
+
+def _split_orbit_segments(
+    btjd: np.ndarray | None, n_frames: int, gap_threshold_days: float
+) -> np.ndarray:
+    """
+    Split ``[0, n_frames)`` into ``[start, end)`` segments wherever the btjd
+    gap between consecutive frames exceeds ``gap_threshold_days``. Frames are
+    assumed already in time order (manifest row order). One segment when
+    ``btjd`` is ``None`` or gaps can't be measured (NaN on either side never
+    forces a split).
+    """
+    if btjd is None or n_frames == 0:
+        return np.array([[0, n_frames]], dtype=np.int64)
+
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for i in range(1, n_frames):
+        b0, b1 = btjd[i - 1], btjd[i]
+        if np.isfinite(b0) and np.isfinite(b1) and (b1 - b0) > gap_threshold_days:
+            bounds.append((start, i))
+            start = i
+    bounds.append((start, n_frames))
+    return np.array(bounds, dtype=np.int64)
+
+
+# ── quantization / cache-key encoding (ported from 03_seam_remap.py) ───────
+
+def quantize_shift(v, quantum: float) -> float:
+    """
+    Round ``v`` to the nearest multiple of ``quantum``: ``round(v/quantum)*quantum``.
+
+    ``v`` may be a scalar or an array; scalar input returns a python
+    ``float``, array input returns an ``ndarray`` (used internally to
+    quantize a whole shift column at once).
+    """
+    arr = np.asarray(v, dtype=np.float64)
+    q = np.round(arr / quantum) * quantum
+    if arr.ndim == 0:
+        return float(q)
+    return q
+
+
+def encode_quantized_shift(q: float) -> str:
+    """Filename-safe encoding of a quantized shift: ``+1.25 -> 'p1p25'``, ``-0.5 -> 'n0p50'``."""
+    sign = "p" if q >= 0 else "n"
+    mag = abs(float(q))
+    body = f"{mag:.2f}".replace(".", "p")
+    return f"{sign}{body}"
+
+
+def cache_key_for(qx: float, qy: float) -> str:
+    """Cache key string for a quantized (qx, qy) pair: ``qx{enc}_qy{enc}``."""
+    return f"qx{encode_quantized_shift(qx)}_qy{encode_quantized_shift(qy)}"
+
+
+# ── TESS-drift -> PS1-shift (ported from 01_shift_schedule.py) ─────────────
+
+def compute_ps1_shift_vectorized(
+    tess_wcs: WCS,
+    dx_tess: np.ndarray,
+    dy_tess: np.ndarray,
+    sky_ra_deg: float,
+    sky_dec_deg: float,
+    ps1_wcs: WCS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Vectorized per-frame TESS-pixel drift -> PS1-pixel shift at one sky
+    point: map the point to its TESS pixel position, perturb it by
+    ``(dx_tess, dy_tess)`` (arrays over frames), and round-trip both the
+    unperturbed and perturbed positions through ``ps1_wcs`` to get the
+    resulting PS1-pixel displacement.
+
+    Ported from ``scripts/verify_seam_remap/01_shift_schedule.py``.
+    """
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
+    x_tess, y_tess = world_ra_dec_to_pixel(tess_wcs, sky_ra_deg, sky_dec_deg)
+    ra1, dec1 = tess_wcs.pixel_to_world_values(x_tess, y_tess)
+    ra2, dec2 = tess_wcs.pixel_to_world_values(x_tess + dx_tess, y_tess + dy_tess)
+    u1, v1 = world_ra_dec_to_pixel(ps1_wcs, ra1, dec1)
+    u2, v2 = world_ra_dec_to_pixel(ps1_wcs, ra2, dec2)
+    return u2 - u1, v2 - v1
+
+
+def hysteresis_round_series(frac: np.ndarray, margin: float = 0.1) -> np.ndarray:
+    """
+    Stateful hysteresis rounding along time (axis 0): stays on the current
+    integer bin until the value strays more than ``0.5 + margin`` away from
+    it, which prevents single-frame flapping at bin edges.
+
+    Ported from ``scripts/verify_seam_remap/01_shift_schedule.py``.
+    """
+    n = len(frac)
+    out = np.empty(n, dtype=np.int16)
+    if n == 0:
+        return out
+    current = int(round(float(frac[0])))
+    out[0] = current
+    threshold = 0.5 + margin
+    for t in range(1, n):
+        f = float(frac[t])
+        candidate = int(round(f))
+        if candidate != current and abs(f - current) > threshold:
+            current = candidate
+        out[t] = current
+    return out
+
+
+def _hysteresis_round_with_fill(
+    values: np.ndarray, valid: np.ndarray, margin: float
+) -> np.ndarray:
+    """
+    Fill invalid entries by linear interpolation between valid neighbors
+    (constant before the first / after the last valid entry, i.e. ``np.interp``
+    default extrapolation), then hysteresis-round the filled series.
+    """
+    filled = np.asarray(values, dtype=np.float64).copy()
+    valid_idx = np.flatnonzero(valid)
+    invalid_idx = np.flatnonzero(~valid)
+    if invalid_idx.size:
+        filled[invalid_idx] = np.interp(invalid_idx, valid_idx, filled[valid_idx])
+    return hysteresis_round_series(filled, margin)
+
+
+def build_rle_dataframe(
+    skycell_names: np.ndarray,
+    sx_int: np.ndarray,
+    sy_int: np.ndarray,
+) -> pd.DataFrame:
+    """
+    Run-length encode the integer shift schedule per skycell: one row per
+    maximal run of constant ``(sx_int, sy_int)``.
+
+    Ported from ``scripts/verify_seam_remap/01_shift_schedule.py``.
+    """
+    n_frames, n_cells = sx_int.shape
+    rows: list[dict] = []
+    for c in range(n_cells):
+        sx_col = sx_int[:, c]
+        sy_col = sy_int[:, c]
+        start = 0
+        while start < n_frames:
+            end = start
+            while (
+                end + 1 < n_frames
+                and sx_col[end + 1] == sx_col[start]
+                and sy_col[end + 1] == sy_col[start]
+            ):
+                end += 1
+            rows.append(
+                {
+                    "skycell": str(skycell_names[c]),
+                    "seg_start_frame_idx": int(start),
+                    "seg_end_frame_idx": int(end),
+                    "sx_int": int(sx_col[start]),
+                    "sy_int": int(sy_col[start]),
+                    "n_frames": int(end - start + 1),
+                }
+            )
+            start = end + 1
+    return pd.DataFrame(rows)
+
+
+# ── ShiftSchedule ────────────────────────────────────────────────────────
+
+@dataclass
+class ShiftSchedule:
+    """Per-skycell PS1-pixel shift time series for one event (frame axis = manifest row order)."""
+
+    skycell_names: np.ndarray   # (C,)
+    sx_float: np.ndarray        # (F, C) f4 — drift-field-derived shift, smoothed
+    sy_float: np.ndarray        # (F, C) f4
+    sx_int: np.ndarray          # (F, C) i2 — hysteresis-rounded
+    sy_int: np.ndarray          # (F, C) i2
+    frame_valid: np.ndarray     # (F,) bool
+    meta: dict
+
+    def to_rle_dataframe(self) -> pd.DataFrame:
+        """Run-length-encoded integer shift segments; see :func:`build_rle_dataframe`."""
+        return build_rle_dataframe(self.skycell_names, self.sx_int, self.sy_int)
+
+    def save(self, npz_path: str | Path) -> None:
+        """Write the NPZ arrays plus a JSON sidecar (same stem, ``.json``)."""
+        npz_path = Path(npz_path)
+        npz_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez(
+            npz_path,
+            skycell_names=self.skycell_names,
+            sx_float=self.sx_float,
+            sy_float=self.sy_float,
+            sx_int=self.sx_int,
+            sy_int=self.sy_int,
+            frame_valid=self.frame_valid,
+        )
+        json_path = npz_path.with_suffix(".json")
+        with open(json_path, "w") as fh:
+            json.dump(self.meta, fh, indent=2)
+        log.info("Shift schedule written to %s (+ %s)", npz_path, json_path.name)
+
+    @classmethod
+    def load(cls, npz_path: str | Path) -> "ShiftSchedule":
+        """Load a :class:`ShiftSchedule` from its NPZ + JSON sidecar."""
+        npz_path = Path(npz_path)
+        with np.load(npz_path, allow_pickle=False) as data:
+            arrays = {key: data[key] for key in data.files}
+
+        json_path = npz_path.with_suffix(".json")
+        meta: dict = {}
+        if json_path.is_file():
+            with open(json_path) as fh:
+                meta = json.load(fh)
+        else:
+            log.warning("Shift schedule sidecar JSON missing: %s", json_path)
+
+        return cls(
+            skycell_names=arrays["skycell_names"],
+            sx_float=arrays["sx_float"],
+            sy_float=arrays["sy_float"],
+            sx_int=arrays["sx_int"],
+            sy_int=arrays["sy_int"],
+            frame_valid=arrays["frame_valid"],
+            meta=meta,
+        )
+
+
+def build_skycell_shift_schedule(
+    frames: Sequence[tuple[str, Optional[WCS]]],
+    skycell_df: pd.DataFrame,
+    ref_wcs: WCS,
+    *,
+    btjd: np.ndarray | None = None,
+    savgol_window: int = 11,
+    savgol_polyorder: int = 2,
+    orbit_gap_threshold_days: float = 0.5,
+    hysteresis_margin: float = 0.1,
+) -> ShiftSchedule:
+    """
+    Measure real per-frame WCS drift directly at every skycell center and
+    convert it to a hysteresis-rounded PS1-pixel shift schedule.
+
+    ``frames`` is ``(filename, WCS-or-None)`` in manifest row order (as
+    returned by :func:`syndiff_pipeline.common.wcs_grouping.build_frame_wcs_objects`,
+    normally cache-backed so this costs no FFI file access on a cache hit).
+    For each row of ``skycell_df`` (must have ``NAME``, ``RA``, ``DEC`` plus
+    the PS1 WCS header columns :func:`build_ps1_wcs` needs): the skycell
+    center's sky position is round-tripped through **every frame's own WCS**
+    directly (``world_to_pixel_values(ra, dec) - (x_ref, y_ref)``, the same
+    primitive the old anchor-grid drift field used, just evaluated at real
+    skycell centers instead of a 30-point proxy grid -- no interpolation).
+    The resulting per-skycell TESS-pixel drift series is Savitzky-Golay
+    smoothed per orbit segment (segments split wherever the ``btjd`` gap
+    exceeds ``orbit_gap_threshold_days``), converted to a PS1-pixel shift via
+    :func:`compute_ps1_shift_vectorized`, and hysteresis-rounded.
+
+    Invalid frames (WCS ``None``, or wherever the round-trip evaluates to
+    NaN) stay NaN in ``sx_float``/``sy_float``. The int arrays carry the last
+    valid value forward: gaps are filled by linear interpolation between
+    valid neighbors before hysteresis rounding, and frames before the first
+    valid frame copy its value.
+    """
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
+    skycell_names = np.array([str(name) for name in skycell_df["NAME"]])
+    n_cells = len(skycell_df)
+    n_frames = len(frames)
+
+    ra = skycell_df["RA"].to_numpy(dtype=np.float64)
+    dec = skycell_df["DEC"].to_numpy(dtype=np.float64)
+    x_ref, y_ref = world_ra_dec_to_pixel(ref_wcs, ra, dec)
+
+    # (F, C) TESS-pixel drift at every real skycell center, one WCS round
+    # trip per frame (vectorized over all skycells at once).
+    frame_valid = np.zeros(n_frames, dtype=bool)
+    drift_raw = np.full((n_frames, n_cells, 2), np.nan, dtype=np.float64)
+    for i, (_, wcs_f) in enumerate(frames):
+        if wcs_f is None:
+            continue
+        try:
+            fx, fy = wcs_f.world_to_pixel_values(ra, dec)
+        except Exception as exc:
+            log.warning("Shift schedule: WCS evaluation failed for frame index %d: %s", i, exc)
+            continue
+        drift_raw[i, :, 0] = np.asarray(fx, dtype=np.float64) - x_ref
+        drift_raw[i, :, 1] = np.asarray(fy, dtype=np.float64) - y_ref
+        frame_valid[i] = True
+
+    if btjd is not None and len(btjd) != n_frames:
+        raise ValueError(f"btjd length ({len(btjd)}) does not match frames length ({n_frames})")
+    segment_bounds = _split_orbit_segments(btjd, n_frames, float(orbit_gap_threshold_days))
+
+    drift_smooth = drift_raw.copy()
+    for seg_start, seg_end in segment_bounds:
+        seg = slice(int(seg_start), int(seg_end))
+        seg_valid = frame_valid[seg]
+        if int(seg_valid.sum()) < 3:
+            continue
+        for c in range(n_cells):
+            for comp in range(2):
+                drift_smooth[seg, c, comp] = _sg_smooth_series(
+                    drift_raw[seg, c, comp], seg_valid, savgol_window, savgol_polyorder
+                )
+
+    sx_float = np.full((n_frames, n_cells), np.nan, dtype=np.float32)
+    sy_float = np.full((n_frames, n_cells), np.nan, dtype=np.float32)
+    sx_int = np.zeros((n_frames, n_cells), dtype=np.int16)
+    sy_int = np.zeros((n_frames, n_cells), dtype=np.int16)
+
+    for c in range(n_cells):
+        row = skycell_df.iloc[c]
+        ps1_wcs, _ = build_ps1_wcs(row)
+        with np.errstate(invalid="ignore"):
+            sx, sy = compute_ps1_shift_vectorized(
+                ref_wcs, drift_smooth[:, c, 0], drift_smooth[:, c, 1],
+                float(ra[c]), float(dec[c]), ps1_wcs
+            )
+        sx = np.asarray(sx, dtype=np.float64)
+        sy = np.asarray(sy, dtype=np.float64)
+        sx_float[:, c] = sx.astype(np.float32)
+        sy_float[:, c] = sy.astype(np.float32)
+
+        valid_col = frame_valid & np.isfinite(sx) & np.isfinite(sy)
+        if not valid_col.any():
+            continue
+        sx_int[:, c] = _hysteresis_round_with_fill(sx, valid_col, hysteresis_margin)
+        sy_int[:, c] = _hysteresis_round_with_fill(sy, valid_col, hysteresis_margin)
+
+    meta = {
+        "schema_version": SCHEMA_VERSION,
+        "n_frames": int(n_frames),
+        "n_skycells": int(n_cells),
+        "savgol_window": int(savgol_window),
+        "savgol_polyorder": int(savgol_polyorder),
+        "orbit_gap_threshold_days": float(orbit_gap_threshold_days),
+        "hysteresis_margin": float(hysteresis_margin),
+        "created_utc": datetime.now(timezone.utc).isoformat(),
+    }
+
+    return ShiftSchedule(
+        skycell_names=skycell_names,
+        sx_float=sx_float,
+        sy_float=sy_float,
+        sx_int=sx_int,
+        sy_int=sy_int,
+        frame_valid=frame_valid,
+        meta=meta,
+    )
+
+
+# ── Signature-based grouping ────────────────────────────────────────────
+
+@dataclass
+class GroupAssignment:
+    """Signature-based template grouping derived from a :class:`ShiftSchedule`."""
+
+    group_id_per_frame: np.ndarray   # (F,) i4, -1 for invalid frames
+    groups: list[dict]                # [{group_id, n_frames, signature_hash}, ...]
+    shifts_df: pd.DataFrame           # template_group_shifts schema (§1.2)
+
+
+def assign_groups_from_schedule(
+    schedule: ShiftSchedule,
+    *,
+    grouping_quantum_ps1_px: float,
+    cache_quantum_ps1_px: float,
+    keying: str,
+) -> GroupAssignment:
+    """
+    Assign signature-based template groups from a shift schedule.
+
+    Per-frame signature = the vector of per-skycell shifts quantized at
+    ``grouping_quantum_ps1_px``: the existing hysteresis-rounded int arrays
+    when the grouping quantum is exactly 1.0 PS1 px (they already embody
+    hysteresis, which naive re-quantization of the float arrays would not),
+    otherwise the float arrays freshly quantized at the given quantum.
+    ``group_id`` is the first-appearance dense rank of each distinct
+    signature among valid frames (0, 1, 2, ... in the order the signature
+    is first seen); invalid frames get ``-1``.
+
+    Each group's representative frame (its first member) supplies one
+    ``template_group_shifts`` row per skycell: ``sx_int``/``sy_int`` as
+    scheduled at that frame, plus ``qx``/``qy`` quantized at
+    ``cache_quantum_ps1_px`` under ``keying``:
+
+    - ``"absolute"``: quantizes the full float shift.
+    - ``"phase"``: quantizes only the fractional part (``sx_float - sx_int``,
+      nominally in ``[-0.5, 0.5)``); the integer part is applied as a roll
+      elsewhere (downstream cache/downsample layers).
+
+    ``signature_hash`` is the sha1 hexdigest of the group's sorted
+    ``(skycell, sx_int, sy_int, cache_key)`` tuples.
+    """
+    if keying not in ("phase", "absolute"):
+        raise ValueError(f"keying must be 'phase' or 'absolute', got {keying!r}")
+
+    n_frames, n_cells = schedule.sx_int.shape
+
+    if np.isclose(float(grouping_quantum_ps1_px), 1.0):
+        gx = schedule.sx_int
+        gy = schedule.sy_int
+    else:
+        gx = quantize_shift(schedule.sx_float.astype(np.float64), grouping_quantum_ps1_px)
+        gy = quantize_shift(schedule.sy_float.astype(np.float64), grouping_quantum_ps1_px)
+
+    group_id_per_frame = np.full(n_frames, -1, dtype=np.int32)
+    signature_to_group: dict[tuple, int] = {}
+    representative_frames: list[int] = []
+
+    for f in range(n_frames):
+        if not schedule.frame_valid[f]:
+            continue
+        sig = tuple(zip(gx[f].tolist(), gy[f].tolist()))
+        gid = signature_to_group.get(sig)
+        if gid is None:
+            gid = len(representative_frames)
+            signature_to_group[sig] = gid
+            representative_frames.append(f)
+        group_id_per_frame[f] = gid
+
+    rows: list[dict] = []
+    groups: list[dict] = []
+    for gid, rep_f in enumerate(representative_frames):
+        n_frames_in_group = int(np.sum(group_id_per_frame == gid))
+        sig_tuples: list[tuple] = []
+        for c in range(n_cells):
+            sx_i = int(schedule.sx_int[rep_f, c])
+            sy_i = int(schedule.sy_int[rep_f, c])
+            sx_f = float(schedule.sx_float[rep_f, c])
+            sy_f = float(schedule.sy_float[rep_f, c])
+            if keying == "absolute":
+                qx = quantize_shift(sx_f, cache_quantum_ps1_px)
+                qy = quantize_shift(sy_f, cache_quantum_ps1_px)
+            else:
+                qx = quantize_shift(sx_f - sx_i, cache_quantum_ps1_px)
+                qy = quantize_shift(sy_f - sy_i, cache_quantum_ps1_px)
+            cache_key = cache_key_for(qx, qy)
+            skycell = str(schedule.skycell_names[c])
+            rows.append(
+                {
+                    "group_id": gid,
+                    "skycell": skycell,
+                    "sx_int": sx_i,
+                    "sy_int": sy_i,
+                    "qx": qx,
+                    "qy": qy,
+                    "cache_key": cache_key,
+                }
+            )
+            sig_tuples.append((skycell, sx_i, sy_i, cache_key))
+
+        sig_tuples.sort()
+        signature_hash = hashlib.sha1(
+            json.dumps(sig_tuples, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        groups.append(
+            {
+                "group_id": gid,
+                "n_frames": n_frames_in_group,
+                "signature_hash": signature_hash,
+            }
+        )
+
+    shifts_df = _build_shifts_dataframe(rows)
+
+    return GroupAssignment(
+        group_id_per_frame=group_id_per_frame,
+        groups=groups,
+        shifts_df=shifts_df,
+    )
+
+
+def _build_shifts_dataframe(rows: list[dict]) -> pd.DataFrame:
+    """Build the ``template_group_shifts`` DataFrame with its frozen §1.2 dtypes."""
+    dtypes = {
+        "group_id": "int32",
+        "skycell": "object",
+        "sx_int": "int16",
+        "sy_int": "int16",
+        "qx": "float32",
+        "qy": "float32",
+        "cache_key": "object",
+    }
+    if not rows:
+        return pd.DataFrame({col: pd.Series(dtype=dt) for col, dt in dtypes.items()})
+    df = pd.DataFrame(rows)
+    return df.astype(dtypes)
+
+
+def write_group_artifacts(
+    assignment: GroupAssignment,
+    event_dir: str | Path,
+    *,
+    geometry_mode: str,
+    grouping_quantum_ps1_px: float,
+    cache_quantum_ps1_px: float,
+) -> tuple[Path, Path]:
+    """
+    Write ``template_group_shifts.parquet`` and ``template_groups.json`` into
+    ``event_dir`` (schema_version 1; see
+    ``doc/distortion_aware_templates_implementation.md`` §1.2).
+    """
+    event_dir = Path(event_dir)
+    event_dir.mkdir(parents=True, exist_ok=True)
+
+    parquet_path = event_dir / "template_group_shifts.parquet"
+    assignment.shifts_df.to_parquet(parquet_path, index=False)
+
+    json_path = event_dir / "template_groups.json"
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "geometry_mode": geometry_mode,
+        "grouping_quantum_ps1_px": float(grouping_quantum_ps1_px),
+        "cache_quantum_ps1_px": float(cache_quantum_ps1_px),
+        "n_groups": len(assignment.groups),
+        "groups": assignment.groups,
+    }
+    with open(json_path, "w") as fh:
+        json.dump(payload, fh, indent=2)
+
+    log.info(
+        "Wrote %s (%d rows) and %s (%d groups)",
+        parquet_path.name,
+        len(assignment.shifts_df),
+        json_path.name,
+        len(assignment.groups),
+    )
+    return parquet_path, json_path
