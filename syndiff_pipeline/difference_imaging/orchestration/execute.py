@@ -1265,9 +1265,14 @@ def run_config_pipeline(
             col_corr_2d = epsf_fitting.build_median_mask_correction(
                 cfg.median_mask_path, cfg.camera, cfg.ccd, crop_bounds
             )
-            shared_mask_path = os.path.join(ws_root, SHARED_MASK_FITS_BASENAME)
-            if not os.path.isfile(shared_mask_path):
-                shared_mask_path = os.path.join(ws_root, "shared_mask.fits")
+            mask_catalog = _ensure_mask_catalog_loaded(
+                ws_root,
+                mask_catalog,
+                shared_mask,
+                crop_bounds=crop_bounds,
+                **_mask_catalog_scc_kwargs(cfg),
+            )
+            shared_mask = mask_catalog.static
             ws_out = ctx.workspace(label_out)
             os.makedirs(ws_out, exist_ok=True)
             epsf_stack, tile_centers_new, ffi_stems, epsf_ok = (
@@ -1279,7 +1284,8 @@ def run_config_pipeline(
                     epsf_p,
                     ws_out,
                     round_id=1,
-                    shared_mask_path=shared_mask_path if os.path.isfile(shared_mask_path) else None,
+                    mask_catalog=mask_catalog,
+                    wcs_table=wcs_table,
                     diff_log_path=diff_log_path,
                     epsf_label=label_out,
                     diffs_input=str(inp["diffs"]),

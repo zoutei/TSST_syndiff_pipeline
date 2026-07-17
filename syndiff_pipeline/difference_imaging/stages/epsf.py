@@ -223,23 +223,28 @@ def load_epsf_smooth(output_dir: str, round_id: int) -> tuple:
 # ── Per-frame gridded ePSF fitting (photutils) ────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# shared_mask bits ignored for ePSF star rejection: BRIGHT_CAT | SAT_CROSS (1|2).
-# Any other set bit rejects (straps, edges, PS1, faint squares, TNS, asteroids).
+# Static-mask bits ignored for ePSF star rejection:
+# BRIGHT_CAT | SAT_CROSS | FAINT_CAT (1|2|32) — all catalog star stamps incl. crosses.
+# Any other set bit rejects (straps, edges, PS1, TNS, asteroids).
 from syndiff_pipeline.masking.bits import EPSF_IGNORE_BITS, epsf_reject_mask
 
-EPSF_SHARED_MASK_BITS = EPSF_IGNORE_BITS  # legacy name; now means "ignored" bits
+EPSF_SHARED_MASK_BITS = EPSF_IGNORE_BITS  # legacy name; means "ignored" bits
+EPSF_STATIC_MASK_BITS = EPSF_IGNORE_BITS
 
 
-def _load_shared_mask_2d(shared_mask_path: str | None, shape: tuple[int, int]) -> np.ndarray | None:
+def _load_static_mask_2d(
+    static_mask_path: str | None, shape: tuple[int, int]
+) -> np.ndarray | None:
     """
-    Load boolean bad-pixel mask for ePSF star extraction, if available.
+    Load boolean reject mask for ePSF from a static mask FITS (fallback path).
 
-    Ignores bits 1|2 (bright catalog / sat crosses); rejects on any other bit.
+    Prefer :func:`epsf_reject_mask_at` with a ``MaskCatalog`` so asteroid bit
+    128 is included per FFI. This path only sees the on-disk static layer.
     """
-    if not shared_mask_path or not os.path.isfile(shared_mask_path):
+    if not static_mask_path or not os.path.isfile(static_mask_path):
         return None
     try:
-        data = fits.getdata(shared_mask_path)
+        data = fits.getdata(static_mask_path)
         if data is None:
             return None
         mask = np.asarray(data)
@@ -247,8 +252,56 @@ def _load_shared_mask_2d(shared_mask_path: str | None, shape: tuple[int, int]) -
             return None
         return epsf_reject_mask(mask)
     except Exception as exc:
-        log.debug("shared mask for ePSF not loaded: %s", exc)
+        log.debug("static mask for ePSF not loaded: %s", exc)
         return None
+
+
+# Backward-compatible alias
+_load_shared_mask_2d = _load_static_mask_2d
+
+
+def epsf_reject_mask_at(mask_catalog, time=None) -> np.ndarray:
+    """Boolean ePSF reject mask for one epoch (in-memory ``mask_at``, no FITS I/O)."""
+    return epsf_reject_mask(mask_catalog.mask_at(time, which="full"))
+
+
+def btjd_by_stem_from_manifest(wcs_table) -> dict:
+    """Map TESS product id / stem → BTJD from the frame manifest."""
+    import pandas as pd
+
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        tess_product_id_from_ffi_path,
+    )
+
+    out: dict = {}
+    if wcs_table is None or len(wcs_table) == 0:
+        return out
+    btjd_col = None
+    for c in ("btjd", "BTJD", "tjd", "TJD", "jd", "JD"):
+        if c in wcs_table.columns:
+            btjd_col = c
+            break
+    if btjd_col is None:
+        return out
+
+    if "product_id" in wcs_table.columns:
+        stems = wcs_table["product_id"].astype(str)
+    elif "filename" in wcs_table.columns:
+        stems = wcs_table["filename"].map(
+            lambda x: tess_product_id_from_ffi_path(str(x)) or ""
+        )
+    elif "path" in wcs_table.columns:
+        stems = wcs_table["path"].map(
+            lambda x: tess_product_id_from_ffi_path(str(x)) or ""
+        )
+    else:
+        return out
+
+    btjd = pd.to_numeric(wcs_table[btjd_col], errors="coerce")
+    for stem, t in zip(stems, btjd):
+        if stem and np.isfinite(t):
+            out[str(stem)] = float(t)
+    return out
 
 
 def fit_epsf_all_frames(diff_paths: list,
@@ -260,6 +313,10 @@ def fit_epsf_all_frames(diff_paths: list,
                          round_id: int = 1,
                          *,
                          shared_mask_path: str | None = None,
+                         static_mask_path: str | None = None,
+                         mask_catalog=None,
+                         btjd_by_stem: dict | None = None,
+                         wcs_table: pd.DataFrame | None = None,
                          diff_log_path: str | None = None,
                          epsf_label: str | None = None,
                          diffs_input: str | None = None) -> tuple:
@@ -270,25 +327,34 @@ def fit_epsf_all_frames(diff_paths: list,
     ----------
     diff_paths  : list of str (FITS files from hotpants)
     gaia_df     : pd.DataFrame (crop-local Gaia catalog)
-    col_corr_2d : 2D ndarray — legacy arg; mask uses shared_mask when given
+    col_corr_2d : 2D ndarray — legacy arg; mask uses static/MaskCatalog when given
     cfg         : SynDiffConfig
     epsf        : EpsfParams
     output_dir  : str, optional
     round_id    : int
-    shared_mask_path : optional path to shared_mask.fits for star masking
-
-    Returns
-    -------
-    epsf_stack, tile_centers, ffi_stems, epsf_ok
+    shared_mask_path : deprecated alias of ``static_mask_path``
+    static_mask_path : optional on-disk static mask FITS (fallback if no catalog)
+    mask_catalog : optional ``MaskCatalog`` — preferred; per-FFI ``mask_at`` (no FITS I/O)
+    btjd_by_stem : optional stem→BTJD map (built from ``wcs_table`` when omitted)
+    wcs_table : optional frame manifest for BTJD lookup
     """
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
+    mask_path = static_mask_path or shared_mask_path
+    if btjd_by_stem is None and wcs_table is not None:
+        btjd_by_stem = btjd_by_stem_from_manifest(wcs_table)
+
     mask_2d = None
     first_path = next((p for p in diff_paths if p and os.path.exists(p)), None)
-    if shared_mask_path and first_path:
+    if mask_catalog is None and mask_path and first_path:
         shape = fits.getdata(first_path).shape
-        mask_2d = _load_shared_mask_2d(shared_mask_path, shape)
-    elif col_corr_2d is not None and first_path is None and col_corr_2d is not None:
+        mask_2d = _load_static_mask_2d(mask_path, shape)
+    elif (
+        mask_catalog is None
+        and col_corr_2d is not None
+        and first_path is None
+        and col_corr_2d is not None
+    ):
         mask_2d = col_corr_2d <= 0
 
     if output_dir is None:
@@ -301,6 +367,8 @@ def fit_epsf_all_frames(diff_paths: list,
         epsf,
         output_dir,
         mask_2d=mask_2d,
+        mask_catalog=mask_catalog,
+        btjd_by_stem=btjd_by_stem,
         round_id=round_id,
         diff_log_path=diff_log_path,
         epsf_label=epsf_label,

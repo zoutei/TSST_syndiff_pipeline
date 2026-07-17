@@ -13,14 +13,15 @@ def test_bit_constants():
     assert bits.FAINT_CAT == 32
     assert bits.TNS == 64
     assert bits.ASTEROID == 128
-    assert bits.EPSF_IGNORE_BITS == (1 | 2)
+    assert bits.EPSF_IGNORE_BITS == (1 | 2 | 32)
     assert bits.STRAP_SOURCE_BITS == (1 | 32)
 
 
 def test_epsf_reject_mask():
     m = np.array([[1, 2, 3, 4, 8, 16, 32, 64, 128, 0]], dtype=np.int16)
     r = bits.epsf_reject_mask(m)
-    assert r.tolist() == [[False, False, False, True, True, True, True, True, True, False]]
+    # ignore 1,2,3(1|2),32; reject 4,8,16,64,128
+    assert r.tolist() == [[False, False, False, True, True, True, False, True, True, False]]
 
 
 def test_full_mask_bool():
