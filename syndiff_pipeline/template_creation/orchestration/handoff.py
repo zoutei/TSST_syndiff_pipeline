@@ -115,6 +115,10 @@ def run_wcs_grouping(
         crop_bounds=crop_bounds,
         crop_mode=wg.crop_mode,
         crop_box_size=wg.crop_box_size if wg.crop_mode == "target_box" else None,
+        geometry_mode=wg.geometry_mode if wg.geometry_mode == "field" else None,
+        grouping_quantum_ps1_px=(
+            wg.grouping_quantum_ps1_px if wg.geometry_mode == "field" else None
+        ),
     )
     wcs_grouping.plot_wcs_drift_and_template_assignment(
         wcs_table,

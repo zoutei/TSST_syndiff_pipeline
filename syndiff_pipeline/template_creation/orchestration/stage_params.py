@@ -20,6 +20,8 @@ WCS_GROUPING_ALLOWED = frozenset(
         "x_left_dead",
         "x_right_dead",
         "y_edge_strip",
+        "geometry_mode",
+        "grouping_quantum_ps1_px",
     }
 )
 MAPPING_ALLOWED = frozenset(
@@ -84,6 +86,13 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "condor_request_disk",
         "condor_requirements",
         "condor_rank",
+        "geometry_mode",
+        "materialize_fits",
+        "hybrid_R",
+        "apply_hybrid_exact",
+        "include_abutting_border_exact",
+        "rebuild_field_store",
+        "prematerialize_top_n",
     }
 )
 
@@ -134,6 +143,9 @@ class WcsGroupingStageParams:
     x_left_dead: int = 44
     x_right_dead: int = 44
     y_edge_strip: int = 30
+    # linear (default) = target-anchored dx/dy groups; field = SCC signature groups
+    geometry_mode: str = "linear"
+    grouping_quantum_ps1_px: float = 1.0
 
 
 @dataclass
@@ -217,6 +229,13 @@ class DownsampleStageParams:
     condor_request_memory: int = 128_000
     condor_request_disk: int | None = None  # MB; None → omit request_disk
     condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
+    geometry_mode: str = "linear"
+    materialize_fits: bool = False
+    hybrid_R: int = 1
+    apply_hybrid_exact: bool = True
+    include_abutting_border_exact: bool = True
+    rebuild_field_store: bool = False
+    prematerialize_top_n: int | None = None
     condor_rank: str | None = "-LoadAvg"
 
     def __post_init__(self):

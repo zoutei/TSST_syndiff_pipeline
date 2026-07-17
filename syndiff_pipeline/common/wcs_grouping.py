@@ -787,8 +787,14 @@ def fits_path_exists(path: str | Path) -> bool:
 
 
 def canonical_fits_path_key(path: str | Path) -> str:
-    """Comparison key treating ``.fits`` and ``.fits.gz`` as the same file."""
-    expanded = os.path.abspath(os.path.expanduser(str(path)))
+    """Comparison key treating ``.fits`` and ``.fits.gz`` as the same file.
+
+    Uses ``realpath`` so a manifest written under a symlinked data_root (e.g.
+    an isolated ``data_field_pilot/tess_ffi`` → shared ``data/tess_ffi``) still
+    matches FFI paths resolved through the ``ws/ffis`` symlink. For a normal
+    non-symlinked layout this is identical to ``abspath``.
+    """
+    expanded = os.path.realpath(os.path.expanduser(str(path)))
     if expanded.endswith(".fits.gz"):
         return expanded[:-3]
     return expanded
@@ -863,6 +869,8 @@ def write_cluster_template_job_json(
     crop_bounds: Optional[dict] = None,
     crop_mode: str | None = None,
     crop_box_size: int | None = None,
+    geometry_mode: str | None = None,
+    grouping_quantum_ps1_px: float | None = None,
 ) -> str:
     """
     Write a JSON bundle for the cluster template job: reference FFI name/path,
@@ -874,6 +882,11 @@ def write_cluster_template_job_json(
     crop_bounds : dict, optional
         From ``get_crop_bounds``. When given, writes ``x_min`` … ``y_max`` and
         ``shape`` ``[ny, nx]`` for downstream reload without separate crop JSON.
+    geometry_mode : str, optional
+        When ``"field"``, stamped into the job JSON for downstream stages.
+        Omitted for linear so existing linear payloads stay byte-compatible.
+    grouping_quantum_ps1_px : float, optional
+        Field-mode grouping quantum (typically 1.0 PS1 px).
     """
     def _json_val(x: Any) -> Union[int, float, str]:
         """Json val.
@@ -923,6 +936,10 @@ def write_cluster_template_job_json(
         payload["crop_mode"] = str(crop_mode)
     if crop_box_size is not None:
         payload["crop_box_size"] = int(crop_box_size)
+    if geometry_mode == "field":
+        payload["geometry_mode"] = "field"
+        if grouping_quantum_ps1_px is not None:
+            payload["grouping_quantum_ps1_px"] = float(grouping_quantum_ps1_px)
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
     with open(out_path, "w") as fh:

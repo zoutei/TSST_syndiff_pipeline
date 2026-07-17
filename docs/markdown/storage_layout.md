@@ -185,9 +185,19 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
   convolved_results/
     sector_{SSSS}_camera_{C}_ccd_{K}.zarr
     sector_{SSSS}_camera_{C}_ccd_{K}_removed_stars.csv
-  shifted_downsampled/             # downsample template FITS (default output_base)
+  shifted_downsampled/             # downsample template FITS (linear / default)
     sector_{SSSS}_camera_{C}_ccd_{K}_x{X0}-{X1}_y{Y0}-{Y1}/
       syndiff_template_*.fits.gz
+  field_templates/                 # field geometry (SCC-shared; geometry_mode: field)
+    sector_{SSSS}_camera_{C}_ccd_{K}/
+      [oversampling_{N}/]
+      template_manifest.json
+      shift_schedule.npz
+      template_group_shifts.parquet
+      contribs/
+        skycell.{proj}.{cell}_sx{±N}_sy{±N}.npz
+      fits/                          # optional; materialize_fits: false by default
+        syndiff_field_*_gid{N}.fits.gz
 ```
 
 | Subtree | Stage |
@@ -197,7 +207,8 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
 | `catalogs/` | `mapping` (Gaia DR3) |
 | `ps1_skycells_zarr/` | `ps1_download` |
 | `convolved_results/` | `ps1_process` |
-| `shifted_downsampled/` | `downsample` |
+| `shifted_downsampled/` | `downsample` (linear) |
+| `field_templates/` | `downsample` / field geometry (SCC cache; events only symlink) |
 
 The two PS1 Zarr paths have the same internal schema but are separate defaults.
 `ps1_download` owns `ps1_skycells_zarr/ps1_skycells.zarr`; `syndiff star`
@@ -205,6 +216,8 @@ owns `ps1_skycells.zarr`. Set `ps1_zarr_path` in `star_config.yaml` to the
 former when star should reuse the template-stage cache.
 
 After `downsample`, the orchestrator creates `events/{label}/ws/templates` (or `ws_{workspace_run_id}/templates`) as a symlink to the physical template directory under `{data_root}/shifted_downsampled/…` (the sector/camera/CCD/crop subtree containing `syndiff_template_*.fits.gz`). Diff imaging resolves templates via this symlink (or an explicit `paths.template_dir` override in `diff_config.yaml`) and writes science products under the active workspace tree (see **Diff workspace trees** above).
+
+With `geometry_mode: field`, templates live under `{data_root}/field_templates/sector_*/camera_*/ccd_*/` (sparse contribs + assemble by `group_id`). The event only gets `ws/field_templates` → that SCC root; it does not own geometry files. Diff must not parse field products with the linear dx/dy filename API.
 
 `events/{label}/ws*/master/` is a **flat FITS mirror** for Condor/shared-FS access: every workspace-label `*.fits` appears as a basename symlink, plus `master/tess_ffi` → `{data_root}/tess_ffi/` when configured. It does **not** hold template FITS.
 

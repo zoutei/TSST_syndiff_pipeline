@@ -317,6 +317,13 @@ def _execute_template_stage(
         job_path = str(Path(resolved.event_dir) / "cluster_template_job.json")
         payload = load_cluster_template_job_payload(job_path)
         ds = resolved.stages.downsample
+        wg = resolved.stages.wcs_grouping
+        geometry_mode = (
+            payload.get("geometry_mode")
+            or wg.geometry_mode
+            or ds.geometry_mode
+            or "linear"
+        )
         if ds.single_offset:
             offsets = np.array([[0.0, 0.0]])
             roi = roi_tuple_from_cluster_job_payload(payload)
@@ -324,6 +331,56 @@ def _execute_template_stage(
             offsets = offsets_from_cluster_job_payload(payload)
             roi = roi_tuple_from_cluster_job_payload(payload)
         x_min, y_min, x_max, y_max = roi
+
+        if str(geometry_mode).lower() == "field":
+            from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
+                ensure_event_field_templates_symlink,
+            )
+            from syndiff_pipeline.template_creation.orchestration.verify import (
+                mapping_master_pixels2skycells_path,
+            )
+            from syndiff_pipeline.template_creation.processing.field_downsample import (
+                run_field_downsample_scc,
+            )
+
+            master_path = mapping_master_pixels2skycells_path(resolved)
+            with __import__("astropy.io.fits", fromlist=["open"]).open(master_path) as hdul:
+                master = hdul[1].data
+                full_shape = (int(master.shape[0]), int(master.shape[1]))
+            field_result = run_field_downsample_scc(
+                sector=t.sector,
+                camera=t.camera,
+                ccd=t.ccd,
+                data_root=resolved.data_root,
+                event_dir=resolved.event_dir,
+                mapping_root=ds.mapping_dir or resolved.mapping_root,
+                convolved_dir=ds.convolved_dir
+                or str(Path(resolved.data_root) / "convolved_results"),
+                roi_bounds=(x_min, y_min, x_max, y_max),
+                base_tess_shape=full_shape,
+                oversampling_factor=ds.oversampling_factor,
+                ignore_mask_bits=list(ds.ignore_mask_bits),
+                grouping_quantum_ps1_px=float(
+                    payload.get("grouping_quantum_ps1_px")
+                    or wg.grouping_quantum_ps1_px
+                    or 1.0
+                ),
+                materialize_fits=bool(ds.materialize_fits),
+                n_jobs=ds.n_jobs,
+                apply_hybrid_exact=bool(getattr(ds, "apply_hybrid_exact", True)),
+                hybrid_R=int(getattr(ds, "hybrid_R", 1) or 1),
+                include_abutting_border_exact=bool(
+                    getattr(ds, "include_abutting_border_exact", True)
+                ),
+                rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
+            )
+            store = field_result["output_dir"]
+            symlink_path = ensure_event_field_templates_symlink(resolved.event_dir, store)
+            field_result = dict(field_result)
+            field_result["template_dir_physical"] = str(store)
+            field_result["template_dir_symlink"] = str(symlink_path)
+            return _manifest_from_result(field_result)
+
         result = run_downsample(
             sector=t.sector,
             camera=t.camera,
@@ -353,7 +410,6 @@ def _execute_template_stage(
         )
         from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
             ensure_event_templates_symlink,
-            event_templates_symlink_path,
         )
 
         physical_dir = result.get("output_dir")
