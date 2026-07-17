@@ -692,9 +692,16 @@ def forced_phot_gridded_epoch(
     *,
     error: np.ndarray | None = None,
     mask: np.ndarray | None = None,
+    local_bkg_estimator=None,
 ) -> tuple[float, float, float, float]:
     """
     Forced PSF photometry at crop-local (x, y) using a per-frame GriddedPSFModel.
+
+    Parameters
+    ----------
+    local_bkg_estimator : optional
+        photutils local-background estimator (e.g. ``LocalBackground``).
+        Default ``None`` matches production (no local background subtraction).
 
     Returns flux, eflux, x_fit, y_fit.
     """
@@ -728,7 +735,7 @@ def forced_phot_gridded_epoch(
             fit_shape=fit_shape,
             aperture_radius=aperture_radius,
             grouper=SourceGrouper(min_separation=grouper_sep),
-            local_bkg_estimator=None,
+            local_bkg_estimator=local_bkg_estimator,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
