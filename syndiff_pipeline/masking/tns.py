@@ -7,7 +7,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 import numpy as np
 import pandas as pd
@@ -32,6 +32,12 @@ SCI_COL_LO, SCI_COL_HI = 45, 2092
 SCI_ROW_LO, SCI_ROW_HI = 1, 2048
 
 TRANSIENT_FIXED_BASENAME = "transient_fixed.parquet"
+
+# WIS TNS rejects bare urllib User-Agent; send a normal browser-like header.
+_TNS_DOWNLOAD_HEADERS = {
+    "User-Agent": "syndiff-pipeline/0.1 (scientific use; TNS public objects)",
+    "Accept": "application/zip,application/octet-stream,*/*",
+}
 
 
 def ensure_tns_public_csv(
@@ -71,7 +77,8 @@ def ensure_tns_public_csv(
     if need_download:
         log.info("Downloading TNS public objects from %s → %s", download_url, dest)
         try:
-            with urlopen(download_url, timeout=120) as resp:
+            req = Request(download_url, headers=_TNS_DOWNLOAD_HEADERS)
+            with urlopen(req, timeout=120) as resp:
                 payload = resp.read()
             with zipfile.ZipFile(BytesIO(payload)) as zf:
                 names = [n for n in zf.namelist() if n.endswith(".csv")]
@@ -79,6 +86,7 @@ def ensure_tns_public_csv(
                     raise RuntimeError(f"No CSV in TNS zip from {download_url}")
                 with zf.open(names[0]) as src, open(dest, "wb") as out:
                     out.write(src.read())
+            log.info("Wrote TNS public CSV → %s (%d bytes)", dest, dest.stat().st_size)
         except Exception as exc:
             if dest.is_file():
                 log.warning("TNS download failed (%s); using existing %s", exc, dest)

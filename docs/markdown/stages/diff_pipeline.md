@@ -60,7 +60,7 @@ Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 
 Builds the shared bitmask and selects isolated Hotpants reference stars.
 **Default style is empirical** (see [masking.md](../masking.md)): T&lt;13 empirical
-circles/crosses (bits 1/2; Gaia ∪ BSC for crosses), 13≤T&lt;18 TESSreduce squares
+circles/crosses (bits 1/2; Gaia ∪ BSC for crosses), 13≤T&lt;18 `faint_star_squares`
 (bit 32), straps/edges/PS1 (4/8/16), optional TNS (64) and per-cadence asteroids
 (128 via `MaskCatalog`). Rollback: site `mask_settings.yaml` with
 `shared.style: tessreduce` (bits 1/2/4/8/16 only).
