@@ -14,6 +14,7 @@ def test_bit_constants():
     assert bits.TNS == 64
     assert bits.ASTEROID == 128
     assert bits.EPSF_IGNORE_BITS == (1 | 2 | 32)
+    assert bits.HOTPANTS_IGNORE_BITS == 32
     assert bits.STRAP_SOURCE_BITS == (1 | 32)
 
 
@@ -27,6 +28,12 @@ def test_epsf_reject_mask():
 def test_full_mask_bool():
     m = np.array([[0, 1, 32]], dtype=np.int16)
     assert bits.full_mask_bool(m).tolist() == [[False, True, True]]
+
+
+def test_hotpants_mask_bool_ignores_faint_cat():
+    m = np.array([[0, 1, 32, 33, 4, 64]], dtype=np.int16)
+    # ignore pure 32; keep 1, 33(1|32), 4, 64
+    assert bits.hotpants_mask_bool(m).tolist() == [[False, True, False, True, True, True]]
 
 
 def test_strap_source_bits():

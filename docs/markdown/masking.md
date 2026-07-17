@@ -14,7 +14,7 @@ Code lives in [`syndiff_pipeline/masking/`](../../syndiff_pipeline/masking/):
 
 | Module | Role |
 |--------|------|
-| `bits.py` | Bit constants + `epsf_reject_mask` / `full_mask_bool` / strap helpers |
+| `bits.py` | Bit constants + `epsf_reject_mask` / `hotpants_mask_bool` / `full_mask_bool` / strap helpers |
 | `geometry.py` | Packaged `mask_geometry.yaml` radii / crosses (numba painters) |
 | `settings.py` | `MaskSettings` load/resolve/freeze |
 | `shared.py` | Hybrid `build_static_mask` + tessreduce `make_shared_mask` / `Cat_mask` |
@@ -99,7 +99,8 @@ write_sector_sample_mask_fits(cat, manifest, "out_dir/")
 
 | Stage | Predicate |
 |-------|-----------|
-| Hotpants / kernel_fit / kernel_subtract / spatial bkg | `full_mask_bool(mask_at(..., which="full"))` |
+| Hotpants | `hotpants_mask_bool(mask_at(..., which="full"))` — ignore bit 32 (`FAINT_CAT`) |
+| kernel_fit / kernel_subtract / spatial bkg | `full_mask_bool(mask_at(..., which="full"))` |
 | Strap QE / phot_mask | source bits `1\|32`; strap bit `4` |
 | ePSF / star ePSF | ignore all star stamps `1\|2\|32` (bright / crosses / faint squares); reject any other set bit via per-FFI `mask_at` |
 
