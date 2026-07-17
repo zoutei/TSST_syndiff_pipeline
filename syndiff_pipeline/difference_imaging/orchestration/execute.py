@@ -961,8 +961,39 @@ def run_config_pipeline(
             gaia_mask_df = epsf_fitting.add_tess_flux_ratio(gaia_df.copy())
             gaia_mask_df["mag"] = gaia_mask_df["tess_mag"]
 
+            from syndiff_pipeline.masking.api import generate_shared_mask_catalog
+            from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+                legacy_mask_stage_overrides,
+            )
+            from syndiff_pipeline.masking.settings import (
+                apply_stage_overrides,
+                resolve_mask_settings,
+            )
+
+            data_root = _infer_data_root(cfg)
+            site_dir = getattr(cfg, "site_config_dir", None) or None
+            legacy_mask = legacy_mask_stage_overrides(stage)
+            if legacy_mask:
+                log.warning(
+                    "shared_mask stage sets legacy mask knobs %s; prefer "
+                    "config/mask_settings.yaml (shared.bright_maglim / strapsize / "
+                    "ps1_min_hit_count)",
+                    sorted(legacy_mask),
+                )
+            mask_settings, _ = resolve_mask_settings(
+                stage_mask_settings=sm.mask_settings,
+                site_dir=site_dir,
+                ws_root=ws_root,
+            )
+            mask_settings = apply_stage_overrides(
+                mask_settings,
+                gaia_mag_bright=legacy_mask.get("gaia_mag_bright"),
+                strapsize=legacy_mask.get("strapsize"),
+                ps1_min_hit_count=legacy_mask.get("ps1_min_hit_count"),
+            )
+
             ref_template_path: str | None = None
-            if int(sm.ps1_min_hit_count) > 0:
+            if int(mask_settings.shared.ps1_min_hit_count) > 0:
                 _ensure_template_paths_for_kernel(
                     cfg,
                     wcs_table,
@@ -986,10 +1017,6 @@ def run_config_pipeline(
                     ref_template_path,
                 )
 
-            from syndiff_pipeline.masking.api import generate_shared_mask_catalog
-
-            data_root = _infer_data_root(cfg)
-            site_dir = getattr(cfg, "site_config_dir", None) or None
             plots_dir = None
             if getattr(cfg, "pipeline_plots", False):
                 plots_dir = os.path.join(_pipeline_plots_root(cfg), "masks")
@@ -1003,7 +1030,7 @@ def run_config_pipeline(
                 sector=int(cfg.sector),
                 camera=int(cfg.camera),
                 ccd=int(cfg.ccd),
-                straps_csv=cfg.straps_csv,
+                straps_csv=cfg.straps_csv or None,
                 ref_ffi_path=ref_ffi_path,
                 bsc_catalog_path=cfg.bsc_catalog or None,
                 nx=ffi_nx,
@@ -1012,11 +1039,9 @@ def run_config_pipeline(
                 x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
                 y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
                 template_path=ref_template_path,
+                settings=mask_settings,
                 stage_mask_settings=sm.mask_settings,
                 site_dir=site_dir,
-                gaia_mag_bright=sm.gaia_mag_bright,
-                strapsize=sm.strapsize,
-                ps1_min_hit_count=int(sm.ps1_min_hit_count),
                 wcs_table=wcs_table,
                 write_plots_dir=plots_dir,
             )
@@ -1262,9 +1287,6 @@ def run_config_pipeline(
             if gaia_df is None:
                 raise RuntimeError("epsf requires gaia_catalog.")
             gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
-            col_corr_2d = epsf_fitting.build_median_mask_correction(
-                cfg.median_mask_path, cfg.camera, cfg.ccd, crop_bounds
-            )
             mask_catalog = _ensure_mask_catalog_loaded(
                 ws_root,
                 mask_catalog,
@@ -1279,7 +1301,6 @@ def run_config_pipeline(
                 epsf_fitting.fit_epsf_all_frames(
                     diff_paths,
                     gaia_df,
-                    col_corr_2d,
                     cfg,
                     epsf_p,
                     ws_out,

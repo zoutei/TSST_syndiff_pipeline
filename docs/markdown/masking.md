@@ -45,14 +45,34 @@ Catalog source is **Gaia** (+ BSC for crosses). Never `ps1_removed_stars`.
 
 ## Settings
 
+Mask policy lives in **`mask_settings.yaml`**, not in `diff_config.yaml`.
+
+You do **not** need to set anything under `- kind: shared_mask` for mask
+geometry/policy. A bare `- kind: shared_mask` is enough.
+
+Resolve order ([`resolve_mask_settings`](../../syndiff_pipeline/masking/settings.py)):
+
+1. Optional stage path: `mask_settings: /path/to.yaml` under `- kind: shared_mask`
+2. Already-frozen `{ws}/mask_settings.yaml` (from a prior `shared_mask` run)
+3. Site `{site_dir}/mask_settings.yaml` (sibling of `diff_config.yaml`)
+4. Packaged code defaults (`MaskSettings()` — empirical; TNS/asteroids **enabled**)
+
 Copy [`config/mask_settings.example.yaml`](../../config/mask_settings.example.yaml)
-to site `mask_settings.yaml`. Resolve order: stage `mask_settings` path →
-`{ws}/mask_settings.yaml` → `{site}/mask_settings.yaml` → packaged defaults
-(empirical; TNS/asteroids **enabled**).
+to site `mask_settings.yaml` when you want non-default maglims / style / TNS /
+asteroids.
 
 `tns.download_url` is omitted from the example — code default
-`DEFAULT_TNS_PUBLIC_ZIP_URL`. Stage keys `gaia_mag_bright` / `strapsize` /
-`ps1_min_hit_count` still override the corresponding settings fields (BC).
+`DEFAULT_TNS_PUBLIC_ZIP_URL`.
+
+**Do not** put maglims / strapsize / PS1 thresholds in the `shared_mask` stage.
+Legacy stage keys `gaia_mag_bright` / `strapsize` / `ps1_min_hit_count` are still
+accepted for BC and override the corresponding settings fields **only when
+explicitly present** (they no longer clobber `mask_settings.yaml` via dataclass
+defaults). Prefer editing `mask_settings.yaml`.
+
+`shared_mask` stage knobs that remain stage-local are Hotpants **ref-star
+selection** only: `ref_mag_min` / `ref_mag_max` / `ref_isolation_*` /
+`ref_separation_px`.
 
 On `shared_mask` execute, effective YAML is frozen to `{ws}/mask_settings.yaml`.
 On submit, if the site file exists it is also copied to `runs/{run_id}/mask_settings.yaml`.
@@ -67,7 +87,7 @@ On submit, if the site file exists it is also copied to `runs/{run_id}/mask_sett
 | TNS public CSV | `{data_root}/catalogs/tns/tns_public_objects.csv` |
 | `pixel_intervals.parquet` + `asteroid_ffi_times.parquet` | `{data_root}/catalogs/sector_*/camera_*/ccd_*/asteroids/` |
 | `TESS_orbit_times.csv` | `{data_root}/catalogs/` (auto-downloaded from MIT) |
-| QA PNGs | `{pipeline_plots}/masks/` when `pipeline_plots: true` |
+| QA PNGs | `{pipeline_plots}/masks/` when `pipeline_plots: true` — bit planes, ePSF/Hotpants predicates, plus TSST-style `tns_locations.png` and `asteroid_tracks_by_epoch.png` |
 
 ## `MaskCatalog.mask_at`
 

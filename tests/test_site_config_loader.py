@@ -109,6 +109,9 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertIn("events", cfg.output_dir)
         self.assertIn("s0020_c3_k3_2020ut", cfg.output_dir)
         self.assertEqual(cfg.ffi_dir, str((self.data / "tess_ffi").resolve()))
+        # Bundled straps/BSC are not injected; empty means packaged default at use time.
+        self.assertEqual(cfg.straps_csv, "")
+        self.assertEqual(cfg.bsc_catalog, "")
         self.assertEqual(
             cfg.gaia_catalog,
             str(

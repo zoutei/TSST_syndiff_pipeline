@@ -41,11 +41,12 @@ Cheap testing of changes: foreground `syndiff diff run` (add `--validate-only` f
 | File | Git | Contains |
 |------|-----|----------|
 | `pipeline.yaml` | committed | Template policy: stages, pools, notifications |
-| `diff_config.yaml` | committed | Diff sub-pipeline policy + Condor resources |
+| `diff_config.yaml` | committed | Diff sub-pipeline: `defaults` + `pipeline:` stage knobs (omit dataclass defaults). Mask policy is **not** here. |
+| `mask_settings.yaml` | optional | Mask geometry/policy (sibling of `diff_config`; bare `- kind: shared_mask` uses this or packaged defaults) |
 | `star_config.yaml` | committed | Star-branch policy |
 | `deployment.yaml` | **gitignored** | `workspace_root`, `data_root`, Gaia + Discord credentials (copy from `deployment.yaml.example`) |
 
-Targets are always passed on the CLI (`--targets` / `--star-targets`), never embedded in config. Each run freezes its effective config under `runs/{run_id}/` — check the frozen copy, not the YAML defaults, when debugging.
+Targets are always passed on the CLI (`--targets` / `--star-targets`), never embedded in config. Each run freezes its effective config under `runs/{run_id}/`; each diff workspace freezes a slim `ws/diff_config.yaml` plus `ws/mask_settings.yaml` after `shared_mask` — check the frozen copies, not the YAML defaults, when debugging.
 
 ## Architecture
 
