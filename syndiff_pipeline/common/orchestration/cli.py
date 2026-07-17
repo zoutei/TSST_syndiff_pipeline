@@ -516,6 +516,18 @@ def _prepare_run_directory(
         rcfg = load_runner_config(config_path)
         rcfg.star_config_path = frozen_star
         write_runner_config(rcfg, config_path)
+
+    # Freeze site mask_settings.yaml when present (star_config pattern).
+    site_mask = None
+    if source_diff_config_path:
+        cand = Path(source_diff_config_path).expanduser().resolve().parent / "mask_settings.yaml"
+        if cand.is_file():
+            site_mask = cand
+    if site_mask is not None:
+        mask_dest = run_directory / "mask_settings.yaml"
+        if not mask_dest.is_file():
+            shutil.copy2(site_mask, mask_dest)
+        meta["mask_settings_path"] = str(mask_dest.resolve())
     if workspace_run_id is not None and str(workspace_run_id).strip():
         meta["workspace_run_id"] = str(workspace_run_id).strip()
     logs.ensure_run_layout(runs_root, run_id, meta)

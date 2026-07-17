@@ -85,6 +85,7 @@ SHARED_MASK_ALLOWED = frozenset(
         "ref_isolation_px",
         "ref_separation_px",
         "ps1_min_hit_count",
+        "mask_settings",
     }
 )
 
@@ -303,6 +304,7 @@ class SharedMaskParams:
     ref_isolation_px: int = 8
     ref_separation_px: int = 10
     ps1_min_hit_count: int = 5000
+    mask_settings: Optional[str] = None
 
 
 @dataclass
