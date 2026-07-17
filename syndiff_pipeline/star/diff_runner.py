@@ -273,6 +273,7 @@ def compute_star_only_stamp_for_frame(
     stamp_size: int = 24,
     kernel_margin_px: int = 470,
     science_fits_path: Optional[str] = None,
+    field_group_to_template: Optional[dict[int, str]] = None,
 ) -> tuple[np.ndarray, dict]:
     """
     Build one star-only diff stamp for a frame/host.
@@ -288,19 +289,33 @@ def compute_star_only_stamp_for_frame(
     manifest = pd.read_csv(manifest_path)
 
     ffi_path = science_fits_path or _ffi_path_for_product_id(manifest, product_id)
-    group_dx, group_dy = template_offsets_for_ffi(manifest, ffi_path)
 
-    offset_key = (float(group_dx), float(group_dy))
-    mini_path = None
-    for key, path in mini_template_fits_paths.items():
-        if abs(float(key[0]) - offset_key[0]) <= 1e-3 and abs(float(key[1]) - offset_key[1]) <= 1e-3:
-            mini_path = path
-            break
-    if mini_path is None:
-        raise FileNotFoundError(
-            f"No mini template for offset dx={group_dx} dy={group_dy}; "
-            f"available keys: {sorted(mini_template_fits_paths)}"
+    if field_group_to_template is not None:
+        # Field mode: look up the mini template by the frame's group_id.
+        from syndiff_pipeline.difference_imaging.support.template_resolution import (
+            group_id_for_ffi,
         )
+
+        gid = group_id_for_ffi(manifest, ffi_path)
+        mini_path = field_group_to_template.get(int(gid))
+        if mini_path is None:
+            raise FileNotFoundError(
+                f"No field mini template for group_id={gid}; "
+                f"available groups: {sorted(field_group_to_template)}"
+            )
+    else:
+        group_dx, group_dy = template_offsets_for_ffi(manifest, ffi_path)
+        offset_key = (float(group_dx), float(group_dy))
+        mini_path = None
+        for key, path in mini_template_fits_paths.items():
+            if abs(float(key[0]) - offset_key[0]) <= 1e-3 and abs(float(key[1]) - offset_key[1]) <= 1e-3:
+                mini_path = path
+                break
+        if mini_path is None:
+            raise FileNotFoundError(
+                f"No mini template for offset dx={group_dx} dy={group_dy}; "
+                f"available keys: {sorted(mini_template_fits_paths)}"
+            )
 
     kernel_solution, hp_config = load_frame_kernel_for_diff(
         ctx.baseline_kernels_dir,

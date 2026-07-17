@@ -325,6 +325,12 @@ def run_star_pipeline(
             continue
 
         mini_template_fits_paths = _mini_template_fits_paths(mini_paths)
+        # Field mode: group_id -> mini-template path (built in star_segments).
+        field_group_to_template = iso_result.get("field_group_to_template")
+        if field_group_to_template:
+            field_group_to_template = {
+                int(k): v for k, v in field_group_to_template.items()
+            }
         blend_flag = _blend_flag(iso_result)
 
         x_ref, y_ref = resolve_host_full_ffi_xy(ctx, host)
@@ -354,6 +360,7 @@ def run_star_pipeline(
                     mini_template_fits_paths=mini_template_fits_paths,
                     stamp_size=run_config.stamp_size,
                     kernel_margin_px=run_config.kernel_margin_px,
+                    field_group_to_template=field_group_to_template or None,
                 )
                 write_star_diff_stamp(
                     str(stamp_path),
