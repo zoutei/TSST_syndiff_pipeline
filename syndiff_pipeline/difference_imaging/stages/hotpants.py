@@ -259,7 +259,7 @@ def frame_kernels_dir(diffs_dir: str) -> str:
     Sibling of *diffs_dir* with ``_kernels`` appended to its basename
     (``hp_d`` → ``hp_d_kernels``, ``ks_d`` → ``ks_d_kernels``).
     """
-    d = os.path.abspath(diffs_dir)
+    d = os.path.realpath(diffs_dir)
     parent = os.path.dirname(d)
     base = os.path.basename(d)
     return os.path.join(parent, f"{base}_kernels")
