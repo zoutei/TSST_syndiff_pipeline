@@ -25,6 +25,7 @@ from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_B
 from syndiff_pipeline.masking.detector import detector_edge_mask, ps1_coverage_mask
 from syndiff_pipeline.masking.geometry import size_limit
 from syndiff_pipeline.masking.shared import Cat_mask, make_shared_mask
+from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
 from syndiff_pipeline.masking.tessreduce_squares import Big_sat, Strap_mask, gaia_auto_mask
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -34,6 +35,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "SHARED_MASK_FITS_BASENAME",
     "size_limit",
+    "faint_star_squares",
     "gaia_auto_mask",
     "Big_sat",
     "Strap_mask",

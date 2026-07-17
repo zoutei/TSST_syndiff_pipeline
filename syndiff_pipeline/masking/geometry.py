@@ -365,6 +365,8 @@ def big_sat_empirical(
 
 def warmup_numba() -> None:
     """Trigger JIT compile once."""
+    from syndiff_pipeline.masking.faint_star_squares import paint_squares
+
     geo = load_geometry()
     m = np.zeros((32, 32), dtype=np.uint8)
     xs = np.array([16], dtype=np.int64)
@@ -376,3 +378,6 @@ def warmup_numba() -> None:
     _radii_from_mags(
         mags, 1.0, geo["_bin_hi"], geo["_bin_lo"], geo["_bin_rad"], 9.0
     )
+    half = np.array([1], dtype=np.int64)
+    active = np.array([1], dtype=np.uint8)
+    paint_squares(m, xs, ys, half, half, active)

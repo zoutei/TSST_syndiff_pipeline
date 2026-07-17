@@ -47,7 +47,7 @@ def test_resume_loads_scc_asteroids(tmp_path):
     fits.writeto(ws / "shared_mask.fits.gz", static, overwrite=True)
 
     data_root = tmp_path / "data"
-    scc = data_root / "catalogs" / "sector_20" / "camera_1" / "ccd_1" / "asteroids"
+    scc = data_root / "catalogs" / "sector_0020" / "camera_1" / "ccd_1" / "asteroids"
     scc.mkdir(parents=True)
     iv = pd.DataFrame(
         {

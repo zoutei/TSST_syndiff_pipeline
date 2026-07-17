@@ -188,6 +188,76 @@ def build_ffi_times_from_manifest(wcs_table: pd.DataFrame) -> pd.DataFrame:
     )
 
 
+def remap_track_points_to_manifest_cadence(
+    track_points: pd.DataFrame,
+    ffi_times: pd.DataFrame,
+    *,
+    jd_col: str = "time_jd",
+    btjd_offset: float = 2457000.0,
+) -> pd.DataFrame:
+    """
+    Re-index track points onto an event ``asteroid_ffi_times`` grid.
+
+    Development track products may use a pointing-grid cadence index that does
+    not match the event manifest. Map each point's JD/BTJD to the nearest
+    manifest cadence so bit-128 lines up with Hotpants / sample FITS epochs.
+    """
+    if track_points is None or track_points.empty:
+        return track_points
+    if ffi_times is None or ffi_times.empty:
+        raise ValueError("ffi_times required to remap track cadences")
+    times = ffi_times.sort_values("cadence").reset_index(drop=True)
+    jds = times["btjd"].to_numpy(float)
+    cads = times["cadence"].to_numpy(int)
+
+    out = track_points.copy()
+    if jd_col in out.columns:
+        t = pd.to_numeric(out[jd_col], errors="coerce").to_numpy(float) - float(
+            btjd_offset
+        )
+    elif "btjd" in out.columns:
+        t = pd.to_numeric(out["btjd"], errors="coerce").to_numpy(float)
+    else:
+        raise ValueError(f"track_points need {jd_col!r} or 'btjd'")
+
+    # nearest cadence
+    idx = np.searchsorted(jds, t)
+    idx = np.clip(idx, 0, len(jds) - 1)
+    for i, tj in enumerate(t):
+        if not np.isfinite(tj):
+            idx[i] = 0
+            continue
+        j = idx[i]
+        if j > 0 and abs(jds[j - 1] - tj) < abs(jds[j] - tj):
+            idx[i] = j - 1
+    out["cadence"] = cads[idx]
+    # normalize column naming for rasterize_track_to_visits
+    if "column" not in out.columns and "col" in out.columns:
+        out["column"] = out["col"]
+    if "row" not in out.columns and "Row" in out.columns:
+        out["row"] = out["Row"]
+    if "radius_px" not in out.columns:
+        out["radius_px"] = 2
+    if "target_id" not in out.columns and "horizons_id" in out.columns:
+        out["target_id"] = out["horizons_id"].astype(str)
+    return out
+
+
+def intervals_from_track_points_on_manifest(
+    track_points: pd.DataFrame,
+    wcs_table: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Remap tracks → pixel_intervals + asteroid_ffi_times on the event grid."""
+    ffi_times = build_ffi_times_from_manifest(wcs_table)
+    # drop non-finite btjd rows from times
+    ffi_times = ffi_times.loc[np.isfinite(ffi_times["btjd"])].reset_index(drop=True)
+    ffi_times["cadence"] = np.arange(len(ffi_times), dtype=np.int64)
+    remapped = remap_track_points_to_manifest_cadence(track_points, ffi_times)
+    intervals = build_pixel_intervals(remapped)
+    return intervals, ffi_times
+
+
+
 def resolve_cadence_from_btjd(
     times: pd.DataFrame,
     btjd: float,

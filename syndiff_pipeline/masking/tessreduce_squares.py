@@ -1,4 +1,4 @@
-"""TESSreduce square catalog masks (gaia_auto_mask) and Big_sat crosses."""
+"""TESSreduce legacy painters: Big_sat crosses and Strap_mask."""
 
 from __future__ import annotations
 
@@ -9,56 +9,13 @@ import numpy as np
 import pandas as pd
 from scipy.signal import fftconvolve
 
+from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
 from syndiff_pipeline.masking.geometry import size_limit
 
 log = logging.getLogger(__name__)
 
-
-def gaia_auto_mask(table: pd.DataFrame, Image: np.ndarray, scale: float = 1.0) -> dict:
-    """
-    Build a magnitude-keyed mask dict from a Gaia catalog.
-    Each magnitude bin gets a square kernel of increasing size.
-    Returns dict with key 'all' containing the union mask.
-
-    Expects table columns: x, y, mag (all in crop-local pixels).
-    """
-    image = np.zeros_like(Image)
-    x = (np.round(table["x"].values, 0)).astype(int)
-    y = (np.round(table["y"].values, 0)).astype(int)
-    m = table["mag"].values
-    ind = size_limit(x, y, image)
-    x, y, m = x[ind], y[ind], m[ind]
-
-    masks = {}
-    mags = [
-        [18, 17],
-        [17, 16],
-        [16, 15],
-        [15, 14],
-        [14, 13.5],
-        [13.5, 12],
-        [12, 10],
-        [10, 9],
-        [9, 8],
-        [8, 7],
-    ]
-    sizes = (np.array([3, 4, 5, 6, 7, 8, 10, 14, 16, 18]) * scale).astype(int)
-
-    for i, mag_range in enumerate(mags):
-        mag_ind = (m > mag_range[1]) & (m <= mag_range[0])
-        magim = np.zeros_like(image)
-        magim[y[mag_ind], x[mag_ind]] = 1.0
-        sz = sizes[i]
-        if sz > 0:
-            k = np.ones((sz, sz))
-            conv = fftconvolve(magim, k, mode="same")
-            masks[str(mag_range[0])] = (conv > 0.1) * 1.0
-
-    masks["all"] = np.zeros_like(image, dtype=float)
-    for key in masks:
-        masks["all"] += masks[key]
-    masks["all"] = (masks["all"] > 0.1) * 1.0
-    return masks
+# Backward-compatible alias (historical TESSreduce / pipeline name).
+gaia_auto_mask = faint_star_squares
 
 
 def Big_sat(table: pd.DataFrame, Image: np.ndarray, scale: float = 1.0) -> list:

@@ -203,7 +203,7 @@ def default_asteroid_intervals_dir(
     return (
         Path(data_root)
         / "catalogs"
-        / f"sector_{int(sector)}"
+        / f"sector_{int(sector):04d}"
         / f"camera_{int(camera)}"
         / f"ccd_{int(ccd)}"
         / "asteroids"

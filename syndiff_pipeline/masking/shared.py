@@ -24,7 +24,8 @@ from syndiff_pipeline.masking.geometry import (
     load_geometry,
 )
 from syndiff_pipeline.masking.settings import MaskSettings
-from syndiff_pipeline.masking.tessreduce_squares import Big_sat, Strap_mask, gaia_auto_mask
+from syndiff_pipeline.masking.faint_star_squares import faint_star_squares
+from syndiff_pipeline.masking.tessreduce_squares import Big_sat, Strap_mask
 
 log = logging.getLogger(__name__)
 
@@ -43,13 +44,13 @@ def Cat_mask(
     TESSreduce full bitmask (bits 1, 2, 4).
 
     Bit layout:
-      bit 1 — catalog sources (gaia_auto_mask)
+      bit 1 — catalog sources (faint_star_squares / historical gaia_auto_mask)
       bit 2 — very bright star crosses (Big_sat, mag < 7; Gaia + BSC)
       bit 4 — TESS straps
     """
     gaia_sub = gaia_df[gaia_df["mag"] < maglim].copy()
 
-    mg = gaia_auto_mask(gaia_sub, data_image, scale)
+    mg = faint_star_squares(gaia_sub, data_image, scale)
     bit1 = (mg["all"] > 0).astype(int)
 
     sat_table = gaia_sub
@@ -213,7 +214,7 @@ def build_static_mask(
     Default ``style: empirical``:
       T < bright_maglim: empirical circles (T≥9 → bit 1) + crosses (T<9 → 1|2);
       BSC ∪ Gaia for crosses.
-      bright_maglim ≤ T < faint_maglim: TESSreduce squares → bit 32.
+      bright_maglim ≤ T < faint_maglim: faint_star_squares → bit 32.
       straps → 4; edges → 8; PS1 → 16; optional TNS → 64.
 
     ``style: tessreduce``: legacy Cat_mask path (bits 1/2/4/8/16 only).
@@ -279,9 +280,9 @@ def build_static_mask(
     # Cross body also sets bit 1 (plan: crosses → bits 1|2)
     bit1 = bit1 | ((sat_mask > 0).astype(np.int16) * bits.BRIGHT_CAT)
 
-    # Bit 32: TESSreduce squares on faint
+    # Bit 32: faint_star_squares on faint catalog stars
     if len(faint):
-        sq = gaia_auto_mask(faint, ref_image, scale=scale)
+        sq = faint_star_squares(faint, ref_image, scale=scale)
         bit32 = (sq["all"] > 0).astype(np.int16) * bits.FAINT_CAT
     else:
         bit32 = np.zeros(ref_image.shape, dtype=np.int16)
