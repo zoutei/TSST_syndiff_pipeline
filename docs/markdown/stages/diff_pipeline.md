@@ -1,5 +1,11 @@
 > **Package integration**: `syndiff` stage `diff` · package `syndiff_pipeline/difference_imaging/` · configured by `config/diff_config*.yaml`  
-> **Related docs**: [template pipeline guide](../template_pipeline.md) · [background stage](background.md)
+> **Related docs**: [template pipeline guide](../template_pipeline.md) · [background stage](background.md) · [field geometry](../field_geometry.md)
+
+> **Field mode:** with `geometry_mode: field` there are no `ws/templates` `dx/dy`
+> FITS — templates are **assembled per `group_id`** on demand from the SCC field
+> store (`ws/field_templates`). `shared_mask`, `hotpants`, and the
+> `kernel_fit`/`convolved_templates`/`kernel_subtract` engine are all field-aware
+> (convolved products are keyed by `group_id`). See [field geometry](../field_geometry.md).
 
 # Difference-Imaging (`diff`) Stage — Internal Pipeline Reference
 
