@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pandas as pd
@@ -76,6 +77,27 @@ def resolve_template_dir(output_dir: str, *, run_id: str | None = None) -> str:
     Returns
     -------
     str"""
+    import json
+
+    from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
+        event_field_templates_symlink_path,
+    )
+
+    # Only prefer the field store when the event is actually field mode, so a
+    # stale ws/field_templates symlink cannot hijack a linear event.
+    geometry_mode = "linear"
+    job = Path(output_dir) / "cluster_template_job.json"
+    if job.is_file():
+        try:
+            geometry_mode = str(
+                json.loads(job.read_text()).get("geometry_mode") or "linear"
+            ).lower()
+        except Exception:
+            geometry_mode = "linear"
+    if geometry_mode == "field":
+        field_link = event_field_templates_symlink_path(output_dir, run_id=run_id)
+        if field_link.is_symlink() or field_link.is_dir():
+            return str(field_link.resolve())
     link = event_templates_symlink_path(output_dir, run_id=run_id)
     if link.is_symlink() or link.is_dir():
         return str(link.resolve())
@@ -120,22 +142,6 @@ def template_offsets_for_ffi(
     return float(gdx), float(gdy)
 
 
-def resolve_template_for_ffi(
-    output_dir: str,
-    manifest: pd.DataFrame,
-    ffi_path: str,
-    *,
-    template_dir: str | None = None,
-) -> tuple[float, float, str]:
-    """Return ``(group_dx, group_dy, template_path)`` for one FFI."""
-    group_dx, group_dy = template_offsets_for_ffi(manifest, ffi_path)
-    tmpl_root = template_dir or resolve_template_dir(output_dir)
-    template_path = find_template_by_offset(
-        tmpl_root, dx=group_dx, dy=group_dy
-    )
-    return group_dx, group_dy, template_path
-
-
 def convolved_template_basename(template_path: str) -> str:
     """Convolved template basename.
     
@@ -152,3 +158,296 @@ def convolved_template_basename(template_path: str) -> str:
     return (
         f"convolved_template_dx{parsed.dx:.3f}_dy{parsed.dy:.3f}{PIPELINE_FITS_EXT}"
     )
+
+
+# ── field-mode resolution (group_id + SCC field store / optional FITS) ─────
+
+_FIELD_GID_FITS_RE = re.compile(
+    r"^syndiff_field_s\d+_\d+_\d+(?:_os\d+)?_gid(?P<gid>\d+)\.fits(?:\.gz)?$",
+    re.IGNORECASE,
+)
+
+
+def is_field_template_store(template_dir: str | Path) -> bool:
+    """True if *template_dir* looks like an SCC field_templates root."""
+    return (Path(template_dir) / "template_manifest.json").is_file()
+
+
+def parse_field_gid_from_filename(path_or_basename: str | Path) -> int | None:
+    m = _FIELD_GID_FITS_RE.match(Path(path_or_basename).name)
+    return int(m.group("gid")) if m else None
+
+
+def group_id_for_ffi(manifest: pd.DataFrame, ffi_path: str) -> int:
+    """Return ``group_id`` for an FFI from the frames CSV."""
+    from syndiff_pipeline.common.wcs_grouping import ref_manifest_row_index
+
+    if "group_id" not in manifest.columns:
+        raise KeyError("manifest missing 'group_id'")
+    idx = ref_manifest_row_index(manifest, ffi_path)
+    if idx is None:
+        raise ValueError(f"No manifest row for FFI {ffi_path!r}")
+    gid = manifest.iloc[idx]["group_id"]
+    if pd.isna(gid) or int(gid) < 0:
+        raise ValueError(f"Invalid group_id for FFI {ffi_path!r}: {gid!r}")
+    return int(gid)
+
+
+def find_field_fits_by_group_id(template_dir: str | Path, group_id: int) -> str | None:
+    """Locate optional materialized ``syndiff_field_*_gid{N}.fits.gz`` under store/fits/."""
+    root = Path(template_dir)
+    matches: list[Path] = []
+    for d in (root / "fits", root):
+        if not d.is_dir():
+            continue
+        for p in d.iterdir():
+            if p.is_file() and parse_field_gid_from_filename(p) == int(group_id):
+                matches.append(p)
+    if not matches:
+        return None
+    prefer_gz = [p for p in matches if p.name.lower().endswith(".fits.gz")]
+    return str((prefer_gz[0] if prefer_gz else matches[0]).resolve())
+
+
+def resolve_template_for_ffi(
+    output_dir: str,
+    manifest: pd.DataFrame,
+    ffi_path: str,
+    *,
+    template_dir: str | None = None,
+    geometry_mode: str | None = None,
+):
+    """
+    Resolve a template for one FFI.
+
+    Linear: ``(group_dx, group_dy, path)``.
+    Field with materialized FITS: ``(group_id, path)``.
+    Field without FITS: raises ``FileNotFoundError`` (assemble from contribs).
+    """
+    tmpl_root = template_dir or resolve_template_dir(output_dir)
+    mode = (geometry_mode or "linear").lower()
+    if mode == "field" or is_field_template_store(tmpl_root):
+        gid = group_id_for_ffi(manifest, ffi_path)
+        path = find_field_fits_by_group_id(tmpl_root, gid)
+        if path is None:
+            raise FileNotFoundError(
+                f"No materialized field FITS for group_id={gid} under {tmpl_root}; "
+                "assemble from SCC contribs (geometry_mode=field, materialize_fits=false)."
+            )
+        return gid, path
+    group_dx, group_dy = template_offsets_for_ffi(manifest, ffi_path)
+    template_path = find_template_by_offset(tmpl_root, dx=group_dx, dy=group_dy)
+    return group_dx, group_dy, template_path
+
+
+# ── on-demand field assemble loader ───────────────────────────────────────
+
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
+
+
+@dataclass(frozen=True)
+class FieldModeTemplateContext:
+    """Picklable context for assembling field templates from SCC contribs."""
+
+    store_root: str
+    shifts_df: Any  # pd.DataFrame
+    base_tess_shape: tuple[int, int]
+    template_roi_bounds: tuple[int, int, int, int]
+
+
+def build_field_mode_template_loader(
+    ctx: FieldModeTemplateContext,
+    diff_crop_bounds: dict,
+    *,
+    planes: str = "flux",
+) -> Callable[[int], Any]:
+    """Return ``group_id -> cropped flux array`` (float64)."""
+    import numpy as np
+
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        assemble_field_group_flux,
+    )
+
+    if planes not in ("flux", "all"):
+        raise ValueError(f"planes must be flux|all, got {planes!r}")
+
+    x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+    dx0 = int(diff_crop_bounds["x_min"]) - int(x_min)
+    dx1 = int(diff_crop_bounds["x_max"]) - int(x_min)
+    dy0 = int(diff_crop_bounds["y_min"]) - int(y_min)
+    dy1 = int(diff_crop_bounds["y_max"]) - int(y_min)
+
+    def _load(group_id: int):
+        crop = (int(x_min), int(x_max), int(y_min), int(y_max))
+        flux = assemble_field_group_flux(
+            ctx.store_root,
+            ctx.shifts_df,
+            int(group_id),
+            shape=ctx.base_tess_shape,
+            crop=crop,
+        )
+        out = flux[dy0:dy1, dx0:dx1].astype(np.float32).astype(np.float64)
+        if planes == "all":
+            # COUNT/MASK not reconstructed here; stack flux thrice for API parity callers
+            return np.stack([out, np.ones_like(out), np.zeros_like(out)], axis=0)
+        return out
+
+    return _load
+
+
+def build_field_mode_count_loader(
+    ctx: FieldModeTemplateContext,
+    diff_crop_bounds: dict,
+) -> Callable[[int], Any]:
+    """Return ``group_id -> cropped PS1 hit-COUNT array`` (float64).
+
+    Same crop geometry as :func:`build_field_mode_template_loader`, but assembles
+    the COUNT plane — used by ``shared_mask``'s PS1-coverage mask in field mode
+    (equivalent to a linear template's COUNT extension).
+    """
+    import numpy as np
+
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        assemble_field_group_count,
+    )
+
+    x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+    dx0 = int(diff_crop_bounds["x_min"]) - int(x_min)
+    dx1 = int(diff_crop_bounds["x_max"]) - int(x_min)
+    dy0 = int(diff_crop_bounds["y_min"]) - int(y_min)
+    dy1 = int(diff_crop_bounds["y_max"]) - int(y_min)
+
+    def _load(group_id: int):
+        crop = (int(x_min), int(x_max), int(y_min), int(y_max))
+        count = assemble_field_group_count(
+            ctx.store_root,
+            ctx.shifts_df,
+            int(group_id),
+            shape=ctx.base_tess_shape,
+            crop=crop,
+        )
+        return count[dy0:dy1, dx0:dx1].astype(np.float64)
+
+    return _load
+
+
+def _group_id_for_ffi_name(manifest, ffi_name: str) -> int:
+    """Resolve group_id from an FFI *name* (basename) or full path.
+
+    Prefers the canonical full-path match (:func:`group_id_for_ffi`); falls back
+    to a basename match against the manifest ``filename``/``path`` columns,
+    treating ``.fits`` and ``.fits.gz`` as the same file.
+    """
+    from syndiff_pipeline.common.wcs_grouping import ref_manifest_row_index
+
+    if ref_manifest_row_index(manifest, ffi_name) is not None:
+        return group_id_for_ffi(manifest, ffi_name)
+
+    def _stem(name: str) -> str:
+        base = Path(str(name)).name
+        return base[:-3] if base.endswith(".fits.gz") else base
+
+    target = _stem(ffi_name)
+    for col in ("filename", "path"):
+        if col not in manifest.columns:
+            continue
+        matches = manifest.index[manifest[col].map(_stem) == target].tolist()
+        if matches:
+            gid = manifest.loc[matches[0], "group_id"]
+            if pd.isna(gid) or int(gid) < 0:
+                raise ValueError(f"Invalid group_id for FFI {ffi_name!r}: {gid!r}")
+            return int(gid)
+    raise ValueError(f"No manifest row for FFI {ffi_name!r}")
+
+
+def assemble_field_template_for_ffi(
+    ctx: "FieldModeTemplateContext",
+    manifest,
+    ffi_path: str,
+    *,
+    crop: tuple[int, int, int, int] | None = None,
+    plane: str = "flux",
+):
+    """Assemble the field template for the group of a single FFI, by FFI name.
+
+    Resolves the FFI's ``group_id`` from *manifest* (the frames CSV), then
+    assembles that group's template from the SCC field store. With ``crop=None``
+    (default) this returns the **full-FFI** ("big") template at
+    ``ctx.base_tess_shape``; pass ``crop=(x_min, x_max, y_min, y_max)`` in
+    full-FFI pixels for a window. Works against a crop-only store — skycells
+    without contribs stay zero (``present_only=True``).
+
+    Parameters
+    ----------
+    ctx : FieldModeTemplateContext
+    manifest : pandas.DataFrame
+        The event frames manifest (``syndiff_ffi_frames.csv``) with ``group_id``.
+    ffi_path : str
+        FFI filename or path (matched via the manifest's canonical path key).
+    crop : tuple, optional
+        ``(x_min, x_max, y_min, y_max)`` half-open full-FFI window; ``None`` → full FFI.
+    plane : str
+        ``"flux"`` (mean flux, default) or ``"count"`` (PS1 hit count).
+
+    Returns
+    -------
+    numpy.ndarray (float64)
+    """
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        assemble_field_group_count,
+        assemble_field_group_flux,
+    )
+
+    if plane not in ("flux", "count"):
+        raise ValueError(f"plane must be flux|count, got {plane!r}")
+    gid = _group_id_for_ffi_name(manifest, ffi_path)
+    assembler = assemble_field_group_flux if plane == "flux" else assemble_field_group_count
+    return assembler(
+        ctx.store_root,
+        ctx.shifts_df,
+        int(gid),
+        shape=ctx.base_tess_shape,
+        crop=crop,
+        present_only=True,
+    )
+
+
+def maybe_load_field_mode_template_context(
+    template_dir: str | Path | None,
+    event_dir: str | Path,
+) -> Optional[FieldModeTemplateContext]:
+    """Load field assemble context from SCC store sidecar, or None."""
+    import json
+    import logging
+
+    log = logging.getLogger(__name__)
+    if template_dir is None:
+        return None
+    root = Path(str(template_dir)).expanduser()
+    if not root.is_dir():
+        # try event ws/field_templates
+        link = Path(event_dir) / "ws" / "field_templates"
+        if link.exists():
+            root = link.resolve()
+        else:
+            return None
+    sidecar = root / "field_mode_assembly.json"
+    shifts_path = Path(event_dir) / "template_group_shifts.parquet"
+    if not sidecar.is_file() or not shifts_path.is_file():
+        return None
+    try:
+        side = json.loads(sidecar.read_text())
+        shifts_df = pd.read_parquet(shifts_path)
+    except Exception as exc:
+        log.warning("field mode context load failed: %s", exc)
+        return None
+    if int(side.get("schema_version", 0)) != 1:
+        return None
+    return FieldModeTemplateContext(
+        store_root=str(side.get("store_root") or root),
+        shifts_df=shifts_df,
+        base_tess_shape=tuple(side["base_tess_shape"]),
+        template_roi_bounds=tuple(side["roi_bounds"]),
+    )
+
