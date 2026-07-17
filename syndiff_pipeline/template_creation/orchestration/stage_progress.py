@@ -237,6 +237,15 @@ def _parse_ps1_process(text: str) -> StageProgress | None:
     return _phase_from_text(text)
 
 
+def _downsample_progress_label(done: int, total: int, data: dict) -> str:
+    """Format skycell fraction, tagging oversampling when os > 1."""
+    os_factor = int(data.get("oversampling_factor") or 1)
+    base = f"{done}/{total}"
+    if os_factor > 1:
+        return f"{base} os{os_factor}"
+    return base
+
+
 def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
     """Parse downsample sidecar.
     
@@ -265,12 +274,12 @@ def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
     if phase == "complete":
         total = int(data.get("total_skycells", 0))
         if total > 0:
-            return StageProgress(f"{total}/{total}", "fraction")
+            return StageProgress(_downsample_progress_label(total, total, data), "fraction")
 
     total = int(data.get("total_skycells", 0))
     done = int(data.get("skycells_done", 0))
     if total > 0:
-        return StageProgress(f"{done}/{total}", "fraction")
+        return StageProgress(_downsample_progress_label(done, total, data), "fraction")
     return None
 
 

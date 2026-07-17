@@ -75,6 +75,15 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "allow_reference_ffi_mismatch",
         "n_jobs",
         "skycells_per_batch",
+        "log_level",
+        "stage_regmaps_to_scratch",
+        "checkpoint_skycells",
+        "executor",
+        "condor_request_cpus",
+        "condor_request_memory",
+        "condor_request_disk",
+        "condor_requirements",
+        "condor_rank",
     }
 )
 
@@ -200,11 +209,24 @@ class DownsampleStageParams:
     allow_reference_ffi_mismatch: bool = False
     n_jobs: int = 16
     skycells_per_batch: int = 20
+    log_level: str = "INFO"
+    stage_regmaps_to_scratch: bool | None = None
+    checkpoint_skycells: bool = False
+    executor: str = "local"
+    condor_request_cpus: int = 16
+    condor_request_memory: int = 128_000
+    condor_request_disk: int | None = None  # MB; None → omit request_disk
+    condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: str | None = "-LoadAvg"
 
     def __post_init__(self):
         """Post init."""
         if self.ignore_mask_bits is None:
             object.__setattr__(self, "ignore_mask_bits", [12])
+        level = (self.log_level or "INFO").upper()
+        if level not in ("INFO", "DEBUG"):
+            raise ValueError(f"log_level must be INFO or DEBUG, got {self.log_level!r}")
+        object.__setattr__(self, "log_level", level)
 
 
 @dataclass
@@ -225,13 +247,21 @@ class TemplateStageParams:
     star: StarStageParams = field(default_factory=StarStageParams)
 
 
-def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
+def _filter_allowed_keys(stage_dict: dict, allowed: FrozenSet[str]) -> dict:
+    """Keep only allow-listed keys (for non-strict frozen-config loading)."""
+    return {k: v for k, v in stage_dict.items() if k in allowed}
+
+
+def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStageParams:
     """Parse stage params.
-    
+
     Parameters
     ----------
     stages_raw : dict
-    
+    strict : bool, optional
+        When False, unknown stage names and keys are dropped instead of
+        raising (for frozen run configs written by newer feature branches).
+
     Returns
     -------
     TemplateStageParams"""
@@ -243,6 +273,14 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
     ds = stages_raw.get("downsample", {}) or {}
     df = stages_raw.get("diff", {}) or {}
     st = stages_raw.get("star", {}) or {}
+    if not strict:
+        wg = _filter_allowed_keys(wg, WCS_GROUPING_ALLOWED)
+        mp = _filter_allowed_keys(mp, MAPPING_ALLOWED)
+        pd = _filter_allowed_keys(pd, PS1_DOWNLOAD_ALLOWED)
+        pp = _filter_allowed_keys(pp, PS1_PROCESS_ALLOWED)
+        ds = _filter_allowed_keys(ds, DOWNSAMPLE_ALLOWED)
+        df = _filter_allowed_keys(df, DIFF_ALLOWED)
+        st = _filter_allowed_keys(st, STAR_ALLOWED)
     validate_stage_keys(wg, WCS_GROUPING_ALLOWED, "wcs_grouping")
     validate_stage_keys(mp, MAPPING_ALLOWED, "mapping")
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
@@ -261,6 +299,8 @@ def parse_stage_params(stages_raw: dict) -> TemplateStageParams:
         raise ValueError("stages.diff.executor must be 'local' or 'condor'")
     if st.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.star.executor must be 'local' or 'condor'")
+    if ds.get("executor", "local") not in ("local", "condor"):
+        raise ValueError("stages.downsample.executor must be 'local' or 'condor'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),

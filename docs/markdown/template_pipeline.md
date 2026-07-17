@@ -809,6 +809,12 @@ Unknown keys under `stages.*` raise `ValueError` at load time (strict allow-list
 | `convolved_dir` | null | Override convolved Zarr directory |
 | `output_base` | null | Template FITS output root |
 | `single_offset` | `false` | Single `[0,0]` offset only (smoke) |
+| `allow_reference_ffi_mismatch` | `false` | Continue when mapping `TESS_FFI` ≠ cluster-job reference |
+| `executor` | `"local"` | `"condor"` or `"local"` |
+| `condor_request_cpus` | `16` | HTCondor `request_cpus` |
+| `condor_request_memory` | `128000` | HTCondor `request_memory` (MB) |
+| `condor_requirements` | `Memory >= 128000 && LoadAvg < 10` | Machine requirements expression |
+| `condor_rank` | `-LoadAvg` | Prefer lower load average |
 
 #### `stages.diff`
 

@@ -29,6 +29,9 @@ stages:
   downsample:
     ignore_mask_bits: [12]
     oversampling_factor: 1
+    # executor: local          # default; set condor + resource keys for heavy oversampled runs
+    # condor_request_cpus: 16
+    # condor_request_memory: 128000
   diff:
     executor: condor
   star:
