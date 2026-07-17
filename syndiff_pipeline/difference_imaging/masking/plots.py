@@ -12,9 +12,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.bits import epsf_reject_mask, full_mask_bool, hotpants_mask_bool
-from syndiff_pipeline.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.bits import epsf_reject_mask, full_mask_bool, hotpants_mask_bool
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
 
 log = logging.getLogger(__name__)
 

@@ -6,8 +6,8 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
-from syndiff_pipeline.masking.catalog import MaskCatalog
-from syndiff_pipeline.masking.ffi_mask import (
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.ffi_mask import (
     normalize_ffi_product_id,
     select_begin_mid_end_ffi_ids,
     write_mask_fits_for_ffi,

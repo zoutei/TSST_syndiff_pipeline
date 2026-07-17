@@ -3,10 +3,10 @@
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.bits import strap_source_mask
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.bits import strap_source_mask
 from syndiff_pipeline.difference_imaging.stages.hotpants import _resolve_hotpants_mask_array
-from syndiff_pipeline.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
 
 
 def test_hotpants_helper_static_ndarray():

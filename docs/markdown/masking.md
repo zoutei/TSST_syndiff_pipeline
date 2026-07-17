@@ -8,9 +8,13 @@ The on-disk artifact is still named `shared_mask.fits.gz` (pipeline stage kind
 `shared_mask`) for backward compatibility; it stores only the **static** layer.
 Per-FFI temporal bits (asteroids) are applied in memory via `MaskCatalog.mask_at`.
 
+Masking is part of the **difference-imaging** package (plus star ePSF consumers).
+Template creation does not import it.
+
 ## Package
 
-Code lives in [`syndiff_pipeline/masking/`](../../syndiff_pipeline/masking/):
+Code lives in [`syndiff_pipeline/difference_imaging/masking/`](../../syndiff_pipeline/difference_imaging/masking/)
+(`import syndiff_pipeline.difference_imaging.masking`):
 
 | Module | Role |
 |--------|------|
@@ -50,7 +54,7 @@ Mask policy lives in **`mask_settings.yaml`**, not in `diff_config.yaml`.
 You do **not** need to set anything under `- kind: shared_mask` for mask
 geometry/policy. A bare `- kind: shared_mask` is enough.
 
-Resolve order ([`resolve_mask_settings`](../../syndiff_pipeline/masking/settings.py)):
+Resolve order ([`resolve_mask_settings`](../../syndiff_pipeline/difference_imaging/masking/settings.py)):
 
 1. Optional stage path: `mask_settings: /path/to.yaml` under `- kind: shared_mask`
 2. Already-frozen `{ws}/mask_settings.yaml` (from a prior `shared_mask` run)
@@ -110,7 +114,7 @@ cat.mask_at(time, which="full"|"static"|"temporal", out=None, as_bool=False)
 ### Per-FFI mask FITS helper
 
 ```python
-from syndiff_pipeline.masking import (
+from syndiff_pipeline.difference_imaging.masking import (
     load_catalog_for_event,
     write_mask_fits_for_ffi,
     write_sector_sample_mask_fits,

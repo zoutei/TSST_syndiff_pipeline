@@ -116,7 +116,7 @@ def _process_one_frame(task: tuple) -> dict:
         }
 
     try:
-        from syndiff_pipeline.masking.bits import full_mask_bool
+        from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
 
         group_dx, group_dy, _ = resolve_template_for_ffi(
             output_dir, manifest, ffi_path

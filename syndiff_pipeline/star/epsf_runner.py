@@ -25,7 +25,7 @@ from syndiff_pipeline.difference_imaging.support.paths import (
     DEFAULT_MANIFEST_BASENAME,
     STATIC_MASK_FITS_BASENAME,
 )
-from syndiff_pipeline.masking.ffi_mask import load_catalog_for_event
+from syndiff_pipeline.difference_imaging.masking.ffi_mask import load_catalog_for_event
 from syndiff_pipeline.star.context import StarEventContext
 from syndiff_pipeline.star.site_config import StarEpsfConfig
 

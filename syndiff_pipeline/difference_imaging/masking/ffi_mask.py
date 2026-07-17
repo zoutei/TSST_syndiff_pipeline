@@ -14,7 +14,7 @@ from astropy.io import fits
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     tess_product_id_from_ffi_path,
 )
-from syndiff_pipeline.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
 
 log = logging.getLogger(__name__)
 
@@ -239,8 +239,8 @@ def load_catalog_for_event(
     ccd: int | None = None,
 ) -> MaskCatalog:
     """Load MaskCatalog from an event workspace (+ optional SCC asteroids)."""
-    from syndiff_pipeline.masking.asteroids import load_asteroid_products
-    from syndiff_pipeline.masking.settings import default_asteroid_intervals_dir
+    from syndiff_pipeline.difference_imaging.masking.asteroids import load_asteroid_products
+    from syndiff_pipeline.difference_imaging.masking.settings import default_asteroid_intervals_dir
 
     cat = MaskCatalog.from_workspace(ws_root, crop_bounds=crop_bounds)
     if cat.has_temporal() or data_root is None or sector is None:

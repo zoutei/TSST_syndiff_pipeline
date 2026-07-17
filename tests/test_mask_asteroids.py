@@ -5,18 +5,18 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.asteroid_discover import (
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.asteroid_discover import (
     ensure_tess_orbit_times,
     horizons_id_from_object_name,
 )
-from syndiff_pipeline.masking.asteroids import (
+from syndiff_pipeline.difference_imaging.masking.asteroids import (
     load_asteroid_products,
     radius_from_vmag,
 )
-from syndiff_pipeline.masking.catalog import MaskCatalog
-from syndiff_pipeline.masking.geometry import radius_from_mag
-from syndiff_pipeline.masking.settings import DEFAULT_TESS_ORBIT_TIMES_URL
+from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
+from syndiff_pipeline.difference_imaging.masking.geometry import radius_from_mag
+from syndiff_pipeline.difference_imaging.masking.settings import DEFAULT_TESS_ORBIT_TIMES_URL
 
 
 def test_radius_from_vmag_uses_geometry_not_drifted_bins():
@@ -74,7 +74,7 @@ def test_ensure_orbit_times_downloads_when_missing(tmp_path):
             return False
 
     with patch(
-        "syndiff_pipeline.masking.asteroid_discover.urlopen",
+        "syndiff_pipeline.difference_imaging.masking.asteroid_discover.urlopen",
         return_value=_Resp(),
     ) as mock_open:
         path = ensure_tess_orbit_times(20, dest)
@@ -104,7 +104,7 @@ def test_ensure_orbit_times_redownloads_when_sector_missing(tmp_path):
             return False
 
     with patch(
-        "syndiff_pipeline.masking.asteroid_discover.urlopen",
+        "syndiff_pipeline.difference_imaging.masking.asteroid_discover.urlopen",
         return_value=_Resp(),
     ) as mock_open:
         ensure_tess_orbit_times(20, dest)

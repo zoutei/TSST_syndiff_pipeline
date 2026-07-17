@@ -67,7 +67,7 @@ completed template + diff artifacts ──verify──→ star   (Condor; separa
 - `syndiff_pipeline/common/orchestration/` — the run engine shared by all stages: supervisor `daemon.py`, `scheduler.py`, SQLite `state.py` (`{workspace_root}/control/pipeline_state.sqlite`), `condor.py` + `condor_wrapper.sh`, `verify_worker.py`, stage/pipeline `spec.py`.
 - `syndiff_pipeline/common/` — FFI download, WCS grouping, parallelism helpers.
 - `syndiff_pipeline/template_creation/processing/` — `pancakes.py` (TESS→PS1 skycell mapping + Gaia), `ps1_download.py` (shared Zarr), `ps1_process.py`/`band_utils.py` (convolution to TESS grid), `downsample.py` (templates).
-- `syndiff_pipeline/difference_imaging/` — `orchestration/execute.py` runs a YAML-ordered sub-pipeline of `stages/` (masking, hotpants, epsf/gridded_epsf, background, photometry, centroids, astrometry, kernel_*, sat_template, …). The `pipeline:` list in `diff_config.yaml` decides which steps run and in what order.
+- `syndiff_pipeline/difference_imaging/` — `orchestration/execute.py` runs a YAML-ordered sub-pipeline of `stages/` (shared_mask, hotpants, epsf/gridded_epsf, background, photometry, centroids, astrometry, kernel_*, sat_template, …). The `pipeline:` list in `diff_config.yaml` decides which steps run and in what order. Empirical/TNS/asteroid mask library: `difference_imaging/masking/` (not used by template creation; star imports it for per-FFI `mask_at`).
 - `syndiff_pipeline/star/` — host-star light curves (`runner.py`, `epsf_runner.py`, `orchestration/stages.py`); reuses diff-stage side products instead of re-running Hotpants.
 
 Heavy stages run on HTCondor by default: `mapping`, `ps1_process`, `diff`, `star`.

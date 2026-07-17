@@ -593,13 +593,13 @@ def _ensure_mask_catalog_loaded(
     intervals_dir: str | None = None,
 ):
     """Load MaskCatalog from memory or workspace FITS (+ SCC asteroid sidecars)."""
-    from syndiff_pipeline.masking.asteroids import (
+    from syndiff_pipeline.difference_imaging.masking.asteroids import (
         convert_intervals_to_crop_local,
         load_asteroid_products,
     )
-    from syndiff_pipeline.masking.catalog import MaskCatalog
-    from syndiff_pipeline.masking.settings import default_asteroid_intervals_dir
-    from syndiff_pipeline.masking.tns import TRANSIENT_FIXED_BASENAME
+    from syndiff_pipeline.difference_imaging.masking.catalog import MaskCatalog
+    from syndiff_pipeline.difference_imaging.masking.settings import default_asteroid_intervals_dir
+    from syndiff_pipeline.difference_imaging.masking.tns import TRANSIENT_FIXED_BASENAME
 
     def _attach_asteroids(static, tns_table, iv, tm):
         if iv is None or crop_bounds is None:
@@ -961,11 +961,11 @@ def run_config_pipeline(
             gaia_mask_df = epsf_fitting.add_tess_flux_ratio(gaia_df.copy())
             gaia_mask_df["mag"] = gaia_mask_df["tess_mag"]
 
-            from syndiff_pipeline.masking.api import generate_shared_mask_catalog
+            from syndiff_pipeline.difference_imaging.masking.api import generate_shared_mask_catalog
             from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
                 legacy_mask_stage_overrides,
             )
-            from syndiff_pipeline.masking.settings import (
+            from syndiff_pipeline.difference_imaging.masking.settings import (
                 apply_stage_overrides,
                 resolve_mask_settings,
             )

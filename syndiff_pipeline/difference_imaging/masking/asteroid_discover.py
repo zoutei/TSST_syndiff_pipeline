@@ -20,7 +20,7 @@ from urllib.request import urlopen
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking.settings import DEFAULT_TESS_ORBIT_TIMES_URL
+from syndiff_pipeline.difference_imaging.masking.settings import DEFAULT_TESS_ORBIT_TIMES_URL
 
 log = logging.getLogger(__name__)
 

@@ -1,6 +1,6 @@
 """Bit layout and consumer predicates."""
 
-from syndiff_pipeline.masking import bits
+from syndiff_pipeline.difference_imaging.masking import bits
 import numpy as np
 
 

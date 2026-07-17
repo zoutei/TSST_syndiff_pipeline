@@ -87,7 +87,7 @@ def _resolve_epsf_frame_mask(ctx: dict, ffi_stem: str) -> np.ndarray | None:
     """Per-FFI ePSF reject mask from MaskCatalog (preferred) or static fallback."""
     catalog = ctx.get("mask_catalog")
     if catalog is not None:
-        from syndiff_pipeline.masking.bits import epsf_reject_mask
+        from syndiff_pipeline.difference_imaging.masking.bits import epsf_reject_mask
 
         btjd = ctx.get("btjd_by_stem", {}).get(ffi_stem)
         return epsf_reject_mask(catalog.mask_at(btjd, which="full"))

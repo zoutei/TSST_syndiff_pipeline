@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
-from syndiff_pipeline.masking.geometry import size_limit
+from syndiff_pipeline.difference_imaging.masking.geometry import size_limit
 
 # Magnitude bins and square side lengths.
 # Dict keys are str(mag_hi) matching the historical list form [hi, lo].

@@ -12,9 +12,9 @@ from urllib.request import Request, urlopen
 import numpy as np
 import pandas as pd
 
-from syndiff_pipeline.masking import bits
-from syndiff_pipeline.masking.geometry import paint_circles, radius_from_mag, size_limit
-from syndiff_pipeline.masking.settings import DEFAULT_TNS_PUBLIC_ZIP_URL
+from syndiff_pipeline.difference_imaging.masking import bits
+from syndiff_pipeline.difference_imaging.masking.geometry import paint_circles, radius_from_mag, size_limit
+from syndiff_pipeline.difference_imaging.masking.settings import DEFAULT_TNS_PUBLIC_ZIP_URL
 
 log = logging.getLogger(__name__)
 
