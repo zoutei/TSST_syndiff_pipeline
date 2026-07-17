@@ -373,6 +373,7 @@ def _execute_template_stage(
                     getattr(ds, "include_abutting_border_exact", True)
                 ),
                 rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
+                stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
             )
             store = field_result["output_dir"]
             symlink_path = ensure_event_field_templates_symlink(resolved.event_dir, store)
