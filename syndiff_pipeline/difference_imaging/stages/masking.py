@@ -385,6 +385,7 @@ def make_shared_mask(ref_image: np.ndarray,
                      x_right_dead: int = 44,
                      y_edge_strip: int = 30,
                      template_path: str | None = None,
+                     template_count_crop: "np.ndarray | None" = None,
                      ps1_min_hit_count: int = 5000) -> np.ndarray:
     """
     Build the shared bitmask for the cropped region.
@@ -452,10 +453,16 @@ def make_shared_mask(ref_image: np.ndarray,
         )
         mask = mask | (edge.astype(np.int16) * 8)
 
-    if template_path and int(ps1_min_hit_count) > 0:
-        from syndiff_pipeline.common.template_coverage import load_template_count_cropped
+    if (template_count_crop is not None or template_path) and int(ps1_min_hit_count) > 0:
+        if template_count_crop is not None:
+            # Field mode: COUNT plane assembled from the SCC field store.
+            count_crop = np.asarray(template_count_crop)
+        else:
+            from syndiff_pipeline.common.template_coverage import (
+                load_template_count_cropped,
+            )
 
-        count_crop = load_template_count_cropped(template_path, crop_bounds)
+            count_crop = load_template_count_cropped(template_path, crop_bounds)
         if count_crop is not None:
             if count_crop.shape != ref_image.shape:
                 raise ValueError(

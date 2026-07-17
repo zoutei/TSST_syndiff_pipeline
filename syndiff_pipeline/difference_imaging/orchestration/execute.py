@@ -768,6 +768,22 @@ def run_config_pipeline(
             _load_template_handoff(cfg, out, manifest_path)
         )
 
+    # Field-mode (geometry_mode: field) template assembly context, loaded once so
+    # every template-consuming stage (shared_mask, hotpants, kernel_*) shares it.
+    # Returns None for linear runs (no field_mode_assembly.json sidecar), so the
+    # linear path is unaffected.
+    field_ctx = None
+    if needs_handoff:
+        from syndiff_pipeline.difference_imaging.support.template_resolution import (
+            maybe_load_field_mode_template_context,
+        )
+
+        field_ctx = maybe_load_field_mode_template_context(
+            getattr(cfg, "template_dir", None), out
+        )
+        if field_ctx is not None:
+            log.info("Field-mode template assembly active (geometry_mode: field)")
+
     coords = load_astrometry_coords(ws_root)
     if coords is not None:
         cfg.target_ra, cfg.target_dec = coords
@@ -841,29 +857,45 @@ def run_config_pipeline(
             gaia_mask_df["mag"] = gaia_mask_df["tess_mag"]
 
             ref_template_path: str | None = None
+            ref_template_count_crop = None
             if int(sm.ps1_min_hit_count) > 0:
-                _ensure_template_paths_for_kernel(
-                    cfg,
-                    wcs_table,
-                    crop_bounds,
-                    pipeline_offset_threshold,
-                )
                 ref_row = wcs_grouping.ref_manifest_row_index(wcs_table, ref_ffi_path)
                 if ref_row is None:
                     raise RuntimeError(
                         f"reference FFI {ref_ffi_path!r} not found in frame manifest"
                     )
                 ref_group_id = int(wcs_table.iloc[ref_row]["group_id"])
-                ref_template_path = cfg.template_paths.get(ref_group_id)
-                if not ref_template_path:
-                    raise RuntimeError(
-                        f"No template path for reference group_id={ref_group_id}"
+                if field_ctx is not None:
+                    # Field mode: assemble the reference group's COUNT plane from
+                    # the SCC field store instead of a linear template FITS.
+                    from syndiff_pipeline.difference_imaging.support.template_resolution import (
+                        build_field_mode_count_loader,
                     )
-                log.info(
-                    "  PS1 coverage mask from reference template (group_id=%s): %s",
-                    ref_group_id,
-                    ref_template_path,
-                )
+
+                    ref_template_count_crop = build_field_mode_count_loader(
+                        field_ctx, crop_bounds
+                    )(ref_group_id)
+                    log.info(
+                        "  PS1 coverage mask from assembled field COUNT (group_id=%s)",
+                        ref_group_id,
+                    )
+                else:
+                    _ensure_template_paths_for_kernel(
+                        cfg,
+                        wcs_table,
+                        crop_bounds,
+                        pipeline_offset_threshold,
+                    )
+                    ref_template_path = cfg.template_paths.get(ref_group_id)
+                    if not ref_template_path:
+                        raise RuntimeError(
+                            f"No template path for reference group_id={ref_group_id}"
+                        )
+                    log.info(
+                        "  PS1 coverage mask from reference template (group_id=%s): %s",
+                        ref_group_id,
+                        ref_template_path,
+                    )
 
             shared_mask = masking.make_shared_mask(
                 ref_image=ref_crop,
@@ -881,6 +913,7 @@ def run_config_pipeline(
                 x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
                 y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
                 template_path=ref_template_path,
+                template_count_crop=ref_template_count_crop,
                 ps1_min_hit_count=int(sm.ps1_min_hit_count),
             )
             ref_stars = masking.select_hotpants_ref_stars(
@@ -915,19 +948,19 @@ def run_config_pipeline(
                     )
                 ref_stars = pd.read_csv(rs_path)
                 log.info("  Loaded hotpants_substamp_stars from prior run (%s)", rs_path)
-            try:
+            # Field mode uses on-demand assembly (field_ctx hoisted above);
+            # linear mode discovers per-group template FITS into cfg.template_paths.
+            if field_ctx is None:
                 hotpants_runner.ensure_template_paths_from_syndiff_or_group_dirs(
                     cfg,
                     wcs_table,
                     crop_bounds,
                     offset_threshold=pipeline_offset_threshold,
                 )
-            except hotpants_runner.SyndiffTemplateDiscoveryError as e:
-                raise RuntimeError(str(e)) from e
-            if not cfg.template_paths:
-                raise RuntimeError(
-                    "template_paths empty; set template_dir or template_paths after WCS grouping."
-                )
+                if not cfg.template_paths:
+                    raise RuntimeError(
+                        "template_paths empty; set template_dir or template_paths after WCS grouping."
+                    )
 
             inp = stage.get("inputs") or {}
             o = stage["output"]
@@ -956,7 +989,7 @@ def run_config_pipeline(
             results = hotpants_runner.hotpants_loop(
                 ffi_paths=processing_ffi_paths,
                 wcs_table=wcs_table,
-                template_path_map={int(k): v for k, v in cfg.template_paths.items()},
+                template_path_map={int(k): v for k, v in (cfg.template_paths or {}).items()},
                 mask=shared_mask,
                 crop_bounds=crop_bounds,
                 hp=hp,
@@ -971,6 +1004,7 @@ def run_config_pipeline(
                 science=sci_label,
                 diff_log_path=diff_log_path,
                 force_rerun=force_rerun,
+                field_mode_context=field_ctx,
             )
             n_ok = sum(1 for r in results if r.get("success"))
             if n_ok == 0:
@@ -1012,6 +1046,7 @@ def run_config_pipeline(
                 params=kf_params,
                 artifact_dir=kernel_fit_ws,
                 debug_ws_dir=kernel_fit_ws,
+                field_ctx=field_ctx,
             )
 
         elif kind == "convolved_templates":
@@ -1020,9 +1055,11 @@ def run_config_pipeline(
                 raise RuntimeError(
                     "convolved_templates requires wcs_table and crop_bounds from template handoff."
                 )
-            _ensure_template_paths_for_kernel(
-                cfg, wcs_table, crop_bounds, pipeline_offset_threshold
-            )
+            # Linear discovers per-group template FITS; field assembles from store.
+            if field_ctx is None:
+                _ensure_template_paths_for_kernel(
+                    cfg, wcs_table, crop_bounds, pipeline_offset_threshold
+                )
             hp = kernel_fit_hp or HotpantsParams()
             inp = stage.get("inputs") or {}
             kernel_fit_label = str(inp["kernel_fit"]).strip()
@@ -1033,9 +1070,11 @@ def run_config_pipeline(
             convolved_templates_runner.run_convolved_templates(
                 kernel_fit_dir=kernel_fit_ws,
                 crop_bounds=crop_bounds,
-                template_paths={int(k): v for k, v in cfg.template_paths.items()},
+                template_paths={int(k): v for k, v in (cfg.template_paths or {}).items()},
                 hp=hp,
                 convolved_ws_dir=conv_ws,
+                field_ctx=field_ctx,
+                manifest=wcs_table,
             )
 
         elif kind == "kernel_subtract":
@@ -1073,6 +1112,7 @@ def run_config_pipeline(
                 bkg_dir=bkg_dir,
                 bkg_label=bkg_l,
                 n_jobs=n_jobs,
+                field_mode=field_ctx is not None,
             )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l
