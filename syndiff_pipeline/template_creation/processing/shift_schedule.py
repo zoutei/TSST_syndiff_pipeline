@@ -30,12 +30,13 @@ module does not import from the scratch dirs):
   bought nothing and was deleted; see
   ``dev/distortion_aware_template/layer1_interpolation_accuracy.ipynb``).
 
-See ``doc/distortion_aware_templates_implementation.md`` §1.2/§2.2 for the
-frozen parquet/JSON schema and module API this implements, and
-``doc/distortion_aware_templates_master_plan.md`` §4/§5 for the grouping-
-quantum-vs-cache-quantum and phase-vs-absolute-keying distinctions:
-the grouping quantum controls template *count*, the cache quantum controls
-per-skycell regmap *geometric accuracy* (independent knobs, may differ).
+See ``docs/markdown/field_geometry.md`` (Cache keys and reuse; Storage) for
+the grouping-quantum-vs-cache-quantum and phase-vs-absolute-keying
+distinctions: the grouping quantum controls template *count*, the cache
+quantum controls per-skycell regmap *geometric accuracy* (independent
+knobs, may differ). Schema of ``template_group_shifts.parquet`` /
+``template_groups.json`` is defined by this module
+(``SCHEMA_VERSION`` / ``write_group_artifacts``).
 """
 
 from __future__ import annotations
@@ -583,8 +584,8 @@ def write_group_artifacts(
 ) -> tuple[Path, Path]:
     """
     Write ``template_group_shifts.parquet`` and ``template_groups.json`` into
-    ``event_dir`` (schema_version 1; see
-    ``doc/distortion_aware_templates_implementation.md`` §1.2).
+    ``event_dir`` (schema_version 1; see ``docs/markdown/field_geometry.md``
+    Storage / Cache keys and reuse).
     """
     event_dir = Path(event_dir)
     event_dir.mkdir(parents=True, exist_ok=True)
