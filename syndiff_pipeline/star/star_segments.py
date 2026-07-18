@@ -71,13 +71,23 @@ def _load_skycell_csv(ctx: StarEventContext) -> pd.DataFrame:
 
 
 def _reg_file_for_skycell(ctx: StarEventContext, skycell_name: str) -> str | None:
-    rel = f"sector_{ctx.sector:04d}/camera_{ctx.camera}/ccd_{ctx.ccd}"
-    pattern = str(Path(ctx.mapping_dir) / rel / f"*{skycell_name}*.fits*")
-    matches = [
-        path
-        for path in sorted(glob(pattern))
-        if "master_pixels2skycells" not in Path(path).name
+    # SCC mapping leaf already includes oversampling_{N}/; legacy trees nest
+    # sector_/camera_/ccd_ under a mapping root.
+    candidates = [
+        Path(ctx.mapping_dir) / f"*{skycell_name}*.fits*",
+        Path(ctx.mapping_dir)
+        / f"sector_{ctx.sector:04d}/camera_{ctx.camera}/ccd_{ctx.ccd}"
+        / f"*{skycell_name}*.fits*",
     ]
+    matches: list[str] = []
+    for pattern in candidates:
+        matches.extend(
+            path
+            for path in sorted(glob(str(pattern)))
+            if "master_pixels2skycells" not in Path(path).name
+        )
+        if matches:
+            break
     if not matches:
         return None
     return matches[0]
@@ -133,28 +143,34 @@ def find_owning_skycell_for_host(
     host_xy = resolve_host_full_ffi_xy(ctx, host)
     x_pix = int(round(host_xy[0]))
     y_pix = int(round(host_xy[1]))
+    os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
+    x_lookup = x_pix * os_factor + os_factor // 2
+    y_lookup = y_pix * os_factor + os_factor // 2
 
     with fits.open(ctx.master_mapping_fits) as hdul:
         hdu_idx = 1 if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None else 0
         tess_data = hdul[hdu_idx].data
 
     if (
-        y_pix < 0
-        or x_pix < 0
-        or y_pix >= tess_data.shape[0]
-        or x_pix >= tess_data.shape[1]
+        y_lookup < 0
+        or x_lookup < 0
+        or y_lookup >= tess_data.shape[0]
+        or x_lookup >= tess_data.shape[1]
     ):
         logger.warning(
-            "Host gaia_source_id=%s at full-FFI pixel (%d, %d) is outside "
-            "master_pixels2skycells shape %s",
+            "Host gaia_source_id=%s at full-FFI pixel (%d, %d) [lookup (%d, %d) os=%d] "
+            "is outside master_pixels2skycells shape %s",
             host.gaia_source_id,
             x_pix,
             y_pix,
+            x_lookup,
+            y_lookup,
+            os_factor,
             tess_data.shape,
         )
         return pd.DataFrame(columns=empty_columns)
 
-    skycell_id = int(tess_data[y_pix, x_pix])
+    skycell_id = int(tess_data[y_lookup, x_lookup])
     if skycell_id < 0:
         logger.warning(
             "Host gaia_source_id=%s at full-FFI pixel (%d, %d) is unmapped "
@@ -351,10 +367,20 @@ def isolate_host_segment(
 
 
 def _full_ffi_mapping_shape(ctx: StarEventContext) -> tuple[int, int]:
+    """Return native (base) FFI shape for downsample binning."""
     with fits.open(ctx.master_mapping_fits) as hdul:
         hdu_idx = 1 if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None else 0
         data = hdul[hdu_idx].data
-    return int(data.shape[0]), int(data.shape[1])
+    ny, nx = int(data.shape[0]), int(data.shape[1])
+    os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
+    if os_factor > 1:
+        if ny % os_factor != 0 or nx % os_factor != 0:
+            raise ValueError(
+                f"Master mapping shape {(ny, nx)} not divisible by "
+                f"oversampling_factor={os_factor}"
+            )
+        return ny // os_factor, nx // os_factor
+    return ny, nx
 
 
 def _mini_roi_full_ffi(
@@ -610,6 +636,7 @@ def isolate_and_write_mini_templates(
         shifts_dict=shifts_dict,
         base_tess_shape=base_tess_shape,
         roi_bounds=roi_bounds_full,
+        oversampling_factor=int(getattr(ctx, "oversampling_factor", 1) or 1),
     )
 
     x_min_crop = int(ctx.crop_bounds["x_min"])
@@ -630,6 +657,7 @@ def isolate_and_write_mini_templates(
         offsets=offsets,
         roi_origin=roi_origin,
         host_identifier_metadata=host_metadata,
+        oversampling_factor=int(getattr(ctx, "oversampling_factor", 1) or 1),
     )
 
     # Field mode: persist group_id -> mini-template path (via the deduped

@@ -6,6 +6,7 @@ defaults:
   cutout_size: 96
   stamp_size: 24
   kernel_margin_px: 470
+  oversampling_factor: 1   # SCC templates/mapping oversampling_{N}/
   ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
   debug_plots: true
   max_ffis: null

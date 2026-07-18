@@ -148,6 +148,49 @@ class TestPlaceMiniTemplateInWindow(unittest.TestCase):
         )
         np.testing.assert_allclose(out, 0.0)
 
+    def test_oversample_scales_canvas_and_origin(self):
+        # Native mini origin (2, 3), F=2 → HR origin (4, 6); native 2x2 window → 4x4 canvas.
+        mini = np.arange(16, dtype=np.float64).reshape(4, 4)
+        out = diff_runner.place_mini_template_in_window(
+            mini,
+            mini_xmin=2,
+            mini_ymin=3,
+            window_x0=2,
+            window_y0=3,
+            window_shape=(2, 2),
+            oversample=2,
+        )
+        self.assertEqual(out.shape, (4, 4))
+        np.testing.assert_allclose(out, mini)
+
+
+class TestWriteStarMiniTemplateOversamp(unittest.TestCase):
+    def test_writes_oversamp_and_native_bounds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            arrays = np.ones((1, 3, 8, 8), dtype=np.float32)
+            paths = write_star_mini_templates(
+                tmp,
+                arrays,
+                offsets=np.array([[0.0, 0.0]]),
+                roi_origin=(10, 20),
+                host_identifier_metadata={
+                    "gaia_source_id": "1",
+                    "sector": 20,
+                    "camera": 3,
+                    "ccd": 2,
+                },
+                oversampling_factor=2,
+            )
+            flux, xmin, ymin, os_factor = diff_runner.load_mini_template_flux_sum(paths[0])
+            self.assertEqual(os_factor, 2)
+            self.assertEqual(xmin, 10)
+            self.assertEqual(ymin, 20)
+            self.assertEqual(flux.shape, (8, 8))
+            with fits.open(paths[0]) as hdul:
+                self.assertEqual(int(hdul[0].header["XMAX"]), 14)
+                self.assertEqual(int(hdul[0].header["YMAX"]), 24)
+                self.assertEqual(int(hdul[0].header["OVERSAMP"]), 2)
+
 
 class TestWriteStarDiffStamp(unittest.TestCase):
     def test_header_round_trip(self):
@@ -274,7 +317,7 @@ class TestComputeStarOnlyStampForFrame(unittest.TestCase):
                 },
             )
 
-            mini_flux, mini_xmin, mini_ymin = diff_runner.load_mini_template_flux_sum(
+            mini_flux, mini_xmin, mini_ymin, _os = diff_runner.load_mini_template_flux_sum(
                 mini_paths[0]
             )
             mini_full = diff_runner.place_mini_template_in_window(

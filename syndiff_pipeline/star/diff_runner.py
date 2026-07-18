@@ -84,31 +84,51 @@ def place_mini_template_in_window(
     window_x0: int,
     window_y0: int,
     window_shape: tuple[int, int],
+    oversample: int = 1,
 ) -> np.ndarray:
     """
     Embed a mini star-template ``FLUX_SUM`` plane into a zero array of *window_shape*.
 
-    Coordinates are crop-local. Partial overlap is clipped; zero overlap yields zeros.
+    Coordinates are crop-local **native** pixels. When ``oversample`` > 1 the mini
+    plane is high-resolution and the returned canvas is
+    ``(window_h * F, window_w * F)`` with origins scaled by ``F``.
+    Partial overlap is clipped; zero overlap yields zeros.
     """
     mini = np.asarray(mini_flux_sum, dtype=np.float64)
-    out = np.zeros(window_shape, dtype=np.float64)
+    factor = max(1, int(oversample))
+    win_h, win_w = int(window_shape[0]), int(window_shape[1])
+    out_shape = (win_h * factor, win_w * factor)
+    out = np.zeros(out_shape, dtype=np.float64)
     if mini.size == 0:
         return out
 
     mini_h, mini_w = mini.shape
-    win_h, win_w = int(window_shape[0]), int(window_shape[1])
+    if factor > 1:
+        window_x0_hr = int(window_x0) * factor
+        window_y0_hr = int(window_y0) * factor
+        mini_xmin_hr = int(mini_xmin) * factor
+        mini_ymin_hr = int(mini_ymin) * factor
+        win_w_hr = win_w * factor
+        win_h_hr = win_h * factor
+    else:
+        window_x0_hr = int(window_x0)
+        window_y0_hr = int(window_y0)
+        mini_xmin_hr = int(mini_xmin)
+        mini_ymin_hr = int(mini_ymin)
+        win_w_hr = win_w
+        win_h_hr = win_h
 
-    overlap_x0 = max(window_x0, mini_xmin)
-    overlap_y0 = max(window_y0, mini_ymin)
-    overlap_x1 = min(window_x0 + win_w, mini_xmin + mini_w)
-    overlap_y1 = min(window_y0 + win_h, mini_ymin + mini_h)
+    overlap_x0 = max(window_x0_hr, mini_xmin_hr)
+    overlap_y0 = max(window_y0_hr, mini_ymin_hr)
+    overlap_x1 = min(window_x0_hr + win_w_hr, mini_xmin_hr + mini_w)
+    overlap_y1 = min(window_y0_hr + win_h_hr, mini_ymin_hr + mini_h)
     if overlap_x0 >= overlap_x1 or overlap_y0 >= overlap_y1:
         return out
 
-    out_y0 = overlap_y0 - window_y0
-    out_x0 = overlap_x0 - window_x0
-    mini_y0 = overlap_y0 - mini_ymin
-    mini_x0 = overlap_x0 - mini_xmin
+    out_y0 = overlap_y0 - window_y0_hr
+    out_x0 = overlap_x0 - window_x0_hr
+    mini_y0 = overlap_y0 - mini_ymin_hr
+    mini_x0 = overlap_x0 - mini_xmin_hr
     out_h = overlap_y1 - overlap_y0
     out_w = overlap_x1 - overlap_x0
     out[out_y0 : out_y0 + out_h, out_x0 : out_x0 + out_w] = mini[
@@ -117,15 +137,22 @@ def place_mini_template_in_window(
     return out
 
 
-def load_mini_template_flux_sum(mini_template_fits_path: str) -> tuple[np.ndarray, int, int]:
-    """Return ``(flux_sum, xmin, ymin)`` from a star mini-template FITS."""
+def load_mini_template_flux_sum(
+    mini_template_fits_path: str,
+) -> tuple[np.ndarray, int, int, int]:
+    """Return ``(flux_sum, xmin, ymin, oversample)`` from a star mini-template FITS.
+
+    ``xmin``/``ymin`` are crop-local native pixels. ``oversample`` defaults to 1
+    when ``OVERSAMP`` is absent (legacy F=1 mini templates).
+    """
     with fits.open(mini_template_fits_path, memmap=True) as hdul:
         header = hdul[0].header
         xmin = int(header["XMIN"])
         ymin = int(header["YMIN"])
+        oversample = max(1, int(header.get("OVERSAMP", 1) or 1))
         flux_hdu = hdul["FLUX_SUM"] if "FLUX_SUM" in hdul else hdul[1]
         flux_sum = np.asarray(flux_hdu.data, dtype=np.float64)
-    return flux_sum, xmin, ymin
+    return flux_sum, xmin, ymin, oversample
 
 
 def compute_star_only_stamp(
@@ -138,6 +165,7 @@ def compute_star_only_stamp(
     hp_config,
     convolve_shape: tuple[int, int],
     stamp_offset_in_conv: tuple[int, int],
+    oversample: int = 1,
 ) -> np.ndarray:
     """
     Compute ``ffi - (conv_temp - S_conv) - phot_bkg`` on the final stamp window.
@@ -146,30 +174,39 @@ def compute_star_only_stamp(
     ``hp_b``.
 
     *mini_star_template_window* must already be embedded in an array whose shape is
-    *convolve_shape*, large enough to hold the stamp plus the Hotpants kernel spatial
-    extent (``~2 * rkernel + 1`` pixels per side). Convolution runs on that larger
-    canvas; the result is cropped with origin *stamp_offset_in_conv* ``(y0, x0)`` so it
-    aligns with *ffi_window* before subtraction. Edge artifacts from truncating the
-    kernel therefore fall outside the stamp.
+    *convolve_shape* (or ``convolve_shape * oversample`` when ``oversample`` > 1),
+    large enough to hold the stamp plus the Hotpants kernel spatial extent
+    (``~2 * rkernel + 1`` pixels per side). Convolution runs on that larger canvas
+    and returns a native-resolution map when ``oversample`` > 1; the result is
+    cropped with origin *stamp_offset_in_conv* ``(y0, x0)`` so it aligns with
+    *ffi_window* before subtraction. Edge artifacts from truncating the kernel
+    therefore fall outside the stamp.
     """
     ffi = np.asarray(ffi_window, dtype=np.float64)
     conv_temp = np.asarray(conv_temp_window, dtype=np.float64)
     background = np.asarray(background_window, dtype=np.float64)
     mini_embedded = np.asarray(mini_star_template_window, dtype=np.float64)
+    factor = max(1, int(oversample))
 
     if ffi.shape != conv_temp.shape or ffi.shape != background.shape:
         raise ValueError(
             f"stamp windows must match: ffi {ffi.shape}, conv_temp {conv_temp.shape}, "
             f"background {background.shape}"
         )
-    if mini_embedded.shape != convolve_shape:
+    expected_mini = (
+        (int(convolve_shape[0]) * factor, int(convolve_shape[1]) * factor)
+        if factor > 1
+        else tuple(convolve_shape)
+    )
+    if mini_embedded.shape != expected_mini:
         raise ValueError(
             f"mini_star_template_window shape {mini_embedded.shape} != "
-            f"convolve_shape {convolve_shape}"
+            f"expected {expected_mini} (convolve_shape={convolve_shape}, "
+            f"oversample={factor})"
         )
 
     stamp_h, stamp_w = ffi.shape
-    conv_h, conv_w = mini_embedded.shape
+    conv_h, conv_w = int(convolve_shape[0]), int(convolve_shape[1])
     crop_y0, crop_x0 = int(stamp_offset_in_conv[0]), int(stamp_offset_in_conv[1])
     if crop_y0 < 0 or crop_x0 < 0 or crop_y0 + stamp_h > conv_h or crop_x0 + stamp_w > conv_w:
         raise ValueError(
@@ -178,7 +215,11 @@ def compute_star_only_stamp(
         )
 
     s_conv_full = convolve_template_with_kernel_solution(
-        mini_embedded, kernel_solution, hp_config
+        mini_embedded,
+        kernel_solution,
+        hp_config,
+        oversample=factor,
+        science_shape=convolve_shape if factor > 1 else None,
     )
     s_conv = s_conv_full[crop_y0 : crop_y0 + stamp_h, crop_x0 : crop_x0 + stamp_w]
     return ffi - (conv_temp - s_conv) - background
@@ -303,6 +344,7 @@ def compute_star_only_stamp_for_frame(
                 f"No field mini template for group_id={gid}; "
                 f"available groups: {sorted(field_group_to_template)}"
             )
+        group_dx, group_dy = float("nan"), float("nan")
     else:
         group_dx, group_dy = template_offsets_for_ffi(manifest, ffi_path)
         offset_key = (float(group_dx), float(group_dy))
@@ -366,7 +408,9 @@ def compute_star_only_stamp_for_frame(
             x1=stamp_x1,
         )
 
-    mini_flux_sum, mini_xmin, mini_ymin = load_mini_template_flux_sum(mini_path)
+    mini_flux_sum, mini_xmin, mini_ymin, oversample = load_mini_template_flux_sum(
+        mini_path
+    )
     mini_star_template_window = place_mini_template_in_window(
         mini_flux_sum,
         mini_xmin=mini_xmin,
@@ -374,6 +418,7 @@ def compute_star_only_stamp_for_frame(
         window_x0=conv_x0,
         window_y0=conv_y0,
         window_shape=conv_shape,
+        oversample=oversample,
     )
 
     stamp = compute_star_only_stamp(
@@ -385,6 +430,7 @@ def compute_star_only_stamp_for_frame(
         hp_config=hp_config,
         convolve_shape=conv_shape,
         stamp_offset_in_conv=(stamp_y0 - conv_y0, stamp_x0 - conv_x0),
+        oversample=oversample,
     )
 
     metadata = {

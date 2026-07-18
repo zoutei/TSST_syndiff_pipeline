@@ -168,20 +168,35 @@ def write_star_mini_templates(
     offsets: np.ndarray,
     roi_origin: tuple[int, int],
     host_identifier_metadata: dict,
+    oversampling_factor: int = 1,
 ) -> list[str]:
     """
     Write per-offset mini star-template FITS cutouts.
 
     ``arrays_by_offset`` has shape ``(num_offsets, 3, h, w)`` with planes
     ``FLUX_SUM``, ``COUNT``, ``MASK``. ``roi_origin`` is ``(x_min, y_min)``
-    of the mini ROI in crop-local template coordinates.
+    of the mini ROI in crop-local **native** template coordinates. When
+    ``oversampling_factor`` > 1 the array planes are high-resolution
+    (``native * F``) and ``OVERSAMP`` is written; ``XMIN``/``XMAX`` stay native.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    os_factor = max(1, int(oversampling_factor))
     x_min, y_min = roi_origin
-    x_max = x_min + arrays_by_offset.shape[3]
-    y_max = y_min + arrays_by_offset.shape[2]
+    arr_h = int(arrays_by_offset.shape[2])
+    arr_w = int(arrays_by_offset.shape[3])
+    if os_factor > 1:
+        if arr_h % os_factor != 0 or arr_w % os_factor != 0:
+            raise ValueError(
+                f"Mini template shape {(arr_h, arr_w)} not divisible by "
+                f"oversampling_factor={os_factor}"
+            )
+        native_h, native_w = arr_h // os_factor, arr_w // os_factor
+    else:
+        native_h, native_w = arr_h, arr_w
+    x_max = x_min + native_w
+    y_max = y_min + native_h
 
     host_tag = _host_tag_from_metadata(host_identifier_metadata)
     sector = int(host_identifier_metadata.get("sector", 0))
@@ -196,12 +211,14 @@ def write_star_mini_templates(
     for idx, (dx, dy) in enumerate(offsets):
         header = fits.Header()
         header["SYNDIFF"] = (True, "Syndiff star mini template")
-        header["XMIN"] = (x_min, "Mini ROI xmin in crop-local template pixels")
-        header["YMIN"] = (y_min, "Mini ROI ymin in crop-local template pixels")
-        header["XMAX"] = (x_max, "Mini ROI xmax (exclusive) in crop-local template pixels")
-        header["YMAX"] = (y_max, "Mini ROI ymax (exclusive) in crop-local template pixels")
+        header["XMIN"] = (x_min, "Mini ROI xmin in crop-local native pixels")
+        header["YMIN"] = (y_min, "Mini ROI ymin in crop-local native pixels")
+        header["XMAX"] = (x_max, "Mini ROI xmax (exclusive) in crop-local native pixels")
+        header["YMAX"] = (y_max, "Mini ROI ymax (exclusive) in crop-local native pixels")
         header["DX_SHIFT"] = (float(dx), "TESS pixel x shift")
         header["DY_SHIFT"] = (float(dy), "TESS pixel y shift")
+        if os_factor > 1:
+            header["OVERSAMP"] = (os_factor, "Oversampling factor")
         if sector:
             header["SECTOR"] = (sector, "TESS sector")
         if camera:

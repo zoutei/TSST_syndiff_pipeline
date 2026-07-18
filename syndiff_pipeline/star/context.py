@@ -63,6 +63,7 @@ class StarEventContext:
     baseline_phot_bkg_dir: str
     baseline_phot_bkg_label: str
     baseline_kernels_dir: str
+    oversampling_factor: int = 1
 
 
 def _resolve_hotpants_output_labels(
@@ -180,14 +181,56 @@ def _resolve_photutils_bkg_label(
     )
 
 
-def _mapping_paths(data_root: str, target: Target) -> tuple[str, str, str]:
-    mapping_dir = Path(data_root) / _DEFAULT_MAPPING_ROOT_NAME
-    rel = f"sector_{target.sector:04d}/camera_{target.camera}/ccd_{target.ccd}"
-    stem = f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}"
-    mapping_csv = str(mapping_dir / rel / f"{stem}_master_skycells_list.csv")
-    master_mapping_fits = str(
-        mapping_dir / rel / f"{stem}_master_pixels2skycells.fits.gz"
+def _mapping_paths(
+    data_root: str,
+    target: Target,
+    *,
+    oversampling_factor: int = 1,
+) -> tuple[str, str, str]:
+    from syndiff_pipeline.common.scc_paths import (
+        scc_mapping_dir,
+        scc_mapping_master_pixels2skycells,
+        scc_mapping_master_skycells_csv,
     )
+
+    os_factor = max(1, int(oversampling_factor))
+    mapping_dir = scc_mapping_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        oversampling_factor=os_factor,
+    )
+    mapping_csv = str(
+        scc_mapping_master_skycells_csv(
+            data_root,
+            target.sector,
+            target.camera,
+            target.ccd,
+            oversampling_factor=os_factor,
+        )
+    )
+    master_mapping_fits = str(
+        scc_mapping_master_pixels2skycells(
+            data_root,
+            target.sector,
+            target.camera,
+            target.ccd,
+            oversampling_factor=os_factor,
+        )
+    )
+    # Fall back to legacy flat mapping tree when SCC nest is absent (older data_roots).
+    if not Path(mapping_csv).is_file():
+        legacy_dir = Path(data_root) / _DEFAULT_MAPPING_ROOT_NAME
+        rel = f"sector_{target.sector:04d}/camera_{target.camera}/ccd_{target.ccd}"
+        stem = f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}"
+        suffix = f"_os{os_factor}" if os_factor > 1 else ""
+        legacy_csv = legacy_dir / rel / f"{stem}_master_skycells_list{suffix}.csv"
+        legacy_fits = (
+            legacy_dir / rel / f"{stem}_master_pixels2skycells{suffix}.fits.gz"
+        )
+        if legacy_csv.is_file():
+            return str(legacy_dir), str(legacy_csv), str(legacy_fits)
     return str(mapping_dir), mapping_csv, master_mapping_fits
 
 
@@ -309,14 +352,29 @@ def load_event_context(
         )
 
     templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
+    os_factor = 1
+    if star_run_config is not None:
+        os_factor = max(1, int(star_run_config.oversampling_factor or 1))
+    expected_templates = resolve_scc_template_dir(
+        data_root, target, oversampling_factor=os_factor
+    )
     if not templates_dir or not Path(templates_dir).is_dir():
-        from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-            resolve_scc_template_dir,
-        )
+        templates_dir = str(expected_templates)
+    elif (
+        star_run_config is not None
+        and Path(templates_dir).resolve() != expected_templates.resolve()
+        and expected_templates.is_dir()
+    ):
+        import logging
 
-        templates_dir = str(
-            resolve_scc_template_dir(data_root, target, oversampling_factor=1)
+        logging.getLogger(__name__).warning(
+            "star oversampling_factor=%s expects templates at %s but baseline "
+            "template_dir is %s; using star oversampling_factor store",
+            os_factor,
+            expected_templates,
+            templates_dir,
         )
+        templates_dir = str(expected_templates)
 
     gaia_catalog_path = str(cfg.gaia_catalog)
     if not gaia_catalog_path:
@@ -329,7 +387,9 @@ def load_event_context(
             )
         )
 
-    mapping_dir, mapping_csv, master_mapping_fits = _mapping_paths(data_root, target)
+    mapping_dir, mapping_csv, master_mapping_fits = _mapping_paths(
+        data_root, target, oversampling_factor=os_factor
+    )
 
     baseline_run_id = normalize_workspace_run_id(baseline_workspace_run_id)
     baseline_workspace_dir = str(
@@ -385,6 +445,7 @@ def load_event_context(
         baseline_phot_bkg_dir=baseline_phot_bkg_dir,
         baseline_phot_bkg_label=phot_bkg_label,
         baseline_kernels_dir=baseline_kernels_dir,
+        oversampling_factor=os_factor,
     )
 
 
