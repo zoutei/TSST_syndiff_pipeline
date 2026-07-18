@@ -19,6 +19,8 @@ NORMALIZED_HEADER_MIN = frozenset(
     {"sector", "camera", "ccd", "target_name", "enabled"}
 )
 EVENT_HEADER = frozenset({"id", "ra", "dec", "tess_coverage"})
+SCC_HEADER = frozenset({"sector", "camera", "ccd"})
+_SCC_LABEL_RE = re.compile(r"^s(\d+)_c(\d+)_k(\d+)$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -40,14 +42,25 @@ class Target:
         str"""
         return f"{self.sector}/{self.camera}/{self.ccd}"
 
+    def event_name(self) -> str:
+        """Sanitized event name (same rules as the name suffix in ``label()``)."""
+        return re.sub(r"[^\w.-]+", "_", self.target_name.strip())
+
+    def scc_label(self) -> str:
+        """SCC-only label without event name suffix."""
+        return f"s{self.sector:04d}_c{self.camera}_k{self.ccd}"
+
     def label(self) -> str:
         """Label.
         
         Returns
         -------
         str"""
-        safe = re.sub(r"[^\w.-]+", "_", self.target_name.strip())
-        return f"s{self.sector:04d}_c{self.camera}_k{self.ccd}_{safe}"
+        return f"{self.scc_label()}_{self.event_name()}"
+
+    def diff_scheduler_key(self) -> str:
+        """Scheduler key for event/SCC split: ``{event_name}/{scc_label}``."""
+        return f"{self.event_name()}/{self.scc_label()}"
 
     def coords_missing(self) -> bool:
         """True when seed RA/Dec were not provided in the targets CSV."""
@@ -192,6 +205,80 @@ def _read_csv_rows(path: Path) -> tuple[List[dict], frozenset[str]]:
     return rows, fields
 
 
+def load_sccs(path: str | Path) -> List[Target]:
+    """Load SCC references from ``sector,camera,ccd[,enabled]`` CSV."""
+    p = Path(path).expanduser().resolve()
+    rows, fields = _read_csv_rows(p)
+    if EVENT_HEADER.issubset(fields) and "sector" not in fields:
+        raise ValueError(
+            f"SCC CSV cannot use event catalog headers in {p}; "
+            "use sector,camera,ccd[,enabled]."
+        )
+    if not SCC_HEADER.issubset(fields):
+        missing = sorted(SCC_HEADER - fields)
+        raise ValueError(f"SCC CSV missing columns {missing} in {p}")
+    seen: set[tuple[int, int, int]] = set()
+    out: List[Target] = []
+    for row in rows:
+        sector = int(row["sector"])
+        camera = int(row["camera"])
+        ccd = int(row["ccd"])
+        key = (sector, camera, ccd)
+        if key in seen:
+            continue
+        seen.add(key)
+        if not _parse_bool(row.get("enabled"), default=True):
+            continue
+        label = f"s{sector:04d}_c{camera}_k{ccd}"
+        out.append(
+            Target(
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                target_ra=float("nan"),
+                target_dec=float("nan"),
+                target_name=label,
+                enabled=True,
+            )
+        )
+    return out
+
+
+def scc_from_cli(sector: int | str, camera: int | str, ccd: int | str) -> Target:
+    """Build one SCC reference from CLI ``sector camera ccd`` arguments."""
+    s, c, k = int(sector), int(camera), int(ccd)
+    label = f"s{s:04d}_c{c}_k{k}"
+    return Target(
+        sector=s,
+        camera=c,
+        ccd=k,
+        target_ra=float("nan"),
+        target_dec=float("nan"),
+        target_name=label,
+        enabled=True,
+    )
+
+
+def write_sccs(path: str | Path, targets: Sequence[Target]) -> Path:
+    """Write ``sector,camera,ccd[,enabled]`` SCC CSV for a run directory."""
+    p = Path(path).expanduser().resolve()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["sector", "camera", "ccd", "enabled"]
+    with p.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for t in targets:
+            writer.writerow(
+                {
+                    "sector": t.sector,
+                    "camera": t.camera,
+                    "ccd": t.ccd,
+                    "enabled": "true" if t.enabled else "false",
+                }
+            )
+    return p
+
+
 def load_targets(path: str | Path) -> List[Target]:
     """Load targets from normalized CSV or SN event catalog CSV."""
     p = Path(path).expanduser().resolve()
@@ -247,24 +334,75 @@ def parse_scc(scc: str) -> tuple[int, int, int]:
     return int(parts[0]), int(parts[1]), int(parts[2])
 
 
-def find_target(targets: Iterable[Target], scc: str) -> Target:
-    """Find target by full label or ``sector,camera,ccd`` / ``sector/camera/ccd`` key."""
-    key = scc.strip()
+def _find_target_matches(
+    targets: Iterable[Target],
+    *,
+    event_name: str | None = None,
+    scc_label: str | None = None,
+    sector: int | None = None,
+    camera: int | None = None,
+    ccd: int | None = None,
+) -> List[Target]:
+    matches: List[Target] = []
     for t in targets:
+        if event_name is not None and t.event_name() != event_name:
+            continue
+        if scc_label is not None and t.scc_label() != scc_label:
+            continue
+        if sector is not None and t.sector != sector:
+            continue
+        if camera is not None and t.camera != camera:
+            continue
+        if ccd is not None and t.ccd != ccd:
+            continue
+        matches.append(t)
+    return matches
+
+
+def _raise_ambiguous_target(query: str, matches: Sequence[Target]) -> None:
+    names = ", ".join(sorted(t.label() for t in matches))
+    raise KeyError(
+        f"Query {query!r} is ambiguous ({len(matches)} targets: {names}); "
+        "use the full target label or event/scc form"
+    )
+
+
+def find_target(targets: Iterable[Target], scc: str) -> Target:
+    """Find target by label, ``event/scc``, SCC label, or numeric SCC key."""
+    key = scc.strip()
+    target_list = list(targets)
+
+    for t in target_list:
         if t.label() == key:
             return t
+
+    if "/" in key:
+        event_part, scc_part = key.split("/", 1)
+        matches = _find_target_matches(
+            target_list, event_name=event_part, scc_label=scc_part
+        )
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            _raise_ambiguous_target(key, matches)
+        raise KeyError(f"No target for event/SCC query {key!r}")
+
+    if _SCC_LABEL_RE.fullmatch(key):
+        matches = _find_target_matches(target_list, scc_label=key)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            _raise_ambiguous_target(key, matches)
+        raise KeyError(f"No target for SCC label {key!r}")
+
     sector, camera, ccd = parse_scc(key)
-    matches = [
-        t for t in targets if t.sector == sector and t.camera == camera and t.ccd == ccd
-    ]
+    matches = _find_target_matches(
+        target_list, sector=sector, camera=camera, ccd=ccd
+    )
     if len(matches) == 1:
         return matches[0]
     if len(matches) > 1:
-        names = ", ".join(sorted(t.label() for t in matches))
-        raise KeyError(
-            f"SCC {sector}/{camera}/{ccd} is ambiguous ({len(matches)} targets: {names}); "
-            "use the full target label"
-        )
+        _raise_ambiguous_target(key, matches)
     raise KeyError(f"No target for SCC {sector}/{camera}/{ccd}")
 
 
