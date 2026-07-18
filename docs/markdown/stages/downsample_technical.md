@@ -1,7 +1,24 @@
-> **Package integration**: `syndiff` stage `downsample` · module `template_creation/processing/downsample.py` · legacy script `multi_offset_downsampling.py`  
+> **Package integration**: `syndiff` stage `templates` (legacy alias: `downsample`) · modules `template_creation/processing/downsample.py` (linear) and `field_downsample.py` (field) · legacy script `multi_offset_downsampling.py`  
 > **Orchestration docs**: [template pipeline guide](../template_pipeline.md)
 
 # Multi-Offset Downsampling — Detailed Technical Reference
+
+## Geometry modes
+
+| Mode | Config | This document | Output |
+|------|--------|---------------|--------|
+| **Linear** (default) | `geometry_mode: linear` | **Yes** — remainder of this file | Per-event `syndiff_template_*_dx*_dy*.fits.gz` |
+| **Field** (distortion-aware) | `geometry_mode: field` | See [field geometry](../field_geometry.md) | SCC sparse `contribs/` + on-demand assembly per `group_id` |
+
+Linear mode measures drift at the science target and rolls each skycell's frozen
+regmap by a per-skycell PS1 integer shift derived from that single offset. Field mode
+measures drift at every skycell center, builds a hybrid roll+Exact assignment per
+`(skycell, sx, sy)`, and caches sparse contributions — it does **not** use the
+`precompute_shifts_for_offsets` / `numpy.roll` path described below.
+
+---
+
+## Linear mode
 
 `multi_offset_downsampling.py` projects convolved Pan-STARRS 1 (PS1) skycell images onto the TESS pixel grid, producing one downsampled template image per requested sub-pixel offset `(dx, dy)`. Each offset simulates a small pointing shift of the TESS telescope and generates an independent synthetic-difference template that matches the expected appearance of the sky under that pointing jitter. Output is a set of multi-extension FITS files, one per offset, containing flux sums, pixel counts, and mask counts at TESS resolution.
 
