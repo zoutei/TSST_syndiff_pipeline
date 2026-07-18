@@ -245,6 +245,7 @@ class FieldModeTemplateContext:
     shifts_df: Any  # pd.DataFrame
     base_tess_shape: tuple[int, int]
     template_roi_bounds: tuple[int, int, int, int]
+    oversampling_factor: int = 1
 
 
 def build_field_mode_template_loader(
@@ -253,7 +254,12 @@ def build_field_mode_template_loader(
     *,
     planes: str = "flux",
 ) -> Callable[[int], Any]:
-    """Return ``group_id -> cropped flux array`` (float64)."""
+    """Return ``group_id -> cropped flux array`` (float64).
+
+    *diff_crop_bounds* are native FFI coordinates. When
+    ``ctx.oversampling_factor`` > 1, the assembled array is oversampled and the
+    crop window into that array is scaled accordingly.
+    """
     import numpy as np
 
     from syndiff_pipeline.template_creation.processing.field_downsample import (
@@ -263,11 +269,14 @@ def build_field_mode_template_loader(
     if planes not in ("flux", "all"):
         raise ValueError(f"planes must be flux|all, got {planes!r}")
 
+    os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
     x_min, y_min, x_max, y_max = ctx.template_roi_bounds
-    dx0 = int(diff_crop_bounds["x_min"]) - int(x_min)
-    dx1 = int(diff_crop_bounds["x_max"]) - int(x_min)
-    dy0 = int(diff_crop_bounds["y_min"]) - int(y_min)
-    dy1 = int(diff_crop_bounds["y_max"]) - int(y_min)
+    # diff_crop_bounds are native FFI; template_roi_bounds / assembled arrays are
+    # in oversampled pixels when os_factor > 1 (same grid as base_tess_shape).
+    dx0 = int(diff_crop_bounds["x_min"]) * os_factor - int(x_min)
+    dx1 = int(diff_crop_bounds["x_max"]) * os_factor - int(x_min)
+    dy0 = int(diff_crop_bounds["y_min"]) * os_factor - int(y_min)
+    dy1 = int(diff_crop_bounds["y_max"]) * os_factor - int(y_min)
 
     def _load(group_id: int):
         crop = (int(x_min), int(x_max), int(y_min), int(y_max))
@@ -303,11 +312,12 @@ def build_field_mode_count_loader(
         assemble_field_group_count,
     )
 
+    os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
     x_min, y_min, x_max, y_max = ctx.template_roi_bounds
-    dx0 = int(diff_crop_bounds["x_min"]) - int(x_min)
-    dx1 = int(diff_crop_bounds["x_max"]) - int(x_min)
-    dy0 = int(diff_crop_bounds["y_min"]) - int(y_min)
-    dy1 = int(diff_crop_bounds["y_max"]) - int(y_min)
+    dx0 = int(diff_crop_bounds["x_min"]) * os_factor - int(x_min)
+    dx1 = int(diff_crop_bounds["x_max"]) * os_factor - int(x_min)
+    dy0 = int(diff_crop_bounds["y_min"]) * os_factor - int(y_min)
+    dy1 = int(diff_crop_bounds["y_max"]) * os_factor - int(y_min)
 
     def _load(group_id: int):
         crop = (int(x_min), int(x_max), int(y_min), int(y_max))
@@ -318,7 +328,14 @@ def build_field_mode_count_loader(
             shape=ctx.base_tess_shape,
             crop=crop,
         )
-        return count[dy0:dy1, dx0:dx1].astype(np.float64)
+        count_hr = count[dy0:dy1, dx0:dx1]
+        if os_factor > 1:
+            from syndiff_pipeline.common.template_coverage import (
+                block_sum_oversampled_to_native,
+            )
+
+            count_hr = block_sum_oversampled_to_native(count_hr, os_factor)
+        return count_hr.astype(np.float64)
 
     return _load
 
@@ -440,5 +457,6 @@ def maybe_load_field_mode_template_context(
         shifts_df=shifts_df,
         base_tess_shape=tuple(side["base_tess_shape"]),
         template_roi_bounds=tuple(side["roi_bounds"]),
+        oversampling_factor=max(1, int(side.get("oversampling_factor", 1) or 1)),
     )
 

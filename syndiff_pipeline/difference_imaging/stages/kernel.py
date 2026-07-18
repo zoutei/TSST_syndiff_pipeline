@@ -63,11 +63,60 @@ def convolve_template_with_kernel_solution(
     template: np.ndarray,
     kernel_solution: np.ndarray,
     hp_config,
+    *,
+    oversample: int = 1,
+    science_shape: tuple[int, int] | None = None,
 ) -> np.ndarray:
-    """Convolve template with a full Hotpants ``kernel_solution`` vector."""
+    """Convolve template with a full Hotpants ``kernel_solution`` vector.
+
+    When ``oversample`` > 1 the template must be high-resolution and
+    ``science_shape`` must be the native output shape; convolution uses the
+    pure-Python Hotpants path and returns a native-resolution array.
+    """
+    tmpl = np.asarray(template, dtype=np.float64)
+    factor = max(1, int(oversample))
+    if factor > 1:
+        if science_shape is None:
+            raise ValueError(
+                "convolve_template_with_kernel_solution requires science_shape "
+                "when oversample > 1"
+            )
+        sci_ny, sci_nx = int(science_shape[0]), int(science_shape[1])
+        expected = (sci_ny * factor, sci_nx * factor)
+        if tmpl.shape != expected:
+            raise ValueError(
+                f"Template shape {tmpl.shape} != science {science_shape} * "
+                f"oversample {factor} = {expected}"
+            )
+        from hotpants.pure.convolution import apply_kernel
+        from hotpants.pure.kernel import calculate_kernel_basis
+
+        hr_rkernel = int(getattr(hp_config, "rkernel", 2)) * factor
+        k_size = 2 * hr_rkernel + 1
+        scaled_sigmas = [
+            float(s) / (factor ** 2)
+            for s in getattr(hp_config, "sigma_gauss", [0.7, 1.5, 3.0])
+        ]
+        basis_funcs = calculate_kernel_basis(
+            (k_size, k_size),
+            scaled_sigmas,
+            list(getattr(hp_config, "deg_fixe", [6, 4, 2])),
+        )
+        variance = np.zeros_like(tmpl, dtype=np.float64)
+        mask = np.zeros(tmpl.shape, dtype=np.int32)
+        conv_lr, _bkg, _var, _mask = apply_kernel(
+            tmpl,
+            np.asarray(kernel_solution, dtype=np.float64).ravel(),
+            variance,
+            mask,
+            hp_config,
+            np.asarray(basis_funcs),
+            oversample=factor,
+        )
+        return np.asarray(conv_lr, dtype=np.float64)
+
     from hotpants.convolve import KernelModel, convolve_template
 
-    tmpl = np.asarray(template, dtype=np.float64)
     model = KernelModel(
         kernel_solution=np.asarray(kernel_solution, dtype=np.float64).ravel(),
         config=hp_config,

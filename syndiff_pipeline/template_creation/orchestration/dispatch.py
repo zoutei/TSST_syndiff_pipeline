@@ -390,6 +390,15 @@ def _execute_template_stage(
         x_min, y_min, x_max, y_max = roi
 
         if str(geometry_mode).lower() == "field":
+            os_factor = max(1, int(ds.oversampling_factor or 1))
+            if os_factor > 1:
+                # Sidecar / field store ROI is always in oversampled pixels.
+                x_min, y_min, x_max, y_max = (
+                    int(x_min) * os_factor,
+                    int(y_min) * os_factor,
+                    int(x_max) * os_factor,
+                    int(y_max) * os_factor,
+                )
             field_result = run_field_downsample_scc(
                 sector=t.sector,
                 camera=t.camera,

@@ -152,6 +152,7 @@ def _run_hotpants_round(
         convolved_dir=work_dir,
         frame_stem=frame_stem,
         write_stamps=False,
+        sci_shape=sci.shape,
     )
     result = run_hotpants_frame(
         sci,
@@ -161,6 +162,8 @@ def _run_hotpants_round(
         ref_stars_xy,
         hp_config,
         collect_kernel_params=collect_kernel_params,
+        oversample=getattr(hp, "oversample", None),
+        use_c_extension=getattr(hp, "use_c_extension", None),
     )
     return result, hp_config
 
@@ -221,15 +224,16 @@ def run_kernel_fit(
 
         group_dx, group_dy = 0.0, 0.0
         template_path = f"field:group_id={group_id_for_ffi(manifest, min_bg_path)}"
+        os_factor = max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
         field_template = assemble_field_template_for_ffi(
             field_ctx,
             manifest,
             min_bg_path,
             crop=(
-                int(crop_bounds["x_min"]),
-                int(crop_bounds["x_max"]),
-                int(crop_bounds["y_min"]),
-                int(crop_bounds["y_max"]),
+                int(crop_bounds["x_min"]) * os_factor,
+                int(crop_bounds["x_max"]) * os_factor,
+                int(crop_bounds["y_min"]) * os_factor,
+                int(crop_bounds["y_max"]) * os_factor,
             ),
         )
     else:
