@@ -34,14 +34,14 @@ Transient template + diff must have completed for the baseline workspace referen
 
 | Artifact | Typical label | Stage |
 |----------|---------------|-------|
-| `cluster_template_job.json` | `events/{label}/` | `wcs_grouping` |
-| `syndiff_ffi_frames.csv` | `events/{label}/` | `wcs_grouping` |
-| `syndiff_template_*` | `templates_dir` | `downsample` |
+| `event_job.json` (legacy: `cluster_template_job.json`) | `events/{event_name}/s{SSSS}_c{C}_k{K}/` | `bind` (diff DAG) |
+| `frames.csv` (legacy: `syndiff_ffi_frames.csv`) | `events/{event_name}/s{SSSS}_c{C}_k{K}/` | `bind` (diff DAG) |
+| `syndiff_template_*` | SCC's `templates/oversampling_{N}/` (`scc_templates_dir()`) | `templates` (legacy config key/alias: `downsample`) |
 | Convolved template | `hp_c` | `hotpants` (`write_convolved: true`) |
 | Kernel solutions | `hp_d_kernels/*_kernel.npz` | `hotpants` (`write_kernel_solutions: true`) |
 | Photutils background | `ks_b_s` or `ks_b` | `kernel_subtract` + `background` |
 | Shared mask | `shared_mask.fits.gz` | `shared_mask` |
-| Mapping + Gaia catalog | `data_root/skycell_pixel_mapping/…`, `catalogs/…` | `mapping` |
+| Mapping + Gaia catalog | `data_root/scc/s{SSSS}_c{C}_k{K}/mapping/oversampling_{N}/…`, `.../catalogs/…` | `mapping` |
 
 Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline workspace: `ws/` when `baseline.workspace_run_id: none`, else `ws_{run_id}/`.
 
@@ -116,7 +116,7 @@ CLI flags on `syndiff star run` override merged config: `--stars-file`, `--basel
 
 ## Outputs
 
-Under `{baseline_ws}/host_star/` (e.g. `events/{label}/ws_star_full_lc/host_star/` when `baseline.workspace_run_id: star_full_lc`, or `events/{label}/ws/host_star/` when baseline is `none`):
+Under `{baseline_ws}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/ws_star_full_lc/host_star/` when `baseline.workspace_run_id: star_full_lc`, or `events/{event_name}/s{SSSS}_c{C}_k{K}/ws/host_star/` when baseline is `none`):
 
 ```text
 {gaia_source_id}/

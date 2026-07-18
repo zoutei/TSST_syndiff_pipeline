@@ -124,4 +124,4 @@ Key arguments:
 
 ## Orchestrator integration
 
-In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` or `syndiff all submit` (Condor pool `mapping`: 16 CPUs / 100 GB by default). Outputs land under `{data_root}/skycell_pixel_mapping/…`; the scheduler verifies only `tess_s{sector}_{camera}_{ccd}_master_skycells_list.csv` before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md).
+In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` (SCC-scoped; there is no combined `syndiff all` preset). It first resolves the SCC's reference FFI via the SCC-scoped chooser in `scc_reference_ffi.py` (median-CRVAL anchor + Earth/Moon-angle cuts), then runs PanCAKES (Condor pool `mapping`: 16 CPUs / 100 GB by default). Outputs land under `{data_root}/scc/s{SSSS}_c{C}_k{K}/mapping/oversampling_{N}/…`; the scheduler verifies only `tess_s{sector}_{camera}_{ccd}_master_skycells_list[_os{N}].csv` before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md).

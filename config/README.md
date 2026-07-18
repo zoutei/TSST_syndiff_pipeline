@@ -18,7 +18,8 @@ This directory is the **config root** passed to `syndiff --site config`.
 | `pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
 | `pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
 | `deployment.yaml` | Gitignored: `workspace_root`, `data_root`, credentials (copy from `deployment.yaml.example`) |
-| `targets_example.csv` | Example targets list for `--targets` |
+| `targets_example.csv` | Example event targets CSV for `syndiff diff --targets` |
+| `scc_example.csv` | Example SCC-only CSV (`sector,camera,ccd[,enabled]`) for `syndiff template --scc` |
 
 ## Foreground diff (two entry points)
 
@@ -38,7 +39,14 @@ legacy names are in `example/legacy/recipe_*.yaml` (read-only reference).
 
 ```bash
 cp config/deployment.yaml.example config/deployment.yaml   # first time
-syndiff all submit --site config --targets config/targets_example.csv --run-id my_run
+
+# Template DAG: SCC-only input, no event coordinates
+syndiff template submit --site config --scc config/scc_example.csv --run-id my_template_run
+
+# Diff DAG: event input, once templates exist. --stages bind,diff is required —
+# the bare `diff` preset does NOT run bind by default (see template_pipeline.md#overview).
+syndiff diff submit --site config --targets config/targets_example.csv \
+  --stages bind,diff --run-id my_diff_run
 ```
 
 **Host-star light curves** (after transient diff artifacts exist on disk):
