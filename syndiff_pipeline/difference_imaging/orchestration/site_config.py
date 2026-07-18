@@ -18,16 +18,18 @@ from syndiff_pipeline.common.orchestration.deployment import (
     require_deployment_path,
 )
 from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    scc_catalogs_dir,
+    scc_ffi_dir,
+    scc_templates_dir,
+)
 from syndiff_pipeline.difference_imaging.orchestration.config import (
     SynDiffConfig,
     absolutize_config,
     normalize_additional_forced_targets,
     resolve_config_path,
     save_config,
-)
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    event_field_templates_symlink_path,
-    event_templates_symlink_path,
 )
 
 log = logging.getLogger(__name__)
@@ -265,17 +267,30 @@ def _deployment_paths(
 
 
 def _event_dir(workspace_root: str, target: Target) -> Path:
-    """Event dir.
-    
-    Parameters
-    ----------
-    workspace_root : str
-    target : Target
-    
-    Returns
-    -------
-    Path"""
-    return Path(workspace_root) / "events" / target.label()
+    """Nested event/SCC workspace leaf."""
+    return event_scc_leaf(
+        workspace_root,
+        target.event_name(),
+        target.sector,
+        target.camera,
+        target.ccd,
+    )
+
+
+def resolve_scc_template_dir(
+    data_root: str | Path,
+    target: Target,
+    *,
+    oversampling_factor: int = 1,
+) -> Path:
+    """Absolute SCC templates store for one target."""
+    return scc_templates_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        oversampling_factor=int(oversampling_factor),
+    )
 
 
 def _gaia_catalog_path(
@@ -303,22 +318,16 @@ def _gaia_catalog_path(
             return pipeline_csv.resolve()
     s, c, k = target.sector, target.camera, target.ccd
     return (
-        data_root
-        / catalog_root
-        / f"sector_{s:04d}"
-        / f"camera_{c}"
-        / f"ccd_{k}"
+        scc_catalogs_dir(data_root, s, c, k)
         / f"gaia_catalog_s{s:04d}_{c}_{k}.csv"
     )
 
 
 def event_geometry_mode(event_dir: str | Path) -> str:
-    """Read ``geometry_mode`` from the event's ``cluster_template_job.json``.
+    """Read ``geometry_mode`` from the event's ``event_job.json``."""
+    from syndiff_pipeline.common.wcs_grouping import _event_job_path
 
-    Returns ``"linear"`` when the job is missing, unreadable, or does not stamp
-    a mode (linear payloads never stamp it). Lower-cased.
-    """
-    job = Path(event_dir) / "cluster_template_job.json"
+    job = Path(_event_job_path(event_dir))
     if job.is_file():
         try:
             mode = json.loads(job.read_text()).get("geometry_mode")
@@ -329,29 +338,25 @@ def event_geometry_mode(event_dir: str | Path) -> str:
     return "linear"
 
 
-def resolve_event_template_dir(event_dir: str | Path) -> str:
-    """Resolve physical template directory via the event ``ws`` symlink.
-
-    Only prefers the field-mode ``ws/field_templates`` SCC store when the event
-    is actually ``geometry_mode: field`` (per ``cluster_template_job.json``), so
-    a stale/leftover ``ws/field_templates`` symlink cannot hijack a linear event.
-    Otherwise resolves the linear ``ws/templates`` symlink.
-    """
-    if event_geometry_mode(event_dir) == "field":
-        field_link = event_field_templates_symlink_path(event_dir)
-        if field_link.is_symlink() or field_link.is_dir():
-            resolved = field_link.resolve()
-            if resolved.is_dir():
-                return str(resolved)
-    link = event_templates_symlink_path(event_dir)
-    if link.is_symlink():
-        resolved = link.resolve()
-        if resolved.is_dir():
-            return str(resolved)
+def resolve_event_template_dir(
+    event_dir: str | Path,
+    *,
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    oversampling_factor: int = 1,
+) -> str:
+    """Resolve SCC templates directory (no workspace symlinks)."""
+    store = resolve_scc_template_dir(
+        data_root,
+        Target(sector, camera, ccd, 0.0, 0.0, "x"),
+        oversampling_factor=oversampling_factor,
+    )
+    if store.is_dir():
+        return str(store.resolve())
     raise FileNotFoundError(
-        f"Missing or broken templates symlink {link} (and no field_templates "
-        "store). Run template pipeline downsample to create ws/templates or "
-        "ws/field_templates."
+        f"SCC templates store missing: {store}. Run template pipeline templates stage."
     )
 
 
@@ -364,7 +369,7 @@ def resolve_diff_config(
     site_config_dir: Path | None = None,
 ) -> SynDiffConfig:
     """Merge site policy, deployment paths, and target fields into a SynDiffConfig."""
-    workspace_root, data_root, ffi_dir = _deployment_paths(
+    workspace_root, data_root, _ffi_root = _deployment_paths(
         deployment, deployment_path=deployment_path
     )
     site_dir = site_config_dir or Path(policy.config_path).parent
@@ -373,32 +378,23 @@ def resolve_diff_config(
     merged_paths = _deep_merge_dict(policy.paths, override.get("paths", {}))
 
     event_dir = _event_dir(workspace_root, target)
-    template_base = str(merged_paths.get("template_base", DEFAULT_TEMPLATE_BASE))
     catalog_root = str(merged_paths.get("catalog_root", DEFAULT_CATALOG_ROOT))
     data_root_path = Path(data_root)
+    # SynDiffConfig.ffi_dir is the SCC ffi leaf (same convention as template resolve_config).
+    ffi_dir = str(
+        scc_ffi_dir(data_root_path, target.sector, target.camera, target.ccd)
+    )
 
+    os_factor = int(merged_defaults.get("oversampling_factor", 1) or 1)
     template_dir = merged_paths.get("template_dir")
     if template_dir:
         template_dir = resolve_config_path(str(template_dir), data_root_path)
     else:
-        try:
-            template_dir = resolve_event_template_dir(event_dir)
-        except FileNotFoundError:
-            if template_base and (data_root_path / template_base).is_dir():
-                pattern = (
-                    f"sector{target.sector:04d}_camera{target.camera}_ccd{target.ccd}"
-                )
-                matches = sorted(
-                    p
-                    for p in (data_root_path / template_base).glob(f"{pattern}*")
-                    if p.is_dir()
-                )
-                if len(matches) == 1:
-                    template_dir = str(matches[0].resolve())
-                else:
-                    raise
-            else:
-                raise
+        template_dir = str(
+            resolve_scc_template_dir(
+                data_root_path, target, oversampling_factor=os_factor
+            )
+        )
 
     gaia_catalog = merged_paths.get("gaia_catalog")
     if gaia_catalog:

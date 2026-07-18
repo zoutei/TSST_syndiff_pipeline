@@ -13,6 +13,7 @@ _STAGE_SHORT_NAMES: dict[str, str] | None = None
 # Display-only short names for CLI progress/notifications. Kept in sync with
 # TEMPLATE_STAGES + diff/star without importing heavy stage modules.
 _STATIC_STAGE_SHORT_NAMES: dict[str, str] = {
+    "bind": "bind",
     "diff": "diff",
     "star": "star",
 }
