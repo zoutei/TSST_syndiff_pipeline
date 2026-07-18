@@ -215,7 +215,7 @@ flowchart TB
 | `mapping` | template | **condor** | `mapping` | SCC-scoped reference-FFI chooser (`scc_reference_ffi.py`) + Gaia + PanCAKES skycell mapping; lighter Condor claim than `ps1_process` |
 | `ps1_download` | template | local | `network` | Shared Zarr at `{data_root}/ps1_skycells_zarr/` |
 | `ps1_process` | template | **condor** | `ps1_process` | Whole-node jobs; configurable |
-| `templates` (config key/legacy alias: `downsample`) | template | local | `cpu_light` | Reads convolved Zarr + mapping; writes the SCC's shared template store |
+| `templates` (config key/legacy alias: `downsample`) | template | local | `templates` | Reads convolved Zarr + mapping; writes the SCC's shared template store |
 | `bind` | diff | local | *(none)* | Unpooled — fast; event WCS grouping; writes `event_job.json` + `frames.csv` under `events/{event_name}/s{SSSS}_c{C}_k{K}/` |
 | `diff` | diff | **condor** (or `local` with `--local`) | `diff` | Config-driven Hotpants → photometry; outputs in `events/{event_name}/s{SSSS}_c{C}_k{K}/ws/` |
 | `star` | independent | **condor** (or `local` with `--local`) | `star` | Separate submission; verifies completed event artifacts and writes `{baseline_ws}/host_star/` |
@@ -477,7 +477,7 @@ Concurrency is limited per **pool** (not globally):
 | Pool | Stages | Typical limit | Purpose |
 |------|--------|---------------|---------|
 | `network` | `tess_ffi_download`, `ps1_download` | 3 | Throttle MAST / PS1 API |
-| `cpu_light` | `templates` | 2 | Moderate CPU / I/O |
+| `templates` | `templates` | 2 | Moderate CPU / I/O |
 | `diff` | `diff` | (configurable) | Condor slot count for diff jobs |
 | `mapping` | `mapping` | 6 | Condor slot count for mapping jobs |
 | `ps1_process` | `ps1_process` | 4 | Condor slot count for PS1 convolution |
@@ -815,7 +815,7 @@ syndiff notify test --run-dir /path/to/runs/batch_no4 --dry-run   # print locall
 resources:
   network:
     max_concurrent: 3
-  cpu_light:
+  templates:
     max_concurrent: 2
   mapping:
     max_concurrent: 6
@@ -829,7 +829,7 @@ stages:
     executor: condor   # or local with syndiff diff submit --local
 ```
 
-Defaults if omitted: `network=3`, `cpu_light=2`, `mapping=6`, `ps1_process=4`, `diff=2`.
+Defaults if omitted: `network=3`, `templates=2`, `mapping=6`, `ps1_process=4`, `diff=2`.
 
 ### Stage parameters
 

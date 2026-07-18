@@ -236,7 +236,7 @@ def _bind_stage_snapshot(ctx: StageRunContext) -> dict:
         "target_name": ctx.target.target_name,
         "event_dir": str(event_dir),
         "stage": "bind",
-        "pool": "cpu_light",
+        "pool": None,
     }
 
 
@@ -244,7 +244,7 @@ BIND_STAGE = StageSpec(
     name="bind",
     short_name="bind",
     deps=(),
-    pool="cpu_light",
+    pool=None,
     default_executor="local",
     execute=execute_bind_stage,
     verify_complete=verify_bind_complete,

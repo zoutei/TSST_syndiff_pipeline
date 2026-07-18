@@ -41,7 +41,7 @@ The **SynDiff orchestrator** is a **batch orchestrator**, not a workflow engine 
 | **CLI writes intents, not state** | `retry`, `kill`, `pause` insert rows into `commands`; the daemon applies them. |
 | **SQLite is the schedule of record** | `stage_runs.status` drives what runs next. Workers do not update SQLite on success — the supervisor does after reading durable sidecars. |
 | **Durable sidecars survive daemon restarts** | Each worker writes `*.status.json` and `*.log` on NFS. After a crash, the supervisor reconciles from disk, not from lost `Popen` handles. |
-| **Global pool limits** | `network`, `mapping`, `ps1_process`, `cpu_light`, `diff` caps apply **across all active runs** on that host, not per run. |
+| **Global pool limits** | `network`, `mapping`, `ps1_process`, `templates`, `diff` caps apply **across all active runs** on that host, not per run. |
 | **Manifest-first skip** | Stages outside `--stages` can become `skipped` without re-running if on-disk artifacts (or a stable manifest) prove completeness. |
 
 ```mermaid
@@ -516,13 +516,13 @@ CLI inserts into `commands`; `_apply_commands` processes FIFO each tick (and aga
 | Pool | Stages | Default max |
 |------|--------|-------------|
 | `network` | `tess_ffi_download`, `ps1_download` | 3 |
-| `cpu_light` | `templates` | 2 |
+| `templates` | `templates` | 2 |
 | `mapping` | `mapping` | 6 |
 | `ps1_process` | `ps1_process` | 4 |
 | `diff` | `diff` | 2 |
 | *(none)* | `bind` | unlimited |
 
-`bind` is intentionally **unpooled** — it is fast and should not compete with `templates` for `cpu_light` slots.
+`bind` is intentionally **unpooled** — it is fast and should not compete with `templates` for pool slots.
 
 Capacity check (`_global_pool_running`):
 

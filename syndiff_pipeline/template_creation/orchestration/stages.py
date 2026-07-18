@@ -223,7 +223,7 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
         "templates",
         "tmpl",
         ("mapping", "ps1_process"),
-        pool="cpu_light",
+        pool="templates",
         condor_resources=_condor_resources_for_templates,
     ),
 )
