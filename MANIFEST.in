@@ -1,0 +1,20 @@
+# Keep sdist/egg-info file discovery inside the Python package. Repo-root
+# symlinks (data, workspace, pyhotpants, TESSreduce) can point at huge NFS
+# trees; setuptools may follow them during packaging.
+prune data
+prune workspace
+prune pyhotpants
+prune TESSreduce
+prune tests
+prune dev
+prune scripts
+prune tools
+prune docs
+prune config
+prune .cursor
+prune .claude
+prune .github
+prune .pytest_cache
+prune .vscode
+graft syndiff_pipeline
+global-exclude *.py[cod] __pycache__ .DS_Store

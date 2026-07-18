@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "SynDiff TESS FFI difference imaging and template-building pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
+license-files = []
 dependencies = [
   "hotpants>=0.1.1",
 ]
@@ -28,9 +29,25 @@ docs = [
 [project.scripts]
 syndiff = "syndiff_pipeline.cli:main"
 
+# Local checkout may symlink data/workspace/pyhotpants/TESSreduce into huge NFS
+# trees. setuptools discovery walks with followlinks=True; with namespaces=true
+# (default) it descends into those symlinks and can hang for hours on /astro.
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["syndiff_pipeline*"]
+exclude = [
+  "data*",
+  "workspace*",
+  "pyhotpants*",
+  "TESSreduce*",
+  "tests*",
+  "dev*",
+  "scripts*",
+  "tools*",
+  "docs*",
+  "config*",
+]
+namespaces = false
 
 [tool.setuptools.package-data]
 "syndiff_pipeline.common.orchestration" = ["condor_wrapper.sh"]
