@@ -141,7 +141,7 @@ Primary outputs under `ws/{output}/`:
 | `gridded_epsf_index.json` | `ffi_stem` → npz path mapping |
 | `epsf.progress.json` | Frame progress sidecar (also mirrored as `diff.epsf.progress.json` beside `diff.log`) |
 
-Legacy tile-stack bundles (for `sat_template` and tile-interpolated photometry) are still written: `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `group_epsf/group_epsf_{gid}.npz` (median gridded cube per WCS group). `tile_centers.json` is saved in `ws/` root (shared with `sat_template` and legacy ePSF photometry).
+Legacy tile-stack bundles are still written for ``sat_template`` (not for forced photometry): `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `group_epsf/group_epsf_{gid}.npz` (median gridded cube per WCS group). `tile_centers.json` is saved in `ws/` root for `sat_template`. Forced photometry with `psf_type: epsf` requires `gridded_epsf_index.json` only.
 
 Key YAML params: `tile_nx`, `tile_ny`, `epsf_oversample`, `psf_size`, `extract_size`, `min_stars_per_tile`, `mag_max_rp`, `epsf_maxiters`, `epsf_recentering_maxiters`, `epsf_n_jobs`.
 
@@ -164,15 +164,26 @@ Key YAML params: `mag_max_rp`, `fit_shape`, `aperture_radius`, `psf_grouper_min_
 
 Builds per-group model images of bright stars as flux-scaled ePSF stamps: `ws/{output}/sat_tmpl_native_r1/group_{gid}.fits.gz` (2× oversampling path) and `sat_tmpl_hr_r1/group_{gid}.fits.gz` (9×).
 
-### `forced_photometry` (`stages/photometry.py`)
+### `forced_photometry` (`stages/photometry.py`) — see [forced_photometry.md](forced_photometry.md)
 
-Forced PSF and/or aperture photometry at the primary target and `additional_forced_targets`. PSF methods (`type: psf`) support:
+Forced PSF and/or aperture photometry at the primary target and
+`additional_forced_targets`. Four modes:
 
-- `psf_type: prf` — official TESS PRF (`PRF.TESS_PRF`)
-- `psf_type: epsf` with `inputs.epsf` pointing at a gridded ePSF workspace — per-frame `GriddedPSFModel` via `photutils.PSFPhotometry` (e.g. method name `gepsf` in `config/diff_config_2020ut_epsf_gepsf.yaml`)
-- `psf_type: epsf` without gridded index — legacy tile-interpolated group ePSF from `epsf_r1_smooth.npz`
+| Mode | YAML | Fitter |
+|------|------|--------|
+| Aperture | `type: aperture` | Square sum ± sky annulus (`subtract_sky`, `mask_sky_with_shared_mask`) |
+| PRF | `psf_type: prf` | Official TESS PRF + TESSreduce `create_psf` |
+| ePSF photutils | `psf_type: epsf` (default / `fitter: photutils`) | Per-frame `GriddedPSFModel` |
+| ePSF tessreduce | `psf_type: epsf`, `fitter: tessreduce` | Same BFGS as PRF on that frame’s gridded stamp |
 
-Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_name}.csv`), plus diagnostic plots when `pipeline_plots: true`. If `ws/{diffs_m}/phot_calib.csv` exists, kernel-sum zero-point calibration columns (`kernel_ref`, calibrated `flux`, `tmag`, `flux_jy`) are added.
+`psf_type: epsf` **requires** `gridded_epsf_index.json` under `inputs.epsf`
+(legacy tile-smooth fallback removed). Full parameter tables, dual-method
+examples, and CSV columns: [Forced photometry](forced_photometry.md).
+
+Writes `ws/{output}/lightcurve_{method}.csv` (and
+`lightcurve_{method}_{extra_name}.csv`), plus diagnostic plots when
+`pipeline_plots: true`. If `ws/{diffs}/phot_calib.csv` exists, kernel-sum
+zero-point calibration columns are added.
 
 ## 3. Production pipeline orders
 
@@ -183,7 +194,7 @@ Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_na
 | `config/diff_config_single_kernel.yaml` | `shared_mask` → `kernel_fit` → `convolved_templates` → `kernel_subtract` → `background` → `subtract` → `forced_photometry` |
 | `config/diff_config_multi_kernel.yaml` | same prefix → `background` → `hotpants` (round 2, `hp_bgo=0`) → `forced_photometry` |
 | `config/diff_config_multi_kernel_resume.yaml` | `workspace_inherit` → `background` → `hotpants` → `forced_photometry` |
-| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `workspace_inherit` (from `multi_hp_temp_calib`: `hp_d`, `hp_m`, shared mask, Gaia catalog, substamp stars) → `epsf` (3×3 grid) → `centroids` → `forced_photometry` (`gepsf`, `psf_type: epsf`) on `hp_d` |
+| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `workspace_inherit` (from `multi_hp_temp_calib`: `hp_d`, `hp_m`, shared mask, Gaia catalog, substamp stars) → `epsf` (3×3 grid) → `centroids` → `forced_photometry` (`psf_type: epsf`, photutils; prefer method names `epsf` / `epsf_bkg`) on `hp_d` |
 
 ## 4. Template resolution
 

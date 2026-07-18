@@ -20,6 +20,7 @@ markdown/stages/standalone_pipeline_overview
 markdown/stages/ps1_process_technical
 markdown/stages/downsample_technical
 markdown/stages/diff_pipeline
+markdown/stages/forced_photometry
 markdown/stages/star_pipeline
 markdown/stages/star_config
 markdown/stages/background
