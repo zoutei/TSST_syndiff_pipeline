@@ -46,7 +46,10 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(STAGE_DEPS["diff"], ["bind"])
 
     def test_bind_unpooled(self):
-        self.assertEqual(STAGE_POOL.get("bind"), "cpu_light")
+        self.assertNotIn("bind", STAGE_POOL)
+
+    def test_templates_pool(self):
+        self.assertEqual(STAGE_POOL.get("templates"), "templates")
 
     def test_short_names(self):
         self.assertEqual(STAGE_SHORT_NAMES["mapping"], "map")

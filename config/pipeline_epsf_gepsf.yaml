@@ -32,7 +32,7 @@ stages:
 resources:
   network:
     max_concurrent: 1
-  cpu_light:
+  templates:
     max_concurrent: 2
   mapping:
     max_concurrent: 6

@@ -145,8 +145,8 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out[name] = ResourcePoolParams(max_concurrent=int(spec.get("max_concurrent", 1)))
     if "network" not in out:
         out["network"] = ResourcePoolParams(max_concurrent=3)
-    if "cpu_light" not in out:
-        out["cpu_light"] = ResourcePoolParams(max_concurrent=2)
+    if "templates" not in out:
+        out["templates"] = ResourcePoolParams(max_concurrent=2)
     if "mapping" not in out:
         out["mapping"] = ResourcePoolParams(max_concurrent=6)
     if "ps1_process" not in out:
