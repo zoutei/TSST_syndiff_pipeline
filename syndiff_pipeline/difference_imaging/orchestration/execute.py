@@ -1450,37 +1450,46 @@ def run_config_pipeline(
             epsf_by_workspace: dict[str, np.ndarray] = {}
             gridded_epsf_by_workspace: dict = {}
             stage_epsf_ws = inp.get("epsf")
-            if stage_epsf_ws:
-                epsf_ws = ctx.workspace(str(stage_epsf_ws).strip())
+            from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+                PsfPhotometryMethodParams,
+            )
+
+            def _load_epsf_workspace(ws_lab: str) -> None:
+                if ws_lab in epsf_by_workspace or ws_lab in gridded_epsf_by_workspace:
+                    return
+                epsf_ws = ctx.workspace(ws_lab)
                 from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
                 catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
                 if catalog is not None:
-                    gridded_epsf_by_workspace[str(stage_epsf_ws).strip()] = catalog
-                else:
-                    arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
-                    if arr.ndim == 3:
-                        arr = np.nanmedian(arr, axis=0)
-                    epsf_by_workspace[str(stage_epsf_ws).strip()] = arr
-            for method in phot_params.methods:
-                from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-                    PsfPhotometryMethodParams,
+                    gridded_epsf_by_workspace[ws_lab] = catalog
+                    return
+                # Tile-smooth stacks are no longer used for forced photometry.
+                stage_lab = (
+                    str(stage_epsf_ws).strip() if stage_epsf_ws else None
                 )
 
-                if isinstance(method, PsfPhotometryMethodParams) and method.epsf_workspace:
-                    ws_lab = method.epsf_workspace
-                    if ws_lab not in epsf_by_workspace and ws_lab not in gridded_epsf_by_workspace:
-                        epsf_ws = ctx.workspace(ws_lab)
-                        from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+                def _method_epsf_label(m: PsfPhotometryMethodParams) -> Optional[str]:
+                    return m.epsf_workspace or stage_lab
 
-                        catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
-                        if catalog is not None:
-                            gridded_epsf_by_workspace[ws_lab] = catalog
-                        else:
-                            arr, _ = epsf_fitting.load_epsf_smooth(epsf_ws, 1)
-                            if arr.ndim == 3:
-                                arr = np.nanmedian(arr, axis=0)
-                            epsf_by_workspace[ws_lab] = arr
+                needs_epsf = any(
+                    isinstance(m, PsfPhotometryMethodParams)
+                    and m.psf_type == "epsf"
+                    and _method_epsf_label(m) == ws_lab
+                    for m in phot_params.methods
+                )
+                if needs_epsf:
+                    raise ValueError(
+                        f"forced_photometry: ePSF workspace {ws_lab!r} has no "
+                        "gridded_epsf_index.json. Rebuild the ePSF stage; the legacy "
+                        "tile-smooth stack is no longer used for forced photometry."
+                    )
+
+            if stage_epsf_ws:
+                _load_epsf_workspace(str(stage_epsf_ws).strip())
+            for method in phot_params.methods:
+                if isinstance(method, PsfPhotometryMethodParams) and method.epsf_workspace:
+                    _load_epsf_workspace(method.epsf_workspace)
 
             extras = list(getattr(cfg, "additional_forced_targets", None) or [])
             science = (float(cfg.target_ra), float(cfg.target_dec))
@@ -1597,6 +1606,19 @@ def run_config_pipeline(
                     pdir, label_out, method_name, extra_name
                 )
 
+            from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+                AperturePhotometryMethodParams,
+            )
+
+            shared_mask_for_phot = None
+            if any(
+                isinstance(m, AperturePhotometryMethodParams)
+                and getattr(m, "mask_sky_with_shared_mask", False)
+                for m in phot_params.methods
+            ):
+                shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+                shared_mask_for_phot = shared_mask
+
             photometry.run_forced_photometry_stage(
                 diff_paths=paths_for_phot,
                 target_specs=target_specs,
@@ -1618,6 +1640,7 @@ def run_config_pipeline(
                 diff_log_path=diff_log_path,
                 plot_path_fn=_plot_path,
                 diffs_dir=ctx.workspace(diff_label),
+                shared_mask=shared_mask_for_phot,
             )
 
             if getattr(cfg, "pipeline_plots", False):
