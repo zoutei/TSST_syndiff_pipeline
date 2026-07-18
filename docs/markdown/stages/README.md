@@ -7,6 +7,7 @@ These documents describe the **science algorithms** behind each template pipelin
 | Document | Stage | Legacy script | Package module |
 |----------|-------|---------------|----------------|
 | [Field (distortion-aware) geometry](../field_geometry.md) | `templates` (`geometry_mode: field`) | — | `field_downsample.py`, `shift_schedule.py`, `hybrid_regmaps.py` |
+| [Oversampled templates + Hotpants stamp modes](../oversampled_templates.md) | `mapping` / `templates` / `diff` / `star` | — | `template_coverage.py`, `hotpants.py`, `kernel.py`, `star/*` |
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
 | [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
 | [WCS grouping](wcs_grouping.md) | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
@@ -39,7 +40,7 @@ There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the Sy
 
 ## Diff imaging
 
-**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
+**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. For oversampled templates (`F>1`) and Hotpants `stamp_mode` / `region_*`, see [oversampled templates](../oversampled_templates.md). Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
 
 ## Host-star light curves
 

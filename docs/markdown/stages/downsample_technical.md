@@ -81,6 +81,12 @@ data/convolved_results/sector_NNNN_camera_N_ccd_N.zarr
 
 When the registration map was generated with `--oversampling_factor N > 1`, each base TESS pixel is sub-divided into an N×N grid of virtual "oversampled" pixels, giving finer spatial resolution at the cost of a larger mapping. The downsampling code selects the correct oversampled mapping directory and decodes oversampled pixel indices back to base-pixel coordinates and sub-pixel positions.
 
+In the supervised pipeline, `N` is always nested as
+`{data_root}/s{SSSS}/c{C}/k{K}/mapping|templates/oversampling_{N}/` (including
+`N=1`). Diff and star consume those products with **native** crop bounds —
+see [oversampled templates](../oversampled_templates.md) for the operator-facing
+guide (headers, Hotpants `oversample` / `stamp_mode`, COUNT reduce, star OS).
+
 ---
 
 ## 2. Pipeline Overview

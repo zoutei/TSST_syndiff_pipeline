@@ -26,6 +26,7 @@ defaults:
   cutout_size: 96
   stamp_size: 24
   kernel_margin_px: 470
+  oversampling_factor: 1   # SCC templates/mapping oversampling_{N}/
   ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
   debug_plots: true
   max_ffis: null              # truncate manifest for debug runs
@@ -84,9 +85,10 @@ overrides:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `cutout_size` | 96 | Mini-template ROI side length (full-FFI pixels) |
-| `stamp_size` | 24 | Final diff-stamp window side (crop-local pixels) |
+| `cutout_size` | 96 | Mini-template ROI side length (full-FFI **native** pixels) |
+| `stamp_size` | 24 | Final diff-stamp window side (crop-local native pixels) |
 | `kernel_margin_px` | 470 | Convolution margin around stamp (Hotpants kernel extent) |
+| `oversampling_factor` | `1` | Must match template/mapping `F`. Selects `mapping/oversampling_{F}/` + `templates/oversampling_{F}/`; mini templates written with `OVERSAMP=F` when `F>1`. See [oversampled templates §10](../oversampled_templates.md#10-star-branch). |
 | `ps1_source` | `zarr_download` | PS1 skycell ingest mode (see below) |
 | `debug_plots` | `true` | Write segment / downsample / LC debug PNGs |
 | `max_ffis` | `null` | Limit frames processed (debug) |

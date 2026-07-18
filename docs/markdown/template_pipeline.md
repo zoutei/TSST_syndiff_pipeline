@@ -861,7 +861,7 @@ Consumed by the **`bind`** stage (diff DAG) — the config key kept its pre-rena
 | `edge_exclusion`, `edge_buffer_large`, `edge_buffer_small` | various | Edge handling |
 | `n_threads` | `8` | Thread count |
 | `max_workers` | null | Optional process pool cap |
-| `oversampling_factor` | `1` | Sub-pixel oversampling |
+| `oversampling_factor` | `1` | Sub-pixel oversampling `F`. Writes under `mapping/oversampling_{F}/` (always nested, including `F=1`). Must match `stages.templates`/`downsample`. Full guide: [oversampled templates](oversampled_templates.md) |
 | `overwrite` | `true` | Overwrite mapping FITS |
 | `skip_download_catalog` | `false` | Skip Gaia download if catalog exists |
 | `executor` | `"condor"` | `"condor"` or `"local"` |
@@ -903,7 +903,7 @@ Either YAML key is accepted (`parse_stage_params` reads `stages.templates` first
 | Key | Default | Description |
 |-----|---------|-------------|
 | `ignore_mask_bits` | `[12]` | PS1 mask bits to ignore |
-| `oversampling_factor` | `1` | Must match mapping |
+| `oversampling_factor` | `1` | Must match `stages.mapping`. Linear templates get `OVERSAMP=F` + HR arrays; field stores use HR `base_tess_shape` / `roi_bounds`. See [oversampled templates](oversampled_templates.md) |
 | `geometry_mode` | `"linear"` (falls back to `stages.wcs_grouping.geometry_mode`) | `"linear"` or `"field"` |
 | `mapping_dir` | null | Override mapping root |
 | `convolved_dir` | null | Override convolved Zarr directory |

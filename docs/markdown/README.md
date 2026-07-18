@@ -11,6 +11,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
 | [Field (distortion-aware) geometry](field_geometry.md) | Users / maintainers | `geometry_mode: field` — per-skycell drift, hybrid Exact, SCC contrib store |
+| [Oversampled templates + Hotpants stamp modes](oversampled_templates.md) | Users / maintainers | `oversampling_factor` (`F`), native vs HR coords, Hotpants `stamp_mode` / `region_*`, star OS |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
 | [Cluster smoke checklist](cluster_smoke_checklist.md) | Ops | Manual validation on HTCondor + NFS after setup |
 | [Orchestration architecture](template_runner_architecture.md) | Maintainers | Spec-driven scheduler, SQLite state machine, verify/launch internals |
@@ -28,6 +29,7 @@ docs/markdown/
 ├── syndiff_cli.md                ← CLI noun/verb reference
 ├── storage_layout.md             ← SCC + nested-event on-disk layout
 ├── field_geometry.md             ← distortion-aware templates (geometry_mode: field)
+├── oversampled_templates.md      ← F>1 templates + Hotpants stamp_mode / region_*
 └── stages/
     ├── README.md                 ← index + script/module mapping
     ├── standalone_pipeline_overview.md   ← legacy single-FFI pipeline.py workflow
