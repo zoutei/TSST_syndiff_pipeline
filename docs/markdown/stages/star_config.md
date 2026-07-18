@@ -121,8 +121,13 @@ Same shape as diff `forced_photometry` methods. Each entry needs unique `name` (
 | `psf` + `psf_type: prf` | (built at runtime from TESS_PRF) | same |
 | `psf` + `psf_type: epsf` | `inputs.epsf`; optional `fit_shape`, `aperture_radius`, `psf_grouper_min_separation` | same |
 
+Diff-pipeline forced photometry (four modes, full parameter tables including
+`subtract_sky`, `mask_sky_with_shared_mask`, `fitter: tessreduce`, nullable
+`phot_bkg_poly_order`): [forced_photometry.md](forced_photometry.md). Star-host
+tessreduce ePSF parity and the new aperture knobs are not yet mirrored here.
+
 PRF photometry requires the `PRF` package and TESS PRF data (same as diff stage).
-Gepsf photometry loads a per-frame `GriddedPSFModel` catalog from
+ePSF (photutils) photometry loads a per-frame `GriddedPSFModel` catalog from
 `{baseline_workspace}/{photometry.inputs.epsf}`. To build a missing catalog,
 add an enabled `epsf` block whose `output` matches that label; `epsf.inputs.diffs`
 optionally selects the source baseline difference workspace and defaults to
