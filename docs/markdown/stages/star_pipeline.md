@@ -108,15 +108,11 @@ Site and example diff configs now set `write_kernel_solutions: true` on every ac
 
 ## PS1 ingest (`ps1_source`)
 
-Implemented in `ps1_cache.py`; same Zarr layout as `ps1_download`:
+Implemented in `ps1_cache.py`; same shared Zarr store as `ps1_download`:
 
 ```text
-{data_root}/ps1_skycells.zarr/{projection}/{skycell}/{band, band_mask, band_wt}
+{data_root}/ps1_skycells_zarr/ps1_skycells.zarr/{projection}/{skycell}/{band, band_mask, band_wt}
 ```
-
-The schema is shared, but the default paths are not: template `ps1_download`
-writes `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. To reuse that store,
-set top-level `ps1_zarr_path` in `star_config.yaml` to its full path.
 
 | Mode | Behavior |
 |------|----------|
@@ -124,13 +120,14 @@ set top-level `ps1_zarr_path` in `star_config.yaml` to its full path.
 | `zarr_download` | Download and cache on miss (default) |
 | `stream` | MAST every time; no zarr write |
 
-Optional `ps1_zarr_path` in `star_config.yaml` overrides the default store location. Legacy CLI values: `zarr` → `zarr_download`, `download` → `stream`.
+Optional `ps1_zarr_path` in `star_config.yaml` overrides the shared store
+location for unusual deployments. Legacy CLI values: `zarr` → `zarr_download`,
+`download` → `stream`.
 
-For batch star runs after a normal `ps1_download` stage, point `ps1_zarr_path`
-at that stage's store and prefer `zarr_local_only`. Without the override,
-pre-populate the star-specific default store or use `zarr_download`. For
-sector-wide astrometry campaigns that used `ps1_source: stream` in template
-processing (see [`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml)),
+For batch star runs after a normal `ps1_download` stage, prefer
+`zarr_local_only` (reads the same shared store). For sector-wide astrometry
+campaigns that used `ps1_source: stream` in template processing (see
+[`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml)),
 star can use `stream` or a pre-populated Zarr store.
 
 ## Outputs per Gaia host

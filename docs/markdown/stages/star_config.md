@@ -20,7 +20,7 @@ CLI flags on `syndiff star run` override merged config for that foreground run.
 
 ```yaml
 deployment_file: deployment.yaml
-# ps1_zarr_path: /path/to/custom/ps1_skycells.zarr   # optional override
+# ps1_zarr_path: /path/to/custom/ps1_skycells.zarr   # rare override of shared store
 
 defaults:
   cutout_size: 96
@@ -137,10 +137,9 @@ If no `epsf` block is present, the referenced catalog must already exist.
 
 Legacy CLI values: `zarr` → `zarr_download`, `download` → `stream`.
 
-Optional top-level `ps1_zarr_path` overrides `{data_root}/ps1_skycells.zarr`.
-To reuse the template pipeline's `ps1_download` cache, set it to
-`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`; the two stores use the same
-schema but have different default paths.
+Optional top-level `ps1_zarr_path` overrides the shared default
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` (same store as template
+`ps1_download`). Use only for unusual deployments.
 
 ## `star_targets.csv`
 

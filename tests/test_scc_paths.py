@@ -7,6 +7,9 @@ from pathlib import Path
 
 from syndiff_pipeline.common.scc_paths import (
     event_scc_leaf,
+    ps1_skycells_zarr_dir,
+    ps1_skycells_zarr_lock_path,
+    ps1_skycells_zarr_path,
     scc_label,
     scc_root,
     scc_templates_dir,
@@ -28,6 +31,20 @@ class TestSccPaths(unittest.TestCase):
     def test_event_scc_leaf_still_flat_label(self):
         leaf = event_scc_leaf("/ws", "2020ftl", 15, 1, 1)
         self.assertEqual(leaf, Path("/ws/events/2020ftl/s0015_c1_k1"))
+
+    def test_ps1_skycells_zarr_paths(self):
+        self.assertEqual(
+            ps1_skycells_zarr_dir("/data"),
+            Path("/data/ps1_skycells_zarr"),
+        )
+        self.assertEqual(
+            ps1_skycells_zarr_path("/data"),
+            Path("/data/ps1_skycells_zarr/ps1_skycells.zarr"),
+        )
+        self.assertEqual(
+            ps1_skycells_zarr_lock_path("/data"),
+            Path("/data/ps1_skycells_zarr/ps1_skycells.zarr.lock"),
+        )
 
 
 if __name__ == "__main__":

@@ -89,15 +89,14 @@ Controls how star loads PS1 skycells for mini-template isolation:
 
 | Mode | When to use |
 |------|-------------|
-| `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells.zarr` |
-| `zarr_local_only` | Batch runs with a pre-populated star cache, or with `ps1_zarr_path` pointed at the `ps1_download` store |
+| `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` |
+| `zarr_local_only` | Batch runs after `ps1_download` (or with a pre-populated shared store) |
 | `stream` | Always fetch from MAST (no zarr write); matches sector-20 stream template runs |
 
-The default star cache is `{data_root}/ps1_skycells.zarr`, while template
-`ps1_download` writes
-`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. To make
-`zarr_local_only` reuse the template cache, set top-level `ps1_zarr_path` in
-`star_config.yaml` to the latter path.
+Star and template `ps1_download` share
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. Optional top-level
+`ps1_zarr_path` in `star_config.yaml` overrides that path for unusual
+deployments.
 
 ## Photometry
 

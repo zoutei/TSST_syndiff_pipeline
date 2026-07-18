@@ -180,18 +180,18 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       oversampling_{N}/            # full-chip sparse template store (field mode)
     legacy/                        # archived pre-cutover artifacts
     bookkeeping/                   # per-stage run_meta (mapping reference FFI, etc.)
-  ps1_skycells_zarr/               # ps1_download (unchanged)
+  ps1_skycells_zarr/               # shared PS1 raw-band cache (ps1_download + syndiff star)
     ps1_skycells.zarr
 ```
 
-Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_wcs_cache_parquet()` / `scc_wcs_cache_csv()`, `scc_mapping_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
+Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_wcs_cache_parquet()` / `scc_wcs_cache_csv()`, `scc_mapping_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `ps1_skycells_zarr_dir()` / `ps1_skycells_zarr_path()` / `ps1_skycells_zarr_lock_path()` resolve the shared PS1 store under `data_root`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
 
 Older top-level science trees (`tess_ffi/`, `skycell_pixel_mapping/`, `field_templates/`, `shifted_downsampled/`, `convolved_results/`, flat `catalogs/`, and `scc/s{SSSS}_c{C}_k{K}/`) are obsolete and are not read by current code.
 
-The two PS1 Zarr paths have the same internal schema but are separate defaults.
-`ps1_download` owns `ps1_skycells_zarr/ps1_skycells.zarr`; `syndiff star`
-owns `ps1_skycells.zarr`. Set `ps1_zarr_path` in `star_config.yaml` to the
-former when star should reuse the template-stage cache.
+`ps1_download` and `syndiff star` share one PS1 Zarr store at
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. Optional top-level
+`ps1_zarr_path` in `star_config.yaml` overrides that location for unusual
+deployments.
 
 Diff imaging resolves templates from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (or an explicit `paths.template_dir` override). The `ws/templates` symlink is no longer created.
 

@@ -29,6 +29,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
 )
 from syndiff_pipeline.common.scc_paths import (
     event_scc_leaf,
+    ps1_skycells_zarr_dir,
     scc_convolved_zarr,
     scc_ffi_dir,
     scc_mapping_dir,
@@ -571,7 +572,7 @@ def resolve_config(
     mapping_root = str(
         scc_mapping_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=mapping_os)
     )
-    zarr_dir = str(Path(data_root) / "ps1_skycells_zarr")
+    zarr_dir = str(ps1_skycells_zarr_dir(data_root))
     template_output_base = str(
         scc_templates_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=templates_os)
     )
