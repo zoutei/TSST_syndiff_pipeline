@@ -204,6 +204,7 @@ _METHOD_PSF_KEYS = frozenset(
         "name",
         "type",
         "psf_type",
+        "fitter",
         "phot_cutout_size",
         "phot_bkg_poly_order",
         "phot_snap",
@@ -227,6 +228,8 @@ _METHOD_APERTURE_KEYS = frozenset(
         "sky_in",
         "sky_out",
         "aperture_cutout_size",
+        "subtract_sky",
+        "mask_sky_with_shared_mask",
         "csv_basename",
     }
 )
@@ -397,8 +400,9 @@ class PsfPhotometryMethodParams:
     """PsfPhotometryMethodParams."""
     name: str
     psf_type: str = "prf"
+    fitter: Optional[str] = None  # photutils | tessreduce; None → photutils for epsf
     phot_cutout_size: int = 15
-    phot_bkg_poly_order: int = 3
+    phot_bkg_poly_order: Optional[int] = 3  # None → no poly surface (flux-only)
     phot_snap: str = "brightest"
     psf_size: int = 11
     epsf_oversample: int = 2
@@ -408,7 +412,8 @@ class PsfPhotometryMethodParams:
     csv_basename: Optional[str] = None
     fit_shape: int = 11
     aperture_radius: float = 2.0
-    psf_grouper_min_separation: float = 10.0
+    # None → grouper=None for single-target forced photometry
+    psf_grouper_min_separation: Optional[float] = None
 
 
 @dataclass
@@ -419,6 +424,8 @@ class AperturePhotometryMethodParams:
     sky_in: int = 5
     sky_out: int = 9
     aperture_cutout_size: Optional[int] = None
+    subtract_sky: bool = True
+    mask_sky_with_shared_mask: bool = False
     csv_basename: Optional[str] = None
 
 
@@ -497,6 +504,26 @@ def _parse_psf_method(
     for n in ("tile_nx", "tile_ny"):
         if n not in kw:
             kw[n] = getattr(stage_defaults, n)
+    if "fitter" in kw and kw["fitter"] is not None:
+        fitter = str(kw["fitter"]).strip().lower()
+        if fitter not in ("photutils", "tessreduce"):
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+                f"fitter must be 'photutils' or 'tessreduce', got {kw['fitter']!r}"
+            )
+        kw["fitter"] = fitter
+    if "phot_bkg_poly_order" in kw and kw["phot_bkg_poly_order"] is not None:
+        kw["phot_bkg_poly_order"] = int(kw["phot_bkg_poly_order"])
+    if pt == "prf" and kw.get("fitter") is not None:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            "fitter is only valid with psf_type: epsf"
+        )
+    if pt == "prf" and (entry.get("inputs") or {}).get("epsf"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            "inputs.epsf is forbidden for psf_type: prf"
+        )
     p = PsfPhotometryMethodParams(name=_parse_method_name(entry["name"], pipeline_idx, method_idx), **kw)
     p.psf_type = pt
     inp = entry.get("inputs") or {}
