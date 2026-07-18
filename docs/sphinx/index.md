@@ -9,7 +9,6 @@ TESS FFI template building and difference-imaging pipeline.
 markdown/README
 markdown/template_pipeline
 markdown/storage_layout
-markdown/scc_migration
 markdown/syndiff_cli
 markdown/star_lightcurves
 markdown/cluster_smoke_checklist

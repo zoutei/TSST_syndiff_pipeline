@@ -25,7 +25,7 @@ class TestFieldTemplates(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = field_templates_root(tmp, 20, 3, 3)
             self.assertTrue(
-                str(root).endswith("scc/s0020_c3_k3/templates/oversampling_1")
+                str(root).endswith("s0020/c3/k3/templates/oversampling_1")
             )
             name = contrib_basename("skycell.2588.036", -2, 5)
             self.assertEqual(name, "skycell.2588.036_sx-2_sy+5.npz")

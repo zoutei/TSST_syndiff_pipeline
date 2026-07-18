@@ -38,15 +38,14 @@ def _resolved(tmp: Path, csv_path: Path, zarr_path: Path, projections_limit: int
     data_root = tmp / "data"
     mapping_root = (
         data_root
-        / "scc"
-        / "s0044_c2_k1"
+        / "s0044" / "c2" / "k1"
         / "mapping"
         / "oversampling_1"
     )
     return ResolvedTargetConfig(
         target=target,
         data_root=str(data_root),
-        ffi_dir=str(data_root / "scc" / "s0044_c2_k1" / "ffi"),
+        ffi_dir=str(data_root / "s0044" / "c2" / "k1" / "ffi"),
         event_dir=str(
             tmp
             / "events"
@@ -64,7 +63,7 @@ def _resolved(tmp: Path, csv_path: Path, zarr_path: Path, projections_limit: int
         mapping_root=str(mapping_root),
         zarr_dir=str(data_root / "ps1_skycells_zarr"),
         template_output_base=str(
-            data_root / "scc" / "s0044_c2_k1" / "templates" / "oversampling_1"
+            data_root / "s0044" / "c2" / "k1" / "templates" / "oversampling_1"
         ),
     )
 
@@ -81,8 +80,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             csv_path = (
                 tmp
                 / "data"
-                / "scc"
-                / "s0044_c2_k1"
+                / "s0044" / "c2" / "k1"
                 / "mapping"
                 / "oversampling_1"
                 / "sector_0044"
@@ -91,7 +89,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                 / "tess_s0044_2_1_master_skycells_list.csv"
             )
             self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
-            zarr_path = tmp / "data" / "scc" / "s0044_c2_k1" / "convolved.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             zarr_path.mkdir(parents=True)
             zarr.open(str(zarr_path), mode="w")
 
@@ -105,8 +103,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             csv_path = (
                 tmp
                 / "data"
-                / "scc"
-                / "s0044_c2_k1"
+                / "s0044" / "c2" / "k1"
                 / "mapping"
                 / "oversampling_1"
                 / "sector_0044"
@@ -121,7 +118,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                     ("skycell.1520.081", "1520"),
                 ],
             )
-            zarr_path = tmp / "data" / "scc" / "s0044_c2_k1" / "convolved.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
@@ -136,8 +133,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             csv_path = (
                 tmp
                 / "data"
-                / "scc"
-                / "s0044_c2_k1"
+                / "s0044" / "c2" / "k1"
                 / "mapping"
                 / "oversampling_1"
                 / "sector_0044"
@@ -152,7 +148,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                     ("skycell.1520.081", "1520"),
                 ],
             )
-            zarr_path = tmp / "data" / "scc" / "s0044_c2_k1" / "convolved.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
@@ -169,8 +165,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             csv_path = (
                 tmp
                 / "data"
-                / "scc"
-                / "s0044_c2_k1"
+                / "s0044" / "c2" / "k1"
                 / "mapping"
                 / "oversampling_1"
                 / "sector_0044"
@@ -179,7 +174,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                 / "tess_s0044_2_1_master_skycells_list.csv"
             )
             self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
-            zarr_path = tmp / "data" / "scc" / "s0044_c2_k1" / "convolved.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")
 
@@ -196,8 +191,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             csv_path = (
                 tmp
                 / "data"
-                / "scc"
-                / "s0044_c2_k1"
+                / "s0044" / "c2" / "k1"
                 / "mapping"
                 / "oversampling_1"
                 / "sector_0044"
@@ -206,7 +200,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                 / "tess_s0044_2_1_master_skycells_list.csv"
             )
             self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
-            zarr_path = tmp / "data" / "scc" / "s0044_c2_k1" / "convolved.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
@@ -225,8 +219,7 @@ class TestVerifyPs1Process(unittest.TestCase):
             csv_path = (
                 tmp
                 / "data"
-                / "scc"
-                / "s0044_c2_k1"
+                / "s0044" / "c2" / "k1"
                 / "mapping"
                 / "oversampling_1"
                 / "sector_0044"
@@ -242,7 +235,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                     ("skycell.1922.042", "1922"),
                 ],
             )
-            zarr_path = tmp / "data" / "scc" / "s0044_c2_k1" / "convolved.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0

@@ -178,11 +178,11 @@ when it starts.
 
 | Stage | Module | What it does |
 |-------|--------|--------------|
-| **`tess_ffi_download`** | `common/download.py` | Download TESS FFIs for the target SCC into `{data_root}/scc/s{SSSS}_c{C}_k{K}/ffi/`. |
+| **`tess_ffi_download`** | `common/download.py` | Download TESS FFIs for the target SCC into `{data_root}/s{SSSS}/c{C}/k{K}/ffi/`. |
 | **`mapping`** | `template_creation/.../pancakes.py` + `.../scc_reference_ffi.py` | SCC-scoped reference-FFI chooser, then PanCAKES TESS↔PS1 skycell mapping. |
 | **`ps1_download`** | `template_creation/.../ps1_download.py` | PS1 skycells into shared Zarr (skipped when `ps1_source: stream`). |
 | **`ps1_process`** | `template_creation/.../ps1_process.py` | Convolution onto TESS grid (defaults to Condor). |
-| **`templates`** (config key/legacy alias: `downsample`) | `template_creation/.../downsample.py` (+ `field_downsample.py`) | Multi-offset template store under `{data_root}/scc/.../templates/oversampling_{N}/`; linear mode also writes `ps1_removed_stars.csv` in `event_dir`. |
+| **`templates`** (config key/legacy alias: `downsample`) | `template_creation/.../downsample.py` (+ `field_downsample.py`) | Multi-offset template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`; linear mode also writes `ps1_removed_stars.csv` in `event_dir`. |
 | **`bind`** | `difference_imaging/.../bind.py` via `common/wcs_grouping.py` | Event WCS drift, template groups; writes handoff (`event_job.json` + `frames.csv`) under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`. |
 | **`diff`** | `difference_imaging/.../execute.py` | Config-driven Hotpants → photometry; outputs in `events/{event_name}/{scc_label}/ws/`. |
 | **`star`** | `star/runner.py` | Host-star mini-templates, kernel-reused stamps, and light curves under `{baseline_ws}/host_star/`. |

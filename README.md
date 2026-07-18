@@ -20,11 +20,11 @@ Hotpants.
 
 `syndiff template submit --scc sccs.csv` (SCC-only input; no event coordinates):
 
-1. **FFI download** (`tess_ffi_download`) — bulk download of calibrated TESS FFIs from MAST into `{data_root}/scc/s{SSSS}_c{C}_k{K}/ffi/`.
+1. **FFI download** (`tess_ffi_download`) — bulk download of calibrated TESS FFIs from MAST into `{data_root}/s{SSSS}/c{C}/k{K}/ffi/`.
 2. **Mapping (PanCAKES)** (`mapping`) — choose the SCC's mapping-epoch reference FFI (median-CRVAL anchor + Earth/Moon-angle cuts), map TESS pixels to PS1 skycells, and download the Gaia catalog for that reference FFI. Uses a customized **[MOCPy](#forked-dependencies)** fork.
 3. **PS1 download** (`ps1_download`) — fetch PS1 skycell cutouts into a shared Zarr store.
 4. **PS1 process** (`ps1_process`) — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-5. **Templates** (`templates`; legacy config key/alias: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/`.
+5. **Templates** (`templates`; legacy config key/alias: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
 
 ### Event binding (`syndiff diff submit --targets targets.csv --stages bind,diff`)
 
@@ -174,7 +174,7 @@ diff policy (`shared_mask`, `hotpants`, `epsf`, `background`,
 the `diff_config:` path selected by `pipeline.yaml`. The event handoff
 (`event_job.json`, `frames.csv`) comes from the **`bind`** stage; templates
 are resolved directly from the SCC's shared store
-(`{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/`) — there is
+(`{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`) — there is
 no `ws/templates` symlink.
 
 **Two foreground paths** (no daemon):
@@ -199,7 +199,6 @@ See [`config/README.md`](config/README.md) for site layout. Outputs live under `
 | [`docs/markdown/template_pipeline.md`](docs/markdown/template_pipeline.md) | `syndiff` orchestration, Condor, config, run lifecycle |
 | [`docs/markdown/syndiff_cli.md`](docs/markdown/syndiff_cli.md) | CLI noun/verb commands and stage modules |
 | [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md) | `workspace_root`, `data_root` (SCC + nested-event layout), on-disk layout |
-| [`docs/markdown/scc_migration.md`](docs/markdown/scc_migration.md) | One-time migration script to the SCC + nested-event layout |
 | [`docs/markdown/star_lightcurves.md`](docs/markdown/star_lightcurves.md) | Host-star quick start, prerequisites, and outputs |
 | [`docs/markdown/stages/`](docs/markdown/stages/README.md) | PanCAKES, PS1 process, template-build algorithms |
 | [`docs/markdown/cluster_smoke_checklist.md`](docs/markdown/cluster_smoke_checklist.md) | Cluster smoke test after setup |

@@ -40,7 +40,7 @@ Optional shortcuts for faster smoke:
 - [ ] `{workspace_root}/runs/smoke_template_01/` created with frozen `config.yaml`, `targets.csv` (normalized SCC CSV), `run_meta.json`
 - [ ] `syndiff daemon status --site config` shows a live supervisor PID
 - [ ] `runs/latest` symlink points at `smoke_template_01`
-- [ ] `{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_1/` populated after `templates` succeeds
+- [ ] `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` populated after `templates` succeeds
 
 ---
 
@@ -192,7 +192,7 @@ Let `EVENT` = event name (e.g. `2020ftl`), `SCC` = SCC label (e.g. `s0023_c1_k3`
       ...
 ```
 
-There is **no** `ws/templates` symlink — `diff` resolves templates directly from `{data_root}/scc/{SCC}/templates/oversampling_{N}/`.
+There is **no** `ws/templates` symlink — `diff` resolves templates directly from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
 
 Quick checks:
 
@@ -200,12 +200,13 @@ Quick checks:
 WS=/path/from/deployment.yaml
 DATA=/path/from/deployment.yaml   # data_root
 EVENT=2020ftl
-SCC=s0023_c1_k3
+SCC=s0023_c1_k3                   # event leaf label (unchanged)
+SCC_DATA=s0023/c1/k3              # nested data_root leaf
 
 test -f "$WS/events/$EVENT/$SCC/event_job.json"
 test -f "$WS/events/$EVENT/$SCC/frames.csv"
-test -d "$DATA/scc/$SCC/templates/oversampling_1" && \
-  ls "$DATA/scc/$SCC/templates/oversampling_1"/*.fits.gz >/dev/null 2>&1
+test -d "$DATA/$SCC_DATA/templates/oversampling_1" && \
+  ls "$DATA/$SCC_DATA/templates/oversampling_1"/*.fits.gz >/dev/null 2>&1
 test -d "$WS/events/$EVENT/$SCC/ws"
 test -f "$WS/events/$EVENT/$SCC/ws/"*/hotpants_substamp_stars.csv 2>/dev/null || \
   test -f "$WS/events/$EVENT/$SCC/shared_mask.fits"
@@ -228,20 +229,19 @@ test -f "$WS/events/$EVENT/$SCC/ws/"*/hotpants_substamp_stars.csv 2>/dev/null ||
     {stage}.condor.*          # when executor=condor
 ```
 
-### Science caches (under `data_root/scc/{SCC}/`, not `events/`)
+### Science caches (under `data_root/s{SSSS}/c{C}/k{K}/`, not `events/`)
 
-- `{data_root}/scc/{SCC}/mapping/oversampling_1/…` — mapping
+- `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_1/…` — mapping
 - `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` — PS1 download (unchanged path)
-- `{data_root}/scc/{SCC}/templates/oversampling_1/…/syndiff_template_*.fits.gz` — `templates` stage output
+- `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/…/syndiff_template_*.fits.gz` — `templates` stage output
 
 **Pass criteria**
 
 - [ ] `event_job.json` and `frames.csv` exist under `events/{EVENT}/{SCC}/` before diff (written by `bind`)
 - [ ] `ps1_removed_stars.csv` present after `templates` (linear geometry_mode)
-- [ ] Before diff: `{data_root}/scc/{SCC}/templates/oversampling_1/` contains `syndiff_template_*.fits*` (or a complete field-mode manifest)
+- [ ] Before diff: `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` contains `syndiff_template_*.fits*` (or a complete field-mode manifest)
 - [ ] `events/{EVENT}/{SCC}/ws/` contains at least one non-`master` workspace label after diff
 - [ ] Run logs and status sidecars exist under `runs/{run_id}/per_target/{LABEL}/`
-- [ ] If migrating from a pre-cutover deployment, `scripts/migrate_scc_event_layout.py` has been run — see [scc_migration.md](scc_migration.md)
 
 ---
 
@@ -298,4 +298,4 @@ See [template_pipeline.md → HTCondor](template_pipeline.md#htcondor-integratio
 | Retry diff | `syndiff retry --deployment config/deployment.yaml --run-id <id> --scc <label> --stage diff` |
 | Manifests | `syndiff reconcile-manifests --site config --run-id <id>` |
 
-**Further reading:** [template_pipeline.md](template_pipeline.md), [template_runner_architecture.md](template_runner_architecture.md), [syndiff_cli.md](syndiff_cli.md), [storage_layout.md](storage_layout.md), [scc_migration.md](scc_migration.md).
+**Further reading:** [template_pipeline.md](template_pipeline.md), [template_runner_architecture.md](template_runner_architecture.md), [syndiff_cli.md](syndiff_cli.md), [storage_layout.md](storage_layout.md).

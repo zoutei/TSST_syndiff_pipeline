@@ -354,7 +354,7 @@ def _cfg_ffi_leaf(cfg: SynDiffConfig) -> str:
     """Return the SCC ffi leaf directory from ``cfg.ffi_dir``.
 
     After the SCC layout cutover, ``SynDiffConfig.ffi_dir`` is already the leaf
-    (``…/scc/sSSSS_cC_kK/ffi``), not the legacy ``tess_ffi`` root.
+    (``…/sSSSS/cC/kK/ffi``), not the legacy ``tess_ffi`` root.
     """
     return str(cfg.ffi_dir)
 

@@ -88,8 +88,7 @@ class TestVerifyDiffCli(unittest.TestCase):
         self.event_dir.mkdir(parents=True, exist_ok=True)
         template_store = (
             self.data
-            / "scc"
-            / "s0020_c3_k3"
+            / "s0020" / "c3" / "k3"
             / "templates"
             / "oversampling_1"
         )

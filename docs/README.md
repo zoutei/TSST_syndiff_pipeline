@@ -2,7 +2,6 @@
 
 - [Documentation index](markdown/README.md)
 - [Storage layout](markdown/storage_layout.md) (`workspace_root`/`data_root`, SCC + nested-event layout)
-- [SCC + nested-event layout migration](markdown/scc_migration.md) — one-time migration script reference
 - **Published site:** https://zoutei.github.io/TSST_syndiff_pipeline/
 
 ## Build HTML locally

@@ -291,7 +291,7 @@ mapping + convolved tree while writing its SCC template store to an isolated `da
 ## Storage
 
 ```
-{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/
+{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/
   template_manifest.json          # completeness marker for the SCC store
   shift_schedule.npz              # per-skycell drift schedule (L2/L3)
   template_group_shifts.parquet   # (group_id, skycell, sx_int, sy_int, ...)
@@ -308,8 +308,8 @@ Resolved at diff time by `template_resolution.resolve_template_dir()` — first 
 
 The store is **shared across events** on an SCC; force-rerun never deletes it.
 Each event records exactly the keys it required (crop-aware verify). Legacy
-pre-cutover stores at `{data_root}/field_templates/sector_*` are archived by the
-migration script and are **not** read by current code. See [storage_layout.md](storage_layout.md).
+pre-cutover stores at `{data_root}/field_templates/sector_*` are obsolete and
+are **not** read by current code. See [storage_layout.md](storage_layout.md).
 
 Diff resolves `group_id` from `syndiff_ffi_frames.csv` → assembles from SCC
 `contribs/`. Do not parse field products with the linear `dx/dy` filename regex.

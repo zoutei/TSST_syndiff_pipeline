@@ -50,7 +50,7 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
     return ResolvedTargetConfig(
         target=target,
         data_root=str(data_root),
-        ffi_dir=str(data_root / "scc" / "s0022_c3_k3" / "ffi"),
+        ffi_dir=str(data_root / "s0022" / "c3" / "k3" / "ffi"),
         event_dir=str(
             event_scc_leaf(tmp, target.event_name(), target.sector, target.camera, target.ccd)
         ),
@@ -65,7 +65,7 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
                 output_base=str(legacy_base),
             ),
         ),
-        mapping_root=str(data_root / "scc" / "s0022_c3_k3" / "mapping" / "oversampling_1"),
+        mapping_root=str(data_root / "s0022" / "c3" / "k3" / "mapping" / "oversampling_1"),
         zarr_dir=str(data_root / "ps1_skycells_zarr"),
         template_output_base=str(
             scc_templates_dir(data_root, target.sector, target.camera, target.ccd, oversampling_factor=1)
