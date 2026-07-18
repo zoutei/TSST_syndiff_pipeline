@@ -13,9 +13,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-# Legacy flat layout parent (``data_root/scc/s{SSSS}_c{C}_k{K}/``). Kept for
-# migration scripts that inventory pre-nested SCC trees; not used by scc_root().
-SCC_SUBDIR = "scc"
 EVENTS_SUBDIR = "events"
 
 FFI_SUBDIR = "ffi"
@@ -30,6 +27,10 @@ CONVOLVED_REMOVED_STARS_CSV_BASENAME = "convolved_removed_stars.csv"
 WCS_CACHE_PARQUET_BASENAME = "wcs_cache.parquet"
 WCS_CACHE_CSV_BASENAME = "wcs_cache.csv"
 
+# Shared PS1 raw-band Zarr store (ps1_download + syndiff star).
+PS1_SKYCELLS_ZARR_DIRNAME = "ps1_skycells_zarr"
+PS1_SKYCELLS_ZARR_BASENAME = "ps1_skycells.zarr"
+
 __all__ = [
     "BOOKKEEPING_SUBDIR",
     "CATALOGS_SUBDIR",
@@ -39,13 +40,17 @@ __all__ = [
     "FFI_SUBDIR",
     "LEGACY_SUBDIR",
     "MAPPING_SUBDIR",
-    "SCC_SUBDIR",
+    "PS1_SKYCELLS_ZARR_BASENAME",
+    "PS1_SKYCELLS_ZARR_DIRNAME",
     "TEMPLATES_SUBDIR",
     "WCS_CACHE_CSV_BASENAME",
     "WCS_CACHE_PARQUET_BASENAME",
     "event_root",
     "event_scc_leaf",
     "oversampling_dirname",
+    "ps1_skycells_zarr_dir",
+    "ps1_skycells_zarr_lock_path",
+    "ps1_skycells_zarr_path",
     "scc_bookkeeping_dir",
     "scc_bookkeeping_stage_dir",
     "scc_catalogs_dir",
@@ -245,6 +250,22 @@ def scc_mapping_master_pixels2skycells(
         scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor)
         / f"tess_s{int(sector):04d}_{int(camera)}_{int(ccd)}_master_pixels2skycells{suffix}.fits.gz"
     )
+
+
+def ps1_skycells_zarr_dir(data_root: str | Path) -> Path:
+    """Directory that holds the shared PS1 skycells Zarr store."""
+    return Path(data_root).expanduser() / PS1_SKYCELLS_ZARR_DIRNAME
+
+
+def ps1_skycells_zarr_path(data_root: str | Path) -> Path:
+    """Canonical shared PS1 raw-band Zarr store under ``data_root``."""
+    return ps1_skycells_zarr_dir(data_root) / PS1_SKYCELLS_ZARR_BASENAME
+
+
+def ps1_skycells_zarr_lock_path(data_root: str | Path) -> Path:
+    """Lock file path alongside the shared PS1 skycells Zarr store."""
+    zarr_path = ps1_skycells_zarr_path(data_root)
+    return zarr_path.parent / f"{zarr_path.name}.lock"
 
 
 def event_root(workspace_root: str | Path, event_name: str) -> Path:

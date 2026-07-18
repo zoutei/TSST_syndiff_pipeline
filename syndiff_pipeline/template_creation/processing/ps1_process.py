@@ -1575,7 +1575,9 @@ def run_modern_sliding_window_pipeline(
         f"[Pipeline] Starting pipeline for sector {sector}, camera {camera}, ccd {ccd} "
         f"(ps1_source={ps1_source})"
     )
-    zarr_path = f"{data_root}/ps1_skycells_zarr/ps1_skycells.zarr"
+    from syndiff_pipeline.common.scc_paths import ps1_skycells_zarr_path
+
+    zarr_path = str(ps1_skycells_zarr_path(data_root))
     ingest_config = {
         "ps1_source": ps1_source,
         "zarr_path": zarr_path,

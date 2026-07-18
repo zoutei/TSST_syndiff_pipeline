@@ -62,9 +62,12 @@ class TestStarPs1Cache(unittest.TestCase):
             zarr_path, lock_file = ps1_skycells_zarr_paths(ctx)
             self.assertEqual(
                 zarr_path,
-                Path(tmpdir) / "data" / "ps1_skycells.zarr",
+                Path(tmpdir) / "data" / "ps1_skycells_zarr" / "ps1_skycells.zarr",
             )
-            self.assertEqual(lock_file, Path(tmpdir) / "data" / "ps1_skycells.zarr.lock")
+            self.assertEqual(
+                lock_file,
+                Path(tmpdir) / "data" / "ps1_skycells_zarr" / "ps1_skycells.zarr.lock",
+            )
 
     def test_ensure_skycell_cached_downloads_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:

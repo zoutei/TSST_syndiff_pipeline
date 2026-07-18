@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from syndiff_pipeline.common import wcs_grouping
-from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
+from syndiff_pipeline.common.scc_paths import ps1_skycells_zarr_path, scc_convolved_zarr
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.common.orchestration.targets import Target
 
@@ -597,7 +597,7 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     Returns
     -------
     VerifyResult"""
-    zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+    zarr_path = ps1_skycells_zarr_path(resolved.data_root)
     if not zarr_path.exists():
         return VerifyResult(
             "ps1_download",
@@ -1256,7 +1256,7 @@ def stage_absence_probe(
         return AbsenceProbeResult.ABSENT
 
     if stage == "ps1_download":
-        zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+        zarr_path = ps1_skycells_zarr_path(resolved.data_root)
         return (
             AbsenceProbeResult.MAYBE_PRESENT
             if zarr_path.exists()
@@ -1439,7 +1439,7 @@ def collect_stage_artifacts(
         return 1, int(ok), artifacts
     if stage == "ps1_download":
         expected = _expected_ps1_download_skycells(resolved)
-        zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+        zarr_path = ps1_skycells_zarr_path(resolved.data_root)
         result = verify_ps1_download(resolved)
         produced = 0
         if result.ok:
