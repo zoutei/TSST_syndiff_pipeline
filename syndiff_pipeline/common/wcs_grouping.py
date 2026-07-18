@@ -49,7 +49,12 @@ warnings.filterwarnings("ignore", category=AstropyWarning)
 
 log = logging.getLogger(__name__)
 
-CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
+EVENT_JOB_FILENAME = "event_job.json"
+FRAMES_CSV_BASENAME = "frames.csv"
+# Legacy names (read-only fallback during migration)
+CLUSTER_TEMPLATE_JOB_FILENAME = EVENT_JOB_FILENAME
+LEGACY_CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
+LEGACY_FRAMES_CSV_BASENAME = "syndiff_ffi_frames.csv"
 WCS_DRIFT_TEMPLATE_DEBUG_FILENAME = "wcs_drift_template_debug.png"
 
 _VALID_CROP_MODES = frozenset({"full", "tl", "tr", "bl", "br"})
@@ -719,13 +724,40 @@ def summarize_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
+def _event_job_path(output_dir: str | Path) -> str:
+    """Return path to live event job JSON, preferring ``event_job.json``."""
+    root = Path(output_dir)
+    live = root / EVENT_JOB_FILENAME
+    if live.is_file():
+        return str(live)
+    legacy = root / LEGACY_CLUSTER_TEMPLATE_JOB_FILENAME
+    if legacy.is_file():
+        return str(legacy)
+    return str(live)
+
+
+def _frames_csv_path(output_dir: str | Path) -> str:
+    """Return path to frames manifest CSV, preferring ``frames.csv``."""
+    root = Path(output_dir)
+    live = root / FRAMES_CSV_BASENAME
+    if live.is_file():
+        return str(live)
+    legacy = root / LEGACY_FRAMES_CSV_BASENAME
+    if legacy.is_file():
+        return str(legacy)
+    return str(live)
+
+
 def load_cluster_template_job(output_dir: str) -> dict:
-    """Load ``cluster_template_job.json`` from ``output_dir``."""
-    path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    """Load event job JSON from ``output_dir`` (``event_job.json`` or legacy name)."""
+    path = _event_job_path(output_dir)
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"Missing cluster handoff: {path}")
+        raise FileNotFoundError(f"Missing event handoff job: {path}")
     with open(path) as fh:
         return json.load(fh)
+
+
+load_event_job = load_cluster_template_job
 
 
 def crop_bounds_from_cluster_payload(payload: dict) -> dict:
@@ -841,7 +873,7 @@ def load_reference_ffi_path(
     counterpart before returning.
     """
     raw: str | None = None
-    job = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    job = _event_job_path(output_dir)
     if os.path.isfile(job):
         with open(job) as fh:
             raw = str(json.load(fh)["reference_ffi_path"])
@@ -941,11 +973,14 @@ def write_cluster_template_job_json(
         if grouping_quantum_ps1_px is not None:
             payload["grouping_quantum_ps1_px"] = float(grouping_quantum_ps1_px)
     os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    out_path = os.path.join(output_dir, EVENT_JOB_FILENAME)
     with open(out_path, "w") as fh:
         json.dump(payload, fh, indent=2)
-    log.info(f"Cluster template job JSON written to {out_path}")
+    log.info(f"Event job JSON written to {out_path}")
     return out_path
+
+
+write_event_job_json = write_cluster_template_job_json
 
 
 def plot_wcs_drift_and_template_assignment(
