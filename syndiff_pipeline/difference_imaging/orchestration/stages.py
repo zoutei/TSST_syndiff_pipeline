@@ -8,6 +8,10 @@ from pathlib import Path
 
 from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.common.orchestration.spec import StageRunContext, StageSpec
+from syndiff_pipeline.difference_imaging.orchestration.bind import (
+    execute_bind_stage,
+    verify_bind_complete,
+)
 from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
     collect_diff_workspace_artifacts,
     diff_workspace_complete,
@@ -37,16 +41,17 @@ def _diff_site_config_path(ctx: StageRunContext) -> Path:
 
 
 def _event_dir_for_target(ctx: StageRunContext) -> Path:
-    """Event dir for target.
-    
-    Parameters
-    ----------
-    ctx : StageRunContext
-    
-    Returns
-    -------
-    Path"""
-    return Path(ctx.runner_cfg.workspace_root) / "events" / ctx.target.label()
+    """Event workspace leaf for one event/SCC pair."""
+    from syndiff_pipeline.common.scc_paths import event_scc_leaf
+
+    t = ctx.target
+    return event_scc_leaf(
+        ctx.runner_cfg.workspace_root,
+        t.event_name(),
+        t.sector,
+        t.camera,
+        t.ccd,
+    )
 
 
 def _frozen_diff_config_path(ctx: StageRunContext) -> Path:
@@ -222,10 +227,37 @@ def write_diff_manifest(
     return payload
 
 
+def _bind_stage_snapshot(ctx: StageRunContext) -> dict:
+    event_dir = _event_dir_for_target(ctx)
+    return {
+        "sector": ctx.target.sector,
+        "camera": ctx.target.camera,
+        "ccd": ctx.target.ccd,
+        "target_name": ctx.target.target_name,
+        "event_dir": str(event_dir),
+        "stage": "bind",
+        "pool": "cpu_light",
+    }
+
+
+BIND_STAGE = StageSpec(
+    name="bind",
+    short_name="bind",
+    deps=(),
+    pool="cpu_light",
+    default_executor="local",
+    execute=execute_bind_stage,
+    verify_complete=verify_bind_complete,
+    collect_artifacts=lambda ctx: (1, 1 if verify_bind_complete(ctx) else 0, []),
+    config_fingerprint=lambda ctx: "bind",
+    stage_snapshot=_bind_stage_snapshot,
+)
+
+
 DIFF_STAGE = StageSpec(
     name="diff",
     short_name="diff",
-    deps=("downsample",),
+    deps=("bind",),
     pool="diff",
     default_executor="condor",
     execute=execute_diff_stage,
@@ -236,4 +268,4 @@ DIFF_STAGE = StageSpec(
     stage_snapshot=_diff_stage_snapshot,
 )
 
-DIFF_STAGES: tuple[StageSpec, ...] = (DIFF_STAGE,)
+DIFF_STAGES: tuple[StageSpec, ...] = (BIND_STAGE, DIFF_STAGE)

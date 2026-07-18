@@ -12,6 +12,40 @@ from syndiff_pipeline.common.orchestration.cli import PRESET_NAMES, preset_stage
 EXECUTION_VERBS = frozenset({"submit", "run"})
 
 
+def _add_shared_execution_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--site",
+        default=None,
+        help="Config directory with pipeline.yaml, diff_config.yaml, and deployment.yaml",
+    )
+    p.add_argument(
+        "--config",
+        default=None,
+        help="Orchestrator policy YAML (default: <site>/pipeline.yaml when --site is set)",
+    )
+    p.add_argument(
+        "--deployment",
+        default=None,
+        help="Path to deployment.yaml (optional override)",
+    )
+    p.add_argument(
+        "--stages",
+        default=None,
+        help="Comma-separated stage override (replaces the preset stage list)",
+    )
+    p.add_argument("--run-id", default=None, help="Unique run name (must not already exist)")
+    p.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Ignore existing artifacts for selected stages (new run only)",
+    )
+    p.add_argument(
+        "--workspace-run-id",
+        default=None,
+        help="Debug workspace suffix (writes to ws_{id}/ instead of ws/)",
+    )
+
+
 def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
     """Build execution parser.
     
@@ -32,53 +66,39 @@ def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
         prog=f"syndiff {preset} {verb}",
         description=f"SynDiff pipeline ({preset} stage preset, {verb})",
     )
-    p.add_argument(
-        "--site",
-        default=None,
-        help="Config directory with pipeline.yaml, diff_config.yaml, and deployment.yaml",
-    )
-    p.add_argument(
-        "--config",
-        default=None,
-        help="Orchestrator policy YAML (default: <site>/pipeline.yaml when --site is set)",
-    )
-    p.add_argument(
-        "--deployment",
-        default=None,
-        help="Path to deployment.yaml (optional override)",
-    )
-    p.add_argument("--targets", required=True, help="Targets CSV path")
-    p.add_argument(
-        "--stages",
-        default=None,
-        help="Comma-separated stage override (replaces the preset stage list)",
-    )
-    p.add_argument("--run-id", default=None, help="Unique run name (must not already exist)")
-    p.add_argument(
-        "--force-rerun",
-        action="store_true",
-        help="Ignore existing artifacts for selected stages (new run only)",
-    )
-    p.add_argument(
-        "--target-name",
-        default=None,
-        help="Run a single target by label (diff foreground debugging)",
-    )
-    p.add_argument(
-        "--validate-only",
-        action="store_true",
-        help="Validate diff config/stages without executing (diff foreground run only)",
-    )
-    p.add_argument(
-        "--workspace-run-id",
-        default=None,
-        help="Debug workspace suffix (writes to ws_{id}/ instead of ws/)",
-    )
-    p.add_argument(
-        "--local",
-        action="store_true",
-        help="Executor override: run diff stage locally (submit only)",
-    )
+    _add_shared_execution_args(p)
+
+    if preset == "template":
+        p.add_argument(
+            "--scc",
+            default=None,
+            help="SCC CSV path (sector,camera,ccd[,enabled])",
+        )
+        p.add_argument("--sector", type=int, default=None, help="Single SCC sector")
+        p.add_argument("--camera", type=int, default=None, help="Single SCC camera")
+        p.add_argument("--ccd", type=int, default=None, help="Single SCC CCD")
+        p.add_argument(
+            "--local",
+            action="store_true",
+            help=argparse.SUPPRESS,
+        )
+    elif preset == "diff":
+        p.add_argument("--targets", required=True, help="Targets CSV path")
+        p.add_argument(
+            "--target-name",
+            default=None,
+            help="Run a single target by label (diff foreground debugging)",
+        )
+        p.add_argument(
+            "--validate-only",
+            action="store_true",
+            help="Validate diff config/stages without executing (diff foreground run only)",
+        )
+        p.add_argument(
+            "--local",
+            action="store_true",
+            help="Executor override: run diff stage locally (submit only)",
+        )
     return p
 
 
@@ -121,7 +141,7 @@ def _finalize_execution_args(preset: str, args: argparse.Namespace) -> argparse.
 def parse_execution_argv(argv: list[str]) -> tuple[str, str, argparse.Namespace]:
     """Parse ``[preset, verb, ...flags]`` into preset name, verb, and namespace."""
     if len(argv) < 2:
-        raise SystemExit("usage: syndiff <all|template|diff> <submit|run> ...")
+        raise SystemExit("usage: syndiff <template|diff> <submit|run> ...")
     preset = argv[0]
     verb = argv[1]
     if preset not in PRESET_NAMES:
@@ -225,7 +245,8 @@ def main(argv: list[str] | None = None) -> int:
         print(
             "usage: syndiff <noun> <verb> ...\n\n"
             "Execution presets:\n"
-            "  syndiff all|template|diff submit|run --site SITE --targets TARGETS.csv\n\n"
+            "  syndiff template submit|run --site SITE --scc SCCS.csv\n"
+            "  syndiff diff submit|run --site SITE --targets TARGETS.csv\n\n"
             "Host-star light curves:\n"
             "  syndiff star submit --site SITE --star-targets STAR_TARGETS.csv\n"
             "  syndiff star run --site SITE --star-targets STAR_TARGETS.csv "
@@ -238,6 +259,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     noun = argv[0]
+    if noun == "all":
+        raise SystemExit(
+            "The 'all' preset was removed. Use 'syndiff template submit|run ...' "
+            "and 'syndiff diff submit|run ...' separately."
+        )
     if noun == "star":
         from syndiff_pipeline.star.cli import main as star_main
 
