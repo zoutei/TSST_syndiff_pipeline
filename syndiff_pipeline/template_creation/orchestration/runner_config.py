@@ -27,7 +27,13 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     TemplateStageParams,
     parse_stage_params,
 )
-from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    scc_convolved_zarr,
+    scc_ffi_dir,
+    scc_mapping_dir,
+    scc_templates_dir,
+)
 from syndiff_pipeline.common.orchestration.workspace import (
     normalize_workspace_root,
     runs_root as runs_root,
@@ -463,9 +469,11 @@ def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Pa
     base_dir : Path"""
     path_keys_by_stage = {
         "wcs_grouping": ("bkg_vector_path",),
+        "mapping": ("bkg_vector_path",),
         "ps1_download": ("local_data_path",),
         "ps1_process": ("catalog_path",),
         "downsample": ("mapping_dir", "convolved_dir", "output_base"),
+        "templates": ("mapping_dir", "convolved_dir", "output_base"),
     }
     for stage_name, path_keys in path_keys_by_stage.items():
         stage_obj = getattr(cfg.stages, stage_name)
@@ -547,15 +555,31 @@ def resolve_config(
     if override and override.get("data_root"):
         data_root = str(Path(override["data_root"]).expanduser())
 
-    event_dir = str(Path(cfg.workspace_root) / "events" / target.label())
-    mapping_root = str(Path(data_root) / "skycell_pixel_mapping")
+    t = target
+    mapping_os = int(merged_stages_raw.get("mapping", {}).get("oversampling_factor", 1) or 1)
+    templates_os = int(
+        (merged_stages_raw.get("templates") or merged_stages_raw.get("downsample") or {}).get(
+            "oversampling_factor", 1
+        )
+        or 1
+    )
+
+    event_dir = str(
+        event_scc_leaf(cfg.workspace_root, target.event_name(), t.sector, t.camera, t.ccd)
+    )
+    ffi_dir = str(scc_ffi_dir(data_root, t.sector, t.camera, t.ccd))
+    mapping_root = str(
+        scc_mapping_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=mapping_os)
+    )
     zarr_dir = str(Path(data_root) / "ps1_skycells_zarr")
-    template_output_base = str(Path(data_root) / "shifted_downsampled")
+    template_output_base = str(
+        scc_templates_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=templates_os)
+    )
 
     return ResolvedTargetConfig(
         target=target,
         data_root=data_root,
-        ffi_dir=cfg.ffi_dir,
+        ffi_dir=ffi_dir,
         event_dir=event_dir,
         skycell_wcs_csv=cfg.skycell_wcs_csv,
         stages=parse_stage_params(merged_stages_raw),

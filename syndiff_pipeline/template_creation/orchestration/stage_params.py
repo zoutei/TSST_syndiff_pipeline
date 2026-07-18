@@ -37,6 +37,13 @@ MAPPING_ALLOWED = frozenset(
         "oversampling_factor",
         "overwrite",
         "skip_download_catalog",
+        "reference_ffi",
+        "bkg_vector_path",
+        "wcs_drift_savgol_window",
+        "wcs_drift_savgol_polyorder",
+        "earth_deg_min",
+        "moon_deg_min",
+        "max_smoothed_residual",
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
@@ -162,6 +169,13 @@ class MappingStageParams:
     oversampling_factor: int = 1
     overwrite: bool = True
     skip_download_catalog: bool = False
+    reference_ffi: str | None = None
+    bkg_vector_path: str | None = None
+    wcs_drift_savgol_window: int | None = 11
+    wcs_drift_savgol_polyorder: int = 2
+    earth_deg_min: float = 45.0
+    moon_deg_min: float = 25.0
+    max_smoothed_residual: float = 0.05
     executor: str = "condor"
     condor_request_cpus: int = 16
     condor_request_memory: int = 100_000
@@ -265,6 +279,11 @@ class TemplateStageParams:
     diff: DiffStageParams = field(default_factory=DiffStageParams)
     star: StarStageParams = field(default_factory=StarStageParams)
 
+    @property
+    def templates(self) -> DownsampleStageParams:
+        """Alias for the SCC template-build stage params (``downsample`` field)."""
+        return self.downsample
+
 
 def _filter_allowed_keys(stage_dict: dict, allowed: FrozenSet[str]) -> dict:
     """Keep only allow-listed keys (for non-strict frozen-config loading)."""
@@ -289,7 +308,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     mp = stages_raw.get("mapping", {}) or {}
     pd = stages_raw.get("ps1_download", {}) or {}
     pp = stages_raw.get("ps1_process", {}) or {}
-    ds = stages_raw.get("downsample", {}) or {}
+    ds = stages_raw.get("templates", {}) or stages_raw.get("downsample", {}) or {}
     df = stages_raw.get("diff", {}) or {}
     st = stages_raw.get("star", {}) or {}
     if not strict:
@@ -304,7 +323,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     validate_stage_keys(mp, MAPPING_ALLOWED, "mapping")
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
     validate_stage_keys(pp, PS1_PROCESS_ALLOWED, "ps1_process")
-    validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
+    validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "templates")
     validate_stage_keys(df, DIFF_ALLOWED, "diff")
     validate_stage_keys(st, STAR_ALLOWED, "star")
     if pp.get("executor", "condor") not in ("local", "condor"):
@@ -319,7 +338,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     if st.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.star.executor must be 'local' or 'condor'")
     if ds.get("executor", "local") not in ("local", "condor"):
-        raise ValueError("stages.downsample.executor must be 'local' or 'condor'")
+        raise ValueError("stages.templates.executor must be 'local' or 'condor'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),

@@ -10,7 +10,8 @@ from typing import Optional
 from astropy.io import fits
 
 from syndiff_pipeline.common import wcs_grouping
-from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis, nested_ffi_dir
+from syndiff_pipeline.common.wcs_grouping import FRAMES_CSV_BASENAME
+from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis
 from syndiff_pipeline.difference_imaging.support.paths import pipeline_plots_root
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import WcsGroupingStageParams
@@ -53,7 +54,7 @@ def run_wcs_grouping(
     event_dir = resolved.event_dir
     os.makedirs(event_dir, exist_ok=True)
 
-    ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+    ffi_leaf = resolved.ffi_dir
     all_sorted = sorted(list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd))
     if not all_sorted:
         patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
@@ -83,7 +84,7 @@ def run_wcs_grouping(
     )
     log.info("Reference FFI: %s", chosen_ref)
 
-    manifest_path = os.path.join(event_dir, "syndiff_ffi_frames.csv")
+    manifest_path = os.path.join(event_dir, FRAMES_CSV_BASENAME)
     wcs_table.to_csv(manifest_path, index=False)
 
     with wcs_grouping.open_fits_memmap(chosen_ref) as hdul:

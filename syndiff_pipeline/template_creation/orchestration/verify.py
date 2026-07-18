@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.common.orchestration.targets import Target
 
@@ -136,8 +137,8 @@ def config_fingerprint(
                 str(pp.bright_star_mag_threshold),
             ]
         )
-    elif stage == "downsample":
-        ds = resolved.stages.downsample
+    elif stage in ("templates", "downsample"):
+        ds = resolved.stages.templates
         parts.extend(
             [
                 str(ds.oversampling_factor),
@@ -372,11 +373,11 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
         expected_ffi_basenames,
         list_local_ffis,
         local_ffi_manifest_basenames,
-        nested_ffi_dir,
     )
 
     t = resolved.target
-    ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+    # resolve_config sets ffi_dir to the SCC ffi leaf already.
+    ffi_leaf = resolved.ffi_dir
     local_files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
     expected = expected_ffi_basenames(
         t.sector, t.camera, t.ccd, output_dir=ffi_leaf, local_only=True
@@ -446,32 +447,29 @@ def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
-    """Verify mapping.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    VerifyResult"""
+    """Verify mapping artifacts under the SCC oversampling leaf."""
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
     mapping_root = Path(resolved.mapping_root)
     if os_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{os_factor}"
         suffix = f"_os{os_factor}"
-    csv_path = (
+    # Prefer flat SCC leaf (post-migration); fall back to legacy nested layout.
+    csv_flat = (
+        mapping_root
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
+    )
+    csv_nested = (
         mapping_root
         / f"sector_{t.sector:04d}"
         / f"camera_{t.camera}"
         / f"ccd_{t.ccd}"
         / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
     )
+    csv_path = csv_flat if csv_flat.is_file() else csv_nested
     if csv_path.is_file():
         return VerifyResult("mapping", True, "Master skycells CSV exists", str(csv_path))
-    return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_path))
+    return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_flat))
 
 
 _PS1_DOWNLOAD_BANDS = ("r", "i", "z", "y")
@@ -642,22 +640,21 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
-    """Mapping csv path.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    Path"""
+    """Mapping CSV path under the SCC oversampling leaf (flat or legacy nested)."""
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
     mapping_root = Path(resolved.mapping_root)
     if os_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{os_factor}"
         suffix = f"_os{os_factor}"
+    csv_flat = (
+        mapping_root
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
+    )
+    if csv_flat.is_file() or not (
+        mapping_root / f"sector_{t.sector:04d}" / f"camera_{t.camera}" / f"ccd_{t.ccd}"
+    ).is_dir():
+        return csv_flat
     return (
         mapping_root
         / f"sector_{t.sector:04d}"
@@ -668,21 +665,9 @@ def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
 
 
 def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
-    """Convolved zarr path.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    Path"""
+    """Convolved zarr path for one SCC."""
     t = resolved.target
-    return (
-        Path(resolved.data_root)
-        / "convolved_results"
-        / f"sector_{t.sector:04d}_camera_{t.camera}_ccd_{t.ccd}.zarr"
-    )
+    return scc_convolved_zarr(resolved.data_root, t.sector, t.camera, t.ccd)
 
 
 def ps1_process_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
@@ -747,8 +732,13 @@ def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
     os_factor = resolved.stages.mapping.oversampling_factor
     mapping_root = Path(resolved.mapping_root)
     if os_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{os_factor}"
         suffix = f"_os{os_factor}"
+    flat = (
+        mapping_root
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}.fits.gz"
+    )
+    if flat.is_file():
+        return flat
     return (
         mapping_root
         / f"sector_{t.sector:04d}"
@@ -1083,7 +1073,27 @@ def expected_downsample_fits_paths(resolved: ResolvedTargetConfig) -> list[Path]
     return paths
 
 
-def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
+def verify_templates(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify SCC templates store (full-chip) or legacy per-event downsample outputs."""
+    store = Path(resolved.template_output_base)
+    if store.is_dir() and any(store.iterdir()):
+        return VerifyResult(
+            "templates",
+            True,
+            f"SCC templates store present under {store.name}/",
+            str(store),
+        )
+    legacy = _verify_downsample_legacy(resolved)
+    return VerifyResult(
+        "templates",
+        legacy.ok,
+        legacy.message,
+        legacy.path,
+        unknown=legacy.unknown,
+    )
+
+
+def _verify_downsample_legacy(resolved: ResolvedTargetConfig) -> VerifyResult:
     """Verify downsample (linear offset FITS or field SCC store)."""
     if _geometry_mode_for_resolved(resolved) == "field":
         return verify_downsample_field_mode(resolved)
@@ -1092,8 +1102,8 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
     try:
         basenames, base = _downsample_expected_basenames(resolved)
     except Exception as exc:
-        out_base = Path(resolved.stages.downsample.output_base or resolved.template_output_base)
-        return VerifyResult("downsample", False, f"Cannot determine expected offsets: {exc}", str(out_base))
+        out_base = Path(resolved.stages.templates.output_base or resolved.template_output_base)
+        return VerifyResult("templates", False, f"Cannot determine expected offsets: {exc}", str(out_base))
 
     found: list[str] = []
     missing: list[str] = []
@@ -1108,7 +1118,7 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
     sample = found[0] if found else str(base)
     if missing:
         return VerifyResult(
-            "downsample",
+            "templates",
             False,
             f"Partial downsample: {len(found)}/{n_expected} offset FITS present "
             f"({len(missing)} missing)",
@@ -1119,18 +1129,21 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
         csv_path = event_dir_ps1_removed_stars_csv_path(resolved)
         if not csv_path.is_file():
             return VerifyResult(
-                "downsample",
+                "templates",
                 False,
                 f"Missing {csv_path.name} in event_dir",
                 str(csv_path),
             )
 
     return VerifyResult(
-        "downsample",
+        "templates",
         True,
         f"All {n_expected} offset FITS present",
         sample,
     )
+
+
+verify_downsample = verify_templates  # legacy alias for in-module callers
 
 
 def verify_diff(
@@ -1212,11 +1225,11 @@ def stage_absence_probe(
     meta: dict | None = None,
 ) -> AbsenceProbeResult:
     """Fast filesystem probe: skip full verify when outputs cannot exist."""
-    from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, tesscurl_script_path
+    from syndiff_pipeline.common.download import list_local_ffis, tesscurl_script_path
     from syndiff_pipeline.common.orchestration.event_ws_symlinks import event_templates_symlink_path
     from syndiff_pipeline.common.wcs_grouping import CLUSTER_TEMPLATE_JOB_FILENAME
 
-    if stage == "wcs_grouping":
+    if stage == "bind":
         job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
         return (
             AbsenceProbeResult.MAYBE_PRESENT
@@ -1234,7 +1247,7 @@ def stage_absence_probe(
 
     if stage == "tess_ffi_download":
         t = resolved.target
-        ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+        ffi_leaf = resolved.ffi_dir
         if list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd):
             return AbsenceProbeResult.MAYBE_PRESENT
         cached = tesscurl_script_path(ffi_leaf, t.sector)
@@ -1258,7 +1271,10 @@ def stage_absence_probe(
             else AbsenceProbeResult.ABSENT
         )
 
-    if stage == "downsample":
+    if stage in ("templates", "downsample"):
+        store = Path(resolved.template_output_base)
+        if store.is_dir() and any(store.iterdir()):
+            return AbsenceProbeResult.MAYBE_PRESENT
         job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
         templates_link = event_templates_symlink_path(resolved.event_dir)
         if job_path.is_file() or (
@@ -1296,11 +1312,11 @@ def stage_absence_probe(
 
 VERIFY_FUNCS = {
     "tess_ffi_download": verify_tess_ffi_download,
-    "wcs_grouping": verify_wcs_grouping,
     "mapping": verify_mapping,
     "ps1_download": verify_ps1_download,
     "ps1_process": verify_ps1_process,
-    "downsample": verify_downsample,
+    "templates": verify_templates,
+    "downsample": verify_templates,
     "diff": verify_diff,
 }
 
@@ -1430,10 +1446,10 @@ def collect_stage_artifacts(
             produced = len(expected)
         return len(expected), produced, [str(zarr_path)]
     if stage == "tess_ffi_download":
-        from syndiff_pipeline.common.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
+        from syndiff_pipeline.common.download import expected_ffi_basenames, list_local_ffis
 
         t = resolved.target
-        ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+        ffi_leaf = resolved.ffi_dir
         expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf) or []
         files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
         return len(expected), len(files), [str(p) for p in files]
