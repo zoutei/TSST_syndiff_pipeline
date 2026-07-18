@@ -33,6 +33,7 @@ from syndiff_pipeline.common.orchestration.notifications import (
     send_run_started_notification,
 )
 from syndiff_pipeline.template_creation.orchestration.run_report import (
+    _format_stage_status_short,
     format_progress_lines,
     format_run_report,
     format_run_report_messages,
@@ -41,9 +42,12 @@ from syndiff_pipeline.template_creation.orchestration.run_report import (
 from syndiff_pipeline.common.orchestration.state import (
     STAGE_NAMES,
     PipelineState,
+    STATUS_EXTERNAL,
     STATUS_PENDING,
     STATUS_RUNNING,
+    STATUS_SKIPPED,
     STATUS_SUCCESS,
+    SKIP_REASON_NOT_SELECTED,
 )
 from syndiff_pipeline.common.orchestration.targets import Target
 
@@ -294,6 +298,87 @@ class TestRunReport(unittest.TestCase):
             lines = format_status_grid(state, "run_a")
             self.assertEqual(len(lines), 2)
             self.assertTrue(any("map:succ" in line for line in lines))
+
+    def test_format_status_grid_matches_legacy_per_cell_lookups(self):
+        """Batched display context must match per-cell DB formatting."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
+            label = target.label()
+            state.create_run(
+                "run_eq",
+                "/cfg.yaml",
+                "/targets.csv",
+                "/runs",
+                [target],
+                ["mapping", "templates"],
+            )
+            state.update_stage_status("run_eq", label, "tess_ffi_download", STATUS_EXTERNAL)
+            state.update_stage_status("run_eq", label, "mapping", STATUS_PENDING)
+            state.update_stage_status("run_eq", label, "ps1_download", STATUS_PENDING)
+            state.update_stage_status("run_eq", label, "ps1_process", STATUS_PENDING)
+            state.update_stage_status("run_eq", label, "templates", STATUS_PENDING)
+            state.update_stage_status(
+                "run_eq", label, "bind", STATUS_SKIPPED, exit_code=0
+            )
+            state.cache_skip_reason("run_eq", label, "bind", SKIP_REASON_NOT_SELECTED)
+            state.cache_external_check(
+                "run_eq", label, "tess_ffi_download", complete=False
+            )
+
+            batched = format_status_grid(state, "run_eq")
+            rows = state.list_stage_runs("run_eq")
+            by_target: dict[str, list] = {}
+            for r in rows:
+                by_target.setdefault(r.target_label, []).append(r)
+            from syndiff_pipeline.pipeline_spec import stage_names
+
+            names = stage_names()
+            stage_order = {name: i for i, name in enumerate(names)}
+            active = state.get_active_stages("run_eq")
+            legacy: list[str] = []
+            for tgt in sorted(by_target):
+                parts = [
+                    _format_stage_status_short(
+                        state,
+                        "run_eq",
+                        r,
+                        active_stages=active,
+                    )
+                    for r in sorted(
+                        by_target[tgt], key=lambda row: stage_order.get(row.stage, len(names))
+                    )
+                ]
+                legacy.append(f"  {tgt}: {' | '.join(parts)}")
+            self.assertEqual(batched, legacy)
+            self.assertIn("tess_dl:sc_q", batched[0])
+            self.assertIn("bind:n/a", batched[0])
+
+    def test_format_status_grid_opens_few_sqlite_connections(self):
+        """Status grid should not open one connection per stage cell."""
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            self._seed_run(state, "run_a")
+            opens = {"n": 0}
+            real_conn = state._conn
+
+            from contextlib import contextmanager
+
+            @contextmanager
+            def counting_conn():
+                opens["n"] += 1
+                with real_conn() as conn:
+                    yield conn
+
+            with mock.patch.object(state, "_conn", counting_conn):
+                lines = format_status_grid(state, "run_a")
+            self.assertEqual(len(lines), 2)
+            # One batched load_run_display_context connection (plus at most a
+            # pipeline_spec / runs lookup already folded in). Far below N cells.
+            self.assertLessEqual(opens["n"], 3)
+            self.assertGreaterEqual(opens["n"], 1)
 
     def test_format_progress_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
