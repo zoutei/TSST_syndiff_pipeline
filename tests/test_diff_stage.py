@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration import condor
+from syndiff_pipeline.common.scc_paths import event_scc_leaf
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
 )
@@ -72,10 +73,10 @@ def _write_diff_policy(path: Path) -> None:
 
 
 class TestDiffPipelineSpec(unittest.TestCase):
-    def test_diff_is_seventh_stage(self):
-        self.assertEqual(len(STAGE_NAMES), 7)
-        self.assertEqual(STAGE_NAMES[-1], "diff")
-        self.assertEqual(STAGE_DEPS["diff"], ["downsample"])
+    def test_diff_is_eighth_stage(self):
+        self.assertEqual(len(STAGE_NAMES), 8)
+        self.assertEqual(STAGE_NAMES[-2], "diff")
+        self.assertEqual(STAGE_DEPS["diff"], ["bind"])
         self.assertEqual(STAGE_POOL["diff"], "diff")
 
     def test_diff_resource_pool_default(self):
@@ -118,19 +119,27 @@ class TestDiffStageExecution(unittest.TestCase):
             data_root=str(self.data),
         )
         _write_diff_policy(self.site / "diff_config.yaml")
+
+        self.target = _target()
+        self.event_dir = event_scc_leaf(
+            self.handoff,
+            self.target.event_name(),
+            self.target.sector,
+            self.target.camera,
+            self.target.ccd,
+        )
+        self.event_dir.mkdir(parents=True, exist_ok=True)
         template_leaf = (
             self.data
-            / "shifted_downsampled"
-            / "sector0020_camera3_ccd3"
+            / "scc"
+            / "s0020_c3_k3"
+            / "templates"
+            / "oversampling_1"
         )
         template_leaf.mkdir(parents=True)
         (template_leaf / "group_1").mkdir()
         (template_leaf / "group_1" / "ps1_template.fits").write_bytes(b"SIMPLE  = T")
-
-        self.target = _target()
-        self.event_dir = self.handoff / "events" / self.target.label()
-        ensure_event_templates_symlink(self.event_dir, template_leaf)
-        (self.event_dir / "cluster_template_job.json").write_text(
+        (self.event_dir / "event_job.json").write_text(
             json.dumps({"reference_ffi_path": "/tmp/ref.fits"}),
             encoding="utf-8",
         )
@@ -186,15 +195,14 @@ class TestDiffStageExecution(unittest.TestCase):
         gaia_csv = self.event_dir / "ws" / "gaia_catalog_pipeline.csv"
         gaia_csv.parent.mkdir(parents=True, exist_ok=True)
         gaia_csv.write_text("source_id,ra,dec\n", encoding="utf-8")
-        handoff_json = self.event_dir / "cluster_template_job.json"
+        handoff_json = self.event_dir / "event_job.json"
         self.assertTrue(handoff_json.is_file())
 
         clear_diff_workspace(self.event_dir)
 
         self.assertFalse((self.event_dir / "ws" / "hp_d").exists())
         self.assertFalse(gaia_csv.is_file())
-        self.assertTrue((self.event_dir / "ws" / "templates").is_symlink())
-        self.assertTrue(handoff_json.is_file())
+        self.assertTrue((self.event_dir / "event_job.json").is_file())
 
     @mock.patch(
         "syndiff_pipeline.difference_imaging.orchestration.execute.run_config_pipeline"
@@ -214,7 +222,6 @@ class TestDiffStageExecution(unittest.TestCase):
 
         self.assertTrue(stale_fits.is_file())
         self.assertTrue((self.event_dir / "ws" / "hp_d").is_dir())
-        self.assertTrue((self.event_dir / "ws" / "templates").is_symlink())
         self.assertTrue(gaia_csv.is_file())
         run_mock.assert_called_once()
 

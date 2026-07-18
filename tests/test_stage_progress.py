@@ -428,6 +428,7 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_state.count_by_status.return_value = {"running": 1, "success": 5}
         fake_state.get_run.return_value = {"status": "running"}
         fake_state.running_stage_runs.return_value = [running_row]
+        fake_state.list_stage_runs.return_value = []
 
         with mock.patch(
             "syndiff_pipeline.common.orchestration.cli._resolve_run_from_args",

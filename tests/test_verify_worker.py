@@ -230,12 +230,12 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, targets, active_stages=["mapping"]
+                tmp_path, targets, active_stages=["templates"]
             )
             ctx.cfg.verify_max_workers = 1
             for target in targets:
                 label = target.label()
-                for stage in ("tess_ffi_download", "wcs_grouping"):
+                for stage in ("tess_ffi_download",):
                     state.update_stage_status(
                         run_id, label, stage, STATUS_SKIPPED, exit_code=0
                     )
@@ -263,12 +263,14 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            state.update_stage_status(run_id, label, "mapping", STATUS_PENDING)
+            _ensure_mapping_csv_exists(ctx, target)
 
             candidates = _iter_verify_candidates(
                 state, run_id, ctx, force_rerun=False
@@ -295,19 +297,27 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            state.update_stage_status(run_id, label, "mapping", STATUS_PENDING)
             _ensure_mapping_csv_exists(ctx, target)
 
             def slow_complete(*_args, **_kwargs):
                 time.sleep(0.4)
                 return False
 
+            from syndiff_pipeline.template_creation.orchestration.verify import (
+                AbsenceProbeResult,
+            )
+
             with unittest.mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.verify.stage_absence_probe",
+                return_value=AbsenceProbeResult.MAYBE_PRESENT,
+            ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=slow_complete,
             ):
@@ -327,10 +337,8 @@ class TestVerifyScheduling(unittest.TestCase):
 
             self.assertTrue(state.external_verify_attempted(run_id, label, "mapping"))
             self.assertFalse(state.external_verify_complete(run_id, label, "mapping"))
-            promoted = state.promote_stages(run_id)
-            self.assertEqual(promoted, 1)
             self.assertEqual(
-                state.get_stage_run(run_id, label, "mapping").status, STATUS_READY
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
             )
             candidates = _iter_verify_candidates(
                 state, run_id, ctx, force_rerun=False
@@ -342,10 +350,10 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
             _ensure_mapping_csv_exists(ctx, target)
@@ -366,7 +374,7 @@ class TestVerifyScheduling(unittest.TestCase):
 
             self.assertFalse(state.external_verify_attempted(run_id, label, "mapping"))
             self.assertEqual(
-                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
+                state.get_stage_run(run_id, label, "mapping").status, STATUS_EXTERNAL
             )
             candidates = _iter_verify_candidates(
                 state, run_id, ctx, force_rerun=False
@@ -375,7 +383,7 @@ class TestVerifyScheduling(unittest.TestCase):
             promoted = state.promote_stages(run_id)
             self.assertEqual(promoted, 0)
             self.assertEqual(
-                state.get_stage_run(run_id, label, "mapping").status, STATUS_PENDING
+                state.get_stage_run(run_id, label, "templates").status, STATUS_PENDING
             )
 
 
@@ -390,10 +398,10 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
             _ensure_mapping_csv_exists(ctx, target)
@@ -413,7 +421,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 state.insert_command(
                     "force_rerun",
                     run_id=run_id,
-                    args={"target_labels": [label], "stages": ["mapping"]},
+                    args={"target_labels": [label], "stages": ["templates"]},
                 )
                 _apply_commands(state)
                 get_verify_worker().drain(
@@ -423,7 +431,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                     block_timeout_s=3.0,
                 )
 
-            row = state.get_stage_run(run_id, label, "mapping")
+            row = state.get_stage_run(run_id, label, "templates")
             self.assertEqual(row.status, STATUS_PENDING)
 
     def test_run_not_stalled_while_verify_in_flight(self):
@@ -431,10 +439,10 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
             _ensure_mapping_csv_exists(ctx, target)
@@ -463,12 +471,13 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
+            _ensure_mapping_csv_exists(ctx, target)
 
             pending, in_flight = _verify_backlog(
                 state, run_id, ctx, force_rerun=False
@@ -494,10 +503,10 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping"]
+                tmp_path, [target], active_stages=["templates"]
             )
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping"):
+            for stage in ("tess_ffi_download",):
                 state.update_stage_status(run_id, label, stage, STATUS_SKIPPED, exit_code=0)
                 state.cache_external_check(run_id, label, stage, complete=True)
             state.set_run_status(run_id, "stalled", stall_reason="test stall")

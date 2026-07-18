@@ -12,13 +12,11 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration.targets import Target, load_targets
+from syndiff_pipeline.common.scc_paths import event_scc_leaf, scc_ffi_dir, scc_templates_dir
 from syndiff_pipeline.difference_imaging.orchestration.config import (
     SynDiffConfig,
     absolutize_config,
     load_config,
-)
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    ensure_event_templates_symlink,
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     SitePaths,
@@ -78,12 +76,10 @@ class TestSiteConfigLoader(unittest.TestCase):
             data_root=str(self.data),
         )
         _write_diff_policy(self.site / "diff_config.yaml")
-        template_leaf = self.data / "shifted_downsampled" / "sector0020_camera3_ccd3"
-        template_leaf.mkdir(parents=True)
-        (template_leaf / "syndiff_template_s0020_3_3.fits").write_bytes(b"")
         target = _target()
-        event_dir = self.handoff / "events" / target.label()
-        ensure_event_templates_symlink(event_dir, template_leaf)
+        template_store = scc_templates_dir(self.data, target.sector, target.camera, target.ccd, oversampling_factor=1)
+        template_store.mkdir(parents=True)
+        (template_store / "template_manifest.json").write_text("{}", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -107,17 +103,17 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertEqual(cfg.ccd, 3)
         self.assertEqual(cfg.target_ra, 210.219333)
         self.assertIn("events", cfg.output_dir)
-        self.assertIn("s0020_c3_k3_2020ut", cfg.output_dir)
-        self.assertEqual(cfg.ffi_dir, str((self.data / "tess_ffi").resolve()))
+        self.assertIn("2020ut", cfg.output_dir)
+        self.assertIn("s0020_c3_k3", cfg.output_dir)
+        self.assertEqual(cfg.ffi_dir, str((self.data / "scc" / "s0020_c3_k3" / "ffi").resolve()))
         self.assertEqual(
             cfg.gaia_catalog,
             str(
                 (
                     self.data
+                    / "scc"
+                    / "s0020_c3_k3"
                     / "catalogs"
-                    / "sector_0020"
-                    / "camera_3"
-                    / "ccd_3"
                     / "gaia_catalog_s0020_3_3.csv"
                 ).resolve()
             ),
@@ -125,7 +121,7 @@ class TestSiteConfigLoader(unittest.TestCase):
 
     def test_prefers_gaia_catalog_pipeline_in_workspace(self):
         target = _target()
-        event_dir = self.handoff / "events" / target.label()
+        event_dir = event_scc_leaf(self.handoff, target.event_name(), target.sector, target.camera, target.ccd)
         ws = event_dir / "ws"
         ws.mkdir(parents=True, exist_ok=True)
         pipeline_csv = ws / "gaia_catalog_pipeline.csv"
@@ -153,16 +149,27 @@ class TestSiteConfigLoader(unittest.TestCase):
         targets = load_targets(_ROOT / "config" / "targets_example.csv")
         self.assertGreater(len(targets), 0)
 
-    def test_resolve_event_template_dir_via_symlink(self):
+    def test_resolve_event_template_dir_via_scc_store(self):
         target = _target()
-        event_dir = self.handoff / "events" / target.label()
-        resolved = resolve_event_template_dir(event_dir)
-        self.assertTrue(resolved.endswith("sector0020_camera3_ccd3"))
+        resolved = resolve_event_template_dir(
+            event_scc_leaf(self.handoff, target.event_name(), target.sector, target.camera, target.ccd),
+            data_root=self.data,
+            sector=target.sector,
+            camera=target.camera,
+            ccd=target.ccd,
+        )
+        self.assertTrue(resolved.endswith("scc/s0020_c3_k3/templates/oversampling_1"))
 
     def test_resolve_event_template_dir_missing_raises(self):
         target = _target()
         with self.assertRaises(FileNotFoundError):
-            resolve_event_template_dir(self.handoff / "events" / "missing_target")
+            resolve_event_template_dir(
+                event_scc_leaf(self.handoff, "missing_target", target.sector, target.camera, target.ccd),
+                data_root=self.data / "empty",
+                sector=target.sector,
+                camera=target.camera,
+                ccd=target.ccd,
+            )
 
     def test_absolutize_config_from_relative_paths(self):
         cfg = SynDiffConfig(

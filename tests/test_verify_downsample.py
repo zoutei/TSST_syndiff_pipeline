@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
 )
+from syndiff_pipeline.common.scc_paths import event_scc_leaf, scc_templates_dir
 from syndiff_pipeline.template_creation.orchestration.dispatch import _manifest_from_result
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (
@@ -44,22 +45,31 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
         target_dec=52.0,
         target_name="2020dgc",
     )
+    data_root = tmp / "data"
+    legacy_base = tmp / "shifted_downsampled"
     return ResolvedTargetConfig(
         target=target,
-        data_root=str(tmp / "data"),
-        ffi_dir=str(tmp / "data" / "tess_ffi"),
-        event_dir=str(tmp / "events" / target.label()),
+        data_root=str(data_root),
+        ffi_dir=str(data_root / "scc" / "s0022_c3_k3" / "ffi"),
+        event_dir=str(
+            event_scc_leaf(tmp, target.event_name(), target.sector, target.camera, target.ccd)
+        ),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
-            downsample=DownsampleStageParams(single_offset=single_offset),
+            downsample=DownsampleStageParams(
+                single_offset=single_offset,
+                output_base=str(legacy_base),
+            ),
         ),
-        mapping_root=str(tmp / "mapping"),
-        zarr_dir=str(tmp / "data" / "ps1_skycells_zarr"),
-        template_output_base=str(tmp / "shifted_downsampled"),
+        mapping_root=str(data_root / "scc" / "s0022_c3_k3" / "mapping" / "oversampling_1"),
+        zarr_dir=str(data_root / "ps1_skycells_zarr"),
+        template_output_base=str(
+            scc_templates_dir(data_root, target.sector, target.camera, target.ccd, oversampling_factor=1)
+        ),
     )
 
 
@@ -86,7 +96,7 @@ def _offset_fits_name(dx: float, dy: float) -> str:
 
 
 def _out_dir(resolved: ResolvedTargetConfig) -> Path:
-    base = Path(resolved.template_output_base)
+    base = Path(resolved.stages.downsample.output_base or resolved.template_output_base)
     return base / "sector0022_camera3_ccd3"
 
 
@@ -241,7 +251,7 @@ class TestDownsampleManifestTemplateDirs(unittest.TestCase):
             payload = write_manifest(
                 manifest_path,
                 resolved,
-                "downsample",
+                "templates",
                 [str(physical / "a.fits.gz")],
                 1,
                 1,

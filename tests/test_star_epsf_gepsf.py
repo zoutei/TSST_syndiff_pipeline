@@ -42,7 +42,7 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
         "y_max": 64,
         "shape": (64, 64),
     }
-    event = tmp / "event"
+    event = tmp / "events" / "s20_astrometry" / "s0020_c3_k2"
     ws = event / ws_name
     for sub in ("hp_d", "hp_c", "ks_b_s", "hp_d_kernels"):
         (ws / sub).mkdir(parents=True, exist_ok=True)
@@ -57,7 +57,7 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
             "group_dy": [0.0],
         }
     )
-    manifest.to_csv(event / "syndiff_ffi_frames.csv", index=False)
+    manifest.to_csv(event / "frames.csv", index=False)
     gaia = pd.DataFrame({"x": [32.0], "y": [32.0], "phot_rp_mean_mag": [10.0]})
     gaia.to_csv(tmp / "gaia.csv", index=False)
     return StarEventContext(
@@ -72,7 +72,7 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
         event_dir=str(event),
         workspace_root=str(tmp / "workspace"),
         data_root=str(tmp / "data"),
-        cluster_job_path=str(event / "cluster_template_job.json"),
+        cluster_job_path=str(event / "event_job.json"),
         cluster_job=crop_bounds,
         crop_bounds=crop_bounds,
         mapping_dir=str(tmp / "mapping"),
@@ -124,7 +124,7 @@ class TestStarEpsfGepsfConfig(unittest.TestCase):
         site = _ROOT / "config"
         policy = load_star_site_policy(site / "star_config_epsf_gepsf.yaml")
         rows = load_star_targets(site / "star_targets_example.csv", site_dir=site)
-        row = find_star_target_row(rows, "20/3/2")
+        row = find_star_target_row(rows, "s0020_c3_k2")
         run_cfg = resolve_star_run_config(policy, row, site_dir=site)
 
         self.assertIsNotNone(run_cfg.epsf)

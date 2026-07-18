@@ -230,7 +230,7 @@ class TestStageShortNamesLightweight(unittest.TestCase):
         for mod in heavy:
             if mod not in before:
                 self.assertNotIn(mod, sys.modules)
-        self.assertEqual(names["downsample"], "down")
+        self.assertEqual(names["templates"], "tmpl")
         self.assertEqual(names["diff"], "diff")
         self.assertEqual(names["star"], "star")
 

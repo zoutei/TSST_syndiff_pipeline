@@ -309,7 +309,7 @@ class TestComputeStarOnlyStampForFrame(unittest.TestCase):
                 ]
             )
             manifest.to_csv(
-                Path(ctx.event_dir) / "syndiff_ffi_frames.csv",
+                Path(ctx.event_dir) / "frames.csv",
                 index=False,
             )
 

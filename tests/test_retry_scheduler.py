@@ -50,7 +50,7 @@ def _make_run_context(tmp: Path, *, enabled: str = "true") -> tuple[RunContext, 
 
     run_id = "run_a"
     run_dir = runs_root / run_id
-    logs.materialize_run_inputs(source_cfg, targets_csv, run_dir)
+    logs.materialize_run_inputs(source_cfg, run_dir, source_targets=targets_csv)
     meta = {
         "run_id": run_id,
         "stages": ["mapping", "downsample"],

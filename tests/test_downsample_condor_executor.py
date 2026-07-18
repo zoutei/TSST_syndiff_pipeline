@@ -15,14 +15,14 @@ from syndiff_pipeline.common.orchestration import condor
 from syndiff_pipeline.pipeline_spec import SYNDIFF_PIPELINE
 from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import parse_stage_params
-from syndiff_pipeline.template_creation.orchestration.stages import _condor_resources_for_downsample
+from syndiff_pipeline.template_creation.orchestration.stages import _condor_resources_for_templates as _condor_resources_for_downsample
 
 
 class TestDownsampleCondorExecutor(unittest.TestCase):
     def test_parse_stage_params_accepts_downsample_executor(self):
         stages = parse_stage_params(
             {
-                "downsample": {
+                "templates": {
                     "executor": "condor",
                     "condor_request_cpus": 32,
                     "condor_request_memory": 256000,
@@ -39,18 +39,18 @@ class TestDownsampleCondorExecutor(unittest.TestCase):
 
     def test_resolve_executor_downsample_condor(self):
         cfg = RunnerConfig(
-            stages=parse_stage_params({"downsample": {"executor": "condor"}}),
+            stages=parse_stage_params({"templates": {"executor": "condor"}}),
             workspace_root="/tmp/ws",
             data_root="/tmp/data",
         )
-        spec = SYNDIFF_PIPELINE.require("downsample")
+        spec = SYNDIFF_PIPELINE.require("templates")
         self.assertEqual(spec.resolve_executor(cfg), "condor")
 
     def test_condor_resources_for_downsample(self):
         cfg = RunnerConfig(
             stages=parse_stage_params(
                 {
-                    "downsample": {
+                    "templates": {
                         "executor": "condor",
                         "condor_request_cpus": 64,
                         "condor_request_memory": 500000,
@@ -110,7 +110,7 @@ class TestDownsampleCondorExecutor(unittest.TestCase):
         from syndiff_pipeline.common.orchestration.launcher import launch_stage
 
         cfg = RunnerConfig(
-            stages=parse_stage_params({"downsample": {"executor": "condor"}}),
+            stages=parse_stage_params({"templates": {"executor": "condor"}}),
             workspace_root="/tmp/ws",
             data_root="/tmp/data",
         )
@@ -121,7 +121,7 @@ class TestDownsampleCondorExecutor(unittest.TestCase):
             desc = launch_stage(
                 ["python", "-m", "syndiff_pipeline.common.orchestration.run_stage"],
                 cfg=cfg,
-                stage="downsample",
+                stage="templates",
                 runs_root="/runs",
                 run_id="run_a",
                 target_label="s0020_c3_k3_2020ut",
