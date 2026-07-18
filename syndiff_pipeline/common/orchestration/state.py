@@ -22,6 +22,7 @@ SKIP_REASON_STREAM = "stream_mode"
 SKIP_REASON_ARTIFACTS = "artifacts_verified"
 SKIP_REASON_NOT_SELECTED = "not_selected"
 SKIP_REASON_SUPERSEDED = "superseded"
+SKIP_REASON_TRUSTED = "trusted_external"
 
 # Stage statuses (single, explicit state machine).
 STATUS_PENDING = "pending"
@@ -205,6 +206,91 @@ def artifact_verify_closure(
 def reopen_status_for_retry(stage: str, active_stages: Sequence[str]) -> str:
     """Selected stages re-execute (pending); closure upstream re-verifies (external)."""
     return STATUS_PENDING if stage in set(active_stages) else STATUS_EXTERNAL
+
+
+@dataclass(frozen=True)
+class RunDisplayContext:
+    """Batched stage/artifact state for status-grid formatting (no per-cell SQL)."""
+
+    rows: List[StageRunRow]
+    active_stages: List[str]
+    status_by_key: Dict[tuple[str, str], str]
+    row_by_key: Dict[tuple[str, str], StageRunRow]
+    external_complete: frozenset[tuple[str, str]]
+    skip_reasons: Dict[tuple[str, str], str]
+
+
+def deps_satisfied_from_map(
+    status_by_key: Dict[tuple[str, str], str],
+    target_label: str,
+    stage: str,
+    *,
+    stages=None,
+    spec: PipelineSpec | None = None,
+) -> bool:
+    """True iff every effective dependency is success/skipped (map lookup, no SQL)."""
+    deps = _pipeline_spec(spec).effective_stage_deps(stage, stages)
+    if not deps:
+        return True
+    return all(
+        status_by_key.get((target_label, dep)) in SATISFIED_STATUSES for dep in deps
+    )
+
+
+def artifact_verify_needed_from_context(
+    ctx: RunDisplayContext,
+    target_label: str,
+    stage: str,
+    active_stages: Sequence[str],
+    *,
+    spec: PipelineSpec | None = None,
+) -> bool:
+    """True if *stage* still needs on-disk artifact verification (context lookup)."""
+    pipeline = _pipeline_spec(spec)
+    active = set(active_stages)
+    if stage in active:
+        return False
+    closure = pipeline.artifact_verify_closure(active_stages)
+    if stage not in closure:
+        return False
+    status = ctx.status_by_key.get((target_label, stage))
+    if status is None or status in SATISFIED_STATUSES:
+        return False
+    direct_dependents = pipeline.direct_dependents(stage)
+    for dep in direct_dependents:
+        if dep not in closure:
+            continue
+        dep_status = ctx.status_by_key.get((target_label, dep))
+        if dep_status is not None and dep_status in SATISFIED_STATUSES:
+            return False
+    return True
+
+
+def stage_needs_artifact_verify_display_from_context(
+    ctx: RunDisplayContext,
+    target_label: str,
+    stage: str,
+    status: str,
+    active_stages: Sequence[str],
+    *,
+    spec: PipelineSpec | None = None,
+) -> bool:
+    """True if the status grid should show artifact verify queued (context lookup)."""
+    pipeline = _pipeline_spec(spec)
+    if status == STATUS_EXTERNAL:
+        return artifact_verify_needed_from_context(
+            ctx, target_label, stage, active_stages, spec=pipeline
+        )
+    if status == STATUS_PENDING and stage in active_stages:
+        return False
+    if status == STATUS_PENDING and stage not in set(active_stages):
+        return (
+            stage in pipeline.artifact_verify_closure(active_stages)
+            and artifact_verify_needed_from_context(
+                ctx, target_label, stage, active_stages, spec=pipeline
+            )
+        )
+    return False
 
 
 def stage_needs_artifact_verify_display(
@@ -1150,6 +1236,7 @@ class PipelineState:
                     SKIP_REASON_SUPERSEDED,
                     SKIP_REASON_STREAM,
                     SKIP_REASON_ARTIFACTS,
+                    SKIP_REASON_TRUSTED,
                 ):
                     continue
                 if row.status in (STATUS_SUCCESS, STATUS_FAILED):
@@ -1157,6 +1244,36 @@ class PipelineState:
                 self._clear_stage_skip_cache(run_id, label, stage)
                 self.mark_skipped(run_id, label, stage)
                 self.cache_skip_reason(run_id, label, stage, SKIP_REASON_SUPERSEDED)
+                count += 1
+        return count
+
+    def trust_external_artifacts(
+        self,
+        run_id: str,
+        targets: Sequence,
+        active_stages: Sequence[str],
+    ) -> int:
+        """Mark upstream external stages skipped without scanning on-disk artifacts.
+
+        Unsafe: assumes existing artifacts are complete. Used when
+        ``scheduler.skip_artifact_verify`` is enabled so the supervisor can
+        promote selected stages immediately.
+        """
+        active = set(active_stages)
+        closure = self.pipeline_spec.artifact_verify_closure(active)
+        count = 0
+        for t in targets:
+            if not getattr(t, "enabled", True):
+                continue
+            label = t.label()
+            for stage in self.pipeline_spec.stage_names:
+                if stage in active or stage not in closure:
+                    continue
+                row = self.get_stage_run(run_id, label, stage)
+                if row is None or row.status != STATUS_EXTERNAL:
+                    continue
+                self.mark_skipped(run_id, label, stage)
+                self.cache_skip_reason(run_id, label, stage, SKIP_REASON_TRUSTED)
                 count += 1
         return count
 
@@ -1317,6 +1434,57 @@ class PipelineState:
                 (run_id,),
             ).fetchall()
             return [_stage_run_from_row(r) for r in rows]
+
+    def load_run_display_context(self, run_id: str) -> RunDisplayContext:
+        """Batch-load stage rows and artifact caches for status-grid formatting.
+
+        Uses a single SQLite connection so CLI status avoids hundreds of NFS
+        round-trips from per-cell lookups.
+        """
+        with self._conn() as conn:
+            run_row = conn.execute(
+                "SELECT stages FROM runs WHERE run_id = ?", (run_id,)
+            ).fetchone()
+            raw_stages = (dict(run_row).get("stages") or "") if run_row else ""
+            selected = [s for s in str(raw_stages).split(",") if s]
+            active_stages = selected or list(self.pipeline_spec.stage_names)
+
+            stage_rows = conn.execute(
+                "SELECT * FROM stage_runs WHERE run_id = ? ORDER BY target_label, stage",
+                (run_id,),
+            ).fetchall()
+            rows = [_stage_run_from_row(r) for r in stage_rows]
+
+            art_rows = conn.execute(
+                "SELECT target_label, stage, artifact_type, path FROM artifacts "
+                "WHERE run_id = ? AND artifact_type IN (?, ?)",
+                (run_id, "external_check", "skip_reason"),
+            ).fetchall()
+
+        status_by_key: Dict[tuple[str, str], str] = {}
+        row_by_key: Dict[tuple[str, str], StageRunRow] = {}
+        for row in rows:
+            key = (row.target_label, row.stage)
+            status_by_key[key] = row.status
+            row_by_key[key] = row
+
+        external_complete: set[tuple[str, str]] = set()
+        skip_reasons: Dict[tuple[str, str], str] = {}
+        for art in art_rows:
+            key = (art["target_label"], art["stage"])
+            if art["artifact_type"] == "external_check" and art["path"] == "1":
+                external_complete.add(key)
+            elif art["artifact_type"] == "skip_reason" and art["path"]:
+                skip_reasons[key] = art["path"]
+
+        return RunDisplayContext(
+            rows=rows,
+            active_stages=active_stages,
+            status_by_key=status_by_key,
+            row_by_key=row_by_key,
+            external_complete=frozenset(external_complete),
+            skip_reasons=skip_reasons,
+        )
 
     def running_stage_runs(self, run_id: str | None = None) -> List[StageRunRow]:
         """Running stage runs.
