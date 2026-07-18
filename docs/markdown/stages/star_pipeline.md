@@ -72,7 +72,11 @@ Kernels are read from `{baseline.diffs}_kernels/` (e.g. `hp_d_kernels/{product_i
 
 - Host position: full-FFI pixels via reference FFI WCS (`resolve_host_full_ffi_xy`).
 - Stamp windows: **crop-local** pixels (same as diff stage).
-- Mini-template downsample: registration indices are **full-FFI**; `XMIN`/`YMIN` in mini-template FITS are crop-local.
+- Mini-template downsample: registration indices are **full-FFI native**;
+  `XMIN`/`YMIN` in mini-template FITS are crop-local **native**. When
+  `defaults.oversampling_factor F>1`, mini planes are HR with `OVERSAMP=F` and
+  stamp convolution downsamples to native — see
+  [oversampled templates §10](../oversampled_templates.md#10-star-branch).
 
 ## Prerequisites
 

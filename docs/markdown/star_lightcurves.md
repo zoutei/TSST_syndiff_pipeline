@@ -1,8 +1,8 @@
 # Host-star light curves (`syndiff star`)
 
-Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants.
+Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants (and therefore has no Hotpants `stamp_mode`).
 
-Configuration is separate from the transient pipeline: see [star_config.md](stages/star_config.md) and the technical deep-dive [star_pipeline.md](stages/star_pipeline.md).
+Configuration is separate from the transient pipeline: see [star_config.md](stages/star_config.md) and the technical deep-dive [star_pipeline.md](stages/star_pipeline.md). When the baseline templates were built at `oversampling_factor F>1`, set the same `defaults.oversampling_factor` in `star_config.yaml` — details in [oversampled templates §10](oversampled_templates.md#10-star-branch).
 
 ## Quick start
 

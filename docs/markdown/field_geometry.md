@@ -24,6 +24,9 @@
 13. [Not yet done](#not-yet-done)
 14. [Glossary](#glossary)
 
+Also see [oversampled templates](oversampled_templates.md) when combining field
+mode with `oversampling_factor F>1` (HR store ROI units vs native diff crops).
+
 ---
 
 ## What it is
@@ -323,11 +326,16 @@ Every template-consuming stage is field-aware; templates are assembled per
 
 | Stage | Field-aware |
 |-------|-------------|
-| `hotpants` | yes (on-demand loader, cached per group) |
-| `shared_mask` | yes (`ps1_min_hit_count>0` uses the assembled COUNT plane) |
-| `kernel_fit` / `convolved_templates` / `kernel_subtract` | yes (convolved products keyed by `group_id`) |
+| `hotpants` | yes (on-demand loader, cached per group); also OS-aware — see [oversampled templates](oversampled_templates.md) |
+| `shared_mask` | yes (`ps1_min_hit_count>0` uses the assembled COUNT plane; HR COUNT is block-summed to native) |
+| `kernel_fit` / `convolved_templates` / `kernel_subtract` | yes (convolved products keyed by `group_id`; OS crop + reconvolve when `F>1`) |
 | `epsf` / `centroids` / `sat_template` / `subtract` / `background` / `forced_photometry` | agnostic (consume diff/ePSF products) |
-| star (host-star LCs) | yes (per-skycell field shifts per `group_id`, deduped to local signatures) |
+| star (host-star LCs) | yes (per-skycell field shifts per `group_id`, deduped to local signatures; same `oversampling_factor` as templates) |
+
+**Field store units when `oversampling_factor F>1`:** sidecar `base_tess_shape` and
+`roi_bounds` are in **oversampled** pixels; diff crop bounds stay native and
+are converted as `native * F - roi_hr_origin` at assemble time. Event-crop
+template builds scale the native cluster ROI by `F` before writing the store.
 
 Assemble a full-FFI ("big") template for any FFI:
 `template_resolution.assemble_field_template_for_ffi(ctx, manifest, ffi_name)`.

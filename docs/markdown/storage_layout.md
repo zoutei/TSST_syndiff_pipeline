@@ -195,7 +195,9 @@ deployments.
 
 Diff imaging resolves templates from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (or an explicit `paths.template_dir` override). The `ws/templates` symlink is no longer created.
 
-With `geometry_mode: field`, templates live under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (sparse contribs + assemble by `group_id` at diff time).
+With `geometry_mode: field`, templates live under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (sparse contribs + assemble by `group_id` at diff time). When `N>1`, field `base_tess_shape` / `roi_bounds` are oversampled pixels; see [oversampled templates §9](oversampled_templates.md#9-field-mode--oversampling).
+
+Linear template FITS at `N>1` carry native `XMIN`/`XMAX`/`YMIN`/`YMAX` plus `OVERSAMP=N`; array planes are shape `(native_h·N, native_w·N)`. Diff crops stay native and are scaled at load time (`common/template_coverage.py`).
 
 `events/{event}/s_c_k/ws*/master/` is a **flat FITS mirror** for Condor/shared-FS access: every workspace-label `*.fits` appears as a basename symlink, plus `master/tess_ffi` → SCC `ffi/` when configured. It does **not** hold template FITS.
 

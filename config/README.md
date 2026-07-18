@@ -145,3 +145,13 @@ Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifact
 Every active `hotpants` stage in site and example diff configs sets **`write_kernel_solutions: true`**, which writes one `{product_id}_kernel.npz` per FFI under `ws/hp_d_kernels/`. The star pipeline reads these (plus `hp_c` convolved templates and `ks_b_s`/`ks_b` photometry background) and does **not** re-run Hotpants.
 
 For a workspace that already has `hp_d` but no kernels (e.g. `multi_hp_temp_calib` before backfill), run a one-time Hotpants-only backfill with [`diff_config_star_full_backfill.yaml`](diff_config_star_full_backfill.yaml) (`write_convolved: true` + `write_kernel_solutions: true`). See [docs/markdown/stages/star_pipeline.md](../docs/markdown/stages/star_pipeline.md).
+
+### Oversampling (`F`) and stamp modes
+
+Template `oversampling_factor` lives in `pipeline.yaml` (`stages.mapping` /
+`stages.templates`). Diff Hotpants accepts optional `oversample`,
+`stamp_mode` (`grid` \| `connected_regions`), `use_c_extension`, and
+`region_*` on the `kind: hotpants` stage. Star uses
+`defaults.oversampling_factor` in `star_config.yaml` (must match template
+`F`). Full parameter tables and recipes:
+[docs/markdown/oversampled_templates.md](../docs/markdown/oversampled_templates.md).

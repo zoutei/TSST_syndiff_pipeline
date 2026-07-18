@@ -6,6 +6,12 @@
 > store (`ws/field_templates`). `shared_mask`, `hotpants`, and the
 > `kernel_fit`/`convolved_templates`/`kernel_subtract` engine are all field-aware
 > (convolved products are keyed by `group_id`). See [field geometry](../field_geometry.md).
+>
+> **Oversampling / stamp modes:** templates may be built at
+> `oversampling_factor F>1` (HR arrays, native crop bounds). Hotpants accepts
+> `oversample`, `stamp_mode` (`grid` \| `connected_regions`), and `region_*`.
+> Full parameter tables and invariants:
+> [oversampled templates](../oversampled_templates.md).
 
 # Difference-Imaging (`diff`) Stage — Internal Pipeline Reference
 
@@ -66,9 +72,32 @@ Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 
 Builds the shared bitmask (Gaia magnitude bins, bright-star crosses, BSC, TESS straps, optional PS1 coverage from the reference template when `ps1_min_hit_count > 0`) and selects isolated Hotpants reference stars (mag 13.5–14.5 default). Writes `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`.
 
+When templates are oversampled (`OVERSAMP=F` or field OS store), the PS1
+`COUNT` plane is HR; syndiff **block-sums** each `F×F` block to native before
+comparing to `ps1_min_hit_count` so the mask stays science-shaped. See
+[oversampled templates §8](../oversampled_templates.md#8-shared-mask-and-ps1-count).
+
 ### `hotpants` (`stages/hotpants.py`)
 
 Per-FFI Hotpants: cropped science frame vs the PS1 template of that frame's WCS group. Runs in-memory through pyhotpants `Hotpants.run_pipeline()`; FITS written afterward.
+
+**Science crops are always native.** Template crops scale by `OVERSAMP` (or
+field OS) so an HR template of shape `science * F` is passed with
+`oversample=F` (inferred from shapes unless YAML sets `oversample` explicitly).
+`F>1` and `stamp_mode: connected_regions` force the pure-Python backend;
+`hp_force_convolve` must be `"t"`. Diffs / noise / mask / bkg outputs remain
+**native (LR)**.
+
+Optional YAML (beyond classical `hp_*` keys):
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `oversample` | inferred | Usually omit |
+| `use_c_extension` | auto | Forced off for `F>1` / connected regions |
+| `stamp_mode` | `grid` | `grid` \| `connected_regions` |
+| `region_*` | see guide | Only for `connected_regions` |
+
+Full tables: [oversampled templates §6](../oversampled_templates.md#6-hotpants-parameter-reference).
 
 Outputs (per YAML `output:` block): diffs `ws/{diffs}/tess{pid}_{diffs}.fits.gz` (PRIMARY + NOISE + MASK), optional convolved model, Hotpants background, and stamps. Production default (`config/diff_config.yaml`): `write_convolved: false`, `write_bkg: true`, `write_stamps: false`. Also appends Hotpants status columns to `syndiff_ffi_frames.csv`.
 
@@ -78,9 +107,15 @@ When `write_kernel_solutions: true`, per-frame kernel vectors are persisted as `
 
 Fits **one target-level kernel** on the minimum-background FFI: Hotpants pass 1 (`hp_bgo=3`) → photutils background removal → Hotpants pass 2 (`hp_bgo=0`), extracting the kernel solution. Writes `ws/{output}/kernel_r2.npz` (`kernel_solution`, `kernel_image`, `basis`, substamps) and `kernel_fit_meta.json`.
 
+Uses the same Hotpants OS / stamp-mode wiring as `hotpants`. In field mode the
+native crop is scaled by `F` before assembling from the HR field store.
+
 ### `convolved_templates` (`stages/convolved_templates.py`)
 
 Convolves each unique WCS-group template with the fixed `kernel_r2.npz` solution (`convolve_template_with_kernel_solution()`). Writes `convolved_template_dx{X.XXX}_dy{Y.YYY}.fits.gz` plus a `convolved_templates.csv` manifest (`group_id`, `group_dx`, `group_dy`, `template_path`, `convolved_path`).
+
+At `F>1`, reconvolve passes `oversample=F` and `science_shape=native`, scaling
+basis sigmas as `σ/F²` to match pyhotpants. Output convolved maps are native.
 
 ### `kernel_subtract` (`stages/kernel_subtract.py`)
 
