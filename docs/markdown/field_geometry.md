@@ -19,12 +19,12 @@ contrib store** and **assembles a template per `group_id` on demand**.
 
 ```yaml
 stages:
-  wcs_grouping:
+  wcs_grouping:                   # consumed by the `bind` stage (diff DAG); config key name unchanged
     geometry_mode: field          # opt in
     grouping_quantum_ps1_px: 1.0  # signature quantum
     crop_mode: target_box         # a crop keeps the contrib set to ROI skycells
     crop_box_size: 1024
-  downsample:
+  templates:                      # `templates` stage (legacy config key: `downsample`)
     geometry_mode: field
     apply_hybrid_exact: true      # L4a R=1 seam/rim Exact (else roll-only)
     hybrid_R: 1
@@ -33,26 +33,30 @@ stages:
     n_jobs: 32                    # hybrid workers cap at min(n_jobs, 24, CPUs)
 ```
 
-`mapping_dir` / `convolved_dir` can point downsample at a shared read-only mapping +
-convolved tree while writing `field_templates/` to an isolated `data_root`.
+`mapping_dir` / `convolved_dir` can point the `templates` stage at a shared read-only mapping +
+convolved tree while writing its SCC template store to an isolated `data_root`.
 
 ## Storage
 
 ```
-{data_root}/field_templates/sector_{S}_camera_{C}_ccd_{K}/[oversampling_{N}/]
+{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/  # scc_templates_dir(); N always nested, including N=1
   template_manifest.json          # completeness marker for the SCC store
   shift_schedule.npz              # per-skycell drift schedule
   template_group_shifts.parquet   # (group_id, skycell, sx_int, sy_int, ...)
   field_mode_assembly.json        # roi_bounds, base_tess_shape, zarr, ignore_mask
   contribs/skycell.{proj}.{cell}_sx{±N}_sy{±N}.npz
   exact_cache/…_exact.npz
-{event}/field_contrib_keys.json   # per-event crop-filtered key set (verify marker)
-{event}/ws/field_templates -> SCC store
+{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/field_contrib_keys.json   # per-event crop-filtered key set (verify marker)
 ```
 
+Resolved at diff time by `difference_imaging/support/template_resolution.py::resolve_template_dir()` — first via `data_root`+SCC (`scc_templates_dir()`), falling back to `sector`/`camera`/`ccd` read from the event's `event_job.json` when `data_root` isn't passed directly. `is_field_template_store()` recognizes the store by the presence of `template_manifest.json`. There is **no** `ws/field_templates` symlink anymore (legacy pre-cutover workspaces may still have one; `scripts/migrate_scc_event_layout.py` unlinks it during migration — see [scc_migration.md](scc_migration.md)).
+
 The store is **shared across events** on an SCC; force-rerun never deletes it, and
-each event records exactly the keys it required (crop-aware verify). See
-`storage_layout.md`.
+each event records exactly the keys it required (crop-aware verify). Legacy pre-cutover
+field-mode stores at `{data_root}/field_templates/sector_{S}_camera_{C}_ccd_{K}/` are
+archived to `{data_root}/scc/s{SSSS}_c{C}_k{K}/legacy/templates_legacy_pre_cutover/` by
+the migration script and are **not** read by current code. See
+[storage_layout.md](storage_layout.md).
 
 ## Engine support
 
