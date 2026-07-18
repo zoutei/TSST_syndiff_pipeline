@@ -1086,17 +1086,23 @@ def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_
         else:
             logging.info(f"Using local files from: {local_data_path}")
 
-    # Construct path to the skycell list CSV
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+    # Prefer SCC layout; fall back to legacy skycell_pixel_mapping tree.
     sector_str = f"sector_{sector:04d}"
     data_root = Path(zarr_output_dir).parent
-    skycell_list_csv = (
-        data_root
-        / "skycell_pixel_mapping"
-        / sector_str
-        / f"camera_{camera}"
-        / f"ccd_{ccd}"
-        / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list.csv"
+    skycell_list_csv = scc_mapping_master_skycells_csv(
+        data_root, sector, camera, ccd, oversampling_factor=1
     )
+    if not skycell_list_csv.exists():
+        skycell_list_csv = (
+            data_root
+            / "skycell_pixel_mapping"
+            / sector_str
+            / f"camera_{camera}"
+            / f"ccd_{ccd}"
+            / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list.csv"
+        )
 
     if not skycell_list_csv.exists():
         error_msg = f"Skycell list not found: {skycell_list_csv}"

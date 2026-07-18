@@ -33,6 +33,23 @@ _CONTRIB_RE = re.compile(
 )
 
 
+from syndiff_pipeline.common.scc_paths import scc_templates_dir
+
+
+def templates_root(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int = 1,
+) -> Path:
+    """Return the SCC templates store directory (does not create it)."""
+    return scc_templates_dir(
+        data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+    )
+
+
 def field_templates_root(
     data_root: str | Path,
     sector: int,
@@ -41,15 +58,10 @@ def field_templates_root(
     *,
     oversampling_factor: int = 1,
 ) -> Path:
-    """Return the SCC field-templates directory (does not create it)."""
-    root = (
-        Path(data_root).expanduser().resolve()
-        / "field_templates"
-        / f"sector_{int(sector):04d}_camera_{int(camera)}_ccd_{int(ccd)}"
+    """Legacy alias for :func:`templates_root`."""
+    return templates_root(
+        data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
     )
-    if int(oversampling_factor) > 1:
-        root = root / f"oversampling_{int(oversampling_factor)}"
-    return root
 
 
 def field_store_lock(store_root: str | Path) -> FileLock:
