@@ -15,14 +15,15 @@
 4. [Architecture (L0–L5)](#architecture-l0l5)
 5. [Drift measurement and smoothing](#drift-measurement-and-smoothing)
 6. [Hybrid recomputation (L4)](#hybrid-recomputation-l4)
-7. [WCS in Exact remapping](#wcs-in-exact-remapping)
-8. [Package modules](#package-modules)
-9. [Config knobs](#config-knobs)
-10. [Storage](#storage)
-11. [Engine support](#engine-support)
-12. [Performance caveats](#performance-caveats)
-13. [Not yet done](#not-yet-done)
-14. [Glossary](#glossary)
+7. [Cache keys and reuse](#cache-keys-and-reuse)
+8. [WCS in Exact remapping](#wcs-in-exact-remapping)
+9. [Package modules](#package-modules)
+10. [Config knobs](#config-knobs)
+11. [Storage](#storage)
+12. [Engine support](#engine-support)
+13. [Performance caveats](#performance-caveats)
+14. [Not yet done](#not-yet-done)
+15. [Glossary](#glossary)
 
 Also see [oversampled templates](oversampled_templates.md) when combining field
 mode with `oversampling_factor F>1` (HR store ROI units vs native diff crops).
@@ -231,6 +232,50 @@ and **which pixels** are scheduled.
 
 ---
 
+## Cache keys and reuse
+
+Two independent quanta appear in the shift-schedule / group handoff
+(`shift_schedule.assign_groups_from_schedule`, written into
+`template_groups.json`):
+
+| Knob | Controls | Typical value |
+|------|----------|---------------|
+| `grouping_quantum_ps1_px` | Full-chip signature → how many `group_id`s | `1.0` (config under `stages.wcs_grouping`) |
+| `cache_quantum_ps1_px` | Per-skycell quantized `(qx, qy)` recorded on group rows | Production field build currently passes `1.0` with `keying="absolute"` |
+
+**Grouping** decides template count. **Cache quantum** is the geometric-accuracy
+knob for per-skycell reuse of Exact patches: finer bins share less work but
+keep ownership closer when two frames land in the same integer roll bin from
+opposite fractional corners.
+
+### Why integer-only reuse is approximate
+
+Within one integer `(sx, sy)` bin, frames can sit at opposite rounding corners
+(`frac_dist` up to ~√2). Nearest-pixel TESS ownership then differs by roughly
+**~0.4% typical / ~1–2% worst** of PS1 pixels on measured s0020/c3/k2 GT sites
+(corr ≈ 0.97 with fractional separation). Integer-align rolling one Exact map
+toward another cuts raw disagree a lot, but a frac-dependent residual remains
+(~0.75% median after roll).
+
+A finer reuse key of the form
+
+```text
+(skycell, quantize(sx_f, q), quantize(sy_f, q))   with q ≈ 0.25 PS1 px
+```
+
+dropped worst-pair disagree to **median ~0.3%, max ~0.6%** on the same probe.
+`shift_schedule` still supports `keying="phase"` (quantize only the fractional
+part) vs `"absolute"`, and a non-1.0 `cache_quantum_ps1_px`, but the live
+`field_downsample` path currently keys Exact work at integer absolute shifts
+(`cache_quantum_ps1_px=1.0`, `keying="absolute"`) — i.e. the cheaper tier with
+the known ~1% worst-case ownership noise inside a bin. Treat that as an
+accuracy budget, not “exact” geometry reuse.
+
+As-built L4 Type I triggers still use the cache key
+`(skycell, sx_int, sy_int)` described above.
+
+---
+
 ## WCS in Exact remapping
 
 Exact patches call `process_skycell_pixel_mapping()` (`pancakes.py`):
@@ -285,6 +330,12 @@ stages:
     rebuild_field_store: false    # true overwrites existing contribs + exact cache
     n_jobs: 32                    # hybrid workers cap at min(n_jobs, 24, CPUs)
 ```
+
+`grouping_quantum_ps1_px` is the supported config knob for template count. Finer
+Exact-reuse quanta (`cache_quantum_ps1_px`, phase vs absolute keying) exist on
+the `shift_schedule` API and are recorded in `template_groups.json`, but the
+production field build currently hardcodes `cache_quantum_ps1_px=1.0` /
+`keying="absolute"` — see [Cache keys and reuse](#cache-keys-and-reuse).
 
 `mapping_dir` / `convolved_dir` can point the `templates` stage at a shared read-only
 mapping + convolved tree while writing its SCC template store to an isolated `data_root`.
@@ -377,4 +428,6 @@ Assemble a full-FFI ("big") template for any FFI:
 | Type II | Inter-skycell abutting-rim consistency (L4b / L4b-lite) |
 | Abutting border | Master 4-neighbour TESS pixels where skycell A meets B |
 | Signature / group | Full-chip vector of per-skycell integer shifts → `group_id` |
+| Grouping quantum | PS1-px quantum for signature / `group_id` count (`grouping_quantum_ps1_px`) |
+| Cache quantum | PS1-px quantum for per-skycell Exact-reuse `(qx, qy)` (`cache_quantum_ps1_px`) |
 | Realizing frame | First valid frame whose schedule matches `(skycell, sx, sy)` |

@@ -46,7 +46,9 @@ docs/markdown/
 ```
 
 **Improvement plans** live under [`.cursor/plans/`](../../.cursor/plans/).
-Field (distortion-aware) templates are implemented — see [field_geometry.md](field_geometry.md).
+Field (distortion-aware) templates are implemented — see [field_geometry.md](field_geometry.md)
+(including hybrid Exact cache-key / reuse notes). Historical design memos under
+`doc/` were retired into that guide.
 The historical target-star plan is superseded by the implemented `syndiff star` branch.
 
 The stage deep-dives originated in an earlier standalone research workflow and
