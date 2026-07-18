@@ -17,7 +17,7 @@ from astropy.io import fits
 
 from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
-from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, _ffi_filename_pattern
+from syndiff_pipeline.common.download import list_local_ffis, _ffi_filename_pattern
 from syndiff_pipeline.difference_imaging.stages import (
     background,
     convolved_templates as convolved_templates_runner,
@@ -351,16 +351,12 @@ def _load_template_handoff(
 
 
 def _cfg_ffi_leaf(cfg: SynDiffConfig) -> str:
-    """Cfg ffi leaf.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    
-    Returns
-    -------
-    str"""
-    return nested_ffi_dir(cfg.sector, cfg.camera, cfg.ccd, root=cfg.ffi_dir)
+    """Return the SCC ffi leaf directory from ``cfg.ffi_dir``.
+
+    After the SCC layout cutover, ``SynDiffConfig.ffi_dir`` is already the leaf
+    (``…/scc/sSSSS_cC_kK/ffi``), not the legacy ``tess_ffi`` root.
+    """
+    return str(cfg.ffi_dir)
 
 
 def _sorted_local_ffis(cfg: SynDiffConfig) -> list:
@@ -584,21 +580,10 @@ def _ensure_ref_stars_loaded(
 
 
 def _ensure_workspace_tree_symlinks(ctx: PipelineInvocationContext, cfg: SynDiffConfig) -> None:
-    """Ensure templates/ffis symlinks exist in the active workspace tree."""
+    """Ensure ffis symlink exists in the active workspace tree (templates are SCC-absolute)."""
     out = cfg.output_dir
     run_id = ctx.workspace_run_id
     os.makedirs(ctx.workspace_root_path(), exist_ok=True)
-
-    tmpl_link = event_templates_symlink_path(out, run_id=run_id)
-    if not tmpl_link.is_symlink():
-        canon = event_templates_symlink_path(out)
-        if canon.is_symlink():
-            try:
-                ensure_event_templates_symlink(out, canon.resolve(), run_id=run_id)
-            except OSError as exc:
-                log.warning("workspace templates symlink failed: %s", exc)
-        elif cfg.template_dir and os.path.isdir(cfg.template_dir):
-            ensure_event_templates_symlink(out, cfg.template_dir, run_id=run_id)
 
     ffis_link = event_ffis_symlink_path(out, run_id=run_id)
     if not ffis_link.is_symlink():

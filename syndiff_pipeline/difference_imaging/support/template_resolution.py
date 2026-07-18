@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from pathlib import Path
 
 import pandas as pd
 
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    event_templates_symlink_path,
-)
 from syndiff_pipeline.difference_imaging.stages.hotpants import (
     parse_syndiff_template_filename,
 )
@@ -66,51 +64,44 @@ def find_template_by_offset(
     return matches[0]
 
 
-def resolve_template_dir(output_dir: str, *, run_id: str | None = None) -> str:
-    """Resolve template dir.
-    
-    Parameters
-    ----------
-    output_dir : str
-    run_id : str | None, optional, default ``None``
-    
-    Returns
-    -------
-    str"""
-    import json
+def resolve_template_dir(
+    output_dir: str,
+    *,
+    run_id: str | None = None,
+    data_root: str | None = None,
+    sector: int | None = None,
+    camera: int | None = None,
+    ccd: int | None = None,
+    oversampling_factor: int = 1,
+) -> str:
+    """Resolve SCC templates directory for an event leaf."""
+    from syndiff_pipeline.common.scc_paths import scc_templates_dir
+    from syndiff_pipeline.common.wcs_grouping import _event_job_path
 
-    from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-        event_field_templates_symlink_path,
-    )
+    if data_root is not None and sector is not None and camera is not None and ccd is not None:
+        store = scc_templates_dir(
+            data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+        )
+        if store.is_dir():
+            return str(store.resolve())
 
-    # Only prefer the field store when the event is actually field mode, so a
-    # stale ws/field_templates symlink cannot hijack a linear event.
-    geometry_mode = "linear"
-    job = Path(output_dir) / "cluster_template_job.json"
+    job = Path(_event_job_path(output_dir))
     if job.is_file():
         try:
-            geometry_mode = str(
-                json.loads(job.read_text()).get("geometry_mode") or "linear"
-            ).lower()
+            payload = json.loads(job.read_text())
+            s, c, k = int(payload["sector"]), int(payload["camera"]), int(payload["ccd"])
+            if data_root:
+                store = scc_templates_dir(
+                    data_root, s, c, k, oversampling_factor=oversampling_factor
+                )
+                if store.is_dir():
+                    return str(store.resolve())
         except Exception:
-            geometry_mode = "linear"
-    if geometry_mode == "field":
-        field_link = event_field_templates_symlink_path(output_dir, run_id=run_id)
-        if field_link.is_symlink() or field_link.is_dir():
-            return str(field_link.resolve())
-    link = event_templates_symlink_path(output_dir, run_id=run_id)
-    if link.is_symlink() or link.is_dir():
-        return str(link.resolve())
-    ws_templates = Path(output_dir) / "ws" / "templates"
-    if ws_templates.exists():
-        return str(ws_templates.resolve())
-    event_root = Path(output_dir).expanduser().resolve()
-    for cand in sorted(event_root.glob("ws_*/templates")):
-        if cand.is_symlink() or cand.is_dir():
-            return str(cand.resolve())
+            pass
+
     raise FileNotFoundError(
-        f"No template directory found under {output_dir} "
-        "(expected ws/templates symlink or directory)."
+        f"No SCC templates store found for event leaf {output_dir!r}. "
+        "Run template pipeline templates stage first."
     )
 
 

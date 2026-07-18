@@ -20,7 +20,7 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     _gaia_catalog_path,
     freeze_target_diff_config,
     load_diff_site_policy,
-    resolve_event_template_dir,
+    resolve_scc_template_dir,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
 from syndiff_pipeline.difference_imaging.support.paths import (
@@ -230,7 +230,15 @@ def _enrich_star_target_coords(
                 )
         except (KeyError, ValueError):
             pass
-    event_dir = Path(workspace_root).expanduser() / "events" / target.label()
+    from syndiff_pipeline.common.scc_paths import event_scc_leaf
+
+    event_dir = event_scc_leaf(
+        workspace_root,
+        target.event_name(),
+        target.sector,
+        target.camera,
+        target.ccd,
+    )
     coords = _target_coords_from_event_diff_configs(event_dir)
     if coords is not None:
         ra, dec = coords
@@ -289,8 +297,8 @@ def load_event_context(
     )
 
     event_dir = str(Path(cfg.output_dir).expanduser().resolve())
-    cluster_job_path = str(Path(event_dir) / wcs_grouping.CLUSTER_TEMPLATE_JOB_FILENAME)
-    with Path(cluster_job_path).open(encoding="utf-8") as fh:
+    cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
+    with Path(wcs_grouping._event_job_path(event_dir)).open(encoding="utf-8") as fh:
         cluster_job = json.load(fh)
     crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)
 
@@ -300,10 +308,15 @@ def load_event_context(
             f"Missing reference_ffi_path in {cluster_job_path}"
         )
 
-    try:
-        templates_dir = resolve_event_template_dir(event_dir)
-    except FileNotFoundError:
-        templates_dir = str(cfg.template_dir)
+    templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
+    if not templates_dir or not Path(templates_dir).is_dir():
+        from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+            resolve_scc_template_dir,
+        )
+
+        templates_dir = str(
+            resolve_scc_template_dir(data_root, target, oversampling_factor=1)
+        )
 
     gaia_catalog_path = str(cfg.gaia_catalog)
     if not gaia_catalog_path:
