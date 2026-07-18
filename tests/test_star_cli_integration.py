@@ -158,7 +158,7 @@ class TestStarDiffClosureIntegration(unittest.TestCase):
                 },
             )
 
-            mini_flux, mini_xmin, mini_ymin = diff_runner.load_mini_template_flux_sum(
+            mini_flux, mini_xmin, mini_ymin, _os = diff_runner.load_mini_template_flux_sum(
                 mini_paths[0]
             )
             mini_full = diff_runner.place_mini_template_in_window(
