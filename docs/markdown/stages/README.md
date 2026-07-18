@@ -6,12 +6,13 @@ These documents describe the **science algorithms** behind each template pipelin
 
 | Document | Stage | Legacy script | Package module |
 |----------|-------|---------------|----------------|
+| [Field (distortion-aware) geometry](../field_geometry.md) | `templates` (`geometry_mode: field`) | — | `field_downsample.py`, `shift_schedule.py`, `hybrid_regmaps.py` |
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
 | [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
 | [WCS grouping](wcs_grouping.md) | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
-| [Multi-offset downsample](downsample_technical.md) | `downsample` | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
+| [Multi-offset downsample](downsample_technical.md) | `templates` (linear `geometry_mode`) | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
 | [Diff pipeline internals](diff_pipeline.md) | `diff` | — | `difference_imaging/orchestration/execute.py` + `difference_imaging/stages/` |
 | [Host-star light curves](../star_lightcurves.md) | `star` | — | `syndiff_pipeline/star/cli.py` |
 | [Star pipeline (technical)](star_pipeline.md) | `star` | — | `syndiff_pipeline/star/` |

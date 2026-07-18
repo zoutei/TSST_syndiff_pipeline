@@ -5,6 +5,11 @@
 
 The `wcs_grouping` stage measures how the science target's **pixel position drifts across the sector** (because each FFI carries its own WCS solution, including SIP distortion), smooths that drift in time, assigns each FFI to a **template offset group**, selects a **reference FFI**, and resolves the **image crop (ROI)**. Its single JSON handoff, `cluster_template_job.json`, drives `mapping`, `downsample`, and `diff`.
 
+With **`geometry_mode: field`**, target-anchored groups from this stage are supplemented
+by a separate per-skycell shift schedule built during the `templates` stage — see
+[field geometry](../field_geometry.md). The linear-mode flow below still applies for
+reference-FFI selection, crop bounds, and `syndiff_ffi_frames.csv`.
+
 This stage is fast (header-only FITS reads) and runs unpooled on the submit host.
 
 ---
@@ -120,7 +125,14 @@ All under `{workspace_root}/events/{target_label}/`:
 | `diff` | Crop bounds (unless `diff_config` overrides with `crop_mode`/explicit bounds); per-frame `group_id`/`group_dx`/`group_dy` from `syndiff_ffi_frames.csv` for template selection (`support/template_resolution.py`) |
 | `downsample` post-step | Reference WCS to project PS1 removed stars into crop-local coordinates (`events/{label}/ps1_removed_stars.csv`) |
 
-## 10. Known limitation: single-point drift
+## 10. Single-point drift (linear mode) and field-mode fix
+
+This section applies to **`geometry_mode: linear`** (the default). For
+**`geometry_mode: field`**, drift is measured at every skycell center and hybrid
+Exact patches fix seam/rim errors — see
+[field geometry](../field_geometry.md).
+
+### Linear-mode limitation
 
 Drift is measured **only at the target's sky position**. The applied template offset is then treated as constant across the chip: `downsample` converts the single `(group_dx, group_dy)` into a per-skycell PS1 shift via a WCS round-trip *at each skycell center*, but the TESS-pixel drift input itself is one number per frame.
 
@@ -129,9 +141,16 @@ In reality the drift field varies over the focal plane (distortion evolves throu
 - Templates are correctly positioned near the science target but degrade with distance from it.
 - Light curves of objects far from the target (e.g. `additional_forced_targets` at large offsets, or secondary science targets) see template misregistration residuals.
 
-Two properties of the existing design matter for any fix: (1) the expensive mapping stage does **not** need re-running for sub-pixel WCS changes — only the cheap per-skycell shift computation does; (2) the natural recomputation quantum is one PS1 pixel ≈ 0.0124 TESS px, matching `offset_threshold`. See `.cursor/plans/spatially_varying_wcs_templates.plan.md` for the planned spatially varying drift-field design.
+Two properties of the existing design matter for any fix: (1) the expensive mapping stage does **not** need re-running for sub-pixel WCS changes — only the cheap per-skycell shift computation does; (2) the natural recomputation quantum is one PS1 pixel ≈ 0.0124 TESS px, matching `offset_threshold`.
 
-**Workaround available today**: for an object away from the main target, re-run `wcs_grouping` with that object's RA/Dec as the target (new event label), then re-run only `downsample` (and `diff`). `mapping`, `ps1_download`, and `ps1_process` outputs are SCC-wide and are reused as-is.
+### Linear-mode workarounds
+
+- **Field mode (recommended for full-chip science):** set `geometry_mode: field` in
+  `stages.wcs_grouping` and `stages.templates`. See [field_geometry.md](../field_geometry.md).
+- **Re-target workaround:** for an object away from the main target, re-run `wcs_grouping`
+  with that object's RA/Dec as the target (new event label), then re-run only `templates`
+  (and `diff`). `mapping`, `ps1_download`, and `ps1_process` outputs are SCC-wide and
+  are reused as-is.
 
 ## 11. Configuration reference
 
@@ -148,5 +167,7 @@ Two properties of the existing design matter for any fix: (1) the expensive mapp
 | `x_min` … `y_max` | null | Explicit crop bounds (override presets) |
 | `x_left_dead`, `x_right_dead` | `44` | Dead columns excluded from usable area |
 | `y_edge_strip` | `30` | Top dead rows excluded from usable area |
+| `geometry_mode` | `"linear"` | `"linear"` or `"field"` — field uses per-skycell schedule in `templates`; see [field_geometry.md](../field_geometry.md) |
+| `grouping_quantum_ps1_px` | `1.0` | Field-mode signature quantum (PS1 px) |
 
 Reference selection thresholds (`earth_deg_min=45`, `moon_deg_min=25`, `max_smoothed_residual=0.05`) are function defaults in `common/wcs_grouping.py`, not YAML keys.

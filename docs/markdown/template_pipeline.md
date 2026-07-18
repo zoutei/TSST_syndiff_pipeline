@@ -626,12 +626,16 @@ Combines convolved Zarr data at multiple sub-pixel offsets into the SCC's shared
 - **`geometry_mode: field`** (default): builds a full-chip, event-independent sparse contrib store under the SCC — see [field_geometry.md](field_geometry.md). No `event_job.json` is required.
 - **`geometry_mode: linear`**: requires an event's `event_job.json` (from a completed `bind` run) on disk for crop bounds and per-transient offsets — the in-process dispatcher raises `FileNotFoundError` if it's missing (`template_creation/orchestration/dispatch.py::_execute_template_stage`).
 
-**Algorithm summary** (see [downsample technical reference](stages/downsample_technical.md)):
+**Algorithm summary**:
 
-1. Load TESS WCS + master registration map; filter skycells to the ROI (linear mode: from `event_job.json`; field mode: full chip).
-2. Precompute per-skycell PS1 pixel shifts for each `(dx, dy)` offset via WCS round-trip.
-3. Parallel joblib workers bin shifted PS1 flux into TESS pixels using registration FITS.
-4. Deduplicate overlapping skycell contributions; write one multi-extension FITS per offset (`FLUX_SUM`, `COUNT`, `MASK`) or the field sparse-contrib store.
+- **Linear mode** — see [downsample technical reference](stages/downsample_technical.md):
+
+  1. Load TESS WCS + master registration map; filter skycells to the ROI from `event_job.json`.
+  2. Precompute per-skycell PS1 pixel shifts for each `(dx, dy)` offset via WCS round-trip.
+  3. Parallel joblib workers bin shifted PS1 flux into TESS pixels using registration FITS.
+  4. Deduplicate overlapping skycell contributions; write one multi-extension FITS per offset.
+
+- **Field mode** — see [field geometry](field_geometry.md): build per-skycell shift schedule (L2/L3), hybrid roll+Exact assignment per `(skycell, sx, sy)` (L4a/L4b-lite), cache sparse contribs, assemble per `group_id` on demand (L5). No per-event ROI at build time.
 
 Default production offsets (linear mode) are the calibrated dither list from the standalone script (10 pairs); `bind`'s WCS grouping supplies the subset needed for each transient's template groups.
 

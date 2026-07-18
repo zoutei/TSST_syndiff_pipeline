@@ -10,6 +10,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, five-stage template DAG + two-stage diff DAG (`bind`→`diff`), independent star branch, Condor, config, workspace layout |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
+| [Field (distortion-aware) geometry](field_geometry.md) | Users / maintainers | `geometry_mode: field` — per-skycell drift, hybrid Exact, SCC contrib store |
 | [SCC + nested-event layout migration](scc_migration.md) | Ops | One-time migration script: legacy layout → SCC + nested-event layout |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
 | [Cluster smoke checklist](cluster_smoke_checklist.md) | Ops | Manual validation on HTCondor + NFS after setup |
@@ -27,6 +28,7 @@ docs/markdown/
 ├── template_pipeline.md          ← orchestration, scheduler, Condor, config, run lifecycle
 ├── syndiff_cli.md                ← CLI noun/verb reference
 ├── storage_layout.md             ← SCC + nested-event on-disk layout
+├── field_geometry.md             ← distortion-aware templates (geometry_mode: field)
 ├── scc_migration.md              ← legacy → SCC + nested-event migration script
 └── stages/
     ├── README.md                 ← index + script/module mapping
@@ -44,8 +46,8 @@ docs/markdown/
 ```
 
 **Improvement plans** live under [`.cursor/plans/`](../../.cursor/plans/).
-The spatially varying WCS template plan remains a design; the historical
-target-star plan is superseded by the implemented `syndiff star` branch.
+Field (distortion-aware) templates are implemented — see [field_geometry.md](field_geometry.md).
+The historical target-star plan is superseded by the implemented `syndiff star` branch.
 
 The stage deep-dives originated in an earlier standalone research workflow and
 are vendored here so this repository is self-contained.
