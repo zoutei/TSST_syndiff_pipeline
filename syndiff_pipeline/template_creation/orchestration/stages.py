@@ -59,11 +59,11 @@ def _condor_resources_for_ps1_process(cfg):
     )
 
 
-def _condor_resources_for_downsample(cfg):
-    """Condor resources for downsample."""
+def _condor_resources_for_templates(cfg):
+    """Condor resources for templates (formerly downsample)."""
     from syndiff_pipeline.common.orchestration import condor
 
-    params = cfg.stages.downsample
+    params = cfg.stages.templates
     disk_mb = getattr(params, "condor_request_disk", None)
     request_disk_kb = None if disk_mb is None else int(disk_mb) * 1024
     return condor.CondorResourceRequest(
@@ -201,11 +201,10 @@ def _make_template_stage(
 
 TEMPLATE_STAGES: tuple[StageSpec, ...] = (
     _make_template_stage("tess_ffi_download", "tess_dl", (), pool="network"),
-    _make_template_stage("wcs_grouping", "wcs", ("tess_ffi_download",)),
     _make_template_stage(
         "mapping",
         "map",
-        ("wcs_grouping",),
+        ("tess_ffi_download",),
         pool="mapping",
         default_executor="condor",
         condor_resources=_condor_resources_for_mapping,
@@ -221,11 +220,11 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
         condor_resources=_condor_resources_for_ps1_process,
     ),
     _make_template_stage(
-        "downsample",
-        "down",
-        ("wcs_grouping", "mapping", "ps1_process"),
+        "templates",
+        "tmpl",
+        ("mapping", "ps1_process"),
         pool="cpu_light",
-        condor_resources=_condor_resources_for_downsample,
+        condor_resources=_condor_resources_for_templates,
     ),
 )
 

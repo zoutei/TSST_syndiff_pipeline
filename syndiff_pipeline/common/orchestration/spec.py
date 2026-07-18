@@ -11,10 +11,17 @@ ManifestTuple = Optional[Tuple[int, int, List[str], Optional[dict]]]
 DIFF_VERIFY_UPSTREAM = frozenset(
     {
         "tess_ffi_download",
-        "wcs_grouping",
-        "downsample",
+        "templates",
     }
 )
+
+# Legacy stage names accepted by resolve_stage_name.
+_STAGE_LEGACY_ALIASES: dict[str, str] = {
+    "downsample": "templates",
+    "down": "templates",
+    "wcs": "bind",
+    "wcs_grouping": "bind",
+}
 
 
 @dataclass
@@ -82,8 +89,8 @@ class StageSpec:
                 return stages.diff.executor
             if self.name == "star":
                 return stages.star.executor
-            if self.name == "downsample":
-                return stages.downsample.executor
+            if self.name == "templates":
+                return stages.templates.executor
         return self.default_executor
 
 
@@ -166,6 +173,9 @@ class PipelineSpec:
         short_to_full = {spec.short_name: spec.name for spec in self.stages}
         if raw in short_to_full:
             return short_to_full[raw]
+        legacy = _STAGE_LEGACY_ALIASES.get(raw)
+        if legacy and legacy in self.stage_names:
+            return legacy
         full_names = ", ".join(self.stage_names)
         short_names = ", ".join(sorted(short_to_full))
         raise ValueError(
@@ -285,7 +295,7 @@ class PipelineSpec:
     def artifact_verify_closure(self, active_stages: Sequence[str]) -> frozenset[str]:
         """Stages eligible for artifact verify in a partial run.
 
-        Diff-only runs verify tess_dl, wcs handoff, and downsample — not the
+        Diff-only runs verify tess_dl, templates on disk, and bind handoff — not the
         full template chain (mapping, ps1_download, ps1_process).
         """
         active = set(active_stages)
