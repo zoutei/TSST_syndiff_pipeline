@@ -51,16 +51,17 @@ SIP_KEY_PREFIXES = ("A_", "B_", "AP_", "BP_")
 _MIN_KEYS = ("CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "CD1_1", "CD2_2")
 
 
+from syndiff_pipeline.common.scc_paths import scc_wcs_cache_csv, scc_wcs_cache_parquet
+
+
 def wcs_cache_path(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
     """Path to the shared per-SCC WCS-header-keyword cache parquet."""
-    return (
-        Path(data_root)
-        / "tess_ffi_wcs_cache"
-        / f"sector_{int(sector):04d}"
-        / f"camera_{int(camera)}"
-        / f"ccd_{int(ccd)}"
-        / "wcs_cache.parquet"
-    )
+    return scc_wcs_cache_parquet(data_root, sector, camera, ccd)
+
+
+def wcs_cache_csv_path(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
+    """Path to the CSV twin of the shared WCS cache."""
+    return scc_wcs_cache_csv(data_root, sector, camera, ccd)
 
 
 def _is_wcs_key(key: str) -> bool:
@@ -139,6 +140,8 @@ def load_or_build_wcs_cache(
                 combined = pd.concat([existing, new_df]) if not existing.empty else new_df
                 combined = combined[~combined.index.duplicated(keep="last")]
                 combined.reset_index().to_parquet(cache_path, index=False)
+                csv_path = cache_path.with_name("wcs_cache.csv")
+                combined.reset_index().to_csv(csv_path, index=False)
                 existing = combined
             log.info(
                 "wcs_header_cache: extracted %d/%d missing entries; cache now has %d rows (%s)",
