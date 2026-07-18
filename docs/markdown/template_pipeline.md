@@ -94,7 +94,7 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid**, o
 2. **`mapping`** (“pancakes”) — choose the SCC's mapping-epoch reference FFI via an SCC-scoped chooser (median-CRVAL anchor + Earth/Moon-angle cuts + smoothed-residual; see [`scc_reference_ffi.py`](../../syndiff_pipeline/template_creation/processing/scc_reference_ffi.py)), then map TESS pixels to PS1 skycells and download the Gaia catalog for that reference FFI.
 3. **`ps1_download`** — fetch PS1 skycell cutouts into a shared Zarr store.
 4. **`ps1_process`** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-5. **`templates`** (config key/legacy name: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/`.
+5. **`templates`** (config key/legacy name: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
 
 **Diff DAG** (`syndiff diff submit --targets targets.csv`; event `--targets` CSV with transient RA/Dec/name):
 
@@ -245,7 +245,7 @@ Diff DAG (`difference_imaging/orchestration/stages.py::DIFF_STAGES`) — depends
 bind
   │
   ▼
-diff  (also resolves templates from {data_root}/scc/.../templates/oversampling_{N}/)
+diff  (also resolves templates from {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/)
 ```
 
 `templates` depends on `mapping` (skycell map) and `ps1_process` (convolved Zarr) — both SCC-scoped, so `templates` has no dependency edge on any event's `bind` stage. With `geometry_mode: field` (default), `templates` builds a full-chip SCC-shared store with no event ROI at all. With `geometry_mode: linear`, the in-process dispatcher (`template_creation/orchestration/dispatch.py::_execute_template_stage`) additionally requires an event's `event_job.json` to exist on disk (from a prior `bind` run) to get crop bounds and offsets — that is a runtime file check, not a scheduler dependency. `diff` depends on `bind` (`DIFF_STAGES = (BIND_STAGE, DIFF_STAGE)`); `diff` also verifies `templates` artifacts exist on disk before launch (see `DIFF_VERIFY_UPSTREAM` below) — again file verification, not an SQLite DAG edge, since `templates` belongs to the separate template-run DAG.
@@ -298,7 +298,7 @@ cp config/deployment.yaml.example config/deployment.yaml
 **Deployment** (`deployment.yaml`): set at minimum:
 
 - `workspace_root` — orchestration workspace: `control/` (SQLite, daemon), `runs/`, and `events/{event_name}/{scc_label}/`.
-- `data_root` — SCC-scoped science data tree under `scc/s{SSSS}_c{C}_k{K}/` (FFIs, mapping caches, Zarr, template store).
+- `data_root` — SCC-scoped science data tree under `s{SSSS}/c{C}/k{K}/` (FFIs, mapping caches, Zarr, template store).
 - `gaia_username` / `gaia_password` — Gaia TAP+ credentials for mapping (optional for anonymous TAP).
 - Discord keys when notifications are enabled.
 
@@ -385,7 +385,7 @@ syndiff retry --run-id 20260607_210919
 ### 5. Use templates in SynDiff
 
 Template output lands in the SCC's shared store at
-`{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/` (`N` always
+`{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (`N` always
 nested, including `N=1`; override the root with `stages.templates.output_base`
 / legacy key `stages.downsample.output_base`). There is **no** `ws/templates`
 symlink anymore — the `diff` stage resolves `cfg.template_dir` directly from
@@ -508,7 +508,7 @@ Execute nodes run `common/orchestration/condor_wrapper.sh`, which activates the 
 
 **Module**: `syndiff_pipeline.common.download`
 
-Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` (`common/scc_paths.py::scc_ffi_dir()` → `{data_root}/scc/s{SSSS}_c{C}_k{K}/ffi/`, flat — no per-sector/camera/ccd nesting) using the shared download helpers.
+Downloads calibrated TESS FFIs for the target SCC into `ffi_dir` (`common/scc_paths.py::scc_ffi_dir()` → `{data_root}/s{SSSS}/c{C}/k{K}/ffi/`) using the shared download helpers.
 
 **Verification**: at least one FFI file present under the SCC's `ffi/` directory.
 
@@ -555,7 +555,7 @@ First resolves the SCC's **mapping-epoch reference FFI** (`resolve_scc_reference
 3. In parallel, project each skycell’s TESS pixel footprints onto the PS1 grid → per-skycell registration FITS.
 4. Compute padding skycells at projection edges for downstream convolution.
 
-**Outputs** (under `{data_root}/scc/s{SSSS}_c{C}_k{K}/mapping/oversampling_{N}/`, `N` always nested including `N=1`; `common/scc_paths.py::scc_mapping_dir()`):
+**Outputs** (under `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/`, `N` always nested including `N=1`; `common/scc_paths.py::scc_mapping_dir()`):
 
 ```text
 mapping/oversampling_{N}/
@@ -606,8 +606,8 @@ Reads PS1 Zarr + mapping CSV; runs the **modern sliding-window convolution pipel
 
 | Path | Description |
 |------|-------------|
-| `{data_root}/scc/s{SSSS}_c{C}_k{K}/convolved.zarr` (`scc_convolved_zarr()`) | Convolved skycell arrays (`*_data`, masks); shared across oversampling factors |
-| `{data_root}/scc/s{SSSS}_c{C}_k{K}/convolved_removed_stars.csv` (`scc_convolved_removed_stars_csv()`) | Optional removed-star records (when enabled) |
+| `{data_root}/s{SSSS}/c{C}/k{K}/convolved.zarr` (`scc_convolved_zarr()`) | Convolved skycell arrays (`*_data`, masks); shared across oversampling factors |
+| `{data_root}/s{SSSS}/c{C}/k{K}/convolved_removed_stars.csv` (`scc_convolved_removed_stars_csv()`) | Optional removed-star records (when enabled) |
 
 **Verification**: convolved Zarr contains the expected number of non-empty `*_data` arrays (derived from mapping CSV and `projections_limit`).
 
@@ -639,7 +639,7 @@ Combines convolved Zarr data at multiple sub-pixel offsets into the SCC's shared
 
 Default production offsets (linear mode) are the calibrated dither list from the standalone script (10 pairs); `bind`'s WCS grouping supplies the subset needed for each transient's template groups.
 
-**Outputs** (under `output_base`, default `{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/`; `common/scc_paths.py::scc_templates_dir()`, `N` always nested including `N=1`):
+**Outputs** (under `output_base`, default `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`; `common/scc_paths.py::scc_templates_dir()`, `N` always nested including `N=1`):
 
 ```text
 templates/oversampling_{N}/
@@ -663,7 +663,7 @@ Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → backgr
 
 **Outputs** (under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/`):
 
-- Frame manifest CSV and per-pipeline-label workspace directories (Hotpants diffs, photometry, etc.). Templates are resolved directly from `{data_root}/scc/.../templates/oversampling_{N}/` — there is no `ws/templates` symlink.
+- Frame manifest CSV and per-pipeline-label workspace directories (Hotpants diffs, photometry, etc.). Templates are resolved directly from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` — there is no `ws/templates` symlink.
 
 **Config** (`stages.diff` in `pipeline.yaml`):
 
@@ -712,7 +712,7 @@ Loaded by `template_creation/orchestration/runner_config.py`. On submit, a **fro
 | Key | Required | Description |
 |-----|----------|-------------|
 | `workspace_root` | yes | Workspace root: `control/`, `runs/`, `events/{event_name}/{scc_label}/` — see [storage_layout.md](storage_layout.md) |
-| `data_root` | yes | SCC-scoped science data tree under `scc/s{SSSS}_c{C}_k{K}/` (FFIs, mapping, Zarr, catalogs) |
+| `data_root` | yes | SCC-scoped science data tree under `s{SSSS}/c{C}/k{K}/` (FFIs, mapping, Zarr, catalogs) |
 | `ffi_dir` | no | Deployment-level fallback only (`RunnerConfig.ffi_dir`, default `{data_root}/tess_ffi`); per-target template resolution always derives `ffi_dir` from `common/scc_paths.py::scc_ffi_dir()` regardless of this key |
 | `gaia_username` / `gaia_password` | no | Gaia TAP+ credentials for mapping |
 | `discord_webhook_url` | no | Incoming webhook for notifications |
@@ -931,10 +931,10 @@ For each target, `runner_config.resolve_config()` derives (`ResolvedTargetConfig
 | Field | Path | Helper |
 |-------|------|--------|
 | `event_dir` | `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/` | `common/scc_paths.py::event_scc_leaf()` |
-| `ffi_dir` | `{data_root}/scc/s{SSSS}_c{C}_k{K}/ffi/` | `scc_ffi_dir()` |
-| `mapping_root` | `{data_root}/scc/s{SSSS}_c{C}_k{K}/mapping/oversampling_{N}/` | `scc_mapping_dir(..., oversampling_factor=N)` (`N` from `stages.mapping.oversampling_factor`) |
+| `ffi_dir` | `{data_root}/s{SSSS}/c{C}/k{K}/ffi/` | `scc_ffi_dir()` |
+| `mapping_root` | `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/` | `scc_mapping_dir(..., oversampling_factor=N)` (`N` from `stages.mapping.oversampling_factor`) |
 | `zarr_dir` | `{data_root}/ps1_skycells_zarr/` | plain `Path(data_root) / "ps1_skycells_zarr"` (unchanged by the refactor) |
-| `template_output_base` | `{data_root}/scc/s{SSSS}_c{C}_k{K}/templates/oversampling_{N}/` | `scc_templates_dir(..., oversampling_factor=N)` (`N` from `stages.templates`/`stages.downsample.oversampling_factor`) |
+| `template_output_base` | `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` | `scc_templates_dir(..., oversampling_factor=N)` (`N` from `stages.templates`/`stages.downsample.oversampling_factor`) |
 
 ---
 
@@ -1673,8 +1673,8 @@ You cannot combine `--force-rerun` with an existing `--run-id` (resubmit is reje
 
 When `ps1_process` runs with `--force-rerun`, it **deletes existing outputs first**:
 
-- `{data_root}/scc/s{SSSS}_c{C}_k{K}/convolved.zarr`
-- `{data_root}/scc/s{SSSS}_c{C}_k{K}/convolved_removed_stars.csv`
+- `{data_root}/s{SSSS}/c{C}/k{K}/convolved.zarr`
+- `{data_root}/s{SSSS}/c{C}/k{K}/convolved_removed_stars.csv`
 
 Deletion is logged in `ps1_process.log`. This ensures a clean Zarr rewrite (`ps1_process` opens Zarr in append mode otherwise).
 
@@ -1743,7 +1743,7 @@ Template building and diff imaging are **two separate DAGs, two separate submits
 └───────────────────────────────────┘   └───────────────────────────────────┘
          │                                              │
          ▼                                              ▼
-{data_root}/scc/s{SSSS}_c{C}_k{K}/         {workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/
+{data_root}/s{SSSS}/c{C}/k{K}/         {workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/
   templates/oversampling_{N}/                event_job.json, frames.csv (bind handoff)
   (shared template store)                    ws/ (diff workspaces + light curves;
                                               resolves templates directly from the

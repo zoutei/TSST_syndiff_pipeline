@@ -1,7 +1,7 @@
 """
 SCC and event workspace path conventions for the storage-first layout.
 
-SCC-scoped template artifacts live under ``{data_root}/scc/s{SSSS}/c{C}/k{K}/``.
+SCC-scoped template artifacts live under ``{data_root}/s{SSSS}/c{C}/k{K}/``.
 Event-scoped diff/star workspaces live under
 ``{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/``.
 
@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+# Legacy flat layout parent (``data_root/scc/s{SSSS}_c{C}_k{K}/``). Kept for
+# migration scripts that inventory pre-nested SCC trees; not used by scc_root().
 SCC_SUBDIR = "scc"
 EVENTS_SUBDIR = "events"
 
@@ -78,11 +80,12 @@ def scc_root(
     camera: int,
     ccd: int,
 ) -> Path:
-    """Root directory for one SCC under ``data_root``."""
+    """Root directory for one SCC under ``data_root``: ``s{SSSS}/c{C}/k{K}/``."""
     return (
         Path(data_root).expanduser()
-        / SCC_SUBDIR
-        / scc_label(sector, camera, ccd)
+        / f"s{int(sector):04d}"
+        / f"c{int(camera)}"
+        / f"k{int(ccd)}"
     )
 
 

@@ -23,8 +23,8 @@ class TestWcsHeaderCachePaths(unittest.TestCase):
             csv = wcs_cache_csv_path(tmp, 20, 3, 3)
             self.assertEqual(pq, scc_wcs_cache_parquet(tmp, 20, 3, 3))
             self.assertEqual(csv, scc_wcs_cache_csv(tmp, 20, 3, 3))
-            self.assertTrue(str(pq).endswith("scc/s0020_c3_k3/wcs_cache.parquet"))
-            self.assertTrue(str(csv).endswith("scc/s0020_c3_k3/wcs_cache.csv"))
+            self.assertTrue(str(pq).endswith("s0020/c3/k3/wcs_cache.parquet"))
+            self.assertTrue(str(csv).endswith("s0020/c3/k3/wcs_cache.csv"))
 
 
 if __name__ == "__main__":

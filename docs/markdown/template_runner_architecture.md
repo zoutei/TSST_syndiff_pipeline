@@ -334,7 +334,7 @@ tess_ffi_download → mapping → ps1_download → ps1_process ─┐
                         └───────────────────────────────────┴──▶ templates
 
 Diff DAG:
-bind → diff   (diff also resolves templates from data_root/scc/.../templates/ on disk)
+bind → diff   (diff also resolves templates from data_root/s{SSSS}/c{C}/k{K}/templates/ on disk)
 ```
 
 Stage metadata (deps, pools, executors, verify hooks) lives in `StageSpec` registries: `template_creation/orchestration/stages.py` (`TEMPLATE_STAGES`, five stages) and `difference_imaging/orchestration/stages.py` (`DIFF_STAGES = (BIND_STAGE, DIFF_STAGE)`; `diff` depends on `bind`). `state.py` reads the composed spec instead of module-level `STAGE_DEPS`.

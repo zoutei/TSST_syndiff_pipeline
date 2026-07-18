@@ -108,14 +108,12 @@ class TestForceRerun(unittest.TestCase):
             data_root = Path(tmp) / "data"
             convolved = (
                 data_root
-                / "scc"
-                / "s0015_c1_k4"
+                / "s0015" / "c1" / "k4"
                 / "convolved.zarr"
             )
             csv_path = (
                 data_root
-                / "scc"
-                / "s0015_c1_k4"
+                / "s0015" / "c1" / "k4"
                 / "convolved_removed_stars.csv"
             )
             convolved.mkdir(parents=True)

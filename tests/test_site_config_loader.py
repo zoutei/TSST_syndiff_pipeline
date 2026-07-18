@@ -105,14 +105,13 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertIn("events", cfg.output_dir)
         self.assertIn("2020ut", cfg.output_dir)
         self.assertIn("s0020_c3_k3", cfg.output_dir)
-        self.assertEqual(cfg.ffi_dir, str((self.data / "scc" / "s0020_c3_k3" / "ffi").resolve()))
+        self.assertEqual(cfg.ffi_dir, str((self.data / "s0020" / "c3" / "k3" / "ffi").resolve()))
         self.assertEqual(
             cfg.gaia_catalog,
             str(
                 (
                     self.data
-                    / "scc"
-                    / "s0020_c3_k3"
+                    / "s0020" / "c3" / "k3"
                     / "catalogs"
                     / "gaia_catalog_s0020_3_3.csv"
                 ).resolve()
@@ -158,7 +157,7 @@ class TestSiteConfigLoader(unittest.TestCase):
             camera=target.camera,
             ccd=target.ccd,
         )
-        self.assertTrue(resolved.endswith("scc/s0020_c3_k3/templates/oversampling_1"))
+        self.assertTrue(resolved.endswith("s0020/c3/k3/templates/oversampling_1"))
 
     def test_resolve_event_template_dir_missing_raises(self):
         target = _target()
