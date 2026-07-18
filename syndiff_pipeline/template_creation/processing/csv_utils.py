@@ -170,7 +170,19 @@ def find_csv_file(data_root: str, sector: int, camera: int, ccd: int) -> str:
     """
     import os
 
-    # Use the correct CSV file pattern
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+    csv_path = str(
+        scc_mapping_master_skycells_csv(
+            data_root, sector, camera, ccd, oversampling_factor=1
+        )
+    )
+
+    if os.path.exists(csv_path):
+        logger.info(f"[CSV] Found CSV file: {csv_path}")
+        return csv_path
+
+    # Legacy layout fallback
     sector_str = f"sector_{sector:04d}"
     csv_path = f"{data_root}/skycell_pixel_mapping/{sector_str}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list.csv"
 

@@ -1271,14 +1271,24 @@ def main(
         output_base = Path(output_base)
 
     # Generate paths based on parameters
-    if oversampling_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{oversampling_factor}"
-
+    # mapping_root from resolve_config is already the SCC oversampling leaf.
     suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
-    SKYCELL_CSV_PATH = mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    csv_flat = mapping_root / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    csv_nested = mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    if oversampling_factor > 1 and not csv_flat.is_file() and not csv_nested.is_file():
+        # Legacy: oversampling nest outside sector tree
+        alt_root = mapping_root / f"oversampling_{oversampling_factor}"
+        csv_flat = alt_root / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+        csv_nested = alt_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+        if csv_flat.is_file() or csv_nested.is_file():
+            mapping_root = alt_root
+    SKYCELL_CSV_PATH = csv_flat if csv_flat.is_file() or not csv_nested.is_file() else csv_nested
     CONVOLVED_DATA_PATH = Path(convolved_dir)
-    REG_FILES_PATTERN = str(mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/*.fits.gz")
-    REG_MASTER_FILES_PATH = str(mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz")
+    leaf = SKYCELL_CSV_PATH.parent
+    REG_FILES_PATTERN = str(leaf / "*.fits.gz")
+    REG_MASTER_FILES_PATH = str(
+        leaf / f"tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz"
+    )
     OUTPUT_DIR = output_base / f"sector{sector:04d}_camera{camera}_ccd{ccd}"
 
     # Processing parameters - lower n_jobs / skycells_per_batch for full-FFI runs

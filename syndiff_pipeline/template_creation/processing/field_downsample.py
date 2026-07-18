@@ -19,12 +19,17 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.common.wcs_grouping import (
+    FRAMES_CSV_BASENAME,
+    LEGACY_FRAMES_CSV_BASENAME,
+    _frames_csv_path,
+)
 from syndiff_pipeline.template_creation.processing.field_templates import (
     FieldManifest,
     assemble_group_from_contribs,
     contrib_path,
     field_store_lock,
-    field_templates_root,
+    templates_root,
     verify_field_store,
     write_contrib,
     write_template_manifest,
@@ -72,6 +77,96 @@ def _skycell_csv_path(
     return scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
 
 
+def _build_shift_schedule_for_scc(
+    *,
+    store_root: Path,
+    data_root: Path,
+    mapping_root: Path,
+    ffi_dir: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    ref_ffi_path: str | Path,
+    oversampling_factor: int = 1,
+) -> ShiftSchedule:
+    """Build ``shift_schedule.npz`` from all SCC FFIs (no event handoff)."""
+    from syndiff_pipeline.common.download import list_local_ffis
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+    from syndiff_pipeline.common.wcs_header_cache import (
+        load_or_build_wcs_cache,
+        wcs_cache_path,
+        wcs_from_cached_row,
+    )
+    from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
+        RELEVANT_WCS_KEYS,
+        load_tess_wcs,
+    )
+    from syndiff_pipeline.template_creation.processing.shift_schedule import (
+        build_skycell_shift_schedule,
+    )
+
+    ref_path = Path(ref_ffi_path).expanduser()
+    if not ref_path.is_file():
+        raise FileNotFoundError(f"reference_ffi_path missing: {ref_path}")
+    ref_wcs, _ = load_tess_wcs(ref_path)
+
+    csv_path = _skycell_csv_path(
+        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+    )
+    if not csv_path.is_file():
+        raise FileNotFoundError(f"skycell catalog missing: {csv_path}")
+    usecols = ["NAME", "RA", "DEC"] + RELEVANT_WCS_KEYS
+    skycell_df = pd.read_csv(csv_path, usecols=usecols)
+
+    paths = sorted(list_local_ffis(str(ffi_dir), sector, camera, ccd))
+    if not paths:
+        raise FileNotFoundError(f"No FFIs under {ffi_dir!r}")
+
+    cache = load_or_build_wcs_cache(
+        paths,
+        wcs_cache_path(data_root, sector, camera, ccd),
+        open_fits=open_fits_memmap,
+    )
+    frame_wcs: list[tuple[str, Any]] = []
+    btjd_list: list[float] = []
+    for p in paths:
+        name = Path(p).name
+        if name in cache.index:
+            try:
+                frame_wcs.append((name, wcs_from_cached_row(cache.loc[name])))
+            except Exception as exc:
+                log.warning("WCS reconstruct failed for %s: %s", name, exc)
+                frame_wcs.append((name, None))
+        else:
+            frame_wcs.append((name, None))
+        row = cache.loc[name] if name in cache.index else None
+        if row is not None and "DATE-OBS" in row.index and pd.notna(row["DATE-OBS"]):
+            try:
+                from astropy.time import Time
+
+                btjd_list.append(float(Time(str(row["DATE-OBS"]), format="isot", scale="utc").btjd))
+            except Exception:
+                btjd_list.append(float("nan"))
+        else:
+            btjd_list.append(float("nan"))
+
+    btjd = np.asarray(btjd_list, dtype=np.float64)
+    schedule = build_skycell_shift_schedule(
+        frame_wcs, skycell_df, ref_wcs, btjd=btjd
+    )
+    schedule.meta = dict(schedule.meta or {})
+    schedule.meta["source"] = "built_from_scc_ffis"
+    schedule.meta["reference_ffi"] = str(ref_path.resolve())
+    with field_store_lock(store_root):
+        schedule.save(store_root / "shift_schedule.npz")
+    log.info(
+        "Built SCC shift_schedule.npz (%d frames × %d skycells)",
+        schedule.sx_int.shape[0],
+        schedule.sx_int.shape[1],
+    )
+    return schedule
+
+
 def _build_shift_schedule_for_event(
     *,
     event_dir: Path,
@@ -98,14 +193,16 @@ def _build_shift_schedule_for_event(
         build_skycell_shift_schedule,
     )
 
-    frames_path = event_dir / "syndiff_ffi_frames.csv"
+    frames_path = Path(_frames_csv_path(event_dir))
     if not frames_path.is_file():
         raise FileNotFoundError(f"Cannot build shift schedule without {frames_path}")
     frames_df = pd.read_csv(frames_path)
     if "path" not in frames_df.columns:
         raise KeyError(f"{frames_path} missing 'path' column")
 
-    job_path = event_dir / "cluster_template_job.json"
+    from syndiff_pipeline.common.wcs_grouping import _event_job_path
+
+    job_path = Path(_event_job_path(event_dir))
     if not job_path.is_file():
         raise FileNotFoundError(f"Cannot build shift schedule without {job_path}")
     job = json.loads(job_path.read_text())
@@ -176,10 +273,27 @@ def _ensure_shift_schedule(
     camera: int,
     ccd: int,
     oversampling_factor: int = 1,
+    ffi_dir: str | Path | None = None,
+    ref_ffi_path: str | Path | None = None,
+    scc_only: bool = False,
 ) -> ShiftSchedule:
     existing = _load_or_copy_shift_schedule(event_dir, store_root)
     if existing is not None:
         return existing
+    if scc_only or ref_ffi_path is not None:
+        if ref_ffi_path is None or ffi_dir is None:
+            raise ValueError("SCC shift schedule requires ref_ffi_path and ffi_dir")
+        return _build_shift_schedule_for_scc(
+            store_root=store_root,
+            data_root=data_root,
+            mapping_root=mapping_root,
+            ffi_dir=ffi_dir or "",
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            ref_ffi_path=ref_ffi_path,
+            oversampling_factor=oversampling_factor,
+        )
     return _build_shift_schedule_for_event(
         event_dir=event_dir,
         store_root=store_root,
@@ -193,7 +307,7 @@ def _ensure_shift_schedule(
 
 
 def _update_frames_group_ids(event_dir: Path, group_id_per_frame: np.ndarray) -> None:
-    frames_path = event_dir / "syndiff_ffi_frames.csv"
+    frames_path = Path(_frames_csv_path(event_dir))
     frames = pd.read_csv(frames_path)
     n = min(len(frames), len(group_id_per_frame))
     if "group_id" not in frames.columns:
@@ -214,17 +328,32 @@ def _mapping_scc_dir(
     *,
     oversampling_factor: int = 1,
 ) -> Path:
-    """Resolve the SCC mapping directory for the requested oversampling."""
+    """Resolve the SCC mapping directory for the requested oversampling.
+
+    Post-migration ``mapping_root`` is already the flat oversampling leaf
+    (``…/mapping/oversampling_{N}/``). Legacy layouts nest ``sector_*/camera_*/ccd_*``.
+    """
     root = Path(mapping_root)
+    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
+    flat_master = (
+        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz"
+    )
+    if flat_master.is_file() or any(root.glob("tess_s*_master_pixels2skycells*.fits.gz")):
+        return root
     scc_tail = Path(f"sector_{int(sector):04d}") / f"camera_{int(camera)}" / f"ccd_{int(ccd)}"
     # Caller may already pass the SCC directory.
-    if root.name == f"ccd_{int(ccd)}" and (root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells.fits.gz").is_file():
+    if root.name == f"ccd_{int(ccd)}" and (
+        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells.fits.gz"
+    ).is_file():
         return root
     if root.name == f"ccd_{int(ccd)}" and any(root.glob("tess_s*_master_pixels2skycells*.fits.gz")):
         return root
-    if int(oversampling_factor) > 1:
+    if int(oversampling_factor) > 1 and root.name != f"oversampling_{int(oversampling_factor)}":
         root = root / f"oversampling_{int(oversampling_factor)}"
-    return root / scc_tail
+    nested = root / scc_tail
+    if nested.is_dir():
+        return nested
+    return root
 
 
 def _find_regmap(
@@ -483,6 +612,9 @@ def run_field_downsample_scc(
     include_abutting_border_exact: bool = True,
     rebuild_field_store: bool = False,
     stage_regmaps_to_scratch: bool | None = None,
+    scc_only: bool = False,
+    ffi_dir: str | Path | None = None,
+    ref_ffi_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """
     Build/reuse the SCC field store and point the event at it.
@@ -524,7 +656,7 @@ def run_field_downsample_scc(
     event_dir = Path(event_dir)
     data_root = Path(data_root)
     mapping_root = Path(mapping_root)
-    store = Path(store_root) if store_root is not None else field_templates_root(
+    store = Path(store_root) if store_root is not None else templates_root(
         data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
     )
     store.mkdir(parents=True, exist_ok=True)
@@ -542,6 +674,9 @@ def run_field_downsample_scc(
         camera=camera,
         ccd=ccd,
         oversampling_factor=oversampling_factor,
+        ffi_dir=ffi_dir,
+        ref_ffi_path=ref_ffi_path,
+        scc_only=scc_only,
     )
     assignment = assign_groups_from_schedule(
         schedule,
@@ -556,26 +691,34 @@ def run_field_downsample_scc(
         grouping_quantum_ps1_px=grouping_quantum_ps1_px,
         cache_quantum_ps1_px=1.0,
     )
-    write_group_artifacts(
-        assignment,
-        event_dir,
-        geometry_mode="field",
-        grouping_quantum_ps1_px=grouping_quantum_ps1_px,
-        cache_quantum_ps1_px=1.0,
-    )
-    if update_frames_csv:
+    if not scc_only:
+        write_group_artifacts(
+            assignment,
+            event_dir,
+            geometry_mode="field",
+            grouping_quantum_ps1_px=grouping_quantum_ps1_px,
+            cache_quantum_ps1_px=1.0,
+        )
+    if update_frames_csv and not scc_only:
         _update_frames_group_ids(event_dir, assignment.group_id_per_frame)
 
     ignore_mask = 0
     for bit in ignore_mask_bits or [12]:
         ignore_mask |= 1 << int(bit)
 
-    zarr_path = Path(convolved_dir) / f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}.zarr"
+    zarr_path = Path(convolved_dir)
+    if zarr_path.suffix != ".zarr" or not zarr_path.name.endswith(".zarr"):
+        zarr_path = zarr_path / f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}.zarr"
     if not zarr_path.exists():
         alt = list(Path(convolved_dir).glob(f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}*.zarr"))
         if not alt:
-            raise FileNotFoundError(f"convolved zarr not found under {convolved_dir}")
-        zarr_path = alt[0]
+            from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
+
+            zarr_path = scc_convolved_zarr(data_root, sector, camera, ccd)
+            if not zarr_path.exists():
+                raise FileNotFoundError(f"convolved zarr not found: {zarr_path}")
+        else:
+            zarr_path = alt[0]
     zarr.open(str(zarr_path), mode="r")
 
     keys = {
