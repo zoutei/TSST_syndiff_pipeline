@@ -138,13 +138,38 @@ def run_convolved_templates(
     hp_fit = replace(hp, hp_bgo=0)
     work = os.path.join(convolved_ws_dir, "_kernel_conv_tmp")
     os.makedirs(work, exist_ok=True)
+    sci_shape = tuple(crop_bounds.get("shape") or ())
+    if len(sci_shape) != 2:
+        sci_shape = (
+            int(crop_bounds["y_max"]) - int(crop_bounds["y_min"]),
+            int(crop_bounds["x_max"]) - int(crop_bounds["x_min"]),
+        )
     hp_config = build_hotpants_config(
         hp_fit,
         work,
         work,
         "kernel_conv_stub",
         write_stamps=False,
+        sci_shape=sci_shape,
     )
+
+    def _convolve_crop(template_crop: np.ndarray) -> np.ndarray:
+        from syndiff_pipeline.difference_imaging.stages.hotpants import (
+            resolve_hotpants_oversample,
+        )
+
+        factor = resolve_hotpants_oversample(
+            sci_shape,
+            template_crop.shape,
+            getattr(hp, "oversample", None),
+        )
+        return convolve_template_with_kernel_solution(
+            template_crop,
+            kernel_solution,
+            hp_config,
+            oversample=factor,
+            science_shape=sci_shape if factor > 1 else None,
+        )
 
     os.makedirs(convolved_ws_dir, exist_ok=True)
 
@@ -188,9 +213,7 @@ def run_convolved_templates(
                 rows.append({**entry, "convolved_path": existing})
                 continue
             template_crop = loader(int(gid))
-            convolved = convolve_template_with_kernel_solution(
-                template_crop, kernel_solution, hp_config
-            )
+            convolved = _convolve_crop(template_crop)
             _write_image_fits(out_path, convolved, header=ref_header)
             rows.append({**entry, "convolved_path": out_path})
             log.info("Convolved field template group_id=%d -> %s", gid, out_path)
@@ -210,9 +233,7 @@ def run_convolved_templates(
                 continue
 
             template_crop = _load_template_cropped(tmpl_path, crop_bounds)
-            convolved = convolve_template_with_kernel_solution(
-                template_crop, kernel_solution, hp_config
-            )
+            convolved = _convolve_crop(template_crop)
             _write_image_fits(out_path, convolved, header=ref_header)
             rows.append({**entry, "convolved_path": out_path})
             log.info(

@@ -111,6 +111,50 @@ class TestFieldModeLoader(unittest.TestCase):
             ctx = maybe_load_field_mode_template_context(store, event)
             self.assertIsNotNone(ctx)
             self.assertEqual(ctx.base_tess_shape, (10, 12))
+            self.assertEqual(ctx.oversampling_factor, 1)
+
+    def test_loader_scales_native_crop_when_oversampled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = Path(tmp) / "store"
+            store.mkdir()
+            (store / "contribs").mkdir()
+            # HR full shape 20x24 = native 10x12 at F=2
+            ny, nx = 20, 24
+            # flat index in HR: y=3,x=5 -> 3*24+5 = 77, flux 8 count 2 -> mean 4
+            write_contrib(
+                store,
+                "skycell.1.1",
+                0,
+                0,
+                indices=np.array([77], dtype=np.int64),
+                flux_sum=np.array([8.0]),
+                count=np.array([2.0]),
+            )
+            shifts = pd.DataFrame(
+                {
+                    "group_id": np.array([0], dtype=np.int32),
+                    "skycell": ["skycell.1.1"],
+                    "sx_int": np.array([0], dtype=np.int16),
+                    "sy_int": np.array([0], dtype=np.int16),
+                    "qx": np.array([0.0], dtype=np.float32),
+                    "qy": np.array([0.0], dtype=np.float32),
+                    "cache_key": ["qx0"],
+                }
+            )
+            ctx = FieldModeTemplateContext(
+                store_root=str(store),
+                shifts_df=shifts,
+                base_tess_shape=(ny, nx),
+                template_roi_bounds=(0, 0, nx, ny),
+                oversampling_factor=2,
+            )
+            # native crop [0,4) x [0,3) -> HR [0,8) x [0,6)
+            loader = build_field_mode_template_loader(
+                ctx, {"x_min": 0, "x_max": 4, "y_min": 0, "y_max": 3}
+            )
+            arr = loader(0)
+            self.assertEqual(arr.shape, (6, 8))
+            self.assertAlmostEqual(float(arr[3, 5]), 4.0)
 
 
 if __name__ == "__main__":

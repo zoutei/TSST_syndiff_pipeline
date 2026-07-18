@@ -126,6 +126,18 @@ HOTPANTS_ALLOWED = frozenset(
         "write_bkg",
         "write_stamps",
         "write_kernel_solutions",
+        "oversample",
+        "use_c_extension",
+        "stamp_mode",
+        "region_weight",
+        "region_max_diameter",
+        "region_bisect_on_reject",
+        "region_min_npix",
+        "region_max_area",
+        "region_connectivity",
+        "region_rss",
+        "region_max_bisects",
+        "region_weight_cap",
     }
 )
 
@@ -329,6 +341,19 @@ class HotpantsParams:
     write_bkg: bool = True
     write_stamps: bool = True
     write_kernel_solutions: bool = False
+    # Oversampled templates / pure-Python stamp modes (pyhotpants >= 0.2).
+    oversample: Optional[int] = None  # None → infer from template vs science shapes
+    use_c_extension: Optional[bool] = None  # None → auto (False if OS>1 or connected)
+    stamp_mode: str = "grid"  # grid | connected_regions
+    region_weight: str = "npix"
+    region_max_diameter: float = 40.0
+    region_bisect_on_reject: bool = False
+    region_min_npix: Optional[int] = None
+    region_max_area: int = 0
+    region_connectivity: int = 8
+    region_rss: Optional[int] = None
+    region_max_bisects: int = 100
+    region_weight_cap: Optional[tuple] = None
 
 
 @dataclass
@@ -608,6 +633,27 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
     if "hotpants_n_jobs" in stage:
         v = stage["hotpants_n_jobs"]
         hp.hotpants_n_jobs = None if v is None else int(v)
+    if "oversample" in stage:
+        v = stage["oversample"]
+        hp.oversample = None if v is None else int(v)
+    if "use_c_extension" in stage:
+        v = stage["use_c_extension"]
+        hp.use_c_extension = None if v is None else bool(v)
+    stamp_mode = str(getattr(hp, "stamp_mode", "grid") or "grid").strip()
+    if stamp_mode not in ("grid", "connected_regions"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] hotpants.stamp_mode must be "
+            f"'grid' or 'connected_regions', got {stamp_mode!r}"
+        )
+    hp.stamp_mode = stamp_mode
+    if "region_weight_cap" in stage and stage["region_weight_cap"] is not None:
+        cap = stage["region_weight_cap"]
+        if not (isinstance(cap, (list, tuple)) and len(cap) == 2):
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] hotpants.region_weight_cap must be "
+                f"[lo, hi], got {cap!r}"
+            )
+        hp.region_weight_cap = (float(cap[0]), float(cap[1]))
     return hp
 
 

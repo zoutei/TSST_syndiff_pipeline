@@ -553,6 +553,7 @@ def build_hotpants_config(
     stamps_dir: Optional[str] = None,
     *,
     write_stamps: bool = True,
+    sci_shape: Optional[tuple[int, int]] = None,
 ):
     """Build hotpants config.
     
@@ -563,7 +564,10 @@ def build_hotpants_config(
     convolved_dir : str
     frame_stem : str
     stamps_dir : Optional[str], optional, default ``None``
-    write_stamps : bool, optional, default ``True``"""
+    write_stamps : bool, optional, default ``True``
+    sci_shape : Optional[tuple[int, int]], optional
+        Science (native) crop shape ``(ny, nx)`` for HotpantsConfig stamp layout.
+    """
     _, HotpantsConfig = _get_hotpants_classes()
 
     rkernel, sigma_gauss, deg_fixe, ngauss = _kernel_sigma_deg_for_basis(hp)
@@ -580,7 +584,7 @@ def build_hotpants_config(
             stamp_out_dir, f"{frame_stem}_stamps"
         )
 
-    hp_config = HotpantsConfig(
+    cfg_kwargs = dict(
         rkernel=int(kernel_halfwidth),
         ko=int(hp.hp_ko),
         bgo=int(hp.hp_bgo),
@@ -607,8 +611,28 @@ def build_hotpants_config(
         # Convolved model FITS written in-repo after run_pipeline (with cropped WCS).
         convolved_image_file=None,
         stamp_region_file=stamp_region_file,
+        stamp_mode=str(getattr(hp, "stamp_mode", "grid") or "grid"),
+        region_weight=str(getattr(hp, "region_weight", "npix") or "npix"),
+        region_max_diameter=float(getattr(hp, "region_max_diameter", 40.0)),
+        region_bisect_on_reject=bool(getattr(hp, "region_bisect_on_reject", False)),
+        region_max_area=int(getattr(hp, "region_max_area", 0) or 0),
+        region_connectivity=int(getattr(hp, "region_connectivity", 8) or 8),
+        region_max_bisects=int(getattr(hp, "region_max_bisects", 100) or 100),
     )
-    return hp_config
+    if sci_shape is not None:
+        cfg_kwargs["ny"] = int(sci_shape[0])
+        cfg_kwargs["nx"] = int(sci_shape[1])
+    region_min_npix = getattr(hp, "region_min_npix", None)
+    if region_min_npix is not None:
+        cfg_kwargs["region_min_npix"] = int(region_min_npix)
+    region_rss = getattr(hp, "region_rss", None)
+    if region_rss is not None:
+        cfg_kwargs["region_rss"] = int(region_rss)
+    region_weight_cap = getattr(hp, "region_weight_cap", None)
+    if region_weight_cap is not None:
+        cfg_kwargs["region_weight_cap"] = tuple(region_weight_cap)
+
+    return HotpantsConfig(**cfg_kwargs)
 
 
 def run_hotpants_frame(
@@ -620,6 +644,8 @@ def run_hotpants_frame(
     hp_config,
     *,
     collect_kernel_params: bool = True,
+    oversample: Optional[int] = None,
+    use_c_extension: Optional[bool] = None,
 ) -> dict:
     """Run Hotpants on in-memory template/science arrays."""
     Hotpants, _ = _get_hotpants_classes()
@@ -633,6 +659,27 @@ def run_hotpants_frame(
         "error_msg": "",
     }
     try:
+        factor = resolve_hotpants_oversample(
+            sci_array.shape, tmpl_array.shape, oversample
+        )
+        stamp_mode = str(getattr(hp_config, "stamp_mode", "grid") or "grid")
+        if factor > 1 and str(getattr(hp_config, "force_convolve", "t")) != "t":
+            raise ValueError(
+                "oversample>1 requires hp_force_convolve='t' (template convolution)"
+            )
+        if stamp_mode == "connected_regions":
+            if ref_stars_xy is None or len(np.asarray(ref_stars_xy)) == 0:
+                raise ValueError(
+                    "stamp_mode='connected_regions' requires a non-empty star_catalog"
+                )
+            use_c = False
+        elif factor > 1:
+            use_c = False
+        elif use_c_extension is None:
+            use_c = True
+        else:
+            use_c = bool(use_c_extension)
+
         hp = Hotpants(
             template_data=np.ascontiguousarray(tmpl_array, dtype=np.float64),
             image_data=np.ascontiguousarray(sci_array, dtype=np.float64),
@@ -643,6 +690,8 @@ def run_hotpants_frame(
             star_catalog=np.ascontiguousarray(ref_stars_xy, dtype=np.float64),
             config=hp_config,
             output_header=None,
+            use_c_extension=use_c,
+            oversample=factor,
         )
         res = hp.run_pipeline()
         result["diff"] = res.get("diff_image")
@@ -697,19 +746,15 @@ class TemplateCoverageError(Exception):
 
 
 def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
-    """Load template cropped.
-    
-    Parameters
-    ----------
-    tmpl_path : str
-    bounds : dict
-    
-    Returns
-    -------
-    np.ndarray"""
+    """Load template cropped to *bounds* (native FFI coords).
+
+    Oversampled templates (``OVERSAMP`` > 1) are sliced in high-res pixel space
+    while *bounds* remain base FFI coordinates.
+    """
     from syndiff_pipeline.common.template_coverage import (
         crop_bounds_subset_of_coverage,
         template_coverage_ffi_bounds,
+        template_crop_slices,
     )
 
     coverage = template_coverage_ffi_bounds(tmpl_path)
@@ -719,14 +764,49 @@ def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
             f"for {tmpl_path}"
         )
 
-    ox = coverage["x_min"]
-    oy = coverage["y_min"]
-    x0, x1 = bounds["x_min"] - ox, bounds["x_max"] - ox
-    y0, y1 = bounds["y_min"] - oy, bounds["y_max"] - oy
+    y_slice, x_slice = template_crop_slices(tmpl_path, bounds)
     with wcs_grouping.open_fits_memmap(tmpl_path) as hdul:
         if hdul[0].data is not None:
-            return hdul[0].data[y0:y1, x0:x1].astype(np.float64)
-        return hdul[1].data[y0:y1, x0:x1].astype(np.float64)
+            return hdul[0].data[y_slice, x_slice].astype(np.float64)
+        return hdul[1].data[y_slice, x_slice].astype(np.float64)
+
+
+def resolve_hotpants_oversample(
+    sci_shape: tuple[int, int],
+    tmpl_shape: tuple[int, int],
+    configured: int | None,
+) -> int:
+    """Resolve Hotpants ``oversample`` from config and array shapes."""
+    sci_ny, sci_nx = int(sci_shape[0]), int(sci_shape[1])
+    tmpl_ny, tmpl_nx = int(tmpl_shape[0]), int(tmpl_shape[1])
+    if configured is not None:
+        factor = int(configured)
+        if factor < 1:
+            raise ValueError(f"oversample must be >= 1, got {factor}")
+    elif (tmpl_ny, tmpl_nx) == (sci_ny, sci_nx):
+        factor = 1
+    elif tmpl_ny % sci_ny == 0 and tmpl_nx % sci_nx == 0:
+        fy = tmpl_ny // sci_ny
+        fx = tmpl_nx // sci_nx
+        if fy != fx:
+            raise ValueError(
+                f"Template shape {tmpl_shape} is not isotropic oversampling of "
+                f"science shape {sci_shape}"
+            )
+        factor = int(fy)
+    else:
+        raise ValueError(
+            f"Template shape {tmpl_shape} does not match science shape "
+            f"{sci_shape} (or an integer oversampling thereof)"
+        )
+
+    expected = (sci_ny * factor, sci_nx * factor)
+    if (tmpl_ny, tmpl_nx) != expected:
+        raise ValueError(
+            f"Template shape {tmpl_shape} != science {sci_shape} * oversample "
+            f"{factor} = {expected}"
+        )
+    return factor
 
 
 def _save_bkg_fits(
@@ -931,6 +1011,7 @@ def _process_one_frame(
         frame_stem=diff_stem,
         stamps_dir=dirs.stamps,
         write_stamps=hp.write_stamps,
+        sci_shape=sci_crop.shape,
     )
 
     result = run_hotpants_frame(
@@ -941,6 +1022,8 @@ def _process_one_frame(
         ref_stars_xy=ref_stars_xy,
         hp_config=hp_config,
         collect_kernel_params=True,
+        oversample=getattr(hp, "oversample", None),
+        use_c_extension=getattr(hp, "use_c_extension", None),
     )
 
     if result["success"]:
