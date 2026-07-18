@@ -92,7 +92,7 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                 "/t",
                 str(handoff / "runs"),
                 [target],
-                ["wcs_grouping"],
+                ["mapping"],
             )
 
             cfg_path = Path(tmp) / "config.yaml"
@@ -110,10 +110,10 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                 f"workspace_root: {handoff}\ndata_root: {handoff / 'data'}\n",
                 encoding="utf-8",
             )
-            targets_path = Path(tmp) / "targets.csv"
-            targets_path.write_text(
-                "sector,camera,ccd,target_ra,target_dec,target_name,enabled\n"
-                "22,3,3,228.0,52.0,2020dgc,true\n",
+            scc_path = Path(tmp) / "sccs.csv"
+            scc_path.write_text(
+                "sector,camera,ccd\n"
+                "22,3,3\n",
                 encoding="utf-8",
             )
 
@@ -123,16 +123,16 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                     "submit",
                     "--config",
                     str(cfg_path),
-                    "--targets",
-                    str(targets_path),
+                    "--scc",
+                    str(scc_path),
                     "--run-id",
                     "batch_a",
-                    "--stages",
-                    "wcs_grouping",
                 ]
             )
-            with mock.patch.object(
-                orch_cli, "load_runner_config", return_value=mock.Mock(
+            args.preset = "template"
+            with mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.runner_config.load_runner_config",
+                return_value=mock.Mock(
                     workspace_root=str(handoff),
                     runs_dir=lambda: str(handoff / "runs"),
                     state_db_path=str(db),
@@ -141,7 +141,7 @@ class TestSubmitRunIdPolicy(unittest.TestCase):
                         ps1_process=mock.Mock(ps1_source="zarr"),
                     ),
                     notifications=mock.Mock(enabled=False),
-                )
+                ),
             ), mock.patch.object(orch_cli, "ensure_daemon_running"), mock.patch.object(
                 orch_cli, "record_deployment_path"
             ):

@@ -17,40 +17,41 @@ from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STA
 
 class TestPipelineSpec(unittest.TestCase):
     def test_template_stage_count(self):
-        self.assertEqual(len(TEMPLATE_STAGES), 6)
+        self.assertEqual(len(TEMPLATE_STAGES), 5)
 
     def test_composed_stage_count_includes_diff(self):
-        self.assertEqual(len(STAGE_NAMES), 7)
-        self.assertEqual(STAGE_NAMES[-1], "diff")
+        self.assertEqual(len(STAGE_NAMES), 8)
+        self.assertIn("bind", STAGE_NAMES)
+        self.assertEqual(STAGE_NAMES[-1], "star")
 
     def test_template_stage_order(self):
         self.assertEqual(
             tuple(s.name for s in TEMPLATE_STAGES),
             (
                 "tess_ffi_download",
-                "wcs_grouping",
                 "mapping",
                 "ps1_download",
                 "ps1_process",
-                "downsample",
+                "templates",
             ),
         )
 
-    def test_downsample_deps(self):
+    def test_templates_deps(self):
         self.assertEqual(
-            STAGE_DEPS["downsample"],
-            ["wcs_grouping", "mapping", "ps1_process"],
+            STAGE_DEPS["templates"],
+            ["mapping", "ps1_process"],
         )
 
-    def test_diff_depends_on_downsample(self):
-        self.assertEqual(STAGE_DEPS["diff"], ["downsample"])
+    def test_diff_depends_on_bind(self):
+        self.assertEqual(STAGE_DEPS["diff"], ["bind"])
 
-    def test_wcs_grouping_unpooled(self):
-        self.assertNotIn("wcs_grouping", STAGE_POOL)
+    def test_bind_unpooled(self):
+        self.assertEqual(STAGE_POOL.get("bind"), "cpu_light")
 
     def test_short_names(self):
         self.assertEqual(STAGE_SHORT_NAMES["mapping"], "map")
         self.assertEqual(STAGE_SHORT_NAMES["ps1_process"], "ps1_pr")
+        self.assertEqual(STAGE_SHORT_NAMES["templates"], "tmpl")
 
     def test_ps1_process_stream_effective_deps(self):
         from syndiff_pipeline.template_creation.orchestration.stage_params import (
@@ -69,12 +70,11 @@ class TestPipelineSpec(unittest.TestCase):
         )
 
     def test_upstream_closure_for_partial_run(self):
-        closure = SYNDIFF_PIPELINE.run_stage_closure(["downsample"])
+        closure = SYNDIFF_PIPELINE.run_stage_closure(["templates"])
         self.assertEqual(
             closure,
             {
-                "downsample",
-                "wcs_grouping",
+                "templates",
                 "tess_ffi_download",
                 "mapping",
                 "ps1_process",
@@ -90,19 +90,20 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertNotIn("mapping", closure)
         self.assertNotIn("ps1_download", closure)
         self.assertNotIn("ps1_process", closure)
+        self.assertIn("templates", DIFF_VERIFY_UPSTREAM)
 
     def test_non_diff_run_uses_full_closure_for_verify(self):
-        closure = SYNDIFF_PIPELINE.artifact_verify_closure(["downsample"])
+        closure = SYNDIFF_PIPELINE.artifact_verify_closure(["templates"])
         self.assertEqual(
             closure,
-            SYNDIFF_PIPELINE.run_stage_closure(["downsample"]),
+            SYNDIFF_PIPELINE.run_stage_closure(["templates"]),
         )
 
     def test_downstream_from_mapping(self):
         downstream = SYNDIFF_PIPELINE.downstream_stages("mapping")
         self.assertEqual(
             downstream,
-            ["ps1_download", "ps1_process", "downsample", "diff"],
+            ["ps1_download", "ps1_process", "templates"],
         )
 
     def test_stages_in_pool(self):
@@ -134,9 +135,17 @@ class TestPipelineSpec(unittest.TestCase):
     def test_direct_dependents(self):
         self.assertEqual(
             SYNDIFF_PIPELINE.direct_dependents("mapping"),
-            ["ps1_download", "downsample"],
+            ["ps1_download", "templates"],
         )
 
     def test_pipeline_spec_view(self):
         other = PipelineSpec(name="other", stages=TEMPLATE_STAGES)
         self.assertEqual(other.stage_names, tuple(s.name for s in TEMPLATE_STAGES))
+
+    def test_legacy_downsample_alias(self):
+        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("downsample"), "templates")
+        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("down"), "templates")
+
+
+if __name__ == "__main__":
+    unittest.main()

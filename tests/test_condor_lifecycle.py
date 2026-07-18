@@ -668,12 +668,13 @@ class TestWriteSubmitFileEnvironment(unittest.TestCase):
                     condor.CondorResourceRequest(),
                 )
             text = submit_path.read_text(encoding="utf-8")
-            self.assertNotIn("environment =", text)
+            self.assertNotIn("SYNDIFF_CONDA_SH=", text)
+            self.assertNotIn("SYNDIFF_CONDA_ENV=", text)
 
 
 class TestStageDeps(unittest.TestCase):
-    def test_downsample_requires_mapping(self):
-        self.assertEqual(STAGE_DEPS["downsample"], ["wcs_grouping", "mapping", "ps1_process"])
+    def test_templates_requires_mapping(self):
+        self.assertEqual(STAGE_DEPS["templates"], ["mapping", "ps1_process"])
 
 
 class TestRaNormalization(unittest.TestCase):

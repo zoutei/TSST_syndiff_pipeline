@@ -19,7 +19,9 @@ class TestResolveStageName(unittest.TestCase):
 
     def test_short_name_resolves(self):
         self.assertEqual(resolve_stage_name("map"), "mapping")
-        self.assertEqual(resolve_stage_name("down"), "downsample")
+        self.assertEqual(resolve_stage_name("tmpl"), "templates")
+        self.assertEqual(resolve_stage_name("down"), "templates")
+        self.assertEqual(resolve_stage_name("downsample"), "templates")
         self.assertEqual(resolve_stage_name("tess_dl"), "tess_ffi_download")
 
     def test_unknown_raises(self):
@@ -37,8 +39,8 @@ class TestResolveStageName(unittest.TestCase):
     def test_parse_stage_list_accepts_short_names(self):
         pipeline = get_syndiff_pipeline()
         self.assertEqual(
-            pipeline.parse_stage_list("map,down"),
-            ["mapping", "downsample"],
+            pipeline.parse_stage_list("map,tmpl"),
+            ["mapping", "templates"],
         )
 
 

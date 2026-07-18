@@ -101,11 +101,11 @@ def _seven_stage_run_setup(tmp_path: Path, target: Target):
 
     all_stages = [
         "tess_ffi_download",
-        "wcs_grouping",
         "mapping",
         "ps1_download",
         "ps1_process",
-        "downsample",
+        "templates",
+        "bind",
         "diff",
     ]
     from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
@@ -141,11 +141,11 @@ class TestSevenStageTick(unittest.TestCase):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         all_stages = [
             "tess_ffi_download",
-            "wcs_grouping",
+            "bind",
             "mapping",
             "ps1_download",
             "ps1_process",
-            "downsample",
+            "templates",
             "diff",
         ]
         with tempfile.TemporaryDirectory() as tmp:

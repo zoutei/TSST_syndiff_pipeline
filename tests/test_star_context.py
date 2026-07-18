@@ -28,7 +28,7 @@ def _minimal_ctx(tmp: str, **overrides) -> StarEventContext:
         event_dir=str(Path(tmp) / "event"),
         workspace_root=str(Path(tmp) / "workspace"),
         data_root=str(Path(tmp) / "data"),
-        cluster_job_path=str(Path(tmp) / "event" / "cluster_template_job.json"),
+        cluster_job_path=str(Path(tmp) / "event" / "event_job.json"),
         cluster_job={"x_min": 10, "y_min": 20, "x_max": 110, "y_max": 120, "shape": [100, 100]},
         crop_bounds={"x_min": 10, "y_min": 20, "x_max": 110, "y_max": 120, "shape": (100, 100)},
         mapping_dir=str(Path(tmp) / "data" / "skycell_pixel_mapping"),
@@ -72,7 +72,7 @@ class TestStarContext(unittest.TestCase):
                 validate_star_prerequisites(ctx)
             message = str(cm.exception)
             self.assertIn("cluster_template_job.json", message)
-            self.assertIn("syndiff_ffi_frames.csv", message)
+            self.assertIn("frames.csv", message)
             self.assertIn("syndiff_template_", message)
             self.assertIn("baseline diff FITS", message)
             self.assertIn("write_convolved: true", message)
@@ -108,8 +108,8 @@ class TestStarContext(unittest.TestCase):
             ):
                 directory.mkdir(parents=True, exist_ok=True)
 
-            (event / "cluster_template_job.json").write_text("{}", encoding="utf-8")
-            (event / "syndiff_ffi_frames.csv").write_text("product_id\n", encoding="utf-8")
+            (event / "event_job.json").write_text("{}", encoding="utf-8")
+            (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
             (templates / "syndiff_template_0.fits").write_bytes(b"")
             (ws / "hp_d" / "tess123_hp_d.fits.gz").write_bytes(b"")
             (ws / "hp_c" / "tess123_hp_c.fits.gz").write_bytes(b"")

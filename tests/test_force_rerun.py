@@ -69,7 +69,7 @@ class TestForceRerun(unittest.TestCase):
                 "/targets.csv",
                 tmp,
                 [target],
-                ["wcs_grouping"],
+                ["bind"],
             )
             label = target.label()
             state.apply_not_selected_skips(
@@ -78,19 +78,19 @@ class TestForceRerun(unittest.TestCase):
                 RunnerConfig(data_root=str(Path(tmp) / "data")),
             )
             self.assertEqual(
-                state.get_skip_reason("run_a", label, "downsample"),
+                state.get_skip_reason("run_a", label, "templates"),
                 "not_selected",
             )
             state.apply_force_rerun(
                 "run_a",
                 [label],
-                ["wcs_grouping", "downsample"],
+                ["bind", "templates"],
             )
             self.assertEqual(
                 state.get_active_stages("run_a"),
-                ["wcs_grouping", "downsample"],
+                ["bind", "templates"],
             )
-            down = state.get_stage_run("run_a", label, "downsample")
+            down = state.get_stage_run("run_a", label, "templates")
             self.assertIsNotNone(down)
             assert down is not None
             self.assertEqual(down.status, STATUS_PENDING)
@@ -108,13 +108,15 @@ class TestForceRerun(unittest.TestCase):
             data_root = Path(tmp) / "data"
             convolved = (
                 data_root
-                / "convolved_results"
-                / "sector_0015_camera_1_ccd_4.zarr"
+                / "scc"
+                / "s0015_c1_k4"
+                / "convolved.zarr"
             )
             csv_path = (
                 data_root
-                / "convolved_results"
-                / "sector_0015_camera_1_ccd_4_removed_stars.csv"
+                / "scc"
+                / "s0015_c1_k4"
+                / "convolved_removed_stars.csv"
             )
             convolved.mkdir(parents=True)
             (convolved / "cell_0_data").write_text("x", encoding="utf-8")

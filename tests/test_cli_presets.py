@@ -25,10 +25,9 @@ class TestPresetStageLists(unittest.TestCase):
         expected = [spec.name for spec in TEMPLATE_STAGES]
         self.assertEqual(preset_stages("template"), expected)
 
-    def test_all_preset_matches_full_dag(self):
-        expected = [spec.name for spec in TEMPLATE_STAGES] + [DIFF_STAGE]
-        self.assertEqual(preset_stages("all"), expected)
-        self.assertNotIn("star", preset_stages("all"))
+    def test_all_preset_removed(self):
+        with self.assertRaises(ValueError):
+            preset_stages("all")
 
     def test_diff_preset_is_diff_only(self):
         self.assertEqual(preset_stages("diff"), [DIFF_STAGE])
@@ -42,30 +41,71 @@ class TestPresetStageLists(unittest.TestCase):
 
 
 class TestExecutionParser(unittest.TestCase):
-    def test_parse_execution_argv_sets_preset(self):
+    def test_parse_execution_argv_sets_preset_for_template_scc(self):
         _, verb, args = parse_execution_argv(
             [
                 "template",
                 "submit",
                 "--config",
                 "/tmp/config.yaml",
-                "--targets",
-                "/tmp/targets.csv",
+                "--scc",
+                "/tmp/sccs.csv",
             ]
         )
         self.assertEqual(verb, "submit")
         self.assertEqual(args.preset, "template")
+        self.assertEqual(args.scc, "/tmp/sccs.csv")
         self.assertIsNone(args.stages)
+
+    def test_parse_execution_argv_sets_preset_for_template_inline_scc(self):
+        _, verb, args = parse_execution_argv(
+            [
+                "template",
+                "submit",
+                "--config",
+                "/tmp/config.yaml",
+                "--sector",
+                "22",
+                "--camera",
+                "3",
+                "--ccd",
+                "3",
+            ]
+        )
+        self.assertEqual(verb, "submit")
+        self.assertEqual(args.preset, "template")
+        self.assertEqual(args.sector, 22)
+        self.assertEqual(args.camera, 3)
+        self.assertEqual(args.ccd, 3)
+
+    def test_all_preset_fails(self):
+        with self.assertRaises(SystemExit) as ctx:
+            parse_execution_argv(
+                [
+                    "all",
+                    "submit",
+                    "--config",
+                    "/tmp/config.yaml",
+                    "--targets",
+                    "/tmp/targets.csv",
+                ]
+            )
+        self.assertIn("all", str(ctx.exception))
+
+    def test_main_rejects_all_preset(self):
+        with self.assertRaises(SystemExit) as ctx:
+            main(["all", "submit", "--config", "/tmp/config.yaml", "--targets", "/tmp/t.csv"])
+        self.assertIn("removed", str(ctx.exception).lower())
 
     def test_stages_override_clears_preset(self):
         _, _, args = parse_execution_argv(
             [
-                "all",
+                "template",
                 "run",
                 "--config",
                 "/tmp/config.yaml",
-                "--targets",
-                "/tmp/targets.csv",
+                "--scc",
+                "/tmp/sccs.csv",
                 "--stages",
                 "mapping,downsample",
             ]
@@ -90,8 +130,18 @@ class TestExecutionParser(unittest.TestCase):
         self.assertEqual(args.config, str((site / "pipeline.yaml").resolve()))
 
     def test_build_execution_parser_prog(self):
-        parser = build_execution_parser("all", "submit")
-        self.assertEqual(parser.prog, "syndiff all submit")
+        parser = build_execution_parser("template", "submit")
+        self.assertEqual(parser.prog, "syndiff template submit")
+
+    def test_template_parser_has_no_targets(self):
+        parser = build_execution_parser("template", "submit")
+        action_dests = {a.dest for a in parser._actions}
+        self.assertNotIn("targets", action_dests)
+
+    def test_diff_parser_requires_targets(self):
+        parser = build_execution_parser("diff", "submit")
+        action_dests = {a.dest for a in parser._actions}
+        self.assertIn("targets", action_dests)
 
 
 class TestDiffRunGuard(unittest.TestCase):
@@ -177,6 +227,57 @@ class TestLocalSubmitPatch(unittest.TestCase):
             self.assertTrue(frozen.is_file())
             raw = yaml.safe_load(frozen.read_text(encoding="utf-8"))
             self.assertEqual(raw["stages"]["diff"]["executor"], "local")
+
+
+class TestTemplateSubmitFreezesScc(unittest.TestCase):
+    def test_template_submit_materializes_scc_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir()
+            cfg_path = Path(tmp) / "config.yaml"
+            cfg_path.write_text(
+                "\n".join(
+                    [
+                        f"workspace_root: {handoff}",
+                        f"data_root: {handoff / 'data'}",
+                        "deployment_file: deployment.yaml",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (Path(tmp) / "deployment.yaml").write_text(
+                f"workspace_root: {handoff}\ndata_root: {handoff / 'data'}\n",
+                encoding="utf-8",
+            )
+            scc_path = Path(tmp) / "sccs.csv"
+            scc_path.write_text(
+                "sector,camera,ccd,enabled\n22,3,3,true\n",
+                encoding="utf-8",
+            )
+
+            _, _, args = parse_execution_argv(
+                [
+                    "template",
+                    "submit",
+                    "--config",
+                    str(cfg_path),
+                    "--scc",
+                    str(scc_path),
+                ]
+            )
+            with mock.patch.object(orch_cli, "ensure_daemon_running"), mock.patch.object(
+                orch_cli, "record_deployment_path"
+            ), mock.patch(
+                "syndiff_pipeline.common.orchestration.run_setup.apply_post_create_run_setup",
+                return_value=mock.Mock(),
+            ):
+                orch_cli.cmd_submit(args)
+
+            runs = sorted((handoff / "runs").glob("*"))
+            self.assertTrue(runs)
+            frozen_scc = runs[0] / "scc.csv"
+            self.assertTrue(frozen_scc.is_file())
+            self.assertIn("22,3,3", frozen_scc.read_text(encoding="utf-8"))
 
 
 class TestVerifySiteScope(unittest.TestCase):

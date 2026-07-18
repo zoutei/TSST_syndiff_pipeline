@@ -24,7 +24,9 @@ class TestFieldTemplates(unittest.TestCase):
     def test_paths_and_basename(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = field_templates_root(tmp, 20, 3, 3)
-            self.assertTrue(str(root).endswith("field_templates/sector_0020_camera_3_ccd_3"))
+            self.assertTrue(
+                str(root).endswith("scc/s0020_c3_k3/templates/oversampling_1")
+            )
             name = contrib_basename("skycell.2588.036", -2, 5)
             self.assertEqual(name, "skycell.2588.036_sx-2_sy+5.npz")
             self.assertEqual(parse_contrib_basename(name), ("skycell.2588.036", -2, 5))

@@ -121,7 +121,7 @@ baseline:
             )
             policy = load_star_site_policy(policy_path)
             rows = load_star_targets(targets_path, site_dir=site)
-            row = find_star_target_row(rows, "20/3/2")
+            row = find_star_target_row(rows, "s0020_c3_k2")
             with self.assertLogs(
                 "syndiff_pipeline.star.site_config", level=logging.WARNING
             ) as cm:

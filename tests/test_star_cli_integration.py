@@ -219,7 +219,7 @@ class TestStarDiffClosureIntegration(unittest.TestCase):
                 )
 
             pd.DataFrame(manifest_rows).to_csv(
-                Path(ctx.event_dir) / "syndiff_ffi_frames.csv",
+                Path(ctx.event_dir) / "frames.csv",
                 index=False,
             )
 

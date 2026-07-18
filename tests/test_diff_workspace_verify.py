@@ -12,9 +12,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    ensure_event_templates_symlink,
-)
+from syndiff_pipeline.common.scc_paths import event_scc_leaf
 from syndiff_pipeline.common.orchestration.spec import StageRunContext
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
@@ -108,12 +106,15 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
         _write_single_kernel_policy(self.site / "diff_config.yaml")
 
         self.target = _target()
-        self.event_dir = self.handoff / "events" / self.target.label()
+        self.event_dir = event_scc_leaf(
+            self.handoff,
+            self.target.event_name(),
+            self.target.sector,
+            self.target.camera,
+            self.target.ccd,
+        )
         self.event_dir.mkdir(parents=True, exist_ok=True)
-        template_leaf = self.data / "shifted_downsampled" / "sector0022_camera3_ccd3"
-        template_leaf.mkdir(parents=True)
-        ensure_event_templates_symlink(self.event_dir, template_leaf)
-        (self.event_dir / "cluster_template_job.json").write_text(
+        (self.event_dir / "event_job.json").write_text(
             json.dumps({"reference_ffi_path": "/tmp/ref.fits"}),
             encoding="utf-8",
         )
@@ -262,11 +263,14 @@ class TestSharedMaskOnlyVerify(unittest.TestCase):
                 encoding="utf-8",
             )
             target = _target()
-            event_dir = handoff / "events" / target.label()
+            event_dir = event_scc_leaf(
+                handoff,
+                target.event_name(),
+                target.sector,
+                target.camera,
+                target.ccd,
+            )
             event_dir.mkdir(parents=True)
-            template_leaf = data / "shifted_downsampled" / "sector0022_camera3_ccd3"
-            template_leaf.mkdir(parents=True)
-            ensure_event_templates_symlink(event_dir, template_leaf)
             manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
             manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
             ws = event_dir / "ws"
