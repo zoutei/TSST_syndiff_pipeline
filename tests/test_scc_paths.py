@@ -7,9 +7,15 @@ from pathlib import Path
 
 from syndiff_pipeline.common.scc_paths import (
     event_scc_leaf,
+    ps1_combined_zarr_path,
+    ps1_convolved_zarr_path,
     ps1_skycells_zarr_dir,
     ps1_skycells_zarr_lock_path,
     ps1_skycells_zarr_path,
+    provenance_db_path,
+    provenance_spool_dir,
+    scc_diff_stage_dir,
+    scc_diff_workspace_index_path,
     scc_label,
     scc_remap_dir,
     scc_root,
@@ -49,6 +55,43 @@ class TestSccPaths(unittest.TestCase):
         self.assertEqual(
             ps1_skycells_zarr_lock_path("/data"),
             Path("/data/ps1_skycells_zarr/ps1_skycells.zarr.lock"),
+        )
+
+    def test_ps1_combined_and_convolved_zarr_paths_share_ps1_skycells_zarr_dir(self):
+        # Provenance plan decision #14: all three PS1 stores live under the
+        # same ps1_skycells_zarr/ directory.
+        self.assertEqual(
+            ps1_combined_zarr_path("/data"),
+            Path("/data/ps1_skycells_zarr/ps1_combined.zarr"),
+        )
+        self.assertEqual(
+            ps1_convolved_zarr_path("/data"),
+            Path("/data/ps1_skycells_zarr/ps1_convolved.zarr"),
+        )
+        self.assertEqual(
+            ps1_combined_zarr_path("/data").parent, ps1_skycells_zarr_dir("/data")
+        )
+        self.assertEqual(
+            ps1_convolved_zarr_path("/data").parent, ps1_skycells_zarr_dir("/data")
+        )
+
+    def test_provenance_db_and_spool_paths_are_data_root_scoped(self):
+        self.assertEqual(
+            provenance_db_path("/data"), Path("/data/bookkeeping/provenance.db")
+        )
+        self.assertEqual(
+            provenance_spool_dir("/data"), Path("/data/bookkeeping/spool")
+        )
+
+    def test_scc_diff_store_paths(self):
+        stage = scc_diff_stage_dir("/data", 20, 3, 3, "diffs_r1", "recipefp")
+        self.assertEqual(
+            stage,
+            Path("/data/s0020/c3/k3/diff/diffs_r1/recipefp"),
+        )
+        self.assertEqual(
+            scc_diff_workspace_index_path("/event/ws"),
+            Path("/event/ws/scc_diff_index.json"),
         )
 
 

@@ -84,6 +84,11 @@ class SynDiffConfig:
     the site-config flow (e.g. ad hoc scripts), in which case provenance
     emission is a no-op."""
 
+    publish_scc: bool = False
+    """When true, finalized diff products are mirrored into the SCC-scoped diff
+    store (``s/c/k/diff/{stage_label}/{recipe_fp}/``) with workspace index
+    pointers (plan §14.2, decision #13). Default off until piloted."""
+
     pipeline: list = field(default_factory=list)
     """Ordered list of stage dicts (``kind`` + fields). Required; :func:`run_pipeline`
     executes these stages in order."""

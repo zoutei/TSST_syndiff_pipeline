@@ -158,6 +158,8 @@ def _hotpants_loky_initializer(
     field_mode_context: Optional[Any] = None,
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
+    publish_scc: bool = False,
+    workspace_root: Optional[str] = None,
 ) -> None:
     """Hotpants loky initializer."""
     global _HOTPANTS_LOKY_PAYLOAD
@@ -186,6 +188,8 @@ def _hotpants_loky_initializer(
         "template_loader": template_loader,
         "sck": sck,
         "data_root": data_root,
+        "publish_scc": bool(publish_scc),
+        "workspace_root": workspace_root,
     }
 
 
@@ -223,6 +227,8 @@ def _hotpants_loky_run_task(
         force_rerun=bool(p.get("force_rerun")),
         sck=p.get("sck"),
         data_root=p.get("data_root"),
+        publish_scc=bool(p.get("publish_scc")),
+        workspace_root=p.get("workspace_root"),
     )
 
 
@@ -895,6 +901,8 @@ def _process_one_frame(
     force_rerun: bool = False,
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
+    publish_scc: bool = False,
+    workspace_root: Optional[str] = None,
 ):
     """Process one frame.
     
@@ -922,6 +930,40 @@ def _process_one_frame(
     diff_stem = workspace_frame_stem(product_id, diffs_label)
 
     if not force_rerun:
+        diff_out_path = workspace_frame_fits_path(dirs.diffs, diff_stem)
+        if publish_scc and sck is not None and data_root and workspace_root:
+            try:
+                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                    try_materialize_workspace_artifact,
+                )
+
+                if try_materialize_workspace_artifact(
+                    publish_scc=True,
+                    data_root=data_root,
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    kind="diff_image",
+                    stage_label=diffs_label,
+                    product_id=product_id,
+                    label=diffs_label,
+                    params=hp,
+                    workspace_dest=diff_out_path,
+                    workspace_root=workspace_root,
+                ):
+                    return {
+                        "stem": diff_stem,
+                        "ffi_product_id": product_id,
+                        "group_id": group_id,
+                        "success": True,
+                        "skipped": True,
+                        "path": diff_out_path,
+                        "scc_store_hit": True,
+                    }
+            except Exception:
+                log.debug(
+                    "SCC diff-store materialize failed for %s", product_id, exc_info=True
+                )
         existing_diff = resolve_pipeline_fits_path(dirs.diffs, diff_stem)
         if existing_diff is not None:
             return {
@@ -1088,6 +1130,8 @@ def _process_one_frame(
                     input_fingerprints=inputs,
                     data_root=data_root,
                     meta={"round_id": round_id, "group_id": group_id},
+                    publish_scc=publish_scc,
+                    workspace_root=workspace_root,
                 )
             except Exception:
                 log.debug(
@@ -1133,6 +1177,8 @@ def _process_one_frame(
                         input_fingerprints=[ffi_fp] if ffi_fp else [],
                         data_root=data_root,
                         meta={"round_id": round_id, "group_id": group_id, "producer": "hotpants"},
+                        publish_scc=publish_scc,
+                        workspace_root=workspace_root,
                     )
                 except Exception:
                     log.debug(
@@ -1239,6 +1285,12 @@ def hotpants_loop(
     except Exception:
         prov_sck = None
     prov_data_root = getattr(cfg, "data_root", "") or None
+    prov_publish_scc = bool(getattr(cfg, "publish_scc", False))
+    from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
+
+    prov_workspace_root = _workspace_root(
+        output_dir, run_id=getattr(cfg, "workspace_run_id", None)
+    )
 
     tasks = []
     for i, ffi_path in enumerate(ffi_paths):
@@ -1337,6 +1389,8 @@ def hotpants_loop(
                 force_rerun=force_rerun,
                 sck=prov_sck,
                 data_root=prov_data_root,
+                publish_scc=prov_publish_scc,
+                workspace_root=prov_workspace_root,
             )
 
         results = []
@@ -1371,6 +1425,8 @@ def hotpants_loop(
                 field_mode_context,
                 prov_sck,
                 prov_data_root,
+                prov_publish_scc,
+                prov_workspace_root,
             ),
             on_result=_record_progress,
         )
