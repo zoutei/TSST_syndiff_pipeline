@@ -673,8 +673,8 @@ class TestWriteSubmitFileEnvironment(unittest.TestCase):
 
 
 class TestStageDeps(unittest.TestCase):
-    def test_templates_requires_mapping(self):
-        self.assertEqual(STAGE_DEPS["templates"], ["mapping", "ps1_process"])
+    def test_downsample_requires_mapping_ps1_and_remap(self):
+        self.assertEqual(STAGE_DEPS["downsample"], ["mapping", "ps1_process", "remap"])
 
 
 class TestRaNormalization(unittest.TestCase):

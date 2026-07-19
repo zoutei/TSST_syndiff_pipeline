@@ -442,16 +442,31 @@ def maybe_load_field_mode_template_context(
         else:
             return None
     sidecar = root / "field_mode_assembly.json"
-    shifts_path = Path(event_dir) / "template_group_shifts.parquet"
-    if not sidecar.is_file() or not shifts_path.is_file():
+    if not sidecar.is_file():
         return None
     try:
         side = json.loads(sidecar.read_text())
-        shifts_df = pd.read_parquet(shifts_path)
     except Exception as exc:
         log.warning("field mode context load failed: %s", exc)
         return None
     if int(side.get("schema_version", 0)) != 1:
+        return None
+    remap_root = side.get("remap_root")
+    shifts_path = None
+    if remap_root:
+        remap_shifts = Path(str(remap_root)) / "template_group_shifts.parquet"
+        if remap_shifts.is_file():
+            shifts_path = remap_shifts
+    if shifts_path is None:
+        event_shifts = Path(event_dir) / "template_group_shifts.parquet"
+        if event_shifts.is_file():
+            shifts_path = event_shifts
+    if shifts_path is None:
+        return None
+    try:
+        shifts_df = pd.read_parquet(shifts_path)
+    except Exception as exc:
+        log.warning("field mode context load failed: %s", exc)
         return None
     return FieldModeTemplateContext(
         store_root=str(side.get("store_root") or root),

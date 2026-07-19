@@ -22,6 +22,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
 )
@@ -60,6 +61,7 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
+            remap=RemapStageParams(),
             downsample=DownsampleStageParams(
                 single_offset=single_offset,
                 output_base=str(legacy_base),
@@ -267,7 +269,7 @@ class TestDownsampleManifestTemplateDirs(unittest.TestCase):
             payload = write_manifest(
                 manifest_path,
                 resolved,
-                "templates",
+                "downsample",
                 [str(physical / "a.fits.fz")],
                 1,
                 1,

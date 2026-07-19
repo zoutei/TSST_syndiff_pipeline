@@ -78,19 +78,19 @@ class TestForceRerun(unittest.TestCase):
                 RunnerConfig(data_root=str(Path(tmp) / "data")),
             )
             self.assertEqual(
-                state.get_skip_reason("run_a", label, "templates"),
+                state.get_skip_reason("run_a", label, "downsample"),
                 "not_selected",
             )
             state.apply_force_rerun(
                 "run_a",
                 [label],
-                ["bind", "templates"],
+                ["bind", "downsample"],
             )
             self.assertEqual(
                 state.get_active_stages("run_a"),
-                ["bind", "templates"],
+                ["bind", "downsample"],
             )
-            down = state.get_stage_run("run_a", label, "templates")
+            down = state.get_stage_run("run_a", label, "downsample")
             self.assertIsNotNone(down)
             assert down is not None
             self.assertEqual(down.status, STATUS_PENDING)
