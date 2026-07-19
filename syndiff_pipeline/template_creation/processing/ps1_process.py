@@ -658,6 +658,8 @@ def process_coordinator(
     pipeline_paused_event: threading.Event = None,
     gaia_catalog: Optional[pd.DataFrame] = None,
     bright_star_mag_threshold: float = 13.0,
+    combined_store_data_root: Optional[str] = None,
+    combined_store_recipe=None,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -668,7 +670,33 @@ def process_coordinator(
     workers. This dramatically reduces the memory footprint in the subprocess
     pool because the raw 4-band data (~1.6 GB) has already been compressed to
     ~0.4 GB by the time it reaches here.
+
+    When ``combined_store_data_root``/``combined_store_recipe`` are given, a
+    freshly computed *regular* (non padding-role, non cache-hit) result is
+    also published to the shared cross-sector combined-skycell store (Phase 1,
+    see ``combined_store.py``) so a later sector overlapping this one can reuse
+    it. Publishing is best-effort and never affects pipeline correctness: any
+    failure only means the next sector recomputes instead of reusing.
     """
+    _publish_combined = None
+    if combined_store_data_root is not None and combined_store_recipe is not None:
+        from syndiff_pipeline.template_creation.processing.combined_store import (
+            publish_combined_cell,
+        )
+
+        def _publish_combined(result: dict) -> None:
+            """Publish combined."""
+            publish_combined_cell(
+                combined_store_data_root,
+                result["projection"],
+                result["skycell_id"],
+                combined_store_recipe,
+                combined_image=result["combined_image"],
+                combined_mask=result["combined_mask"],
+                headers_data=result.get("headers_data"),
+                removed_stars=result.get("removed_stars"),
+                produced_by="ps1_process",
+            )
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
     if band_cache is None:
         band_cache = {}
@@ -719,6 +747,15 @@ def process_coordinator(
                                     }
                                     logger.info(f"[ProcessCoordinator] Cached padding source {result['skycell_id']}")
                                 else:
+                                    if _publish_combined is not None:
+                                        try:
+                                            _publish_combined(result)
+                                        except Exception:
+                                            logger.warning(
+                                                f"[ProcessCoordinator] Combined-store publish "
+                                                f"failed for {result['skycell_id']} (non-fatal)",
+                                                exc_info=True,
+                                            )
                                     pending_results.append(result)
                             else:
                                 logger.warning(f"[ProcessCoordinator] Got None result for {skycell_id}")
@@ -824,6 +861,15 @@ def process_coordinator(
                             "removed_stars": result.get("removed_stars", []),
                         }
                     else:
+                        if _publish_combined is not None:
+                            try:
+                                _publish_combined(result)
+                            except Exception:
+                                logger.warning(
+                                    f"[ProcessCoordinator] Combined-store publish "
+                                    f"failed for {result['skycell_id']} (non-fatal)",
+                                    exc_info=True,
+                                )
                         pending_results.append(result)
             except Exception as e:
                 logger.error(f"[ProcessCoordinator] Final task failed for {skycell_id}: {e}")
@@ -1697,6 +1743,45 @@ def run_modern_sliding_window_pipeline(
         except Exception as e:
             logger.warning(f"[Pipeline] Failed to identify padding sources: {e}. Continuing without cache.")
 
+    # Shared combined-skycell store (Phase 1): seed band_cache with any REGULAR
+    # (non padding-role) skycell already built by an earlier, overlapping
+    # sector under the identical recipe. Padding-role cells are intentionally
+    # left out of this seed (see combined_store.py module docstring for why)
+    # so this stays a conservative, additive optimization: on any failure or
+    # empty result, the pipeline proceeds exactly as before.
+    combined_store_recipe = None
+    try:
+        from syndiff_pipeline.template_creation.processing.combined_store import (
+            combined_recipe,
+            gaia_version_stamp,
+            seed_band_cache_from_combined_store,
+        )
+
+        _gaia_version = (
+            gaia_version_stamp(catalog_path)
+            if (enable_saturation_correction or remove_saturated_stars)
+            else "none"
+        )
+        combined_store_recipe = combined_recipe(
+            enable_saturation_correction=enable_saturation_correction,
+            remove_saturated_stars=remove_saturated_stars,
+            bright_star_mag_threshold=bright_star_mag_threshold,
+            gaia_version=_gaia_version,
+        )
+        _seed_names = set(all_regular_cell_names) - set(padding_sources.keys())
+        _hits = seed_band_cache_from_combined_store(data_root, _seed_names, combined_store_recipe)
+        band_cache.update(_hits)
+        logger.info(
+            f"[Pipeline] Combined-store seed: {len(_hits)}/{len(_seed_names)} regular "
+            f"skycells reused from the shared cross-sector store."
+        )
+    except Exception as e:
+        logger.warning(
+            f"[Pipeline] Combined-store seeding failed (continuing without shared-store "
+            f"cache): {e}",
+            exc_info=True,
+        )
+
     # Fix 3 — event to pause coordinator new-submissions during cross-projection padding
     pipeline_paused_event = threading.Event()
 
@@ -1716,6 +1801,10 @@ def run_modern_sliding_window_pipeline(
               band_cache, band_cache_uses, pipeline_paused_event,
               catalog if remove_saturated_stars else None,
               bright_star_mag_threshold),
+        kwargs={
+            "combined_store_data_root": data_root,
+            "combined_store_recipe": combined_store_recipe,
+        },
         daemon=True,
     )
     process_coordinator_thread.start()
