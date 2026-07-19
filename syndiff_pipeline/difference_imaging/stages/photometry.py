@@ -1354,7 +1354,7 @@ def _run_aperture_photometry_multi(
         if shared_mask is None:
             raise ValueError(
                 f"aperture method {method.name!r}: mask_sky_with_shared_mask=true "
-                "requires shared_mask.fits.gz (run shared_mask stage first)"
+                "requires shared_mask.fits.fz (run shared_mask stage first)"
             )
         shared_mask_arr = np.asarray(shared_mask)
 

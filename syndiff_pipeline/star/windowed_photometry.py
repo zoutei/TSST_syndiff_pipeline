@@ -8,7 +8,6 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.stages.photometry import (
     PsfPhotometryMethodParams,
@@ -18,12 +17,15 @@ from syndiff_pipeline.difference_imaging.stages.photometry import (
     create_psf,
     forced_phot_gridded_epoch,
 )
+from syndiff_pipeline.difference_imaging.support.ffi_naming import strip_fits_suffix
 from syndiff_pipeline.star.identifiers import ResolvedHost
 
 
 def read_star_diff_stamp(path: str) -> tuple[np.ndarray, dict]:
     """Read a stamp FITS written by :func:`~syndiff_pipeline.star.diff_runner.write_star_diff_stamp`."""
-    with fits.open(path, memmap=True) as hdul:
+    from syndiff_pipeline.common.fits_io import open_fits
+
+    with open_fits(path) as hdul:
         stamp = np.asarray(hdul[0].data, dtype=np.float64)
         hdr = hdul[0].header
         header = {
@@ -83,12 +85,7 @@ def aperture_flux_on_stamp(
 
 
 def _stamp_product_id(stamp_path: str) -> str:
-    stem = Path(str(stamp_path)).name
-    if stem.endswith(".fits.gz"):
-        stem = stem[: -len(".fits.gz")]
-    elif stem.endswith(".fits"):
-        stem = stem[: -len(".fits")]
-    return stem
+    return strip_fits_suffix(Path(str(stamp_path)).name)
 
 
 def _gepsf_params_from_method(method: dict) -> PsfPhotometryMethodParams:

@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from syndiff_pipeline.common.fits_variants import fits_logical_path, prefer_fits_path
 from syndiff_pipeline.difference_imaging.stages.hotpants import (
     parse_syndiff_template_filename,
 )
@@ -59,8 +60,8 @@ def find_template_by_offset(
             f"No syndiff_template with dx={dx} dy={dy} under {root}"
         )
     if len(matches) > 1:
-        prefer_gz = [p for p in matches if p.lower().endswith(".fits.gz")]
-        return prefer_gz[0] if prefer_gz else matches[0]
+        preferred = prefer_fits_path(matches)
+        return preferred if preferred is not None else matches[0]
     return matches[0]
 
 
@@ -154,7 +155,7 @@ def convolved_template_basename(template_path: str) -> str:
 # ── field-mode resolution (group_id + SCC field store / optional FITS) ─────
 
 _FIELD_GID_FITS_RE = re.compile(
-    r"^syndiff_field_s\d+_\d+_\d+(?:_os\d+)?_gid(?P<gid>\d+)\.fits(?:\.gz)?$",
+    r"^syndiff_field_s\d+_\d+_\d+(?:_os\d+)?_gid(?P<gid>\d+)\.fits(?:\.fz|\.gz)?$",
     re.IGNORECASE,
 )
 
@@ -185,7 +186,7 @@ def group_id_for_ffi(manifest: pd.DataFrame, ffi_path: str) -> int:
 
 
 def find_field_fits_by_group_id(template_dir: str | Path, group_id: int) -> str | None:
-    """Locate optional materialized ``syndiff_field_*_gid{N}.fits.gz`` under store/fits/."""
+    """Locate optional materialized ``syndiff_field_*_gid{N}.fits*`` under store/fits/."""
     root = Path(template_dir)
     matches: list[Path] = []
     for d in (root / "fits", root):
@@ -196,8 +197,9 @@ def find_field_fits_by_group_id(template_dir: str | Path, group_id: int) -> str 
                 matches.append(p)
     if not matches:
         return None
-    prefer_gz = [p for p in matches if p.name.lower().endswith(".fits.gz")]
-    return str((prefer_gz[0] if prefer_gz else matches[0]).resolve())
+    preferred = prefer_fits_path(matches)
+    chosen = Path(preferred) if preferred is not None else matches[0]
+    return str(chosen.resolve())
 
 
 def resolve_template_for_ffi(
@@ -345,7 +347,7 @@ def _group_id_for_ffi_name(manifest, ffi_name: str) -> int:
 
     Prefers the canonical full-path match (:func:`group_id_for_ffi`); falls back
     to a basename match against the manifest ``filename``/``path`` columns,
-    treating ``.fits`` and ``.fits.gz`` as the same file.
+    treating ``.fits`` / ``.fits.gz`` / ``.fits.fz`` as the same file.
     """
     from syndiff_pipeline.common.wcs_grouping import ref_manifest_row_index
 
@@ -353,8 +355,7 @@ def _group_id_for_ffi_name(manifest, ffi_name: str) -> int:
         return group_id_for_ffi(manifest, ffi_name)
 
     def _stem(name: str) -> str:
-        base = Path(str(name)).name
-        return base[:-3] if base.endswith(".fits.gz") else base
+        return Path(fits_logical_path(name)).name
 
     target = _stem(ffi_name)
     for col in ("filename", "path"):

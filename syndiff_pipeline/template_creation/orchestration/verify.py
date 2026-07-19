@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import List, Optional
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.fits_variants import (
+    FITS_STORAGE_SUFFIXES,
+    strip_fits_storage_suffix,
+)
+from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.common.scc_paths import ps1_skycells_zarr_path, scc_convolved_zarr
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.common.orchestration.targets import Target
@@ -735,7 +740,7 @@ def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
         suffix = f"_os{os_factor}"
     flat = (
         mapping_root
-        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}.fits.gz"
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
     )
     if flat.is_file():
         return flat
@@ -744,7 +749,7 @@ def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
         / f"sector_{t.sector:04d}"
         / f"camera_{t.camera}"
         / f"ccd_{t.ccd}"
-        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}.fits.gz"
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
     )
 
 
@@ -1029,17 +1034,16 @@ def _downsample_expected_basenames(resolved: ResolvedTargetConfig) -> tuple[list
     base = Path(ds.output_base or resolved.template_output_base)
     basenames = [
         f"syndiff_template_s{t.sector:04d}_{t.camera}_{t.ccd}{roi_part}{os_part}"
-        f"_dx{float(dx):.3f}_dy{float(dy):.3f}.fits.gz"
+        f"_dx{float(dx):.3f}_dy{float(dy):.3f}{PIPELINE_FITS_EXT}"
         for dx, dy in offsets
     ]
     return basenames, base
 
 
 def _downsample_fits_filename_candidates(basename: str) -> list[str]:
-    """Canonical ``.fits.gz`` basename plus legacy uncompressed ``.fits``."""
-    if basename.endswith(".fits.gz"):
-        return [basename, basename[:-3]]
-    return [basename]
+    """Canonical ``.fits.fz`` basename plus legacy ``.fits.gz`` / ``.fits``."""
+    stem = strip_fits_storage_suffix(basename)
+    return [f"{stem}{sfx}" for sfx in FITS_STORAGE_SUFFIXES]
 
 
 def _find_downsample_fits(base: Path, t, basename: str) -> str | None:

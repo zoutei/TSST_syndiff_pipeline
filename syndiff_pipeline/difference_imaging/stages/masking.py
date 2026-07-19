@@ -25,6 +25,7 @@ from astropy.stats import sigma_clip
 from joblib import Parallel, delayed
 import multiprocessing
 
+from syndiff_pipeline.common.fits_io import write_primary_hdu_fits
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -481,7 +482,7 @@ def make_shared_mask(ref_image: np.ndarray,
         os.makedirs(output_dir, exist_ok=True)
         out_path = os.path.join(output_dir, SHARED_MASK_FITS_BASENAME)
         hdu = fits.PrimaryHDU(mask.astype(np.int16))
-        hdu.writeto(out_path, overwrite=True)
+        write_primary_hdu_fits(out_path, hdu)
         log.info(f"Shared mask written to {out_path}  "
                  f"(masked pixels: {(mask > 0).sum()} / {mask.size})")
 

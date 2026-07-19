@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
 from syndiff_pipeline.difference_imaging.support.paths import DEFAULT_MANIFEST_BASENAME
 from syndiff_pipeline.star.context import (
@@ -346,7 +347,7 @@ def run_star_pipeline(
         frame_errors: list[str] = []
 
         for product_id in product_ids:
-            stamp_path = stamp_dir / f"{product_id}.fits.gz"
+            stamp_path = stamp_dir / f"{product_id}{PIPELINE_FITS_EXT}"
             if stamp_path.is_file() and not run_config.overwrite:
                 stamp_paths.append(str(stamp_path))
                 stamp_time_values.append(btjd_by_product_id.get(product_id, float("nan")))

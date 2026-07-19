@@ -16,6 +16,7 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.fits_io import write_hdul_fits, write_image_fits
 from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
 from syndiff_pipeline.common.download import list_local_ffis, _ffi_filename_pattern
 from syndiff_pipeline.difference_imaging.stages import (
@@ -30,6 +31,7 @@ from syndiff_pipeline.difference_imaging.stages import (
     sat_template,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    is_pipeline_fits_filename,
     resolve_pipeline_artifact_path,
     resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
@@ -1125,9 +1127,9 @@ def run_config_pipeline(
             col_corr_2d = epsf_fitting.build_median_mask_correction(
                 cfg.median_mask_path, cfg.camera, cfg.ccd, crop_bounds
             )
-            shared_mask_path = os.path.join(out, "shared_mask.fits")
-            if not os.path.isfile(shared_mask_path):
-                shared_mask_path = os.path.join(out, "shared_mask.fits.gz")
+            shared_mask_path = resolve_pipeline_artifact_path(
+                out, SHARED_MASK_FITS_BASENAME
+            )
             ws_out = ctx.workspace(label_out)
             os.makedirs(ws_out, exist_ok=True)
             epsf_stack, tile_centers_new, ffi_stems, epsf_ok = (
@@ -1139,7 +1141,11 @@ def run_config_pipeline(
                     epsf_p,
                     ws_out,
                     round_id=1,
-                    shared_mask_path=shared_mask_path if os.path.isfile(shared_mask_path) else None,
+                    shared_mask_path=(
+                        shared_mask_path
+                        if shared_mask_path and os.path.isfile(shared_mask_path)
+                        else None
+                    ),
                     diff_log_path=diff_log_path,
                     epsf_label=label_out,
                     diffs_input=str(inp["diffs"]),
@@ -1350,14 +1356,19 @@ def run_config_pipeline(
                 out_fp = workspace_frame_fits_path(out_ws, out_stem)
                 if acc_var is not None:
                     noise_sigma = np.sqrt(acc_var)
-                    fits.HDUList(
-                        [
-                            fits.PrimaryHDU(acc.astype(np.float32)),
-                            fits.ImageHDU(noise_sigma.astype(np.float32), name="NOISE"),
-                        ]
-                    ).writeto(out_fp, overwrite=True)
+                    write_hdul_fits(
+                        out_fp,
+                        fits.HDUList(
+                            [
+                                fits.PrimaryHDU(acc.astype(np.float32)),
+                                fits.ImageHDU(
+                                    noise_sigma.astype(np.float32), name="NOISE"
+                                ),
+                            ]
+                        ),
+                    )
                 else:
-                    fits.writeto(out_fp, acc.astype(np.float32), overwrite=True)
+                    write_image_fits(out_fp, acc.astype(np.float32))
 
         elif kind == "background":
             if wcs_table is None:
@@ -1400,7 +1411,7 @@ def run_config_pipeline(
             if not any(
                 p.is_file()
                 for p in Path(diff_ws).rglob("*")
-                if p.name.endswith((".fits", ".fits.gz"))
+                if is_pipeline_fits_filename(p.name)
             ):
                 raise RuntimeError(
                     f"forced_photometry: no diff FITS under workspace {diff_label!r} "

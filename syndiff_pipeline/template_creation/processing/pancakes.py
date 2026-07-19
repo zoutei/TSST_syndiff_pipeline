@@ -1189,11 +1189,9 @@ def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, o
 
     hdul = fits.HDUList([primary_hdu, image_hdu])
     hdul.verify("fix")
-    hdul.writeto(file_path, overwrite=overwrite)
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
 
-    # Compress file
-    compress_cmd = f"gzip -f {file_path}"
-    os.system(compress_cmd)
+    write_hdul_fits(file_path, hdul)
 
 
 def master_skycells_csv_paths(output_path, sector, camera_id, ccd_id, oversampling_factor=1):
@@ -1306,11 +1304,9 @@ def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_na
     table = fits.BinTableHDU.from_columns([fits.Column(name="SKYCELL", format="20A", array=selected_skycells["NAME"].values), fits.Column(name="SKYCIND", format="K", array=np.arange(len(selected_skycells)))])
 
     hdul = fits.HDUList([primary_hdu, image_hdu, table])
-    hdul.writeto(file_path, overwrite=overwrite)
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
 
-    # Compress file
-    compress_cmd = f"gzip -f {file_path}"
-    os.system(compress_cmd)
+    write_hdul_fits(file_path, hdul)
 
 
 def process_single_skycell(args):

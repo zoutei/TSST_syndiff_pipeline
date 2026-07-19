@@ -21,6 +21,9 @@ from syndiff_pipeline.difference_imaging.support.manifest import (
     DEFAULT_MANIFEST_BASENAME,
     ordered_diff_paths_for_workspace,
 )
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    resolve_pipeline_artifact_path,
+)
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.star.context import StarEventContext
 from syndiff_pipeline.star.site_config import StarEpsfConfig
@@ -29,11 +32,9 @@ logger = logging.getLogger(__name__)
 
 
 def _shared_mask_path(baseline_workspace_dir: str) -> str | None:
-    for name in (SHARED_MASK_FITS_BASENAME, "shared_mask.fits"):
-        path = os.path.join(baseline_workspace_dir, name)
-        if os.path.isfile(path):
-            return path
-    return None
+    return resolve_pipeline_artifact_path(
+        baseline_workspace_dir, SHARED_MASK_FITS_BASENAME
+    )
 
 
 def epsf_workspace_dir(ctx: StarEventContext, epsf_label: str) -> str:

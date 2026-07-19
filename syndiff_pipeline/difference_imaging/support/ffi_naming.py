@@ -8,7 +8,7 @@ Original SPOC FFIs on disk look like
 substring uniquely identifies the FFI epoch (sector / camera / CCD / cadence
 are encoded redundantly in path layout). The pipeline's per-FFI FITS outputs
 are written into ``ws/<label>/`` workspaces and use the basename
-``{ffi_product_id}_{label}.fits.gz`` so the file's directory determines what
+``{ffi_product_id}_{label}.fits.fz`` so the file's directory determines what
 stage it belongs to.
 
 The helpers below are the single source of truth for that mapping.
@@ -22,10 +22,23 @@ import re
 from pathlib import Path
 from typing import Optional, Tuple
 
-# Canonical extension for pipeline FITS writes.
-PIPELINE_FITS_EXT = ".fits.gz"
-# Read fallback for pre-gzip pipeline outputs.
-LEGACY_PIPELINE_FITS_EXT = ".fits"
+from syndiff_pipeline.common.fits_variants import (
+    FITS_FPACK_EXT,
+    FITS_GZIP_EXT,
+    FITS_PLAIN_EXT,
+    FITS_STORAGE_SUFFIXES,
+    is_fits_storage_filename,
+    iter_fits_variant_globs,
+    resolve_stem_in_directory,
+    storage_suffix_rank,
+    strip_fits_storage_suffix,
+)
+
+# Canonical extension for pipeline FITS writes (CFITSIO fpack).
+PIPELINE_FITS_EXT = FITS_FPACK_EXT
+# Legacy read fallbacks (gzip-era and plain).
+LEGACY_PIPELINE_FITS_EXT = FITS_PLAIN_EXT
+LEGACY_PIPELINE_FITS_SUFFIXES = (FITS_GZIP_EXT, FITS_PLAIN_EXT)
 
 # ``tess<digits>`` (case-insensitive) at the start of the FFI basename.
 _TESS_PRODUCT_ID_RE = re.compile(r"^(tess\d+)", re.IGNORECASE)
@@ -35,24 +48,13 @@ _WORKSPACE_FRAME_STEM_RE = re.compile(r"^(tess\d+)_(.+)$", re.IGNORECASE)
 
 
 def strip_fits_suffix(name: str) -> str:
-    """Remove ``.fits.gz`` or trailing ``.fits`` from a basename or path."""
-    base = Path(str(name)).name
-    lower = base.lower()
-    if lower.endswith(PIPELINE_FITS_EXT):
-        return base[: -len(PIPELINE_FITS_EXT)]
-    if lower.endswith(LEGACY_PIPELINE_FITS_EXT):
-        return base[: -len(LEGACY_PIPELINE_FITS_EXT)]
-    return os.path.splitext(base)[0]
+    """Remove ``.fits.fz`` / ``.fits.gz`` / ``.fits`` from a basename or path."""
+    return strip_fits_storage_suffix(name)
 
 
 def is_pipeline_fits_filename(name: str) -> bool:
-    """True for pipeline FITS basenames (``.fits.gz`` or legacy ``.fits``)."""
-    lower = Path(str(name)).name.lower()
-    if lower.endswith(PIPELINE_FITS_EXT):
-        return True
-    return lower.endswith(LEGACY_PIPELINE_FITS_EXT) and not lower.endswith(
-        PIPELINE_FITS_EXT
-    )
+    """True for pipeline FITS basenames (``.fits.fz``, ``.fits.gz``, or ``.fits``)."""
+    return is_fits_storage_filename(name)
 
 
 def workspace_frame_fits_basename(stem: str) -> str:
@@ -69,47 +71,36 @@ def resolve_pipeline_fits_path(directory: str, stem: str) -> Optional[str]:
     """
     Return an existing pipeline FITS path for *stem* under *directory*.
 
-    Prefers ``.fits.gz`` over legacy ``.fits``. Returns ``None`` when neither
-    file exists.
+    Prefers ``.fits.fz`` over ``.fits.gz`` over legacy ``.fits``.
     """
-    for ext in (PIPELINE_FITS_EXT, LEGACY_PIPELINE_FITS_EXT):
-        candidate = os.path.join(directory, f"{stem}{ext}")
-        if os.path.isfile(candidate):
-            return candidate
-    return None
+    return resolve_stem_in_directory(directory, stem)
 
 
 def resolve_pipeline_artifact_path(directory: str, basename: str) -> Optional[str]:
     """
     Resolve a fixed-basename pipeline artifact (e.g. ``shared_mask``).
 
-    Tries ``{stem}.fits.gz`` then ``{stem}.fits`` when *basename* has no ext,
-    otherwise tries the basename as given then the gzip variant.
+    Tries storage variants when *basename* has no ext, otherwise tries the
+    basename as given then sibling variants via stem resolution.
     """
     base = Path(str(basename)).name
     if is_pipeline_fits_filename(base):
         stem = strip_fits_suffix(base)
         return resolve_pipeline_fits_path(directory, stem)
-    gz = f"{base}{PIPELINE_FITS_EXT}"
-    legacy = f"{base}{LEGACY_PIPELINE_FITS_EXT}"
-    for candidate in (gz, legacy):
-        path = os.path.join(directory, candidate)
-        if os.path.isfile(path):
-            return path
-    return None
+    return resolve_pipeline_fits_path(directory, base)
 
 
 def iter_pipeline_fits_paths(directory: str) -> list[str]:
     """
     Sorted pipeline FITS paths in *directory*, deduped by workspace stem.
 
-  When both ``.fits.gz`` and ``.fits`` exist for the same stem, only the gzip
-    path is returned.
+    When multiple storage variants exist for the same stem, only the preferred
+    path (``.fits.fz`` > ``.fits.gz`` > ``.fits``) is returned.
     """
     if not os.path.isdir(directory):
         return []
     by_stem: dict[str, str] = {}
-    for pattern in ("*.fits.gz", "*.fits"):
+    for pattern in iter_fits_variant_globs():
         for path in sorted(glob.glob(os.path.join(directory, pattern))):
             if not os.path.isfile(path):
                 continue
@@ -118,10 +109,9 @@ def iter_pipeline_fits_paths(directory: str) -> list[str]:
                 continue
             stem = strip_fits_suffix(name)
             existing = by_stem.get(stem)
-            if existing is None:
-                by_stem[stem] = path
-                continue
-            if name.lower().endswith(PIPELINE_FITS_EXT):
+            if existing is None or storage_suffix_rank(name) < storage_suffix_rank(
+                existing
+            ):
                 by_stem[stem] = path
     return [by_stem[k] for k in sorted(by_stem)]
 
