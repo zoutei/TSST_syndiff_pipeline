@@ -40,6 +40,14 @@ def _add_shared_execution_args(p: argparse.ArgumentParser) -> None:
         help="Ignore existing artifacts for selected stages (new run only)",
     )
     p.add_argument(
+        "--skip-artifact-verify",
+        action="store_true",
+        help=(
+            "Skip supervisor pre-flight artifact scanning; trust upstream "
+            "external stages as complete (unsafe)"
+        ),
+    )
+    p.add_argument(
         "--workspace-run-id",
         default=None,
         help="Debug workspace suffix (writes to ws_{id}/ instead of ws/)",
@@ -131,10 +139,7 @@ def _finalize_execution_args(preset: str, args: argparse.Namespace) -> argparse.
     -------
     argparse.Namespace"""
     _resolve_execution_config(args)
-    if args.stages:
-        args.preset = None
-    else:
-        args.preset = preset
+    args.preset = preset
     return args
 
 

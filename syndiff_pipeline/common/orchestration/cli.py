@@ -481,6 +481,20 @@ def _resolve_execution_targets(args: argparse.Namespace):
     return path, load_targets(path)
 
 
+def _patch_skip_artifact_verify(config_path: str) -> None:
+    """Set ``scheduler.skip_artifact_verify`` on a frozen run config."""
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+        write_runner_config,
+    )
+
+    rcfg = load_runner_config(config_path)
+    if rcfg.skip_artifact_verify:
+        return
+    rcfg.skip_artifact_verify = True
+    write_runner_config(rcfg, config_path)
+
+
 def _prepare_run_directory(
     source_config: str,
     run_id: str,
@@ -495,6 +509,7 @@ def _prepare_run_directory(
     source_diff_config_path: str | None = None,
     source_star_config_path: str | None = None,
     workspace_run_id: str | None = None,
+    skip_artifact_verify: bool = False,
 ) -> Path:
     """Prepare run directory.
     
@@ -510,6 +525,7 @@ def _prepare_run_directory(
     source_diff_config_path : str | None, optional, default ``None``
     source_star_config_path : str | None, optional, default ``None``
     workspace_run_id : str | None, optional, default ``None``
+    skip_artifact_verify : bool, optional, default ``False``
     
     Returns
     -------
@@ -563,6 +579,9 @@ def _prepare_run_directory(
         }
         if source_scc:
             meta["source_scc_path"] = str(Path(source_scc).resolve())
+    if skip_artifact_verify:
+        _patch_skip_artifact_verify(config_path)
+        meta["skip_artifact_verify"] = True
     if source_diff_config_path:
         meta["source_diff_config_path"] = str(Path(source_diff_config_path).resolve())
     if source_star_config_path:
@@ -652,6 +671,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
             inline_scc_targets=targets if source_input_path is None else None,
             source_diff_config_path=cfg.diff_config_path or None,
             workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
     else:
         run_directory = _prepare_run_directory(
@@ -664,6 +684,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
             source_targets=source_input_path,
             source_diff_config_path=cfg.diff_config_path or None,
             workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
 
     if getattr(args, "local", False) and preset == "diff":
@@ -686,6 +707,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
         )
     if setup.stream_skipped:
         print(f"Marked ps1_download n/a (stream_mode) for {setup.stream_skipped} target(s).")
+    if setup.linear_remap_skipped:
+        print(
+            f"Marked remap n/a (linear_geometry) for {setup.linear_remap_skipped} target(s)."
+        )
     if setup.not_selected:
         print(
             f"Marked {setup.not_selected} stage row(s) n/a "
@@ -769,6 +794,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             inline_scc_targets=targets if source_input_path is None else None,
             source_diff_config_path=cfg.diff_config_path or None,
             workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
     else:
         run_directory = _prepare_run_directory(
@@ -781,6 +807,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             source_targets=source_input_path,
             source_diff_config_path=cfg.diff_config_path or None,
             workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
 
     return run_scheduler(

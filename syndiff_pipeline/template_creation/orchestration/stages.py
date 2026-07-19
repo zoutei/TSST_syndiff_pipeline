@@ -59,11 +59,39 @@ def _condor_resources_for_ps1_process(cfg):
     )
 
 
-def _condor_resources_for_templates(cfg):
-    """Condor resources for templates (formerly downsample)."""
+def _downsample_effective_deps(stages) -> tuple[str, ...]:
+    """Downsample deps: field mode requires remap; linear omits it."""
+    base = ("mapping", "ps1_process")
+    ds = getattr(stages, "downsample", None)
+    wg = getattr(stages, "wcs_grouping", None)
+    mode = str(
+        getattr(ds, "geometry_mode", None)
+        or getattr(wg, "geometry_mode", None)
+        or "linear"
+    ).lower()
+    if mode == "field":
+        return base + ("remap",)
+    return base
+
+
+def _condor_resources_for_remap(cfg):
+    """Condor resources for remap."""
     from syndiff_pipeline.common.orchestration import condor
 
-    params = cfg.stages.templates
+    params = cfg.stages.remap
+    return condor.CondorResourceRequest(
+        request_cpus=params.condor_request_cpus,
+        request_memory_mb=params.condor_request_memory,
+        requirements=params.condor_requirements,
+        rank=params.condor_rank,
+    )
+
+
+def _condor_resources_for_downsample(cfg):
+    """Condor resources for downsample."""
+    from syndiff_pipeline.common.orchestration import condor
+
+    params = cfg.stages.downsample
     disk_mb = getattr(params, "condor_request_disk", None)
     request_disk_kb = None if disk_mb is None else int(disk_mb) * 1024
     return condor.CondorResourceRequest(
@@ -220,11 +248,20 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
         condor_resources=_condor_resources_for_ps1_process,
     ),
     _make_template_stage(
-        "templates",
-        "tmpl",
-        ("mapping", "ps1_process"),
-        pool="templates",
-        condor_resources=_condor_resources_for_templates,
+        "remap",
+        "rmap",
+        ("mapping",),
+        pool="remap",
+        default_executor="condor",
+        condor_resources=_condor_resources_for_remap,
+    ),
+    _make_template_stage(
+        "downsample",
+        "down",
+        ("mapping", "ps1_process", "remap"),
+        pool="downsample",
+        effective_deps=_downsample_effective_deps,
+        condor_resources=_condor_resources_for_downsample,
     ),
 )
 

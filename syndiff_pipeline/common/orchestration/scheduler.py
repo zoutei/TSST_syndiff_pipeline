@@ -1551,13 +1551,22 @@ def _tick_run(state: pstate.PipelineState, run_id: str, ctx) -> None:
             repaired,
             run_id,
         )
-    _schedule_external_and_pending_skips(
-        state,
-        run_id,
-        ctx,
-        force_rerun=force_rerun,
-        budget=ctx.cfg.verify_budget_per_tick,
-    )
+    if ctx.cfg.skip_artifact_verify:
+        trusted = state.trust_external_artifacts(run_id, ctx.targets, active_stages)
+        if trusted:
+            log.info(
+                "Trusted %d external stage(s) for run %s (skip_artifact_verify)",
+                trusted,
+                run_id,
+            )
+    else:
+        _schedule_external_and_pending_skips(
+            state,
+            run_id,
+            ctx,
+            force_rerun=force_rerun,
+            budget=ctx.cfg.verify_budget_per_tick,
+        )
     target_stages_map = {
         label: resolve_config(target, ctx.cfg).stages
         for label, target in targets_by_label.items()

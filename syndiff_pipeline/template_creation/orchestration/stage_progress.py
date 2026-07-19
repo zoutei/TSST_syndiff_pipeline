@@ -485,6 +485,7 @@ def _elapsed_progress(started_at: str | None) -> StageProgress | None:
 _PARSERS = {
     "ps1_download": _parse_ps1_download,
     "ps1_process": _parse_ps1_process,
+    "remap": _parse_downsample,
     "downsample": _parse_downsample,
     "tess_ffi_download": _parse_tess_ffi_download,
     "mapping": _parse_mapping,

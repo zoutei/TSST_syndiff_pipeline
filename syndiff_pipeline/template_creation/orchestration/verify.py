@@ -18,9 +18,10 @@ from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.common.fits_variants import (
     FITS_STORAGE_SUFFIXES,
     strip_fits_storage_suffix,
+    try_resolve_fits_variant,
 )
-from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.common.scc_paths import ps1_skycells_zarr_path, scc_convolved_zarr
+from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.common.orchestration.targets import Target
 
@@ -142,8 +143,21 @@ def config_fingerprint(
                 str(pp.bright_star_mag_threshold),
             ]
         )
-    elif stage in ("templates", "downsample"):
-        ds = resolved.stages.templates
+    elif stage == "remap":
+        rm = resolved.stages.remap
+        mp = resolved.stages.mapping
+        parts.extend(
+            [
+                str(mp.oversampling_factor),
+                str(rm.cache_quantum_ps1_px),
+                str(rm.keying),
+                str(rm.apply_hybrid_exact),
+                str(rm.hybrid_R),
+                str(rm.include_abutting_border_exact),
+            ]
+        )
+    elif stage == "downsample":
+        ds = resolved.stages.downsample
         parts.extend(
             [
                 str(ds.oversampling_factor),
@@ -742,15 +756,20 @@ def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
         mapping_root
         / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
     )
-    if flat.is_file():
-        return flat
-    return (
+    found = try_resolve_fits_variant(flat)
+    if found is not None:
+        return found
+    nested = (
         mapping_root
         / f"sector_{t.sector:04d}"
         / f"camera_{t.camera}"
         / f"ccd_{t.ccd}"
         / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
     )
+    found = try_resolve_fits_variant(nested)
+    if found is not None:
+        return found
+    return flat
 
 
 def _geometry_mode_for_resolved(resolved: ResolvedTargetConfig) -> str:
@@ -774,6 +793,11 @@ def _geometry_mode_for_resolved(resolved: ResolvedTargetConfig) -> str:
 
 def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult:
     """Verify SCC field_templates store for geometry_mode: field."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        REMAP_MANIFEST_NAME,
+        remap_root,
+        resolve_remap_read_root,
+    )
     from syndiff_pipeline.template_creation.processing.field_templates import (
         field_templates_root,
         verify_field_store,
@@ -781,6 +805,7 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
 
     t = resolved.target
     ds = resolved.stages.downsample
+    mp = resolved.stages.mapping
     store = field_templates_root(
         resolved.data_root,
         t.sector,
@@ -788,6 +813,25 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
         t.ccd,
         oversampling_factor=ds.oversampling_factor,
     )
+    remap_store = remap_root(
+        resolved.data_root,
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=mp.oversampling_factor,
+    )
+    try:
+        read_root, _legacy = resolve_remap_read_root(remap_store, store)
+    except FileNotFoundError as exc:
+        return VerifyResult("downsample", False, str(exc), str(remap_store))
+    manifest_path = read_root / REMAP_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return VerifyResult(
+            "downsample",
+            False,
+            f"Field downsample requires {REMAP_MANIFEST_NAME} from remap stage",
+            str(read_root),
+        )
     # The SCC store is shared across events; each event records exactly the
     # crop-filtered keys it required in field_contrib_keys.json (written only
     # after a successful build). Verify against THAT — not the full-chip
@@ -1077,19 +1121,19 @@ def expected_downsample_fits_paths(resolved: ResolvedTargetConfig) -> list[Path]
     return paths
 
 
-def verify_templates(resolved: ResolvedTargetConfig) -> VerifyResult:
+def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
     """Verify SCC templates store (full-chip) or legacy per-event downsample outputs."""
     store = Path(resolved.template_output_base)
     if store.is_dir() and any(store.iterdir()):
         return VerifyResult(
-            "templates",
+            "downsample",
             True,
             f"SCC templates store present under {store.name}/",
             str(store),
         )
     legacy = _verify_downsample_legacy(resolved)
     return VerifyResult(
-        "templates",
+        "downsample",
         legacy.ok,
         legacy.message,
         legacy.path,
@@ -1106,8 +1150,8 @@ def _verify_downsample_legacy(resolved: ResolvedTargetConfig) -> VerifyResult:
     try:
         basenames, base = _downsample_expected_basenames(resolved)
     except Exception as exc:
-        out_base = Path(resolved.stages.templates.output_base or resolved.template_output_base)
-        return VerifyResult("templates", False, f"Cannot determine expected offsets: {exc}", str(out_base))
+        out_base = Path(resolved.stages.downsample.output_base or resolved.template_output_base)
+        return VerifyResult("downsample", False, f"Cannot determine expected offsets: {exc}", str(out_base))
 
     found: list[str] = []
     missing: list[str] = []
@@ -1122,7 +1166,7 @@ def _verify_downsample_legacy(resolved: ResolvedTargetConfig) -> VerifyResult:
     sample = found[0] if found else str(base)
     if missing:
         return VerifyResult(
-            "templates",
+            "downsample",
             False,
             f"Partial downsample: {len(found)}/{n_expected} offset FITS present "
             f"({len(missing)} missing)",
@@ -1133,21 +1177,86 @@ def _verify_downsample_legacy(resolved: ResolvedTargetConfig) -> VerifyResult:
         csv_path = event_dir_ps1_removed_stars_csv_path(resolved)
         if not csv_path.is_file():
             return VerifyResult(
-                "templates",
+                "downsample",
                 False,
                 f"Missing {csv_path.name} in event_dir",
                 str(csv_path),
             )
 
     return VerifyResult(
-        "templates",
+        "downsample",
         True,
         f"All {n_expected} offset FITS present",
         sample,
     )
 
 
-verify_downsample = verify_templates  # legacy alias for in-module callers
+def verify_remap(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify SCC remap store (shift schedule, groups, remap_manifest)."""
+    import json
+
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        REMAP_MANIFEST_NAME,
+        remap_root,
+    )
+
+    t = resolved.target
+    mp = resolved.stages.mapping
+    rm = resolved.stages.remap
+    store = remap_root(
+        resolved.data_root,
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=mp.oversampling_factor,
+    )
+    manifest_path = store / REMAP_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return VerifyResult(
+            "remap",
+            False,
+            f"Missing {REMAP_MANIFEST_NAME}",
+            str(store),
+        )
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return VerifyResult(
+            "remap",
+            False,
+            f"Unreadable {REMAP_MANIFEST_NAME}: {exc}",
+            str(manifest_path),
+        )
+    if float(payload.get("cache_quantum_ps1_px", -1)) != float(rm.cache_quantum_ps1_px):
+        return VerifyResult(
+            "remap",
+            False,
+            "remap_manifest cache_quantum_ps1_px does not match config",
+            str(manifest_path),
+        )
+    if str(payload.get("keying", "")) != str(rm.keying):
+        return VerifyResult(
+            "remap",
+            False,
+            "remap_manifest keying does not match config",
+            str(manifest_path),
+        )
+    schedule = store / "shift_schedule.npz"
+    groups = store / "template_group_shifts.parquet"
+    missing = [p.name for p in (schedule, groups) if not p.is_file()]
+    if missing:
+        return VerifyResult(
+            "remap",
+            False,
+            f"Remap store incomplete: missing {', '.join(missing)}",
+            str(store),
+        )
+    return VerifyResult(
+        "remap",
+        True,
+        f"Remap store OK ({store.name})",
+        str(manifest_path),
+    )
 
 
 def verify_diff(
@@ -1275,7 +1384,7 @@ def stage_absence_probe(
             else AbsenceProbeResult.ABSENT
         )
 
-    if stage in ("templates", "downsample"):
+    if stage == "downsample":
         store = Path(resolved.template_output_base)
         if store.is_dir() and any(store.iterdir()):
             return AbsenceProbeResult.MAYBE_PRESENT
@@ -1284,6 +1393,25 @@ def stage_absence_probe(
         if job_path.is_file() or (
             templates_link.is_symlink() and templates_link.resolve().is_dir()
         ):
+            return AbsenceProbeResult.MAYBE_PRESENT
+        return AbsenceProbeResult.ABSENT
+
+    if stage == "remap":
+        from syndiff_pipeline.template_creation.processing.field_remap import (
+            REMAP_MANIFEST_NAME,
+            remap_root,
+        )
+
+        t = resolved.target
+        mp = resolved.stages.mapping
+        store = remap_root(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=mp.oversampling_factor,
+        )
+        if (store / REMAP_MANIFEST_NAME).is_file():
             return AbsenceProbeResult.MAYBE_PRESENT
         return AbsenceProbeResult.ABSENT
 
@@ -1319,8 +1447,8 @@ VERIFY_FUNCS = {
     "mapping": verify_mapping,
     "ps1_download": verify_ps1_download,
     "ps1_process": verify_ps1_process,
-    "templates": verify_templates,
-    "downsample": verify_templates,
+    "remap": verify_remap,
+    "downsample": verify_downsample,
     "diff": verify_diff,
 }
 
@@ -1399,6 +1527,24 @@ def collect_stage_artifacts(
             raise ValueError("diff artifact collection requires RunnerConfig")
         ctx = _diff_stage_context(resolved, runner_cfg, meta=meta)
         return DIFF_STAGE.collect_artifacts(ctx)
+    if stage == "remap":
+        from syndiff_pipeline.template_creation.processing.field_remap import (
+            REMAP_MANIFEST_NAME,
+            remap_root,
+        )
+
+        t = resolved.target
+        mp = resolved.stages.mapping
+        store = remap_root(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=mp.oversampling_factor,
+        )
+        manifest = store / REMAP_MANIFEST_NAME
+        ok = manifest.is_file()
+        return 1, int(ok), [str(manifest)] if ok else [str(store)]
     if stage == "downsample":
         paths = expected_downsample_fits_paths(resolved)
         if ps1_process_removed_stars_csv_path(resolved).is_file():

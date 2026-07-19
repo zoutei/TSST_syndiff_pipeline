@@ -254,7 +254,7 @@ def main(argv: list[str] | None = None) -> int:
                             )
                         )
                     )
-                    if args.stage in ("templates", "downsample")
+                    if args.stage == "downsample"
                     else None,
                 )
             if manifest is None:

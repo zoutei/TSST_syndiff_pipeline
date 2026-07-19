@@ -31,7 +31,7 @@ stages:
 resources:
   network:
     max_concurrent: 1
-  templates:
+  downsample:
     max_concurrent: 2
   mapping:
     max_concurrent: 6
