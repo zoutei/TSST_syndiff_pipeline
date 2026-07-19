@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.common.fits_io import write_image_fits
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
@@ -283,8 +284,7 @@ def write_per_frame_fits(
             continue
         stem = workspace_frame_stem(rec.product_id, out_label)
         fn = workspace_frame_fits_basename(stem)
-        fits.writeto(
+        write_image_fits(
             os.path.join(out_dir, fn),
             np.asarray(stack[i], dtype=np.float32),
-            overwrite=True,
         )

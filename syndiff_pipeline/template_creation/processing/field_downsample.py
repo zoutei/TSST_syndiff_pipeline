@@ -336,17 +336,17 @@ def _mapping_scc_dir(
     root = Path(mapping_root)
     suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
     flat_master = (
-        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz"
+        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.fz"
     )
-    if flat_master.is_file() or any(root.glob("tess_s*_master_pixels2skycells*.fits.gz")):
+    if flat_master.is_file() or any(root.glob("tess_s*_master_pixels2skycells*.fits.fz")):
         return root
     scc_tail = Path(f"sector_{int(sector):04d}") / f"camera_{int(camera)}" / f"ccd_{int(ccd)}"
     # Caller may already pass the SCC directory.
     if root.name == f"ccd_{int(ccd)}" and (
-        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells.fits.gz"
+        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells.fits.fz"
     ).is_file():
         return root
-    if root.name == f"ccd_{int(ccd)}" and any(root.glob("tess_s*_master_pixels2skycells*.fits.gz")):
+    if root.name == f"ccd_{int(ccd)}" and any(root.glob("tess_s*_master_pixels2skycells*.fits.fz")):
         return root
     if int(oversampling_factor) > 1 and root.name != f"oversampling_{int(oversampling_factor)}":
         root = root / f"oversampling_{int(oversampling_factor)}"
@@ -378,8 +378,8 @@ def _find_regmap(
         name = f"skycell.{name}"
     suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
     candidates = [
-        scc / f"tess_s{int(sector)}_{camera}_{ccd}_{name}{suffix}.fits.gz",
-        scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_{name}{suffix}.fits.gz",
+        scc / f"tess_s{int(sector)}_{camera}_{ccd}_{name}{suffix}.fits.fz",
+        scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_{name}{suffix}.fits.fz",
         scc / f"tess_s{int(sector)}_{camera}_{ccd}_{name}{suffix}.fits",
         scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_{name}{suffix}.fits",
     ]
@@ -406,10 +406,10 @@ def _master_pixels2skycells_path(
         mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
     )
     suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
-    path = scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz"
+    path = scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.fz"
     if path.is_file():
         return path
-    matches = sorted(scc.glob("tess_*_master_pixels2skycells*.fits.gz"))
+    matches = sorted(scc.glob("tess_*_master_pixels2skycells*.fits.fz"))
     if matches:
         return matches[0]
     raise FileNotFoundError(f"master pixels2skycells not found under {scc}")

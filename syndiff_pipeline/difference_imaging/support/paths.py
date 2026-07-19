@@ -28,7 +28,7 @@ DEFAULT_MANIFEST_BASENAME = "frames.csv"
 LEGACY_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
 HOTPANTS_SUBSTAMP_STARS_BASENAME = "hotpants_substamp_stars.csv"
 TARGETS_DS9_REGION_BASENAME = "targets.reg"
-SHARED_MASK_FITS_BASENAME = "shared_mask.fits.gz"
+SHARED_MASK_FITS_BASENAME = "shared_mask.fits.fz"
 GAIA_CATALOG_PIPELINE_BASENAME = "gaia_catalog_pipeline.csv"
 DIFF_CONFIG_SNAPSHOT_BASENAME = "diff_config.yaml"
 
@@ -42,13 +42,13 @@ WORKSPACE_ROOT_ARTIFACTS = (
 
 MASTER_TESS_FFI_LINK = "tess_ffi"
 HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
-HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits.gz"
+HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits.fz"
 LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits"
 
 from syndiff_pipeline.common.download import (  # noqa: E402
     is_spoc_ffi_filename,
     manifest_basename_from_local,
-    spoc_ffi_gzip_basename,
+    resolve_local_ffi_path,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (  # noqa: E402
     is_pipeline_fits_filename,
@@ -83,7 +83,7 @@ BACKGROUND_STACK_NPZ_ARRAY_KEY = "stack"
 ADAPTIVE_BKG_STACK_BASENAME = "bkg_temp_smooth"
 
 # Union mask (2D): pixels where PRF source-hunt excluded sky in any epoch (output_dir root)
-BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits.gz"
+BKG_SOURCE_HUNT_UNION_FITS_BASENAME = "bkg_source_hunt_union.fits.fz"
 
 PIPELINE_PLOTS_SUBDIR = "debug_plots"
 KERNEL_RECONSTRUCTION_NPZ_BASENAME = "kernel_reconstruction.npz"
@@ -292,8 +292,10 @@ def _is_hotpants_stamps_fits_basename(name: str) -> bool:
     -------
     bool"""
     lower = name.lower()
-    return lower.endswith(HOTPANTS_STAMPS_FITS_SUFFIX) or lower.endswith(
-        LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX
+    return (
+        lower.endswith(HOTPANTS_STAMPS_FITS_SUFFIX)
+        or lower.endswith("_stamps.fits.gz")
+        or lower.endswith(LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX)
     )
 
 
@@ -364,16 +366,14 @@ def link_master_workspace(
             stem = strip_fits_suffix(entry)
             if stem in linked_stems:
                 continue
-            gz_name = f"{stem}.fits.gz"
-            legacy_name = f"{stem}.fits"
-            if os.path.isfile(os.path.join(ws_label_dir, gz_name)):
-                entry = gz_name
-            elif os.path.isfile(os.path.join(ws_label_dir, legacy_name)):
-                entry = legacy_name
-            else:
+            from syndiff_pipeline.common.fits_variants import resolve_stem_in_directory
+
+            resolved = resolve_stem_in_directory(ws_label_dir, stem)
+            if not resolved:
                 continue
+            entry = os.path.basename(resolved)
             linked_stems.add(stem)
-            target = os.path.join(ws_label_dir, entry)
+            target = resolved
             if not os.path.isfile(target):
                 continue
             link = os.path.join(m_root, entry)
@@ -393,16 +393,12 @@ def link_master_workspace(
                 manifest_bn = manifest_basename_from_local(entry)
                 if manifest_bn in linked_manifest:
                     continue
-                gz_name = spoc_ffi_gzip_basename(manifest_bn)
-                plain_name = manifest_bn
-                if os.path.isfile(os.path.join(ffi_leaf_abs, gz_name)):
-                    entry = gz_name
-                elif os.path.isfile(os.path.join(ffi_leaf_abs, plain_name)):
-                    entry = plain_name
-                else:
+                resolved = resolve_local_ffi_path(ffi_leaf_abs, manifest_bn)
+                if not resolved:
                     continue
+                entry = os.path.basename(resolved)
                 linked_manifest.add(manifest_bn)
-                target = os.path.join(ffi_leaf_abs, entry)
+                target = resolved
                 if not os.path.isfile(target):
                     continue
                 link = os.path.join(m_root, entry)

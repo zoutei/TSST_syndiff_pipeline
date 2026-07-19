@@ -248,7 +248,7 @@ def scc_mapping_master_pixels2skycells(
     suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
     return (
         scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor)
-        / f"tess_s{int(sector):04d}_{int(camera)}_{int(ccd)}_master_pixels2skycells{suffix}.fits.gz"
+        / f"tess_s{int(sector):04d}_{int(camera)}_{int(ccd)}_master_pixels2skycells{suffix}.fits.fz"
     )
 
 

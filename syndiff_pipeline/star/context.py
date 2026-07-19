@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     require_deployment_path,
@@ -23,6 +24,10 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     resolve_scc_template_dir,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    PIPELINE_FITS_EXT,
+    resolve_pipeline_artifact_path,
+)
 from syndiff_pipeline.difference_imaging.support.paths import (
     DEFAULT_MANIFEST_BASENAME,
     SHARED_MASK_FITS_BASENAME,
@@ -219,6 +224,9 @@ def _mapping_paths(
             oversampling_factor=os_factor,
         )
     )
+    resolved_master = try_resolve_fits_variant(master_mapping_fits)
+    if resolved_master is not None:
+        master_mapping_fits = str(resolved_master)
     # Fall back to legacy flat mapping tree when SCC nest is absent (older data_roots).
     if not Path(mapping_csv).is_file():
         legacy_dir = Path(data_root) / _DEFAULT_MAPPING_ROOT_NAME
@@ -226,11 +234,14 @@ def _mapping_paths(
         stem = f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}"
         suffix = f"_os{os_factor}" if os_factor > 1 else ""
         legacy_csv = legacy_dir / rel / f"{stem}_master_skycells_list{suffix}.csv"
-        legacy_fits = (
-            legacy_dir / rel / f"{stem}_master_pixels2skycells{suffix}.fits.gz"
-        )
+        legacy_fits = legacy_dir / rel / f"{stem}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
+        resolved_legacy = try_resolve_fits_variant(legacy_fits)
         if legacy_csv.is_file():
-            return str(legacy_dir), str(legacy_csv), str(legacy_fits)
+            return (
+                str(legacy_dir),
+                str(legacy_csv),
+                str(resolved_legacy) if resolved_legacy is not None else str(legacy_fits),
+            )
     return str(mapping_dir), mapping_csv, master_mapping_fits
 
 
@@ -548,10 +559,13 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "re-run the baseline hotpants stage with write_kernel_solutions: true"
         )
 
-    shared_mask = Path(ctx.baseline_workspace_dir) / SHARED_MASK_FITS_BASENAME
-    if not shared_mask.is_file():
+    shared_mask = resolve_pipeline_artifact_path(
+        ctx.baseline_workspace_dir, SHARED_MASK_FITS_BASENAME
+    )
+    if shared_mask is None:
         missing.append(
-            f"shared_mask.fits.gz missing at {shared_mask}; "
+            f"shared_mask missing under {ctx.baseline_workspace_dir} "
+            f"(expected {SHARED_MASK_FITS_BASENAME} or legacy .fits.gz/.fits); "
             "run the shared_mask diff stage for this event"
         )
 
@@ -562,10 +576,10 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "run the mapping stage for this sector/camera/ccd"
         )
 
-    master_mapping = Path(ctx.master_mapping_fits)
-    if not master_mapping.is_file():
+    master_mapping = try_resolve_fits_variant(ctx.master_mapping_fits)
+    if master_mapping is None:
         missing.append(
-            f"master_pixels2skycells FITS missing at {master_mapping}; "
+            f"master_pixels2skycells FITS missing at {ctx.master_mapping_fits}; "
             "run the mapping stage for this sector/camera/ccd"
         )
 

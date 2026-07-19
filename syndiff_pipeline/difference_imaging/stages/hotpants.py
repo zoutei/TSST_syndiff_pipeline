@@ -61,6 +61,11 @@ from syndiff_pipeline.difference_imaging.support.flux_calibration import (
     tess_zp_from_kernel_sum,
     write_phot_calib_table,
 )
+from syndiff_pipeline.common.fits_variants import (
+    FITS_STORAGE_SUFFIXES,
+    is_fits_storage_filename,
+    storage_suffix_rank,
+)
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     iter_pipeline_fits_paths,
     resolve_pipeline_fits_path,
@@ -83,11 +88,13 @@ def write_diff_noise_mask_fits(
     mask_img: Optional[np.ndarray],
     *,
     header: Optional[fits.Header] = None,
-) -> None:
+) -> str:
     """
     Write one multi-extension FITS: PRIMARY = difference, extensions NOISE (1σ)
-    and MASK when provided. Uses float32 for all arrays.
+    and MASK when provided. Uses float32 for all arrays. Stored as ``.fits.fz``.
     """
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
+
     primary_hdr = fits.Header(header) if header is not None else None
     primary = fits.PrimaryHDU(
         np.asarray(diff_img, dtype=np.float32), header=primary_hdr
@@ -115,7 +122,7 @@ def write_diff_noise_mask_fits(
                 name="MASK",
             )
         )
-    fits.HDUList(hdul).writeto(out_path, overwrite=True)
+    return write_hdul_fits(out_path, fits.HDUList(hdul))
 
 
 def _write_image_fits(
@@ -123,15 +130,11 @@ def _write_image_fits(
     data: np.ndarray,
     *,
     header: Optional[fits.Header] = None,
-) -> None:
-    """Write a single 2D image FITS (float32), optionally with header."""
-    hdr = fits.Header(header) if header is not None else None
-    fits.writeto(
-        out_path,
-        np.asarray(data, dtype=np.float32),
-        header=hdr,
-        overwrite=True,
-    )
+) -> str:
+    """Write a single 2D image FITS (float32) as ``.fits.fz``."""
+    from syndiff_pipeline.common.fits_io import write_image_fits
+
+    return write_image_fits(out_path, data, header=header)
 
 
 # Loky workers: large read-only objects are set once per process via initializer
@@ -816,7 +819,7 @@ def _save_bkg_fits(
     *,
     header: Optional[fits.Header] = None,
 ) -> None:
-    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits.gz``."""
+    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits.fz``."""
     os.makedirs(bkg_dir, exist_ok=True)
     _write_image_fits(
         workspace_frame_fits_path(bkg_dir, basename),
@@ -832,7 +835,7 @@ def _legacy_save_bkg_sidecar(
     *,
     header: Optional[fits.Header] = None,
 ) -> None:
-    """Write ``{diff_basename}_bkg.fits.gz`` next to the diff (legacy layout)."""
+    """Write ``{diff_basename}_bkg.fits.fz`` next to the diff (legacy layout)."""
     os.makedirs(diff_dir, exist_ok=True)
     _write_image_fits(
         workspace_frame_fits_path(diff_dir, f"{diff_basename}_bkg"),
@@ -1331,9 +1334,12 @@ def _is_diff_sidecar_path(path: str) -> bool:
     -------
     bool"""
     lower = path.lower()
-    return lower.endswith(
-        ("_bkg.fits.gz", "_stamps.fits.gz", "_bkg.fits", "_stamps.fits")
+    sidecar_suffixes = tuple(
+        f"{kind}{sfx}"
+        for sfx in FITS_STORAGE_SUFFIXES
+        for kind in ("_bkg", "_stamps")
     )
+    return lower.endswith(sidecar_suffixes)
 
 
 def collect_diff_paths(output_dir: str, round_id: int) -> list:
@@ -1353,7 +1359,7 @@ _SYNDIFF_TEMPLATE_RE = re.compile(
     r"^syndiff_template_s(?P<sector>\d+)_(?P<camera>\d+)_(?P<ccd>\d+)"
     r"(?P<roi>_x(?P<x0>\d+)-(?P<x1>\d+)_y(?P<y0>\d+)-(?P<y1>\d+))?"
     r"(?:_os\d+)?"
-    r"_dx(?P<dx>[+-]?\d*\.?\d+)_dy(?P<dy>[+-]?\d*\.?\d+)\.fits(?:\.gz)?$",
+    r"_dx(?P<dx>[+-]?\d*\.?\d+)_dy(?P<dy>[+-]?\d*\.?\d+)\.fits(?:\.fz|\.gz)?$",
     re.IGNORECASE,
 )
 
@@ -1435,10 +1441,11 @@ def _syndiff_template_preference_key(
 ) -> tuple[int, int, str]:
     """Sort key for choosing one template when legacy duplicates exist."""
     name = Path(parsed.path).name.lower()
-    prefer_gz = 0 if name.endswith(".fits.gz") else 1
+    # Lower storage_suffix_rank = preferred (fz > gz > plain).
+    prefer_storage = storage_suffix_rank(name)
     canonical_suffix = f"_dx{float(group_dx):.3f}_dy{float(group_dy):.3f}".lower()
     prefer_canonical = 0 if canonical_suffix in name else 1
-    return (prefer_gz, prefer_canonical, parsed.path)
+    return (prefer_storage, prefer_canonical, parsed.path)
 
 
 def _select_canonical_syndiff_template(
@@ -1528,8 +1535,8 @@ def verify_syndiff_templates(
 
     Returns ``group_id`` → absolute path. Raises :exc:`SyndiffTemplateDiscoveryError`
     if any group is missing. When multiple files match the same offsets (legacy
-    ``.fits`` plus canonical ``.fits.gz``), prefers ``.fits.gz`` and the downsample
-    ``dx{:.3f}_dy{:.3f}`` basename format.
+    ``.fits`` / ``.fits.gz`` plus canonical ``.fits.fz``), prefers ``.fits.fz`` and
+    the downsample ``dx{:.3f}_dy{:.3f}`` basename format.
     """
     root = Path(template_dir)
     if not root.is_dir():
@@ -1539,8 +1546,7 @@ def verify_syndiff_templates(
 
     parsed_files: list[ParsedSyndiffTemplate] = []
     for name in sorted(os.listdir(root)):
-        lower = name.lower()
-        if not (lower.endswith(".fits.gz") or lower.endswith(".fits")):
+        if not is_fits_storage_filename(name):
             continue
         full = root / name
         if not full.is_file():

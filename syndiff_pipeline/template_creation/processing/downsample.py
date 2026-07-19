@@ -43,8 +43,18 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 
 # Import from existing script
+from syndiff_pipeline.common.fits_io import write_hdul_fits
+from syndiff_pipeline.common.fits_variants import (
+    is_fits_storage_filename,
+    iter_fits_variant_globs,
+    storage_suffix_rank,
+    strip_fits_storage_suffix,
+)
 from syndiff_pipeline.common.wcs_grouping import open_fits_memmap, resolve_existing_fits_path
-from syndiff_pipeline.difference_imaging.support.ffi_naming import strip_fits_suffix
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    PIPELINE_FITS_EXT,
+    strip_fits_suffix,
+)
 from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import RELEVANT_WCS_KEYS, build_ps1_wcs, compute_ps1_shift_for_skycell, load_tess_wcs
 from syndiff_pipeline.template_creation.processing.downsample_progress import (
     init_progress as init_downsample_progress,
@@ -255,10 +265,11 @@ def stage_regmap_files_to_scratch(
     scratch_base: Path | None = None,
 ) -> tuple[list[str], Path, int, float]:
     """
-    Copy ROI regmap FITS onto local scratch **as-is** (keep ``.fits.gz`` compressed).
+    Copy ROI regmap FITS onto local scratch **as-is** (keep ``.fits.fz`` /
+    ``.fits.gz`` compressed).
 
     Gunzipping full-chip osN regmaps would require hundreds of GB; ``fits.open``
-    reads ``.fits.gz`` directly. Convolved Zarr stays on shared NFS.
+    reads compressed FITS directly. Convolved Zarr stays on shared NFS.
 
     Returns
     -------
@@ -1180,9 +1191,12 @@ def save_fits_outputs(
                 roi_part = f"_x{rx0}-{rx1}_y{ry0}-{ry1}"
         os_part = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
 
-        output_filename = output_dir / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
-        hdu_list.writeto(output_filename, overwrite=True)
-        written_paths.append(str(output_filename))
+        output_filename = (
+            output_dir
+            / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}"
+            f"_dx{dx:.3f}_dy{dy:.3f}{PIPELINE_FITS_EXT}"
+        )
+        written_paths.append(write_hdul_fits(output_filename, hdu_list))
 
     return written_paths
 
@@ -1285,9 +1299,11 @@ def main(
     SKYCELL_CSV_PATH = csv_flat if csv_flat.is_file() or not csv_nested.is_file() else csv_nested
     CONVOLVED_DATA_PATH = Path(convolved_dir)
     leaf = SKYCELL_CSV_PATH.parent
-    REG_FILES_PATTERN = str(leaf / "*.fits.gz")
     REG_MASTER_FILES_PATH = str(
-        leaf / f"tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz"
+        resolve_existing_fits_path(
+            leaf
+            / f"tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
+        )
     )
     OUTPUT_DIR = output_base / f"sector{sector:04d}_camera{camera}_ccd{ccd}"
 
@@ -1411,10 +1427,22 @@ def main(
     )
     shifts_elapsed = time.perf_counter() - t_shifts
 
-    # Get registration files
+    # Get registration files (any storage variant; prefer fz > gz > plain per stem)
     print("Getting registration files...")
     t_batches = time.perf_counter()
-    reg_files_all = sorted(glob(REG_FILES_PATTERN))
+    by_stem: dict[str, str] = {}
+    for pattern in iter_fits_variant_globs():
+        for path in glob(str(leaf / pattern)):
+            name = Path(path).name
+            if not is_fits_storage_filename(name):
+                continue
+            stem = strip_fits_storage_suffix(name)
+            existing = by_stem.get(stem)
+            if existing is None or storage_suffix_rank(name) < storage_suffix_rank(
+                Path(existing).name
+            ):
+                by_stem[stem] = path
+    reg_files_all = sorted(by_stem.values())
     reg_files = [f for f in reg_files_all if "master_pixels2skycells" not in Path(f).name]
     skycell_names = [extract_skycell_name_from_reg_file(f) for f in reg_files]
 

@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.common.fits_io import write_hdul_fits
+from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.template_creation.processing.convolution_utils import (
     apply_gaussian_convolution,
 )
@@ -251,9 +253,8 @@ def write_star_mini_templates(
         output_filename = (
             output_dir
             / f"star_template_{host_tag}_s{sector:04d}_{camera}_{ccd}"
-            f"{roi_part}_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
+            f"{roi_part}_dx{dx:.3f}_dy{dy:.3f}{PIPELINE_FITS_EXT}"
         )
-        hdu_list.writeto(output_filename, overwrite=True)
-        written_paths.append(str(output_filename))
+        written_paths.append(write_hdul_fits(output_filename, hdu_list))
 
     return written_paths

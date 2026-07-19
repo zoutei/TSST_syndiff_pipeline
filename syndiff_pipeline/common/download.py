@@ -89,15 +89,31 @@ def nested_ffi_dir(sector: int, camera: int, ccd: int, root: str = "data/tess_ff
     return str(Path(root) / f"s{sector:04d}" / f"cam{camera}_ccd{ccd}")
 
 
+FFIC_FPACK_SUFFIX = ".fits.fz"
 FFIC_GZIP_SUFFIX = ".fits.gz"
 FFIC_PLAIN_SUFFIX = ".fits"
 
 
+def spoc_ffi_fpack_basename(spoc_basename: str) -> str:
+    """``tess..._ffic.fits`` → ``tess..._ffic.fits.fz``."""
+    base = os.path.basename(str(spoc_basename))
+    lower = base.lower()
+    if lower.endswith(FFIC_FPACK_SUFFIX):
+        return base
+    if lower.endswith(FFIC_GZIP_SUFFIX):
+        return base[: -len(FFIC_GZIP_SUFFIX)] + FFIC_FPACK_SUFFIX
+    if lower.endswith(FFIC_PLAIN_SUFFIX):
+        return base + ".fz"
+    return base + FFIC_FPACK_SUFFIX
+
+
 def spoc_ffi_gzip_basename(spoc_basename: str) -> str:
-    """``tess..._ffic.fits`` → ``tess..._ffic.fits.gz``."""
+    """``tess..._ffic.fits`` → ``tess..._ffic.fits.gz`` (legacy)."""
     base = os.path.basename(str(spoc_basename))
     if base.lower().endswith(FFIC_GZIP_SUFFIX):
         return base
+    if base.lower().endswith(FFIC_FPACK_SUFFIX):
+        return base[: -len(FFIC_FPACK_SUFFIX)] + FFIC_GZIP_SUFFIX
     if base.lower().endswith(FFIC_PLAIN_SUFFIX):
         return base + ".gz"
     return base + FFIC_GZIP_SUFFIX
@@ -109,34 +125,45 @@ def spoc_ffi_basename_from_local(path_or_name: str) -> str:
 
 
 def is_spoc_ffi_filename(name: str) -> bool:
-    """True for SPOC calibrated FFI basenames (``.fits`` or ``.fits.gz``)."""
+    """True for SPOC calibrated FFI basenames (``.fits.fz`` / ``.gz`` / ``.fits``)."""
     lower = os.path.basename(str(name)).lower()
-    return lower.endswith("_ffic.fits.gz") or lower.endswith("_ffic.fits")
+    return (
+        lower.endswith("_ffic.fits.fz")
+        or lower.endswith("_ffic.fits.gz")
+        or lower.endswith("_ffic.fits")
+    )
 
 
 def resolve_local_ffi_path(directory: str, spoc_basename: str) -> str | None:
-    """Return on-disk FFI path, preferring ``.fits.gz`` over legacy ``.fits``."""
-    for candidate in (
-        spoc_ffi_gzip_basename(spoc_basename),
-        os.path.basename(str(spoc_basename)),
-    ):
-        path = os.path.join(directory, candidate)
-        if os.path.isfile(path):
-            return path
-    return None
+    """Return on-disk FFI path, preferring ``.fits.fz`` over ``.gz`` over plain."""
+    from syndiff_pipeline.common.fits_variants import strip_fits_storage_suffix
+
+    stem = strip_fits_storage_suffix(os.path.basename(str(spoc_basename)))
+    # Manifest basenames are ``…_ffic.fits``; stem is ``…_ffic``.
+    from syndiff_pipeline.common.fits_variants import resolve_stem_in_directory
+
+    return resolve_stem_in_directory(directory, stem)
 
 
 def ffi_glob_patterns(sector: int, camera: int, ccd: int) -> list[str]:
-    """Glob patterns for SPOC FFIs (gzip first, then legacy plain)."""
+    """Glob patterns for SPOC FFIs (fpack first, then gzip, then plain)."""
     return [
-        _ffi_filename_pattern(sector, camera, ccd, gz=True),
-        _ffi_filename_pattern(sector, camera, ccd, gz=False),
+        _ffi_filename_pattern(sector, camera, ccd, kind="fz"),
+        _ffi_filename_pattern(sector, camera, ccd, kind="gz"),
+        _ffi_filename_pattern(sector, camera, ccd, kind="plain"),
     ]
 
 
-def _ffi_filename_pattern(sector: int, camera: int, ccd: int, *, gz: bool = False) -> str:
+def _ffi_filename_pattern(
+    sector: int, camera: int, ccd: int, *, kind: str = "fz"
+) -> str:
     """Return glob pattern for TESS FFI calibrated files."""
-    suffix = "_ffic.fits.gz" if gz else "_ffic.fits"
+    if kind == "fz":
+        suffix = "_ffic.fits.fz"
+    elif kind == "gz":
+        suffix = "_ffic.fits.gz"
+    else:
+        suffix = "_ffic.fits"
     return f"tess*-s{sector:04d}-{camera}-{ccd}-*{suffix}"
 
 
@@ -147,11 +174,11 @@ def _ffic_product_basename_matches(
     True if ``productFilename`` is a calibrated FFI for exactly this sector/camera/CCD.
 
     SPOC names look like ``tess2020019142923-s0020-3-3-0165-s_ffic.fits`` (manifest)
-    or ``..._ffic.fits.gz`` on disk after gzip migration.
+    or ``..._ffic.fits.fz`` / ``.fits.gz`` on disk after compression migration.
     """
     base = os.path.basename(str(product_filename))
     pat = re.compile(
-        rf"^tess[0-9]+-s{sector:04d}-{camera}-{ccd}-.+_ffic\.fits(?:\.gz)?$",
+        rf"^tess[0-9]+-s{sector:04d}-{camera}-{ccd}-.+_ffic\.fits(?:\.fz|\.gz)?$",
         re.IGNORECASE,
     )
     return pat.match(base) is not None
@@ -159,19 +186,25 @@ def _ffic_product_basename_matches(
 
 def manifest_basename_from_local(path_or_name: str) -> str:
     """Map a local FFI path to the tesscurl manifest basename (``.fits``)."""
-    name = os.path.basename(str(path_or_name))
-    if name.lower().endswith(".fits.gz"):
-        return name[:-3]
-    return name
+    from syndiff_pipeline.common.fits_variants import fits_logical_path
+
+    return os.path.basename(fits_logical_path(path_or_name))
 
 
 def local_ffi_manifest_basenames(paths: list[str]) -> set[str]:
-    """Manifest basenames for a list of local FFI paths (``.fits`` or ``.fits.gz``)."""
+    """Manifest basenames for local FFI paths (``.fits`` / ``.gz`` / ``.fz``)."""
     return {manifest_basename_from_local(p) for p in paths}
 
 
+def compress_spoc_ffi_to_fpack(plain_path: str) -> str:
+    """Compress ``path.fits`` to ``path.fits.fz`` and remove the uncompressed file."""
+    from syndiff_pipeline.common.fits_io import fpack_plain_fits
+
+    return str(fpack_plain_fits(plain_path, delete_plain=True))
+
+
 def compress_spoc_ffi_to_gzip(plain_path: str) -> str:
-    """Compress ``path.fits`` to ``path.fits.gz`` and remove the uncompressed file."""
+    """Legacy: compress ``path.fits`` to ``path.fits.gz`` (prefer :func:`compress_spoc_ffi_to_fpack`)."""
     return _gzip_fits_file(plain_path)
 
 
@@ -201,7 +234,7 @@ def list_local_ffis(ffi_dir: str, sector: int, camera: int, ccd: int) -> list:
     """
     Glob for already-downloaded FFI files matching sector/camera/CCD.
 
-    Prefers ``.fits.gz`` over legacy ``.fits`` when both exist for the same product.
+    Prefers ``.fits.fz`` over ``.fits.gz`` over legacy ``.fits`` when both exist.
 
     Parameters
     ----------
@@ -215,13 +248,19 @@ def list_local_ffis(ffi_dir: str, sector: int, camera: int, ccd: int) -> list:
     list of str
         Sorted list of absolute file paths.
     """
+    from syndiff_pipeline.common.fits_variants import storage_suffix_rank
+
     by_manifest: dict[str, str] = {}
-    for gz in (True, False):
-        pattern = os.path.join(ffi_dir, _ffi_filename_pattern(sector, camera, ccd, gz=gz))
+    for kind in ("fz", "gz", "plain"):
+        pattern = os.path.join(
+            ffi_dir, _ffi_filename_pattern(sector, camera, ccd, kind=kind)
+        )
         for path in sorted(glob.glob(pattern)):
             key = manifest_basename_from_local(path)
             existing = by_manifest.get(key)
-            if existing is None or path.lower().endswith(".fits.gz"):
+            if existing is None or storage_suffix_rank(path) < storage_suffix_rank(
+                existing
+            ):
                 by_manifest[key] = path
     return [by_manifest[k] for k in sorted(by_manifest)]
 
@@ -361,17 +400,24 @@ def _stream_url_to_file(url: str, dest_path: str, timeout: float) -> None:
         raise
 
 
-def _stream_url_to_gzip_fits(url: str, gz_dest_path: str, timeout: float) -> None:
-    """Stream ``url`` directly to ``gz_dest_path`` (atomic replace on success).
+def _stream_url_to_fpack_fits(url: str, fz_dest_path: str, timeout: float) -> None:
+    """
+    Download ``url`` to a plain FITS temp, then ``fpack -F`` to ``fz_dest_path``.
 
     If the HTTP payload is already gzip-compressed (MAST FITS+GZIP), bytes are
-    written as-is. Otherwise chunks are gzip-compressed on the fly (no plain
-    ``.fits`` intermediate file).
+    gunzipped to plain FITS first. Plain FITS payloads are written as-is before
+    fpack. Never leaves a plain ``.fits`` beside the final ``.fits.fz``.
     """
     import gzip
+    import io
 
+    from syndiff_pipeline.common.fits_io import fpack_plain_fits
+    from syndiff_pipeline.common.fits_variants import fits_logical_path
+
+    fz_dest = Path(fz_dest_path)
+    plain_path = Path(fits_logical_path(fz_dest))
+    part = str(plain_path) + ".part"
     req = Request(url, headers={"User-Agent": _USER_AGENT})
-    part = gz_dest_path + ".part"
     try:
         with urlopen(req, timeout=timeout) as resp:
             first_chunk = resp.read(_CHUNK_BYTES)
@@ -380,6 +426,22 @@ def _stream_url_to_gzip_fits(url: str, gz_dest_path: str, timeout: float) -> Non
 
             already_gzip = first_chunk[:2] == _GZIP_MAGIC
             if already_gzip:
+                # Accumulate gzip payload then decompress to plain FITS.
+                buf = io.BytesIO()
+                buf.write(first_chunk)
+                while True:
+                    chunk = resp.read(_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    buf.write(chunk)
+                buf.seek(0)
+                with gzip.GzipFile(fileobj=buf) as gz_in, open(part, "wb") as out:
+                    while True:
+                        chunk = gz_in.read(_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+            else:
                 with open(part, "wb") as fh:
                     fh.write(first_chunk)
                     while True:
@@ -387,22 +449,38 @@ def _stream_url_to_gzip_fits(url: str, gz_dest_path: str, timeout: float) -> Non
                         if not chunk:
                             break
                         fh.write(chunk)
-            else:
-                with gzip.open(part, "wb", compresslevel=_GZIP_COMPRESSLEVEL) as gz_out:
-                    gz_out.write(first_chunk)
-                    while True:
-                        chunk = resp.read(_CHUNK_BYTES)
-                        if not chunk:
-                            break
-                        gz_out.write(chunk)
-        os.replace(part, gz_dest_path)
+        os.replace(part, plain_path)
+        fpack_plain_fits(plain_path, delete_plain=True)
+        # fpack writes sibling .fits.fz next to plain; ensure final name matches dest.
+        produced = Path(str(plain_path) + ".fz")
+        if produced.resolve() != fz_dest.resolve():
+            if fz_dest.is_file():
+                fz_dest.unlink()
+            os.replace(produced, fz_dest)
     except BaseException:
         if os.path.isfile(part):
             try:
                 os.remove(part)
             except OSError:
                 pass
+        if plain_path.is_file():
+            try:
+                plain_path.unlink()
+            except OSError:
+                pass
         raise
+
+
+# Back-compat alias used by older tests/callers.
+def _stream_url_to_gzip_fits(url: str, gz_dest_path: str, timeout: float) -> None:
+    """Deprecated: download and fpack to ``.fits.fz`` (gz path rewritten)."""
+    fz_dest = spoc_ffi_fpack_basename(gz_dest_path)
+    if not gz_dest_path.endswith(FFIC_FPACK_SUFFIX):
+        parent = os.path.dirname(gz_dest_path) or "."
+        fz_dest = os.path.join(parent, os.path.basename(fz_dest))
+    else:
+        fz_dest = gz_dest_path
+    _stream_url_to_fpack_fits(url, fz_dest, timeout)
 
 
 def _run_one_ffi_download(basename: str, download_fn: Callable[[], None]) -> tuple[str, str | None]:
@@ -560,16 +638,16 @@ def _download_ffis_via_tesscurl(
         )
         tasks: list[tuple[str, Callable[[], None]]] = []
         for bn, url in filtered:
-            gz_path = os.path.join(output_dir, spoc_ffi_gzip_basename(bn))
+            fz_path = os.path.join(output_dir, spoc_ffi_fpack_basename(bn))
 
-            def _download(url: str = url, gz_path: str = gz_path) -> None:
+            def _download(url: str = url, fz_path: str = fz_path) -> None:
                 """Download.
                 
                 Parameters
                 ----------
                 url : str, optional, default ``url``
-                gz_path : str, optional, default ``gz_path``"""
-                _stream_url_to_gzip_fits(url, gz_path, _DOWNLOAD_TIMEOUT_FITS_S)
+                fz_path : str, optional, default ``fz_path``"""
+                _stream_url_to_fpack_fits(url, fz_path, _DOWNLOAD_TIMEOUT_FITS_S)
 
             tasks.append((bn, _download))
         n_ok, n_err = _execute_ffi_downloads(tasks, max_workers)
@@ -745,7 +823,7 @@ def _download_ffis_via_astroquery(
                 if status != "COMPLETE":
                     raise OSError(f"{status} {msg or ''}".strip())
                 if os.path.isfile(plain_path):
-                    _gzip_fits_file(plain_path)
+                    compress_spoc_ffi_to_fpack(plain_path)
 
             tasks.append((basename, _download))
         n_ok, n_err = _execute_ffi_downloads(tasks, max_workers)

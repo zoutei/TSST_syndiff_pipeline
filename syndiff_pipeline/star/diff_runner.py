@@ -474,5 +474,4 @@ def write_star_diff_stamp(
     hdr["HOSTY"] = (host_y - wy, "Host y within stamp (crop-local minus YMIN)")
     out_path = str(path)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-    _write_image_fits(out_path, stamp, header=hdr)
-    return out_path
+    return _write_image_fits(out_path, stamp, header=hdr)
