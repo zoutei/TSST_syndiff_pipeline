@@ -119,14 +119,33 @@ flowchart TB
 |-------|------|------|--------|
 | **L0** | Frozen `TESS_PIXEL_MAP` per skycell + master `pixels2skycells` | Once per SCC (`mapping` stage) | `pancakes.py` |
 | **L1** | Per-FFI celestial WCS (SIP) via shared keyword cache | Every frame; ~9 ms/frame on cache hit | `wcs_header_cache.py` |
-| **L2** | TESS-pixel drift at each skycell center; convert to PS1 shift | Built into `shift_schedule.npz` | `shift_schedule.py` |
-| **L3** | Hysteresis round → integer `(sx, sy)`; frame signature → `group_id` | Same schedule build | `shift_schedule.py` |
-| **L4a** | Roll frozen map + Exact-patch R=1 seam/rim mask | Per `(skycell, sx, sy)` cache key | `hybrid_regmaps.py`, `field_hybrid_exact.py` |
-| **L4b-lite** | Exact-refresh abutting TESS border when neighbors differ | Expanded into L4a TESS-id set | `field_hybrid_exact.py` |
-| **L5** | Bin PS1 flux through hybrid assignment; sum contribs per `group_id` | `templates` stage + diff assembly | `field_downsample.py`, `field_templates.py` |
+| **L2** | TESS-pixel drift at each skycell center; convert to PS1 shift | `remap` stage → `shift_schedule.npz` | `shift_schedule.py`, `field_remap.py` |
+| **L3** | Hysteresis round → integer `(sx, sy)`; frame signature → `group_id` | Same `remap` schedule build | `shift_schedule.py`, `field_remap.py` |
+| **L4a** | Roll frozen map + Exact-patch R=1 seam/rim mask | `remap` → `exact_cache/` per `(skycell, sx, sy)` | `hybrid_regmaps.py`, `field_hybrid_exact.py` |
+| **L4b-lite** | Exact-refresh abutting TESS border when neighbors differ | Expanded into L4a TESS-id set (still `remap`) | `field_hybrid_exact.py` |
+| **L5** | Bin PS1 flux through hybrid assignment; sum contribs per `group_id` | `downsample` stage + diff assembly | `field_downsample.py`, `field_templates.py` |
 
 **Measured scale (s0020/c3/k3):** ~1036 skycells, ~1183 valid frames, ~16.6k Type I
 keys `(skycell, sx, sy)`, ~951 distinct `group_id`s.
+
+### Why `remap` and `downsample` are separate stages
+
+| Layer | Needs `convolved.zarr`? | Stage |
+|-------|-------------------------|-------|
+| L2–L3 schedule + groups | No | `remap` |
+| L4 hybrid Exact cache | No | `remap` |
+| L5 flux binning → `contribs/` | **Yes** | `downsample` |
+
+`remap` depends only on `mapping`, so it can run in parallel with `ps1_download` /
+`ps1_process`. `downsample` waits for both `remap` (field) and `ps1_process`.
+
+**Linear mode:** the scheduler pre-skips `remap` (`apply_linear_remap_skips`) and
+`downsample`'s `effective_deps` omit it — linear still rolls frozen L0 maps inside
+`downsample` and writes offset FITS.
+
+**What “recompute” means:** hybrid Exact (L4a/L4b-lite) is **not** a full PanCAKES
+remap per frame, and it is **not** folded into `mapping` (L0 stays reference-epoch
+only).
 
 ---
 
@@ -303,7 +322,8 @@ WCS headers**.
 | `template_creation/processing/compute_ps1_skycell_shifts.py` | TESS drift → PS1 shift WCS round-trip |
 | `template_creation/processing/hybrid_regmaps.py` | Roll, recompute mask, hybrid patch merge |
 | `template_creation/processing/field_hybrid_exact.py` | Exact regmap for TESS-id subsets; L4a/L4b-lite orchestration |
-| `template_creation/processing/field_downsample.py` | SCC field store build (`run_field_downsample_scc`) |
+| `template_creation/processing/field_remap.py` | SCC remap store build (`run_field_remap_scc`; L2–L4) |
+| `template_creation/processing/field_downsample.py` | SCC field downsample (`run_field_downsample_scc`; L5 contribs) |
 | `template_creation/processing/field_templates.py` | Contrib cache, per-group assembly |
 | `template_creation/processing/pancakes.py` | `process_skycell_pixel_mapping` (shared with L0 mapping) |
 | `common/wcs_header_cache.py` | Per-FFI WCS keyword cache (zero file I/O on hit) |
@@ -322,45 +342,78 @@ stages:
     wcs_drift_savgol_polyorder: 2
     crop_mode: target_box         # diff crop; field store is full-chip, crop filters at assembly
     crop_box_size: 1024
-  templates:                      # `templates` stage (legacy config key: `downsample`)
-    geometry_mode: field
-    apply_hybrid_exact: true      # L4a R=1 seam/rim Exact (else roll-only fallback)
+  remap:                          # L2–L4 (schedule, groups, exact_cache)
+    apply_hybrid_exact: true
     hybrid_R: 1
     include_abutting_border_exact: true   # L4b-lite
-    rebuild_field_store: false    # true overwrites existing contribs + exact cache
-    n_jobs: 32                    # hybrid workers cap at min(n_jobs, 24, CPUs)
+    rebuild_remap_cache: false
+    n_jobs: 32
+  downsample:                     # L5 contribs under templates/oversampling_{N}/
+    geometry_mode: field
+    rebuild_field_store: false    # true overwrites existing contribs
+    n_jobs: 32
 ```
 
 `grouping_quantum_ps1_px` is the supported config knob for template count. Finer
-Exact-reuse quanta (`cache_quantum_ps1_px`, phase vs absolute keying) exist on
-the `shift_schedule` API and are recorded in `template_groups.json`, but the
-production field build currently hardcodes `cache_quantum_ps1_px=1.0` /
-`keying="absolute"` — see [Cache keys and reuse](#cache-keys-and-reuse).
+Exact-reuse quanta (`cache_quantum_ps1_px`, phase vs absolute keying) are set on
+`stages.remap` and recorded in `remap_manifest.json` / `template_groups.json`
+(defaults `1.0` / `absolute`).
 
-`mapping_dir` / `convolved_dir` can point the `templates` stage at a shared read-only
-mapping + convolved tree while writing its SCC template store to an isolated `data_root`.
+`mapping_dir` / `convolved_dir` can point remap/downsample at a shared read-only
+mapping + convolved tree while writing SCC stores to an isolated `data_root`.
 
 ---
 
 ## Storage
 
 ```
-{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/
+{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/       # remap stage (L2–L4)
+  remap_manifest.json              # verify gate + recipe (schema_version, hybrid knobs, …)
+  shift_schedule.npz / .json
+  template_group_shifts.parquet
+  template_groups.json
+  exact_cache/{skycell}_sx{±N}_sy{±N}_exact.npz   # Exact TESS-id patch only
+  .lock
+
+{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/  # downsample stage (L5)
   template_manifest.json          # completeness marker for the SCC store
-  shift_schedule.npz              # per-skycell drift schedule (L2/L3)
-  template_group_shifts.parquet   # (group_id, skycell, sx_int, sy_int, ...)
-  field_mode_assembly.json        # roi_bounds, base_tess_shape, zarr, ignore_mask
+  field_mode_assembly.json        # remap_root, roi_bounds, base_tess_shape, zarr, …
   contribs/skycell.{proj}.{cell}_sx{±N}_sy{±N}.npz
-  exact_cache/…_exact.npz
+  .lock
+
 {workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/field_contrib_keys.json
 ```
+
+### What each stage saves (and does not)
+
+| Stage | Saves | Does **not** save |
+|-------|-------|-------------------|
+| `mapping` | Frozen L0 regmaps under `mapping/oversampling_{N}/` | Shift schedules, Exact patches, flux |
+| `remap` | Schedule, groups, `exact_cache/` Exact **patches** (~9% of footprint ids), `remap_manifest.json` | Full hybrid assignment grids (too large), full per-frame PanCAKES regmaps, `contribs/`, template FITS, zarr |
+| `downsample` | `contribs/`, `template_manifest.json`, `field_mode_assembly.json` (with `remap_root`) | Exact PanCAKES calls when cache hits — only `roll(L0) + apply_patch(exact_cache)` then bin |
+
+`exact_cache` stores Exact TESS-id subsets only. At bin time `downsample` rebuilds the
+in-memory hybrid assignment cheaply from frozen L0 + patch; it must not call
+`exact_regmap_for_tess_ids` / `process_skycell_pixel_mapping` on a warm cache.
+
+### Migration from pre-split stores
+
+Older field builds colocated L2–L4 under `templates/oversampling_{N}/`. Use
+`migrate_scc_remap_artifacts()` in
+[`migrate_field_remap_store.py`](../../syndiff_pipeline/template_creation/processing/migrate_field_remap_store.py)
+to **copy** schedule / groups / `exact_cache/` into `remap/` (sources left in place;
+idempotent). Until migrated, code dual-reads those legacy files when
+`remap_manifest.json` is absent.
 
 Resolved at diff time by `template_resolution.resolve_template_dir()` — first via
 `data_root`+SCC (`scc_templates_dir()`), falling back to sector/camera/ccd from
 `event_job.json`. `is_field_template_store()` recognizes the store by
-`template_manifest.json`.
+`template_manifest.json`. Group shifts prefer `remap_root` from
+`field_mode_assembly.json` when present.
 
-The store is **shared across events** on an SCC; force-rerun never deletes it.
+Both stores are **shared across events** on an SCC; ordinary force-rerun never
+deletes them. Use `rebuild_remap_cache: true` (`stages.remap`) and/or
+`rebuild_field_store: true` (`stages.downsample`) for intentional rebuilds.
 Each event records exactly the keys it required (crop-aware verify). Legacy
 pre-cutover stores at `{data_root}/field_templates/sector_*` are obsolete and
 are **not** read by current code. See [storage_layout.md](storage_layout.md).
