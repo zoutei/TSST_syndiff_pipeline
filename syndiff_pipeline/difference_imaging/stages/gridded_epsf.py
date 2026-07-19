@@ -28,6 +28,7 @@ from syndiff_pipeline.common.joblib_progress import (
     tqdm_iter,
 )
 from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     parse_workspace_frame_stem,
     strip_fits_suffix,
@@ -64,6 +65,9 @@ def _init_gridded_epsf_worker(
     output_dir: str,
     mask_2d: np.ndarray | None,
     skip_existing: bool = True,
+    sck: tuple | None = None,
+    data_root: str | None = None,
+    epsf_label: str | None = None,
 ) -> None:
     """Load shared ePSF inputs once per loky worker (see starpositioningscript)."""
     _suppress_photutils_epsf_noise()
@@ -75,6 +79,9 @@ def _init_gridded_epsf_worker(
             "output_dir": output_dir,
             "mask_2d": mask_2d,
             "skip_existing": bool(skip_existing),
+            "sck": sck,
+            "data_root": data_root,
+            "epsf_label": epsf_label,
         }
     )
 
@@ -583,6 +590,28 @@ def _fit_one_frame_task(
         grid_xypos,
         int(epsf_params.epsf_oversample),
     )
+
+    sck = ctx.get("sck")
+    if sck is not None:
+        try:
+            product_id = tess_product_id_from_ffi_path(ffi_stem) or ffi_stem
+            inputs = [provenance_glue.upstream_label_edge("diff_image", diff_path)["fingerprint"]]
+            provenance_glue.emit_diff_artifact(
+                kind="epsf",
+                sector=sck[0],
+                camera=sck[1],
+                ccd=sck[2],
+                product_id=product_id,
+                label=str(ctx.get("epsf_label") or "epsf"),
+                params=epsf_params,
+                location=out_path,
+                input_fingerprints=inputs,
+                data_root=ctx.get("data_root"),
+                is_fits=False,
+            )
+        except Exception:
+            log.debug("provenance emit (epsf) failed for %s", ffi_stem, exc_info=True)
+
     return frame_idx, ffi_stem, True, grid_xypos, stack, False
 
 
@@ -669,7 +698,22 @@ def fit_gridded_epsf_all_frames(
             workspace_progress_path, cli_progress_path, success=_ok
         )
 
-    worker_initargs = (gaia_df, epsf_params, output_dir, mask_2d, skip_existing)
+    try:
+        prov_sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
+    except Exception:
+        prov_sck = None
+    prov_data_root = getattr(cfg, "data_root", "") or None
+
+    worker_initargs = (
+        gaia_df,
+        epsf_params,
+        output_dir,
+        mask_2d,
+        skip_existing,
+        prov_sck,
+        prov_data_root,
+        epsf_label,
+    )
 
     results: list[tuple] = []
     if n_workers <= 1 or n_frames <= 1:

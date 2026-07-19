@@ -11,6 +11,10 @@ import numpy as np
 from joblib import Parallel, delayed
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+    KernelSubtractParams,
+)
 from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
     lookup_convolved_path,
 )
@@ -100,6 +104,8 @@ def _process_one_frame(task: tuple) -> dict:
     bkg_label = p.get("bkg_label")
     output_dir = p["output_dir"]
     manifest = p["manifest"]
+    sck = p.get("sck")
+    data_root = p.get("data_root")
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
     diff_stem = workspace_frame_stem(product_id, diffs_label)
@@ -114,6 +120,7 @@ def _process_one_frame(task: tuple) -> dict:
         }
 
     try:
+        template_path = None
         if bool(p.get("field_mode", False)):
             from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
                 lookup_convolved_path_by_group_id,
@@ -126,7 +133,7 @@ def _process_one_frame(task: tuple) -> dict:
                 convolved_table, group_id_for_ffi(manifest, ffi_path)
             )
         else:
-            group_dx, group_dy, _ = resolve_template_for_ffi(
+            group_dx, group_dy, template_path = resolve_template_for_ffi(
                 output_dir, manifest, ffi_path
             )
             conv_path = lookup_convolved_path(convolved_table, group_dx, group_dy)
@@ -144,13 +151,69 @@ def _process_one_frame(task: tuple) -> dict:
 
         header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
         _write_image_fits(diff_out, diff_raw, header=header)
+        if sck is not None:
+            try:
+                inputs = []
+                ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
+                if ffi_fp:
+                    inputs.append(ffi_fp)
+                if template_path:
+                    inputs.append(
+                        provenance_glue.template_input_edge(template_path)["fingerprint"]
+                    )
+                provenance_glue.emit_diff_artifact(
+                    kind="diff_image",
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=product_id,
+                    label=diffs_label,
+                    # KernelFitParams is resolved in a separate upstream pipeline
+                    # stage and not threaded through this loop; the recorded
+                    # recipe covers this stage's own params only (deviation,
+                    # see PR-D1 report).
+                    params=KernelSubtractParams(phot_box_size=int(phot_box_size)),
+                    location=diff_out,
+                    input_fingerprints=inputs,
+                    data_root=data_root,
+                    meta={"producer": "kernel_subtract"},
+                )
+            except Exception:
+                log.debug(
+                    "provenance emit (diff_image/kernel_subtract) failed for %s",
+                    product_id,
+                    exc_info=True,
+                )
         if bkg_dir and bkg_label:
             bkg_stem = workspace_frame_stem(product_id, bkg_label)
+            bkg_out = workspace_frame_fits_path(bkg_dir, bkg_stem)
             _write_image_fits(
-                workspace_frame_fits_path(bkg_dir, bkg_stem),
+                bkg_out,
                 phot_bkg,
                 header=header,
             )
+            if sck is not None:
+                try:
+                    ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
+                    provenance_glue.emit_diff_artifact(
+                        kind="diff_background",
+                        sector=sck[0],
+                        camera=sck[1],
+                        ccd=sck[2],
+                        product_id=product_id,
+                        label=bkg_label,
+                        params=KernelSubtractParams(phot_box_size=int(phot_box_size)),
+                        location=bkg_out,
+                        input_fingerprints=[ffi_fp] if ffi_fp else [],
+                        data_root=data_root,
+                        meta={"producer": "kernel_subtract"},
+                    )
+                except Exception:
+                    log.debug(
+                        "provenance emit (diff_background/kernel_subtract) failed for %s",
+                        product_id,
+                        exc_info=True,
+                    )
 
         return {
             "success": True,
@@ -182,15 +245,29 @@ def kernel_subtract_loop(
     bkg_label: Optional[str] = None,
     n_jobs: int = 1,
     field_mode: bool = False,
+    cfg: Optional[Any] = None,
 ) -> list[dict]:
     """Run algebraic diff + photutils background for each FFI.
 
     ``field_mode`` keys the convolved-template lookup by ``group_id`` (field
     geometry) instead of the linear ``(group_dx, group_dy)`` offsets.
+
+    ``cfg`` (``SynDiffConfig``), when given, drives best-effort PR-D1 diff
+    provenance tracking (sector/camera/ccd + ``data_root``); never changes
+    what/where is written. See ``orchestration/provenance_glue.py``.
     """
     os.makedirs(diffs_dir, exist_ok=True)
     if bkg_dir:
         os.makedirs(bkg_dir, exist_ok=True)
+
+    sck = None
+    data_root = None
+    if cfg is not None:
+        try:
+            sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
+        except Exception:
+            sck = None
+        data_root = getattr(cfg, "data_root", "") or None
 
     payload = {
         "crop_bounds": crop_bounds,
@@ -204,6 +281,8 @@ def kernel_subtract_loop(
         "output_dir": output_dir,
         "manifest": manifest,
         "field_mode": bool(field_mode),
+        "sck": sck,
+        "data_root": data_root,
     }
 
     tasks = [(ffi_path,) for ffi_path in ffi_paths]

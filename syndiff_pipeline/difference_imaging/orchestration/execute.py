@@ -217,7 +217,14 @@ def _run_background_stage(
     if params.write_stack:
         background.save_stack(stack, out_ws)
     if params.write_per_frame_fits:
-        background.write_per_frame_fits(out_ws, stack, records)
+        background.write_per_frame_fits(
+            out_ws,
+            stack,
+            records,
+            sck=(int(cfg.sector), int(cfg.camera), int(cfg.ccd)),
+            data_root=getattr(cfg, "data_root", "") or None,
+            background_params=params,
+        )
 
     stem_rows = _records_to_stem_rows(records)
     _maybe_write_background_gif(
@@ -902,6 +909,9 @@ def run_config_pipeline(
                 template_path=ref_template_path,
                 template_count_crop=ref_template_count_crop,
                 ps1_min_hit_count=int(sm.ps1_min_hit_count),
+                sck=(int(cfg.sector), int(cfg.camera), int(cfg.ccd)),
+                data_root=getattr(cfg, "data_root", "") or None,
+                mask_params=sm,
             )
             ref_stars = masking.select_hotpants_ref_stars(
                 gaia_df=gaia_mask_df,
@@ -1100,6 +1110,7 @@ def run_config_pipeline(
                 bkg_label=bkg_l,
                 n_jobs=n_jobs,
                 field_mode=field_ctx is not None,
+                cfg=cfg,
             )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l

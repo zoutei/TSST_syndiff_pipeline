@@ -26,6 +26,7 @@ from joblib import Parallel, delayed
 import multiprocessing
 
 from syndiff_pipeline.common.fits_io import write_primary_hdu_fits
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 
 warnings.filterwarnings("ignore", category=RuntimeWarning)
@@ -387,7 +388,10 @@ def make_shared_mask(ref_image: np.ndarray,
                      y_edge_strip: int = 30,
                      template_path: str | None = None,
                      template_count_crop: "np.ndarray | None" = None,
-                     ps1_min_hit_count: int = 5000) -> np.ndarray:
+                     ps1_min_hit_count: int = 5000,
+                     sck: tuple | None = None,
+                     data_root: str | None = None,
+                     mask_params=None) -> np.ndarray:
     """
     Build the shared bitmask for the cropped region.
 
@@ -485,6 +489,18 @@ def make_shared_mask(ref_image: np.ndarray,
         write_primary_hdu_fits(out_path, hdu)
         log.info(f"Shared mask written to {out_path}  "
                  f"(masked pixels: {(mask > 0).sum()} / {mask.size})")
+        if sck is not None and mask_params is not None:
+            try:
+                provenance_glue.emit_shared_mask_artifact(
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    params=mask_params,
+                    location=out_path,
+                    data_root=data_root,
+                )
+            except Exception:
+                log.debug("provenance emit (shared_mask) failed", exc_info=True)
 
     return mask
 

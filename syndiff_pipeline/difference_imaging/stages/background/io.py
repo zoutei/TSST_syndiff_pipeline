@@ -5,13 +5,14 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.common.fits_io import write_image_fits
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
@@ -269,14 +270,26 @@ def write_per_frame_fits(
     out_dir: str,
     stack: np.ndarray,
     records: List[FrameRecord],
+    *,
+    sck: Optional[tuple] = None,
+    data_root: Optional[str] = None,
+    background_params: Optional[Any] = None,
 ) -> None:
     """Write per frame fits.
-    
+
     Parameters
     ----------
     out_dir : str
     stack : np.ndarray
-    records : List[FrameRecord]"""
+    records : List[FrameRecord]
+    sck : Optional[tuple], optional
+        ``(sector, camera, ccd)``; when set (with *data_root* and
+        *background_params*), emits a best-effort ``diff_background``
+        provenance sidecar per frame (PR-D1, never changes what/where is
+        written; see ``orchestration/provenance_glue.py``).
+    data_root : Optional[str], optional
+    background_params : Optional[Any], optional
+        The stage's ``BackgroundParams`` (recipe source for the sidecar)."""
     os.makedirs(out_dir, exist_ok=True)
     out_label = workspace_label_from_dir(out_dir)
     for i, rec in enumerate(records):
@@ -284,7 +297,41 @@ def write_per_frame_fits(
             continue
         stem = workspace_frame_stem(rec.product_id, out_label)
         fn = workspace_frame_fits_basename(stem)
+        out_path = os.path.join(out_dir, fn)
         write_image_fits(
-            os.path.join(out_dir, fn),
+            out_path,
             np.asarray(stack[i], dtype=np.float32),
         )
+        if sck is not None and background_params is not None:
+            try:
+                # This standalone background stage reads the diffs stack (not
+                # the raw FFI) — its diff_background node depends on the
+                # upstream diff_image node, not on an `ffi` node directly
+                # (§21 open question: hotpants-internal bkg vs standalone
+                # background stage are tracked with different recipes/edges).
+                inputs = []
+                if rec.diff_path:
+                    inputs.append(
+                        provenance_glue.upstream_label_edge("diff_image", rec.diff_path)[
+                            "fingerprint"
+                        ]
+                    )
+                provenance_glue.emit_diff_artifact(
+                    kind="diff_background",
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=rec.product_id,
+                    label=out_label,
+                    params=background_params,
+                    location=out_path,
+                    input_fingerprints=inputs,
+                    data_root=data_root,
+                    meta={"producer": "background"},
+                )
+            except Exception:
+                log.debug(
+                    "provenance emit (diff_background/background) failed for %s",
+                    rec.product_id,
+                    exc_info=True,
+                )
