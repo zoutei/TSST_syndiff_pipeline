@@ -394,6 +394,51 @@ recompute.
 mosaic that `templates` consumes; its inputs are the shared convolved cells +
 mapping.
 
+### 13.1 Validated: the seam correction must be additive convolution, not a value blend
+
+Investigated 2026-07-19 before touching any production padding code, because
+"re-pad post-hoc from shared convolved cells" is ambiguous about whether it means
+splicing already-convolved pixel *values* at the seam (cheap, but not obviously
+correct) or something else. Using the **real** production convolution function
+(`convolution_utils.apply_gaussian_convolution`, `sigma=60`, `radius=470`) on
+controlled synthetic arrays (`tests/test_seam_correction_linearity.py`, locked in
+as a regression test):
+
+- **Gaussian convolution is linear, and this was verified to floating-point
+  precision (not just argued on paper):** `convolve(canonical_gap_zero) +
+  convolve(reprojected_patch_alone)` reproduces `convolve(correctly_padded)` to
+  relative error ~1e-15 — pure roundoff. So the **exact** Phase-2 correction is:
+  convolve the reprojected cross-projection patch *by itself* (placed at its true
+  position in an otherwise-zero array of the same extent) and **add** that to the
+  canonical (same-projection-only) convolved cell. This is provably exact, not an
+  approximation, given the same production convolution kernel.
+- **The naive shortcut — leaving the cross-projection gap zero-filled with no
+  correction at all — is NOT safe to skip.** The same test quantifies the bias:
+  up to ~50% flux deficit at the immediate seam edge, tapering to negligible by
+  roughly one truncation radius (~470 px) away. This is a real, systematic,
+  hard-to-notice photometric defect if shipped uncorrected — exactly the class of
+  bug this gate exists to catch.
+
+**Implication for scope:** the correction is *real new production code* — it
+touches the live per-row padding/convolution sequence in `ps1_process.py` /
+`cross_projection_padding.py` (isolating and convolving each padding patch
+separately, then adding the result into the recipient cell's canonical
+convolution), not just a stitching step over already-finished pixels. Landing it
+is therefore properly gated on (a) implementing that patch-convolve-and-add path
+carefully in the live pipeline, and (b) the real-SCC numeric-equivalence
+comparison below — both left for a dedicated follow-up, not bundled into the
+data-layer PR.
+
+**What has landed (data layer only, not wired into the live pipeline):**
+`template_creation/processing/convolved_store.py` — fingerprint/publish/load for
+the *canonical* (same-projection-only) convolved cell, mirroring
+`combined_store.py`'s proven pattern exactly (`convolved_recipe` records
+`psf_sigma`/`radius`/`mode`/`padding="same_projection_only"`; the cell's
+fingerprint takes the upstream `combined_skycell` fingerprint as a Merkle input,
+so a combined-cell recompute invalidates it automatically). `ps1_process.py` does
+**not** call it yet — building the actual patch-convolve-and-add correction and
+wiring it into the live row loop is the next, separately-reviewed step.
+
 **Blocking numeric-equivalence gate:** assemble a real SCC from shared + re-padded
 cells and require agreement with today's baked-in `convolved.zarr` within tolerance,
 wired into the existing downsample/template comparison harness. Given this branch's
