@@ -660,6 +660,9 @@ def process_coordinator(
     bright_star_mag_threshold: float = 13.0,
     combined_store_data_root: Optional[str] = None,
     combined_store_recipe=None,
+    convolved_store_data_root: Optional[str] = None,
+    convolved_store_recipe=None,
+    psf_sigma: float = 60.0,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -682,12 +685,12 @@ def process_coordinator(
             publish_combined_cell,
         )
 
-        def _publish_combined(result: dict) -> None:
+        def _publish_combined(result: dict) -> Optional[dict]:
             parsed = _projection_and_cell(result["skycell_id"])
             if parsed is None:
-                return
+                return None
             projection, cell = parsed
-            publish_combined_cell(
+            return publish_combined_cell(
                 combined_store_data_root,
                 projection,
                 cell,
@@ -697,6 +700,40 @@ def process_coordinator(
                 removed_stars=result.get("removed_stars"),
                 recipe=combined_store_recipe,
                 producer="ps1_process",
+            )
+    _publish_convolved = None
+    if convolved_store_data_root is not None and convolved_store_recipe is not None:
+        from syndiff_pipeline.template_creation.processing.combined_store import (
+            _projection_and_cell as _proj_and_cell,
+        )
+        from syndiff_pipeline.template_creation.processing.convolved_store import (
+            publish_convolved_cell,
+        )
+
+        def _publish_convolved(result: dict, combined_pub: Optional[dict]) -> None:
+            if not combined_pub or not combined_pub.get("fingerprint"):
+                return
+            parsed = _proj_and_cell(result["skycell_id"])
+            if parsed is None:
+                return
+            projection, cell = parsed
+            img = np.asarray(result["combined_image"], dtype=np.float64)
+            mask = np.asarray(result["combined_mask"])
+            nan_mask = np.isnan(img)
+            work = img.copy()
+            work[nan_mask] = 0.0
+            conv = convolution_utils.apply_gaussian_convolution(work, sigma=psf_sigma)
+            conv[nan_mask] = np.nan
+            publish_convolved_cell(
+                convolved_store_data_root,
+                projection,
+                cell,
+                convolved_image=conv,
+                convolved_mask=mask,
+                headers_data=result.get("headers_data") or {},
+                removed_stars=result.get("removed_stars", []),
+                recipe=convolved_store_recipe,
+                combined_fingerprint=str(combined_pub["fingerprint"]),
             )
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
     if band_cache is None:
@@ -748,12 +785,23 @@ def process_coordinator(
                                     }
                                     logger.info(f"[ProcessCoordinator] Cached padding source {result['skycell_id']}")
                                 else:
+                                    combined_pub = None
                                     if _publish_combined is not None:
                                         try:
-                                            _publish_combined(result)
+                                            combined_pub = _publish_combined(result)
                                         except Exception:
                                             logger.warning(
                                                 "[ProcessCoordinator] Combined-store publish "
+                                                "failed for %s (non-fatal)",
+                                                result["skycell_id"],
+                                                exc_info=True,
+                                            )
+                                    if _publish_convolved is not None:
+                                        try:
+                                            _publish_convolved(result, combined_pub)
+                                        except Exception:
+                                            logger.warning(
+                                                "[ProcessCoordinator] Convolved-store publish "
                                                 "failed for %s (non-fatal)",
                                                 result["skycell_id"],
                                                 exc_info=True,
@@ -887,8 +935,15 @@ def process_coordinator(
     logger.info("[ProcessCoordinator] Finished")
 
 
-def saver_worker(results_queue: _thread_queue.Queue, output_path: str):
+def saver_worker(results_queue: _thread_queue.Queue, output_path: str, *, enabled: bool = True):
     """Stage 4: Saves final results to an output Zarr store."""
+    if not enabled:
+        while True:
+            processed_bundle = results_queue.get()
+            if processed_bundle is None:
+                break
+        logger.info("[Saver] Per-SCC convolved.zarr writes disabled; drained results queue.")
+        return
     try:
         output_store = zarr.open(output_path, mode="a")
         logger.info(f"[Saver] Opened output store {output_path}")
@@ -1614,6 +1669,8 @@ def run_modern_sliding_window_pipeline(
     remove_saturated_stars: bool = False,
     catalog_path: Optional[str] = None,
     bright_star_mag_threshold: float = 13.0,
+    use_shared_convolved_store: bool = False,
+    write_per_scc_convolved_zarr: bool = True,
 ):
     """The top-level master orchestrator for the entire pipeline."""
     global _child_processes
@@ -1784,11 +1841,35 @@ def run_modern_sliding_window_pipeline(
             exc_info=True,
         )
 
+    convolved_store_recipe = None
+    if use_shared_convolved_store:
+        try:
+            from syndiff_pipeline.template_creation.processing.convolved_store import (
+                convolved_recipe,
+            )
+
+            convolved_store_recipe = convolved_recipe(psf_sigma=psf_sigma)
+            logger.info(
+                "[Pipeline] Shared convolved store enabled (canonical same-projection cells)."
+            )
+        except Exception as e:
+            logger.warning(
+                "[Pipeline] Convolved-store recipe setup failed (continuing without "
+                "shared convolved publish): %s",
+                e,
+                exc_info=True,
+            )
+
     # Fix 3 — event to pause coordinator new-submissions during cross-projection padding
     pipeline_paused_event = threading.Event()
 
     # --- Start Persistent Workers (Stages 1, 1.5, 2, 4) ---
-    saver_thread = threading.Thread(target=saver_worker, args=(results_queue, output_path), daemon=True)
+    saver_thread = threading.Thread(
+        target=saver_worker,
+        args=(results_queue, output_path),
+        kwargs={"enabled": bool(write_per_scc_convolved_zarr)},
+        daemon=True,
+    )
     saver_thread.start()
 
     band_combiner_threads = []
@@ -1806,6 +1887,9 @@ def run_modern_sliding_window_pipeline(
         kwargs={
             "combined_store_data_root": data_root,
             "combined_store_recipe": combined_store_recipe,
+            "convolved_store_data_root": data_root if use_shared_convolved_store else None,
+            "convolved_store_recipe": convolved_store_recipe,
+            "psf_sigma": psf_sigma,
         },
         daemon=True,
     )

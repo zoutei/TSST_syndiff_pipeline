@@ -201,6 +201,41 @@ def cmd_bookkeeping_verify(args: argparse.Namespace) -> int:
     return 0 if row is not None and row.state == "complete" else 1
 
 
+def cmd_bookkeeping_gc(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.common.provenance.gc import gc_report
+
+    data_root = _resolve_data_root(args)
+    report = gc_report(data_root)
+    print(json.dumps(report.to_dict(), indent=2))
+    return 1 if report.errors else 0
+
+
+def cmd_bookkeeping_pilot(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.common.provenance.pilot import format_pilot_checklist
+
+    data_root = _resolve_data_root(args)
+    print(format_pilot_checklist(data_root))
+    report = __import__(
+        "syndiff_pipeline.common.provenance.pilot", fromlist=["pilot_checklist_report"]
+    ).pilot_checklist_report(data_root)
+    return 0 if report.get("go") else 1
+
+
+def cmd_bookkeeping_convolved_gate(args: argparse.Namespace) -> int:
+    from syndiff_pipeline.common.provenance.convolved_gate import convolved_gate_report
+
+    data_root = _resolve_data_root(args)
+    report = convolved_gate_report(
+        data_root,
+        sector=int(args.sector),
+        camera=int(args.camera),
+        ccd=int(args.ccd),
+        sample_cells=int(args.sample_cells),
+    )
+    print(json.dumps(report, indent=2))
+    return 0 if report.get("pass") else 1
+
+
 def _add_data_root_args(sp: argparse.ArgumentParser) -> None:
     sp.add_argument("--data-root", default=None, help="Pipeline data root (direct)")
     sp.add_argument("--config", default=None, help="RunnerConfig YAML to derive data_root from")
@@ -246,6 +281,24 @@ def register_bookkeeping_subparser(sub: "argparse._SubParsersAction") -> None:
         "--stage", default="mapping", help="mapping | remap_store | downsample"
     )
     sp_verify.set_defaults(func=cmd_bookkeeping_verify)
+
+    sp_gc = bk_sub.add_parser("gc", help="Report-only GC: orphan dirs and missing files")
+    _add_data_root_args(sp_gc)
+    sp_gc.set_defaults(func=cmd_bookkeeping_gc)
+
+    sp_pilot = bk_sub.add_parser("pilot", help="Phase-5 dual-write go/no-go checklist")
+    _add_data_root_args(sp_pilot)
+    sp_pilot.set_defaults(func=cmd_bookkeeping_pilot)
+
+    sp_gate = bk_sub.add_parser(
+        "convolved-gate", help="PR5 gate report: legacy vs shared convolved store"
+    )
+    _add_data_root_args(sp_gate)
+    sp_gate.add_argument("--sector", type=int, default=20)
+    sp_gate.add_argument("--camera", type=int, default=3)
+    sp_gate.add_argument("--ccd", type=int, default=3)
+    sp_gate.add_argument("--sample-cells", type=int, default=5)
+    sp_gate.set_defaults(func=cmd_bookkeeping_convolved_gate)
 
 
 def main(argv: Optional[list] = None) -> int:

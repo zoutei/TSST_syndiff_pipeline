@@ -237,6 +237,46 @@ Full daemon/liveness details: [template_runner_architecture.md — SQLite and NF
 
 ---
 
+## Provenance bookkeeping (`data_root/bookkeeping/`)
+
+Content-addressed provenance (see `doc/template_bookkeeping_plan.md`) lives under `data_root`:
+
+```text
+{data_root}/bookkeeping/
+  provenance.db          # derived index (rebuildable via ``syndiff bookkeeping reindex``)
+  spool/                 # per-process JSONL sidecars drained by the supervisor
+```
+
+Shared PS1 stores (decision #14):
+
+```text
+{data_root}/ps1_skycells_zarr/
+  ps1_skycells.zarr/     # raw bands
+  ps1_combined.zarr/     # star-removed combined cells (PR4)
+  ps1_convolved.zarr/    # canonical convolved cells (PR5, gated)
+```
+
+SCC-scoped diff store (PR-D2, `publish_scc: true` on finalized runs only):
+
+```text
+{data_root}/s{SSSS}/c{C}/k{K}/diff/{stage_label}/{recipe_fp}/
+  tess<digits>_{label}.fits.fz   # mirrored diff products
+```
+
+Event workspaces record pointers in `ws/scc_diff_index.json` (no symlinks into `data_root`).
+
+Operator commands:
+
+| Command | Purpose |
+|---------|---------|
+| `syndiff bookkeeping stats` | Row counts by kind/state |
+| `syndiff bookkeeping reindex` | Offline DB rebuild from disk |
+| `syndiff bookkeeping gc` | Report-only orphan/missing scan |
+| `syndiff bookkeeping pilot` | Phase-5 go/no-go checklist |
+| `syndiff bookkeeping convolved-gate` | PR5 gate before write cutover |
+
+---
+
 ## Related docs
 
 | Document | Contents |
