@@ -67,7 +67,7 @@ wcs_grouping               →  {workspace_root}/events/{target_label}/cluster_t
 mapping (PanCAKES)         →  data_root/skycell_pixel_mapping/sector_*/camera_*/ccd_*/tess_s*_master_skycells_list.csv
 ps1_download               →  data_root/ps1_skycells_zarr/ps1_skycells.zarr
 ps1_process                →  data_root/convolved_results/sector_*_camera_*_ccd_*.zarr
-downsample                 →  data_root/shifted_downsampled/.../syndiff_template_*.fits.gz
+downsample                 →  data_root/shifted_downsampled/.../syndiff_template_*.fits.fz
 diff                       →  {workspace_root}/events/{target_label}/ws/{workspace_label}/
 star (after diff verify)   →  {workspace_root}/events/{target_label}/star[_run_id]/{gaia_source_id}/
 ```

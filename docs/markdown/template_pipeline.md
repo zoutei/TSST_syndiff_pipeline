@@ -560,7 +560,7 @@ First resolves the SCC's **mapping-epoch reference FFI** (`resolve_scc_reference
 ```text
 mapping/oversampling_{N}/
   tess_s{SSSS}_{C}_{K}_master_skycells_list[_os{N}].csv
-  tess_s{SSSS}_{C}_{K}_master_pixels2skycells[_os{N}].fits.gz
+  tess_s{SSSS}_{C}_{K}_master_pixels2skycells[_os{N}].fits.fz
   tess_s{SSSS}_{C}_{K}_{skycell}.fits   (per skycell)
 ```
 
@@ -643,7 +643,7 @@ Default production offsets (linear mode) are the calibrated dither list from the
 
 ```text
 templates/oversampling_{N}/
-  syndiff_template_s{SSSS}_{camera}_{ccd}_dx{X.XXX}_dy{Y.YYY}.fits.gz   # linear mode
+  syndiff_template_s{SSSS}_{camera}_{ccd}_dx{X.XXX}_dy{Y.YYY}.fits.fz   # linear mode
   template_manifest.json, contribs/…                                    # field mode (see field_geometry.md)
 ```
 
@@ -1517,7 +1517,7 @@ Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL
 | `mapping` | Master skycells CSV |
 | `ps1_download` | Every expected skycell has all 12 arrays (`{band}`, `{band}_mask`, `{band}_wt` for r/i/z/y) with materialized chunks |
 | `ps1_process` | Each expected skycell's `{skycell}_data` array has materialized chunks |
-| `templates` | All per-offset `syndiff_template_*.fits.gz` present (linear geometry_mode) or a complete field-mode manifest |
+| `templates` | All per-offset `syndiff_template_*.fits.fz` present (linear geometry_mode) or a complete field-mode manifest |
 | `diff` | Frame manifest CSV and workspace label directories under `events/{event_name}/{scc_label}/ws/` |
 
 Partial convolved Zarr (interrupted run) reports e.g. `Partial convolved zarr: 3/120 skycells saved`.

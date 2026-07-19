@@ -59,7 +59,7 @@ contrib store** and **assembles a template per `group_id` on demand**.
 | Drift smoothing | SG on target `(dx, dy)` per frame | SG on each skycell's `(dx, dy)` time series |
 | Template groups | ~19 per sector (target-anchored) | ~10²–10³ (full-chip signature) |
 | Regmap geometry | Integer roll of frozen L0 map | Roll + hybrid Exact patch (L4a/L4b-lite) |
-| Output | Per-event `syndiff_template_*_dx*_dy*.fits.gz` | SCC `contribs/` + on-demand assembly |
+| Output | Per-event `syndiff_template_*_dx*_dy*.fits.fz` | SCC `contribs/` + on-demand assembly |
 | Event dependency | Requires `event_job.json` (crop, offsets) | SCC-wide; no event ROI at build time |
 | Deep dive | [wcs_grouping.md](stages/wcs_grouping.md), [downsample_technical.md](stages/downsample_technical.md) | This document |
 

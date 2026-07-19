@@ -52,13 +52,13 @@ Only three top-level subtrees belong here long-term:
         master/                    # flat FITS mirror + tess_ffi link (diff stage)
         debug_plots/               # PNG diagnostics when pipeline_plots: true
           wcs_drift_template_debug.png
-        shared_mask.fits.gz        # ws-root artifacts (see diff workspace table below)
+        shared_mask.fits.fz        # ws-root artifacts (see diff workspace table below)
         hotpants_substamp_stars.csv
         gaia_catalog_pipeline.csv
         targets.reg
         tile_centers.json
         {diffs_label}/             # e.g. hp_d — per-FFI difference FITS
-          tess{pid}_{diffs_label}.fits.gz
+          tess{pid}_{diffs_label}.fits.fz
         {diffs_label}_m/           # meta workspace paired with diffs (hp_d → hp_m)
           hotpants.progress.json
           kernel_reconstruction.npz
@@ -91,14 +91,14 @@ Only three top-level subtrees belong here long-term:
 
 ### Diff workspace trees (`ws/` / `ws_{workspace_run_id}/`)
 
-Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.gz` (`support/ffi_naming.py`). Star-branch outputs live under `host_star/` inside the baseline workspace (not a sibling `star_*` tree).
+Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.fz` (`support/ffi_naming.py`). SynDiff-produced FITS (and local TESS FFIs) are written as CFITSIO fpack (`.fits.fz`); readers also accept legacy `.fits.gz` and plain `.fits`. Star-branch outputs live under `host_star/` inside the baseline workspace (not a sibling `star_*` tree).
 
 | Path (under active `ws*` tree) | Stage / role |
 |--------------------------------|--------------|
 | `templates/` | **Removed.** Diff resolves `cfg.template_dir` from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` |
 | `master/` | Flat basename symlinks to all workspace FITS + optional `tess_ffi` link (`master_fits_mirror`); skips `host_star/` |
 | `debug_plots/` | Diagnostic PNGs when `pipeline_plots: true` (ePSF montages, light-curve figures, background GIFs) |
-| `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `tile_centers.json` | `shared_mask`, ePSF, `sat_template`, legacy photometry |
+| `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `tile_centers.json` | `shared_mask`, ePSF, `sat_template`, legacy photometry |
 | `{diffs_label}/` | Hotpants or `kernel_subtract` difference images (e.g. `hp_d/`) |
 | `{diffs_label}_m/` | Meta workspace for a diffs label (`hp_d` → `hp_m`): `hotpants.progress.json`, `kernel_reconstruction.npz`, `phot_calib.csv` |
 | `{diffs_label}_kernels/{product_id}_kernel.npz` | Per-frame Hotpants `kernel_solution` (sibling of `{diffs_label}/`; only when `write_kernel_solutions: true`) |
