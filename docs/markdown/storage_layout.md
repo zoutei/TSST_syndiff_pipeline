@@ -173,7 +173,7 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
     catalogs/                      # Gaia DR3 (mapping stage)
     convolved.zarr                 # ps1_process output
     convolved_removed_stars.csv
-    wcs_cache.parquet              # shared WCS keyword cache (+ wcs_cache.csv twin)
+    ffi_list.parquet               # shared FFI header inventory (+ ffi_list.csv twin)
     mapping/
       oversampling_{N}/            # PanCAKES skycell maps
     remap/
@@ -186,7 +186,7 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
     ps1_skycells.zarr
 ```
 
-Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_wcs_cache_parquet()` / `scc_wcs_cache_csv()`, `scc_mapping_dir()`, `scc_remap_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `ps1_skycells_zarr_dir()` / `ps1_skycells_zarr_path()` / `ps1_skycells_zarr_lock_path()` resolve the shared PS1 store under `data_root`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
+Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_ffi_list_parquet()` / `scc_ffi_list_csv()`, `scc_mapping_dir()`, `scc_remap_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `ps1_skycells_zarr_dir()` / `ps1_skycells_zarr_path()` / `ps1_skycells_zarr_lock_path()` resolve the shared PS1 store under `data_root`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
 
 Older top-level science trees (`tess_ffi/`, `skycell_pixel_mapping/`, `field_templates/`, `shifted_downsampled/`, `convolved_results/`, flat `catalogs/`, and `scc/s{SSSS}_c{C}_k{K}/`) are obsolete and are not read by current code.
 

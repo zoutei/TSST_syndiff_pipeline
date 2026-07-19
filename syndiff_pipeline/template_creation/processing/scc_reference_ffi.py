@@ -5,16 +5,20 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
 from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis
-from syndiff_pipeline.common.scc_paths import scc_bookkeeping_stage_dir, scc_wcs_cache_parquet
-from syndiff_pipeline.common.wcs_header_cache import load_or_build_wcs_cache
+from syndiff_pipeline.common.scc_paths import scc_bookkeeping_stage_dir, scc_ffi_list_parquet
+from syndiff_pipeline.common.wcs_header_cache import (
+    ensure_scc_ffi_list,
+    ffi_list_is_complete,
+    load_ffi_list,
+    median_crval_from_cache,
+)
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 
 log = logging.getLogger(__name__)
@@ -32,25 +36,6 @@ def mapping_run_meta_path(resolved: ResolvedTargetConfig) -> Path:
     if os_factor != 1:
         base = base / f"oversampling_{os_factor}"
     return base / RUN_META_FILENAME
-
-
-def _median_crval_anchor(ffi_paths: list[str]) -> tuple[float, float]:
-    """Return median CRVAL across usable FFIs (chip-center sky anchor)."""
-    rvals: list[float] = []
-    dvals: list[float] = []
-    for ffi_path in ffi_paths:
-        info = wcs_grouping.extract_wcs_from_ffi(ffi_path)
-        if not info.get("wcs_ok"):
-            continue
-        hdr = info["header"]
-        try:
-            rvals.append(float(hdr["CRVAL1"]))
-            dvals.append(float(hdr["CRVAL2"]))
-        except (KeyError, TypeError, ValueError):
-            continue
-    if not rvals:
-        raise RuntimeError("No usable WCS headers for SCC median-CRVAL anchor")
-    return float(np.median(rvals)), float(np.median(dvals))
 
 
 def _write_run_meta(path: Path, payload: dict[str, Any]) -> None:
@@ -110,12 +95,20 @@ def resolve_scc_reference_ffi(
             f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
         )
 
-    cache_path = scc_wcs_cache_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
-    load_or_build_wcs_cache(
-        ffi_paths,
-        cache_path,
-        open_fits=wcs_grouping.open_fits_memmap,
-    )
+    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
+        log.info("FFI list missing/incomplete (%s); backfilling ...", ffi_list_path)
+        t0 = time.monotonic()
+        ffi_list_df = ensure_scc_ffi_list(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            ffi_paths,
+            open_fits=wcs_grouping.open_fits_memmap,
+        )
+        log.info("FFI list ensure finished in %.1fs", time.monotonic() - t0)
 
     if explicit:
         ref = _resolve_existing_ffi_path(resolved, explicit)
@@ -123,8 +116,19 @@ def resolve_scc_reference_ffi(
             raise FileNotFoundError(f"reference_ffi override not found: {explicit!r}")
         selection_rule = "override"
     else:
-        anchor_ra, anchor_dec = _median_crval_anchor(ffi_paths)
-        wcs_table = wcs_grouping.build_wcs_table(ffi_paths, anchor_ra, anchor_dec)
+        t0 = time.monotonic()
+        anchor_ra, anchor_dec = median_crval_from_cache(ffi_list_df, ffi_paths)
+        log.info(
+            "SCC median-CRVAL anchor (%.4f, %.4f) in %.2fs",
+            anchor_ra,
+            anchor_dec,
+            time.monotonic() - t0,
+        )
+        t0 = time.monotonic()
+        wcs_table = wcs_grouping.build_wcs_table_from_cache(
+            ffi_list_df, ffi_paths, anchor_ra, anchor_dec
+        )
+        log.info("WCS table from ffi_list built in %.2fs", time.monotonic() - t0)
         wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
             wcs_table,
             window_length=mp.wcs_drift_savgol_window,

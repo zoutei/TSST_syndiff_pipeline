@@ -182,7 +182,7 @@ class TestTesscurlDownloadFpack(unittest.TestCase):
                     return script.encode()
                 raise AssertionError(f"unexpected fetch {url}")
 
-            def fake_stream(url, fz_dest, timeout):
+            def fake_stream(url, fz_dest, timeout, on_plain_fits=None):
                 buf = io.BytesIO()
                 fits.writeto(buf, np.zeros((2, 2), dtype=np.float32), overwrite=True)
                 buf.seek(0)
@@ -229,7 +229,7 @@ class TestTesscurlDownloadFpack(unittest.TestCase):
                     return script.encode()
                 raise AssertionError(f"unexpected fetch {url}")
 
-            def fake_stream(url, fz_dest, timeout):
+            def fake_stream(url, fz_dest, timeout, on_plain_fits=None):
                 with lock:
                     active["n"] += 1
                     active["peak"] = max(active["peak"], active["n"])

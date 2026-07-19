@@ -1,38 +1,31 @@
 """
-wcs_header_cache.py
-====================
-Shared, SCC-scoped cache of per-FFI WCS header keywords.
+Per-SCC ``ffi_list`` inventory: one row per FFI with full HDU1 header blob.
 
 Opening a TESS FFI (``.fits.fz`` / ``.fits.gz``, tens of MB) just to read its
-WCS header is CPU-bound on decompression, not I/O latency (an OS-page-cache-warm
-re-open of the same file is no faster than a cold one) -- roughly
-130-160 ms/file regardless of how few bytes are actually needed. The ~80
-WCS-relevant keywords (CRVAL/CRPIX/CD/CTYPE/CUNIT + SIP distortion terms)
-are the only thing any consumer actually needs, and reconstructing a
-``WCS`` purely from those cached keywords is numerically identical to
-building it from the file's full header (validated on real TESS FFIs:
-``world_to_pixel_values`` discrepancy ~1e-9 px) at ~9 ms/frame with zero
-file I/O once cached.
-
-The cache is SCC-shared (``data_root``-scoped, not per-event), matching the
-existing storage convention used by ``skycell_pixel_mapping/``,
-``catalogs/``, and ``skycell_remaps/`` (see ``docs/markdown/storage_layout.md``)
--- so multiple targets on the same sector/camera/ccd, and repeated passes
-within one event's own ``wcs_grouping`` run, never re-pay the decompression
-cost for the same physical file.
+WCS header is CPU-bound on decompression. The ``ffi_list`` is SCC-shared
+(``data_root``-scoped) so mapping, bind, and field remap never re-pay that cost
+once the list is complete.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import warnings
 from pathlib import Path
-from typing import Callable, Iterable, Optional
+from typing import Callable, Iterable, Sequence
 
 import pandas as pd
 from astropy.io import fits
 from astropy.wcs import WCS
 from filelock import FileLock
+
+from syndiff_pipeline.common.download import manifest_basename_from_local
+from syndiff_pipeline.common.scc_paths import (
+    FFI_LIST_CSV_BASENAME,
+    scc_ffi_list_csv,
+    scc_ffi_list_parquet,
+)
 
 log = logging.getLogger(__name__)
 
@@ -50,125 +43,256 @@ SIP_KEY_PREFIXES = ("A_", "B_", "AP_", "BP_")
 
 _MIN_KEYS = ("CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "CD1_1", "CD2_2")
 
-
-from syndiff_pipeline.common.scc_paths import scc_wcs_cache_csv, scc_wcs_cache_parquet
-
-
-def wcs_cache_path(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
-    """Path to the shared per-SCC WCS-header-keyword cache parquet."""
-    return scc_wcs_cache_parquet(data_root, sector, camera, ccd)
-
-
-def wcs_cache_csv_path(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
-    """Path to the CSV twin of the shared WCS cache."""
-    return scc_wcs_cache_csv(data_root, sector, camera, ccd)
-
-
-def _is_wcs_key(key: str) -> bool:
-    if not key:
-        return False
-    return key in WCS_KEYS or key.startswith(SIP_KEY_PREFIXES)
+_SLIM_CSV_COLUMNS = (
+    "filename",
+    "wcs_ok",
+    "DATE-OBS",
+    "CRVAL1",
+    "CRVAL2",
+    "CRPIX1",
+    "CRPIX2",
+    "NAXIS1",
+    "NAXIS2",
+)
 
 
-def extract_wcs_keywords(path: str | Path, *, open_fits: Callable) -> Optional[dict]:
+def ffi_list_parquet_path(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """Path to the shared per-SCC ``ffi_list.parquet``."""
+    return scc_ffi_list_parquet(data_root, sector, camera, ccd)
+
+
+def ffi_list_csv_path(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """Path to the slim CSV twin of the shared FFI list."""
+    return scc_ffi_list_csv(data_root, sector, camera, ccd)
+
+
+def _wcs_header_complete(header: fits.Header) -> bool:
+    for key in _MIN_KEYS:
+        if key not in header:
+            return False
+    return True
+
+
+def _header_cards_bytes(hdr: fits.Header) -> bytes:
+    raw = hdr.tostring()
+    if isinstance(raw, bytes):
+        return raw
+    return raw.encode("latin1")
+
+
+def extract_ffi_header_record(path: str | Path, *, open_fits: Callable) -> dict:
     """
-    Open one FFI (the expensive, decompression-bound step -- only ever called
-    on a genuine cache miss) and pull the WCS-relevant header keywords plus
-    a few bookkeeping columns.
+    Open one FFI and snapshot HDU1 header into an ``ffi_list`` row.
 
-    ``open_fits`` is the context-manager-returning callable to use (pass
-    ``wcs_grouping.open_fits_memmap`` so gz/memmap resolution isn't
-    duplicated here). Returns ``None`` if the file can't be opened or is
-    missing the minimum WCS keys.
+    Always returns a row (``wcs_ok=False`` on open/extract failure).
     """
+    row = {
+        "filename": manifest_basename_from_local(path),
+        "wcs_ok": False,
+        "date_obs": None,
+        "header_cards": b"",
+        "schema_version": SCHEMA_VERSION,
+    }
     try:
         with open_fits(path) as hdul:
             hdr = hdul[1].header
-            row = {"filename": Path(str(path)).name}
-            for key in hdr.keys():
-                if _is_wcs_key(key):
-                    row[key] = hdr[key]
-            row["DATE-OBS"] = hdr.get("DATE-OBS", None)
-            row["NAXIS1"] = hdr.get("NAXIS1", None)
-            row["NAXIS2"] = hdr.get("NAXIS2", None)
+            row["header_cards"] = _header_cards_bytes(hdr)
+            row["date_obs"] = hdr.get("DATE-OBS")
+            row["wcs_ok"] = _wcs_header_complete(hdr)
     except Exception as exc:
-        log.warning("wcs_header_cache: could not extract WCS keywords from %s: %s", path, exc)
-        return None
-    if any(k not in row for k in _MIN_KEYS):
-        return None
+        log.warning("ffi_list: could not extract header from %s: %s", path, exc)
     return row
 
 
-def load_wcs_cache(cache_path: str | Path) -> pd.DataFrame:
-    """Load the cache parquet, or an empty frame (indexed by filename) if absent."""
-    cache_path = Path(cache_path)
-    if not cache_path.is_file():
-        return pd.DataFrame(index=pd.Index([], name="filename"))
-    return pd.read_parquet(cache_path).set_index("filename")
+def load_ffi_list(ffi_list_path: str | Path) -> pd.DataFrame:
+    """Load ``ffi_list.parquet``, or an empty frame indexed by logical filename."""
+    ffi_list_path = Path(ffi_list_path)
+    if not ffi_list_path.is_file():
+        return pd.DataFrame(index=pd.Index([], name="filename", dtype="object"))
+    df = pd.read_parquet(ffi_list_path)
+    if "filename" in df.columns:
+        df = df.set_index("filename")
+    df.index = df.index.astype(str)
+    return df
 
 
-def load_or_build_wcs_cache(
+def logical_keys_from_paths(paths: Iterable[str | Path]) -> set[str]:
+    return {manifest_basename_from_local(p) for p in paths}
+
+
+def ffi_list_is_complete(
+    local_paths: Sequence[str | Path],
+    ffi_list_df: pd.DataFrame,
+) -> bool:
+    """True when every local logical FFI key has a row (any ``wcs_ok``)."""
+    if ffi_list_df.empty and local_paths:
+        return False
+    required = logical_keys_from_paths(local_paths)
+    if not required:
+        return True
+    have = set(ffi_list_df.index.astype(str))
+    return required.issubset(have)
+
+
+def _slim_csv_rows(df: pd.DataFrame) -> pd.DataFrame:
+    rows = []
+    for filename, series in df.iterrows():
+        row = {
+            "filename": str(filename),
+            "wcs_ok": bool(series.get("wcs_ok", False)),
+            "DATE-OBS": series.get("date_obs"),
+            "CRVAL1": None,
+            "CRVAL2": None,
+            "CRPIX1": None,
+            "CRPIX2": None,
+            "NAXIS1": None,
+            "NAXIS2": None,
+        }
+        cards = series.get("header_cards")
+        if cards is not None and not (isinstance(cards, float) and pd.isna(cards)):
+            try:
+                hdr = header_from_cached_row(series)
+                row["DATE-OBS"] = row["DATE-OBS"] or hdr.get("DATE-OBS")
+                for key in ("CRVAL1", "CRVAL2", "CRPIX1", "CRPIX2", "NAXIS1", "NAXIS2"):
+                    if key in hdr:
+                        row[key] = hdr[key]
+            except Exception:
+                pass
+        rows.append(row)
+    return pd.DataFrame(rows, columns=list(_SLIM_CSV_COLUMNS))
+
+
+def _write_ffi_list_artifacts(ffi_list_path: Path, combined: pd.DataFrame) -> None:
+    ffi_list_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ffi_list_path.with_suffix(".parquet.tmp")
+    out = combined.reset_index()
+    out.to_parquet(tmp, index=False)
+    os.replace(tmp, ffi_list_path)
+    csv_path = ffi_list_path.with_name(FFI_LIST_CSV_BASENAME)
+    slim = _slim_csv_rows(combined)
+    csv_tmp = csv_path.with_suffix(".csv.tmp")
+    slim.to_csv(csv_tmp, index=False)
+    os.replace(csv_tmp, csv_path)
+
+
+def upsert_ffi_list_rows(ffi_list_path: str | Path, rows: Sequence[dict]) -> None:
+    """Locked merge-by-filename upsert with atomic parquet + slim CSV write."""
+    if not rows:
+        return
+    ffi_list_path = Path(ffi_list_path)
+    lock_path = str(ffi_list_path) + ".lock"
+    with FileLock(lock_path):
+        existing = load_ffi_list(ffi_list_path)
+        new_df = pd.DataFrame(rows).set_index("filename")
+        combined = pd.concat([existing, new_df]) if not existing.empty else new_df
+        combined = combined[~combined.index.duplicated(keep="last")]
+        _write_ffi_list_artifacts(ffi_list_path, combined)
+
+
+def ensure_scc_ffi_list(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
     paths: Iterable[str | Path],
-    cache_path: str | Path,
     *,
     open_fits: Callable,
 ) -> pd.DataFrame:
     """
-    Return a WCS-keyword table covering every filename in ``paths``,
-    extracting (and persisting) only the entries missing from ``cache_path``.
-
-    Concurrent-safe: the read-modify-append-write cycle is guarded by
-    ``FileLock(str(cache_path) + ".lock")`` (the same discipline
-    ``skycell_remap.py`` already uses for ``remap_index.parquet``), so
-    multiple events' ``wcs_grouping`` runs on the same SCC can safely
-    populate the cache together.
+    Return ``ffi_list`` covering every logical key in ``paths``, backfilling misses.
     """
     path_list = [Path(p) for p in paths]
-    cache_path = Path(cache_path)
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with FileLock(str(cache_path) + ".lock"):
-        existing = load_wcs_cache(cache_path)
-        have = set(existing.index)
-        missing = [p for p in path_list if p.name not in have]
-
-        if missing:
-            new_rows = [extract_wcs_keywords(p, open_fits=open_fits) for p in missing]
-            new_rows = [r for r in new_rows if r is not None]
-            if new_rows:
-                new_df = pd.DataFrame(new_rows).set_index("filename")
-                combined = pd.concat([existing, new_df]) if not existing.empty else new_df
-                combined = combined[~combined.index.duplicated(keep="last")]
-                combined.reset_index().to_parquet(cache_path, index=False)
-                csv_path = cache_path.with_name("wcs_cache.csv")
-                combined.reset_index().to_csv(csv_path, index=False)
-                existing = combined
-            log.info(
-                "wcs_header_cache: extracted %d/%d missing entries; cache now has %d rows (%s)",
-                len(new_rows), len(missing), len(existing), cache_path,
-            )
-
+    ffi_list_path = ffi_list_parquet_path(data_root, sector, camera, ccd)
+    existing = load_ffi_list(ffi_list_path)
+    have = set(existing.index.astype(str)) if not existing.empty else set()
+    missing = [
+        p for p in path_list
+        if manifest_basename_from_local(p) not in have
+    ]
+    if missing:
+        new_rows = [extract_ffi_header_record(p, open_fits=open_fits) for p in missing]
+        upsert_ffi_list_rows(ffi_list_path, new_rows)
+        existing = load_ffi_list(ffi_list_path)
+        log.info(
+            "ffi_list: extracted %d/%d missing entries; list now has %d rows (%s)",
+            len(new_rows),
+            len(missing),
+            len(existing),
+            ffi_list_path,
+        )
     return existing
 
 
-def header_from_cached_row(row: "pd.Series") -> fits.Header:
-    """Reconstruct a minimal ``fits.Header`` from one cached row (no file I/O)."""
-    hdr = fits.Header()
-    for key, value in row.items():
-        if key == "DATE-OBS" or pd.isna(value):
+def rebuild_scc_ffi_list(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    paths: Iterable[str | Path],
+    *,
+    open_fits: Callable,
+) -> pd.DataFrame:
+    """Force re-extract every local FFI into ``ffi_list`` (cold backfill)."""
+    path_list = [Path(p) for p in paths]
+    ffi_list_path = ffi_list_parquet_path(data_root, sector, camera, ccd)
+    rows = [extract_ffi_header_record(p, open_fits=open_fits) for p in path_list]
+    upsert_ffi_list_rows(ffi_list_path, rows)
+    df = load_ffi_list(ffi_list_path)
+    log.info("ffi_list: rebuilt %d rows at %s", len(df), ffi_list_path)
+    return df
+
+
+def median_crval_from_cache(
+    ffi_list_df: pd.DataFrame,
+    paths: Sequence[str | Path],
+) -> tuple[float, float]:
+    """Median CRVAL across ``wcs_ok`` rows for the given local paths."""
+    import numpy as np
+
+    rvals: list[float] = []
+    dvals: list[float] = []
+    for p in paths:
+        key = manifest_basename_from_local(p)
+        if key not in ffi_list_df.index:
             continue
-        hdr[key] = value
-    return hdr
+        row = ffi_list_df.loc[key]
+        if not bool(row.get("wcs_ok", False)):
+            continue
+        try:
+            hdr = header_from_cached_row(row)
+            rvals.append(float(hdr["CRVAL1"]))
+            dvals.append(float(hdr["CRVAL2"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    if not rvals:
+        raise RuntimeError("No usable WCS headers for SCC median-CRVAL anchor")
+    return float(np.median(rvals)), float(np.median(dvals))
+
+
+def header_from_cached_row(row: "pd.Series") -> fits.Header:
+    """Deserialize HDU1 header from one ``ffi_list`` row (no file I/O)."""
+    cards = row.get("header_cards")
+    if cards is not None and not (isinstance(cards, float) and pd.isna(cards)):
+        if isinstance(cards, memoryview):
+            cards = bytes(cards)
+        if isinstance(cards, str):
+            cards = cards.encode("latin1")
+        return fits.Header.fromstring(cards)
+    return fits.Header()
 
 
 def wcs_from_cached_row(row: "pd.Series") -> WCS:
-    """
-    Reconstruct an astropy ``WCS`` from one cached row, no file I/O.
-
-    Numerically identical to building the WCS from the file's full header
-    (validated on real TESS FFIs: ``world_to_pixel_values`` discrepancy
-    ~1e-9 px).
-    """
+    """Reconstruct an astropy ``WCS`` from one ``ffi_list`` row."""
     hdr = header_from_cached_row(row)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")

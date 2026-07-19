@@ -25,12 +25,25 @@ BOOKKEEPING_SUBDIR = "bookkeeping"
 
 CONVOLVED_ZARR_BASENAME = "convolved.zarr"
 CONVOLVED_REMOVED_STARS_CSV_BASENAME = "convolved_removed_stars.csv"
-WCS_CACHE_PARQUET_BASENAME = "wcs_cache.parquet"
-WCS_CACHE_CSV_BASENAME = "wcs_cache.csv"
+FFI_LIST_PARQUET_BASENAME = "ffi_list.parquet"
+FFI_LIST_CSV_BASENAME = "ffi_list.csv"
 
 # Shared PS1 raw-band Zarr store (ps1_download + syndiff star).
 PS1_SKYCELLS_ZARR_DIRNAME = "ps1_skycells_zarr"
 PS1_SKYCELLS_ZARR_BASENAME = "ps1_skycells.zarr"
+
+# Sky-keyed shared combined/convolved PS1 stores (provenance plan §7, decision
+# #14): both live alongside ps1_skycells.zarr under the same
+# ps1_skycells_zarr/ directory. Phase 1/2 writers/readers land in later PRs;
+# these are path constants only.
+PS1_COMBINED_ZARR_BASENAME = "ps1_combined.zarr"
+PS1_CONVOLVED_ZARR_BASENAME = "ps1_convolved.zarr"
+
+# Provenance bookkeeping tree (provenance plan §7/§8): data_root-scoped, not
+# SCC-scoped -- ``{data_root}/bookkeeping/provenance.db`` + a per-host/pid
+# spool of sidecar JSONL files the supervisor drains.
+PROVENANCE_DB_BASENAME = "provenance.db"
+PROVENANCE_SPOOL_SUBDIR = "spool"
 
 __all__ = [
     "BOOKKEEPING_SUBDIR",
@@ -45,14 +58,18 @@ __all__ = [
     "PS1_SKYCELLS_ZARR_BASENAME",
     "PS1_SKYCELLS_ZARR_DIRNAME",
     "TEMPLATES_SUBDIR",
-    "WCS_CACHE_CSV_BASENAME",
-    "WCS_CACHE_PARQUET_BASENAME",
+    "FFI_LIST_CSV_BASENAME",
+    "FFI_LIST_PARQUET_BASENAME",
     "event_root",
     "event_scc_leaf",
     "oversampling_dirname",
+    "ps1_combined_zarr_path",
+    "ps1_convolved_zarr_path",
     "ps1_skycells_zarr_dir",
     "ps1_skycells_zarr_lock_path",
     "ps1_skycells_zarr_path",
+    "provenance_db_path",
+    "provenance_spool_dir",
     "scc_bookkeeping_dir",
     "scc_bookkeeping_stage_dir",
     "scc_catalogs_dir",
@@ -67,8 +84,8 @@ __all__ = [
     "scc_remap_dir",
     "scc_root",
     "scc_templates_dir",
-    "scc_wcs_cache_csv",
-    "scc_wcs_cache_parquet",
+    "scc_ffi_list_csv",
+    "scc_ffi_list_parquet",
 ]
 
 
@@ -140,24 +157,24 @@ def scc_convolved_removed_stars_csv(
     )
 
 
-def scc_wcs_cache_parquet(
+def scc_ffi_list_parquet(
     data_root: str | Path,
     sector: int,
     camera: int,
     ccd: int,
 ) -> Path:
-    """Path to the shared per-SCC WCS header cache (Parquet)."""
-    return scc_root(data_root, sector, camera, ccd) / WCS_CACHE_PARQUET_BASENAME
+    """Path to the shared per-SCC FFI header inventory (Parquet)."""
+    return scc_root(data_root, sector, camera, ccd) / FFI_LIST_PARQUET_BASENAME
 
 
-def scc_wcs_cache_csv(
+def scc_ffi_list_csv(
     data_root: str | Path,
     sector: int,
     camera: int,
     ccd: int,
 ) -> Path:
-    """Path to the CSV twin of the shared WCS header cache."""
-    return scc_root(data_root, sector, camera, ccd) / WCS_CACHE_CSV_BASENAME
+    """Path to the slim CSV twin of the shared FFI list."""
+    return scc_root(data_root, sector, camera, ccd) / FFI_LIST_CSV_BASENAME
 
 
 def scc_mapping_dir(
@@ -301,3 +318,23 @@ def event_scc_leaf(
 ) -> Path:
     """Event workspace leaf for one SCC: ``events/{event}/s{SSSS}_c{C}_k{K}/``."""
     return event_root(workspace_root, event_name) / scc_label(sector, camera, ccd)
+
+
+def ps1_combined_zarr_path(data_root: str | Path) -> Path:
+    """Sky-keyed shared combined-skycell Zarr store (provenance plan §7/§14, decision #14)."""
+    return ps1_skycells_zarr_dir(data_root) / PS1_COMBINED_ZARR_BASENAME
+
+
+def ps1_convolved_zarr_path(data_root: str | Path) -> Path:
+    """Sky-keyed shared convolved-skycell Zarr store (provenance plan §7/§14, decision #14)."""
+    return ps1_skycells_zarr_dir(data_root) / PS1_CONVOLVED_ZARR_BASENAME
+
+
+def provenance_db_path(data_root: str | Path) -> Path:
+    """Path to the rebuildable provenance index ``{data_root}/bookkeeping/provenance.db``."""
+    return Path(data_root).expanduser() / BOOKKEEPING_SUBDIR / PROVENANCE_DB_BASENAME
+
+
+def provenance_spool_dir(data_root: str | Path) -> Path:
+    """Directory of per-host/pid sidecar JSONL spool files the supervisor drains."""
+    return Path(data_root).expanduser() / BOOKKEEPING_SUBDIR / PROVENANCE_SPOOL_SUBDIR
