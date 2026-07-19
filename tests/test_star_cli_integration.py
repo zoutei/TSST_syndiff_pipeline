@@ -85,7 +85,7 @@ def _minimal_ctx(tmp: Path, *, crop_size: int = 128) -> StarEventContext:
         crop_bounds=crop_bounds,
         mapping_dir=str(tmp / "mapping"),
         mapping_csv=str(tmp / "mapping" / "map.csv"),
-        master_mapping_fits=str(tmp / "mapping" / "master.fits.gz"),
+        master_mapping_fits=str(tmp / "mapping" / "master.fits.fz"),
         gaia_catalog_path=str(tmp / "gaia.csv"),
         templates_dir=str(tmp / "templates"),
         reference_ffi_path=str(tmp / "ref.fits"),
@@ -247,14 +247,14 @@ class TestStarDiffClosureIntegration(unittest.TestCase):
                     rtol=1e-5,
                 )
 
-                stamp_path = str(root / "stamps" / f"{product_id}.fits.gz")
-                diff_runner.write_star_diff_stamp(
+                stamp_path = str(root / "stamps" / f"{product_id}.fits.fz")
+                written = diff_runner.write_star_diff_stamp(
                     stamp_path,
                     stamp,
                     window_origin=(metadata["window_x0"], metadata["window_y0"]),
                     host_local_xy=(host_x, host_y),
                 )
-                stamp_paths.append(stamp_path)
+                stamp_paths.append(written)
 
             host = _resolved_host()
             lc_results = run_windowed_forced_photometry(

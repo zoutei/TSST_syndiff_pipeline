@@ -125,10 +125,10 @@ def test_verify_field_store_marker(field_store):
 def test_kernel_convolved_group_lookup():
     table = pd.DataFrame(
         [
-            {"group_id": 0, "convolved_path": "/w/convolved_template_gid0.fits.gz"},
-            {"group_id": 7, "convolved_path": "/w/convolved_template_gid7.fits.gz"},
+            {"group_id": 0, "convolved_path": "/w/convolved_template_gid0.fits.fz"},
+            {"group_id": 7, "convolved_path": "/w/convolved_template_gid7.fits.fz"},
         ]
     )
-    assert lookup_convolved_path_by_group_id(table, 7).endswith("gid7.fits.gz")
+    assert lookup_convolved_path_by_group_id(table, 7).endswith("gid7.fits.fz")
     with pytest.raises(FileNotFoundError):
         lookup_convolved_path_by_group_id(table, 3)

@@ -17,6 +17,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from syndiff_pipeline.common.fits_io import open_fits
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.stages import hotpants
 from syndiff_pipeline.difference_imaging.stages.kernel import (
@@ -90,7 +91,7 @@ def _minimal_ctx(
         crop_bounds=crop_bounds,
         mapping_dir=str(tmp / "mapping"),
         mapping_csv=str(tmp / "mapping" / "map.csv"),
-        master_mapping_fits=str(tmp / "mapping" / "master.fits.gz"),
+        master_mapping_fits=str(tmp / "mapping" / "master.fits.fz"),
         gaia_catalog_path=str(tmp / "gaia.csv"),
         templates_dir=str(tmp / "templates"),
         reference_ffi_path=str(tmp / "ref.fits"),
@@ -195,15 +196,16 @@ class TestWriteStarMiniTemplateOversamp(unittest.TestCase):
 class TestWriteStarDiffStamp(unittest.TestCase):
     def test_header_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "stamp.fits.gz")
+            path = os.path.join(tmp, "stamp.fits.fz")
             stamp = np.ones((8, 8), dtype=np.float32)
-            diff_runner.write_star_diff_stamp(
+            written = diff_runner.write_star_diff_stamp(
                 path,
                 stamp,
                 window_origin=(40, 50),
                 host_local_xy=(52.5, 61.25),
             )
-            with fits.open(path) as hdul:
+            self.assertTrue(written.endswith(".fits.fz"))
+            with open_fits(written) as hdul:
                 hdr = hdul[0].header
                 self.assertEqual(int(hdr["XMIN"]), 40)
                 self.assertEqual(int(hdr["YMIN"]), 50)

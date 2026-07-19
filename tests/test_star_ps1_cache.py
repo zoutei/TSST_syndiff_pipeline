@@ -39,7 +39,7 @@ def _ctx(tmp: Path) -> StarEventContext:
         crop_bounds={"x_min": 0, "y_min": 0, "x_max": 20, "y_max": 20, "shape": (20, 20)},
         mapping_dir=str(tmp / "data" / "skycell_pixel_mapping"),
         mapping_csv=str(tmp / "data" / "mapping.csv"),
-        master_mapping_fits=str(tmp / "data" / "master.fits.gz"),
+        master_mapping_fits=str(tmp / "data" / "master.fits.fz"),
         gaia_catalog_path=str(tmp / "data" / "gaia.csv"),
         templates_dir=str(tmp / "templates"),
         reference_ffi_path=str(tmp / "ref.fits"),

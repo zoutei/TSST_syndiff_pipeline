@@ -77,7 +77,7 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
         crop_bounds=crop_bounds,
         mapping_dir=str(tmp / "mapping"),
         mapping_csv=str(tmp / "mapping" / "map.csv"),
-        master_mapping_fits=str(tmp / "mapping" / "master.fits.gz"),
+        master_mapping_fits=str(tmp / "mapping" / "master.fits.fz"),
         gaia_catalog_path=str(tmp / "gaia.csv"),
         templates_dir=str(tmp / "templates"),
         reference_ffi_path=str(tmp / "ref.fits"),
@@ -168,7 +168,7 @@ class TestStarEpsfRunner(unittest.TestCase):
             from syndiff_pipeline.difference_imaging.stages import hotpants
 
             hotpants._write_image_fits(
-                str(hp_d / "tess2019358235923_hp_d.fits.gz"),
+                str(hp_d / "tess2019358235923_hp_d.fits.fz"),
                 np.zeros((64, 64), dtype=np.float32),
             )
 
@@ -319,15 +319,15 @@ class TestWindowedGepsfPhotometry(unittest.TestCase):
             for i in range(2):
                 stamp = np.full((25, 25), 5.0, dtype=np.float64)
                 stamp[int(round(host_xy[1])), int(round(host_xy[0]))] += 20.0 + i
-                path = tmp_path / "stamps" / f"{ffi_stem}_{i}.fits.gz"
+                path = tmp_path / "stamps" / f"{ffi_stem}_{i}.fits.fz"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                diff_runner.write_star_diff_stamp(
+                written = diff_runner.write_star_diff_stamp(
                     str(path),
                     stamp.astype(np.float32),
                     window_origin=(10 + i, 20 + i),
                     host_local_xy=(10 + i + host_xy[0], 20 + i + host_xy[1]),
                 )
-                stamp_paths.append(str(path))
+                stamp_paths.append(written)
 
             out_dir = tmp_path / "lc"
             dfs = run_windowed_forced_photometry(
@@ -366,9 +366,9 @@ class TestWindowedGepsfPhotometry(unittest.TestCase):
             assert catalog is not None
 
             stamp = np.full((25, 25), 5.0, dtype=np.float64)
-            path = tmp_path / "stamps" / "missing_frame.fits.gz"
+            path = tmp_path / "stamps" / "missing_frame.fits.fz"
             path.parent.mkdir(parents=True, exist_ok=True)
-            diff_runner.write_star_diff_stamp(
+            written = diff_runner.write_star_diff_stamp(
                 str(path),
                 stamp.astype(np.float32),
                 window_origin=(10, 20),
@@ -376,7 +376,7 @@ class TestWindowedGepsfPhotometry(unittest.TestCase):
             )
 
             dfs = run_windowed_forced_photometry(
-                [str(path)],
+                [written],
                 host=host,
                 methods=[
                     {

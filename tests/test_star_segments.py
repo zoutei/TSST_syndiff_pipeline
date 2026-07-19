@@ -412,7 +412,7 @@ class TestDebugPlotsGating(unittest.TestCase):
             ),
             patch(
                 "syndiff_pipeline.star.star_segments.write_star_mini_templates",
-                return_value=[str(tmp / "mini_0_0.fits.gz")],
+                return_value=[str(tmp / "mini_0_0.fits.fz")],
             ),
             patch("syndiff_pipeline.star.star_segments.write_ps1_segment_overlay_png") as mock_seg_png,
             patch("syndiff_pipeline.star.star_segments.write_mini_template_downsample_png") as mock_ds_png,
@@ -432,7 +432,7 @@ class TestDebugPlotsGating(unittest.TestCase):
             result, mock_seg_png, mock_ds_png = self._run_with_mocks(
                 Path(tmpdir), write_debug_plots=True
             )
-            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.gz")])
+            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.fz")])
             mock_seg_png.assert_called_once()
             mock_ds_png.assert_called_once()
 
@@ -441,7 +441,7 @@ class TestDebugPlotsGating(unittest.TestCase):
             result, mock_seg_png, mock_ds_png = self._run_with_mocks(
                 Path(tmpdir), write_debug_plots=False
             )
-            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.gz")])
+            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.fz")])
             mock_seg_png.assert_not_called()
             mock_ds_png.assert_not_called()
 

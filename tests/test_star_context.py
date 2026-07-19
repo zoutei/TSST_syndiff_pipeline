@@ -38,7 +38,7 @@ def _minimal_ctx(tmp: str, **overrides) -> StarEventContext:
         ),
         master_mapping_fits=str(
             Path(tmp) / "data" / "skycell_pixel_mapping" / "sector_0020" / "camera_3" / "ccd_2"
-            / "tess_s0020_3_2_master_pixels2skycells.fits.gz"
+            / "tess_s0020_3_2_master_pixels2skycells.fits.fz"
         ),
         gaia_catalog_path=str(Path(tmp) / "data" / "catalogs" / "gaia.csv"),
         templates_dir=str(Path(tmp) / "templates"),
@@ -78,7 +78,7 @@ class TestStarContext(unittest.TestCase):
             self.assertIn("write_convolved: true", message)
             self.assertIn("photutils background FITS", message)
             self.assertIn("write_kernel_solutions: true", message)
-            self.assertIn("shared_mask.fits.gz", message)
+            self.assertIn("shared_mask.fits.fz", message)
             self.assertIn("mapping CSV", message)
             self.assertIn("master_pixels2skycells", message)
             self.assertIn("Gaia catalog CSV", message)
@@ -111,13 +111,13 @@ class TestStarContext(unittest.TestCase):
             (event / "event_job.json").write_text("{}", encoding="utf-8")
             (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
             (templates / "syndiff_template_0.fits").write_bytes(b"")
-            (ws / "hp_d" / "tess123_hp_d.fits.gz").write_bytes(b"")
-            (ws / "hp_c" / "tess123_hp_c.fits.gz").write_bytes(b"")
-            (ws / "ks_b_s" / "tess123_ks_b_s.fits.gz").write_bytes(b"")
+            (ws / "hp_d" / "tess123_hp_d.fits.fz").write_bytes(b"")
+            (ws / "hp_c" / "tess123_hp_c.fits.fz").write_bytes(b"")
+            (ws / "ks_b_s" / "tess123_ks_b_s.fits.fz").write_bytes(b"")
             (ws / "hp_d_kernels" / "tess123_kernel.npz").write_bytes(b"")
-            (ws / "shared_mask.fits.gz").write_bytes(b"")
+            (ws / "shared_mask.fits.fz").write_bytes(b"")
             (mapping / "tess_s0020_3_2_master_skycells_list.csv").write_bytes(b"")
-            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.gz").write_bytes(b"")
+            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.fz").write_bytes(b"")
             (gaia / "gaia.csv").write_bytes(b"")
 
             ctx = _minimal_ctx(tmp)
