@@ -865,6 +865,91 @@ def _verify_worker():
     return try_get_verify_worker()
 
 
+# ---------------------------------------------------------------------------
+# Provenance graph fast path (PR3): replaces the O(cells) NFS verify scan for
+# ps1_process with an O(1) indexed lookup, falling back to the legacy
+# manifest/scan path whenever the provenance graph has no answer yet (cold
+# SCCs, pre-checkpoint history). See doc/template_bookkeeping_plan.md §11 and
+# doc/bookkeeping_pr3_seam_map.md.
+# ---------------------------------------------------------------------------
+_PROVENANCE_STORE_CACHE: dict = {}
+_PROVENANCE_DRAIN_LAST: dict = {}
+_PROVENANCE_DRAIN_INTERVAL_S = 5.0
+
+
+def _provenance_store(data_root: str):
+    """Return (and cache) a ProvenanceStore for *data_root*; None on any failure.
+
+    Never raises: the provenance graph is a pure optimization layer here, and a
+    missing/unopenable store must fall back to the legacy scan, not crash the
+    scheduler.
+    """
+    if not data_root:
+        return None
+    cached = _PROVENANCE_STORE_CACHE.get(data_root)
+    if cached is not None:
+        return cached
+    try:
+        from syndiff_pipeline.common.provenance.store import ProvenanceStore
+        from syndiff_pipeline.common.scc_paths import provenance_db_path
+
+        store = ProvenanceStore(provenance_db_path(data_root))
+    except Exception:
+        log.debug("Could not open provenance store for %s", data_root, exc_info=True)
+        return None
+    _PROVENANCE_STORE_CACHE[data_root] = store
+    return store
+
+
+def _ps1_process_provenance_complete(resolved) -> bool:
+    """True iff the provenance graph already proves ps1_process is current.
+
+    Computes the *expected* fingerprint fresh from the current config (not a
+    stored one) and checks it against the store — so a config change is
+    detected exactly like today's config_fingerprint comparison, but without
+    touching the filesystem. Any failure (import, store, computation) is
+    treated as "no answer" so the caller falls back to the legacy scan.
+    """
+    try:
+        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+            ps1_process_checkpoint_record,
+        )
+
+        store = _provenance_store(getattr(resolved, "data_root", None))
+        if store is None:
+            return False
+        expected_fp = ps1_process_checkpoint_record(resolved)["fingerprint"]
+        return store.scc_stage_complete([expected_fp])
+    except Exception:
+        log.debug("Provenance fast-path check failed; falling back to scan", exc_info=True)
+        return False
+
+
+def _drain_provenance_spool(data_root: str | None) -> None:
+    """Best-effort, throttled drain of the worker sidecar spool into the store.
+
+    Cheap (a directory glob over usually-empty spool files), so running it on
+    every idle daemon tick is fine; throttled anyway to avoid pointless syscalls
+    when many runs share one data_root.
+    """
+    if not data_root:
+        return
+    now = time.monotonic()
+    last = _PROVENANCE_DRAIN_LAST.get(data_root, 0.0)
+    if now - last < _PROVENANCE_DRAIN_INTERVAL_S:
+        return
+    _PROVENANCE_DRAIN_LAST[data_root] = now
+    store = _provenance_store(data_root)
+    if store is None:
+        return
+    try:
+        from syndiff_pipeline.common.provenance.ingest import drain_data_root
+
+        drain_data_root(store, data_root)
+    except Exception:
+        log.warning("Provenance spool drain failed for %s", data_root, exc_info=True)
+
+
 def _cancel_verify_run(run_id: str) -> None:
     """Cancel verify run.
     
@@ -1138,6 +1223,16 @@ def _run_verify_pass(
         ):
             if budget_left <= 0:
                 break
+            if key.stage == "ps1_process" and _ps1_process_provenance_complete(resolved):
+                budget_left -= 1
+                outcome = VerifyOutcome(
+                    key=key,
+                    complete=True,
+                    stable_path=stable_path,
+                    resolved=resolved,
+                )
+                total += apply(outcome)
+                continue
             manifest_hit = check_manifests_only(
                 resolved,
                 key.stage,
@@ -2059,6 +2154,7 @@ def run_supervisor_daemon(workspace_root: str) -> int:
                         ctx = _load_run_context(state, run_id)
                         if ctx is None:
                             continue
+                        _drain_provenance_spool(getattr(ctx.cfg, "data_root", None))
                         _tick_run(state, run_id, ctx)
                         # Honor cancel/pause/stop intents promptly even when a
                         # large active-run set makes a full pass slow.

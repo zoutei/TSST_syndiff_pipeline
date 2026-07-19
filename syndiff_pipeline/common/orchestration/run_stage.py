@@ -37,6 +37,28 @@ log = logging.getLogger(__name__)
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
 
+def _emit_provenance_checkpoint(stage: str, resolved, run_id: str) -> None:
+    """Best-effort provenance-graph checkpoint, dual-written alongside the manifest.
+
+    Never allowed to affect stage success: this is purely additive bookkeeping
+    that the scheduler's fast path (PR3) can consult later. See
+    ``template_creation.orchestration.provenance_checkpoint``.
+    """
+    try:
+        if stage == "ps1_process":
+            from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+                emit_ps1_process_checkpoint,
+            )
+
+            emit_ps1_process_checkpoint(resolved, produced_by=run_id)
+    except Exception:
+        log.warning(
+            "Provenance checkpoint emission failed for stage=%s (non-fatal)",
+            stage,
+            exc_info=True,
+        )
+
+
 def _configure_logging() -> None:
     """Configure logging."""
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, force=True)
@@ -315,6 +337,8 @@ def main(argv: list[str] | None = None) -> int:
                         produced_count,
                         meta=manifest_meta,
                     )
+                if args.stage == "ps1_process":
+                    _emit_provenance_checkpoint(args.stage, resolved, args.run_id)
     except SystemExit as exc:
         if isinstance(exc.code, int):
             exit_code = exc.code
