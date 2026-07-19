@@ -57,6 +57,13 @@ _LOCAL_START_GRACE_S = 300.0
 # staleness threshold used by the lifecycle layer (DEFAULT_HEARTBEAT_STALE_S).
 _HEARTBEAT_INTERVAL_S = 15.0
 
+# Provenance spool-ingest drain cadence (template_bookkeeping_plan.md §10/§15:
+# "supervisor rotates + drains ... global, once per pass, throttled"). The
+# supervisor is the sole DB writer, so this throttle just bounds how often we
+# pay the rotate+drain cost per loop pass -- it is not a correctness lock.
+_PROVENANCE_DRAIN_INTERVAL_S = 5.0
+_last_provenance_drain_ts = 0.0
+
 # On SIGTERM, drain in-flight verify results briefly before dropping them.
 _SHUTDOWN_VERIFY_DRAIN_S = 5.0
 
@@ -919,6 +926,64 @@ def _apply_verify_outcome(state: pstate.PipelineState, outcome: VerifyOutcome) -
     return 0
 
 
+# Stage this PR's checkpoint-first verify short-circuit applies to (plan
+# §11/§19 PR3: perf win is scoped to ps1_process only -- mapping/remap/
+# downsample verifies are already cheap and untouched).
+_CHECKPOINT_FIRST_STAGE = "ps1_process"
+
+
+def _ps1_process_checkpoint_hit(
+    key: "VerifyTaskKey",
+    resolved,
+    stable_path: str,
+) -> "VerifyOutcome | None":
+    """Checkpoint-first fast path for ``ps1_process`` (plan §11, PR3).
+
+    Recomputes the ``scc_assembly`` fingerprint fresh from *resolved* (a pure
+    function, no filesystem access -- config drift naturally yields a
+    different fingerprint and therefore a miss) and checks it against the
+    provenance store with one indexed query. On a HIT, returns a
+    legacy-shaped "ok" :class:`VerifyOutcome` so the caller can route it
+    through the existing ``_apply_verify_outcome`` exactly as a scan success
+    would. On ANY miss condition -- fingerprint not indexed, DB/store
+    unavailable, provenance package absent, or any other exception -- returns
+    ``None`` so the caller falls open, unchanged, to the legacy
+    ``check_manifests_only`` / ``stage_absence_probe`` / background
+    ``VerifyTask`` path. Never raises.
+    """
+    from syndiff_pipeline.common.orchestration.verify_worker import VerifyOutcome
+
+    try:
+        from syndiff_pipeline.common.provenance.store import ProvenanceStore
+        from syndiff_pipeline.common.scc_paths import provenance_db_path
+        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+            expected_scc_assembly_fingerprint,
+        )
+
+        expected_fp = expected_scc_assembly_fingerprint(resolved)
+        store = ProvenanceStore(
+            str(provenance_db_path(resolved.data_root)), read_only=True
+        )
+        if not store.scc_stage_complete([expected_fp]):
+            return None
+    except Exception:
+        log.debug(
+            "ps1_process checkpoint check unavailable for %s/%s (falling open"
+            " to legacy verify)",
+            key.run_id,
+            key.target_label,
+            exc_info=True,
+        )
+        return None
+
+    return VerifyOutcome(
+        key=key,
+        complete=True,
+        stable_path=stable_path,
+        resolved=resolved,
+    )
+
+
 def _iter_verify_candidates(
     state: pstate.PipelineState,
     run_id: str,
@@ -1138,6 +1203,14 @@ def _run_verify_pass(
         ):
             if budget_left <= 0:
                 break
+            if key.stage == _CHECKPOINT_FIRST_STAGE:
+                checkpoint_outcome = _ps1_process_checkpoint_hit(
+                    key, resolved, stable_path
+                )
+                if checkpoint_outcome is not None:
+                    budget_left -= 1
+                    total += apply(checkpoint_outcome)
+                    continue
             manifest_hit = check_manifests_only(
                 resolved,
                 key.stage,
@@ -1983,6 +2056,50 @@ def _apply_commands(state: pstate.PipelineState) -> None:
             state.mark_command_processed(cmd.id)
 
 
+def _maybe_drain_provenance_spool(data_roots) -> None:
+    """Throttled, best-effort drain of the provenance spool into ``provenance.db``.
+
+    template_bookkeeping_plan.md §10/§15: "supervisor rotates each spool file
+    (rename -> fresh fd), drains into ``provenance.db`` in one transaction
+    (idempotent ``INSERT OR REPLACE``) ... Sole writer." This function is only
+    ever called from the supervisor's own tick loop below, so the sole-writer
+    invariant holds by construction -- no lock is taken here.
+
+    Never raises: a missing/broken ``provenance`` package (it may still be
+    mid-authoring, per the phased-PR rollout) or any per-``data_root`` failure
+    must not affect scheduling. Imports are lazy and guarded so the scheduler
+    keeps working even if the package cannot be imported at all.
+    """
+    global _last_provenance_drain_ts
+    if not data_roots:
+        return
+    now = time.monotonic()
+    if now - _last_provenance_drain_ts < _PROVENANCE_DRAIN_INTERVAL_S:
+        return
+    _last_provenance_drain_ts = now
+    try:
+        from syndiff_pipeline.common.scc_paths import (
+            provenance_db_path,
+            provenance_spool_dir,
+        )
+        from syndiff_pipeline.common.provenance.store import ProvenanceStore
+        from syndiff_pipeline.common.provenance.ingest import drain_spool
+    except Exception:
+        log.debug(
+            "Provenance package unavailable; skipping spool drain this pass",
+            exc_info=True,
+        )
+        return
+    for data_root in data_roots:
+        try:
+            store = ProvenanceStore(str(provenance_db_path(data_root)))
+            drain_spool(store, provenance_spool_dir(data_root))
+        except Exception:
+            log.exception(
+                "Provenance spool drain failed for data_root=%s (non-fatal)", data_root
+            )
+
+
 def run_supervisor_daemon(workspace_root: str) -> int:
     """Run supervisor daemon.
     
@@ -2060,6 +2177,7 @@ def run_supervisor_daemon(workspace_root: str) -> int:
             while not _shutdown:
                 _apply_commands(state)
 
+                provenance_data_roots: set[str] = set()
                 for run in state.list_active_runs():
                     if _shutdown:
                         break
@@ -2068,6 +2186,9 @@ def run_supervisor_daemon(workspace_root: str) -> int:
                         ctx = _load_run_context(state, run_id)
                         if ctx is None:
                             continue
+                        data_root = getattr(ctx.cfg, "data_root", None)
+                        if data_root:
+                            provenance_data_roots.add(str(data_root))
                         _tick_run(state, run_id, ctx)
                         # Honor cancel/pause/stop intents promptly even when a
                         # large active-run set makes a full pass slow.
@@ -2081,6 +2202,7 @@ def run_supervisor_daemon(workspace_root: str) -> int:
                 active_runs = state.list_active_runs()
                 by_run = _collect_verify_status_by_run(state, active_runs)
                 write_verify_in_flight(workspace_root, by_run)
+                _maybe_drain_provenance_spool(provenance_data_roots)
 
                 # Interruptible idle: wake early on shutdown instead of sleeping
                 # through a SIGTERM.
