@@ -207,7 +207,14 @@ def _execute_template_stage(
         from syndiff_pipeline.common.download import download_ffis
 
         out_dir = resolved.ffi_dir
-        download_ffis(sector=t.sector, camera=t.camera, ccd=t.ccd, output_dir=out_dir)
+        download_ffis(
+            sector=t.sector,
+            camera=t.camera,
+            ccd=t.ccd,
+            output_dir=out_dir,
+            data_root=resolved.data_root,
+            update_ffi_list=True,
+        )
         return None
 
     if stage == "mapping":

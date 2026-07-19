@@ -185,13 +185,15 @@ def _build_shift_schedule_for_scc(
     oversampling_factor: int = 1,
 ) -> ShiftSchedule:
     """Build ``shift_schedule.npz`` from all SCC FFIs (no event handoff)."""
-    from syndiff_pipeline.common.download import list_local_ffis
+    from syndiff_pipeline.common.download import list_local_ffis, manifest_basename_from_local
     from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
     from syndiff_pipeline.common.wcs_header_cache import (
-        load_or_build_wcs_cache,
-        wcs_cache_path,
+        ensure_scc_ffi_list,
+        ffi_list_is_complete,
+        load_ffi_list,
         wcs_from_cached_row,
     )
+    from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
     from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
         RELEVANT_WCS_KEYS,
         load_tess_wcs,
@@ -217,29 +219,35 @@ def _build_shift_schedule_for_scc(
     if not paths:
         raise FileNotFoundError(f"No FFIs under {ffi_dir!r}")
 
-    cache = load_or_build_wcs_cache(
-        paths,
-        wcs_cache_path(data_root, sector, camera, ccd),
-        open_fits=open_fits_memmap,
-    )
+    ffi_list_path = scc_ffi_list_parquet(data_root, sector, camera, ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(paths, ffi_list_df):
+        ffi_list_df = ensure_scc_ffi_list(
+            data_root,
+            sector,
+            camera,
+            ccd,
+            paths,
+            open_fits=open_fits_memmap,
+        )
     frame_wcs: list[tuple[str, Any]] = []
     btjd_list: list[float] = []
     for p in paths:
-        name = Path(p).name
-        if name in cache.index:
+        logical = manifest_basename_from_local(p)
+        if logical in ffi_list_df.index:
             try:
-                frame_wcs.append((name, wcs_from_cached_row(cache.loc[name])))
+                frame_wcs.append((logical, wcs_from_cached_row(ffi_list_df.loc[logical])))
             except Exception as exc:
-                log.warning("WCS reconstruct failed for %s: %s", name, exc)
-                frame_wcs.append((name, None))
+                log.warning("WCS reconstruct failed for %s: %s", logical, exc)
+                frame_wcs.append((logical, None))
         else:
-            frame_wcs.append((name, None))
-        row = cache.loc[name] if name in cache.index else None
-        if row is not None and "DATE-OBS" in row.index and pd.notna(row["DATE-OBS"]):
+            frame_wcs.append((logical, None))
+        row = ffi_list_df.loc[logical] if logical in ffi_list_df.index else None
+        if row is not None and pd.notna(row.get("date_obs")):
             try:
                 from astropy.time import Time
 
-                btjd_list.append(float(Time(str(row["DATE-OBS"]), format="isot", scale="utc").btjd))
+                btjd_list.append(float(Time(str(row["date_obs"]), format="isot", scale="utc").btjd))
             except Exception:
                 btjd_list.append(float("nan"))
         else:
@@ -252,7 +260,7 @@ def _build_shift_schedule_for_scc(
     schedule.meta = dict(schedule.meta or {})
     schedule.meta["source"] = "built_from_scc_ffis"
     schedule.meta["reference_ffi"] = str(ref_path.resolve())
-    schedule.meta["frame_filenames"] = [Path(p).name for p in paths]
+    schedule.meta["frame_filenames"] = [manifest_basename_from_local(p) for p in paths]
     with field_store_lock(store_root):
         schedule.save(store_root / "shift_schedule.npz")
     log.info(
@@ -275,12 +283,15 @@ def _build_shift_schedule_for_event(
     oversampling_factor: int = 1,
 ) -> ShiftSchedule:
     """Build ``shift_schedule.npz`` from WCS cache + skycell catalog when missing."""
+    from syndiff_pipeline.common.download import manifest_basename_from_local
     from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
     from syndiff_pipeline.common.wcs_header_cache import (
-        load_or_build_wcs_cache,
-        wcs_cache_path,
+        ensure_scc_ffi_list,
+        ffi_list_is_complete,
+        load_ffi_list,
         wcs_from_cached_row,
     )
+    from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
     from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
         RELEVANT_WCS_KEYS,
         load_tess_wcs,
@@ -318,22 +329,28 @@ def _build_shift_schedule_for_event(
     skycell_df = pd.read_csv(csv_path, usecols=usecols)
 
     paths = [Path(str(p)) for p in frames_df["path"].tolist()]
-    cache = load_or_build_wcs_cache(
-        paths,
-        wcs_cache_path(data_root, sector, camera, ccd),
-        open_fits=open_fits_memmap,
-    )
+    ffi_list_path = scc_ffi_list_parquet(data_root, sector, camera, ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(paths, ffi_list_df):
+        ffi_list_df = ensure_scc_ffi_list(
+            data_root,
+            sector,
+            camera,
+            ccd,
+            paths,
+            open_fits=open_fits_memmap,
+        )
     frame_wcs: list[tuple[str, Any]] = []
     for p in paths:
-        name = p.name
-        if name in cache.index:
+        logical = manifest_basename_from_local(p)
+        if logical in ffi_list_df.index:
             try:
-                frame_wcs.append((name, wcs_from_cached_row(cache.loc[name])))
+                frame_wcs.append((logical, wcs_from_cached_row(ffi_list_df.loc[logical])))
             except Exception as exc:
-                log.warning("WCS reconstruct failed for %s: %s", name, exc)
-                frame_wcs.append((name, None))
+                log.warning("WCS reconstruct failed for %s: %s", logical, exc)
+                frame_wcs.append((logical, None))
         else:
-            frame_wcs.append((name, None))
+            frame_wcs.append((logical, None))
 
     btjd = None
     if "btjd" in frames_df.columns:
@@ -343,7 +360,7 @@ def _build_shift_schedule_for_event(
         frame_wcs, skycell_df, ref_wcs, btjd=btjd
     )
     schedule.meta = dict(schedule.meta or {})
-    schedule.meta["source"] = "built_from_wcs_cache"
+    schedule.meta["source"] = "built_from_ffi_list"
     schedule.meta["reference_ffi"] = str(ref_path)
     with field_store_lock(store_root):
         schedule.save(store_root / "shift_schedule.npz")
@@ -481,33 +498,33 @@ def _load_frame_wcs(frames_df: pd.DataFrame, frame_index: int) -> Any:
 
 def _resolve_frame_filenames(
     schedule: ShiftSchedule,
-    wcs_cache: pd.DataFrame,
+    ffi_list_df: pd.DataFrame,
 ) -> list[str]:
     meta = schedule.meta or {}
     names = meta.get("frame_filenames")
     if names:
         return [str(n) for n in names]
     n_frames = int(schedule.sx_int.shape[0])
-    candidates = sorted(str(n) for n in wcs_cache.index)
+    candidates = sorted(str(n) for n in ffi_list_df.index)
     if len(candidates) != n_frames:
         raise RuntimeError(
-            f"shift schedule has {n_frames} frames but WCS cache has "
+            f"shift schedule has {n_frames} frames but ffi_list has "
             f"{len(candidates)} entries and schedule.meta lacks frame_filenames"
         )
     return candidates
 
 
 def _load_frame_wcs_from_cache(
-    wcs_cache: pd.DataFrame,
+    ffi_list_df: pd.DataFrame,
     frame_filenames: list[str],
     frame_index: int,
 ) -> Any:
     from syndiff_pipeline.common.wcs_header_cache import wcs_from_cached_row
 
     name = frame_filenames[int(frame_index)]
-    if name not in wcs_cache.index:
-        raise KeyError(f"frame {name!r} missing from WCS cache")
-    return wcs_from_cached_row(wcs_cache.loc[name])
+    if name not in ffi_list_df.index:
+        raise KeyError(f"frame {name!r} missing from ffi_list")
+    return wcs_from_cached_row(ffi_list_df.loc[name])
 
 
 def _skycell_catalog_row(
@@ -670,19 +687,17 @@ def run_field_remap_scc(
             master_arr, name_to_id = _master_skycell_id_map(master_path)
 
         if scc_only:
-            from syndiff_pipeline.common.wcs_header_cache import (
-                load_wcs_cache,
-                wcs_cache_path,
-            )
+            from syndiff_pipeline.common.wcs_header_cache import load_ffi_list
+            from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
 
-            cache_path = wcs_cache_path(data_root, sector, camera, ccd)
-            if not cache_path.is_file():
-                raise FileNotFoundError(f"Missing WCS cache at {cache_path}")
-            wcs_cache = load_wcs_cache(cache_path)
-            frame_filenames = _resolve_frame_filenames(schedule, wcs_cache)
+            ffi_list_path = scc_ffi_list_parquet(data_root, sector, camera, ccd)
+            if not ffi_list_path.is_file():
+                raise FileNotFoundError(f"Missing ffi_list at {ffi_list_path}")
+            ffi_list_df = load_ffi_list(ffi_list_path)
+            frame_filenames = _resolve_frame_filenames(schedule, ffi_list_df)
 
             def _frame_wcs_at(frame_index: int) -> Any:
-                return _load_frame_wcs_from_cache(wcs_cache, frame_filenames, frame_index)
+                return _load_frame_wcs_from_cache(ffi_list_df, frame_filenames, frame_index)
         else:
             frames_path = Path(_frames_csv_path(event_dir))
             if not frames_path.is_file():

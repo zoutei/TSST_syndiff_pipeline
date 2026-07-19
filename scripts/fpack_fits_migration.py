@@ -95,16 +95,60 @@ def _collect_gz_files(roots: list[Path]) -> list[Path]:
     return out
 
 
+def _sector_name_from_ffi_leaf(ffi: Path) -> str | None:
+    """``…/s0020/c3/k3/ffi`` → ``s0020``."""
+    parts = ffi.parts
+    for i, part in enumerate(parts):
+        if part != "ffi":
+            continue
+        if i >= 3 and parts[i - 3].startswith("s") and parts[i - 3][1:].isdigit():
+            return parts[i - 3]
+    for part in parts:
+        if len(part) >= 2 and part[0] == "s" and part[1:].isdigit():
+            return part
+    return None
+
+
 def _roots_for_scope(
-    scope: str, *, data_root: Path, workspace_root: Path
+    scope: str,
+    *,
+    data_root: Path,
+    workspace_root: Path,
+    shard: int | None = None,
+    num_shards: int = 1,
 ) -> list[Path]:
     if scope == "tess_ffi":
-        roots = [data_root / "tess_ffi"]
+        roots: list[Path] = []
+        legacy = data_root / "tess_ffi"
+        if legacy.is_dir():
+            roots.append(legacy)
         # SCC-nested ffi leaves: sNNNN/cC/kK/ffi
-        for ffi in data_root.glob("s*/c*/k*/ffi"):
+        for ffi in sorted(data_root.glob("s*/c*/k*/ffi")):
             if ffi.is_dir():
                 roots.append(ffi)
-        return roots
+        if shard is None or num_shards <= 1:
+            return roots
+        if shard < 0 or shard >= num_shards:
+            raise ValueError(f"shard must be in [0, {num_shards})")
+        # Partition by sector so each Condor job walks a subset of the tree.
+        by_sector: dict[str, list[Path]] = {}
+        other: list[Path] = []
+        for root in roots:
+            sector = _sector_name_from_ffi_leaf(root)
+            if sector is None and root.name.startswith("s") and root.name[1:].isdigit():
+                sector = root.name
+            if sector is None:
+                other.append(root)
+                continue
+            by_sector.setdefault(sector, []).append(root)
+        selected: list[Path] = []
+        for i, sector in enumerate(sorted(by_sector)):
+            if i % num_shards == shard:
+                selected.extend(by_sector[sector])
+        # Put unscoped roots only on shard 0.
+        if shard == 0:
+            selected.extend(other)
+        return selected
     if scope == "data_root":
         return [
             data_root / "shifted_downsampled",
@@ -132,23 +176,23 @@ def _gunzip_to_plain(gz_path: Path, plain_path: Path) -> None:
         raise
 
 
-def _convert_one(gz_path: Path, *, dry_run: bool) -> tuple[str, Path | None]:
-    """Return (status, fz_path). status in ok|skip|fail."""
+def convert_ffi_gz_to_fz(gz_path: str | Path) -> tuple[str, Path | None]:
+    """
+    Migrate one ``.fits.gz`` file to sibling ``.fits.fz``.
+
+    Returns ``(status, fz_path)`` where ``status`` is ``ok``, ``skip``, or raises on
+    failure (caller handles exceptions as ``fail``).
+    """
+    gz_path = Path(gz_path)
     fz_path = Path(fits_fpack_path(gz_path))
     if fz_path.is_file():
         return "skip", fz_path
-    if dry_run:
-        return "ok", fz_path
 
     plain = Path(fits_logical_path(gz_path))
-    # Work in a temp dir beside the target to stay on the same filesystem.
-    tmpdir = Path(
-        tempfile.mkdtemp(prefix=".fpack_mig.", dir=str(gz_path.parent))
-    )
+    tmpdir = Path(tempfile.mkdtemp(prefix=".fpack_mig.", dir=str(gz_path.parent)))
     try:
         tmp_plain = tmpdir / plain.name
         _gunzip_to_plain(gz_path, tmp_plain)
-        # Verify readable before fpack
         with fits.open(tmp_plain, memmap=False) as hdul:
             _ = len(hdul)
         produced = fpack_plain_fits(tmp_plain, delete_plain=True)
@@ -162,6 +206,16 @@ def _convert_one(gz_path: Path, *, dry_run: bool) -> tuple[str, Path | None]:
         return "ok", fz_path
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _convert_one(gz_path: Path, *, dry_run: bool) -> tuple[str, Path | None]:
+    """Return (status, fz_path). status in ok|skip|fail."""
+    fz_path = Path(fits_fpack_path(gz_path))
+    if fz_path.is_file():
+        return "skip", fz_path
+    if dry_run:
+        return "ok", fz_path
+    return convert_ffi_gz_to_fz(gz_path)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -187,26 +241,50 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--limit", type=int, default=0, help="Max files (0=all)")
+    parser.add_argument(
+        "--shard",
+        type=int,
+        default=None,
+        help="Optional shard index (with --num-shards) for tess_ffi Condor splits",
+    )
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Number of Condor shards when --shard is set",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
     data_root = args.data_root.expanduser().resolve()
     workspace_root = args.workspace_root.expanduser().resolve()
-    log_path = _setup_logging(args.log_dir.expanduser().resolve(), args.scope, args.verbose)
+    log_label = args.scope
+    if args.shard is not None:
+        log_label = f"{args.scope}_shard{args.shard}"
+    log_path = _setup_logging(
+        args.log_dir.expanduser().resolve(), log_label, args.verbose
+    )
     state = RunState(scope=args.scope, dry_run=args.dry_run, log_dir=args.log_dir)
-    state.failure_log_path = state.log_dir / f"fpack_{args.scope}_failures.log"
+    state.failure_log_path = state.log_dir / f"fpack_{log_label}_failures.log"
 
     roots = _roots_for_scope(
-        args.scope, data_root=data_root, workspace_root=workspace_root
+        args.scope,
+        data_root=data_root,
+        workspace_root=workspace_root,
+        shard=args.shard,
+        num_shards=args.num_shards,
     )
     files = _collect_gz_files(roots)
     if args.limit > 0:
         files = files[: args.limit]
     state.counts.total = len(files)
     log.info(
-        "scope=%s files=%d dry_run=%s log=%s",
+        "scope=%s shard=%s/%s files=%d roots=%d dry_run=%s log=%s",
         args.scope,
+        args.shard,
+        args.num_shards,
         len(files),
+        len(roots),
         args.dry_run,
         log_path,
     )
