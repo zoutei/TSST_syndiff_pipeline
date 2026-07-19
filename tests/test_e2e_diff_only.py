@@ -113,7 +113,7 @@ def _diff_only_run_setup(tmp_path: Path, target: Target, *, run_id: str = "run_a
 
 DIFF_VERIFY_STAGES = (
     "tess_ffi_download",
-    "templates",
+    "downsample",
 )
 DIFF_EXTERNAL_STAGES = DIFF_VERIFY_STAGES + ("bind",)
 DIFF_NOT_SELECTED_STAGES = (
@@ -160,7 +160,7 @@ class TestDiffOnlyE2E(unittest.TestCase):
             state, ctx, run_id = _diff_only_run_setup(tmp_path, target)
             label = target.label()
 
-            for stage in ("tess_ffi_download", "templates"):
+            for stage in ("tess_ffi_download", "downsample"):
                 self.assertEqual(
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_EXTERNAL,
@@ -200,7 +200,7 @@ class TestDiffOnlyE2E(unittest.TestCase):
                 for _ in range(4):
                     _tick_run(state, run_id, ctx)
 
-            for stage in ("tess_ffi_download", "templates"):
+            for stage in ("tess_ffi_download", "downsample"):
                 self.assertEqual(
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_SKIPPED,

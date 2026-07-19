@@ -312,13 +312,13 @@ class TestRunReport(unittest.TestCase):
                 "/targets.csv",
                 "/runs",
                 [target],
-                ["mapping", "templates"],
+                ["mapping", "downsample"],
             )
             state.update_stage_status("run_eq", label, "tess_ffi_download", STATUS_EXTERNAL)
             state.update_stage_status("run_eq", label, "mapping", STATUS_PENDING)
             state.update_stage_status("run_eq", label, "ps1_download", STATUS_PENDING)
             state.update_stage_status("run_eq", label, "ps1_process", STATUS_PENDING)
-            state.update_stage_status("run_eq", label, "templates", STATUS_PENDING)
+            state.update_stage_status("run_eq", label, "downsample", STATUS_PENDING)
             state.update_stage_status(
                 "run_eq", label, "bind", STATUS_SKIPPED, exit_code=0
             )

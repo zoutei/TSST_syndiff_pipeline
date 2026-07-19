@@ -230,7 +230,7 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, targets, active_stages=["templates"]
+                tmp_path, targets, active_stages=["downsample"]
             )
             ctx.cfg.verify_max_workers = 1
             for target in targets:
@@ -263,7 +263,7 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):
@@ -297,7 +297,7 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):
@@ -350,7 +350,7 @@ class TestVerifyScheduling(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):
@@ -383,7 +383,7 @@ class TestVerifyScheduling(unittest.TestCase):
             promoted = state.promote_stages(run_id)
             self.assertEqual(promoted, 0)
             self.assertEqual(
-                state.get_stage_run(run_id, label, "templates").status, STATUS_PENDING
+                state.get_stage_run(run_id, label, "downsample").status, STATUS_PENDING
             )
 
 
@@ -398,7 +398,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):
@@ -421,7 +421,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                 state.insert_command(
                     "force_rerun",
                     run_id=run_id,
-                    args={"target_labels": [label], "stages": ["templates"]},
+                    args={"target_labels": [label], "stages": ["downsample"]},
                 )
                 _apply_commands(state)
                 get_verify_worker().drain(
@@ -431,7 +431,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
                     block_timeout_s=3.0,
                 )
 
-            row = state.get_stage_run(run_id, label, "templates")
+            row = state.get_stage_run(run_id, label, "downsample")
             self.assertEqual(row.status, STATUS_PENDING)
 
     def test_run_not_stalled_while_verify_in_flight(self):
@@ -439,7 +439,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):
@@ -471,7 +471,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):
@@ -503,7 +503,7 @@ class TestVerifyCommandIntegration(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["templates"]
+                tmp_path, [target], active_stages=["downsample"]
             )
             label = target.label()
             for stage in ("tess_ffi_download",):

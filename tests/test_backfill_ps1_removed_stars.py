@@ -22,6 +22,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
 )
@@ -52,6 +53,7 @@ def _resolved(tmp: Path) -> ResolvedTargetConfig:
             mapping=MappingStageParams(),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
+            remap=RemapStageParams(),
             downsample=DownsampleStageParams(),
         ),
         mapping_root=str(tmp / "mapping"),

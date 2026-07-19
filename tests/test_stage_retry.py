@@ -47,7 +47,7 @@ class TestStageRetry(unittest.TestCase):
                 "mapping",
                 "ps1_download",
                 "ps1_process",
-                "templates",
+                "downsample",
             ]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             state.reset_stage_for_retry("run_a", target.label(), "mapping", reset_downstream=True)
@@ -87,7 +87,7 @@ class TestStageRetry(unittest.TestCase):
                 "mapping",
                 "ps1_download",
                 "ps1_process",
-                "templates",
+                "downsample",
             ]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             label = target.label()
@@ -95,7 +95,7 @@ class TestStageRetry(unittest.TestCase):
                 state.update_stage_status("run_a", label, stage, STATUS_SUCCESS, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_download", STATUS_BLOCKED)
             state.update_stage_status("run_a", label, "ps1_process", STATUS_BLOCKED)
-            state.update_stage_status("run_a", label, "templates", STATUS_BLOCKED)
+            state.update_stage_status("run_a", label, "downsample", STATUS_BLOCKED)
 
             # A cached verify attempt allows blocked upstream to promote to ready.
             state.cache_external_check("run_a", label, "ps1_download", complete=False)
@@ -104,7 +104,7 @@ class TestStageRetry(unittest.TestCase):
             self.assertEqual(promoted, 1)
             ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
             ps1_proc = state.get_stage_run("run_a", label, "ps1_process")
-            down = state.get_stage_run("run_a", label, "templates")
+            down = state.get_stage_run("run_a", label, "downsample")
             self.assertEqual(ps1_dl.status, STATUS_READY)
             self.assertEqual(ps1_proc.status, STATUS_BLOCKED)
             self.assertEqual(down.status, STATUS_BLOCKED)
@@ -126,14 +126,14 @@ class TestStageRetry(unittest.TestCase):
                 "mapping",
                 "ps1_download",
                 "ps1_process",
-                "templates",
+                "downsample",
             ]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             label = target.label()
             for stage in ("tess_ffi_download", "bind", "mapping", "ps1_process"):
                 state.update_stage_status("run_a", label, stage, STATUS_SUCCESS, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_download", STATUS_FAILED, exit_code=1)
-            state.update_stage_status("run_a", label, "templates", STATUS_FAILED, exit_code=1)
+            state.update_stage_status("run_a", label, "downsample", STATUS_FAILED, exit_code=1)
 
             failed = state.list_failed_stage_runs("run_a")
             for row in failed:
@@ -141,13 +141,13 @@ class TestStageRetry(unittest.TestCase):
                     "run_a", row.target_label, row.stage, reset_downstream=True
                 )
 
-            down = state.get_stage_run("run_a", label, "templates")
+            down = state.get_stage_run("run_a", label, "downsample")
             ps1_proc = state.get_stage_run("run_a", label, "ps1_process")
             ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
             self.assertEqual(ps1_proc.status, STATUS_PENDING)
             self.assertEqual(down.status, STATUS_PENDING)
             self.assertEqual(ps1_dl.status, STATUS_PENDING)
-            self.assertFalse(state.deps_satisfied("run_a", label, "templates"))
+            self.assertFalse(state.deps_satisfied("run_a", label, "downsample"))
 
     def test_deps_satisfied_accepts_skipped_upstream(self):
         target = self._target()
@@ -159,13 +159,13 @@ class TestStageRetry(unittest.TestCase):
                 "/targets.csv",
                 tmp,
                 [target],
-                ["ps1_process", "templates"],
+                ["ps1_process", "downsample"],
             )
             label = target.label()
-            state.update_stage_status("run_a", label, "bind", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status("run_a", label, "mapping", STATUS_SKIPPED, exit_code=0)
+            state.update_stage_status("run_a", label, "remap", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_process", STATUS_SUCCESS, exit_code=0)
-            self.assertTrue(state.deps_satisfied("run_a", label, "templates"))
+            self.assertTrue(state.deps_satisfied("run_a", label, "downsample"))
 
     def test_full_dag_materializes_external_stages(self):
         target = self._target()
@@ -177,16 +177,16 @@ class TestStageRetry(unittest.TestCase):
                 "/targets.csv",
                 tmp,
                 [target],
-                ["templates"],
+                ["downsample"],
             )
             label = target.label()
             mapping = state.get_stage_run("run_a", label, "mapping")
             self.assertEqual(mapping.status, STATUS_EXTERNAL)
 
     def test_reopen_status_for_retry_helper(self):
-        active = ["mapping", "templates"]
+        active = ["mapping", "downsample"]
         self.assertEqual(reopen_status_for_retry("mapping", active), STATUS_PENDING)
-        self.assertEqual(reopen_status_for_retry("templates", active), STATUS_PENDING)
+        self.assertEqual(reopen_status_for_retry("downsample", active), STATUS_PENDING)
         self.assertEqual(reopen_status_for_retry("ps1_download", active), STATUS_EXTERNAL)
         self.assertEqual(reopen_status_for_retry("ps1_process", active), STATUS_EXTERNAL)
         self.assertEqual(reopen_status_for_retry("bind", active), STATUS_EXTERNAL)
@@ -195,7 +195,7 @@ class TestStageRetry(unittest.TestCase):
         target = self._target()
         with tempfile.TemporaryDirectory() as tmp:
             state = PipelineState(str(Path(tmp) / "state.sqlite"))
-            stages = ["mapping", "templates"]
+            stages = ["mapping", "downsample"]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             label = target.label()
             for stage in ("ps1_download", "ps1_process"):
@@ -209,7 +209,7 @@ class TestStageRetry(unittest.TestCase):
             mapping = state.get_stage_run("run_a", label, "mapping")
             ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
             ps1_pr = state.get_stage_run("run_a", label, "ps1_process")
-            down = state.get_stage_run("run_a", label, "templates")
+            down = state.get_stage_run("run_a", label, "downsample")
             self.assertEqual(mapping.status, STATUS_PENDING)
             self.assertEqual(ps1_dl.status, STATUS_EXTERNAL)
             self.assertEqual(ps1_pr.status, STATUS_EXTERNAL)
@@ -226,7 +226,7 @@ class TestStageRetry(unittest.TestCase):
                 "mapping",
                 "ps1_download",
                 "ps1_process",
-                "templates",
+                "downsample",
             ]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             label = target.label()
@@ -236,7 +236,7 @@ class TestStageRetry(unittest.TestCase):
 
             ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
             ps1_pr = state.get_stage_run("run_a", label, "ps1_process")
-            down = state.get_stage_run("run_a", label, "templates")
+            down = state.get_stage_run("run_a", label, "downsample")
             self.assertEqual(ps1_dl.status, STATUS_PENDING)
             self.assertEqual(ps1_pr.status, STATUS_PENDING)
             self.assertEqual(down.status, STATUS_PENDING)
@@ -252,7 +252,7 @@ class TestStageRetry(unittest.TestCase):
             state.reset_stage_for_retry("run_a", label, "mapping", reset_downstream=True)
 
             ps1_dl = state.get_stage_run("run_a", label, "ps1_download")
-            down = state.get_stage_run("run_a", label, "templates")
+            down = state.get_stage_run("run_a", label, "downsample")
             self.assertEqual(ps1_dl.status, STATUS_EXTERNAL)
             self.assertEqual(down.status, STATUS_EXTERNAL)
 
@@ -261,7 +261,7 @@ class TestStageRetry(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state = PipelineState(str(Path(tmp) / "state.sqlite"))
             state.create_run(
-                "run_a", "/cfg.yaml", "/targets.csv", tmp, [target], ["mapping", "templates"]
+                "run_a", "/cfg.yaml", "/targets.csv", tmp, [target], ["mapping", "downsample"]
             )
             label = target.label()
             state.update_stage_status("run_a", label, "ps1_download", STATUS_PENDING)

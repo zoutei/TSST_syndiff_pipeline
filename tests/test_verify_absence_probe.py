@@ -19,6 +19,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
 )
@@ -42,6 +43,7 @@ def _resolved(tmp: Path) -> ResolvedTargetConfig:
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
+            remap=RemapStageParams(),
             downsample=DownsampleStageParams(),
         ),
         mapping_root=str(tmp / "mapping"),
@@ -152,7 +154,7 @@ class TestVerifyPassAbsenceProbe(unittest.TestCase):
 
                 self.assertEqual(scheduled, [])
                 self.assertTrue(
-                    state.external_verify_attempted(run_id, label, "templates")
+                    state.external_verify_attempted(run_id, label, "downsample")
                 )
         finally:
             shutdown_verify_worker(wait=False)

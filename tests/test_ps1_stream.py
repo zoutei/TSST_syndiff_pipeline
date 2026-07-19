@@ -18,6 +18,7 @@ from syndiff_pipeline.template_creation.orchestration.runner_config import Runne
 from syndiff_pipeline.template_creation.orchestration.stage_params import Ps1ProcessStageParams
 from syndiff_pipeline.common.orchestration.state import (
     SKIP_REASON_ARTIFACTS,
+    SKIP_REASON_LINEAR_GEOMETRY,
     SKIP_REASON_STREAM,
     STATUS_PENDING,
     STATUS_SKIPPED,
@@ -37,6 +38,22 @@ class TestEffectiveStageDeps(unittest.TestCase):
     def test_zarr_mode_keeps_ps1_download_dep(self):
         stages = parse_stage_params({})
         self.assertEqual(effective_stage_deps("ps1_process", stages), ["ps1_download"])
+
+    def test_linear_downsample_omits_remap_dep(self):
+        stages = parse_stage_params({})
+        self.assertEqual(
+            effective_stage_deps("downsample", stages),
+            ["mapping", "ps1_process"],
+        )
+
+    def test_field_downsample_includes_remap_dep(self):
+        stages = parse_stage_params(
+            {"downsample": {"geometry_mode": "field"}, "wcs_grouping": {"geometry_mode": "field"}}
+        )
+        self.assertEqual(
+            effective_stage_deps("downsample", stages),
+            ["mapping", "ps1_process", "remap"],
+        )
 
 
 def _write_stream_run_dir(tmp: Path, *, run_id: str, db_path: Path) -> Path:
@@ -148,6 +165,120 @@ class TestStreamSkipAtCreate(unittest.TestCase):
                     stages=resolve_config(target, cfg).stages,
                 )
             )
+
+
+class TestLinearRemapSkipAtCreate(unittest.TestCase):
+    def test_apply_post_create_run_setup_linear_remap_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            db = tmp_path / "state.sqlite"
+            cfg = RunnerConfig(
+                data_root="/data",
+                ffi_dir="/data",
+                workspace_root=str(tmp_path / "handoffs"),
+                runs_root=str(tmp_path / "runs"),
+                skycell_wcs_csv="/wcs.csv",
+                stages=parse_stage_params({}),
+            )
+            state = PipelineState(db)
+            target = Target(80, 4, 2, 274.9, 66.0, "2024pvw", True)
+            state.create_run(
+                "batch_test",
+                str(tmp_path / "config.yaml"),
+                str(tmp_path / "targets.csv"),
+                cfg.runs_root,
+                [target],
+                ["mapping", "ps1_process", "remap", "downsample"],
+            )
+            result = apply_post_create_run_setup(
+                state,
+                "batch_test",
+                [target],
+                cfg,
+                ["mapping", "ps1_process", "remap", "downsample"],
+            )
+            self.assertEqual(result.linear_remap_skipped, 1)
+            row = state.get_stage_run("batch_test", target.label(), "remap")
+            self.assertEqual(row.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason("batch_test", target.label(), "remap"),
+                SKIP_REASON_LINEAR_GEOMETRY,
+            )
+
+    def test_apply_linear_remap_skips(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            cfg = RunnerConfig(
+                data_root="/data",
+                ffi_dir="/data",
+                workspace_root=str(Path(tmp) / "handoffs"),
+                runs_root=str(Path(tmp) / "runs"),
+                skycell_wcs_csv="/wcs.csv",
+                stages=parse_stage_params({}),
+            )
+            target = Target(80, 4, 2, 274.9, 66.0, "2024pvw", True)
+            state.create_run(
+                "batch_test",
+                str(Path(tmp) / "config.yaml"),
+                str(Path(tmp) / "targets.csv"),
+                cfg.runs_root,
+                [target],
+                ["mapping", "ps1_process", "remap", "downsample"],
+            )
+            n = state.apply_linear_remap_skips("batch_test", [target], cfg)
+            self.assertEqual(n, 1)
+            row = state.get_stage_run("batch_test", target.label(), "remap")
+            self.assertEqual(row.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason("batch_test", target.label(), "remap"),
+                SKIP_REASON_LINEAR_GEOMETRY,
+            )
+            state.update_stage_status(
+                "batch_test", target.label(), "mapping", "success", exit_code=0
+            )
+            state.update_stage_status(
+                "batch_test", target.label(), "ps1_process", "success", exit_code=0
+            )
+            self.assertTrue(
+                state.deps_satisfied(
+                    "batch_test",
+                    target.label(),
+                    "downsample",
+                    stages=resolve_config(target, cfg).stages,
+                )
+            )
+
+    def test_field_geometry_does_not_skip_remap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "state.sqlite"
+            state = PipelineState(db)
+            cfg = RunnerConfig(
+                data_root="/data",
+                ffi_dir="/data",
+                workspace_root=str(Path(tmp) / "handoffs"),
+                runs_root=str(Path(tmp) / "runs"),
+                skycell_wcs_csv="/wcs.csv",
+                stages=parse_stage_params(
+                    {
+                        "downsample": {"geometry_mode": "field"},
+                        "wcs_grouping": {"geometry_mode": "field"},
+                    }
+                ),
+            )
+            target = Target(80, 4, 2, 274.9, 66.0, "2024pvw", True)
+            state.create_run(
+                "batch_test",
+                str(Path(tmp) / "config.yaml"),
+                str(Path(tmp) / "targets.csv"),
+                cfg.runs_root,
+                [target],
+                ["mapping", "remap", "downsample"],
+            )
+            n = state.apply_linear_remap_skips("batch_test", [target], cfg)
+            self.assertEqual(n, 0)
+            row = state.get_stage_run("batch_test", target.label(), "remap")
+            self.assertEqual(row.status, STATUS_PENDING)
 
 
 class TestRunSchedulerStreamSkips(unittest.TestCase):
