@@ -40,7 +40,7 @@ Transient template + diff must have completed for the baseline workspace referen
 | Convolved template | `hp_c` | `hotpants` (`write_convolved: true`) |
 | Kernel solutions | `hp_d_kernels/*_kernel.npz` | `hotpants` (`write_kernel_solutions: true`) |
 | Photutils background | `ks_b_s` or `ks_b` | `kernel_subtract` + `background` |
-| Shared mask | `shared_mask.fits.gz` | `shared_mask` |
+| Shared mask | `shared_mask.fits.fz` | `shared_mask` |
 | Mapping + Gaia catalog | `data_root/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`, `.../catalogs/…` | `mapping` |
 
 Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline workspace: `ws/` when `baseline.workspace_run_id: none`, else `ws_{run_id}/`.
@@ -122,9 +122,9 @@ Under `{baseline_ws}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/ws
   identifier.json
   host_gaia_row.csv
   mini_templates/
-    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.gz
+    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.fz
   diff_stamps/
-    {product_id}.fits.gz
+    {product_id}.fits.fz
   lightcurve_ap3_gaia_{id}.csv
   lightcurve_prf_gaia_{id}.csv
   plots/                         # when debug_plots: true

@@ -87,7 +87,7 @@ Notes:
 
 - Per-method `inputs.epsf` is allowed only when methods need **different** ePSF trees.
 - Gaia is **not** loaded for aperture star-masking. Use existing
-  `shared_mask.fits.gz` (built with `gaia_mag_bright`, default 13).
+  `shared_mask.fits.fz` (built with `gaia_mag_bright`, default 13).
 - Top-level `psf_type` (outside `methods`) is rejected; migrate to a `methods`
   entry with `type: psf`.
 
@@ -122,7 +122,7 @@ concern (`gaia_mag_bright`), not an aperture knob.
 
 ### I/O cost
 
-Field-scale `shared_mask.fits.gz` is small (~39 KB for 1024² int16). The stage
+Field-scale `shared_mask.fits.fz` is small (~39 KB for 1024² int16). The stage
 loads it **once** when any method sets `mask_sky_with_shared_mask: true`, then
 takes an in-memory cutout aligned with each science cutout. No per-epoch FITS
 re-read of the mask.

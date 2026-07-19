@@ -206,7 +206,7 @@ SCC_DATA=s0023/c1/k3              # nested data_root leaf
 test -f "$WS/events/$EVENT/$SCC/event_job.json"
 test -f "$WS/events/$EVENT/$SCC/frames.csv"
 test -d "$DATA/$SCC_DATA/templates/oversampling_1" && \
-  ls "$DATA/$SCC_DATA/templates/oversampling_1"/*.fits.gz >/dev/null 2>&1
+  ls "$DATA/$SCC_DATA/templates/oversampling_1"/*.fits.fz >/dev/null 2>&1
 test -d "$WS/events/$EVENT/$SCC/ws"
 test -f "$WS/events/$EVENT/$SCC/ws/"*/hotpants_substamp_stars.csv 2>/dev/null || \
   test -f "$WS/events/$EVENT/$SCC/shared_mask.fits"
@@ -233,7 +233,7 @@ test -f "$WS/events/$EVENT/$SCC/ws/"*/hotpants_substamp_stars.csv 2>/dev/null ||
 
 - `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_1/…` — mapping
 - `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` — PS1 download (unchanged path)
-- `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/…/syndiff_template_*.fits.gz` — `templates` stage output
+- `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/…/syndiff_template_*.fits.fz` — `templates` stage output
 
 **Pass criteria**
 

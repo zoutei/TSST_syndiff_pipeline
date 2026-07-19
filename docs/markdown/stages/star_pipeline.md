@@ -91,7 +91,7 @@ Kernels are read from `{baseline.diffs}_kernels/` (e.g. `hp_d_kernels/{product_i
 | Convolved templates (`hp_c`) | same workspace | `hotpants` with `write_convolved: true` |
 | Photutils background (`ks_b_s` / `ks_b`) | same workspace | `kernel_subtract` + optional `background` |
 | Kernel solutions | `{diffs}_kernels/*_kernel.npz` | `hotpants` with `write_kernel_solutions: true` |
-| `shared_mask.fits.gz` | workspace root | `shared_mask` |
+| `shared_mask.fits.fz` | workspace root | `shared_mask` |
 | `{inputs.epsf}/gridded_epsf_index.json` + per-frame NPZ | baseline workspace; optionally built by matching `epsf.output` | star `epsf_runner` or prior diff `epsf` stage |
 | Mapping CSV + master FITS | `data_root/skycell_pixel_mapping/…` | `mapping` |
 | Gaia catalog CSV | `data_root/catalogs/…` | `mapping` |
@@ -143,9 +143,9 @@ Root: `{baseline_ws}/host_star/` (e.g. `ws_star_full_lc/host_star/`). Legacy sib
   identifier.json              # resolved TIC/Gaia, RA/Dec, resolution_method
   host_gaia_row.csv            # one-row Gaia-catalog-style record
   mini_templates/
-    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.gz
+    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.fz
   diff_stamps/
-    {product_id}.fits.gz       # crop-local stamp; headers XMIN, YMIN, HOSTX, HOSTY
+    {product_id}.fits.fz       # crop-local stamp; headers XMIN, YMIN, HOSTX, HOSTY
   lightcurve_{method}_gaia_{id}.csv
   plots/                       # when debug_plots: true
     ps1_segment_{skycell}.png

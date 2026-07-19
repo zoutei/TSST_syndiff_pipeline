@@ -59,7 +59,7 @@ Driver: `run_wcs_grouping()` in `template_creation/orchestration/handoff.py`.
 
 | Column | Meaning |
 |--------|---------|
-| `filename`, `path` | FFI file (`.fits` / `.fits.gz` both resolved) |
+| `filename`, `path` | FFI file (`.fits.fz` / `.fits.gz` / `.fits` all resolved) |
 | `wcs_ok` | Header has CRVAL/CRPIX/CD keys and projection succeeded |
 | `DATE-OBS`, `btjd` | Frame timestamp (BTJD = BJD − 2457000) |
 | `x_pix`, `y_pix` | Target pixel position through **this frame's** WCS (0-based, full-FFI) |

@@ -145,7 +145,7 @@ writes `x_fit`, `y_fit`).
 (sky-subtracted), `sky`, and `eflux`. With `subtract_sky: true` (default), ZP and
 plots use `flux_wo_sky`; with `false`, they use raw `flux`. Defaults match
 TESSreduce `diff_lc`: `tar_ap=3`, `sky_in=5`, `sky_out=9`. Star masking for the
-sky annulus uses existing `shared_mask.fits.gz` (bits 1|2 = Gaia catalog + bright
+sky annulus uses existing `shared_mask.fits.fz` (bits 1|2 = Gaia catalog + bright
 crosses), not a per-method mag cut.
 
 Top-level `psf_type` is no longer supported; migrate existing configs to a
