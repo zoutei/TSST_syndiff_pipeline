@@ -38,14 +38,14 @@ class TestPipelineWorkspaceInherit(unittest.TestCase):
                 "workspace_inherit": {
                     "from": "single_hp_kernel",
                     "labels": ["ks_b"],
-                    "root_artifacts": ["shared_mask.fits"],
+                    "root_artifacts": ["shared_mask.fits.fz"],
                 }
             },
             0,
         )
         self.assertEqual(spec.from_run_id, "single_hp_kernel")
         self.assertEqual(spec.labels, ("ks_b",))
-        self.assertEqual(spec.root_artifacts, ("shared_mask.fits",))
+        self.assertEqual(spec.root_artifacts, ("shared_mask.fits.fz",))
 
     def test_split_pipeline_inherit_and_stage(self):
         pipeline = [
@@ -74,7 +74,7 @@ class TestPipelineWorkspaceInherit(unittest.TestCase):
                     "workspace_inherit": {
                         "from": "single_hp_kernel",
                         "labels": ["ks_b"],
-                        "root_artifacts": ["shared_mask.fits"],
+                        "root_artifacts": ["shared_mask.fits.fz"],
                     }
                 },
                 {
@@ -104,17 +104,17 @@ class TestBootstrapWorkspaceInherit(unittest.TestCase):
             parent.mkdir()
             (parent / "ks_b").mkdir()
             (parent / "ks_b" / "frame.fits").write_bytes(b"fits")
-            (parent / "shared_mask.fits").write_bytes(b"mask")
+            (parent / "shared_mask.fits.fz").write_bytes(b"mask")
 
             spec = WorkspaceInheritSpec(
                 from_run_id="parent",
                 labels=("ks_b",),
-                root_artifacts=("shared_mask.fits",),
+                root_artifacts=("shared_mask.fits.fz",),
             )
             bootstrap_workspace_inherit(event, run_id="child", spec=spec)
             child = event / "ws_child"
             self.assertTrue((child / "ks_b").is_symlink())
-            self.assertTrue((child / "shared_mask.fits").is_symlink())
+            self.assertTrue((child / "shared_mask.fits.fz").is_symlink())
             self.assertTrue((child / "ks_b" / "frame.fits").is_file())
 
             bootstrap_workspace_inherit(event, run_id="child", spec=spec)

@@ -92,7 +92,7 @@ def _write_cluster_job(event_dir: Path, offsets: list[tuple[float, float]]) -> N
 
 
 def _offset_fits_name(dx: float, dy: float) -> str:
-    return f"syndiff_template_s0022_3_3_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
+    return f"syndiff_template_s0022_3_3_dx{dx:.3f}_dy{dy:.3f}.fits.fz"
 
 
 def _out_dir(resolved: ResolvedTargetConfig) -> Path:
@@ -222,6 +222,22 @@ class TestVerifyDownsampleLegacyFits(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertIn("All 1 offset FITS present", result.message)
 
+    def test_legacy_gzip_fits_still_verifies(self):
+        offsets = [(0.0, 0.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=False)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
+            out_dir = _out_dir(resolved)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            legacy_name = "syndiff_template_s0022_3_3_dx0.000_dy0.000.fits.gz"
+            (out_dir / legacy_name).write_bytes(b"fits")
+
+            result = verify_downsample(resolved)
+            self.assertTrue(result.ok)
+            self.assertIn("All 1 offset FITS present", result.message)
+
 
 class TestDownsampleManifestTemplateDirs(unittest.TestCase):
     def test_manifest_from_result_preserves_template_dir_meta(self):
@@ -230,7 +246,7 @@ class TestDownsampleManifestTemplateDirs(unittest.TestCase):
         result = {
             "expected_count": 2,
             "produced_count": 2,
-            "artifacts": [f"{physical}/a.fits.gz"],
+            "artifacts": [f"{physical}/a.fits.fz"],
             "template_dir_physical": physical,
             "template_dir_symlink": symlink,
         }
@@ -252,7 +268,7 @@ class TestDownsampleManifestTemplateDirs(unittest.TestCase):
                 manifest_path,
                 resolved,
                 "templates",
-                [str(physical / "a.fits.gz")],
+                [str(physical / "a.fits.fz")],
                 1,
                 1,
                 meta={

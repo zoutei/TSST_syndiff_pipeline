@@ -43,11 +43,17 @@ def test_compare_kernels_identical():
 
 
 def test_parse_syndiff_template_dx0_dy0():
-    name = "syndiff_template_s0020_3_3_dx0.000_dy0.000.fits.gz"
+    name = "syndiff_template_s0020_3_3_dx0.000_dy0.000.fits.fz"
     parsed = parse_syndiff_template_filename(name)
     assert parsed is not None
     assert parsed.dx == pytest.approx(0.0)
     assert parsed.dy == pytest.approx(0.0)
+    # Legacy gzip basename still parses.
+    legacy = parse_syndiff_template_filename(
+        "syndiff_template_s0020_3_3_dx0.000_dy0.000.fits.gz"
+    )
+    assert legacy is not None
+    assert legacy.dx == pytest.approx(0.0)
 
 
 def test_variant_label_names():
