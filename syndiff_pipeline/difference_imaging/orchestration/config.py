@@ -75,6 +75,15 @@ class SynDiffConfig:
     """Optional absolute path to the per-FFI manifest CSV. If empty, uses
     ``syndiff_ffi_frames.csv`` under ``output_dir`` (see ``paths.DEFAULT_MANIFEST_BASENAME``)."""
 
+    data_root: str = ""
+    """Deployment ``data_root`` (SCC trees, ``ffi_list``, provenance bookkeeping).
+    Distinct from ``output_dir``/``ffi_dir`` (workspace-rooted). Populated from
+    the site deployment file at freeze time; used by the provenance glue
+    (``orchestration/provenance_glue.py``) to locate ``bookkeeping/`` for
+    best-effort diff-artifact tracking. May be empty for configs built outside
+    the site-config flow (e.g. ad hoc scripts), in which case provenance
+    emission is a no-op."""
+
     pipeline: list = field(default_factory=list)
     """Ordered list of stage dicts (``kind`` + fields). Required; :func:`run_pipeline`
     executes these stages in order."""
@@ -370,6 +379,7 @@ _PATH_FIELDS = (
     "ref_ffi_path",
     "template_dir",
     "manifest",
+    "data_root",
 )
 
 

@@ -438,6 +438,7 @@ def resolve_diff_config(
         sector=target.sector,
         camera=target.camera,
         ccd=target.ccd,
+        data_root=str(data_root),
         **optional_paths,
     )
     for key, val in merged_defaults.items():

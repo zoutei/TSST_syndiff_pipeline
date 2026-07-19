@@ -49,6 +49,7 @@ from syndiff_pipeline.common.joblib_progress import (
     tqdm_iter,
 )
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import HotpantsParams
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
     init_progress_pair,
     progress_path_for_diff_log,
@@ -155,6 +156,8 @@ def _hotpants_loky_initializer(
     sci_bkg_ws: Optional[str] = None,
     force_rerun: bool = False,
     field_mode_context: Optional[Any] = None,
+    sck: Optional[tuple] = None,
+    data_root: Optional[str] = None,
 ) -> None:
     """Hotpants loky initializer."""
     global _HOTPANTS_LOKY_PAYLOAD
@@ -181,6 +184,8 @@ def _hotpants_loky_initializer(
         "force_rerun": force_rerun,
         "template_cache": {},
         "template_loader": template_loader,
+        "sck": sck,
+        "data_root": data_root,
     }
 
 
@@ -216,6 +221,8 @@ def _hotpants_loky_run_task(
         template_cache=p.get("template_cache"),
         template_loader=p.get("template_loader"),
         force_rerun=bool(p.get("force_rerun")),
+        sck=p.get("sck"),
+        data_root=p.get("data_root"),
     )
 
 
@@ -886,6 +893,8 @@ def _process_one_frame(
     template_cache: Optional[dict] = None,
     template_loader: Optional[Any] = None,
     force_rerun: bool = False,
+    sck: Optional[tuple] = None,
+    data_root: Optional[str] = None,
 ):
     """Process one frame.
     
@@ -1059,6 +1068,31 @@ def _process_one_frame(
             log.error("Failed writing %s: %s", diff_out_path, exc)
             result["success"] = False
             result["error_msg"] = str(exc)
+        if result["success"] and sck is not None:
+            try:
+                inputs = []
+                ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
+                if ffi_fp:
+                    inputs.append(ffi_fp)
+                if tmpl_path:
+                    inputs.append(provenance_glue.template_input_edge(tmpl_path)["fingerprint"])
+                provenance_glue.emit_diff_artifact(
+                    kind="diff_image",
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=product_id,
+                    label=diffs_label,
+                    params=hp,
+                    location=diff_out_path,
+                    input_fingerprints=inputs,
+                    data_root=data_root,
+                    meta={"round_id": round_id, "group_id": group_id},
+                )
+            except Exception:
+                log.debug(
+                    "provenance emit (diff_image) failed for %s", product_id, exc_info=True
+                )
         if (
             hp.write_convolved
             and result["success"]
@@ -1084,6 +1118,28 @@ def _process_one_frame(
             _save_bkg_fits(
                 result["bkg"], bkg_basename, dirs.bkg, header=crop_header
             )
+            if sck is not None:
+                try:
+                    ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
+                    provenance_glue.emit_diff_artifact(
+                        kind="diff_background",
+                        sector=sck[0],
+                        camera=sck[1],
+                        ccd=sck[2],
+                        product_id=product_id,
+                        label=bkg_label,
+                        params=hp,
+                        location=workspace_frame_fits_path(dirs.bkg, bkg_basename),
+                        input_fingerprints=[ffi_fp] if ffi_fp else [],
+                        data_root=data_root,
+                        meta={"round_id": round_id, "group_id": group_id, "producer": "hotpants"},
+                    )
+                except Exception:
+                    log.debug(
+                        "provenance emit (diff_background/hotpants) failed for %s",
+                        product_id,
+                        exc_info=True,
+                    )
         if kernel_sum is not None:
             result["kernel_sum"] = kernel_sum
         if tess_zp is not None:
@@ -1174,6 +1230,15 @@ def hotpants_loop(
 
     ref_stars_xy = ref_stars_df[["x", "y"]].values
     path_to_row = wcs_grouping.manifest_path_row_index(wcs_table)
+
+    # PR-D1 diff-provenance tracking: best-effort, never changes what/where is
+    # written (see orchestration/provenance_glue.py). Absent cfg.sector/etc or
+    # data_root, emit calls downstream simply no-op.
+    try:
+        prov_sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
+    except Exception:
+        prov_sck = None
+    prov_data_root = getattr(cfg, "data_root", "") or None
 
     tasks = []
     for i, ffi_path in enumerate(ffi_paths):
@@ -1270,6 +1335,8 @@ def hotpants_loop(
                 template_cache=template_cache,
                 template_loader=template_loader,
                 force_rerun=force_rerun,
+                sck=prov_sck,
+                data_root=prov_data_root,
             )
 
         results = []
@@ -1302,6 +1369,8 @@ def hotpants_loop(
                 sci_bkg_ws,
                 force_rerun,
                 field_mode_context,
+                prov_sck,
+                prov_data_root,
             ),
             on_result=_record_progress,
         )
