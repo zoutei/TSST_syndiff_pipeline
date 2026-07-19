@@ -15,7 +15,7 @@ pipeline:
       labels:
         - ks_b_s
       root_artifacts:
-        - shared_mask.fits.gz
+        - shared_mask.fits.fz
         - hotpants_substamp_stars.csv
         - gaia_catalog_pipeline.csv
   - kind: hotpants
