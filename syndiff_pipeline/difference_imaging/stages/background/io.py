@@ -274,6 +274,8 @@ def write_per_frame_fits(
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
     background_params: Optional[Any] = None,
+    publish_scc: bool = False,
+    workspace_root: Optional[str] = None,
 ) -> None:
     """Write per frame fits.
 
@@ -328,6 +330,8 @@ def write_per_frame_fits(
                     input_fingerprints=inputs,
                     data_root=data_root,
                     meta={"producer": "background"},
+                    publish_scc=publish_scc,
+                    workspace_root=workspace_root,
                 )
             except Exception:
                 log.debug(

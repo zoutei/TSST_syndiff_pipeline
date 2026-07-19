@@ -492,6 +492,8 @@ def emit_diff_artifact(
     data_root: Optional[str] = None,
     meta: Optional[dict] = None,
     is_fits: bool = True,
+    publish_scc: bool = False,
+    workspace_root: Optional[str] = None,
 ) -> Optional[str]:
     """
     Best-effort sidecar record for an already-written per-FFI file.
@@ -535,6 +537,30 @@ def emit_diff_artifact(
             data_root=str(data_root),
             meta=full_meta,
         ):
+            if publish_scc:
+                try:
+                    from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                        publish_mirror,
+                    )
+
+                    rid = _recipe_id_fn(kind, recipe["params"], recipe["code_version"])
+                    publish_mirror(
+                        publish_scc=True,
+                        data_root=str(data_root),
+                        sector=sector,
+                        camera=camera,
+                        ccd=ccd,
+                        stage_label=label,
+                        recipe_fp=rid,
+                        product_id=product_id,
+                        label=label,
+                        source_path=location_str,
+                        fingerprint=fp,
+                        workspace_root=workspace_root,
+                        kind=kind,
+                    )
+                except Exception:
+                    log.debug("SCC diff-store mirror failed", exc_info=True)
             return fp
         return None
     except Exception:

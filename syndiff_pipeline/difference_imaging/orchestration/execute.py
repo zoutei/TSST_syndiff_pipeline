@@ -217,6 +217,11 @@ def _run_background_stage(
     if params.write_stack:
         background.save_stack(stack, out_ws)
     if params.write_per_frame_fits:
+        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
+
+        ws_index_root = _workspace_root(
+            cfg.output_dir, run_id=getattr(cfg, "workspace_run_id", None)
+        )
         background.write_per_frame_fits(
             out_ws,
             stack,
@@ -224,6 +229,8 @@ def _run_background_stage(
             sck=(int(cfg.sector), int(cfg.camera), int(cfg.ccd)),
             data_root=getattr(cfg, "data_root", "") or None,
             background_params=params,
+            publish_scc=bool(getattr(cfg, "publish_scc", False)),
+            workspace_root=ws_index_root,
         )
 
     stem_rows = _records_to_stem_rows(records)

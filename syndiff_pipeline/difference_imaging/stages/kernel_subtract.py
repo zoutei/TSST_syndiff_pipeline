@@ -106,10 +106,39 @@ def _process_one_frame(task: tuple) -> dict:
     manifest = p["manifest"]
     sck = p.get("sck")
     data_root = p.get("data_root")
+    publish_scc = bool(p.get("publish_scc"))
+    workspace_root = p.get("workspace_root")
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
     diff_stem = workspace_frame_stem(product_id, diffs_label)
     diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
+
+    if resolve_pipeline_fits_path(diffs_dir, diff_stem) is None:
+        if publish_scc and sck is not None and data_root and workspace_root:
+            try:
+                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                    try_materialize_workspace_artifact,
+                )
+
+                ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
+                try_materialize_workspace_artifact(
+                    publish_scc=True,
+                    data_root=data_root,
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    kind="diff_image",
+                    stage_label=diffs_label,
+                    product_id=product_id,
+                    label=diffs_label,
+                    params=ks_params,
+                    workspace_dest=diff_out,
+                    workspace_root=workspace_root,
+                )
+            except Exception:
+                log.debug(
+                    "SCC diff-store materialize failed for %s", product_id, exc_info=True
+                )
 
     if resolve_pipeline_fits_path(diffs_dir, diff_stem) is not None:
         return {
@@ -177,6 +206,8 @@ def _process_one_frame(task: tuple) -> dict:
                     input_fingerprints=inputs,
                     data_root=data_root,
                     meta={"producer": "kernel_subtract"},
+                    publish_scc=publish_scc,
+                    workspace_root=workspace_root,
                 )
             except Exception:
                 log.debug(
@@ -207,6 +238,8 @@ def _process_one_frame(task: tuple) -> dict:
                         input_fingerprints=[ffi_fp] if ffi_fp else [],
                         data_root=data_root,
                         meta={"producer": "kernel_subtract"},
+                        publish_scc=publish_scc,
+                        workspace_root=workspace_root,
                     )
                 except Exception:
                     log.debug(
@@ -262,12 +295,20 @@ def kernel_subtract_loop(
 
     sck = None
     data_root = None
+    publish_scc = False
+    workspace_root = None
     if cfg is not None:
         try:
             sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
         except Exception:
             sck = None
         data_root = getattr(cfg, "data_root", "") or None
+        publish_scc = bool(getattr(cfg, "publish_scc", False))
+        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
+
+        workspace_root = _workspace_root(
+            output_dir, run_id=getattr(cfg, "workspace_run_id", None)
+        )
 
     payload = {
         "crop_bounds": crop_bounds,
@@ -283,6 +324,8 @@ def kernel_subtract_loop(
         "field_mode": bool(field_mode),
         "sck": sck,
         "data_root": data_root,
+        "publish_scc": publish_scc,
+        "workspace_root": workspace_root,
     }
 
     tasks = [(ffi_path,) for ffi_path in ffi_paths]

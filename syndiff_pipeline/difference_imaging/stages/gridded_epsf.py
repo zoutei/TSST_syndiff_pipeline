@@ -68,6 +68,8 @@ def _init_gridded_epsf_worker(
     sck: tuple | None = None,
     data_root: str | None = None,
     epsf_label: str | None = None,
+    publish_scc: bool = False,
+    workspace_root: str | None = None,
 ) -> None:
     """Load shared ePSF inputs once per loky worker (see starpositioningscript)."""
     _suppress_photutils_epsf_noise()
@@ -82,6 +84,8 @@ def _init_gridded_epsf_worker(
             "sck": sck,
             "data_root": data_root,
             "epsf_label": epsf_label,
+            "publish_scc": bool(publish_scc),
+            "workspace_root": workspace_root,
         }
     )
 
@@ -565,6 +569,37 @@ def _fit_one_frame_task(
     out_path = gridded_epsf_npz_path(output_dir, ffi_stem)
     if ctx.get("skip_existing", True) and _is_valid_gridded_epsf_npz(out_path):
         return frame_idx, ffi_stem, True, None, None, True
+    if (
+        ctx.get("publish_scc")
+        and ctx.get("sck") is not None
+        and ctx.get("data_root")
+        and ctx.get("workspace_root")
+        and ctx.get("epsf_params") is not None
+    ):
+        try:
+            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                try_materialize_workspace_artifact,
+            )
+
+            sck = ctx["sck"]
+            if try_materialize_workspace_artifact(
+                publish_scc=True,
+                data_root=str(ctx["data_root"]),
+                sector=sck[0],
+                camera=sck[1],
+                ccd=sck[2],
+                kind="epsf",
+                stage_label=str(ctx.get("epsf_label") or "epsf"),
+                product_id=tess_product_id_from_ffi_path(ffi_stem) or ffi_stem,
+                label=str(ctx.get("epsf_label") or "epsf"),
+                params=ctx["epsf_params"],
+                workspace_dest=out_path,
+                workspace_root=ctx.get("workspace_root"),
+                suffix=".npz",
+            ) and _is_valid_gridded_epsf_npz(out_path):
+                return frame_idx, ffi_stem, True, None, None, True
+        except Exception:
+            log.debug("SCC diff-store epsf materialize failed for %s", ffi_stem, exc_info=True)
     if diff_path is None or not os.path.exists(diff_path):
         log.warning("  diff frame missing: %s", diff_path)
         return frame_idx, ffi_stem, False, None, None, False
@@ -608,6 +643,8 @@ def _fit_one_frame_task(
                 input_fingerprints=inputs,
                 data_root=ctx.get("data_root"),
                 is_fits=False,
+                publish_scc=bool(ctx.get("publish_scc")),
+                workspace_root=ctx.get("workspace_root"),
             )
         except Exception:
             log.debug("provenance emit (epsf) failed for %s", ffi_stem, exc_info=True)
@@ -628,6 +665,8 @@ def fit_gridded_epsf_all_frames(
     epsf_label: str | None = None,
     diffs_input: str | None = None,
     skip_existing: bool = True,
+    publish_scc: bool = False,
+    workspace_root: str | None = None,
 ) -> tuple[np.ndarray, list[tuple[float, float]], list[str], list[bool]]:
     """
     Fit gridded ePSF on every difference image (thread-parallel over frames).
@@ -703,6 +742,15 @@ def fit_gridded_epsf_all_frames(
     except Exception:
         prov_sck = None
     prov_data_root = getattr(cfg, "data_root", "") or None
+    prov_publish_scc = publish_scc or bool(getattr(cfg, "publish_scc", False))
+    if workspace_root is None:
+        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
+
+        prov_workspace_root = _workspace_root(
+            cfg.output_dir, run_id=getattr(cfg, "workspace_run_id", None)
+        )
+    else:
+        prov_workspace_root = workspace_root
 
     worker_initargs = (
         gaia_df,
@@ -713,6 +761,8 @@ def fit_gridded_epsf_all_frames(
         prov_sck,
         prov_data_root,
         epsf_label,
+        prov_publish_scc,
+        prov_workspace_root,
     )
 
     results: list[tuple] = []

@@ -22,6 +22,7 @@ REMAP_SUBDIR = "remap"
 TEMPLATES_SUBDIR = "templates"
 LEGACY_SUBDIR = "legacy"
 BOOKKEEPING_SUBDIR = "bookkeeping"
+DIFF_SUBDIR = "diff"
 
 CONVOLVED_ZARR_BASENAME = "convolved.zarr"
 CONVOLVED_REMOVED_STARS_CSV_BASENAME = "convolved_removed_stars.csv"
@@ -47,6 +48,7 @@ PROVENANCE_SPOOL_SUBDIR = "spool"
 
 __all__ = [
     "BOOKKEEPING_SUBDIR",
+    "DIFF_SUBDIR",
     "CATALOGS_SUBDIR",
     "CONVOLVED_REMOVED_STARS_CSV_BASENAME",
     "CONVOLVED_ZARR_BASENAME",
@@ -63,6 +65,8 @@ __all__ = [
     "event_root",
     "event_scc_leaf",
     "oversampling_dirname",
+    "mapping_sector_tree_root",
+    "mapping_write_dir",
     "ps1_combined_zarr_path",
     "ps1_convolved_zarr_path",
     "ps1_skycells_zarr_dir",
@@ -75,6 +79,8 @@ __all__ = [
     "scc_catalogs_dir",
     "scc_convolved_removed_stars_csv",
     "scc_convolved_zarr",
+    "scc_diff_stage_dir",
+    "scc_diff_workspace_index_path",
     "scc_ffi_dir",
     "scc_label",
     "scc_legacy_dir",
@@ -97,6 +103,51 @@ def scc_label(sector: int, camera: int, ccd: int) -> str:
 def oversampling_dirname(oversampling_factor: int) -> str:
     """Directory name for one oversampling factor, e.g. ``oversampling_2``."""
     return f"oversampling_{int(oversampling_factor)}"
+
+
+def mapping_sector_tree_root(output_path: str | Path, oversampling_factor: int) -> Path:
+    """Resolve the oversampling leaf directory for mapping outputs.
+
+    Pipeline dispatch passes ``scc_mapping_dir`` (already ``…/mapping/oversampling_N``).
+    Legacy callers pass the parent ``…/mapping`` directory.
+    """
+    root = Path(output_path).expanduser().resolve()
+    os_n = int(oversampling_factor)
+    if os_n <= 1:
+        return root
+    os_dir = oversampling_dirname(os_n)
+    if root.name == os_dir:
+        return root
+    return root / os_dir
+
+
+def mapping_write_dir(
+    output_path: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int = 1,
+) -> Path:
+    """Directory where mapping FITS and CSV files are written.
+
+    Pipeline runs (``output_path`` already ``…/mapping/oversampling_N``) use a flat
+    layout matching :func:`scc_mapping_dir` — same as existing OS1 data.
+
+    Legacy standalone pancakes callers keep the ``sector_*/camera_*/ccd_*`` tree.
+    """
+    root = Path(output_path).expanduser().resolve()
+    os_n = int(oversampling_factor)
+    os_dir = oversampling_dirname(os_n)
+    if os_n >= 1 and root.name == os_dir:
+        return root
+    base = mapping_sector_tree_root(output_path, oversampling_factor)
+    return (
+        base
+        / f"sector_{int(sector):04d}"
+        / f"camera_{int(camera)}"
+        / f"ccd_{int(ccd)}"
+    )
 
 
 def scc_root(
@@ -254,6 +305,28 @@ def scc_bookkeeping_stage_dir(
 ) -> Path:
     """Directory for one template stage's bookkeeping under an SCC."""
     return scc_bookkeeping_dir(data_root, sector, camera, ccd) / str(stage).strip()
+
+
+def scc_diff_stage_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    stage_label: str,
+    recipe_fp: str,
+) -> Path:
+    """SCC-scoped diff store directory for one finalized recipe (plan §14.2)."""
+    return (
+        scc_root(data_root, sector, camera, ccd)
+        / DIFF_SUBDIR
+        / str(stage_label).strip()
+        / str(recipe_fp).strip()
+    )
+
+
+def scc_diff_workspace_index_path(workspace_root: str | Path) -> Path:
+    """Per-workspace index of SCC-scoped diff artifacts (decision #16: new runs only)."""
+    return Path(workspace_root).expanduser() / "scc_diff_index.json"
 
 
 def scc_mapping_master_skycells_csv(
