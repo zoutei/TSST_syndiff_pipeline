@@ -62,7 +62,7 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(STAGE_SHORT_NAMES["mapping"], "map")
         self.assertEqual(STAGE_SHORT_NAMES["ps1_process"], "ps1_pr")
         self.assertEqual(STAGE_SHORT_NAMES["downsample"], "down")
-        self.assertEqual(STAGE_SHORT_NAMES["remap"], "rmap")
+        self.assertEqual(STAGE_SHORT_NAMES["remap"], "remap")
 
     def test_ps1_process_stream_effective_deps(self):
         from syndiff_pipeline.template_creation.orchestration.stage_params import (
@@ -159,7 +159,7 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("map"), "mapping")
         self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("ps1_pr"), "ps1_process")
         self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("down"), "downsample")
-        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("rmap"), "remap")
+        self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("remap"), "remap")
 
     def test_resolve_stage_name_skycell_remap_alias(self):
         self.assertEqual(SYNDIFF_PIPELINE.resolve_stage_name("skycell_remap"), "remap")

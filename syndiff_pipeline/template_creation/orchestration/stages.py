@@ -249,7 +249,7 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
     ),
     _make_template_stage(
         "remap",
-        "rmap",
+        "remap",
         ("mapping",),
         pool="remap",
         default_executor="condor",

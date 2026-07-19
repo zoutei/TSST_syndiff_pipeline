@@ -71,24 +71,22 @@ Run-level `scan_queued` / `scan_running` in `progress` count only deps-eligible 
 `sc_q` is shown for `external` stages needing verify and selected `pending` stages whose dependencies are satisfied.
 ---
 
-## 2. Stage dependency DAG (8 composed stages, two disconnected sub-graphs)
+## 2. Stage dependency DAG (9 composed stages, two disconnected sub-graphs)
 
-`pipeline_spec.py` composes **five template stages + `bind` + `diff` + `star`** into one registry, but `create_run` (§3) always materializes **all eight** stage rows for every target regardless of which CLI noun (`template`/`diff`) submitted the run. Critically, the DAG itself has **no edge** between the template sub-graph and the diff sub-graph — `bind` has **zero** dependencies (not even `tess_ffi_download`), and `templates` does not depend on `bind`:
+`pipeline_spec.py` composes **six template stages + `bind` + `diff` + `star`** into one registry, but `create_run` (§3) always materializes **all nine** stage rows for every target regardless of which CLI noun (`template`/`diff`) submitted the run. Critically, the DAG itself has **no edge** between the template sub-graph and the diff sub-graph — `bind` has **zero** dependencies (not even `tess_ffi_download`), and `downsample` does not depend on `bind`:
 
 ```text
 Template sub-graph:
 tess_ffi_download
        │
        ▼
-   mapping
-       │
-       ▼
- ps1_download
-       │
-       ▼
-  ps1_process ───────────────────────────────┐
-       │                                     │
-       └──────────── (mapping also feeds) ───┴──▶ templates
+   mapping ──────────────┐
+       │                │
+       ▼                ▼
+ ps1_download         remap
+       │                │
+       ▼                │
+  ps1_process ─────────┴──▶ downsample
 
 Diff sub-graph (disconnected from the above in SQL dependency terms):
 bind → diff
@@ -99,11 +97,12 @@ bind → diff
 | `mapping` | `tess_ffi_download` |
 | `ps1_download` | `mapping` |
 | `ps1_process` | `ps1_download` (or `mapping` only when `ps1_source=stream`) |
-| `templates` (legacy config key: `downsample`) | `mapping`, `ps1_process` |
+| `remap` | `mapping` (pre-skipped in linear mode) |
+| `downsample` | `mapping`, `ps1_process`, `remap` (effective deps omit `remap` in linear mode) |
 | `bind` | *(none)* |
 | `diff` | `bind` |
 
-Legacy stage-name aliases (`resolve_stage_name` / `spec.py::_STAGE_LEGACY_ALIASES`): `downsample`→`templates`, `down`→`templates`, `wcs_grouping`→`bind`, `wcs`→`bind`.
+Legacy stage-name aliases (`resolve_stage_name` / `spec.py::_STAGE_LEGACY_ALIASES`): `skycell_remap`→`remap`, `wcs_grouping`→`bind`, `wcs`→`bind`. Stage names `templates` / `tmpl` are **rejected** (hard cut).
 
 ### Partial-run concepts
 
@@ -116,24 +115,24 @@ Legacy stage-name aliases (`resolve_stage_name` / `spec.py::_STAGE_LEGACY_ALIASE
 
 | `--stages` | `run_stage_closure` |
 |------------|---------------------|
-| template preset (5 stages: `tess_ffi_download`…`templates`) | tess, map, ps1_dl, ps1_pr, tmpl (all 5) |
+| template preset (6 stages: `tess_ffi_download`…`downsample`) | tess, map, ps1_dl, ps1_pr, remap, down (all 6) |
 | `mapping` | tess, mapping |
-| `templates` (or `mapping,templates`) | tess, mapping, ps1_dl, ps1_pr, templates (all 5 template stages) |
+| `downsample` (or `mapping,downsample`) | tess, mapping, ps1_dl, ps1_pr, remap, downsample (all 6 template stages) |
 | `ps1_process` | tess, mapping, ps1_dl, ps1_pr |
 | `bind` | bind (alone — no deps) |
 | `diff` (default `diff` preset) | bind, diff (**not** any template stage — see below) |
-| `bind,templates` | bind + all 5 template stages (still two disjoint components; nothing connects them) |
+| `bind,downsample` | bind + all 6 template stages (still two disjoint components; nothing connects them) |
 
-Note there is **no `all` preset** anymore, and `--stages templates` alone (or any subset including it) pulls in the **entire** template sub-graph — same as before the rename (`downsample` had the same effective closure).
+Note there is **no `all` preset** anymore, and `--stages downsample` alone (or any subset including it) pulls in the **entire** template sub-graph.
 
 ### Diff-only artifact verify closure
 
-For the default `syndiff diff submit` (`--stages diff`, i.e. `active_stages == {"diff"}`), `artifact_verify_closure` is a **special case**, not simply `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM = {tess_ffi_download, templates}`):
+For the default `syndiff diff submit` (`--stages diff`, i.e. `active_stages == {"diff"}`), `artifact_verify_closure` is a **special case**, not simply `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}`):
 
 | Stage | In `run_stage_closure({"diff"})`? | In `artifact_verify_closure({"diff"})`? |
 |-------|-----------------|------------------|
 | `bind` | **yes** (`diff` depends on it) | **no** — despite being DAG-upstream, `bind` is excluded from `DIFF_VERIFY_UPSTREAM`, so it is marked `skipped` (`not_selected`) immediately, without ever running or being checked on disk |
-| `tess_ffi_download`, `templates` | **no** (no DAG edge to `diff`/`bind` at all) | **yes** — pulled in only by the `DIFF_VERIFY_UPSTREAM` special-case, then scanned on disk |
+| `tess_ffi_download`, `downsample` | **no** (no DAG edge to `diff`/`bind` at all) | **yes** — pulled in only by the `DIFF_VERIFY_UPSTREAM` special-case, then scanned on disk |
 | `mapping`, `ps1_download`, `ps1_process` | no | no — immediate **n/a** (`not_selected`) |
 | `diff` | yes (selected) | yes (before launch) |
 
@@ -158,20 +157,21 @@ Legend: **P** = pending, **E** = external, **S(n/a)** = skipped (not_selected)
 
 ### 3.1 Primary submission types
 
-**Template preset (5 stages, `tess_ffi_download`…`templates`)** — `syndiff template submit` default (verified against `PipelineSpec.artifact_verify_closure`):
+**Template preset (6 stages, `tess_ffi_download`…`downsample`)** — `syndiff template submit` default (verified against `PipelineSpec.artifact_verify_closure`):
 
-| Stage | Template (5) | `mapping` only | `templates` only | `mapping,templates` |
+| Stage | Template (6) | `mapping` only | `downsample` only | `mapping,downsample` |
 |-------|--------------|----------------|-------------------|----------------------|
 | `tess_ffi_download` | P | E | E | E |
 | `mapping` | P | P | E | P |
 | `ps1_download` | P | S(n/a) | E | E |
 | `ps1_process` | P | S(n/a) | E | E |
-| `templates` | P | S(n/a) | P | P |
+| `remap` | P | S(n/a) | E | E |
+| `downsample` | P | S(n/a) | P | P |
 | `bind` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 | `diff` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 | `star` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 
-`create_run` always materializes all eight composed stages (§2), so a `template` run's SQLite rows include `bind`/`diff`/`star` too — all three sit outside `run_stage_closure` for every template-only `--stages` combination (there is no DAG edge from any template stage to `bind`), so they are marked **n/a** immediately.
+`create_run` always materializes all nine composed stages (§2), so a `template` run's SQLite rows include `bind`/`diff`/`star` too — all three sit outside `run_stage_closure` for every template-only `--stages` combination (there is no DAG edge from any template stage to `bind`), so they are marked **n/a** immediately.
 
 **There is no combined end-to-end preset** (`all` was removed); run `template submit` and `diff submit` as two separate submissions.
 
@@ -183,32 +183,33 @@ Legend: **P** = pending, **E** = external, **S(n/a)** = skipped (not_selected)
 | `mapping` | S(n/a) | S(n/a) |
 | `ps1_download` | S(n/a) | S(n/a) |
 | `ps1_process` | S(n/a) | S(n/a) |
-| `templates` | E (verify → skip) | **S(n/a)** — no longer verified! |
+| `remap` | S(n/a) | S(n/a) |
+| `downsample` | E (verify → skip) | **S(n/a)** — no longer verified! |
 | `bind` | **S(n/a) — never runs, never checked on disk** | P (runs) |
 | `diff` | P | P |
 
 **Two distinct footguns, same root cause** (`spec.py::artifact_verify_closure` special-cases only the *exact* set `{"diff"}`):
 
-- **Default `--stages diff`**: `tess_ffi_download`/`templates` get verified on disk (`DIFF_VERIFY_UPSTREAM`), but `bind` is skipped as not-selected and never actually runs. If the event's handoff doesn't already exist, `diff` fails at runtime.
-- **Explicit `--stages bind,diff`**: `bind` now runs, but because `active_stages` is `{"bind", "diff"}` rather than exactly `{"diff"}`, the `DIFF_VERIFY_UPSTREAM` special-case **does not fire** — `run_stage_closure({"bind","diff"}) == {"bind","diff"}` with no expansion, so `tess_ffi_download` and `templates` fall **outside** the closure and are marked `skipped` (not_selected) without ever being scanned. `diff` will still fail at runtime if the template store is actually missing; it just won't get a `[FAIL]`-style verify warning first.
+- **Default `--stages diff`**: `tess_ffi_download`/`downsample` get verified on disk (`DIFF_VERIFY_UPSTREAM`), but `bind` is skipped as not-selected and never actually runs. If the event's handoff doesn't already exist, `diff` fails at runtime.
+- **Explicit `--stages bind,diff`**: `bind` now runs, but because `active_stages` is `{"bind", "diff"}` rather than exactly `{"diff"}`, the `DIFF_VERIFY_UPSTREAM` special-case **does not fire** — `run_stage_closure({"bind","diff"}) == {"bind","diff"}` with no expansion, so `tess_ffi_download` and `downsample` fall **outside** the closure and are marked `skipped` (not_selected) without ever being scanned. `diff` will still fail at runtime if the template store is actually missing; it just won't get a `[FAIL]`-style verify warning first.
 
-There is currently no `--stages` combination that both runs `bind` **and** verifies `tess_ffi_download`/`templates` on disk. Run `syndiff verify --targets ... --stages tess_ffi_download,templates` separately beforehand if you want that on-disk check.
+There is currently no `--stages` combination that both runs `bind` **and** verifies `tess_ffi_download`/`downsample` on disk. Run `syndiff verify --targets ... --stages tess_ffi_download,downsample` separately beforehand if you want that on-disk check.
 
 ### 3.3 Other partial runs
 
 | `--stages` | Pending | External (verify path) | Skipped immediately (n/a) |
 |------------|---------|------------------------|---------------------------|
-| `tess_ffi_download` | tess | — | map, ps1_dl, ps1_pr, tmpl, bind, diff, star |
-| `mapping` | map | tess | ps1_dl, ps1_pr, tmpl, bind, diff, star |
-| `ps1_download` | ps1_dl | tess, map | ps1_pr, tmpl, bind, diff, star |
-| `ps1_process` | ps1_pr | tess, map, ps1_dl | tmpl, bind, diff, star |
-| `ps1_process,templates` | ps1_pr, tmpl | tess, map, ps1_dl | bind, diff, star |
-| `mapping,ps1_process` | map, ps1_pr | tess, ps1_dl | tmpl, bind, diff, star |
-| `mapping,ps1_process,templates` | map, ps1_pr, tmpl | tess, ps1_dl | bind, diff, star |
-| `bind` | bind | — | tess, map, ps1_dl, ps1_pr, tmpl, diff, star |
-| `bind,templates` | bind, tmpl | tess, map, ps1_dl, ps1_pr | diff, star |
+| `tess_ffi_download` | tess | — | map, ps1_dl, ps1_pr, down, bind, diff, star |
+| `mapping` | map | tess | ps1_dl, ps1_pr, down, bind, diff, star |
+| `ps1_download` | ps1_dl | tess, map | ps1_pr, down, bind, diff, star |
+| `ps1_process` | ps1_pr | tess, map, ps1_dl | down, bind, diff, star |
+| `ps1_process,downsample` | ps1_pr, down | tess, map, ps1_dl | bind, diff, star |
+| `mapping,ps1_process` | map, ps1_pr | tess, ps1_dl | down, bind, diff, star |
+| `mapping,ps1_process,downsample` | map, ps1_pr, down | tess, ps1_dl | bind, diff, star |
+| `bind` | bind | — | tess, map, ps1_dl, ps1_pr, down, diff, star |
+| `bind,downsample` | bind, down | tess, map, ps1_dl, ps1_pr | diff, star |
 
-Note `bind` and the template stages never expand into each other's closures — `bind,templates` runs both independently (two disjoint sub-DAGs), not as one combined chain.
+Note `bind` and the template stages never expand into each other's closures — `bind,downsample` runs both independently (two disjoint sub-DAGs), not as one combined chain.
 
 ### 3.4 `force_rerun=true` vs `false` on submit
 
@@ -286,7 +287,7 @@ There is no combined "full run" preset anymore. A **template** submission and a 
 
 ```
 Template stages: pending
-→ tess → mapping → ps1_dl → ps1_pr → templates (per target, pool-limited)
+→ tess → mapping → ps1_dl → ps1_pr → remap → downsample (per target, pool-limited)
 bind, diff, star: n/a (outside closure of the 5-stage template preset)
 → run: success
 ```
@@ -296,35 +297,35 @@ bind, diff, star: n/a (outside closure of the 5-stage template preset)
 ```
 tess: sc_q → skip
 map:  pend → runn → succ
-ps1_dl, ps1_pr, tmpl, bind, diff, star: n/a
+ps1_dl, ps1_pr, down, bind, diff, star: n/a
 → run: success
 ```
 
-### 5.3 `templates` only
+### 5.3 `downsample` only
 
 ```
 tess, map, ps1_dl, ps1_pr: sc_q → skip (sequential verify)
-tmpl: pend → runn → succ
+down: pend → runn → succ
 bind, diff, star: n/a
 → run: success
 ```
 
-### 5.4 `mapping,templates`
+### 5.4 `mapping,downsample`
 
 ```
 tess, ps1_dl, ps1_pr: sc_q → skip
 map:  pend → runn → succ
-tmpl: pend → runn → succ  (after ps1_pr satisfied)
+down: pend → runn → succ  (after ps1_pr satisfied)
 bind, diff, star: n/a
 ```
 
-Mapping and templates can overlap across different targets (separate resource pools).
+Mapping and downsample can overlap across different targets (separate resource pools).
 
 ### 5.5 `bind` only
 
 ```
 bind: pend → runn → succ
-tess, map, ps1_dl, ps1_pr, tmpl, diff, star: n/a (bind has no deps; no closure edge to template stages)
+tess, map, ps1_dl, ps1_pr, down, diff, star: n/a (bind has no deps; no closure edge to template stages)
 → run: success
 ```
 
@@ -333,16 +334,16 @@ tess, map, ps1_dl, ps1_pr, tmpl, diff, star: n/a (bind has no deps; no closure e
 ```
 tess, map, ps1_dl: sc_q → skip (ps1_dl may be superseded once ps1_pr satisfied)
 ps1_pr: pend → runn → succ
-tmpl, bind, diff, star: n/a
+down, bind, diff, star: n/a
 → run: success
 ```
 
-### 5.7 `ps1_process,templates`
+### 5.7 `ps1_process,downsample`
 
 ```
 tess, map, ps1_dl: sc_q → skip
 ps1_pr: pend → runn → succ
-tmpl:   pend → runn → succ
+down:   pend → runn → succ
 bind, diff, star: n/a
 → run: success
 ```
@@ -350,7 +351,7 @@ bind, diff, star: n/a
 ### 5.8 `diff` only (`syndiff diff submit`, default — no `--stages`)
 
 ```
-tess, tmpl: sc_q → skip   (DIFF_VERIFY_UPSTREAM only)
+tess, down: sc_q → skip   (DIFF_VERIFY_UPSTREAM only)
 map, ps1_dl, ps1_pr: n/a  (not artifact-verified)
 bind: n/a                 (NOT run — treated as already satisfied; see §3.2)
 diff: pend → runn → succ  (may fail at runtime if bind's handoff never actually ran)
@@ -361,7 +362,7 @@ diff: pend → runn → succ  (may fail at runtime if bind's handoff never actua
 
 ```
 bind: pend → runn → succ  (now actually runs, writes event_job.json + frames.csv)
-tess, tmpl: n/a            (DIFF_VERIFY_UPSTREAM special-case does NOT fire for {"bind","diff"} — see §3.2)
+tess, down: n/a            (DIFF_VERIFY_UPSTREAM special-case does NOT fire for {"bind","diff"} — see §3.2)
 map, ps1_dl, ps1_pr, star: n/a
 diff: pend → runn → succ  (after bind succeeds)
 → run: success
@@ -388,10 +389,10 @@ Run status → `canceled`.
 | Run type | Canceled | Untouched |
 |----------|----------|-----------|
 | Template preset (5) | All non-terminal non-skipped template stages | Prior `success`/`failed`/`skipped`; `bind`/`diff`/`star` (already n/a) |
-| `mapping` only | tess(E), mapping(P) | ps1_*, tmpl, bind, diff, star (n/a skipped) |
-| `templates` only | All 4 upstream(E) + tmpl(P) | bind, diff, star |
-| `mapping,templates` | tess, ps1_dl, ps1_pr(E) + map, tmpl(P) | bind, diff, star |
-| `bind` only | bind(P) | tess..tmpl, diff, star (n/a) |
+| `mapping` only | tess(E), mapping(P) | ps1_*, down, bind, diff, star (n/a skipped) |
+| `downsample` only | All 4 upstream(E) + down(P) | bind, diff, star |
+| `mapping,downsample` | tess, ps1_dl, ps1_pr(E) + map, down(P) | bind, diff, star |
+| `bind` only | bind(P) | tess..down, diff, star (n/a) |
 | `diff` (default) | diff(P); (`bind` already n/a, untouched) | mapping, ps1_*, star |
 
 ---
@@ -474,28 +475,28 @@ Running workers continue until exit during pause.
 |----------|----------|-------------------|----------------|
 | Template preset (5) | failed/blocked/canceled + downstream → P | E unchanged | — |
 | `mapping` only | mapping → P; downstream → E briefly | E | Re-skipped next tick ✓ |
-| `mapping,templates` | failed map/tmpl → P | ps1 stays E ✓ | — |
-| `ps1_process` only | ps1_pr → P; tmpl S → P briefly | E | tmpl re-skipped next tick ✓ |
+| `mapping,downsample` | failed map/down → P | ps1 stays E ✓ | — |
+| `ps1_process` only | ps1_pr → P; down S → P briefly | E | down re-skipped next tick ✓ |
 
 ### 8.2 Cancel + bulk retry (safe after fix)
 
 | Run type | After retry | Outcome |
 |----------|-------------|---------|
-| **`mapping,templates`** | map/tmpl → P; ps1/tess in closure → E | ps1 sc_q → skip → tmpl runs ✓ |
-| **`templates` only** | tmpl → P; upstream → E | upstream sc_q → skip → tmpl runs ✓ |
-| **`mapping` only** | map → P; tess → E; ps1/tmpl → E → n/a | Works ✓ |
+| **`mapping,downsample`** | map/down → P; ps1/tess in closure → E | ps1 sc_q → skip → down runs ✓ |
+| **`downsample` only** | down → P; upstream → E | upstream sc_q → skip → down runs ✓ |
+| **`mapping` only** | map → P; tess → E; ps1/down → E → n/a | Works ✓ |
 | Template preset (5) | All reset to pending | Works ✓ |
 
-**Historical example:** `mapping_downsample_v1` hit this deadlock before the fix (predates the `templates` rename); after
+**Historical example:** `mapping_downsample_v1` hit this deadlock before the fix (predates the remap/downsample split); after
 deploy, `repair_orphaned_pending_upstream` auto-recovers such runs on the next daemon tick.
 
 ### 8.3 Targeted retry `--stage mapping` (reset_downstream=True)
 
-| Run type | map | tess | ps1_dl/pr | tmpl |
+| Run type | map | tess | ps1_dl/pr | down |
 |----------|-----|----------|-----------|------|
 | Template preset (5) | P | unchanged | P | P |
 | `mapping` only | P | E | P→S(n/a) next tick | P→S(n/a) next tick |
-| `mapping,templates` | P | E | E | P |
+| `mapping,downsample` | P | E | E | P |
 
 ### 8.4 After retry — pending vs external vs skipped
 
@@ -513,67 +514,67 @@ deploy, `repair_orphaned_pending_upstream` auto-recovers such runs on the next d
 
 ## 9. Scenario walkthroughs
 
-### A. Normal `mapping,templates` (happy path)
+### A. Normal `mapping,downsample` (happy path)
 
 ```
 tess:sc_q → skip | map:runn → succ
 ps1_dl:sc_q → skip | ps1_pr:sc_q → skip
-tmpl:pend → runn → succ
+down:pend → runn → succ
 ```
 
 ### B. `mapping` only (happy path)
 
 ```
 tess:sc_q → skip | map:runn → succ
-ps1_dl:n/a | ps1_pr:n/a | tmpl:n/a
+ps1_dl:n/a | ps1_pr:n/a | down:n/a
 ```
 
-### C. `templates` only (happy path)
+### C. `downsample` only (happy path)
 
 ```
 tess:sc_q → skip | map:sc_q → skip
 ps1_dl:sc_q → skip | ps1_pr:sc_q → skip
-tmpl:pend → runn → succ
+down:pend → runn → succ
 ```
 
-### D. `mapping,templates` + cancel + bulk retry (recovery path)
+### D. `mapping,downsample` + cancel + bulk retry (recovery path)
 
 **After cancel:**
 
 ```
-map:canc | tmpl:canc | tess/ps1:canc (if non-terminal)
+map:canc | down:canc | tess/ps1:canc (if non-terminal)
 ```
 
 **After retry:**
 
 ```
-map:pend | tmpl:pend | tess:exte | ps1_dl:exte | ps1_pr:exte
+map:pend | down:pend | tess:exte | ps1_dl:exte | ps1_pr:exte
 ```
 
 **Progression:**
 
 ```
-ps1_dl:sc_q → skip | ps1_pr:sc_q → skip | map:runn → succ | tmpl:runn → succ
+ps1_dl:sc_q → skip | ps1_pr:sc_q → skip | map:runn → succ | down:runn → succ
 ```
 
-### E. `mapping,templates` + retry failed mapping (no cancel)
+### E. `mapping,downsample` + retry failed mapping (no cancel)
 
 ```
-map:pend (relaunch) | ps1:exte → sc_q → skip | tmpl:pend → runn → succ  ✓
+map:pend (relaunch) | ps1:exte → sc_q → skip | down:pend → runn → succ  ✓
 ```
 
 ### F. Template preset + ps1_dl fails + bulk retry
 
 ```
-ps1_dl:pend | ps1_pr:pend (was success) | tmpl:pend
-→ ps1 chain must re-run before templates  ✓ (intentional)
+ps1_dl:pend | ps1_pr:pend (was success) | down:pend
+→ ps1 chain must re-run before downsample  ✓ (intentional)
 ```
 
 ### G. `diff` only (default), then explicit `bind,diff` recovery
 
 ```
 # First attempt: syndiff diff submit --targets ... (no --stages)
-tess:sc_q → skip | tmpl:sc_q → skip
+tess:sc_q → skip | down:sc_q → skip
 bind:n/a (never runs)
 diff:pend → runn → FAILED (event_job.json missing)
 
@@ -583,7 +584,7 @@ diff:pend → runn → FAILED (event_job.json missing)
 syndiff diff submit --targets ... --stages bind,diff --run-id <new_id>
 
 bind:pend → runn → succ  (writes event_job.json + frames.csv)
-tess, tmpl: n/a  (DIFF_VERIFY_UPSTREAM special-case does not fire for {"bind","diff"})
+tess, down: n/a  (DIFF_VERIFY_UPSTREAM special-case does not fire for {"bind","diff"})
 diff:pend → runn → succ
 ```
 
@@ -659,7 +660,7 @@ stateDiagram-v2
 
 | Goal | Safe approach |
 |------|---------------|
-| Retry failed mapping in `mapping,templates` | Bulk or targeted retry (cancel+retry supported) |
+| Retry failed mapping in `mapping,downsample` | Bulk or targeted retry (cancel+retry supported) |
 | Retry without invalidating downstream | `syndiff retry --scc ... --stage ... --no-reset-downstream` |
 | Recover after kill on partial run | `syndiff retry` (auto-repairs orphan pending) |
 | Re-run from scratch | `submit --force-rerun` with **new** `--run-id` |
@@ -676,10 +677,10 @@ stateDiagram-v2
 | 3 | `repair_orphaned_pending_upstream()` each tick | Self-heal stuck runs |
 | 4 | `run_report` + `_stall_reasons`: show `sc_q` for orphan pending | Better observability |
 
-Cancel + retry on `mapping,templates` produces:
+Cancel + retry on `mapping,downsample` produces:
 
 ```
-ps1_dl:sc_q → skip | ps1_pr:sc_q → skip | tmpl:runn → succ
+ps1_dl:sc_q → skip | ps1_pr:sc_q → skip | down:runn → succ
 ```
 
 ---

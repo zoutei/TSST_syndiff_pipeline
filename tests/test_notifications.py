@@ -43,6 +43,7 @@ from syndiff_pipeline.common.orchestration.state import (
     STAGE_NAMES,
     PipelineState,
     STATUS_EXTERNAL,
+    STATUS_FAILED,
     STATUS_PENDING,
     STATUS_RUNNING,
     STATUS_SKIPPED,
@@ -332,28 +333,60 @@ class TestRunReport(unittest.TestCase):
             by_target: dict[str, list] = {}
             for r in rows:
                 by_target.setdefault(r.target_label, []).append(r)
-            from syndiff_pipeline.pipeline_spec import stage_names
+            from syndiff_pipeline.template_creation.orchestration.run_report import (
+                _format_status_grid_parts,
+                _status_grid_rows,
+            )
 
-            names = stage_names()
-            stage_order = {name: i for i, name in enumerate(names)}
             active = state.get_active_stages("run_eq")
+            display = state.load_run_display_context("run_eq")
             legacy: list[str] = []
             for tgt in sorted(by_target):
-                parts = [
-                    _format_stage_status_short(
-                        state,
-                        "run_eq",
-                        r,
-                        active_stages=active,
-                    )
-                    for r in sorted(
-                        by_target[tgt], key=lambda row: stage_order.get(row.stage, len(names))
-                    )
-                ]
+                parts = _format_status_grid_parts(
+                    state,
+                    "run_eq",
+                    _status_grid_rows(by_target[tgt]),
+                    active_stages=active,
+                    verifying_keys=None,
+                    display=display,
+                )
                 legacy.append(f"  {tgt}: {' | '.join(parts)}")
             self.assertEqual(batched, legacy)
             self.assertIn("tess_dl:sc_q", batched[0])
-            self.assertIn("bind:n/a", batched[0])
+            self.assertNotIn("bind:", batched[0])
+
+    def test_format_status_grid_maps_legacy_templates_row_to_down(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pipeline_state.sqlite"
+            state = PipelineState(db)
+            target = Target(20, 1, 1, 292.6, 35.7, "2021udg")
+            label = target.label()
+            state.create_run(
+                "run_legacy",
+                "/cfg.yaml",
+                "/targets.csv",
+                "/runs",
+                [target],
+                ["downsample"],
+            )
+            with state._conn() as conn:
+                conn.execute(
+                    "UPDATE stage_runs SET stage = 'templates' "
+                    "WHERE run_id = ? AND target_label = ? AND stage = 'downsample'",
+                    ("run_legacy", label),
+                )
+                conn.execute(
+                    "DELETE FROM stage_runs "
+                    "WHERE run_id = ? AND target_label = ? AND stage = 'remap'",
+                    ("run_legacy", label),
+                )
+            state.update_stage_status("run_legacy", label, "templates", STATUS_FAILED)
+
+            lines = format_status_grid(state, "run_legacy")
+            self.assertEqual(len(lines), 1)
+            self.assertIn("down:fail", lines[0])
+            self.assertNotIn("templates:", lines[0])
+            self.assertIn("remap:n/a", lines[0])
 
     def test_format_status_grid_opens_few_sqlite_connections(self):
         """Status grid should not open one connection per stage cell."""
