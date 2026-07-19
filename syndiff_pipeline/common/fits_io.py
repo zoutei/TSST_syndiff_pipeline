@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -41,13 +42,28 @@ def _require_fpack() -> str:
     return path
 
 
+def _run_fpack(fpack_bin: str, target: Path) -> subprocess.CompletedProcess:
+    """Invoke ``fpack -g -q 0 -Y -D`` on *target*. Isolated for monkeypatching in tests."""
+    cmd = [fpack_bin, "-g", "-q", "0", "-Y", "-D", str(target)]
+    return subprocess.run(cmd, check=False, capture_output=True, text=True)
+
+
 def fpack_plain_fits(plain_path: str | Path, *, delete_plain: bool = True) -> Path:
     """
     Run ``fpack -g -q 0 -Y`` on a plain ``.fits`` file; return the ``.fits.fz`` path.
 
     Uses GZIP tile compression with ``-q 0`` (lossless for floats). ``-Y``
-    suppresses the interactive lossy-prompt; an existing sibling ``.fits.fz``
-    is removed first.
+    suppresses the interactive lossy-prompt.
+
+    Atomicity (provenance plan §10): fpack never runs against *plain_path* or
+    the final ``.fits.fz`` name directly. A hardlinked (falling back to
+    copied) temp sibling ``_tmp_{stem}_{pid}_{uuid}.fits`` is fpacked instead
+    -- its output, a temp ``....fits.fz``, is moved onto the final
+    ``.fits.fz`` key with one atomic :func:`os.replace`. *plain_path* itself
+    is only ever unlinked (when ``delete_plain=True``) **after** that replace
+    has already succeeded. A crash at any point before the replace leaves the
+    final ``.fits.fz`` key untouched (absent or in its prior, complete state)
+    plus only a ``_tmp_*`` orphan -- never a partially-written ``.fits.fz``.
     """
     plain = Path(plain_path)
     if not plain.is_file():
@@ -59,27 +75,33 @@ def fpack_plain_fits(plain_path: str | Path, *, delete_plain: bool = True) -> Pa
 
     fpack_bin = _require_fpack()
     fz_path = Path(fits_fpack_path(plain))
-    if fz_path.is_file():
-        try:
-            fz_path.unlink()
-        except OSError as exc:
-            raise RuntimeError(f"Could not remove existing {fz_path}: {exc}") from exc
 
-    cmd = [fpack_bin, "-g", "-q", "0", "-Y"]
-    if delete_plain:
-        cmd.append("-D")
-    cmd.append(str(plain))
-    proc = subprocess.run(
-        cmd,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode != 0 or not fz_path.is_file():
-        err = (proc.stderr or proc.stdout or "").strip()
-        raise RuntimeError(
-            f"fpack failed for {plain} (rc={proc.returncode}): {err or 'no output'}"
-        )
+    tmp_plain = plain.parent / f"_tmp_{plain.stem}_{os.getpid()}_{uuid.uuid4().hex[:8]}.fits"
+    tmp_fz = Path(fits_fpack_path(tmp_plain))
+    try:
+        try:
+            os.link(plain, tmp_plain)
+        except OSError:
+            # Cross-device or filesystem without hardlink support: fall back
+            # to a real copy. Either way *plain* itself is never touched by
+            # fpack -- only the temp sibling is.
+            shutil.copy2(plain, tmp_plain)
+
+        proc = _run_fpack(fpack_bin, tmp_plain)
+        if proc.returncode != 0 or not tmp_fz.is_file():
+            err = (proc.stderr or proc.stdout or "").strip()
+            raise RuntimeError(
+                f"fpack failed for {plain} (rc={proc.returncode}): {err or 'no output'}"
+            )
+        os.replace(tmp_fz, fz_path)
+    finally:
+        for leftover in (tmp_plain, tmp_fz):
+            if leftover.exists():
+                try:
+                    leftover.unlink()
+                except OSError:  # pragma: no cover - best-effort cleanup
+                    pass
+
     if delete_plain and plain.is_file():
         try:
             plain.unlink()

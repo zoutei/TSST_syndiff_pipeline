@@ -1725,6 +1725,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp_test.set_defaults(func=cmd_notify_test)
 
+    from syndiff_pipeline.common.provenance.cli import register_bookkeeping_subparser
+
+    register_bookkeeping_subparser(sub)
+
     return p
 
 
