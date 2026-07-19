@@ -295,7 +295,49 @@ def _execute_template_stage(
             raise RuntimeError(result["error"])
         return _manifest_from_result(result)
 
-    if stage in ("templates", "downsample"):
+    if stage == "remap":
+        from syndiff_pipeline.template_creation.orchestration.verify import (
+            mapping_master_pixels2skycells_path,
+        )
+        from syndiff_pipeline.template_creation.processing.field_remap import (
+            run_field_remap_scc,
+        )
+        from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
+            resolve_scc_reference_ffi,
+        )
+
+        rm = resolved.stages.remap
+        wg = resolved.stages.wcs_grouping
+        mp = resolved.stages.mapping
+        master_path = mapping_master_pixels2skycells_path(resolved)
+        with __import__("astropy.io.fits", fromlist=["open"]).open(master_path) as hdul:
+            master = hdul[1].data
+            full_shape = (int(master.shape[0]), int(master.shape[1]))
+        ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
+        field_result = run_field_remap_scc(
+            sector=t.sector,
+            camera=t.camera,
+            ccd=t.ccd,
+            data_root=resolved.data_root,
+            event_dir=resolved.event_dir,
+            mapping_root=resolved.mapping_root,
+            base_tess_shape=full_shape,
+            oversampling_factor=mp.oversampling_factor,
+            grouping_quantum_ps1_px=float(wg.grouping_quantum_ps1_px or 1.0),
+            cache_quantum_ps1_px=float(rm.cache_quantum_ps1_px),
+            keying=str(rm.keying),
+            apply_hybrid_exact=bool(rm.apply_hybrid_exact),
+            hybrid_R=int(rm.hybrid_R or 1),
+            include_abutting_border_exact=bool(rm.include_abutting_border_exact),
+            rebuild_remap_cache=bool(rm.rebuild_remap_cache),
+            scc_only=True,
+            ffi_dir=resolved.ffi_dir,
+            ref_ffi_path=ref_ffi,
+            n_jobs=rm.n_jobs,
+        )
+        return _manifest_from_result(field_result)
+
+    if stage == "downsample":
         import numpy as np
 
         from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
@@ -318,7 +360,7 @@ def _execute_template_stage(
             resolve_scc_reference_ffi,
         )
 
-        ds = resolved.stages.templates
+        ds = resolved.stages.downsample
         wg = resolved.stages.wcs_grouping
         geometry_mode = str(ds.geometry_mode or wg.geometry_mode or "field").lower()
         job_path = _event_job_path(resolved.event_dir)

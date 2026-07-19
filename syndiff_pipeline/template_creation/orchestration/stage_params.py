@@ -73,6 +73,22 @@ PS1_PROCESS_ALLOWED = frozenset(
 )
 DIFF_ALLOWED = frozenset({"executor"})
 STAR_ALLOWED = frozenset({"executor"})
+REMAP_ALLOWED = frozenset(
+    {
+        "cache_quantum_ps1_px",
+        "keying",
+        "apply_hybrid_exact",
+        "hybrid_R",
+        "include_abutting_border_exact",
+        "rebuild_remap_cache",
+        "n_jobs",
+        "executor",
+        "condor_request_cpus",
+        "condor_request_memory",
+        "condor_requirements",
+        "condor_rank",
+    }
+)
 DOWNSAMPLE_ALLOWED = frozenset(
     {
         "ignore_mask_bits",
@@ -224,6 +240,23 @@ class StarStageParams:
 
 
 @dataclass
+class RemapStageParams:
+    """RemapStageParams."""
+    cache_quantum_ps1_px: float = 1.0
+    keying: str = "absolute"
+    apply_hybrid_exact: bool = True
+    hybrid_R: int = 1
+    include_abutting_border_exact: bool = True
+    rebuild_remap_cache: bool = False
+    n_jobs: int = 16
+    executor: str = "condor"
+    condor_request_cpus: int = 32
+    condor_request_memory: int = 128_000
+    condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: str | None = "-LoadAvg"
+
+
+@dataclass
 class DownsampleStageParams:
     """DownsampleStageParams."""
     ignore_mask_bits: list = None  # type: ignore[assignment]
@@ -275,14 +308,10 @@ class TemplateStageParams:
     mapping: MappingStageParams
     ps1_download: Ps1DownloadStageParams
     ps1_process: Ps1ProcessStageParams
+    remap: RemapStageParams
     downsample: DownsampleStageParams
     diff: DiffStageParams = field(default_factory=DiffStageParams)
     star: StarStageParams = field(default_factory=StarStageParams)
-
-    @property
-    def templates(self) -> DownsampleStageParams:
-        """Alias for the SCC template-build stage params (``downsample`` field)."""
-        return self.downsample
 
 
 def _filter_allowed_keys(stage_dict: dict, allowed: FrozenSet[str]) -> dict:
@@ -304,11 +333,19 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     -------
     TemplateStageParams"""
     stages_raw = stages_raw or {}
+    if strict and "templates" in stages_raw:
+        raise ValueError(
+            "stages.templates was renamed to stages.downsample; update your config"
+        )
     wg = stages_raw.get("wcs_grouping", {}) or {}
     mp = stages_raw.get("mapping", {}) or {}
     pd = stages_raw.get("ps1_download", {}) or {}
     pp = stages_raw.get("ps1_process", {}) or {}
-    ds = stages_raw.get("templates", {}) or stages_raw.get("downsample", {}) or {}
+    rm = stages_raw.get("remap", {}) or stages_raw.get("skycell_remap", {}) or {}
+    if strict:
+        ds = stages_raw.get("downsample", {}) or {}
+    else:
+        ds = stages_raw.get("downsample", {}) or stages_raw.get("templates", {}) or {}
     df = stages_raw.get("diff", {}) or {}
     st = stages_raw.get("star", {}) or {}
     if not strict:
@@ -316,6 +353,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
         mp = _filter_allowed_keys(mp, MAPPING_ALLOWED)
         pd = _filter_allowed_keys(pd, PS1_DOWNLOAD_ALLOWED)
         pp = _filter_allowed_keys(pp, PS1_PROCESS_ALLOWED)
+        rm = _filter_allowed_keys(rm, REMAP_ALLOWED)
         ds = _filter_allowed_keys(ds, DOWNSAMPLE_ALLOWED)
         df = _filter_allowed_keys(df, DIFF_ALLOWED)
         st = _filter_allowed_keys(st, STAR_ALLOWED)
@@ -323,7 +361,8 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     validate_stage_keys(mp, MAPPING_ALLOWED, "mapping")
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
     validate_stage_keys(pp, PS1_PROCESS_ALLOWED, "ps1_process")
-    validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "templates")
+    validate_stage_keys(rm, REMAP_ALLOWED, "remap")
+    validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
     validate_stage_keys(df, DIFF_ALLOWED, "diff")
     validate_stage_keys(st, STAR_ALLOWED, "star")
     if pp.get("executor", "condor") not in ("local", "condor"):
@@ -337,13 +376,19 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
         raise ValueError("stages.diff.executor must be 'local' or 'condor'")
     if st.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.star.executor must be 'local' or 'condor'")
+    if rm.get("executor", "condor") not in ("local", "condor"):
+        raise ValueError("stages.remap.executor must be 'local' or 'condor'")
     if ds.get("executor", "local") not in ("local", "condor"):
-        raise ValueError("stages.templates.executor must be 'local' or 'condor'")
+        raise ValueError("stages.downsample.executor must be 'local' or 'condor'")
+    remap_keying = str(rm.get("keying", "absolute"))
+    if remap_keying not in ("absolute", "phase"):
+        raise ValueError("stages.remap.keying must be 'absolute' or 'phase'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),
         ps1_download=_merge_dataclass(Ps1DownloadStageParams, pd),
         ps1_process=_merge_dataclass(Ps1ProcessStageParams, pp),
+        remap=_merge_dataclass(RemapStageParams, rm),
         downsample=_merge_dataclass(DownsampleStageParams, ds),
         diff=_merge_dataclass(DiffStageParams, df),
         star=_merge_dataclass(StarStageParams, st),

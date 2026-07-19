@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterator, List, Sequence
 from syndiff_pipeline.common.orchestration.spec import PipelineSpec
 
 SKIP_REASON_STREAM = "stream_mode"
+SKIP_REASON_LINEAR_GEOMETRY = "linear_geometry"
 SKIP_REASON_ARTIFACTS = "artifacts_verified"
 SKIP_REASON_NOT_SELECTED = "not_selected"
 SKIP_REASON_SUPERSEDED = "superseded"
@@ -1137,6 +1138,33 @@ class PipelineState:
             count += 1
         return count
 
+    def apply_linear_remap_skips(self, run_id: str, targets: Sequence, cfg) -> int:
+        """Pre-skip remap when downsample geometry_mode is not field."""
+        from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
+        count = 0
+        for t in targets:
+            if not getattr(t, "enabled", True):
+                continue
+            resolved = resolve_config(t, cfg)
+            ds = resolved.stages.downsample
+            wg = resolved.stages.wcs_grouping
+            mode = str(
+                getattr(ds, "geometry_mode", None)
+                or getattr(wg, "geometry_mode", None)
+                or "linear"
+            ).lower()
+            if mode == "field":
+                continue
+            label = t.label()
+            row = self.get_stage_run(run_id, label, "remap")
+            if row is None or row.status in TERMINAL_STATUSES:
+                continue
+            self.mark_skipped(run_id, label, "remap")
+            self.cache_skip_reason(run_id, label, "remap", SKIP_REASON_LINEAR_GEOMETRY)
+            count += 1
+        return count
+
     def _clear_stage_skip_cache(
         self, run_id: str, target_label: str, stage: str
     ) -> None:
@@ -1235,6 +1263,7 @@ class PipelineState:
                     SKIP_REASON_NOT_SELECTED,
                     SKIP_REASON_SUPERSEDED,
                     SKIP_REASON_STREAM,
+                    SKIP_REASON_LINEAR_GEOMETRY,
                     SKIP_REASON_ARTIFACTS,
                     SKIP_REASON_TRUSTED,
                 ):
