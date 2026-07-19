@@ -11,6 +11,7 @@ from syndiff_pipeline.common.scc_paths import (
     ps1_skycells_zarr_lock_path,
     ps1_skycells_zarr_path,
     scc_label,
+    scc_remap_dir,
     scc_root,
     scc_templates_dir,
 )
@@ -24,6 +25,10 @@ class TestSccPaths(unittest.TestCase):
     def test_scc_templates_dir_nested(self):
         path = scc_templates_dir("/data", 20, 3, 3, oversampling_factor=1)
         self.assertEqual(path, Path("/data/s0020/c3/k3/templates/oversampling_1"))
+
+    def test_scc_remap_dir_nested(self):
+        path = scc_remap_dir("/data", 20, 3, 3, oversampling_factor=2)
+        self.assertEqual(path, Path("/data/s0020/c3/k3/remap/oversampling_2"))
 
     def test_scc_label_unchanged(self):
         self.assertEqual(scc_label(15, 1, 1), "s0015_c1_k1")

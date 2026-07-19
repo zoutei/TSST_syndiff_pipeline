@@ -18,6 +18,7 @@ EVENTS_SUBDIR = "events"
 FFI_SUBDIR = "ffi"
 CATALOGS_SUBDIR = "catalogs"
 MAPPING_SUBDIR = "mapping"
+REMAP_SUBDIR = "remap"
 TEMPLATES_SUBDIR = "templates"
 LEGACY_SUBDIR = "legacy"
 BOOKKEEPING_SUBDIR = "bookkeeping"
@@ -40,6 +41,7 @@ __all__ = [
     "FFI_SUBDIR",
     "LEGACY_SUBDIR",
     "MAPPING_SUBDIR",
+    "REMAP_SUBDIR",
     "PS1_SKYCELLS_ZARR_BASENAME",
     "PS1_SKYCELLS_ZARR_DIRNAME",
     "TEMPLATES_SUBDIR",
@@ -62,6 +64,7 @@ __all__ = [
     "scc_mapping_dir",
     "scc_mapping_master_pixels2skycells",
     "scc_mapping_master_skycells_csv",
+    "scc_remap_dir",
     "scc_root",
     "scc_templates_dir",
     "scc_wcs_cache_csv",
@@ -169,6 +172,22 @@ def scc_mapping_dir(
     return (
         scc_root(data_root, sector, camera, ccd)
         / MAPPING_SUBDIR
+        / oversampling_dirname(oversampling_factor)
+    )
+
+
+def scc_remap_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int,
+) -> Path:
+    """Directory for field remap artifacts at one oversampling factor."""
+    return (
+        scc_root(data_root, sector, camera, ccd)
+        / REMAP_SUBDIR
         / oversampling_dirname(oversampling_factor)
     )
 
