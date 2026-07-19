@@ -31,6 +31,18 @@ WCS_CACHE_CSV_BASENAME = "wcs_cache.csv"
 PS1_SKYCELLS_ZARR_DIRNAME = "ps1_skycells_zarr"
 PS1_SKYCELLS_ZARR_BASENAME = "ps1_skycells.zarr"
 
+# Shared, sky-addressed PS1 band-combined Zarr store.
+PS1_COMBINED_ZARR_DIRNAME = "ps1_combined_zarr"
+PS1_COMBINED_ZARR_BASENAME = "ps1_combined.zarr"
+
+# Shared, sky-addressed PS1 convolved Zarr store.
+PS1_CONVOLVED_ZARR_DIRNAME = "ps1_convolved_zarr"
+PS1_CONVOLVED_ZARR_BASENAME = "ps1_convolved.zarr"
+
+# Top-level provenance bookkeeping (derived index + worker sidecar spool).
+PROVENANCE_DB_BASENAME = "provenance.db"
+SPOOL_SUBDIR = "spool"
+
 __all__ = [
     "BOOKKEEPING_SUBDIR",
     "CATALOGS_SUBDIR",
@@ -40,14 +52,28 @@ __all__ = [
     "FFI_SUBDIR",
     "LEGACY_SUBDIR",
     "MAPPING_SUBDIR",
+    "PROVENANCE_DB_BASENAME",
+    "PS1_COMBINED_ZARR_BASENAME",
+    "PS1_COMBINED_ZARR_DIRNAME",
+    "PS1_CONVOLVED_ZARR_BASENAME",
+    "PS1_CONVOLVED_ZARR_DIRNAME",
     "PS1_SKYCELLS_ZARR_BASENAME",
     "PS1_SKYCELLS_ZARR_DIRNAME",
+    "SPOOL_SUBDIR",
     "TEMPLATES_SUBDIR",
     "WCS_CACHE_CSV_BASENAME",
     "WCS_CACHE_PARQUET_BASENAME",
     "event_root",
     "event_scc_leaf",
     "oversampling_dirname",
+    "provenance_bookkeeping_dir",
+    "provenance_db_path",
+    "provenance_spool_dir",
+    "provenance_spool_file",
+    "ps1_combined_zarr_dir",
+    "ps1_combined_zarr_path",
+    "ps1_convolved_zarr_dir",
+    "ps1_convolved_zarr_path",
     "ps1_skycells_zarr_dir",
     "ps1_skycells_zarr_lock_path",
     "ps1_skycells_zarr_path",
@@ -266,6 +292,51 @@ def ps1_skycells_zarr_lock_path(data_root: str | Path) -> Path:
     """Lock file path alongside the shared PS1 skycells Zarr store."""
     zarr_path = ps1_skycells_zarr_path(data_root)
     return zarr_path.parent / f"{zarr_path.name}.lock"
+
+
+def ps1_combined_zarr_dir(data_root: str | Path) -> Path:
+    """Directory that holds the shared PS1 band-combined Zarr store."""
+    return Path(data_root).expanduser() / PS1_COMBINED_ZARR_DIRNAME
+
+
+def ps1_combined_zarr_path(data_root: str | Path) -> Path:
+    """Canonical shared, sky-addressed PS1 combined Zarr store under ``data_root``."""
+    return ps1_combined_zarr_dir(data_root) / PS1_COMBINED_ZARR_BASENAME
+
+
+def ps1_convolved_zarr_dir(data_root: str | Path) -> Path:
+    """Directory that holds the shared PS1 convolved Zarr store."""
+    return Path(data_root).expanduser() / PS1_CONVOLVED_ZARR_DIRNAME
+
+
+def ps1_convolved_zarr_path(data_root: str | Path) -> Path:
+    """Canonical shared, sky-addressed PS1 convolved Zarr store under ``data_root``."""
+    return ps1_convolved_zarr_dir(data_root) / PS1_CONVOLVED_ZARR_BASENAME
+
+
+def provenance_bookkeeping_dir(data_root: str | Path) -> Path:
+    """Top-level provenance bookkeeping directory: ``data_root/bookkeeping``.
+
+    Distinct from :func:`scc_bookkeeping_dir`, which is the per-SCC
+    ``s../c../k../bookkeeping`` leaf. This one holds the shared provenance
+    index and worker sidecar spool.
+    """
+    return Path(data_root).expanduser() / BOOKKEEPING_SUBDIR
+
+
+def provenance_db_path(data_root: str | Path) -> Path:
+    """Path to the derived, rebuildable provenance index database."""
+    return provenance_bookkeeping_dir(data_root) / PROVENANCE_DB_BASENAME
+
+
+def provenance_spool_dir(data_root: str | Path) -> Path:
+    """Directory for per-host worker sidecar append logs."""
+    return provenance_bookkeeping_dir(data_root) / SPOOL_SUBDIR
+
+
+def provenance_spool_file(data_root: str | Path, host: str, pid: int) -> Path:
+    """Sidecar spool file for one worker: ``spool/{host}.{pid}.jsonl``."""
+    return provenance_spool_dir(data_root) / f"{str(host).strip()}.{int(pid)}.jsonl"
 
 
 def event_root(workspace_root: str | Path, event_name: str) -> Path:
