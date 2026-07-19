@@ -31,7 +31,7 @@ Use a one-row `scc_smoke.csv` (`sector,camera,ccd,enabled` — copy the SCC from
 
 Optional shortcuts for faster smoke:
 
-- `--stages ps1_process,templates` — skip earlier stages if mapping/Zarr already exist
+- `--stages ps1_process,downsample` — skip earlier stages if mapping/Zarr already exist
 - `--force-rerun` — ignore existing artifacts for selected stages (new run only)
 
 **Pass criteria**
@@ -40,7 +40,7 @@ Optional shortcuts for faster smoke:
 - [ ] `{workspace_root}/runs/smoke_template_01/` created with frozen `config.yaml`, `targets.csv` (normalized SCC CSV), `run_meta.json`
 - [ ] `syndiff daemon status --site config` shows a live supervisor PID
 - [ ] `runs/latest` symlink points at `smoke_template_01`
-- [ ] `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` populated after `templates` succeeds
+- [ ] `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` populated after `downsample` succeeds
 
 ---
 
@@ -85,7 +85,7 @@ syndiff status --site config --run-id smoke_diff_01 --watch
 **Pass criteria**
 
 - [ ] Summary line shows stage counts (`pending`, `running`, `success`, etc.) and run status `running` (or terminal state when finished)
-- [ ] While stages run, detail lines appear for the smoke target (e.g. `ps1_dl: …`, `tmpl: …`, or diff log progress)
+- [ ] While stages run, detail lines appear for the smoke target (e.g. `ps1_dl: …`, `down: …`, or diff log progress)
 - [ ] `scan_queued` / `scan_running` appear briefly during artifact verify, then return to zero
 - [ ] No persistent `stalled` status unless genuinely blocked (check `stall_reason` in `progress` output)
 
@@ -182,7 +182,7 @@ Let `EVENT` = event name (e.g. `2020ftl`), `SCC` = SCC label (e.g. `s0023_c1_k3`
   event_job.json                  # after bind (legacy name: cluster_template_job.json)
   frames.csv                      # after bind (legacy name: syndiff_ffi_frames.csv)
   wcs_drift_template_debug.png    # optional (plots enabled)
-  ps1_removed_stars.csv           # written by `templates` (linear geometry_mode)
+  ps1_removed_stars.csv           # written by `downsample` (linear geometry_mode)
   ws/
     master/                       # after diff: flat FITS mirror + tess_ffi link
     <pipeline_label>/             # e.g. hp_d, ep, lc_prf_on_diffs — per diff_config.yaml
@@ -233,12 +233,12 @@ test -f "$WS/events/$EVENT/$SCC/ws/"*/hotpants_substamp_stars.csv 2>/dev/null ||
 
 - `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_1/…` — mapping
 - `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` — PS1 download (unchanged path)
-- `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/…/syndiff_template_*.fits.fz` — `templates` stage output
+- `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/…/syndiff_template_*.fits.fz` — `downsample` stage output
 
 **Pass criteria**
 
 - [ ] `event_job.json` and `frames.csv` exist under `events/{EVENT}/{SCC}/` before diff (written by `bind`)
-- [ ] `ps1_removed_stars.csv` present after `templates` (linear geometry_mode)
+- [ ] `ps1_removed_stars.csv` present after `downsample` (linear geometry_mode)
 - [ ] Before diff: `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` contains `syndiff_template_*.fits*` (or a complete field-mode manifest)
 - [ ] `events/{EVENT}/{SCC}/ws/` contains at least one non-`master` workspace label after diff
 - [ ] Run logs and status sidecars exist under `runs/{run_id}/per_target/{LABEL}/`

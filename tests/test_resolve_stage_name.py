@@ -21,7 +21,7 @@ class TestResolveStageName(unittest.TestCase):
         self.assertEqual(resolve_stage_name("map"), "mapping")
         self.assertEqual(resolve_stage_name("down"), "downsample")
         self.assertEqual(resolve_stage_name("downsample"), "downsample")
-        self.assertEqual(resolve_stage_name("rmap"), "remap")
+        self.assertEqual(resolve_stage_name("remap"), "remap")
         self.assertEqual(resolve_stage_name("skycell_remap"), "remap")
         self.assertEqual(resolve_stage_name("tess_dl"), "tess_ffi_download")
 

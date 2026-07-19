@@ -94,7 +94,7 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid**, o
 2. **`mapping`** (“pancakes”) — choose the SCC's mapping-epoch reference FFI via an SCC-scoped chooser (median-CRVAL anchor + Earth/Moon-angle cuts + smoothed-residual; see [`scc_reference_ffi.py`](../../syndiff_pipeline/template_creation/processing/scc_reference_ffi.py)), then map TESS pixels to PS1 skycells and download the Gaia catalog for that reference FFI.
 3. **`ps1_download`** — fetch PS1 skycell cutouts into a shared Zarr store.
 4. **`ps1_process`** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-5. **`remap`** (short `rmap`; alias `skycell_remap`) — field-mode L2–L4 only: per-skycell shift schedule, signature groups, hybrid Exact cache under `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`. Scheduler pre-skips this stage in linear mode. Does **not** write flux `contribs/`.
+5. **`remap`** (short `remap`; alias `skycell_remap`) — field-mode L2–L4 only: per-skycell shift schedule, signature groups, hybrid Exact cache under `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`. Scheduler pre-skips this stage in linear mode. Does **not** write flux `contribs/`.
 6. **`downsample`** (short `down`) — L5 flux binning into the SCC template product store `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (linear offset FITS, or field `contribs/` after reading remap artifacts). Stage names `templates` / `tmpl` are **rejected** (hard cut; not aliases).
 
 **Diff DAG** (`syndiff diff submit --targets targets.csv`; event `--targets` CSV with transient RA/Dec/name):
@@ -290,7 +290,7 @@ syndiff --help
 
 **Cluster / Condor** (optional): HTCondor client tools (`condor_submit`, `condor_q`, `condor_history`, `condor_rm`) on the submit node. No `python-htcondor` package is required.
 
-**Hardware** (from production experience): `ps1_process` expects a **whole node** (~64 cores, 512 GB RAM on the STScI science cluster). Mapping and `templates` are lighter but benefit from multi-core hosts and fast NFS.
+**Hardware** (from production experience): `ps1_process` expects a **whole node** (~64 cores, 512 GB RAM on the STScI science cluster). Mapping, `remap`, and `downsample` are lighter but benefit from multi-core hosts and fast NFS.
 
 ---
 
@@ -383,7 +383,7 @@ syndiff tail --run-dir /path/to/runs/20260607_210919 \
   --target s0023_c1_k3_2020ftl --stage ps1_process
 ```
 
-`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `tmpl: 45/84` from `per_target/<label>/downsample.progress.json` — the sidecar filename kept its pre-rename name even though the stage and its `.log` file are now `templates`/`templates.log` — `diff: epsf r1 12/48` from `per_target/<label>/diff.epsf.progress.json` beside `diff.log` — also `diff.hotpants.progress.json`, `diff.centroids.progress.json`, and `diff.photometry.progress.json` when those phases are active). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
+`progress` prints a one-line summary (`pending=…`, `running=…`, etc.) and, when any stages are **running**, a detail section parsed from each worker’s stage log or sidecar (e.g. `ps1_dl: 342/1009` for PS1 skycell downloads, `ps1_pr: 2/19 projections 5/10 rows` for convolution, `down: 45/84` from `per_target/<label>/downsample.progress.json` (sidecar filename unchanged), `remap: …` from remap progress when field mode is active — `diff: epsf r1 12/48` from `per_target/<label>/diff.epsf.progress.json` beside `diff.log` — also `diff.hotpants.progress.json`, `diff.centroids.progress.json`, and `diff.photometry.progress.json` when those phases are active). Use `--no-detail` for summary-only output (scripts). For full worker output, `tail -f` the log under `per_target/<target_label>/<stage>.log`.
 
 **Discord alerts** (optional): when `notifications.enabled: true` in config, the supervisor posts to a webhook on run/stage events. Messages include the same **progress** summary and **status** grid as the CLI. Preview without changing pipeline state:
 
@@ -637,13 +637,13 @@ Reads PS1 Zarr + mapping CSV; runs the **modern sliding-window convolution pipel
 
 ---
 
-### `templates` (config key/legacy alias: `downsample`)
+### `downsample` (short `down`)
 
-**Module**: `template_creation/processing/downsample.py` (ported from `multi_offset_downsampling.py`; `geometry_mode: field` instead uses `template_creation/processing/field_downsample.py`)
+**Module**: `template_creation/processing/downsample.py` (linear; `geometry_mode: field` uses `field_downsample.py` after `remap`)
 
-Combines convolved Zarr data at multiple sub-pixel offsets into the SCC's shared template store. Deps: `mapping`, `ps1_process` (both SCC-scoped — no event dependency edge). Produces template FITS/store for SynDiff Hotpants. Legacy stage-name aliases accepted by `resolve_stage_name`: `downsample` → `templates`, `down` → `templates`.
+L5 flux binning into the SCC template product store. Deps: `mapping`, `ps1_process`, and `remap` in field mode (`effective_deps` omits `remap` in linear mode). Produces template FITS/store for SynDiff Hotpants. Stage names `templates` / `tmpl` are **rejected** by `resolve_stage_name`.
 
-- **`geometry_mode: field`** (default): builds a full-chip, event-independent sparse contrib store under the SCC — see [field_geometry.md](field_geometry.md). No `event_job.json` is required.
+- **`geometry_mode: field`** (default): reads L2–L4 remap artifacts from `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`, then writes flux `contribs/` under `templates/oversampling_{N}/` — see [field_geometry.md](field_geometry.md). No `event_job.json` is required.
 - **`geometry_mode: linear`**: requires an event's `event_job.json` (from a completed `bind` run) on disk for crop bounds and per-transient offsets — the in-process dispatcher raises `FileNotFoundError` if it's missing (`template_creation/orchestration/dispatch.py::_execute_template_stage`).
 
 **Algorithm summary**:
@@ -655,7 +655,7 @@ Combines convolved Zarr data at multiple sub-pixel offsets into the SCC's shared
   3. Parallel joblib workers bin shifted PS1 flux into TESS pixels using registration FITS.
   4. Deduplicate overlapping skycell contributions; write one multi-extension FITS per offset.
 
-- **Field mode** — see [field geometry](field_geometry.md): build per-skycell shift schedule (L2/L3), hybrid roll+Exact assignment per `(skycell, sx, sy)` (L4a/L4b-lite), cache sparse contribs, assemble per `group_id` on demand (L5). No per-event ROI at build time.
+- **Field mode** — L5 assembly from remap cache: see [field geometry](field_geometry.md). Shift schedule and hybrid Exact cache are built by the separate **`remap`** stage.
 
 Default production offsets (linear mode) are the calibrated dither list from the standalone script (10 pairs); `bind`'s WCS grouping supplies the subset needed for each transient's template groups.
 
@@ -669,7 +669,7 @@ templates/oversampling_{N}/
 
 **Verification**: at least one template FITS (linear) or a complete field-mode manifest under the SCC template directory.
 
-**Progress sidecar**: during pipeline runs, parallel batch workers update `per_target/<label>/downsample.progress.json` — the sidecar kept its pre-rename filename even though the stage/log are now `templates`/`templates.log` (beside `templates.log`) — with skycell-weighted progress (`skycells_done` / `total_skycells`). `syndiff progress` reads this file for in-flight fraction (short name `tmpl`); shift precompute shows as `shifts k/n` phase text. The log is unchanged aside from existing batch completion lines.
+**Progress sidecar**: during pipeline runs, parallel batch workers update `per_target/<label>/downsample.progress.json` with skycell-weighted progress (`skycells_done` / `total_skycells`). `syndiff progress` reads this file for in-flight fraction (short name `down`).
 
 **Deep dive**: [downsample_technical.md](stages/downsample_technical.md)
 
@@ -697,7 +697,7 @@ Condor resource requests (`request_cpus`, `request_memory`, …) are defined in 
 
 **Progress sidecars**: during diff runs, workers update JSON mirrors beside `per_target/<label>/diff.log` — `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json`. `syndiff progress` reads the most recently updated sidecar via `stage_progress.py` (ePSF and centroids also merge live artifact counts when `output_dir` is recorded).
 
-**Diff-only submit** (`syndiff diff submit`, default `--stages diff` = just `["diff"]`): `tess_ffi_download` and `templates` are the only upstream stages verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`). `bind`, `mapping`, `ps1_download`, and `ps1_process` are all marked **n/a** (not_selected) immediately — critically, this means **`bind` itself is not verified or executed by default**, since `DIFF_VERIFY_UPSTREAM` does not include it. Pass `--stages bind,diff` explicitly to have `bind` run (required the first time a new event is diffed, so its `event_job.json`/`frames.csv` handoff actually gets written before `diff` reads it).
+**Diff-only submit** (`syndiff diff submit`, default `--stages diff` = just `["diff"]`): `tess_ffi_download` and `downsample` are the only upstream stages verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`). `bind`, `mapping`, `ps1_download`, `ps1_process`, and `remap` are all marked **n/a** (not_selected) immediately — critically, this means **`bind` itself is not verified or executed by default**, since `DIFF_VERIFY_UPSTREAM` does not include it. Pass `--stages bind,diff` explicitly to have `bind` run (required the first time a new event is diffed, so its `event_job.json`/`frames.csv` handoff actually gets written before `diff` reads it).
 
 ---
 
@@ -1134,11 +1134,15 @@ syndiff progress --run-dir /path/to/runs/batch_no5
 syndiff progress --no-detail   # summary only (for scripts)
 ```
 
-Detail lines look like `s0023_c1_k3 ps1_pr: 2/19 projections 5/10 rows`, `tmpl: 45/84` from `downsample.progress.json` (sidecar filename unchanged by the `templates` rename), or `diff: epsf r1 12/48` from `diff.epsf.progress.json` (plus `diff.hotpants.progress.json`, `diff.centroids.progress.json`, and `diff.photometry.progress.json` when active). Parsed by `template_creation/orchestration/stage_progress.py`.
+Detail lines look like `s0023_c1_k3 ps1_pr: 2/19 projections 5/10 rows`, `down: 45/84` from `downsample.progress.json` (sidecar filename unchanged), or `diff: epsf r1 12/48` from `diff.epsf.progress.json` (plus `diff.hotpants.progress.json`, `diff.centroids.progress.json`, and `diff.photometry.progress.json` when active). Parsed by `template_creation/orchestration/stage_progress.py`.
 
 #### `status`
 
-**Purpose**: Per-target stage grid (`tess_dl:pend | map:run | ps1_dl:succ | …`). Abbreviations match `STAGE_SHORT_NAMES` in the scheduler.
+**Purpose**: Per-target stage grid with seven columns in pipeline order:
+
+`tess_dl | map | ps1_dl | ps1_pr | remap | down | diff`
+
+(`bind` and `star` are omitted — star uses a separate submission path.) Abbreviations match `stage_short_names()` in the scheduler.
 
 ```bash
 syndiff status

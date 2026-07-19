@@ -115,7 +115,7 @@ syndiff retry \
 | Command | What it does |
 |---------|--------------|
 | **`syndiff progress`** | Aggregate stage counts; optional per-task detail from stage logs and progress sidecars (`downsample.progress.json` — filename unchanged by the `templates` rename — `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json` beside `diff.log`). For Condor stages, detail lines also show queue state from `condor_q` (`condor idle cN.0`, `condor running cN.0`, `condor held cN.0`, or `condor unsubmitted` before a cluster id is recorded). Use `--no-detail` for summary-only output. |
-| **`syndiff status`** | Per-target stage grid (`tess_dl`, `bind`, `map`, `ps1_dl`, `ps1_pr`, `tmpl`, `diff`, `star` as applicable). `--watch` for live refresh. |
+| **`syndiff status`** | Per-target stage grid: `tess_dl | map | ps1_dl | ps1_pr | remap | down | diff` (`bind` and `star` omitted). `--watch` for live refresh. |
 | **`syndiff show`** | Dump `run_meta.json`. |
 | **`syndiff logs`** / **`syndiff tail`** | Daemon log or `per_target/<label>/<stage>.log`. |
 
