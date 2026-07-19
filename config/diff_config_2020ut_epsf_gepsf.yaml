@@ -31,7 +31,7 @@ pipeline:
       from: multi_hp_temp_calib
       labels: [hp_d, hp_m]
       root_artifacts:
-        - shared_mask.fits
+        - shared_mask.fits.fz
         - gaia_catalog_pipeline.csv
         - hotpants_substamp_stars.csv
         - targets.reg
