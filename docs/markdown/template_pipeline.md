@@ -1,13 +1,13 @@
 # SynDiff unified pipeline (`syndiff`)
 
 This document describes the **orchestrated SynDiff pipeline** behind the
-`syndiff` CLI. One supervisor daemon and one SQLite state DB know about eight
-registered stages: a five-stage **template** DAG (`tess_ffi_download → mapping
-→ ps1_download → ps1_process → templates`), a two-stage **diff** DAG
-(`bind → diff`), plus the independent `star` branch for host-star light
-curves from an existing event. There is **no** `syndiff all` preset — template
-and diff are separate CLI nouns with their own SCC/targets inputs. CLI presets
-select stage subsets:
+`syndiff` CLI. One supervisor daemon and one SQLite state DB know about nine
+registered stages: a six-stage **template** DAG (`tess_ffi_download → mapping
+→ ps1_download → ps1_process → downsample`, with `mapping → remap` for field
+mode), a two-stage **diff** DAG (`bind → diff`), plus the independent `star`
+branch for host-star light curves from an existing event. There is **no**
+`syndiff all` preset — template and diff are separate CLI nouns with their own
+SCC/targets inputs. CLI presets select stage subsets:
 
 ```text
 syndiff template submit --site SITE --scc sccs.csv               # template DAG only
@@ -28,7 +28,7 @@ satisfied) rather than run. Pass **`--stages bind,diff`** explicitly the first
 time you diff a new event, so `bind` actually executes and writes
 `event_job.json` + `frames.csv`; otherwise `diff` fails at runtime if that
 handoff doesn't already exist on disk (`DIFF_VERIFY_UPSTREAM` in
-`common/orchestration/spec.py` covers `tess_ffi_download` and `templates`
+`common/orchestration/spec.py` covers `tess_ffi_download` and `downsample`
 only, not `bind`). See [Runs and stages](#runs-and-stages) below.
 
 Invoking the removed `syndiff all` preset prints a guiding error pointing at
@@ -94,12 +94,13 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid**, o
 2. **`mapping`** (“pancakes”) — choose the SCC's mapping-epoch reference FFI via an SCC-scoped chooser (median-CRVAL anchor + Earth/Moon-angle cuts + smoothed-residual; see [`scc_reference_ffi.py`](../../syndiff_pipeline/template_creation/processing/scc_reference_ffi.py)), then map TESS pixels to PS1 skycells and download the Gaia catalog for that reference FFI.
 3. **`ps1_download`** — fetch PS1 skycell cutouts into a shared Zarr store.
 4. **`ps1_process`** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-5. **`templates`** (config key/legacy name: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
+5. **`remap`** (short `rmap`; alias `skycell_remap`) — field-mode L2–L4 only: per-skycell shift schedule, signature groups, hybrid Exact cache under `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`. Scheduler pre-skips this stage in linear mode. Does **not** write flux `contribs/`.
+6. **`downsample`** (short `down`) — L5 flux binning into the SCC template product store `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (linear offset FITS, or field `contribs/` after reading remap artifacts). Stage names `templates` / `tmpl` are **rejected** (hard cut; not aliases).
 
 **Diff DAG** (`syndiff diff submit --targets targets.csv`; event `--targets` CSV with transient RA/Dec/name):
 
-6. **`bind`** — event WCS grouping: measure the transient's pixel drift across epochs, assign template offset groups, and write the handoff (`event_job.json` + `frames.csv`) under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`.
-7. **`diff`** — run the config-driven difference-imaging pipeline against the SCC's template store; outputs under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/`.
+7. **`bind`** — event WCS grouping: measure the transient's pixel drift across epochs, assign template offset groups, and write the handoff (`event_job.json` + `frames.csv`) under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`.
+8. **`diff`** — run the config-driven difference-imaging pipeline against the SCC's template store; outputs under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/`.
 
 The separately submitted **star** branch verifies those completed artifacts,
 then writes host-star products under `{baseline_ws}/host_star/`; it does not
@@ -109,8 +110,8 @@ The runner is designed for **batch operation across many SCCs and events**:
 
 - A host-level **supervisor daemon** (single owner per workspace via `control/daemon.lease` on NFS) dequeues work for all active runs subject to resource-pool limits.
 - Progress is tracked in **SQLite (WAL)** and on disk (logs, summaries, per-stage status/manifest files).
-- Stages can be run **subset-by-subset** (e.g. only `ps1_process,templates`) when upstream artifacts already exist.
-- **`mapping`**, **`ps1_process`**, **`diff`**, and **`star`** can run on a
+- Stages can be run **subset-by-subset** (e.g. only `ps1_process,downsample`) when upstream artifacts already exist.
+- **`mapping`**, **`ps1_process`**, **`remap`**, **`diff`**, and **`star`** can run on a
   shared **HTCondor** pool; other stages run as local subprocesses on the
   submit host (`bind` is unpooled).
 
@@ -139,7 +140,9 @@ standalone research workflow.
 | `pancakes_v2.py` | `template_creation/processing/pancakes.py` + `processing/scc_reference_ffi.py` | `mapping` (SCC-scoped reference-FFI chooser + PanCAKES) |
 | `download_and_store_zarr.py` | `template_creation/processing/ps1_download.py` | `ps1_download` |
 | `process_ps1.py` | `template_creation/processing/ps1_process.py` | `ps1_process` |
-| `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` (+ `field_downsample.py` for `geometry_mode: field`) | `templates` (config key/legacy alias: `downsample`) |
+| `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` (+ `field_downsample.py` for `geometry_mode: field`) | `downsample` |
+| — | `template_creation/processing/field_remap.py` | `remap` (field L2–L4; Exact cache) |
+| — | `template_creation/processing/migrate_field_remap_store.py` | one-shot copy of legacy colocated L2–L4 → `remap/` |
 | — | `difference_imaging/orchestration/execute.py` | `diff` |
 | — | `star/runner.py` | `star` |
 
@@ -175,7 +178,8 @@ flowchart TB
         s3[mapping]
         s4[ps1_download]
         s5[ps1_process]
-        s6[templates]
+        s5b[remap]
+        s6[downsample]
     end
 
     subgraph DiffStages["Diff DAG workers"]
@@ -215,7 +219,8 @@ flowchart TB
 | `mapping` | template | **condor** | `mapping` | SCC-scoped reference-FFI chooser (`scc_reference_ffi.py`) + Gaia + PanCAKES skycell mapping; lighter Condor claim than `ps1_process` |
 | `ps1_download` | template | local | `network` | Shared Zarr at `{data_root}/ps1_skycells_zarr/` |
 | `ps1_process` | template | **condor** | `ps1_process` | Whole-node jobs; configurable |
-| `templates` (config key/legacy alias: `downsample`) | template | local | `templates` | Reads convolved Zarr + mapping; writes the SCC's shared template store |
+| `remap` | template | **condor** | `remap` | Field L2–L4; lighter than `downsample` |
+| `downsample` | template | local | `downsample` | Reads convolved Zarr + mapping (+ remap in field mode); writes SCC template store |
 | `bind` | diff | local | *(none)* | Unpooled — fast; event WCS grouping; writes `event_job.json` + `frames.csv` under `events/{event_name}/s{SSSS}_c{C}_k{K}/` |
 | `diff` | diff | **condor** (or `local` with `--local`) | `diff` | Config-driven Hotpants → photometry; outputs in `events/{event_name}/s{SSSS}_c{C}_k{K}/ws/` |
 | `star` | independent | **condor** (or `local` with `--local`) | `star` | Separate submission; verifies completed event artifacts and writes `{baseline_ws}/host_star/` |
@@ -228,16 +233,19 @@ Template DAG (`template_creation/orchestration/stages.py::TEMPLATE_STAGES`):
 tess_ffi_download
        │
        ▼
-   mapping
-       │
-       ▼
- ps1_download
-       │
-       ▼
-  ps1_process ───────────────────────────────┐
-       │                                     │
-       └─────────── (also needs mapping) ───▶ templates
+   mapping ──────────────┐
+       │                 │
+       ▼                 ▼
+ ps1_download          remap
+       │                 │
+       ▼                 │
+  ps1_process ───────────┼──▶ downsample
+       │                 │
+       └─────────────────┘
 ```
+
+(`remap` is a nominal `downsample` dependency; `effective_deps` omits it when
+`geometry_mode: linear`.)
 
 Diff DAG (`difference_imaging/orchestration/stages.py::DIFF_STAGES`) — depends on template artifacts existing on disk, not on the template DAG's SQLite rows:
 
@@ -248,7 +256,18 @@ bind
 diff  (also resolves templates from {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/)
 ```
 
-`templates` depends on `mapping` (skycell map) and `ps1_process` (convolved Zarr) — both SCC-scoped, so `templates` has no dependency edge on any event's `bind` stage. With `geometry_mode: field` (default), `templates` builds a full-chip SCC-shared store with no event ROI at all. With `geometry_mode: linear`, the in-process dispatcher (`template_creation/orchestration/dispatch.py::_execute_template_stage`) additionally requires an event's `event_job.json` to exist on disk (from a prior `bind` run) to get crop bounds and offsets — that is a runtime file check, not a scheduler dependency. `diff` depends on `bind` (`DIFF_STAGES = (BIND_STAGE, DIFF_STAGE)`); `diff` also verifies `templates` artifacts exist on disk before launch (see `DIFF_VERIFY_UPSTREAM` below) — again file verification, not an SQLite DAG edge, since `templates` belongs to the separate template-run DAG.
+`downsample` depends on `mapping` and `ps1_process` (both SCC-scoped), and on
+`remap` in field mode (`effective_deps` omits `remap` in linear mode) — so
+`downsample` has no dependency edge on any event's `bind` stage. With
+`geometry_mode: field`, `remap` + `downsample` build a full-chip SCC-shared
+store with no event ROI at all. With `geometry_mode: linear`, the in-process
+dispatcher (`template_creation/orchestration/dispatch.py::_execute_template_stage`)
+additionally requires an event's `event_job.json` to exist on disk (from a prior
+`bind` run) to get crop bounds and offsets — that is a runtime file check, not
+a scheduler dependency. `diff` depends on `bind` (`DIFF_STAGES = (BIND_STAGE,
+DIFF_STAGE)`); `diff` also verifies `downsample` artifacts exist on disk before
+launch (see `DIFF_VERIFY_UPSTREAM` below) — again file verification, not an
+SQLite DAG edge, since template stages belong to the separate template-run DAG.
 
 When you run a **stage subset**, dependencies outside the subset are satisfied if **on-disk artifacts pass verification** (see [Verification](#verification)).
 
@@ -445,7 +464,7 @@ handoff and workspace paths instead use `Target.event_name()` (sanitized
 
 ### Runs and stages
 
-A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). The composed registry (`pipeline_spec.py`) has **eight** stages total: five template stages (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `templates`), two diff stages (`bind`, `diff`), and the independent `star` stage. `state.py::create_run` always materializes **all eight** stage rows per target, regardless of which noun (`template`/`diff`) was submitted — a `template` submit and a `diff` submit are still separate runs (separate `run_id`, separate target rows: SCC-only targets for `template`, event targets for `diff`), but each run's SQLite rows span the full registry. Stages in `--stages` start `pending`; the rest start `external` (upstream-closure) or immediately `skipped`/not_selected (outside closure), and are resolved to `skipped` once verified complete on disk.
+A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). The composed registry (`pipeline_spec.py`) has **nine** stages total: six template stages (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample`), two diff stages (`bind`, `diff`), and the independent `star` stage. `state.py::create_run` always materializes **all nine** stage rows per target, regardless of which noun (`template`/`diff`) was submitted — a `template` submit and a `diff` submit are still separate runs (separate `run_id`, separate target rows: SCC-only targets for `template`, event targets for `diff`), but each run's SQLite rows span the full registry. Stages in `--stages` start `pending`; the rest start `external` (upstream-closure) or immediately `skipped`/not_selected (outside closure), and are resolved to `skipped` once verified complete on disk.
 
 | Status | Meaning |
 |--------|---------|
@@ -457,7 +476,7 @@ A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_
 | `skipped` | Artifacts verified complete (no rerun) |
 | `blocked` | Never started (upstream failure) |
 | `canceled` | User kill (retryable) |
-| `external` | Outside `--stages`; verify once then `skipped` if on-disk artifacts are complete. Stages outside the artifact-verify closure of `--stages` are marked **n/a** immediately (no artifact verify). For the **default** `diff submit` (`--stages diff`, i.e. just `["diff"]` — `bind` is not in `preset_stages("diff")`), `tess_ffi_download` and `templates` are `external` and verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`); `bind`, `mapping`, `ps1_download`, and `ps1_process` are marked **n/a** immediately (not_selected) — `bind` is **not** in `DIFF_VERIFY_UPSTREAM`, so it is treated as satisfied without ever verifying or running it. **Pass `--stages bind,diff` explicitly** the first time you diff a new event (or whenever `bind`'s handoff might not already exist) so `bind` actually executes; otherwise `diff` will fail at runtime with a missing-handoff error if `event_job.json` isn't already on disk. |
+| `external` | Outside `--stages`; verify once then `skipped` if on-disk artifacts are complete. Stages outside the artifact-verify closure of `--stages` are marked **n/a** immediately (no artifact verify). For the **default** `diff submit` (`--stages diff`, i.e. just `["diff"]` — `bind` is not in `preset_stages("diff")`), `tess_ffi_download` and `downsample` are `external` and verified on disk (`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`); `bind`, `mapping`, `ps1_download`, `ps1_process`, and `remap` are marked **n/a** immediately (not_selected) — `bind` is **not** in `DIFF_VERIFY_UPSTREAM`, so it is treated as satisfied without ever verifying or running it. **Pass `--stages bind,diff` explicitly** the first time you diff a new event (or whenever `bind`'s handoff might not already exist) so `bind` actually executes; otherwise `diff` will fail at runtime with a missing-handoff error if `event_job.json` isn't already on disk. |
 
 Run-level status (`runs.status`): `running`, `stalled`, `success`, `failed`, `canceled`. A `stalled` run has no running or launchable work, no artifact-verify backlog, and non-terminal stages remain (see `stall_reason` in `progress`/`status`). Runs stay **`running`** while artifact scans are queued (`sc_q`) or running (`scan`).
 
@@ -477,7 +496,8 @@ Concurrency is limited per **pool** (not globally):
 | Pool | Stages | Typical limit | Purpose |
 |------|--------|---------------|---------|
 | `network` | `tess_ffi_download`, `ps1_download` | 3 | Throttle MAST / PS1 API |
-| `templates` | `templates` | 2 | Moderate CPU / I/O |
+| `remap` | `remap` | 2 | Field L2–L4 CPU / I/O |
+| `downsample` | `downsample` | 2 | Template FITS / L5 contribs |
 | `diff` | `diff` | (configurable) | Condor slot count for diff jobs |
 | `mapping` | `mapping` | 6 | Condor slot count for mapping jobs |
 | `ps1_process` | `ps1_process` | 4 | Condor slot count for PS1 convolution |
@@ -1517,7 +1537,8 @@ Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL
 | `mapping` | Master skycells CSV |
 | `ps1_download` | Every expected skycell has all 12 arrays (`{band}`, `{band}_mask`, `{band}_wt` for r/i/z/y) with materialized chunks |
 | `ps1_process` | Each expected skycell's `{skycell}_data` array has materialized chunks |
-| `templates` | All per-offset `syndiff_template_*.fits.fz` present (linear geometry_mode) or a complete field-mode manifest |
+| `remap` | `remap_manifest.json`, `shift_schedule.npz`, and group artifacts under `remap/oversampling_{N}/` (field mode) |
+| `downsample` | All per-offset `syndiff_template_*.fits.fz` present (linear geometry_mode) or a complete field-mode manifest under the SCC template directory |
 | `diff` | Frame manifest CSV and workspace label directories under `events/{event_name}/{scc_label}/ws/` |
 
 Partial convolved Zarr (interrupted run) reports e.g. `Partial convolved zarr: 3/120 skycells saved`.
@@ -1739,7 +1760,8 @@ Template building and diff imaging are **two separate DAGs, two separate submits
 ```text
 ┌───────────────────────────────────┐   ┌───────────────────────────────────┐
 │ syndiff template submit --scc ... │   │ syndiff diff submit --targets ... │
-│ tess_ffi … ps1_process → templates│   │ bind → diff (Hotpants → phot.)    │
+│ tess_ffi … ps1_process → downsample │   │ bind → diff (Hotpants → phot.)    │
+│ (+ remap in field mode)             │   │                                   │
 └───────────────────────────────────┘   └───────────────────────────────────┘
          │                                              │
          ▼                                              ▼
@@ -1779,7 +1801,7 @@ references are vendored under [`docs/markdown/stages/`](stages/README.md):
 | `common/scc_paths.py` | SCC-scoped + event-scoped path helpers (`scc_root`, `scc_ffi_dir`, `scc_mapping_dir`, `scc_templates_dir`, `event_scc_leaf`, …) |
 | `template_creation/orchestration/runner_config.py` | YAML loading, path resolution, overrides |
 | `template_creation/orchestration/stage_params.py` | Typed stage parameters + validation |
-| `template_creation/orchestration/stages.py` | Template stage registry (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `templates`) |
+| `template_creation/orchestration/stages.py` | Template stage registry (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample`) |
 | `template_creation/processing/scc_reference_ffi.py` | SCC-scoped mapping reference-FFI chooser + bookkeeping |
 | `difference_imaging/orchestration/stages.py` | Diff DAG registry (`bind`, `diff`) |
 | `difference_imaging/orchestration/bind.py` | `bind` stage: event WCS grouping wrapper writing into the nested event leaf |
@@ -1796,8 +1818,9 @@ references are vendored under [`docs/markdown/stages/`](stages/README.md):
 | `template_creation/processing/pancakes.py` | Mapping stage (PanCAKES) |
 | `template_creation/processing/ps1_download.py` | PS1 Zarr download |
 | `template_creation/processing/ps1_process.py` | Convolution pipeline |
-| `template_creation/processing/downsample.py` | Multi-offset template FITS (`templates` stage, linear geometry_mode) |
-| `template_creation/processing/field_downsample.py` | Field-geometry SCC template store (`templates` stage, field geometry_mode) |
+| `template_creation/processing/downsample.py` | Multi-offset template FITS (`downsample` stage, linear geometry_mode) |
+| `template_creation/processing/field_remap.py` | Field-geometry SCC remap store (`remap` stage) |
+| `template_creation/processing/field_downsample.py` | Field-geometry L5 contribs (`downsample` stage, field geometry_mode) |
 | `difference_imaging/orchestration/execute.py` | Diff pipeline (`run_config_pipeline`) |
 
 ---

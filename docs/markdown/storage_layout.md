@@ -176,15 +176,17 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
     wcs_cache.parquet              # shared WCS keyword cache (+ wcs_cache.csv twin)
     mapping/
       oversampling_{N}/            # PanCAKES skycell maps
+    remap/
+      oversampling_{N}/            # field L2–L4 (schedule, groups, exact_cache)
     templates/
-      oversampling_{N}/            # full-chip sparse template store (field mode)
+      oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode)
     legacy/                        # archived pre-cutover artifacts
     bookkeeping/                   # per-stage run_meta (mapping reference FFI, etc.)
   ps1_skycells_zarr/               # shared PS1 raw-band cache (ps1_download + syndiff star)
     ps1_skycells.zarr
 ```
 
-Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_wcs_cache_parquet()` / `scc_wcs_cache_csv()`, `scc_mapping_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `ps1_skycells_zarr_dir()` / `ps1_skycells_zarr_path()` / `ps1_skycells_zarr_lock_path()` resolve the shared PS1 store under `data_root`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
+Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_wcs_cache_parquet()` / `scc_wcs_cache_csv()`, `scc_mapping_dir()`, `scc_remap_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `ps1_skycells_zarr_dir()` / `ps1_skycells_zarr_path()` / `ps1_skycells_zarr_lock_path()` resolve the shared PS1 store under `data_root`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
 
 Older top-level science trees (`tess_ffi/`, `skycell_pixel_mapping/`, `field_templates/`, `shifted_downsampled/`, `convolved_results/`, flat `catalogs/`, and `scc/s{SSSS}_c{C}_k{K}/`) are obsolete and are not read by current code.
 
@@ -195,7 +197,27 @@ deployments.
 
 Diff imaging resolves templates from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (or an explicit `paths.template_dir` override). The `ws/templates` symlink is no longer created.
 
-With `geometry_mode: field`, templates live under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (sparse contribs + assemble by `group_id` at diff time). When `N>1`, field `base_tess_shape` / `roi_bounds` are oversampled pixels; see [oversampled templates §9](oversampled_templates.md#9-field-mode--oversampling).
+With `geometry_mode: field`, L2–L4 artifacts live under
+`{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`:
+
+```text
+remap/oversampling_{N}/
+  remap_manifest.json
+  shift_schedule.npz / .json
+  template_group_shifts.parquet
+  template_groups.json
+  exact_cache/{skycell}_sx{±N}_sy{±N}_exact.npz
+  .lock
+```
+
+L5 sparse contribs and `template_manifest.json` live under
+`templates/oversampling_{N}/` (product path name; stage name is `downsample`).
+Code dual-reads legacy L2–L4 files colocated under `templates/` when
+`remap_manifest.json` is absent. Migrate with
+`syndiff_pipeline.template_creation.processing.migrate_field_remap_store.migrate_scc_remap_artifacts`
+(copy+verify; sources left in place). When `N>1`, field
+`base_tess_shape` / `roi_bounds` are oversampled pixels; see
+[oversampled templates §9](oversampled_templates.md#9-field-mode--oversampling).
 
 Linear template FITS at `N>1` carry native `XMIN`/`XMAX`/`YMIN`/`YMAX` plus `OVERSAMP=N`; array planes are shape `(native_h·N, native_w·N)`. Diff crops stay native and are scaled at load time (`common/template_coverage.py`).
 
