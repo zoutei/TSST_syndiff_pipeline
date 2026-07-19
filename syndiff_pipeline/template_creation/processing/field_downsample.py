@@ -1,34 +1,37 @@
-"""Field-mode downsample: SCC ``field_templates/`` schedule + sparse contribs.
+"""Field-mode downsample (L5): bin sparse contribs from remap artifacts.
 
-Builds (or reuses) a per-SCC shift schedule, writes ``template_group_shifts``,
-bins unique ``(skycell, sx, sy)`` contribs with hybrid Exact L4a (R=1) plus
-optional abutting-border Exact (L4b-lite), and updates the event frames CSV
-``group_id`` from the signature schedule. Set ``apply_hybrid_exact=False`` to
-fall back to frozen-regmap + integer PS1 data roll.
+Reads shift schedule, group artifacts, and optional ``exact_cache/`` from
+``remap/oversampling_{N}/`` (or legacy colocated ``templates/`` during
+migration) and writes ``contribs/`` under ``templates/oversampling_{N}/``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import shutil
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
 from astropy.io import fits
 
-from syndiff_pipeline.common.wcs_grouping import (
-    FRAMES_CSV_BASENAME,
-    LEGACY_FRAMES_CSV_BASENAME,
-    _frames_csv_path,
+from syndiff_pipeline.common.wcs_grouping import _frames_csv_path
+from syndiff_pipeline.template_creation.processing.field_remap import (
+    REMAP_MANIFEST_NAME,
+    _find_regmap,
+    _mapping_scc_dir,
+    _master_pixels2skycells_path,
+    exact_cache_dir_for_read_root,
+    load_remap_shifts_df,
+    remap_root,
+    resolve_remap_read_root,
 )
 from syndiff_pipeline.template_creation.processing.field_templates import (
     FieldManifest,
     assemble_group_from_contribs,
+    contrib_basename,
     contrib_path,
-    field_store_lock,
     templates_root,
     verify_field_store,
     write_contrib,
@@ -42,268 +45,22 @@ from syndiff_pipeline.template_creation.processing.shift_schedule import (
 
 log = logging.getLogger(__name__)
 
-
-def _load_or_copy_shift_schedule(
-    event_dir: Path,
-    store_root: Path,
-) -> ShiftSchedule | None:
-    """Prefer event ``shift_schedule.npz``; fall back to store copy. None if missing."""
-    event_npz = event_dir / "shift_schedule.npz"
-    store_npz = store_root / "shift_schedule.npz"
-    src = event_npz if event_npz.is_file() else store_npz
-    if not src.is_file():
-        return None
-    if src != store_npz:
-        with field_store_lock(store_root):
-            shutil.copy2(src, store_npz)
-            sidecar = src.with_suffix(".json")
-            if sidecar.is_file():
-                shutil.copy2(sidecar, store_npz.with_suffix(".json"))
-    return ShiftSchedule.load(store_npz)
+# Re-export mapping helpers for existing tests/callers.
+__all__ = [
+    "_find_regmap",
+    "_mapping_scc_dir",
+    "_master_pixels2skycells_path",
+    "assemble_field_group_count",
+    "assemble_field_group_flux",
+    "run_field_downsample_scc",
+]
 
 
-def _skycell_csv_path(
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    *,
-    oversampling_factor: int = 1,
-) -> Path:
-    scc = _mapping_scc_dir(
-        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
-    )
-    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
-    return scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
-
-
-def _build_shift_schedule_for_scc(
-    *,
-    store_root: Path,
-    data_root: Path,
-    mapping_root: Path,
-    ffi_dir: str | Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    ref_ffi_path: str | Path,
-    oversampling_factor: int = 1,
-) -> ShiftSchedule:
-    """Build ``shift_schedule.npz`` from all SCC FFIs (no event handoff)."""
-    from syndiff_pipeline.common.download import list_local_ffis
-    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
-    from syndiff_pipeline.common.wcs_header_cache import (
-        load_or_build_wcs_cache,
-        wcs_cache_path,
-        wcs_from_cached_row,
-    )
-    from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
-        RELEVANT_WCS_KEYS,
-        load_tess_wcs,
-    )
-    from syndiff_pipeline.template_creation.processing.shift_schedule import (
-        build_skycell_shift_schedule,
-    )
-
-    ref_path = Path(ref_ffi_path).expanduser()
-    if not ref_path.is_file():
-        raise FileNotFoundError(f"reference_ffi_path missing: {ref_path}")
-    ref_wcs, _ = load_tess_wcs(ref_path)
-
-    csv_path = _skycell_csv_path(
-        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
-    )
-    if not csv_path.is_file():
-        raise FileNotFoundError(f"skycell catalog missing: {csv_path}")
-    usecols = ["NAME", "RA", "DEC"] + RELEVANT_WCS_KEYS
-    skycell_df = pd.read_csv(csv_path, usecols=usecols)
-
-    paths = sorted(list_local_ffis(str(ffi_dir), sector, camera, ccd))
-    if not paths:
-        raise FileNotFoundError(f"No FFIs under {ffi_dir!r}")
-
-    cache = load_or_build_wcs_cache(
-        paths,
-        wcs_cache_path(data_root, sector, camera, ccd),
-        open_fits=open_fits_memmap,
-    )
-    frame_wcs: list[tuple[str, Any]] = []
-    btjd_list: list[float] = []
-    for p in paths:
-        name = Path(p).name
-        if name in cache.index:
-            try:
-                frame_wcs.append((name, wcs_from_cached_row(cache.loc[name])))
-            except Exception as exc:
-                log.warning("WCS reconstruct failed for %s: %s", name, exc)
-                frame_wcs.append((name, None))
-        else:
-            frame_wcs.append((name, None))
-        row = cache.loc[name] if name in cache.index else None
-        if row is not None and "DATE-OBS" in row.index and pd.notna(row["DATE-OBS"]):
-            try:
-                from astropy.time import Time
-
-                btjd_list.append(float(Time(str(row["DATE-OBS"]), format="isot", scale="utc").btjd))
-            except Exception:
-                btjd_list.append(float("nan"))
-        else:
-            btjd_list.append(float("nan"))
-
-    btjd = np.asarray(btjd_list, dtype=np.float64)
-    schedule = build_skycell_shift_schedule(
-        frame_wcs, skycell_df, ref_wcs, btjd=btjd
-    )
-    schedule.meta = dict(schedule.meta or {})
-    schedule.meta["source"] = "built_from_scc_ffis"
-    schedule.meta["reference_ffi"] = str(ref_path.resolve())
-    with field_store_lock(store_root):
-        schedule.save(store_root / "shift_schedule.npz")
-    log.info(
-        "Built SCC shift_schedule.npz (%d frames × %d skycells)",
-        schedule.sx_int.shape[0],
-        schedule.sx_int.shape[1],
-    )
-    return schedule
-
-
-def _build_shift_schedule_for_event(
-    *,
-    event_dir: Path,
-    store_root: Path,
-    data_root: Path,
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    oversampling_factor: int = 1,
-) -> ShiftSchedule:
-    """Build ``shift_schedule.npz`` from WCS cache + skycell catalog when missing."""
-    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
-    from syndiff_pipeline.common.wcs_header_cache import (
-        load_or_build_wcs_cache,
-        wcs_cache_path,
-        wcs_from_cached_row,
-    )
-    from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
-        RELEVANT_WCS_KEYS,
-        load_tess_wcs,
-    )
-    from syndiff_pipeline.template_creation.processing.shift_schedule import (
-        build_skycell_shift_schedule,
-    )
-
-    frames_path = Path(_frames_csv_path(event_dir))
-    if not frames_path.is_file():
-        raise FileNotFoundError(f"Cannot build shift schedule without {frames_path}")
-    frames_df = pd.read_csv(frames_path)
-    if "path" not in frames_df.columns:
-        raise KeyError(f"{frames_path} missing 'path' column")
-
-    from syndiff_pipeline.common.wcs_grouping import _event_job_path
-
-    job_path = Path(_event_job_path(event_dir))
-    if not job_path.is_file():
-        raise FileNotFoundError(f"Cannot build shift schedule without {job_path}")
-    job = json.loads(job_path.read_text())
-    ref_path = Path(str(job.get("reference_ffi_path") or "")).expanduser()
-    if not ref_path.is_file():
-        raise FileNotFoundError(
-            f"reference_ffi_path missing or not a file: {ref_path} (from {job_path})"
-        )
-    ref_wcs, _ = load_tess_wcs(ref_path)
-
-    csv_path = _skycell_csv_path(
-        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
-    )
-    if not csv_path.is_file():
-        raise FileNotFoundError(f"skycell catalog missing: {csv_path}")
-    usecols = ["NAME", "RA", "DEC"] + RELEVANT_WCS_KEYS
-    skycell_df = pd.read_csv(csv_path, usecols=usecols)
-
-    paths = [Path(str(p)) for p in frames_df["path"].tolist()]
-    cache = load_or_build_wcs_cache(
-        paths,
-        wcs_cache_path(data_root, sector, camera, ccd),
-        open_fits=open_fits_memmap,
-    )
-    frame_wcs: list[tuple[str, Any]] = []
-    for p in paths:
-        name = p.name
-        if name in cache.index:
-            try:
-                frame_wcs.append((name, wcs_from_cached_row(cache.loc[name])))
-            except Exception as exc:
-                log.warning("WCS reconstruct failed for %s: %s", name, exc)
-                frame_wcs.append((name, None))
-        else:
-            frame_wcs.append((name, None))
-
-    btjd = None
-    if "btjd" in frames_df.columns:
-        btjd = frames_df["btjd"].to_numpy(dtype=np.float64)
-
-    schedule = build_skycell_shift_schedule(
-        frame_wcs, skycell_df, ref_wcs, btjd=btjd
-    )
-    schedule.meta = dict(schedule.meta or {})
-    schedule.meta["source"] = "built_from_wcs_cache"
-    schedule.meta["reference_ffi"] = str(ref_path)
-    with field_store_lock(store_root):
-        schedule.save(store_root / "shift_schedule.npz")
-        shutil.copy2(store_root / "shift_schedule.npz", event_dir / "shift_schedule.npz")
-        store_json = store_root / "shift_schedule.json"
-        if store_json.is_file():
-            shutil.copy2(store_json, event_dir / "shift_schedule.json")
-    log.info(
-        "Built shift_schedule.npz (%d frames × %d skycells) for field downsample",
-        schedule.sx_int.shape[0],
-        schedule.sx_int.shape[1],
-    )
-    return schedule
-
-
-def _ensure_shift_schedule(
-    *,
-    event_dir: Path,
-    store_root: Path,
-    data_root: Path,
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    oversampling_factor: int = 1,
-    ffi_dir: str | Path | None = None,
-    ref_ffi_path: str | Path | None = None,
-    scc_only: bool = False,
-) -> ShiftSchedule:
-    existing = _load_or_copy_shift_schedule(event_dir, store_root)
-    if existing is not None:
-        return existing
-    if scc_only or ref_ffi_path is not None:
-        if ref_ffi_path is None or ffi_dir is None:
-            raise ValueError("SCC shift schedule requires ref_ffi_path and ffi_dir")
-        return _build_shift_schedule_for_scc(
-            store_root=store_root,
-            data_root=data_root,
-            mapping_root=mapping_root,
-            ffi_dir=ffi_dir or "",
-            sector=sector,
-            camera=camera,
-            ccd=ccd,
-            ref_ffi_path=ref_ffi_path,
-            oversampling_factor=oversampling_factor,
-        )
-    return _build_shift_schedule_for_event(
-        event_dir=event_dir,
-        store_root=store_root,
-        data_root=data_root,
-        mapping_root=mapping_root,
-        sector=sector,
-        camera=camera,
-        ccd=ccd,
-        oversampling_factor=oversampling_factor,
-    )
+def _load_remap_manifest(read_root: Path) -> dict[str, Any]:
+    path = read_root / REMAP_MANIFEST_NAME
+    if path.is_file():
+        return json.loads(path.read_text())
+    return {}
 
 
 def _update_frames_group_ids(event_dir: Path, group_id_per_frame: np.ndarray) -> None:
@@ -312,107 +69,10 @@ def _update_frames_group_ids(event_dir: Path, group_id_per_frame: np.ndarray) ->
     n = min(len(frames), len(group_id_per_frame))
     if "group_id" not in frames.columns:
         frames["group_id"] = -1
-    # Positional assignment (label-based .loc slicing is fragile if the CSV
-    # ever carries a non-default index or n == 0).
     col = frames.columns.get_loc("group_id")
     if n:
         frames.iloc[:n, col] = np.asarray(group_id_per_frame[:n], dtype=np.int64)
     frames.to_csv(frames_path, index=False)
-
-
-def _mapping_scc_dir(
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    *,
-    oversampling_factor: int = 1,
-) -> Path:
-    """Resolve the SCC mapping directory for the requested oversampling.
-
-    Post-migration ``mapping_root`` is already the flat oversampling leaf
-    (``…/mapping/oversampling_{N}/``). Legacy layouts nest ``sector_*/camera_*/ccd_*``.
-    """
-    root = Path(mapping_root)
-    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
-    flat_master = (
-        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.fz"
-    )
-    if flat_master.is_file() or any(root.glob("tess_s*_master_pixels2skycells*.fits.fz")):
-        return root
-    scc_tail = Path(f"sector_{int(sector):04d}") / f"camera_{int(camera)}" / f"ccd_{int(ccd)}"
-    # Caller may already pass the SCC directory.
-    if root.name == f"ccd_{int(ccd)}" and (
-        root / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells.fits.fz"
-    ).is_file():
-        return root
-    if root.name == f"ccd_{int(ccd)}" and any(root.glob("tess_s*_master_pixels2skycells*.fits.fz")):
-        return root
-    if int(oversampling_factor) > 1 and root.name != f"oversampling_{int(oversampling_factor)}":
-        root = root / f"oversampling_{int(oversampling_factor)}"
-    nested = root / scc_tail
-    if nested.is_dir():
-        return nested
-    return root
-
-
-def _find_regmap(
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    skycell: str,
-    *,
-    oversampling_factor: int = 1,
-) -> Path:
-    """Locate one skycell regmap; never cross oversampling trees.
-
-    Per-skycell files use unpadded sector (``tess_s20_...``), matching
-    ``pancakes.py``. Master maps use zero-padded sector.
-    """
-    scc = _mapping_scc_dir(
-        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
-    )
-    name = str(skycell).strip()
-    if not name.startswith("skycell."):
-        name = f"skycell.{name}"
-    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
-    candidates = [
-        scc / f"tess_s{int(sector)}_{camera}_{ccd}_{name}{suffix}.fits.fz",
-        scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_{name}{suffix}.fits.fz",
-        scc / f"tess_s{int(sector)}_{camera}_{ccd}_{name}{suffix}.fits",
-        scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_{name}{suffix}.fits",
-    ]
-    for path in candidates:
-        if path.is_file():
-            return path
-    matches = sorted(p for p in scc.glob(f"*_{name}{suffix}.fits*") if p.is_file())
-    if matches:
-        return matches[0]
-    raise FileNotFoundError(
-        f"No regmap for {name} under {scc} (oversampling_factor={oversampling_factor})"
-    )
-
-
-def _master_pixels2skycells_path(
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    *,
-    oversampling_factor: int = 1,
-) -> Path:
-    scc = _mapping_scc_dir(
-        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
-    )
-    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
-    path = scc / f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.fz"
-    if path.is_file():
-        return path
-    matches = sorted(scc.glob("tess_*_master_pixels2skycells*.fits.fz"))
-    if matches:
-        return matches[0]
-    raise FileNotFoundError(f"master pixels2skycells not found under {scc}")
 
 
 def _bin_skycell_contrib(
@@ -426,12 +86,7 @@ def _bin_skycell_contrib(
     roi_bounds: tuple[int, int, int, int],
     ignore_mask: int,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Sparse bin one skycell contribution.
-
-    Production linear convention: ``assignment`` is frozen and PS1 data/mask are
-    rolled by ``(+sy, +sx)``. Hybrid Exact convention: pass an already-shifted
-    hybrid ``assignment`` with ``sx_int=sy_int=0`` (unshifted PS1 data).
-    """
+    """Sparse bin one skycell contribution."""
     from syndiff_pipeline.template_creation.processing.downsample import (
         _aggregate_sorted_groups,
     )
@@ -485,78 +140,6 @@ def _bin_skycell_contrib(
     )
 
 
-def _frame_index_for_shift(
-    schedule: ShiftSchedule,
-    skycell: str,
-    sx_int: int,
-    sy_int: int,
-) -> int | None:
-    """First valid frame whose schedule matches ``(skycell, sx, sy)``."""
-    names = np.asarray(schedule.skycell_names).astype(str)
-    hits = np.where(names == str(skycell))[0]
-    if hits.size == 0:
-        return None
-    c = int(hits[0])
-    valid = np.asarray(schedule.frame_valid).astype(bool)
-    match = (
-        valid
-        & (schedule.sx_int[:, c] == int(sx_int))
-        & (schedule.sy_int[:, c] == int(sy_int))
-    )
-    idxs = np.flatnonzero(match)
-    if idxs.size == 0:
-        return None
-    return int(idxs[0])
-
-
-def _load_frame_wcs(frames_df: pd.DataFrame, frame_index: int) -> Any:
-    from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
-        load_tess_wcs,
-    )
-
-    path = Path(str(frames_df.iloc[int(frame_index)]["path"]))
-    wcs, _ = load_tess_wcs(path)
-    return wcs
-
-
-def _skycell_catalog_row(
-    mapping_root: Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    skycell: str,
-    *,
-    oversampling_factor: int = 1,
-) -> pd.Series:
-    from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import (
-        RELEVANT_WCS_KEYS,
-    )
-
-    csv_path = _skycell_csv_path(
-        mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
-    )
-    usecols = ["NAME", "RA", "DEC"] + RELEVANT_WCS_KEYS
-    df = pd.read_csv(csv_path, usecols=usecols)
-    rows = df[df["NAME"].astype(str) == str(skycell)]
-    if rows.empty:
-        raise KeyError(f"skycell {skycell} not in {csv_path}")
-    return rows.iloc[0]
-
-
-def _master_skycell_id_map(
-    master_path: Path,
-) -> tuple[np.ndarray, dict[str, int]]:
-    with fits.open(master_path) as hdul:
-        master = np.asarray(hdul[1].data)
-        name_to_id: dict[str, int] = {}
-        if len(hdul) > 2:
-            tab = hdul[2].data
-            name_to_id = {
-                str(n).strip(): int(i) for n, i in zip(tab["SKYCELL"], tab["SKYCIND"])
-            }
-    return master, name_to_id
-
-
 def _load_zarr_skycell(zstore, skycell: str) -> tuple[np.ndarray, np.ndarray]:
     data = np.asarray(zstore[f"{skycell}_data"][:], dtype=np.float32)
     try:
@@ -602,11 +185,14 @@ def run_field_downsample_scc(
     oversampling_factor: int = 1,
     ignore_mask_bits: list[int] | None = None,
     grouping_quantum_ps1_px: float = 1.0,
+    cache_quantum_ps1_px: float = 1.0,
+    keying: str = "absolute",
     materialize_fits: bool = False,
     n_jobs: int = 1,
     update_frames_csv: bool = True,
     crop_filter_skycells: bool = True,
     store_root: str | Path | None = None,
+    remap_store_root: str | Path | None = None,
     apply_hybrid_exact: bool = True,
     hybrid_R: int = 1,
     include_abutting_border_exact: bool = True,
@@ -617,41 +203,24 @@ def run_field_downsample_scc(
     ref_ffi_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """
-    Build/reuse the SCC field store and point the event at it.
+    Bin sparse contribs into the SCC templates store (L5 only).
 
-    Returns a result dict with ``output_dir`` = SCC store root.
+    Requires remap artifacts under ``remap/oversampling_{N}/`` (or legacy
+    colocated schedule/cache under ``templates/``). Does not compute Exact
+    remaps; reads ``exact_cache/`` and merges when ``apply_hybrid_exact`` is set.
 
-    Parameters
-    ----------
-    crop_filter_skycells
-        If True (default), only build contribs for skycells intersecting
-        ``roi_bounds``.
-    store_root
-        Optional override for the field store path (tests/smoke).
-    apply_hybrid_exact
-        If True (default), Exact-patch the L4a R=1 seam/rim under a frame WCS
-        that realizes each ``(skycell, sx, sy)``, then bin with hybrid
-        assignment (unshifted PS1). If False, use frozen map + data roll.
-    hybrid_R
-        Dilation radius for the L4a recompute mask (design default 1).
-    include_abutting_border_exact
-        Expand Exact TESS-id set with this skycell's master abutting-border
-        pixels (L4b-lite / neighbour-rim under the Type-I realizing frame WCS).
-    rebuild_field_store
-        If True, overwrite existing contrib NPZs (and Exact caches for those
-        keys). Default False preserves the shared SCC store across events /
-        force-reruns.
+    Parameters ``ffi_dir`` and ``ref_ffi_path`` are accepted for dispatch
+    compatibility but ignored (remap must run separately).
     """
+    import os as _os
     import zarr
     from joblib import Parallel, delayed
 
     from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
-        abutting_border_tess_ids,
-        build_hybrid_assignment_with_exact,
+        hybrid_assignment_from_exact_cache,
     )
-    from syndiff_pipeline.template_creation.processing.field_templates import (
-        contrib_basename,
-    )
+
+    del ffi_dir, ref_ffi_path  # remap stage owns schedule build inputs
 
     event_dir = Path(event_dir)
     data_root = Path(data_root)
@@ -659,37 +228,39 @@ def run_field_downsample_scc(
     store = Path(store_root) if store_root is not None else templates_root(
         data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
     )
+    remap_store = (
+        Path(remap_store_root)
+        if remap_store_root is not None
+        else remap_root(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor)
+    )
     store.mkdir(parents=True, exist_ok=True)
     (store / "contribs").mkdir(exist_ok=True)
-    exact_cache_dir = store / "exact_cache"
-    if apply_hybrid_exact:
-        exact_cache_dir.mkdir(exist_ok=True)
 
-    schedule = _ensure_shift_schedule(
-        event_dir=event_dir,
-        store_root=store,
-        data_root=data_root,
-        mapping_root=mapping_root,
-        sector=sector,
-        camera=camera,
-        ccd=ccd,
-        oversampling_factor=oversampling_factor,
-        ffi_dir=ffi_dir,
-        ref_ffi_path=ref_ffi_path,
-        scc_only=scc_only,
-    )
+    remap_read, _legacy = resolve_remap_read_root(remap_store, store)
+    remap_manifest = _load_remap_manifest(remap_read)
+    if remap_manifest:
+        apply_hybrid_exact = bool(
+            remap_manifest.get("apply_hybrid_exact", apply_hybrid_exact)
+        )
+        hybrid_R = int(remap_manifest.get("hybrid_R", hybrid_R))
+        include_abutting_border_exact = bool(
+            remap_manifest.get("include_abutting_border_exact", include_abutting_border_exact)
+        )
+        cache_quantum_ps1_px = float(
+            remap_manifest.get("cache_quantum_ps1_px", cache_quantum_ps1_px)
+        )
+        keying = str(remap_manifest.get("keying", keying))
+
+    schedule_path = remap_read / "shift_schedule.npz"
+    if not schedule_path.is_file():
+        raise FileNotFoundError(f"shift schedule missing under remap read root {remap_read}")
+    schedule = ShiftSchedule.load(schedule_path)
+    shifts_df = load_remap_shifts_df(remap_read)
     assignment = assign_groups_from_schedule(
         schedule,
         grouping_quantum_ps1_px=grouping_quantum_ps1_px,
-        cache_quantum_ps1_px=1.0,
-        keying="absolute",
-    )
-    write_group_artifacts(
-        assignment,
-        store,
-        geometry_mode="field",
-        grouping_quantum_ps1_px=grouping_quantum_ps1_px,
-        cache_quantum_ps1_px=1.0,
+        cache_quantum_ps1_px=cache_quantum_ps1_px,
+        keying=keying,
     )
     if not scc_only:
         write_group_artifacts(
@@ -697,10 +268,12 @@ def run_field_downsample_scc(
             event_dir,
             geometry_mode="field",
             grouping_quantum_ps1_px=grouping_quantum_ps1_px,
-            cache_quantum_ps1_px=1.0,
+            cache_quantum_ps1_px=cache_quantum_ps1_px,
         )
     if update_frames_csv and not scc_only:
         _update_frames_group_ids(event_dir, assignment.group_id_per_frame)
+
+    exact_cache_dir = exact_cache_dir_for_read_root(remap_read)
 
     ignore_mask = 0
     for bit in ignore_mask_bits or [12]:
@@ -723,7 +296,7 @@ def run_field_downsample_scc(
 
     keys = {
         (str(r.skycell), int(r.sx_int), int(r.sy_int))
-        for r in assignment.shifts_df.itertuples(index=False)
+        for r in shifts_df.itertuples(index=False)
     }
     master_path = _master_pixels2skycells_path(
         mapping_root,
@@ -732,10 +305,6 @@ def run_field_downsample_scc(
         ccd,
         oversampling_factor=oversampling_factor,
     )
-    master_arr = None
-    name_to_id: dict[str, int] = {}
-    if crop_filter_skycells or (apply_hybrid_exact and include_abutting_border_exact):
-        master_arr, name_to_id = _master_skycell_id_map(master_path)
     if crop_filter_skycells:
         allowed = _skycells_in_crop(master_path, roi_bounds)
         before = len(keys)
@@ -747,8 +316,6 @@ def run_field_downsample_scc(
             len(allowed),
         )
 
-    # Condor parity: stage the ROI skycell regmaps to local scratch so workers
-    # read them off local disk instead of shared NFS (auto-enabled on Condor).
     from syndiff_pipeline.template_creation.processing.downsample import (
         resolve_stage_regmaps_to_scratch,
         stage_regmap_files_to_scratch,
@@ -760,8 +327,19 @@ def run_field_downsample_scc(
         for sc in sorted({k[0] for k in keys}):
             try:
                 sky_reg.append(
-                    (sc, str(_find_regmap(mapping_root, sector, camera, ccd, sc,
-                                          oversampling_factor=oversampling_factor)))
+                    (
+                        sc,
+                        str(
+                            _find_regmap(
+                                mapping_root,
+                                sector,
+                                camera,
+                                ccd,
+                                sc,
+                                oversampling_factor=oversampling_factor,
+                            )
+                        ),
+                    )
                 )
             except FileNotFoundError:
                 continue
@@ -776,23 +354,11 @@ def run_field_downsample_scc(
             scratch_regmaps = {sc: lp for (sc, _), lp in zip(sky_reg, local_paths)}
             log.info(
                 "Staged %d/%d ROI regmaps to scratch %s in %.1fs",
-                n_staged, len(sky_reg), scratch_dir, elapsed,
+                n_staged,
+                len(sky_reg),
+                scratch_dir,
+                elapsed,
             )
-
-    frames_df = pd.read_csv(event_dir / "syndiff_ffi_frames.csv")
-    skycell_row_cache: dict[str, pd.Series] = {}
-
-    def _skycell_row(skycell: str) -> pd.Series:
-        if skycell not in skycell_row_cache:
-            skycell_row_cache[skycell] = _skycell_catalog_row(
-                mapping_root,
-                sector,
-                camera,
-                ccd,
-                skycell,
-                oversampling_factor=oversampling_factor,
-            )
-        return skycell_row_cache[skycell]
 
     def _one(skycell: str, sx_i: int, sy_i: int) -> str:
         out = contrib_path(store, skycell, sx_i, sy_i)
@@ -819,69 +385,42 @@ def run_field_downsample_scc(
         use_hybrid = bool(apply_hybrid_exact) and not (int(sx_i) == 0 and int(sy_i) == 0)
         binned = None
         if use_hybrid:
-            frame_i = _frame_index_for_shift(schedule, skycell, sx_i, sy_i)
-            if frame_i is None:
-                log.warning(
-                    "No frame WCS for %s sx=%+d sy=%+d; falling back to data-roll",
+            cache_name = contrib_basename(skycell, sx_i, sy_i).replace(".npz", "_exact.npz")
+            cache_path = exact_cache_dir / cache_name
+            try:
+                hybrid_map, meta = hybrid_assignment_from_exact_cache(
+                    assignment_map,
+                    sx_i,
+                    sy_i,
+                    cache_path,
+                    hybrid_R=int(hybrid_R),
+                )
+                log.debug(
+                    "L5 hybrid %s sx=%+d sy=%+d cache=%s",
                     skycell,
                     sx_i,
                     sy_i,
+                    meta.get("cache_hit"),
+                )
+                binned = _bin_skycell_contrib(
+                    assignment=hybrid_map,
+                    ps1_data=ps1_data,
+                    ps1_mask=ps1_mask,
+                    sx_int=0,
+                    sy_int=0,
+                    base_tess_shape=base_tess_shape,
+                    roi_bounds=roi_bounds,
+                    ignore_mask=ignore_mask,
+                )
+            except (FileNotFoundError, RuntimeError) as exc:
+                log.warning(
+                    "L5 exact-cache miss for %s sx=%+d sy=%+d (%s); data-roll fallback",
+                    skycell,
+                    sx_i,
+                    sy_i,
+                    exc,
                 )
                 use_hybrid = False
-            else:
-                try:
-                    tess_wcs = _load_frame_wcs(frames_df, frame_i)
-                    extra = None
-                    if include_abutting_border_exact and master_arr is not None:
-                        sid = name_to_id.get(str(skycell))
-                        if sid is not None:
-                            extra = abutting_border_tess_ids(master_arr, sid)
-                    cache_name = contrib_basename(skycell, sx_i, sy_i).replace(
-                        ".npz", "_exact.npz"
-                    )
-                    cache_path = exact_cache_dir / cache_name
-                    if rebuild_field_store and cache_path.is_file():
-                        cache_path.unlink()
-                    hybrid_map, meta = build_hybrid_assignment_with_exact(
-                        assignment_map,
-                        sx_i,
-                        sy_i,
-                        tess_wcs,
-                        _skycell_row(skycell),
-                        data_shape=base_tess_shape,
-                        hybrid_R=int(hybrid_R),
-                        oversampling_factor=oversampling_factor,
-                        extra_tess_ids=extra,
-                        exact_cache_path=cache_path,
-                    )
-                    log.debug(
-                        "L4a hybrid %s sx=%+d sy=%+d mask=%s tids=%s cache=%s",
-                        skycell,
-                        sx_i,
-                        sy_i,
-                        meta.get("n_mask"),
-                        meta.get("n_tess_ids"),
-                        meta.get("cache_hit"),
-                    )
-                    binned = _bin_skycell_contrib(
-                        assignment=hybrid_map,
-                        ps1_data=ps1_data,
-                        ps1_mask=ps1_mask,
-                        sx_int=0,
-                        sy_int=0,
-                        base_tess_shape=base_tess_shape,
-                        roi_bounds=roi_bounds,
-                        ignore_mask=ignore_mask,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "L4a Exact failed for %s sx=%+d sy=%+d (%s); data-roll fallback",
-                        skycell,
-                        sx_i,
-                        sy_i,
-                        exc,
-                    )
-                    use_hybrid = False
 
         if not use_hybrid:
             binned = _bin_skycell_contrib(
@@ -921,17 +460,8 @@ def run_field_downsample_scc(
 
     key_list = sorted(keys)
     n_jobs_eff = max(1, min(int(n_jobs), len(key_list) or 1))
-    # Hybrid Exact workers each hold ~2 GB (frozen regmap + full-chip tpix +
-    # process_skycell_pixel_mapping scratch). Cap parallelism to keep memory
-    # bounded, but 4 badly under-utilizes large multi-core hosts; allow up to
-    # HYBRID_MAX_JOBS (override with SYNDIFF_HYBRID_MAX_JOBS) so a 1024-box crop
-    # (~4k keys) finishes in tens of minutes instead of hours.
     if apply_hybrid_exact:
-        import os as _os
-
         hybrid_cap = int(_os.environ.get("SYNDIFF_HYBRID_MAX_JOBS", "24"))
-        # Also clamp to the CPUs actually available (a Condor slot's cgroup
-        # cpuset) so a hybrid run cannot oversubscribe its request_cpus.
         avail = len(_os.sched_getaffinity(0)) if hasattr(_os, "sched_getaffinity") else (
             _os.cpu_count() or hybrid_cap
         )
@@ -962,6 +492,7 @@ def run_field_downsample_scc(
     sidecar = {
         "schema_version": 1,
         "store_root": str(store),
+        "remap_root": str(remap_store),
         "zarr_path": str(zarr_path),
         "base_tess_shape": list(base_tess_shape),
         "roi_bounds": list(roi_bounds),
@@ -985,8 +516,6 @@ def run_field_downsample_scc(
     )
     if not v["ok"]:
         raise RuntimeError(f"field store incomplete: {v['reasons']}")
-    # Content gate: at least one required key must carry flux (crop-edge keys
-    # may legitimately be empty NPZs).
     nonempty = 0
     for skycell, sx_i, sy_i in keys:
         p = contrib_path(store, skycell, sx_i, sy_i)
@@ -1005,26 +534,24 @@ def run_field_downsample_scc(
             f"(regmap/ROI mismatch?)"
         )
 
-    # Per-event completeness marker: the SCC store is shared across events, so
-    # each event records exactly the crop-filtered keys IT required. Written
-    # only after the store verify passes, so its presence means this event's
-    # field downsample completed. verify_downsample_field_mode checks against
-    # this (not the full-chip template_group_shifts, which would false-fail a
-    # cropped run). See verify.py::verify_downsample_field_mode.
-    (event_dir / "field_contrib_keys.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "store_root": str(store),
-                "n_contrib_keys": len(keys),
-                "keys": [[str(s), int(x), int(y)] for s, x, y in key_list],
-            }
+    if not scc_only:
+        event_dir.mkdir(parents=True, exist_ok=True)
+        (event_dir / "field_contrib_keys.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "store_root": str(store),
+                    "remap_root": str(remap_store),
+                    "n_contrib_keys": len(keys),
+                    "keys": [[str(s), int(x), int(y)] for s, x, y in key_list],
+                }
+            )
+            + "\n"
         )
-        + "\n"
-    )
 
     return {
         "output_dir": str(store),
+        "remap_root": str(remap_store),
         "n_groups": len(assignment.groups),
         "n_contrib_keys": len(keys),
         "n_contribs_written": n_written,
@@ -1036,7 +563,6 @@ def run_field_downsample_scc(
     }
 
 
-
 def _group_shifts_present(
     store_root: str | Path,
     shifts_df: pd.DataFrame,
@@ -1044,8 +570,6 @@ def _group_shifts_present(
     *,
     present_only: bool,
 ) -> list[tuple[str, int, int]]:
-    """The group's ``(skycell, sx, sy)`` shifts, optionally restricted to keys
-    whose contrib NPZ exists (cropped stores only materialize their ROI skycells)."""
     rows = shifts_df.loc[shifts_df["group_id"] == int(group_id)]
     if rows.empty:
         raise KeyError(f"group_id={group_id} not in template_group_shifts")
@@ -1075,14 +599,6 @@ def assemble_field_group_flux(
     crop: tuple[int, int, int, int] | None = None,
     present_only: bool | None = None,
 ) -> np.ndarray:
-    """Assemble mean flux for one group_id (optionally cropped).
-
-    ``present_only`` restricts to keys whose contrib NPZ exists; it defaults to
-    ``crop is not None`` so a cropped assemble tolerates a crop-only store, while
-    a full-FFI assemble (``crop=None``) requires every key by default. Pass
-    ``present_only=True`` to assemble a full-FFI template from a cropped store
-    (missing skycells simply stay zero).
-    """
     if present_only is None:
         present_only = crop is not None
     shifts = _group_shifts_present(
@@ -1105,11 +621,6 @@ def assemble_field_group_count(
     crop: tuple[int, int, int, int] | None = None,
     present_only: bool | None = None,
 ) -> np.ndarray:
-    """Assemble the per-TESS-pixel PS1 hit COUNT for one group_id (optionally cropped).
-
-    This is the same COUNT plane a linear template FITS carries, used by the
-    ``shared_mask`` PS1-coverage mask (``COUNT < ps1_min_hit_count``).
-    """
     if present_only is None:
         present_only = crop is not None
     shifts = _group_shifts_present(

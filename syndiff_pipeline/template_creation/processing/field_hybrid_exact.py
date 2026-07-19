@@ -151,6 +151,31 @@ def build_hybrid_assignment_with_exact(
     return hybrid, meta
 
 
+def hybrid_assignment_from_exact_cache(
+    frozen_tid: np.ndarray,
+    sx_int: int,
+    sy_int: int,
+    exact_cache_path: str | Path,
+    *,
+    hybrid_R: int = 1,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Build hybrid assignment from a pre-built Exact cache (L5 downsample only)."""
+    cache_path = Path(exact_cache_path)
+    meta: dict[str, Any] = {"cache_hit": False, "cache_path": str(cache_path)}
+    if not cache_path.is_file():
+        raise FileNotFoundError(f"exact cache missing: {cache_path}")
+    try:
+        with np.load(cache_path) as z:
+            exact = np.asarray(z["exact_tid"], dtype=np.int32)
+        meta["cache_hit"] = True
+    except Exception as exc:
+        raise RuntimeError(f"corrupt exact cache {cache_path.name}: {exc}") from exc
+    hybrid, _ = build_l4a_hybrid_assignment(
+        frozen_tid, sx_int, sy_int, exact_tid=exact, hybrid_R=hybrid_R
+    )
+    return hybrid, meta
+
+
 def abutting_border_tess_ids(
     master: np.ndarray,
     skycell_id: int,
