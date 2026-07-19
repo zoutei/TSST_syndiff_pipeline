@@ -44,6 +44,8 @@ _RE_TESS_PROGRESS = re.compile(r"FFI download progress: (\d+)/(\d+)")
 _RE_TESS_TQDM_FRAC = re.compile(r"(\d+)/(\d+)\s*\[")
 _RE_TESS_TQDM_PCT = re.compile(r"(\d+)%\|")
 
+_RE_MAP_SKYCELLS = re.compile(r"Processing skycells:.*?(\d+)/(\d+)")
+
 _RE_HOTPANTS_FRAMES = re.compile(
     r"hotpants \[(\w+)\] round \d+: (\d+)/(\d+) frames succeeded"
 )
@@ -165,15 +167,17 @@ def _phase_from_text(text: str) -> StageProgress | None:
     Returns
     -------
     StageProgress | None"""
-    last_line = ""
+    last_label: str | None = None
     for line in text.splitlines():
         stripped = line.strip()
-        if stripped:
-            last_line = stripped
-    for needle, label in _PHASE_LINES:
-        if needle in last_line or needle in text:
-            return StageProgress(label, "phase")
-    return None
+        if not stripped:
+            continue
+        for needle, label in _PHASE_LINES:
+            if needle in stripped:
+                last_label = label
+    if last_label is None:
+        return None
+    return StageProgress(last_label, "phase")
 
 
 def _parse_ps1_download(text: str) -> StageProgress | None:
@@ -355,6 +359,9 @@ def _parse_mapping(text: str) -> StageProgress | None:
     Returns
     -------
     StageProgress | None"""
+    match = _last_match(_RE_MAP_SKYCELLS, text)
+    if match:
+        return StageProgress(f"{match.group(1)}/{match.group(2)}", "fraction")
     return _phase_from_text(text)
 
 
