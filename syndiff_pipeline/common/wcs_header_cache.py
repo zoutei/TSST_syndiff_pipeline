@@ -3,8 +3,8 @@ wcs_header_cache.py
 ====================
 Shared, SCC-scoped cache of per-FFI WCS header keywords.
 
-Opening a TESS FFI (``.fits.gz``, ~30 MB) just to read its WCS header is
-CPU-bound on gzip decompression, not I/O latency (an OS-page-cache-warm
+Opening a TESS FFI (``.fits.fz`` / ``.fits.gz``, tens of MB) just to read its
+WCS header is CPU-bound on decompression, not I/O latency (an OS-page-cache-warm
 re-open of the same file is no faster than a cold one) -- roughly
 130-160 ms/file regardless of how few bytes are actually needed. The ~80
 WCS-relevant keywords (CRVAL/CRPIX/CD/CTYPE/CUNIT + SIP distortion terms)

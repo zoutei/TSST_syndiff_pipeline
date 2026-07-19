@@ -790,46 +790,39 @@ def crop_bounds_from_cluster_payload(payload: dict) -> dict:
 
 
 def resolve_existing_fits_path(path: str | Path) -> Path:
-    """Return an on-disk FITS path, trying ``.fits.gz`` when the exact path is missing."""
-    ref_ffi_path = Path(os.path.expanduser(str(path)))
-    if ref_ffi_path.is_file():
-        return ref_ffi_path
-    if ref_ffi_path.suffix == ".gz":
-        candidate = ref_ffi_path.with_suffix("")
-        if candidate.is_file():
-            return candidate
-    elif ref_ffi_path.suffix == ".fits":
-        candidate = ref_ffi_path.with_suffix(ref_ffi_path.suffix + ".gz")
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(f"Could not find FITS file: {path}")
+    """Return an on-disk FITS path (``.fits.fz`` / ``.fits.gz`` / ``.fits``)."""
+    from syndiff_pipeline.common.fits_variants import resolve_fits_variant
+
+    return resolve_fits_variant(path)
 
 
 def try_resolve_existing_fits_path(path: str | Path) -> Path | None:
     """Like :func:`resolve_existing_fits_path`, but return ``None`` when missing."""
-    try:
-        return resolve_existing_fits_path(path)
-    except FileNotFoundError:
-        return None
+    from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
+
+    return try_resolve_fits_variant(path)
 
 
 def fits_path_exists(path: str | Path) -> bool:
-    """True when *path* resolves to an on-disk FITS file (plain or ``.gz``)."""
-    return try_resolve_existing_fits_path(path) is not None
+    """True when *path* resolves to an on-disk FITS file (any storage variant)."""
+    from syndiff_pipeline.common.fits_variants import fits_path_exists as _exists
+
+    return _exists(path)
 
 
 def canonical_fits_path_key(path: str | Path) -> str:
-    """Comparison key treating ``.fits`` and ``.fits.gz`` as the same file.
+    """Comparison key treating ``.fits`` / ``.fits.gz`` / ``.fits.fz`` as the same file.
 
     Uses ``realpath`` so a manifest written under a symlinked data_root (e.g.
     an isolated ``data_field_pilot/tess_ffi`` → shared ``data/tess_ffi``) still
     matches FFI paths resolved through the ``ws/ffis`` symlink. For a normal
     non-symlinked layout this is identical to ``abspath``.
     """
-    expanded = os.path.realpath(os.path.expanduser(str(path)))
-    if expanded.endswith(".fits.gz"):
-        return expanded[:-3]
-    return expanded
+    from syndiff_pipeline.common.fits_variants import (
+        canonical_fits_path_key as _canonical,
+    )
+
+    return _canonical(path)
 
 
 def ref_manifest_row_index(
@@ -841,7 +834,7 @@ def ref_manifest_row_index(
 
 
 def manifest_path_row_index(wcs_table: "pd.DataFrame") -> dict[str, int]:
-    """Map canonical FITS path key → positional row index (``.fits`` / ``.fits.gz``)."""
+    """Map canonical FITS path key → row index (``.fits`` / ``.gz`` / ``.fz``)."""
     path_col = "path" if "path" in wcs_table.columns else "filename"
     out: dict[str, int] = {}
     for i in range(len(wcs_table)):
@@ -856,10 +849,13 @@ def manifest_path_row_index(wcs_table: "pd.DataFrame") -> dict[str, int]:
 
 
 def open_fits_memmap(path: str | Path, **kwargs):
-    """Open a FITS file after resolving ``.fits`` / ``.fits.gz`` variants."""
-    if "memmap" not in kwargs:
-        kwargs["memmap"] = True
-    return fits.open(resolve_existing_fits_path(path), **kwargs)
+    """Open a FITS file after resolving storage variants.
+
+    Compressed variants (``.fits.fz``, ``.fits.gz``) default to ``memmap=False``.
+    """
+    from syndiff_pipeline.common.fits_io import open_fits
+
+    return open_fits(path, **kwargs)
 
 
 def load_reference_ffi_path(
