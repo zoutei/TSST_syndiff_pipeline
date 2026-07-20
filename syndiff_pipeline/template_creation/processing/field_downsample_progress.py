@@ -74,6 +74,25 @@ def read_progress(path: Path | str) -> dict[str, Any] | None:
         return None
 
 
+def init_field_setup_progress(path: Path | str) -> None:
+    """Create sidecar immediately at L5 start (before schedule / staging work)."""
+    path = Path(path)
+    payload: dict[str, Any] = {
+        "geometry_mode": "field",
+        "total_skycells": 0,
+        "skycells_done": 0,
+        "composite_keys_total": 0,
+        "composite_keys_done": 0,
+        "contrib_keys_total": 0,
+        "contrib_writes": 0,
+        "contrib_skips": 0,
+        "oversampling_factor": 1,
+    }
+    _transition_phase(payload, "setup")
+    payload["updated_at"] = _utc_now_iso()
+    _write_atomic(path, payload)
+
+
 def init_field_progress(
     path: Path | str,
     *,

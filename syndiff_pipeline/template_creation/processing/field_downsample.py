@@ -7,8 +7,10 @@ migration) and writes ``contribs/`` under ``templates/oversampling_{N}/``.
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -692,6 +694,8 @@ def run_field_downsample_scc(
     del ffi_dir, ref_ffi_path  # remap stage owns schedule build inputs
     progress_file = Path(progress_path) if progress_path is not None else None
     t_run0 = _time.perf_counter()
+    if progress_file is not None:
+        field_downsample_progress.init_field_setup_progress(progress_file)
 
     event_dir = Path(event_dir)
     data_root = Path(data_root)
@@ -881,7 +885,8 @@ def run_field_downsample_scc(
                 "Staging %d skycell regmaps to Condor scratch (may take minutes)...",
                 len(sky_reg),
             )
-            local_paths, scratch_dir, n_staged, elapsed = stage_regmap_files_to_scratch(
+            try:
+                local_paths, scratch_dir, n_staged, elapsed = stage_regmap_files_to_scratch(
                     [p for _, p in sky_reg],
                     sector=sector,
                     camera=camera,
@@ -895,6 +900,21 @@ def run_field_downsample_scc(
                     len(sky_reg),
                     scratch_dir,
                     elapsed,
+                )
+            except OSError as exc:
+                if getattr(exc, "errno", None) != errno.ENOSPC:
+                    raise
+                os_suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
+                scratch_dir = (
+                    resolve_downsample_scratch_dir()
+                    / f"syndiff_downsample_regmaps_{sector:04d}_{camera}_{ccd}{os_suffix}"
+                )
+                if scratch_dir.is_dir():
+                    shutil.rmtree(scratch_dir, ignore_errors=True)
+                scratch_regmaps = {}
+                log.warning(
+                    "Scratch staging hit ENOSPC (%s); continuing with NFS regmap paths",
+                    exc,
                 )
 
     key_list = sorted(
