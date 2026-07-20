@@ -870,7 +870,7 @@ Consumed by the **`bind`** stage (diff DAG) — the config key kept its pre-rena
 | `x_min`, `x_max`, `y_min`, `y_max` | null | Explicit crop bounds (pixels; override any `crop_mode` preset) |
 | `x_left_dead`, `x_right_dead` | `44` | Horizontal dead columns |
 | `y_edge_strip` | `30` | Vertical edge strip |
-| `geometry_mode` | `"linear"` | `"linear"` or `"field"` — see [field_geometry.md](field_geometry.md) |
+| `geometry_mode` | `"field"` | `"field"` (default) or `"linear"` — see [field_geometry.md](field_geometry.md) |
 
 #### `stages.mapping`
 
@@ -924,7 +924,7 @@ Either YAML key is accepted (`parse_stage_params` reads `stages.templates` first
 |-----|---------|-------------|
 | `ignore_mask_bits` | `[12]` | PS1 mask bits to ignore |
 | `oversampling_factor` | `1` | Must match `stages.mapping`. Linear templates get `OVERSAMP=F` + HR arrays; field stores use HR `base_tess_shape` / `roi_bounds`. See [oversampled templates](oversampled_templates.md) |
-| `geometry_mode` | `"linear"` (falls back to `stages.wcs_grouping.geometry_mode`) | `"linear"` or `"field"` |
+| `geometry_mode` | `"field"` (falls back to `stages.wcs_grouping.geometry_mode`) | `"field"` (default) or `"linear"` |
 | `mapping_dir` | null | Override mapping root |
 | `convolved_dir` | null | Override convolved Zarr directory |
 | `output_base` | null | Template store output root (default: SCC's `templates/oversampling_{N}/`) |
@@ -936,7 +936,7 @@ Either YAML key is accepted (`parse_stage_params` reads `stages.templates` first
 | `condor_requirements` | `Memory >= 128000 && LoadAvg < 10` | Machine requirements expression |
 | `condor_rank` | `-LoadAvg` | Prefer lower load average |
 
-Field-mode-only keys (`apply_hybrid_exact`, `hybrid_R`, `include_abutting_border_exact`, `rebuild_field_store`, `n_jobs`, `stage_regmaps_to_scratch`, `materialize_fits`, …): see [field_geometry.md](field_geometry.md).
+Field-mode-only keys (`apply_hybrid_exact`, `hybrid_R`, `rebuild_field_store`, `n_jobs`, `stage_regmaps_to_scratch`, `materialize_fits`, …): see [field_geometry.md](field_geometry.md).
 
 #### `stages.diff`
 

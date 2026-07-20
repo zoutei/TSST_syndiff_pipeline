@@ -10,7 +10,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, five-stage template DAG + two-stage diff DAG (`bind`→`diff`), independent star branch, Condor, config, workspace layout |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
-| [Field (distortion-aware) geometry](field_geometry.md) | Users / maintainers | `geometry_mode: field` — per-skycell drift, hybrid Exact, SCC contrib store |
+| [Field (distortion-aware) templates](field_geometry.md) | Users / maintainers | **Default** `geometry_mode: field` — L0–L5, L4a/L4b, storage, verify, ops |
 | [Oversampled templates + Hotpants stamp modes](oversampled_templates.md) | Users / maintainers | `oversampling_factor` (`F`), native vs HR coords, Hotpants `stamp_mode` / `region_*`, star OS |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
 | [Cluster smoke checklist](cluster_smoke_checklist.md) | Ops | Manual validation on HTCondor + NFS after setup |
@@ -28,7 +28,7 @@ docs/markdown/
 ├── template_pipeline.md          ← orchestration, scheduler, Condor, config, run lifecycle
 ├── syndiff_cli.md                ← CLI noun/verb reference
 ├── storage_layout.md             ← SCC + nested-event on-disk layout
-├── field_geometry.md             ← distortion-aware templates (geometry_mode: field)
+├── field_geometry.md             ← default field templates (L0–L5, L4a/L4b F2)
 ├── oversampled_templates.md      ← F>1 templates + Hotpants stamp_mode / region_*
 └── stages/
     ├── README.md                 ← index + script/module mapping

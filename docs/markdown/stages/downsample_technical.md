@@ -7,8 +7,8 @@
 
 | Mode | Config | This document | Output |
 |------|--------|---------------|--------|
-| **Linear** (default) | `geometry_mode: linear` | **Yes** — remainder of this file | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
-| **Field** (distortion-aware) | `geometry_mode: field` | See [field geometry](../field_geometry.md) | SCC sparse `contribs/` + on-demand assembly per `group_id` |
+| **Field** (default) | `geometry_mode: field` | See [field templates](../field_geometry.md) | SCC sparse `contribs/` + on-demand assembly per `group_id` |
+| **Linear** (opt-out) | `geometry_mode: linear` | **Yes** — remainder of this file | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
 
 Linear mode measures drift at the science target and rolls each skycell's frozen
 regmap by a per-skycell PS1 integer shift derived from that single offset. Field mode
