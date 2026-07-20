@@ -336,6 +336,7 @@ def _execute_template_stage(
             intra_skycell_R=int(rm.intra_skycell_R or 1),
             rebuild_remap_cache=bool(rm.rebuild_remap_cache),
             rebuild_inter_skycell_cache=bool(rm.rebuild_inter_skycell_cache),
+            store_root=resolved.remap_output_base or None,
             scc_only=True,
             ffi_dir=resolved.ffi_dir,
             ref_ffi_path=ref_ffi,
@@ -348,7 +349,7 @@ def _execute_template_stage(
     if stage == "downsample":
         import numpy as np
 
-        from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
+        from syndiff_pipeline.common.scc_paths import scc_convolved_zarr, scc_remap_dir
         from syndiff_pipeline.common.wcs_grouping import _event_job_path
         from syndiff_pipeline.template_creation.orchestration.verify import (
             clear_downsample_event_artifacts,
@@ -370,11 +371,22 @@ def _execute_template_stage(
 
         ds = resolved.stages.downsample
         wg = resolved.stages.wcs_grouping
+        mp = resolved.stages.mapping
         geometry_mode = str(ds.geometry_mode or wg.geometry_mode or "field").lower()
         job_path = _event_job_path(resolved.event_dir)
         has_event_job = Path(job_path).is_file()
         convolved = ds.convolved_dir or str(
             scc_convolved_zarr(resolved.data_root, t.sector, t.camera, t.ccd)
+        )
+        remap_store_root = str(
+            scc_remap_dir(
+                resolved.data_root,
+                t.sector,
+                t.camera,
+                t.ccd,
+                oversampling_factor=mp.oversampling_factor,
+                store_name=resolved.downsample_remap_store_name,
+            )
         )
 
         master_path = mapping_master_pixels2skycells_path(resolved)
@@ -404,6 +416,7 @@ def _execute_template_stage(
                 crop_filter_skycells=False,
                 update_frames_csv=False,
                 store_root=ds.output_base or resolved.template_output_base,
+                remap_store_root=remap_store_root,
                 scc_only=True,
                 ffi_dir=resolved.ffi_dir,
                 ref_ffi_path=ref_ffi,
@@ -467,6 +480,7 @@ def _execute_template_stage(
                 rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
                 stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
                 store_root=ds.output_base or resolved.template_output_base,
+                remap_store_root=remap_store_root,
                 progress_path=progress_path,
             )
             field_result = dict(field_result)

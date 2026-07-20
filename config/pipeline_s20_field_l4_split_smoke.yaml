@@ -39,6 +39,11 @@ stages:
     condor_rank: "-LoadAvg"
   downsample:
     geometry_mode: field
+    # Named lanes (optional A/B):
+    #   remap_store_name: null       # INPUT  (omit → inherit stages.remap.store_name)
+    #   output_store_name: no_l4b    # OUTPUT → templates_no_l4b/oversampling_N/
+    # Diff against that lane: paths.template_store_name: no_l4b
+    # Star against that lane: defaults.template_store_name: no_l4b
     rebuild_field_store: true
     materialize_fits: false
     oversampling_factor: 1

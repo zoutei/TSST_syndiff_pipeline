@@ -282,6 +282,7 @@ def resolve_scc_template_dir(
     target: Target,
     *,
     oversampling_factor: int = 1,
+    store_name: str | None = None,
 ) -> Path:
     """Absolute SCC templates store for one target."""
     return scc_templates_dir(
@@ -290,6 +291,7 @@ def resolve_scc_template_dir(
         target.camera,
         target.ccd,
         oversampling_factor=int(oversampling_factor),
+        store_name=store_name,
     )
 
 
@@ -346,12 +348,14 @@ def resolve_event_template_dir(
     camera: int,
     ccd: int,
     oversampling_factor: int = 1,
+    store_name: str | None = None,
 ) -> str:
     """Resolve SCC templates directory (no workspace symlinks)."""
     store = resolve_scc_template_dir(
         data_root,
         Target(sector, camera, ccd, 0.0, 0.0, "x"),
         oversampling_factor=oversampling_factor,
+        store_name=store_name,
     )
     if store.is_dir():
         return str(store.resolve())
@@ -390,9 +394,17 @@ def resolve_diff_config(
     if template_dir:
         template_dir = resolve_config_path(str(template_dir), data_root_path)
     else:
+        from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+        template_store_name = normalize_store_name(
+            merged_paths.get("template_store_name")
+        )
         template_dir = str(
             resolve_scc_template_dir(
-                data_root_path, target, oversampling_factor=os_factor
+                data_root_path,
+                target,
+                oversampling_factor=os_factor,
+                store_name=template_store_name,
             )
         )
 

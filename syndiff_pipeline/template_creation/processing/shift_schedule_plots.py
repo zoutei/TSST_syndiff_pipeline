@@ -1,12 +1,14 @@
 """
 Debug figures for the per-skycell PS1 shift schedule (remap L2).
 
-Written next to ``shift_schedule.npz`` under
-``{data_root}/s…/c…/k…/remap/oversampling_{N}/``:
+Written under ``{data_root}/s…/c…/k…/debug_plots/``:
 
 - ``skycell_shift_grid_debug.png`` — 3×3 FoV grid, SG + quantized absolute dx/dy
 - ``skycell_shift_relative_center_debug.png`` — same grid; off-center = skycell −
   FoV-center SG; center panel absolute (no quantized)
+
+When ``store_name`` is set, basenames gain a ``_{store_name}`` suffix (e.g.
+``skycell_shift_grid_debug_hybrid_r2.png``).
 
 Layout: tess_x=0, tess_y=0 at bottom-left. X-axis: BTJD. Orbit segments are
 plotted as disconnected series (same colors). Empty-WCS frames are gray guides.
@@ -24,6 +26,7 @@ from astropy.io import fits
 from astropy.wcs import WCS
 from matplotlib.gridspec import GridSpec
 
+from syndiff_pipeline.common.scc_paths import normalize_store_name
 from syndiff_pipeline.template_creation.processing.shift_schedule import (
     FRAME_ORIGIN_MEASURED,
     FRAME_ORIGIN_SYNTH_MISSING_WCS,
@@ -33,11 +36,30 @@ from syndiff_pipeline.template_creation.processing.shift_schedule import (
 
 log = logging.getLogger(__name__)
 
-SKYCELL_SHIFT_GRID_DEBUG_FILENAME = "skycell_shift_grid_debug.png"
-SKYCELL_SHIFT_RELATIVE_CENTER_DEBUG_FILENAME = "skycell_shift_relative_center_debug.png"
+SKYCELL_SHIFT_GRID_DEBUG_BASENAME = "skycell_shift_grid_debug"
+SKYCELL_SHIFT_RELATIVE_CENTER_DEBUG_BASENAME = "skycell_shift_relative_center_debug"
+# Backward-compatible aliases for the default (unnamed) lane.
+SKYCELL_SHIFT_GRID_DEBUG_FILENAME = f"{SKYCELL_SHIFT_GRID_DEBUG_BASENAME}.png"
+SKYCELL_SHIFT_RELATIVE_CENTER_DEBUG_FILENAME = (
+    f"{SKYCELL_SHIFT_RELATIVE_CENTER_DEBUG_BASENAME}.png"
+)
 
 _GRID_FRACS = (0.15, 0.50, 0.85)
 _N_GRID = 3
+
+
+def skycell_shift_debug_filenames(
+    store_name: str | None = None,
+) -> tuple[str, str]:
+    """Return ``(grid_png, relative_center_png)`` basenames for a remap lane."""
+    name = normalize_store_name(store_name)
+    suffix = f"_{name}" if name else ""
+    return (
+        f"{SKYCELL_SHIFT_GRID_DEBUG_BASENAME}{suffix}.png",
+        f"{SKYCELL_SHIFT_RELATIVE_CENTER_DEBUG_BASENAME}{suffix}.png",
+    )
+
+
 _COLOR_SG = "#1f77b4"
 _COLOR_Q = "#ff7f0e"
 
@@ -236,6 +258,7 @@ def write_skycell_shift_debug_plots(
     camera: int,
     ccd: int,
     dpi: int = 140,
+    store_name: str | None = None,
 ) -> dict[str, Path]:
     """
     Write the two skycell shift debug PNGs under ``out_dir``.
@@ -254,6 +277,8 @@ def write_skycell_shift_debug_plots(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     master_path = Path(master_path)
+    grid_name, rel_name = skycell_shift_debug_filenames(store_name)
+    store_label = normalize_store_name(store_name)
 
     names = np.asarray(schedule.skycell_names).astype(str)
     n_frames = int(schedule.sx_float.shape[0])
@@ -306,6 +331,7 @@ def write_skycell_shift_debug_plots(
     ref_name = Path(ref_label).name if ref_label else "(reference)"
     guide = "gray = empty-WCS frames  |  origin BL (tess_x=0, tess_y=0)"
     scc = f"s{int(sector):04d}/c{int(camera)}/k{int(ccd)}"
+    lane = f"  |  store={store_label}" if store_label else ""
 
     # Absolute SG + quantized
     fig1 = plt.figure(figsize=(14, 12))
@@ -332,14 +358,14 @@ def write_skycell_shift_debug_plots(
             legend=(p["plot_row"] == 0 and p["plot_col"] == 0),
         )
     fig1.suptitle(
-        f"{scc} — skycell shift schedule (SG + quantized) vs reference\n"
+        f"{scc} — skycell shift schedule (SG + quantized) vs reference{lane}\n"
         f"measured={n_measured}  synth_missing_wcs={n_empty}  "
         f"synth_sigma={counts.get('synth_sigma_clipped', 0)}  |  "
         f"ref: {ref_name}\n{guide}",
         fontsize=10,
         y=0.995,
     )
-    out_grid = out_dir / SKYCELL_SHIFT_GRID_DEBUG_FILENAME
+    out_grid = out_dir / grid_name
     fig1.savefig(out_grid, dpi=dpi, bbox_inches="tight")
     plt.close(fig1)
 
@@ -380,14 +406,14 @@ def write_skycell_shift_debug_plots(
         )
     fig2.suptitle(
         f"{scc} — skycell shifts relative to FoV center "
-        f"({center['skycell']}; center panel = absolute)\n"
+        f"({center['skycell']}; center panel = absolute){lane}\n"
         f"off-center: Δ = skycell − center  |  SG only  |  "
         f"measured={n_measured}  synth_missing_wcs={n_empty}\n"
         f"ref: {ref_name}  |  {guide}",
         fontsize=10,
         y=0.995,
     )
-    out_rel = out_dir / SKYCELL_SHIFT_RELATIVE_CENTER_DEBUG_FILENAME
+    out_rel = out_dir / rel_name
     fig2.savefig(out_rel, dpi=dpi, bbox_inches="tight")
     plt.close(fig2)
 

@@ -157,6 +157,7 @@ def config_fingerprint(
                 str(rm.cache_quantum_ps1_px),
                 str(rm.keying),
                 str(rm.intra_skycell_R),
+                str(rm.store_name or ""),
             ]
         )
     elif stage == "downsample":
@@ -167,6 +168,10 @@ def config_fingerprint(
                 str(ds.single_offset),
                 str(list(ds.ignore_mask_bits)),
                 str(ds.output_base or resolved.template_output_base),
+                str(ds.output_store_name or ""),
+                str(resolved.downsample_remap_store_name or ""),
+                str(bool(ds.apply_intra_skycell)),
+                str(bool(ds.apply_inter_skycell)),
             ]
         )
     elif stage == "ps1_download":
@@ -836,8 +841,16 @@ def _polluted_legacy_exact_cache_reason(read_root: Path) -> str | None:
 def _verify_remap_exact_caches(
     read_root: Path,
     payload: dict,
+    *,
+    require_intra_skycell: bool = True,
+    require_inter_skycell: bool = True,
 ) -> str | None:
-    """Validate intra + inter exact cache layout and NPZ counts."""
+    """Validate intra + inter exact cache layout and NPZ counts.
+
+    ``require_intra_skycell`` / ``require_inter_skycell`` control whether each
+    layer's on-disk cache must be present and complete (used by downsample when
+    geometry toggles skip a layer). Remap verify keeps both required.
+    """
     from syndiff_pipeline.template_creation.processing.field_remap import (
         EXACT_CACHE_L4A_DIRNAME,
         EXACT_CACHE_L4B_DIRNAME,
@@ -859,7 +872,11 @@ def _verify_remap_exact_caches(
     l4b_dir = read_root / EXACT_CACHE_L4B_DIRNAME
 
     if schema >= 3:
-        if _has_flat_exact_npz(l4a_dir) or _has_flat_exact_npz(l4b_dir):
+        check_flat_l4a = require_intra_skycell or l4a_dir.is_dir()
+        check_flat_l4b = require_inter_skycell or l4b_dir.is_dir()
+        if (check_flat_l4a and _has_flat_exact_npz(l4a_dir)) or (
+            check_flat_l4b and _has_flat_exact_npz(l4b_dir)
+        ):
             return (
                 "legacy flat Exact NPZ files found under exact_cache_l4a/ or "
                 "exact_cache_l4b/ root; wipe Exact dirs and rebuild remap for "
@@ -887,38 +904,40 @@ def _verify_remap_exact_caches(
             "n_l4b_pair_states"
         )
 
-    if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
+    if require_intra_skycell:
+        if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
+            if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
+                return (
+                    f"missing {EXACT_CACHE_L4A_DIRNAME}/ "
+                    f"(manifest n_shift_epochs/n_intra={n_l4a_manifest}); rebuild "
+                    "intra-skycell (stages.remap.rebuild_remap_cache: true)"
+                )
+
         if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
-            return (
-                f"missing {EXACT_CACHE_L4A_DIRNAME}/ "
-                f"(manifest n_shift_epochs/n_intra={n_l4a_manifest}); rebuild "
-                "intra-skycell (stages.remap.rebuild_remap_cache: true)"
-            )
+            on_disk = _count_npz_files(l4a_dir)
+            if on_disk < n_l4a_manifest:
+                return (
+                    f"intra-skycell cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
+                    f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
+                )
 
-    if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
-        on_disk = _count_npz_files(l4a_dir)
-        if on_disk < n_l4a_manifest:
+    if require_inter_skycell:
+        if not l4b_dir.is_dir():
             return (
-                f"intra-skycell cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
-                f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
+                f"missing {EXACT_CACHE_L4B_DIRNAME}/; rebuild inter-skycell "
+                "(stages.remap.rebuild_inter_skycell_cache: true)"
             )
-
-    if not l4b_dir.is_dir():
-        return (
-            f"missing {EXACT_CACHE_L4B_DIRNAME}/; rebuild inter-skycell "
-            "(stages.remap.rebuild_inter_skycell_cache: true)"
-        )
-    if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
-        on_disk = _count_npz_files(l4b_dir)
-        if on_disk < n_l4b_manifest:
+        if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
+            on_disk = _count_npz_files(l4b_dir)
+            if on_disk < n_l4b_manifest:
+                return (
+                    f"inter-skycell cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
+                    f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
+                )
+        elif _count_npz_files(l4b_dir) == 0:
             return (
-                f"inter-skycell cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
-                f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
+                f"inter-skycell requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
             )
-    elif _count_npz_files(l4b_dir) == 0:
-        return (
-            f"inter-skycell requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
-        )
     return None
 
 
@@ -956,21 +975,24 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
     t = resolved.target
     ds = resolved.stages.downsample
     mp = resolved.stages.mapping
-    rm = resolved.stages.remap
-    rm = resolved.stages.remap
     store = field_templates_root(
         resolved.data_root,
         t.sector,
         t.camera,
         t.ccd,
         oversampling_factor=ds.oversampling_factor,
+        store_name=ds.output_store_name,
     )
+    # Prefer absolute override when output_base is set (matches dispatch write path).
+    if ds.output_base:
+        store = Path(ds.output_base)
     remap_store = remap_root(
         resolved.data_root,
         t.sector,
         t.camera,
         t.ccd,
         oversampling_factor=mp.oversampling_factor,
+        store_name=resolved.downsample_remap_store_name,
     )
     try:
         read_root, _legacy = resolve_remap_read_root(remap_store, store)
@@ -1000,9 +1022,12 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
     )
     if lite_reason:
         return VerifyResult("downsample", False, lite_reason, str(manifest_path))
+    ds = resolved.stages.downsample
     cache_reason = _verify_remap_exact_caches(
         read_root,
         remap_payload,
+        require_intra_skycell=bool(getattr(ds, "apply_intra_skycell", True)),
+        require_inter_skycell=bool(getattr(ds, "apply_inter_skycell", True)),
     )
     if cache_reason:
         return VerifyResult("downsample", False, cache_reason, str(read_root))
@@ -1418,6 +1443,7 @@ def verify_remap(resolved: ResolvedTargetConfig) -> VerifyResult:
         t.camera,
         t.ccd,
         oversampling_factor=mp.oversampling_factor,
+        store_name=rm.store_name,
     )
     manifest_path = store / REMAP_MANIFEST_NAME
     if not manifest_path.is_file():
@@ -1628,6 +1654,7 @@ def stage_absence_probe(
             t.camera,
             t.ccd,
             oversampling_factor=mp.oversampling_factor,
+            store_name=resolved.stages.remap.store_name,
         )
         if (store / REMAP_MANIFEST_NAME).is_file():
             return AbsenceProbeResult.MAYBE_PRESENT
@@ -1759,6 +1786,7 @@ def collect_stage_artifacts(
             t.camera,
             t.ccd,
             oversampling_factor=mp.oversampling_factor,
+            store_name=resolved.stages.remap.store_name,
         )
         manifest = store / REMAP_MANIFEST_NAME
         ok = manifest.is_file()

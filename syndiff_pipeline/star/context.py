@@ -364,10 +364,15 @@ def load_event_context(
 
     templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
     os_factor = 1
+    template_store_name = None
     if star_run_config is not None:
         os_factor = max(1, int(star_run_config.oversampling_factor or 1))
+        template_store_name = star_run_config.template_store_name
     expected_templates = resolve_scc_template_dir(
-        data_root, target, oversampling_factor=os_factor
+        data_root,
+        target,
+        oversampling_factor=os_factor,
+        store_name=template_store_name,
     )
     if not templates_dir or not Path(templates_dir).is_dir():
         templates_dir = str(expected_templates)

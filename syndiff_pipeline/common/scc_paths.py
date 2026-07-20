@@ -11,6 +11,7 @@ directories unless a helper explicitly documents ``mkdir`` behavior.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 EVENTS_SUBDIR = "events"
@@ -20,9 +21,13 @@ CATALOGS_SUBDIR = "catalogs"
 MAPPING_SUBDIR = "mapping"
 REMAP_SUBDIR = "remap"
 TEMPLATES_SUBDIR = "templates"
+DEBUG_PLOTS_SUBDIR = "debug_plots"
 LEGACY_SUBDIR = "legacy"
 BOOKKEEPING_SUBDIR = "bookkeeping"
 DIFF_SUBDIR = "diff"
+
+# Named store lanes: templates_{NAME}/, remap_{NAME}/. Empty/None → base subdir.
+_STORE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
 CONVOLVED_ZARR_BASENAME = "convolved.zarr"
 CONVOLVED_REMOVED_STARS_CSV_BASENAME = "convolved_removed_stars.csv"
@@ -48,6 +53,7 @@ PROVENANCE_SPOOL_SUBDIR = "spool"
 
 __all__ = [
     "BOOKKEEPING_SUBDIR",
+    "DEBUG_PLOTS_SUBDIR",
     "DIFF_SUBDIR",
     "CATALOGS_SUBDIR",
     "CONVOLVED_REMOVED_STARS_CSV_BASENAME",
@@ -64,6 +70,7 @@ __all__ = [
     "FFI_LIST_PARQUET_BASENAME",
     "event_root",
     "event_scc_leaf",
+    "normalize_store_name",
     "oversampling_dirname",
     "mapping_sector_tree_root",
     "mapping_write_dir",
@@ -79,6 +86,7 @@ __all__ = [
     "scc_catalogs_dir",
     "scc_convolved_removed_stars_csv",
     "scc_convolved_zarr",
+    "scc_debug_plots_dir",
     "scc_diff_stage_dir",
     "scc_diff_workspace_index_path",
     "scc_ffi_dir",
@@ -92,6 +100,7 @@ __all__ = [
     "scc_templates_dir",
     "scc_ffi_list_csv",
     "scc_ffi_list_parquet",
+    "store_subdir",
 ]
 
 
@@ -103,6 +112,31 @@ def scc_label(sector: int, camera: int, ccd: int) -> str:
 def oversampling_dirname(oversampling_factor: int) -> str:
     """Directory name for one oversampling factor, e.g. ``oversampling_2``."""
     return f"oversampling_{int(oversampling_factor)}"
+
+
+def normalize_store_name(store_name: str | None) -> str | None:
+    """Return a validated store lane name, or ``None`` for the default lane.
+
+    Empty / whitespace-only names become ``None``. Non-empty names must match
+    ``^[A-Za-z0-9][A-Za-z0-9_-]*$`` (no path separators).
+    """
+    if store_name is None:
+        return None
+    name = str(store_name).strip()
+    if not name:
+        return None
+    if not _STORE_NAME_RE.fullmatch(name):
+        raise ValueError(
+            f"Invalid store_name {store_name!r}: must match "
+            r"^[A-Za-z0-9][A-Za-z0-9_-]*$ (no path separators)"
+        )
+    return name
+
+
+def store_subdir(base: str, store_name: str | None) -> str:
+    """Return ``base`` or ``base_{name}`` for a named store lane."""
+    name = normalize_store_name(store_name)
+    return base if name is None else f"{base}_{name}"
 
 
 def mapping_sector_tree_root(output_path: str | Path, oversampling_factor: int) -> Path:
@@ -251,11 +285,16 @@ def scc_remap_dir(
     ccd: int,
     *,
     oversampling_factor: int,
+    store_name: str | None = None,
 ) -> Path:
-    """Directory for field remap artifacts at one oversampling factor."""
+    """Directory for field remap artifacts at one oversampling factor.
+
+    Default lane: ``remap/oversampling_{N}/``. Named lane:
+    ``remap_{store_name}/oversampling_{N}/``.
+    """
     return (
         scc_root(data_root, sector, camera, ccd)
-        / REMAP_SUBDIR
+        / store_subdir(REMAP_SUBDIR, store_name)
         / oversampling_dirname(oversampling_factor)
     )
 
@@ -267,13 +306,28 @@ def scc_templates_dir(
     ccd: int,
     *,
     oversampling_factor: int,
+    store_name: str | None = None,
 ) -> Path:
-    """Directory for full-chip template products at one oversampling factor."""
+    """Directory for full-chip template products at one oversampling factor.
+
+    Default lane: ``templates/oversampling_{N}/``. Named lane:
+    ``templates_{store_name}/oversampling_{N}/``.
+    """
     return (
         scc_root(data_root, sector, camera, ccd)
-        / TEMPLATES_SUBDIR
+        / store_subdir(TEMPLATES_SUBDIR, store_name)
         / oversampling_dirname(oversampling_factor)
     )
+
+
+def scc_debug_plots_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """SCC-scoped template-pipeline diagnostics directory (``debug_plots/``)."""
+    return scc_root(data_root, sector, camera, ccd) / DEBUG_PLOTS_SUBDIR
 
 
 def scc_legacy_dir(
