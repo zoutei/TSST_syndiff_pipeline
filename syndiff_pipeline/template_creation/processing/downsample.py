@@ -39,7 +39,7 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.io import fits
 from astropy.wcs import WCS
-from joblib import Parallel, delayed
+from joblib import delayed
 from tqdm import tqdm
 
 # Import from existing script
@@ -58,7 +58,7 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
 from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import RELEVANT_WCS_KEYS, build_ps1_wcs, compute_ps1_shift_for_skycell, load_tess_wcs
 from syndiff_pipeline.template_creation.processing.downsample_progress import (
     init_progress as init_downsample_progress,
-    mark_skycell_done as mark_downsample_skycell_done,
+    mark_skycells_done as mark_downsample_skycells_done,
     set_progress_phase as set_downsample_progress_phase,
 )
 
@@ -847,8 +847,6 @@ def _run_skycell_batch_core(
         except Exception as e:
             print(f"Error processing registration for skycell {skycell_name}: {e}")
         finally:
-            if progress_path is not None:
-                mark_downsample_skycell_done(progress_path, batch_idx)
             if debug:
                 print(
                     f"[downsample] skycell {skycell_name} regmap={skycell_regmap:.1f}s "
@@ -1520,9 +1518,13 @@ def main(
                 f"[downsample] resume: {len(completed)} skycell checkpoints in {partial_dir}"
             )
 
-    # Process batches in parallel
-    results = Parallel(n_jobs=N_JOBS)(
-        delayed(process_skycell_batch)(
+    # Process batches in parallel. Progress is updated in the parent as each
+    # batch completes (NFS-safe; workers must not flock the sidecar).
+    from syndiff_pipeline.common.joblib_progress import parallel_map_with_optional_tqdm
+
+    def _run_one_batch(args):
+        i, reg_batch, name_batch = args
+        batch_result = process_skycell_batch(
             i,
             reg_batch,
             name_batch,
@@ -1533,14 +1535,39 @@ def main(
             roi_bounds,
             oversampling_factor=oversampling_factor,
             ignore_mask_bits=ignore_mask_bits,
-            progress_path=progress_path,
+            progress_path=None,
             log_level=log_level,
             total_batches=num_batches,
             checkpoint_dir=partial_dir,
             checkpoint_skycells=checkpoint_skycells,
         )
+        return i, len(reg_batch), batch_result
+
+    batch_args = [
+        (i, reg_batch, name_batch)
         for i, (reg_batch, name_batch) in enumerate(zip(reg_batches, name_batches))
-    )
+    ]
+
+    def _on_batch_done(item) -> None:
+        batch_idx, n_done, _batch_result = item
+        if progress_path is not None and n_done:
+            mark_downsample_skycells_done(progress_path, batch_idx, n_done)
+
+    if N_JOBS == 1 or len(batch_args) <= 1:
+        batch_items = []
+        for args in batch_args:
+            item = _run_one_batch(args)
+            _on_batch_done(item)
+            batch_items.append(item)
+    else:
+        batch_items = parallel_map_with_optional_tqdm(
+            (delayed(_run_one_batch)(args) for args in batch_args),
+            n_tasks=len(batch_args),
+            desc="downsample batches",
+            n_jobs_eff=N_JOBS,
+            on_result=_on_batch_done,
+        )
+    results = [batch_result for _i, _n, batch_result in batch_items]
     batches_elapsed = time.perf_counter() - t_batches
 
     # Combine results using the sparse array approach

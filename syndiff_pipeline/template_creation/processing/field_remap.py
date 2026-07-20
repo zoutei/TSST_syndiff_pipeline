@@ -783,7 +783,7 @@ def run_field_remap_scc(
     optional ``exact_cache_l4a/`` (and ``exact_cache_l4b/`` when L4b is enabled),
     and ``remap_manifest.json``.
     """
-    from joblib import Parallel, delayed
+    from joblib import delayed
 
     from syndiff_pipeline.template_creation.processing import remap_progress
 
@@ -916,11 +916,7 @@ def run_field_remap_scc(
         def _one_exact(skycell: str, sx_i: int, sy_i: int) -> str:
             if int(sx_i) == 0 and int(sy_i) == 0:
                 return "skip"
-            try:
-                return _one_exact_impl(skycell, sx_i, sy_i)
-            finally:
-                if progress_file is not None:
-                    remap_progress.mark_exact_l4a_done(progress_file)
+            return _one_exact_impl(skycell, sx_i, sy_i)
 
         def _one_exact_impl(skycell: str, sx_i: int, sy_i: int) -> str:
             cache_name = contrib_basename(skycell, sx_i, sy_i).replace(".npz", "_exact.npz")
@@ -984,11 +980,29 @@ def run_field_remap_scc(
 
         key_list = sorted(keys)
         n_jobs_eff = _effective_parallel_jobs(n_jobs, n_exact_keys)
+
+        def _on_l4a_done(_status: str) -> None:
+            if progress_file is not None:
+                remap_progress.mark_exact_l4a_done(progress_file)
+
         if n_jobs_eff == 1 or n_exact_keys <= 1:
-            exact_statuses = [_one_exact(s, x, y) for s, x, y in key_list]
+            exact_statuses = []
+            for s, x, y in key_list:
+                status = _one_exact(s, x, y)
+                _on_l4a_done(status)
+                exact_statuses.append(status)
         else:
-            exact_statuses = Parallel(n_jobs=n_jobs_eff, prefer="processes")(
-                delayed(_one_exact)(s, x, y) for s, x, y in key_list
+            from syndiff_pipeline.common.joblib_progress import (
+                parallel_map_with_optional_tqdm,
+            )
+
+            exact_statuses = parallel_map_with_optional_tqdm(
+                (delayed(_one_exact)(s, x, y) for s, x, y in key_list),
+                n_tasks=len(key_list),
+                desc="remap L4a exact",
+                n_jobs_eff=n_jobs_eff,
+                prefer="processes",
+                on_result=_on_l4a_done,
             )
         n_exact_written = sum(1 for s in exact_statuses if s == "write")
         log.info(
@@ -1059,11 +1073,7 @@ def run_field_remap_scc(
             sx_b: int,
             sy_b: int,
         ) -> str:
-            try:
-                return _one_l4b_impl(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
-            finally:
-                if progress_file is not None and n_l4b_pair_states:
-                    remap_progress.mark_exact_l4b_done(progress_file)
+            return _one_l4b_impl(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
 
         def _one_l4b_impl(
             id_a: int,
@@ -1173,15 +1183,32 @@ def run_field_remap_scc(
 
         if n_l4b_pair_states:
             n_jobs_l4b = _effective_parallel_jobs(n_jobs, n_l4b_pair_states)
+
+            def _on_l4b_done(_status: str) -> None:
+                if progress_file is not None:
+                    remap_progress.mark_exact_l4b_done(progress_file)
+
             if n_jobs_l4b == 1 or n_l4b_pair_states <= 1:
-                l4b_statuses = [
-                    _one_l4b(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
-                    for id_a, id_b, sx_a, sy_a, sx_b, sy_b in pair_states
-                ]
+                l4b_statuses = []
+                for id_a, id_b, sx_a, sy_a, sx_b, sy_b in pair_states:
+                    status = _one_l4b(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
+                    _on_l4b_done(status)
+                    l4b_statuses.append(status)
             else:
-                l4b_statuses = Parallel(n_jobs=n_jobs_l4b, prefer="processes")(
-                    delayed(_one_l4b)(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
-                    for id_a, id_b, sx_a, sy_a, sx_b, sy_b in pair_states
+                from syndiff_pipeline.common.joblib_progress import (
+                    parallel_map_with_optional_tqdm,
+                )
+
+                l4b_statuses = parallel_map_with_optional_tqdm(
+                    (
+                        delayed(_one_l4b)(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
+                        for id_a, id_b, sx_a, sy_a, sx_b, sy_b in pair_states
+                    ),
+                    n_tasks=n_l4b_pair_states,
+                    desc="remap L4b rim",
+                    n_jobs_eff=n_jobs_l4b,
+                    prefer="processes",
+                    on_result=_on_l4b_done,
                 )
             n_l4b_written = sum(1 for s in l4b_statuses if s == "write")
             log.info(

@@ -88,6 +88,30 @@ class TestDownsampleProgressSidecar(unittest.TestCase):
         self.assertEqual(state["phase"], "parallel_batches")
         self.assertIn("precomputing_shifts", state.get("phase_elapsed_s", {}))
 
+    def test_no_fcntl_flock_in_module(self):
+        import inspect
+
+        import syndiff_pipeline.template_creation.processing.downsample_progress as mod
+
+        src = inspect.getsource(mod)
+        self.assertNotIn("import fcntl", src)
+        self.assertNotIn("fcntl.flock", src)
+
+    def test_mark_skycells_done_batch(self):
+        from syndiff_pipeline.template_creation.processing.downsample_progress import (
+            mark_skycells_done,
+        )
+
+        path = self.root / "downsample.progress.json"
+        init_progress(path, total_skycells=5, batch_sizes=[3, 2])
+        mark_skycells_done(path, 0, 3)
+        mark_skycells_done(path, 1, 2)
+        state = read_progress(path)
+        assert state is not None
+        self.assertEqual(state["skycells_done"], 5)
+        self.assertEqual(state["batches"]["0"]["done"], 3)
+        self.assertEqual(state["batches"]["1"]["done"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

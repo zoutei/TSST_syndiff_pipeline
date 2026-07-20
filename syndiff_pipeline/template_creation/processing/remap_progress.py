@@ -1,10 +1,14 @@
-"""Sidecar JSON progress for field remap (shift schedule, grouping, Exact cache)."""
+"""Sidecar JSON progress for field remap (shift schedule, grouping, Exact cache).
+
+Counters are updated from the **parent** process as Parallel results are
+drained (see :func:`run_field_remap_scc`). Updates use atomic write via a
+temporary file so they remain reliable on NFS mounts without working
+``flock`` (same pattern as Hotpants).
+"""
 
 from __future__ import annotations
 
-import fcntl
 import json
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -44,34 +48,19 @@ def _transition_phase(state: dict[str, Any], new_phase: str) -> None:
     state["phase_started_at"] = _utc_now_iso()
 
 
-def _write_locked(path: Path, payload: dict[str, Any]) -> None:
+def _write_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
     tmp.replace(path)
 
 
-def _update_locked(path: Path, mutator) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+", encoding="utf-8") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            fh.seek(0)
-            raw = fh.read()
-            if raw.strip():
-                state = json.loads(raw)
-            else:
-                state = {}
-            mutator(state)
-            state["updated_at"] = _utc_now_iso()
-            fh.seek(0)
-            fh.truncate(0)
-            json.dump(state, fh, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+def _update_atomic(path: Path, mutator) -> None:
+    """Read-modify-write via :func:`_write_atomic` (parent process only)."""
+    state = read_progress(path) or {}
+    mutator(state)
+    state["updated_at"] = _utc_now_iso()
+    _write_atomic(path, state)
 
 
 def init_progress(
@@ -87,12 +76,12 @@ def init_progress(
 
     path = Path(path)
     if path.is_file():
-        _update_locked(path, mutator)
+        _update_atomic(path, mutator)
     else:
         payload: dict[str, Any] = {"oversampling_factor": int(oversampling_factor)}
         _transition_phase(payload, "shift_schedule")
         payload["updated_at"] = _utc_now_iso()
-        _write_locked(path, payload)
+        _write_atomic(path, payload)
 
 
 def set_progress_phase(
@@ -130,7 +119,7 @@ def set_progress_phase(
             state["oversampling_factor"] = int(oversampling_factor)
 
     if path.is_file():
-        _update_locked(path, mutator)
+        _update_atomic(path, mutator)
     else:
         payload: dict[str, Any] = {}
         _transition_phase(payload, phase)
@@ -151,7 +140,7 @@ def set_progress_phase(
         if oversampling_factor is not None:
             payload["oversampling_factor"] = int(oversampling_factor)
         payload["updated_at"] = _utc_now_iso()
-        _write_locked(path, payload)
+        _write_atomic(path, payload)
 
 
 def init_exact_l4a_cache(path: Path | str, total_keys: int) -> None:
@@ -164,7 +153,7 @@ def init_exact_l4a_cache(path: Path | str, total_keys: int) -> None:
         state["exact_done"] = 0
         state["exact_total"] = int(total_keys)
 
-    _update_locked(Path(path), mutator)
+    _update_atomic(Path(path), mutator)
 
 
 def init_exact_l4b_cache(path: Path | str, total_keys: int) -> None:
@@ -175,7 +164,7 @@ def init_exact_l4b_cache(path: Path | str, total_keys: int) -> None:
         state["exact_l4b_done"] = 0
         state["exact_l4b_total"] = int(total_keys)
 
-    _update_locked(Path(path), mutator)
+    _update_atomic(Path(path), mutator)
 
 
 def init_exact_cache(path: Path | str, total_keys: int) -> None:
@@ -184,7 +173,7 @@ def init_exact_cache(path: Path | str, total_keys: int) -> None:
 
 
 def mark_exact_l4a_done(path: Path | str) -> None:
-    """Increment ``exact_l4a_done`` (safe under joblib workers via flock)."""
+    """Increment ``exact_l4a_done`` (parent process only; NFS-safe tmp+replace)."""
 
     def mutator(state: dict[str, Any]) -> None:
         total = int(state.get("exact_l4a_total", state.get("exact_total", 0)))
@@ -195,11 +184,11 @@ def mark_exact_l4a_done(path: Path | str) -> None:
         state["exact_done"] = done
         state["phase"] = "exact_l4a"
 
-    _update_locked(Path(path), mutator)
+    _update_atomic(Path(path), mutator)
 
 
 def mark_exact_l4b_done(path: Path | str) -> None:
-    """Increment ``exact_l4b_done`` (safe under joblib workers via flock)."""
+    """Increment ``exact_l4b_done`` (parent process only; NFS-safe tmp+replace)."""
 
     def mutator(state: dict[str, Any]) -> None:
         total = int(state.get("exact_l4b_total", 0))
@@ -209,7 +198,7 @@ def mark_exact_l4b_done(path: Path | str) -> None:
         state["exact_l4b_done"] = done
         state["phase"] = "exact_l4b"
 
-    _update_locked(Path(path), mutator)
+    _update_atomic(Path(path), mutator)
 
 
 def mark_exact_done(path: Path | str) -> None:
