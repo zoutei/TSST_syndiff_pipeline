@@ -12,17 +12,20 @@ import pytest
 
 from syndiff_pipeline.template_creation.processing.field_abutting import (
     l4b_rim_cache_basename,
-    unique_pair_states,
+    l4b_rim_path,
 )
 from syndiff_pipeline.template_creation.processing.field_remap import (
     EXACT_CACHE_L4B_DIRNAME,
     REMAP_MANIFEST_NAME,
+    _group_l4b_epochs_by_pair,
+    _l4b_rim_pair_batch,
     remap_root,
     run_field_remap_scc,
 )
 from syndiff_pipeline.template_creation.processing.shift_schedule import (
     ShiftSchedule,
     assign_groups_from_schedule,
+    build_pair_epochs,
 )
 
 
@@ -49,7 +52,7 @@ def _synthetic_master() -> tuple[np.ndarray, dict[str, int]]:
     return master, name_to_id
 
 
-def _expected_pair_state_count(schedule: ShiftSchedule, master: np.ndarray) -> int:
+def _expected_pair_epoch_count(schedule: ShiftSchedule, master: np.ndarray) -> int:
     from syndiff_pipeline.template_creation.processing.field_abutting import (
         abutting_undirected_pairs,
         build_col_of_name,
@@ -65,15 +68,19 @@ def _expected_pair_state_count(schedule: ShiftSchedule, master: np.ndarray) -> i
         col_of_name=build_col_of_name(schedule.skycell_names),
         idx_to_name=idx_to_name,
     )
-    return len(
-        unique_pair_states(
-            schedule.sx_int,
-            schedule.sy_int,
-            pair_idx,
-            schedule.frame_valid,
-            pair_ids=pair_ids,
-        )
+    assignment = assign_groups_from_schedule(
+        schedule,
+        grouping_quantum_ps1_px=1.0,
+        cache_quantum_ps1_px=1.0,
+        keying="absolute",
     )
+    pair_epochs, _ = build_pair_epochs(
+        schedule,
+        assignment.group_id_per_frame,
+        pair_ids=pair_ids,
+        pair_idx=pair_idx,
+    )
+    return int(len(pair_epochs))
 
 
 @pytest.fixture
@@ -129,7 +136,11 @@ def remap_l4b_env(tmp_path: Path, monkeypatch):
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_hybrid_exact.candidate_tess_ids_for_l4a",
-        lambda *a, **k: (np.array([], dtype=np.int32), np.zeros((4, 4), dtype=bool)),
+        lambda *a, **k: (np.array([], dtype=np.int32), np.zeros((4, 6), dtype=bool)),
+    )
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_remap._read_regmap_assignment",
+        lambda skycell: np.zeros((4, 6), dtype=np.int32),
     )
 
     rim_a = np.array([101, 102], dtype=np.int32)
@@ -160,7 +171,7 @@ def remap_l4b_env(tmp_path: Path, monkeypatch):
         "ccd": ccd,
         "schedule": schedule,
         "master": master,
-        "expected_n": _expected_pair_state_count(schedule, master),
+        "expected_n": _expected_pair_epoch_count(schedule, master),
     }
 
 
@@ -179,20 +190,22 @@ def test_inter_skycell_writes_expected_npzs(remap_l4b_env):
     )
 
     l4b_dir = env["store"] / EXACT_CACHE_L4B_DIRNAME
-    npz_files = sorted(l4b_dir.glob("pair_*_rim.npz"))
+    npz_files = sorted(l4b_dir.rglob("*_rim.npz"))
     assert result["n_inter_skycell_pair_states"] == env["expected_n"]
     assert result["n_inter_skycell_written"] == env["expected_n"]
     assert len(npz_files) == env["expected_n"]
 
     manifest = json.loads((env["store"] / REMAP_MANIFEST_NAME).read_text())
     assert manifest["n_inter_skycell_pair_states"] == env["expected_n"]
-    assert manifest["schema_version"] == 2
+    assert manifest["n_pair_epochs"] == env["expected_n"]
+    assert manifest["schema_version"] == 3
     assert "l4b_policy" not in manifest
 
     with np.load(npz_files[0]) as z:
         assert "exact_tid_lo" in z
         assert "exact_tid_hi" in z
         assert "rep_frame_index" in z
+        assert "pair_epoch_id" in z
         assert int(z["id_lo"]) <= int(z["id_hi"])
 
 
@@ -210,11 +223,12 @@ def test_inter_skycell_basename_undirected(remap_l4b_env):
         store_root=env["store"],
     )
     l4b_dir = env["store"] / EXACT_CACHE_L4B_DIRNAME
-    names = {p.name for p in l4b_dir.glob("*.npz")}
+    paths = {p.relative_to(l4b_dir).as_posix() for p in l4b_dir.rglob("*.npz")}
+    # Undirected pair folder; epoch filenames include e{N}_
+    assert any(p.startswith("pair_10__20/") for p in paths)
     canonical = l4b_rim_cache_basename(10, 20, 0, 0, 1, 0)
     swapped = l4b_rim_cache_basename(20, 10, 1, 0, 0, 0)
     assert canonical == swapped
-    assert canonical in names
 
 
 def test_inter_skycell_skips_existing_unless_rebuild(remap_l4b_env):
@@ -237,3 +251,79 @@ def test_inter_skycell_skips_existing_unless_rebuild(remap_l4b_env):
 
     third = run_field_remap_scc(**kwargs, rebuild_inter_skycell_cache=True)
     assert third["n_inter_skycell_written"] == env["expected_n"]
+
+
+def test_group_l4b_epochs_by_pair():
+    pair_epochs = pd.DataFrame(
+        {
+            "id_lo": [10, 10, 30, 10],
+            "id_hi": [20, 20, 40, 20],
+            "pair_epoch_id": [0, 1, 0, 2],
+            "sx_lo": [0, 1, 0, 2],
+            "sy_lo": [0, 0, 1, 0],
+            "sx_hi": [1, 1, 0, 1],
+            "sy_hi": [0, 1, 0, 0],
+            "rep_frame_index": [0, 1, 2, 3],
+        }
+    )
+    batches = _group_l4b_epochs_by_pair(pair_epochs)
+    assert [pair for pair, _ in batches] == [(10, 20), (30, 40)]
+    assert len(batches[0][1]) == 3
+    assert len(batches[1][1]) == 1
+    assert sum(len(epochs) for _, epochs in batches) == len(pair_epochs)
+    assert batches[0][1][0] == (0, 0, 0, 1, 0, 0)
+    assert batches[1][1][0] == (0, 0, 1, 0, 0, 2)
+
+
+def test_l4b_pair_batch_calls_border_ids_once(monkeypatch):
+    import syndiff_pipeline.template_creation.processing.field_remap as fr
+    import syndiff_pipeline.template_creation.processing.field_hybrid_exact as hy
+
+    calls: list[tuple[int, int]] = []
+    one_epoch_calls: list[tuple[int, int, int]] = []
+
+    def fake_shared(_master, id_a, id_b):
+        calls.append((int(id_a), int(id_b)))
+        return (
+            np.array([1, 2], dtype=np.int32),
+            np.array([3, 4], dtype=np.int32),
+        )
+
+    def fake_one_epoch(
+        id_lo,
+        id_hi,
+        pair_epoch_id,
+        *_args,
+        **_kwargs,
+    ):
+        one_epoch_calls.append((int(id_lo), int(id_hi), int(pair_epoch_id)))
+        return "skip"
+
+    monkeypatch.setattr(hy, "shared_abutting_border_tess_ids", fake_shared)
+    monkeypatch.setattr(fr, "_l4b_rim_one_epoch", fake_one_epoch)
+    monkeypatch.setattr(
+        fr,
+        "_worker_ps1_info",
+        lambda skycell: pd.Series({"NAME": skycell}),
+    )
+
+    fr._reset_remap_worker()
+    fr._REMAP_WORKER.update(
+        {
+            "exact_l4b_dir": "/tmp/l4b_unused",
+            "rebuild_inter_skycell_cache": False,
+            "idx_to_name": {10: "skycell.1.1", 20: "skycell.1.2"},
+            "master": np.array([[10, 20]], dtype=np.int32),
+            "skycell_rows": {},
+        }
+    )
+
+    epochs = [
+        (0, 0, 0, 1, 0, 0),
+        (1, 1, 0, 1, 1, 1),
+        (2, 2, 0, 1, 0, 2),
+    ]
+    statuses = _l4b_rim_pair_batch(10, 20, epochs)
+    assert statuses == ["skip", "skip", "skip"]
+    assert calls == [(10, 20)]
+    assert one_epoch_calls == [(10, 20, 0), (10, 20, 1), (10, 20, 2)]

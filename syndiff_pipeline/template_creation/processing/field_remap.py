@@ -10,9 +10,10 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -34,6 +35,8 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
 from syndiff_pipeline.template_creation.processing.shift_schedule import (
     ShiftSchedule,
     assign_groups_from_schedule,
+    build_pair_epochs,
+    build_shift_epochs,
     write_group_artifacts,
 )
 
@@ -45,8 +48,12 @@ EXACT_CACHE_L4B_DIRNAME = "exact_cache_l4b"
 # Legacy monolithic tree (L4b-lite pollution); never read for hybrid L4a.
 EXACT_CACHE_LEGACY_DIRNAME = "exact_cache"
 EXACT_CACHE_LEGACY_POLLUTED_DIRNAME = "exact_cache_legacy_polluted"
-REMAP_SCHEMA_VERSION = 2
-
+REMAP_SCHEMA_VERSION = 3
+SHIFT_EPOCHS_PARQUET = "shift_epochs.parquet"
+PAIR_EPOCHS_PARQUET = "pair_epochs.parquet"
+EPOCH_GROUP_MEMBERS_PARQUET = "epoch_group_members.parquet"
+GID_EPOCH_INDEX_NPZ = "gid_epoch_index.npz"
+GROUP_ID_PER_FRAME_NPY = "group_id_per_frame.npy"
 
 def remap_root(
     data_root: str | Path,
@@ -710,6 +717,665 @@ def _effective_parallel_jobs(n_jobs: int, n_tasks: int) -> int:
     return min(n_jobs_eff, max(1, hybrid_cap), max(1, avail))
 
 
+# Per-process caches for remap Exact workers (loky reuses processes).
+_REMAP_WORKER: dict[str, Any] = {}
+
+
+def _init_remap_worker(payload: dict[str, Any]) -> None:
+    """Initialize one loky worker: hoist TESS coords once per process."""
+    global _REMAP_WORKER
+    from syndiff_pipeline.template_creation.processing.pancakes import (
+        create_tess_pixel_coordinates,
+    )
+
+    _REMAP_WORKER = dict(payload)
+    master_path = _REMAP_WORKER.pop("master_path", None)
+    if master_path and _REMAP_WORKER.get("master") is None:
+        master, _name_to_id = _master_skycell_id_map(Path(master_path))
+        _REMAP_WORKER["master"] = master
+    tpix, _ = create_tess_pixel_coordinates(
+        tuple(_REMAP_WORKER["base_tess_shape"]),
+        int(_REMAP_WORKER["oversampling_factor"]),
+    )
+    _REMAP_WORKER["_tpix"] = tpix
+
+
+def _ensure_remap_worker(payload: dict[str, Any]) -> None:
+    """Initialize worker caches in the parent (serial path) or after fork."""
+    if not _REMAP_WORKER:
+        _init_remap_worker(payload)
+
+
+def _reset_remap_worker() -> None:
+    global _REMAP_WORKER
+    _REMAP_WORKER = {}
+
+
+def _reset_joblib_executor_args() -> None:
+    """Clear joblib's cached Parallel initargs so a second pool can start.
+
+    L4a then L4b both pass ``ShiftSchedule`` (ndarray fields) in initargs.
+    joblib compares cached vs new initargs with ``==``, which raises
+    ``ValueError: ambiguous truth value`` on numpy arrays. Clearing the cache
+    forces a fresh executor for L4b (smoke_4 crash).
+    """
+    try:
+        import joblib.executor as _joblib_executor
+
+        _joblib_executor._executor_args = None
+    except Exception:
+        pass
+
+
+def _worker_frame_wcs(frame_index: int) -> Any:
+    mode = _REMAP_WORKER["wcs_mode"]
+    if mode == "scc":
+        return _load_frame_wcs_from_cache(
+            _REMAP_WORKER["ffi_list_df"],
+            _REMAP_WORKER["frame_filenames"],
+            frame_index,
+        )
+    return _load_frame_wcs(_REMAP_WORKER["frames_df"], frame_index)
+
+
+def _read_regmap_assignment(skycell: str) -> np.ndarray:
+    """Load one skycell TESS_PIXEL_MAP (scratch first, then mapping_root)."""
+    regmap_path = _REMAP_WORKER["scratch_regmaps"].get(skycell)
+    if regmap_path is None:
+        regmap_path = str(
+            _find_regmap(
+                Path(_REMAP_WORKER["mapping_root"]),
+                int(_REMAP_WORKER["sector"]),
+                int(_REMAP_WORKER["camera"]),
+                int(_REMAP_WORKER["ccd"]),
+                skycell,
+                oversampling_factor=int(_REMAP_WORKER["oversampling_factor"]),
+            )
+        )
+    with fits.open(regmap_path) as hdul:
+        if "TESS_PIXEL_MAP" in hdul:
+            return np.asarray(hdul["TESS_PIXEL_MAP"].data)
+        return np.asarray(hdul[1].data)
+
+
+def _group_l4a_epochs_by_skycell(
+    shift_epochs: pd.DataFrame,
+) -> list[tuple[str, list[tuple[int, int, int, int]]]]:
+    """Group L4a epochs by skycell: ``(epoch_id, sx, sy, rep_frame_index)``."""
+    from collections import defaultdict
+
+    by_skycell: dict[str, list[tuple[int, int, int, int]]] = defaultdict(list)
+    if shift_epochs is None or len(shift_epochs) == 0:
+        return []
+    for row in shift_epochs.itertuples(index=False):
+        by_skycell[str(row.skycell)].append(
+            (
+                int(row.epoch_id),
+                int(row.sx_int),
+                int(row.sy_int),
+                int(row.rep_frame_index),
+            )
+        )
+    return sorted(by_skycell.items())
+
+
+def _group_l4b_epochs_by_pair(
+    pair_epochs: pd.DataFrame,
+) -> list[tuple[tuple[int, int], list[tuple[int, int, int, int, int, int]]]]:
+    """Group L4b pair-epochs by abutting pair ``(id_lo, id_hi)``.
+
+    Each epoch tuple is
+    ``(pair_epoch_id, sx_lo, sy_lo, sx_hi, sy_hi, rep_frame_index)``.
+    """
+    from collections import defaultdict
+
+    by_pair: dict[tuple[int, int], list[tuple[int, int, int, int, int, int]]] = (
+        defaultdict(list)
+    )
+    if pair_epochs is None or len(pair_epochs) == 0:
+        return []
+    for row in pair_epochs.itertuples(index=False):
+        by_pair[(int(row.id_lo), int(row.id_hi))].append(
+            (
+                int(row.pair_epoch_id),
+                int(row.sx_lo),
+                int(row.sy_lo),
+                int(row.sx_hi),
+                int(row.sy_hi),
+                int(row.rep_frame_index),
+            )
+        )
+    return sorted(by_pair.items())
+
+
+def _worker_ps1_info(skycell: str) -> pd.Series:
+    rows = _REMAP_WORKER["skycell_rows"]
+    if skycell not in rows:
+        rows[skycell] = _skycell_catalog_row(
+            Path(_REMAP_WORKER["mapping_root"]),
+            int(_REMAP_WORKER["sector"]),
+            int(_REMAP_WORKER["camera"]),
+            int(_REMAP_WORKER["ccd"]),
+            skycell,
+            oversampling_factor=int(_REMAP_WORKER["oversampling_factor"]),
+        )
+    return rows[skycell]
+
+
+def _worker_exact_regmap(
+    tess_wcs: Any,
+    skycell: str,
+    tess_ids: np.ndarray,
+) -> np.ndarray:
+    from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
+        exact_regmap_for_tess_ids,
+    )
+
+    row = _worker_ps1_info(skycell)
+    return exact_regmap_for_tess_ids(
+        tess_wcs,
+        row,
+        tess_ids,
+        data_shape=tuple(_REMAP_WORKER["base_tess_shape"]),
+        oversampling_factor=int(_REMAP_WORKER["oversampling_factor"]),
+        tpix_coord_input=_REMAP_WORKER["_tpix"],
+    )
+
+
+def _l4a_exact_one_shift(
+    skycell: str,
+    epoch_id: int,
+    sx_i: int,
+    sy_i: int,
+    rep_frame_index: int,
+    assignment_map: np.ndarray,
+) -> str:
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        l4a_exact_path,
+    )
+    from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
+        candidate_tess_ids_for_l4a,
+    )
+
+    exact_l4a_dir = Path(_REMAP_WORKER["exact_l4a_dir"])
+    rebuild = bool(_REMAP_WORKER["rebuild_remap_cache"])
+    cache_path = l4a_exact_path(exact_l4a_dir, skycell, epoch_id, sx_i, sy_i)
+    if cache_path.is_file() and not rebuild:
+        return "skip"
+    if cache_path.is_file() and rebuild:
+        cache_path.unlink()
+    frame_i = int(rep_frame_index)
+    try:
+        tess_wcs = _worker_frame_wcs(frame_i)
+        tids, mask = candidate_tess_ids_for_l4a(
+            assignment_map,
+            sx_i,
+            sy_i,
+            hybrid_R=int(_REMAP_WORKER["intra_skycell_R"]),
+        )
+        if tids.size == 0 or int(mask.sum()) == 0:
+            return "skip"
+        exact = _worker_exact_regmap(tess_wcs, skycell, tids)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            exact_tid=exact.astype(np.int32),
+            epoch_id=np.int32(epoch_id),
+            rep_frame_index=np.int32(frame_i),
+            sx_int=np.int32(sx_i),
+            sy_int=np.int32(sy_i),
+        )
+        return "write"
+    except Exception as exc:
+        log.warning(
+            "Exact cache failed for %s epoch=%d sx=%+d sy=%+d (%s)",
+            skycell,
+            epoch_id,
+            sx_i,
+            sy_i,
+            exc,
+        )
+        return "fail"
+
+
+def _l4a_exact_skycell_batch(
+    skycell: str,
+    epochs: list[tuple[int, int, int, int]],
+) -> list[str]:
+    """Process L4a epochs for one skycell: ``(epoch_id, sx, sy, rep_frame_index)``."""
+    if not epochs:
+        return []
+    assignment_map = _read_regmap_assignment(skycell)
+    return [
+        _l4a_exact_one_shift(skycell, epoch_id, sx_i, sy_i, rep_f, assignment_map)
+        for epoch_id, sx_i, sy_i, rep_f in epochs
+    ]
+
+
+def _l4b_rim_one_epoch(
+    id_lo: int,
+    id_hi: int,
+    pair_epoch_id: int,
+    sx_lo: int,
+    sy_lo: int,
+    sx_hi: int,
+    sy_hi: int,
+    rep_frame_index: int,
+    *,
+    name_lo: str,
+    name_hi: str,
+    ids_lo: np.ndarray,
+    ids_hi: np.ndarray,
+) -> str:
+    """Write or skip one L4b rim NPZ; border tess ids are provided by the batch."""
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        l4b_rim_path,
+    )
+
+    exact_l4b_dir = Path(_REMAP_WORKER["exact_l4b_dir"])
+    rebuild = bool(_REMAP_WORKER["rebuild_inter_skycell_cache"])
+    cache_path = l4b_rim_path(
+        exact_l4b_dir,
+        id_lo,
+        id_hi,
+        pair_epoch_id,
+        sx_lo,
+        sy_lo,
+        sx_hi,
+        sy_hi,
+    )
+    if cache_path.is_file() and not rebuild:
+        return "skip"
+    if cache_path.is_file() and rebuild:
+        cache_path.unlink()
+
+    if ids_lo.size == 0 and ids_hi.size == 0:
+        return "skip"
+
+    frame_i = int(rep_frame_index)
+    try:
+        rep_wcs = _worker_frame_wcs(frame_i)
+        exact_tid_lo = (
+            _worker_exact_regmap(rep_wcs, name_lo, ids_lo)
+            if ids_lo.size
+            else np.array([], dtype=np.int32)
+        )
+        exact_tid_hi = (
+            _worker_exact_regmap(rep_wcs, name_hi, ids_hi)
+            if ids_hi.size
+            else np.array([], dtype=np.int32)
+        )
+
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            cache_path,
+            exact_tid_lo=exact_tid_lo.astype(np.int32),
+            exact_tid_hi=exact_tid_hi.astype(np.int32),
+            id_lo=np.int32(id_lo),
+            id_hi=np.int32(id_hi),
+            sx_lo=np.int16(sx_lo),
+            sy_lo=np.int16(sy_lo),
+            sx_hi=np.int16(sx_hi),
+            sy_hi=np.int16(sy_hi),
+            pair_epoch_id=np.int32(pair_epoch_id),
+            rep_frame_index=np.int32(frame_i),
+        )
+        return "write"
+    except Exception as exc:
+        log.warning(
+            "L4b rim cache failed for pair %d|%d epoch=%d (%+d,%+d)|(%+d,%+d): %s",
+            id_lo,
+            id_hi,
+            pair_epoch_id,
+            sx_lo,
+            sy_lo,
+            sx_hi,
+            sy_hi,
+            exc,
+        )
+        return "fail"
+
+
+def _l4b_rim_pair_batch(
+    id_lo: int,
+    id_hi: int,
+    epochs: list[tuple[int, int, int, int, int, int]],
+) -> list[str]:
+    """Process L4b pair-epochs for one abutting border; hoist border tess ids once."""
+    from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
+        shared_abutting_border_tess_ids,
+    )
+
+    if not epochs:
+        return []
+
+    idx_to_name = _REMAP_WORKER["idx_to_name"]
+    name_lo = idx_to_name.get(int(id_lo))
+    name_hi = idx_to_name.get(int(id_hi))
+    if name_lo is None or name_hi is None:
+        log.warning(
+            "L4b pair-state ids %d|%d missing from master table; skipping batch",
+            id_lo,
+            id_hi,
+        )
+        return ["skip"] * len(epochs)
+
+    master = _REMAP_WORKER["master"]
+    ids_lo, ids_hi = shared_abutting_border_tess_ids(master, id_lo, id_hi)
+    # Warm PS1 catalog rows once per border (shared across epochs).
+    _worker_ps1_info(name_lo)
+    _worker_ps1_info(name_hi)
+
+    return [
+        _l4b_rim_one_epoch(
+            id_lo,
+            id_hi,
+            pair_epoch_id,
+            sx_lo,
+            sy_lo,
+            sx_hi,
+            sy_hi,
+            rep_frame_index,
+            name_lo=name_lo,
+            name_hi=name_hi,
+            ids_lo=ids_lo,
+            ids_hi=ids_hi,
+        )
+        for pair_epoch_id, sx_lo, sy_lo, sx_hi, sy_hi, rep_frame_index in epochs
+    ]
+
+
+def _build_remap_worker_payload(
+    *,
+    schedule: ShiftSchedule,
+    mapping_root: Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    base_tess_shape: tuple[int, int],
+    oversampling_factor: int,
+    intra_skycell_R: int,
+    exact_l4a_dir: Path,
+    exact_l4b_dir: Path,
+    rebuild_remap_cache: bool,
+    rebuild_inter_skycell_cache: bool,
+    scratch_regmaps: dict[str, str],
+    wcs_mode: str,
+    ffi_list_df: pd.DataFrame | None = None,
+    frame_filenames: list[str] | None = None,
+    frames_df: pd.DataFrame | None = None,
+    master: np.ndarray | None = None,
+    master_path: str | Path | None = None,
+    idx_to_name: dict[int, str] | None = None,
+) -> dict[str, Any]:
+    # Prefer master_path over master ndarray so joblib initargs equality does
+    # not compare large numpy arrays when spinning up the L4b pool after L4a.
+    payload: dict[str, Any] = {
+        "schedule": schedule,
+        "mapping_root": str(mapping_root),
+        "sector": int(sector),
+        "camera": int(camera),
+        "ccd": int(ccd),
+        "base_tess_shape": tuple(int(x) for x in base_tess_shape),
+        "oversampling_factor": int(oversampling_factor),
+        "intra_skycell_R": int(intra_skycell_R),
+        "exact_l4a_dir": str(exact_l4a_dir),
+        "exact_l4b_dir": str(exact_l4b_dir),
+        "rebuild_remap_cache": bool(rebuild_remap_cache),
+        "rebuild_inter_skycell_cache": bool(rebuild_inter_skycell_cache),
+        "scratch_regmaps": dict(scratch_regmaps),
+        "skycell_rows": {},
+        "wcs_mode": wcs_mode,
+        "ffi_list_df": ffi_list_df,
+        "frame_filenames": frame_filenames,
+        "frames_df": frames_df,
+        "master": None if master_path is not None else master,
+        "master_path": str(master_path) if master_path is not None else None,
+        "idx_to_name": idx_to_name or {},
+    }
+    return payload
+
+
+def _stage_remap_regmaps_to_scratch(
+    *,
+    mapping_root: Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    oversampling_factor: int,
+    skycells: set[str],
+) -> tuple[dict[str, str], int, float]:
+    """Copy unique skycell regmaps to local scratch; return skycell→path map."""
+    from syndiff_pipeline.template_creation.processing.downsample import (
+        resolve_stage_regmaps_to_scratch,
+        stage_regmap_files_to_scratch,
+    )
+
+    if not skycells or not resolve_stage_regmaps_to_scratch(None):
+        return {}, 0, 0.0
+
+    sky_reg: list[tuple[str, str]] = []
+    for sc in sorted(skycells):
+        try:
+            sky_reg.append(
+                (
+                    sc,
+                    str(
+                        _find_regmap(
+                            mapping_root,
+                            sector,
+                            camera,
+                            ccd,
+                            sc,
+                            oversampling_factor=oversampling_factor,
+                        )
+                    ),
+                )
+            )
+        except FileNotFoundError:
+            continue
+    if not sky_reg:
+        return {}, 0, 0.0
+
+    local_paths, scratch_dir, n_staged, elapsed = stage_regmap_files_to_scratch(
+        [p for _, p in sky_reg],
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    scratch_regmaps = {sc: lp for (sc, _), lp in zip(sky_reg, local_paths)}
+    log.info(
+        "Staged %d/%d remap regmaps to scratch %s in %.1fs",
+        n_staged,
+        len(sky_reg),
+        scratch_dir,
+        elapsed,
+    )
+    return scratch_regmaps, n_staged, elapsed
+
+
+def load_gid_epoch_index(path: str | Path) -> dict[str, Any]:
+    """Load ``gid_epoch_index.npz`` into dicts for O(1) compose lookup."""
+    data = np.load(Path(path), allow_pickle=True)
+    l4a: dict[tuple[str, int, int, int], int] = {}
+    for i in range(len(data["l4a_gid"])):
+        key = (
+            str(data["l4a_skycell"][i]),
+            int(data["l4a_gid"][i]),
+            int(data["l4a_sx"][i]),
+            int(data["l4a_sy"][i]),
+        )
+        l4a[key] = int(data["l4a_epoch_id"][i])
+    l4b: dict[tuple[int, int, int, int, int, int, int], int] = {}
+    for i in range(len(data["l4b_gid"])):
+        key = (
+            int(data["l4b_pair_lo"][i]),
+            int(data["l4b_pair_hi"][i]),
+            int(data["l4b_gid"][i]),
+            int(data["l4b_sx_lo"][i]),
+            int(data["l4b_sy_lo"][i]),
+            int(data["l4b_sx_hi"][i]),
+            int(data["l4b_sy_hi"][i]),
+        )
+        l4b[key] = int(data["l4b_pair_epoch_id"][i])
+    return {"l4a": l4a, "l4b": l4b}
+
+
+def resolve_l4a_epoch_id(
+    epoch_index: Mapping[str, Any],
+    *,
+    skycell: str,
+    group_id: int,
+    sx_int: int,
+    sy_int: int,
+) -> int:
+    key = (str(skycell), int(group_id), int(sx_int), int(sy_int))
+    l4a = epoch_index["l4a"]
+    if key not in l4a:
+        raise KeyError(f"No L4a epoch for {key}")
+    return int(l4a[key])
+
+
+def resolve_l4b_pair_epoch_id(
+    epoch_index: Mapping[str, Any],
+    *,
+    id_lo: int,
+    id_hi: int,
+    group_id: int,
+    sx_lo: int,
+    sy_lo: int,
+    sx_hi: int,
+    sy_hi: int,
+) -> int:
+    lo, hi = (int(id_lo), int(id_hi)) if int(id_lo) <= int(id_hi) else (int(id_hi), int(id_lo))
+    if (int(id_lo), int(id_hi)) != (lo, hi):
+        sx_lo, sy_lo, sx_hi, sy_hi = int(sx_hi), int(sy_hi), int(sx_lo), int(sy_lo)
+    key = (lo, hi, int(group_id), int(sx_lo), int(sy_lo), int(sx_hi), int(sy_hi))
+    l4b = epoch_index["l4b"]
+    if key not in l4b:
+        raise KeyError(f"No L4b pair-epoch for {key}")
+    return int(l4b[key])
+
+
+def _wipe_exact_cache_tree(cache_dir: Path) -> None:
+    """Remove an Exact cache directory tree and recreate an empty root."""
+    if cache_dir.is_dir():
+        shutil.rmtree(cache_dir)
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _write_gid_epoch_index(
+    path: Path,
+    *,
+    shift_epochs: pd.DataFrame,
+    pair_epochs: pd.DataFrame,
+    members: pd.DataFrame,
+) -> None:
+    """Persist O(1) compose lookup arrays for L4a/L4b epochs."""
+    l4a_m = members[members["kind"] == "l4a"] if len(members) else members
+    l4b_m = members[members["kind"] == "l4b"] if len(members) else members
+
+    l4a_skycell: list[str] = []
+    l4a_gid: list[int] = []
+    l4a_sx: list[int] = []
+    l4a_sy: list[int] = []
+    l4a_epoch_id: list[int] = []
+    if len(l4a_m) and len(shift_epochs):
+        ep = shift_epochs.set_index(["skycell", "epoch_id"], drop=False)
+        for row in l4a_m.itertuples(index=False):
+            key = (str(row.scope_key), int(row.epoch_id))
+            if key not in ep.index:
+                continue
+            er = ep.loc[key]
+            if isinstance(er, pd.DataFrame):
+                er = er.iloc[0]
+            l4a_skycell.append(str(row.scope_key))
+            l4a_gid.append(int(row.group_id))
+            l4a_sx.append(int(er.sx_int))
+            l4a_sy.append(int(er.sy_int))
+            l4a_epoch_id.append(int(row.epoch_id))
+
+    l4b_pair_lo: list[int] = []
+    l4b_pair_hi: list[int] = []
+    l4b_gid: list[int] = []
+    l4b_sx_lo: list[int] = []
+    l4b_sy_lo: list[int] = []
+    l4b_sx_hi: list[int] = []
+    l4b_sy_hi: list[int] = []
+    l4b_pair_epoch_id: list[int] = []
+    if len(l4b_m) and len(pair_epochs):
+        ep = pair_epochs.set_index(["id_lo", "id_hi", "pair_epoch_id"], drop=False)
+        for row in l4b_m.itertuples(index=False):
+            # scope_key = pair_{lo}__{hi}
+            parts = str(row.scope_key).split("__")
+            if len(parts) != 2 or not parts[0].startswith("pair_"):
+                continue
+            id_lo = int(parts[0].removeprefix("pair_"))
+            id_hi = int(parts[1])
+            key = (id_lo, id_hi, int(row.epoch_id))
+            if key not in ep.index:
+                continue
+            er = ep.loc[key]
+            if isinstance(er, pd.DataFrame):
+                er = er.iloc[0]
+            l4b_pair_lo.append(id_lo)
+            l4b_pair_hi.append(id_hi)
+            l4b_gid.append(int(row.group_id))
+            l4b_sx_lo.append(int(er.sx_lo))
+            l4b_sy_lo.append(int(er.sy_lo))
+            l4b_sx_hi.append(int(er.sx_hi))
+            l4b_sy_hi.append(int(er.sy_hi))
+            l4b_pair_epoch_id.append(int(row.epoch_id))
+
+    np.savez_compressed(
+        path,
+        l4a_skycell=np.asarray(l4a_skycell, dtype=object),
+        l4a_gid=np.asarray(l4a_gid, dtype=np.int32),
+        l4a_sx=np.asarray(l4a_sx, dtype=np.int32),
+        l4a_sy=np.asarray(l4a_sy, dtype=np.int32),
+        l4a_epoch_id=np.asarray(l4a_epoch_id, dtype=np.int32),
+        l4b_pair_lo=np.asarray(l4b_pair_lo, dtype=np.int32),
+        l4b_pair_hi=np.asarray(l4b_pair_hi, dtype=np.int32),
+        l4b_gid=np.asarray(l4b_gid, dtype=np.int32),
+        l4b_sx_lo=np.asarray(l4b_sx_lo, dtype=np.int32),
+        l4b_sy_lo=np.asarray(l4b_sy_lo, dtype=np.int32),
+        l4b_sx_hi=np.asarray(l4b_sx_hi, dtype=np.int32),
+        l4b_sy_hi=np.asarray(l4b_sy_hi, dtype=np.int32),
+        l4b_pair_epoch_id=np.asarray(l4b_pair_epoch_id, dtype=np.int32),
+    )
+
+
+def _write_epoch_artifacts(
+    store: Path,
+    *,
+    schedule: ShiftSchedule,
+    group_id_per_frame: np.ndarray,
+    pair_ids: np.ndarray,
+    pair_idx: np.ndarray,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Write shift/pair epoch tables + membership + gid index under *store*."""
+    shift_epochs, l4a_members = build_shift_epochs(schedule, group_id_per_frame)
+    pair_epochs, l4b_members = build_pair_epochs(
+        schedule,
+        group_id_per_frame,
+        pair_ids=pair_ids,
+        pair_idx=pair_idx,
+    )
+    members = pd.concat([l4a_members, l4b_members], ignore_index=True)
+    shift_epochs.to_parquet(store / SHIFT_EPOCHS_PARQUET, index=False)
+    pair_epochs.to_parquet(store / PAIR_EPOCHS_PARQUET, index=False)
+    members.to_parquet(store / EPOCH_GROUP_MEMBERS_PARQUET, index=False)
+    np.save(store / GROUP_ID_PER_FRAME_NPY, np.asarray(group_id_per_frame, dtype=np.int32))
+    _write_gid_epoch_index(
+        store / GID_EPOCH_INDEX_NPZ,
+        shift_epochs=shift_epochs,
+        pair_epochs=pair_epochs,
+        members=members,
+    )
+    return shift_epochs, pair_epochs, members
+
+
 def _write_remap_manifest(
     store: Path,
     *,
@@ -721,6 +1387,8 @@ def _write_remap_manifest(
     n_groups: int,
     reference_ffi: str | None,
     n_inter_skycell_pair_states: int = 0,
+    n_shift_epochs: int = 0,
+    n_pair_epochs: int = 0,
     rebuild_inter_skycell_cache: bool = False,
     shift_schedule_frame_origin_counts: dict[str, int] | None = None,
 ) -> None:
@@ -731,10 +1399,15 @@ def _write_remap_manifest(
         "intra_skycell_R": int(intra_skycell_R),
         "cache_quantum_ps1_px": float(cache_quantum_ps1_px),
         "keying": str(keying),
-        "n_intra_skycell_keys": int(n_intra_skycell_keys),
+        "n_shift_epochs": int(n_shift_epochs),
+        "n_pair_epochs": int(n_pair_epochs),
+        # Legacy aliases (same counts as epochs under schema v3)
+        "n_intra_skycell_keys": int(n_shift_epochs if n_shift_epochs else n_intra_skycell_keys),
+        "n_inter_skycell_pair_states": int(
+            n_pair_epochs if n_pair_epochs else n_inter_skycell_pair_states
+        ),
         "exact_cache_l4a": EXACT_CACHE_L4A_DIRNAME,
         "n_groups": int(n_groups),
-        "n_inter_skycell_pair_states": int(n_inter_skycell_pair_states),
         "exact_cache_l4b": EXACT_CACHE_L4B_DIRNAME,
         "rebuild_inter_skycell_cache": bool(rebuild_inter_skycell_cache),
         "written_at": datetime.now(timezone.utc).isoformat(),
@@ -789,11 +1462,6 @@ def run_field_remap_scc(
             oversampling_factor=int(oversampling_factor),
         )
 
-    from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
-        candidate_tess_ids_for_l4a,
-        exact_regmap_for_tess_ids,
-    )
-
     event_dir = Path(event_dir)
     data_root = Path(data_root)
     mapping_root = Path(mapping_root)
@@ -844,18 +1512,58 @@ def run_field_remap_scc(
             cache_quantum_ps1_px=cache_quantum_ps1_px,
         )
 
-    keys = {
-        (str(r.skycell), int(r.sx_int), int(r.sy_int))
-        for r in assignment.shifts_df.itertuples(index=False)
-    }
-    n_intra_skycell_keys = sum(
-        1 for s, x, y in keys if not (x == 0 and y == 0)
+    # Contiguous group islands are already assigned. Build epoch tables next
+    # (needed before Exact enumeration) and persist group_id_per_frame.
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+        build_col_of_name,
+        pair_column_indices,
     )
+
+    master_path = _master_pixels2skycells_path(
+        mapping_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    master, name_to_id = _master_skycell_id_map(master_path)
+    idx_to_name = {int(v): str(k) for k, v in name_to_id.items()}
+    pair_ids = abutting_undirected_pairs(master)
+    col_of_name = build_col_of_name(schedule.skycell_names)
+    pair_idx = pair_column_indices(
+        pair_ids,
+        name_to_id=name_to_id,
+        col_of_name=col_of_name,
+        idx_to_name=idx_to_name,
+    )
+    shift_epochs, pair_epochs, _members = _write_epoch_artifacts(
+        store,
+        schedule=schedule,
+        group_id_per_frame=assignment.group_id_per_frame,
+        pair_ids=pair_ids,
+        pair_idx=pair_idx,
+    )
+    if not scc_only:
+        _write_epoch_artifacts(
+            event_dir,
+            schedule=schedule,
+            group_id_per_frame=assignment.group_id_per_frame,
+            pair_ids=pair_ids,
+            pair_idx=pair_idx,
+        )
+
+    n_intra_skycell_keys = int(len(shift_epochs))
+    n_inter_skycell_pair_states = int(len(pair_epochs))
     n_intra_skycell_written = 0
-    n_inter_skycell_pair_states = 0
     n_inter_skycell_written = 0
     run_intra = bool(n_intra_skycell_keys)
     run_inter = True
+
+    if rebuild_remap_cache:
+        _wipe_exact_cache_tree(exact_l4a_dir)
+    if rebuild_inter_skycell_cache:
+        _wipe_exact_cache_tree(exact_l4b_dir)
 
     if progress_file is not None:
         if run_intra:
@@ -864,11 +1572,16 @@ def run_field_remap_scc(
             remap_progress.set_progress_phase(progress_file, "complete")
 
     frame_wcs_loader: Any | None = None
+    wcs_mode = "event"
+    ffi_list_df: pd.DataFrame | None = None
+    frame_filenames: list[str] | None = None
+    frames_df: pd.DataFrame | None = None
     if run_intra or run_inter:
         if scc_only:
             from syndiff_pipeline.common.wcs_header_cache import load_ffi_list
             from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
 
+            wcs_mode = "scc"
             ffi_list_path = scc_ffi_list_parquet(data_root, sector, camera, ccd)
             if not ffi_list_path.is_file():
                 raise FileNotFoundError(f"Missing ffi_list at {ffi_list_path}")
@@ -888,159 +1601,129 @@ def run_field_remap_scc(
 
         frame_wcs_loader = _frame_wcs_at
 
-    skycell_row_cache: dict[str, pd.Series] = {}
-
-    def _skycell_row(skycell: str) -> pd.Series:
-        if skycell not in skycell_row_cache:
-            skycell_row_cache[skycell] = _skycell_catalog_row(
-                mapping_root,
-                sector,
-                camera,
-                ccd,
-                skycell,
-                oversampling_factor=oversampling_factor,
-            )
-        return skycell_row_cache[skycell]
+    scratch_regmaps: dict[str, str] = {}
+    regmaps_staged = 0
+    scratch_elapsed_s = 0.0
+    if run_intra or run_inter:
+        skycells_for_stage = (
+            set(str(s) for s in shift_epochs["skycell"].unique())
+            if len(shift_epochs)
+            else set()
+        )
+        for id_a, id_b in pair_ids:
+            for sid in (id_a, id_b):
+                name = idx_to_name.get(int(sid))
+                if name:
+                    skycells_for_stage.add(str(name))
+        scratch_regmaps, regmaps_staged, scratch_elapsed_s = _stage_remap_regmaps_to_scratch(
+            mapping_root=mapping_root,
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            oversampling_factor=oversampling_factor,
+            skycells=skycells_for_stage,
+        )
 
     if run_intra:
         assert frame_wcs_loader is not None
 
-        def _one_exact(skycell: str, sx_i: int, sy_i: int) -> str:
-            if int(sx_i) == 0 and int(sy_i) == 0:
-                return "skip"
-            return _one_exact_impl(skycell, sx_i, sy_i)
+        skycell_batches = _group_l4a_epochs_by_skycell(shift_epochs)
+        n_jobs_eff = _effective_parallel_jobs(n_jobs, len(skycell_batches))
+        worker_payload = _build_remap_worker_payload(
+            schedule=schedule,
+            mapping_root=mapping_root,
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            base_tess_shape=base_tess_shape,
+            oversampling_factor=oversampling_factor,
+            intra_skycell_R=intra_skycell_R,
+            exact_l4a_dir=exact_l4a_dir,
+            exact_l4b_dir=exact_l4b_dir,
+            rebuild_remap_cache=rebuild_remap_cache,
+            rebuild_inter_skycell_cache=rebuild_inter_skycell_cache,
+            scratch_regmaps=scratch_regmaps,
+            wcs_mode=wcs_mode,
+            ffi_list_df=ffi_list_df,
+            frame_filenames=frame_filenames,
+            frames_df=frames_df,
+        )
+        if progress_file is not None:
+            import os as _os
 
-        def _one_exact_impl(skycell: str, sx_i: int, sy_i: int) -> str:
-            cache_name = contrib_basename(skycell, sx_i, sy_i).replace(".npz", "_exact.npz")
-            cache_path = exact_l4a_dir / cache_name
-            if cache_path.is_file() and not rebuild_remap_cache:
-                return "skip"
-            if cache_path.is_file() and rebuild_remap_cache:
-                cache_path.unlink()
-            frame_i = _frame_index_for_shift(schedule, skycell, sx_i, sy_i)
-            if frame_i is None:
-                log.warning(
-                    "No frame WCS for exact cache %s sx=%+d sy=%+d; skipping",
-                    skycell,
-                    sx_i,
-                    sy_i,
-                )
-                return "skip"
-            try:
-                tess_wcs = frame_wcs_loader(frame_i)
-                with fits.open(
-                    _find_regmap(
-                        mapping_root,
-                        sector,
-                        camera,
-                        ccd,
-                        skycell,
-                        oversampling_factor=oversampling_factor,
-                    )
-                ) as hdul:
-                    if "TESS_PIXEL_MAP" in hdul:
-                        assignment_map = np.asarray(hdul["TESS_PIXEL_MAP"].data)
-                    else:
-                        assignment_map = np.asarray(hdul[1].data)
-                tids, mask = candidate_tess_ids_for_l4a(
-                    assignment_map,
-                    sx_i,
-                    sy_i,
-                    hybrid_R=int(intra_skycell_R),
-                )
-                if tids.size == 0 or int(mask.sum()) == 0:
-                    return "skip"
-                exact = exact_regmap_for_tess_ids(
-                    tess_wcs,
-                    _skycell_row(skycell),
-                    tids,
-                    data_shape=base_tess_shape,
-                    oversampling_factor=oversampling_factor,
-                )
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(cache_path, exact_tid=exact.astype(np.int32))
-                return "write"
-            except Exception as exc:
-                log.warning(
-                    "Exact cache failed for %s sx=%+d sy=%+d (%s)",
-                    skycell,
-                    sx_i,
-                    sy_i,
-                    exc,
-                )
-                return "fail"
-
-        key_list = sorted(keys)
-        n_jobs_eff = _effective_parallel_jobs(n_jobs, n_intra_skycell_keys)
+            perf_meta = {
+                "n_jobs_requested": int(n_jobs),
+                "n_jobs_eff": int(n_jobs_eff),
+                "regmaps_staged": int(regmaps_staged),
+                "scratch_elapsed_s": round(scratch_elapsed_s, 3),
+                "worker_cache": "tpix_skycell_batch",
+            }
+            tag = _os.environ.get("SYNDIFF_REMAP_BENCHMARK_TAG")
+            if tag:
+                perf_meta["benchmark_tag"] = tag
+            remap_progress.set_perf_metadata(progress_file, **perf_meta)
 
         def _on_l4a_done(_status: str) -> None:
             if progress_file is not None:
                 remap_progress.mark_exact_l4a_done(progress_file)
 
-        if n_jobs_eff == 1 or n_intra_skycell_keys <= 1:
-            exact_statuses = []
-            for s, x, y in key_list:
-                status = _one_exact(s, x, y)
+        def _on_l4a_batch_done(batch_statuses: list[str]) -> None:
+            for status in batch_statuses:
                 _on_l4a_done(status)
-                exact_statuses.append(status)
+
+        l4a_t0 = time.perf_counter()
+        if n_jobs_eff == 1 or len(skycell_batches) <= 1:
+            _reset_remap_worker()
+            _ensure_remap_worker(worker_payload)
+            exact_statuses = []
+            for skycell, epochs in skycell_batches:
+                batch_statuses = _l4a_exact_skycell_batch(skycell, epochs)
+                for status in batch_statuses:
+                    _on_l4a_done(status)
+                exact_statuses.extend(batch_statuses)
         else:
             from syndiff_pipeline.common.joblib_progress import (
                 parallel_map_with_optional_tqdm,
             )
 
-            exact_statuses = parallel_map_with_optional_tqdm(
-                (delayed(_one_exact)(s, x, y) for s, x, y in key_list),
-                n_tasks=len(key_list),
+            batch_results = parallel_map_with_optional_tqdm(
+                (
+                    delayed(_l4a_exact_skycell_batch)(sc, epochs)
+                    for sc, epochs in skycell_batches
+                ),
+                n_tasks=len(skycell_batches),
                 desc="remap L4a exact",
                 n_jobs_eff=n_jobs_eff,
                 prefer="processes",
-                on_result=_on_l4a_done,
+                initializer=_init_remap_worker,
+                initargs=(worker_payload,),
+                on_result=_on_l4a_batch_done,
             )
+            exact_statuses = [s for batch in batch_results for s in batch]
+        l4a_elapsed_s = time.perf_counter() - l4a_t0
         n_intra_skycell_written = sum(1 for s in exact_statuses if s == "write")
-        log.info(
-            "Intra-skycell exact cache: %d keys, %d written",
-            n_intra_skycell_keys,
-            n_intra_skycell_written,
+        l4a_rate = (
+            n_intra_skycell_keys / l4a_elapsed_s if l4a_elapsed_s > 0 else 0.0
         )
+        log.info(
+            "Intra-skycell exact cache: %d epochs (%d skycells), %d written in %.1fs (%.2f task/s)",
+            n_intra_skycell_keys,
+            len(skycell_batches),
+            n_intra_skycell_written,
+            l4a_elapsed_s,
+            l4a_rate,
+        )
+        if progress_file is not None:
+            remap_progress.set_perf_metadata(
+                progress_file,
+                l4a_elapsed_s=round(l4a_elapsed_s, 3),
+                l4a_task_rate_per_s=round(l4a_rate, 3),
+                l4a_keys_processed=n_intra_skycell_keys,
+                l4a_skycell_batches=len(skycell_batches),
+            )
 
     if run_inter:
-        from syndiff_pipeline.template_creation.processing.field_abutting import (
-            abutting_undirected_pairs,
-            build_col_of_name,
-            l4b_rim_cache_basename,
-            pair_column_indices,
-            unique_pair_states,
-        )
-        from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
-            shared_abutting_border_tess_ids,
-        )
-
         assert frame_wcs_loader is not None
-        master_path = _master_pixels2skycells_path(
-            mapping_root,
-            sector,
-            camera,
-            ccd,
-            oversampling_factor=oversampling_factor,
-        )
-        master, name_to_id = _master_skycell_id_map(master_path)
-        idx_to_name = {int(v): str(k) for k, v in name_to_id.items()}
-        pair_ids = abutting_undirected_pairs(master)
-        col_of_name = build_col_of_name(schedule.skycell_names)
-        pair_idx = pair_column_indices(
-            pair_ids,
-            name_to_id=name_to_id,
-            col_of_name=col_of_name,
-            idx_to_name=idx_to_name,
-        )
-        pair_states = unique_pair_states(
-            schedule.sx_int,
-            schedule.sy_int,
-            pair_idx,
-            schedule.frame_valid,
-            pair_ids=pair_ids,
-        )
-        n_inter_skycell_pair_states = len(pair_states)
 
         if progress_file is not None:
             if n_inter_skycell_pair_states:
@@ -1057,174 +1740,119 @@ def run_field_remap_scc(
             else:
                 remap_progress.set_progress_phase(progress_file, "complete")
 
-        def _one_l4b(
-            id_a: int,
-            id_b: int,
-            sx_a: int,
-            sy_a: int,
-            sx_b: int,
-            sy_b: int,
-        ) -> str:
-            return _one_l4b_impl(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
-
-        def _one_l4b_impl(
-            id_a: int,
-            id_b: int,
-            sx_a: int,
-            sy_a: int,
-            sx_b: int,
-            sy_b: int,
-        ) -> str:
-            cache_name = l4b_rim_cache_basename(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
-            cache_path = exact_l4b_dir / cache_name
-            if cache_path.is_file() and not rebuild_inter_skycell_cache:
-                return "skip"
-            if cache_path.is_file() and rebuild_inter_skycell_cache:
-                cache_path.unlink()
-
-            name_a = idx_to_name.get(int(id_a))
-            name_b = idx_to_name.get(int(id_b))
-            if name_a is None or name_b is None:
-                log.warning(
-                    "L4b pair-state ids %d|%d missing from master table; skipping",
-                    id_a,
-                    id_b,
-                )
-                return "skip"
-
-            frame_i = _frame_index_for_pair_state(
-                schedule, name_a, name_b, sx_a, sy_a, sx_b, sy_b
-            )
-            if frame_i is None:
-                log.warning(
-                    "No rep frame for L4b pair %d|%d shifts (%+d,%+d)|(%+d,%+d); skipping",
-                    id_a,
-                    id_b,
-                    sx_a,
-                    sy_a,
-                    sx_b,
-                    sy_b,
-                )
-                return "skip"
-
-            try:
-                rep_wcs = frame_wcs_loader(frame_i)
-                ids_a, ids_b = shared_abutting_border_tess_ids(master, id_a, id_b)
-                if ids_a.size == 0 and ids_b.size == 0:
-                    return "skip"
-                exact_lo = (
-                    exact_regmap_for_tess_ids(
-                        rep_wcs,
-                        _skycell_row(name_a),
-                        ids_a,
-                        data_shape=base_tess_shape,
-                        oversampling_factor=oversampling_factor,
-                    )
-                    if ids_a.size
-                    else np.array([], dtype=np.int32)
-                )
-                exact_hi = (
-                    exact_regmap_for_tess_ids(
-                        rep_wcs,
-                        _skycell_row(name_b),
-                        ids_b,
-                        data_shape=base_tess_shape,
-                        oversampling_factor=oversampling_factor,
-                    )
-                    if ids_b.size
-                    else np.array([], dtype=np.int32)
-                )
-                id_lo, id_hi = (int(id_a), int(id_b)) if int(id_a) <= int(id_b) else (
-                    int(id_b),
-                    int(id_a),
-                )
-                if id_a == id_lo:
-                    sx_lo, sy_lo, sx_hi, sy_hi = int(sx_a), int(sy_a), int(sx_b), int(sy_b)
-                    exact_tid_lo, exact_tid_hi = exact_lo, exact_hi
-                else:
-                    sx_lo, sy_lo, sx_hi, sy_hi = int(sx_b), int(sy_b), int(sx_a), int(sy_a)
-                    exact_tid_lo, exact_tid_hi = exact_hi, exact_lo
-
-                cache_path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(
-                    cache_path,
-                    exact_tid_lo=exact_tid_lo.astype(np.int32),
-                    exact_tid_hi=exact_tid_hi.astype(np.int32),
-                    id_lo=np.int32(id_lo),
-                    id_hi=np.int32(id_hi),
-                    sx_lo=np.int16(sx_lo),
-                    sy_lo=np.int16(sy_lo),
-                    sx_hi=np.int16(sx_hi),
-                    sy_hi=np.int16(sy_hi),
-                    rep_frame_index=np.int32(frame_i),
-                )
-                return "write"
-            except Exception as exc:
-                log.warning(
-                    "L4b rim cache failed for pair %d|%d (%+d,%+d)|(%+d,%+d): %s",
-                    id_a,
-                    id_b,
-                    sx_a,
-                    sy_a,
-                    sx_b,
-                    sy_b,
-                    exc,
-                )
-                return "fail"
-
         if n_inter_skycell_pair_states:
-            n_jobs_l4b = _effective_parallel_jobs(n_jobs, n_inter_skycell_pair_states)
+            pair_batches = _group_l4b_epochs_by_pair(pair_epochs)
+            n_jobs_l4b = _effective_parallel_jobs(n_jobs, len(pair_batches))
+            worker_payload = _build_remap_worker_payload(
+                schedule=schedule,
+                mapping_root=mapping_root,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                base_tess_shape=base_tess_shape,
+                oversampling_factor=oversampling_factor,
+                intra_skycell_R=intra_skycell_R,
+                exact_l4a_dir=exact_l4a_dir,
+                exact_l4b_dir=exact_l4b_dir,
+                rebuild_remap_cache=rebuild_remap_cache,
+                rebuild_inter_skycell_cache=rebuild_inter_skycell_cache,
+                scratch_regmaps=scratch_regmaps,
+                wcs_mode=wcs_mode,
+                ffi_list_df=ffi_list_df,
+                frame_filenames=frame_filenames,
+                frames_df=frames_df,
+                master_path=master_path,
+                idx_to_name=idx_to_name,
+            )
+            if progress_file is not None:
+                remap_progress.set_perf_metadata(
+                    progress_file,
+                    l4b_n_jobs_eff=int(n_jobs_l4b),
+                    l4b_pair_batches=len(pair_batches),
+                    worker_cache="tpix_border_batch",
+                )
 
             def _on_l4b_done(_status: str) -> None:
                 if progress_file is not None:
                     remap_progress.mark_exact_l4b_done(progress_file)
 
-            if n_jobs_l4b == 1 or n_inter_skycell_pair_states <= 1:
-                l4b_statuses = []
-                for id_a, id_b, sx_a, sy_a, sx_b, sy_b in pair_states:
-                    status = _one_l4b(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
+            def _on_l4b_batch_done(batch_statuses: list[str]) -> None:
+                for status in batch_statuses:
                     _on_l4b_done(status)
-                    l4b_statuses.append(status)
+
+            # Avoid joblib initargs == crash after L4a pool (ShiftSchedule ndarrays).
+            _reset_joblib_executor_args()
+            _reset_remap_worker()
+
+            l4b_t0 = time.perf_counter()
+            if n_jobs_l4b == 1 or len(pair_batches) <= 1:
+                _reset_remap_worker()
+                _ensure_remap_worker(worker_payload)
+                l4b_statuses: list[str] = []
+                for (id_lo, id_hi), epochs in pair_batches:
+                    batch_statuses = _l4b_rim_pair_batch(id_lo, id_hi, epochs)
+                    for status in batch_statuses:
+                        _on_l4b_done(status)
+                    l4b_statuses.extend(batch_statuses)
             else:
                 from syndiff_pipeline.common.joblib_progress import (
                     parallel_map_with_optional_tqdm,
                 )
 
-                l4b_statuses = parallel_map_with_optional_tqdm(
+                batch_results = parallel_map_with_optional_tqdm(
                     (
-                        delayed(_one_l4b)(id_a, id_b, sx_a, sy_a, sx_b, sy_b)
-                        for id_a, id_b, sx_a, sy_a, sx_b, sy_b in pair_states
+                        delayed(_l4b_rim_pair_batch)(id_lo, id_hi, epochs)
+                        for (id_lo, id_hi), epochs in pair_batches
                     ),
-                    n_tasks=n_inter_skycell_pair_states,
-                    desc="remap inter-skycell rim",
+                    n_tasks=len(pair_batches),
+                    desc="remap L4b rim",
                     n_jobs_eff=n_jobs_l4b,
                     prefer="processes",
-                    on_result=_on_l4b_done,
+                    initializer=_init_remap_worker,
+                    initargs=(worker_payload,),
+                    on_result=_on_l4b_batch_done,
                 )
+                l4b_statuses = [s for batch in batch_results for s in batch]
+            l4b_elapsed_s = time.perf_counter() - l4b_t0
             n_inter_skycell_written = sum(1 for s in l4b_statuses if s == "write")
-            log.info(
-                "Inter-skycell rim cache: %d pair-states, %d written",
-                n_inter_skycell_pair_states,
-                n_inter_skycell_written,
+            l4b_rate = (
+                n_inter_skycell_pair_states / l4b_elapsed_s if l4b_elapsed_s > 0 else 0.0
             )
+            log.info(
+                "Inter-skycell rim cache: %d pair-epochs in %d pair batches, "
+                "%d written in %.1fs (%.2f epoch/s)",
+                n_inter_skycell_pair_states,
+                len(pair_batches),
+                n_inter_skycell_written,
+                l4b_elapsed_s,
+                l4b_rate,
+            )
+            if progress_file is not None:
+                remap_progress.set_perf_metadata(
+                    progress_file,
+                    l4b_elapsed_s=round(l4b_elapsed_s, 3),
+                    l4b_task_rate_per_s=round(l4b_rate, 3),
+                    l4b_keys_processed=n_inter_skycell_pair_states,
+                    l4b_pair_batches=len(pair_batches),
+                )
 
-    if progress_file is not None:
-        remap_progress.set_progress_phase(
-            progress_file,
-            "complete",
-            exact_l4a_done=n_intra_skycell_keys if run_intra else None,
-            exact_l4a_total=n_intra_skycell_keys if run_intra else None,
-            exact_l4b_done=(
-                n_inter_skycell_pair_states
-                if run_inter and n_inter_skycell_pair_states
-                else None
-            ),
-            exact_l4b_total=(
-                n_inter_skycell_pair_states
-                if run_inter and n_inter_skycell_pair_states
-                else None
-            ),
-        )
+        if progress_file is not None:
+            remap_progress.set_progress_phase(
+                progress_file,
+                "complete",
+                exact_l4a_done=n_intra_skycell_keys if run_intra else None,
+                exact_l4a_total=n_intra_skycell_keys if run_intra else None,
+                exact_l4b_done=(
+                    n_inter_skycell_pair_states
+                    if run_inter and n_inter_skycell_pair_states
+                    else None
+                ),
+                exact_l4b_total=(
+                    n_inter_skycell_pair_states
+                    if run_inter and n_inter_skycell_pair_states
+                    else None
+                ),
+            )
 
     ref_ffi = None
     if schedule.meta:
@@ -1242,6 +1870,8 @@ def run_field_remap_scc(
         n_groups=len(assignment.groups),
         reference_ffi=str(ref_ffi) if ref_ffi else None,
         n_inter_skycell_pair_states=n_inter_skycell_pair_states,
+        n_shift_epochs=n_intra_skycell_keys,
+        n_pair_epochs=n_inter_skycell_pair_states,
         rebuild_inter_skycell_cache=bool(rebuild_inter_skycell_cache),
         shift_schedule_frame_origin_counts=origin_counts,
     )
@@ -1253,6 +1883,8 @@ def run_field_remap_scc(
         "n_intra_skycell_written": n_intra_skycell_written,
         "n_inter_skycell_pair_states": n_inter_skycell_pair_states,
         "n_inter_skycell_written": n_inter_skycell_written,
+        "n_shift_epochs": n_intra_skycell_keys,
+        "n_pair_epochs": n_inter_skycell_pair_states,
         "geometry_mode": "field",
         "intra_skycell_R": int(intra_skycell_R),
         "rebuild_remap_cache": bool(rebuild_remap_cache),
