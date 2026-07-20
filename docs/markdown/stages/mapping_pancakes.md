@@ -66,12 +66,12 @@ Layout: `{output_path}/[oversampling_{N}/]sector_{SSSS}/camera_{C}/ccd_{D}/`
 - **Master skycell list (CSV)** — `tess_s{SSSS}_{C}_{D}_master_skycells_list[_osN].csv`  
   One row per selected skycell: `NAME`, full PS1 WCS columns (`NAXIS1/2`, `CRVAL*`, `CRPIX*`, `PC*`, `CDELT*`, …), sky corners, grid position (`projection`, `cell`, `y`, `x`), `pixel_indices` + `pixel_indices_num_pix`, and padding columns (`pad_skycell_top/right/…`, `special_padding_needed`, …). **This CSV is the only artifact the orchestrator's verify step checks.**
 
-- **Master TESS-to-skycell map (FITS)** — `tess_s{SSSS}_{C}_{D}_master_pixels2skycells[_osN].fits.gz`  
+- **Master TESS-to-skycell map (FITS)** — `tess_s{SSSS}_{C}_{D}_master_pixels2skycells[_osN].fits.fz`  
   - HDU 0: empty primary.
   - HDU 1: 2D `int16` image, FFI-shaped (or oversampled); each pixel = skycell index 0…N−1 or `-1`. Header carries the full TESS FFI header plus `TESS_FFI`, `DATE-MOD`, `SOFTWARE`, `CREATOR`, optional `OVERSAMP`. Downsample reads the TESS WCS from this header.
   - HDU 2: binary table with columns `SKYCELL` (name) and `SKYCIND` (index matching the image values).
 
-- **Per-skycell registration maps (FITS)** — `tess_s{SSSS}_{C}_{D}_skycell.{PROJ}.{CELL}[_osN].fits.gz`  
+- **Per-skycell registration maps (FITS)** — `tess_s{SSSS}_{C}_{D}_skycell.{PROJ}.{CELL}[_osN].fits.fz`  
   - HDU 0: primary header (`SECTOR`, `CAMERA`, `CCD`, `SKYCELL`, …).
   - HDU 1: `ImageHDU` with `EXTNAME='TESS_PIXEL_MAP'`, PS1-skycell-shaped; each PS1 pixel = 1D ravelled TESS index or `-1`, stored as scaled `int32` (`BZERO=32768`). Header includes the full PS1 WCS.
 
@@ -124,4 +124,4 @@ Key arguments:
 
 ## Orchestrator integration
 
-In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` or `syndiff all submit` (Condor pool `mapping`: 16 CPUs / 100 GB by default). Outputs land under `{data_root}/skycell_pixel_mapping/…`; the scheduler verifies only `tess_s{sector}_{camera}_{ccd}_master_skycells_list.csv` before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md).
+In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` (SCC-scoped; there is no combined `syndiff all` preset). It first resolves the SCC's reference FFI via the SCC-scoped chooser in `scc_reference_ffi.py` (median-CRVAL anchor + Earth/Moon-angle cuts), then runs PanCAKES (Condor pool `mapping`: 16 CPUs / 100 GB by default). Outputs land under `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`; the scheduler verifies only `tess_s{sector}_{camera}_{ccd}_master_skycells_list[_os{N}].csv` before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md).

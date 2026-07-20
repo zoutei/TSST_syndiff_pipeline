@@ -1,4 +1,4 @@
-"""Tests for canonical .fits / .fits.gz manifest path matching."""
+"""Tests for canonical .fits / .fits.gz / .fits.fz manifest path matching."""
 
 from __future__ import annotations
 
@@ -28,6 +28,16 @@ class TestManifestPathMatching(unittest.TestCase):
         self.assertEqual(idx[wcs_grouping.canonical_fits_path_key(gz)], 0)
         self.assertEqual(wcs_grouping.ref_manifest_row_index(wcs, gz), 0)
 
+    def test_manifest_path_row_index_fits_vs_fz(self):
+        wcs = pd.DataFrame(
+            {
+                "path": ["/data/tess2026039233236-s0100-1-2-0302-s_ffic.fits"],
+                "group_id": [3],
+            }
+        )
+        fz = "/data/tess2026039233236-s0100-1-2-0302-s_ffic.fits.fz"
+        self.assertEqual(wcs_grouping.ref_manifest_row_index(wcs, fz), 0)
+
     def test_manifest_path_row_index_gz_manifest_fits_lookup(self):
         wcs = pd.DataFrame(
             {
@@ -37,6 +47,10 @@ class TestManifestPathMatching(unittest.TestCase):
         )
         self.assertEqual(
             wcs_grouping.ref_manifest_row_index(wcs, "/data/frame.fits"),
+            0,
+        )
+        self.assertEqual(
+            wcs_grouping.ref_manifest_row_index(wcs, "/data/frame.fits.fz"),
             0,
         )
 

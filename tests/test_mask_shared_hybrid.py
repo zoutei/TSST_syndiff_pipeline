@@ -99,7 +99,7 @@ def test_tessreduce_no_bit32():
     assert (mask & bits.BRIGHT_CAT).any()
 
 
-def test_make_shared_mask_legacy_basename(tmp_path):
+def test_make_shared_mask_writes_canonical_basename(tmp_path):
     image = np.zeros((40, 40), dtype=np.float64)
     crop = {"x_min": 0, "x_max": 40, "y_min": 0, "y_max": 40, "shape": (40, 40)}
     gaia = pd.DataFrame({"x": [20.0], "y": [20.0], "mag": [12.0]})
@@ -112,5 +112,8 @@ def test_make_shared_mask_legacy_basename(tmp_path):
         output_dir=str(tmp_path),
         ps1_min_hit_count=0,
     )
-    assert (tmp_path / "shared_mask.fits.gz").is_file()
+    from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
+
+    assert (tmp_path / SHARED_MASK_FITS_BASENAME).is_file()
+    assert SHARED_MASK_FITS_BASENAME.endswith(".fits.fz")
     assert mask.dtype == np.int16

@@ -132,12 +132,12 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     run_directory = orch_cli._prepare_run_directory(
         str(pipeline_config),
-        str(star_targets_path),
         run_id,
         runs_root,
         stages=["star"],
         detach=True,
         force_rerun=bool(args.force_rerun),
+        source_targets=str(star_targets_path),
         source_star_config_path=str(star_config_path),
         workspace_run_id=None,
     )

@@ -30,7 +30,7 @@ pipeline:
       from: single_hp_kernel
       labels: [ks_b, ks_d]
       root_artifacts:
-        - shared_mask.fits
+        - shared_mask.fits.fz
         - hotpants_substamp_stars.csv
   - kind: background
     inputs:

@@ -21,8 +21,11 @@ the CLI) to disable. This extra step does not run for ``--single-offset`` or whe
 no cluster job / event dir is provided.
 """
 
+import errno
 import json
 import os
+import shutil
+import tempfile
 import time
 import warnings
 from glob import glob
@@ -36,16 +39,26 @@ from astropy.coordinates import SkyCoord
 import astropy.units as u
 from astropy.io import fits
 from astropy.wcs import WCS
-from joblib import Parallel, delayed
+from joblib import delayed
 from tqdm import tqdm
 
 # Import from existing script
+from syndiff_pipeline.common.fits_io import write_hdul_fits
+from syndiff_pipeline.common.fits_variants import (
+    is_fits_storage_filename,
+    iter_fits_variant_globs,
+    storage_suffix_rank,
+    strip_fits_storage_suffix,
+)
 from syndiff_pipeline.common.wcs_grouping import open_fits_memmap, resolve_existing_fits_path
-from syndiff_pipeline.difference_imaging.support.ffi_naming import strip_fits_suffix
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    PIPELINE_FITS_EXT,
+    strip_fits_suffix,
+)
 from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import RELEVANT_WCS_KEYS, build_ps1_wcs, compute_ps1_shift_for_skycell, load_tess_wcs
 from syndiff_pipeline.template_creation.processing.downsample_progress import (
     init_progress as init_downsample_progress,
-    mark_skycell_done as mark_downsample_skycell_done,
+    mark_skycells_done as mark_downsample_skycells_done,
     set_progress_phase as set_downsample_progress_phase,
 )
 
@@ -226,6 +239,150 @@ def write_ps1_removed_star_gaia_csv(
     return out_path
 
 
+def resolve_downsample_scratch_dir() -> Path:
+    """Local scratch for staging regmaps (Condor ``_CONDOR_SCRATCH_DIR`` or ``TMPDIR``)."""
+    for env_var in ("_CONDOR_SCRATCH_DIR", "TMPDIR"):
+        val = os.environ.get(env_var)
+        if val:
+            return Path(val)
+    return Path(tempfile.gettempdir())
+
+
+def resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch: bool | None) -> bool:
+    """Auto-enable staging on Condor when ``stage_regmaps_to_scratch`` is None."""
+    if stage_regmaps_to_scratch is not None:
+        return stage_regmaps_to_scratch
+    return "_CONDOR_SCRATCH_DIR" in os.environ or "CONDOR_JOB_AD" in os.environ
+
+
+def stage_regmap_files_to_scratch(
+    reg_files: list[str],
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    oversampling_factor: int,
+    scratch_base: Path | None = None,
+) -> tuple[list[str], Path, int, float]:
+    """
+    Copy ROI regmap FITS onto local scratch **as-is** (keep ``.fits.fz`` /
+    ``.fits.gz`` compressed).
+
+    Gunzipping full-chip osN regmaps would require hundreds of GB; ``fits.open``
+    reads compressed FITS directly. Convolved Zarr stays on shared NFS.
+
+    Returns
+    -------
+    local_paths, scratch_dir, n_newly_staged, elapsed_s
+    """
+    t0 = time.perf_counter()
+    scratch_root = scratch_base or resolve_downsample_scratch_dir()
+    os_suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
+    scratch_dir = (
+        scratch_root
+        / f"syndiff_downsample_regmaps_{sector:04d}_{camera}_{ccd}{os_suffix}"
+    )
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+
+    local_paths: list[str] = []
+    n_staged = 0
+    for src_str in reg_files:
+        src = Path(src_str)
+        dest = scratch_dir / src.name
+        if not dest.is_file():
+            shutil.copy2(src, dest)
+            n_staged += 1
+        local_paths.append(str(dest))
+
+    return local_paths, scratch_dir, n_staged, time.perf_counter() - t0
+
+
+def checkpoint_dir_for_output(output_dir: str | Path) -> Path:
+    """Sparse per-skycell NPZ checkpoint directory under the sector output tree."""
+    return Path(output_dir) / "_partial"
+
+
+def checkpoint_npz_path(checkpoint_dir: Path, skycell_name: str) -> Path:
+    """Safe on-disk path for one skycell's sparse contribution arrays."""
+    safe = skycell_name.replace("/", "_")
+    return checkpoint_dir / f"{safe}.npz"
+
+
+def is_valid_skycell_checkpoint(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        with np.load(path) as data:
+            for key in ("indices", "sums", "counts", "mask_counts"):
+                if key not in data:
+                    return False
+        return True
+    except (OSError, ValueError, KeyError):
+        return False
+
+
+def load_skycell_checkpoint(
+    path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    with np.load(path) as data:
+        return (
+            np.asarray(data["indices"]),
+            np.asarray(data["sums"]),
+            np.asarray(data["counts"]),
+            np.asarray(data["mask_counts"]),
+        )
+
+
+def save_skycell_checkpoint(
+    path: Path,
+    indices: np.ndarray,
+    sums: np.ndarray,
+    counts: np.ndarray,
+    mask_counts: np.ndarray,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_stem = path.parent / f"{path.stem}.tmp"
+    np.savez_compressed(
+        tmp_stem,
+        indices=indices,
+        sums=sums,
+        counts=counts,
+        mask_counts=mask_counts,
+    )
+    tmp_path = Path(f"{tmp_stem}.npz")
+    tmp_path.replace(path)
+
+
+def scan_completed_skycell_checkpoints(checkpoint_dir: Path) -> set[str]:
+    """Skycell names with a readable checkpoint NPZ in ``checkpoint_dir``."""
+    if not checkpoint_dir.is_dir():
+        return set()
+    completed: set[str] = set()
+    for path in checkpoint_dir.glob("*.npz"):
+        if path.name.endswith(".tmp.npz"):
+            continue
+        if not is_valid_skycell_checkpoint(path):
+            continue
+        completed.add(path.stem)
+    return completed
+
+
+def load_all_checkpoint_contributions(
+    checkpoint_dir: Path,
+) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """Load every valid skycell checkpoint for combine after a mid-run restart."""
+    if not checkpoint_dir.is_dir():
+        return []
+    contributions: list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]] = []
+    for path in sorted(checkpoint_dir.glob("*.npz")):
+        if path.name.endswith(".tmp.npz"):
+            continue
+        if not is_valid_skycell_checkpoint(path):
+            continue
+        contributions.append(load_skycell_checkpoint(path))
+    return contributions
+
+
 def extract_skycell_name_from_reg_file(reg_file: str) -> str | None:
     """Extract skycell.<proj>.<cell> from a registration filename."""
     fname = Path(reg_file).name
@@ -376,6 +533,104 @@ def _ignore_mask_from_bits(ignore_mask_bits: list[int] | None) -> int:
     return ignore_mask
 
 
+def _shifts_for_skycell(
+    shifts_dict: dict[tuple[float, float], pd.DataFrame],
+    offsets: np.ndarray,
+    skycell_name: str,
+) -> list[tuple[int, int] | None]:
+    """Per-offset (shift_x, shift_y) for ``skycell_name``, or None when absent."""
+    result: list[tuple[int, int] | None] = []
+    for dx, dy in offsets:
+        shift_df = shifts_dict[(float(dx), float(dy))]
+        name_to_shift = dict(
+            zip(
+                shift_df["NAME"],
+                zip(
+                    shift_df["shift_x"].astype(int, copy=False),
+                    shift_df["shift_y"].astype(int, copy=False),
+                ),
+            )
+        )
+        result.append(name_to_shift.get(skycell_name))
+    return result
+
+
+def _aggregate_sorted_groups(
+    ps1_rav: np.ndarray,
+    ps1_mask_rav: np.ndarray,
+    group_starts: np.ndarray,
+    ignore_mask: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized per-group counts, nansum (excluding ignored), and mask counts."""
+    n_groups = len(group_starts)
+    group_ends = np.concatenate([group_starts[1:], [len(ps1_rav)]])
+    group_sizes = group_ends - group_starts
+    group_ids = np.repeat(np.arange(n_groups, dtype=np.intp), group_sizes)
+
+    slice_start = int(group_starts[0])
+    ps1_grouped = ps1_rav[slice_start:]
+    mask_grouped = ps1_mask_rav[slice_start:]
+
+    ignored = (mask_grouped & ignore_mask) > 0
+    sum_weights = np.where(ignored, 0.0, ps1_grouped).astype(np.float64, copy=False)
+    sum_weights = np.where(np.isnan(sum_weights), 0.0, sum_weights)
+
+    counts = np.bincount(group_ids, minlength=n_groups).astype(np.int32, copy=False)
+    sums = np.bincount(group_ids, weights=sum_weights, minlength=n_groups).astype(
+        np.float32, copy=False
+    )
+    mask_weights = (mask_grouped != 0).astype(np.int32, copy=False)
+    mask_counts = np.bincount(
+        group_ids, weights=mask_weights, minlength=n_groups
+    ).astype(np.int32, copy=False)
+    return sums, counts, mask_counts
+
+
+def _decode_sparse_indices_to_roi(
+    combined_indices: np.ndarray,
+    base_tess_shape: tuple[int, int],
+    roi_bounds: tuple[int, int, int, int],
+    oversampling_factor: int,
+    out_h: int,
+    out_w: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Return (valid_mask, out_y, out_x) for sparse linearized TESS indices."""
+    x_min, y_min, x_max, y_max = roi_bounds
+    _, t_x = base_tess_shape
+
+    if oversampling_factor > 1:
+        os_width = t_x * oversampling_factor
+        y_os = combined_indices // os_width
+        x_os = combined_indices % os_width
+        y_base = y_os // oversampling_factor
+        x_base = x_os // oversampling_factor
+        sub_y = y_os % oversampling_factor
+        sub_x = x_os % oversampling_factor
+        out_y = (y_base - y_min) * oversampling_factor + sub_y
+        out_x = (x_base - x_min) * oversampling_factor + sub_x
+    else:
+        y_base = combined_indices // t_x
+        x_base = combined_indices % t_x
+        out_y = y_base - y_min
+        out_x = x_base - x_min
+
+    valid = (
+        (x_min <= x_base)
+        & (x_base < x_max)
+        & (y_min <= y_base)
+        & (y_base < y_max)
+        & (out_y >= 0)
+        & (out_y < out_h)
+        & (out_x >= 0)
+        & (out_x < out_w)
+    )
+    return (
+        valid,
+        out_y[valid].astype(np.int32, copy=False),
+        out_x[valid].astype(np.int32, copy=False),
+    )
+
+
 def _process_skycell_registration_binning(
     *,
     ps1_assignment: np.ndarray,
@@ -405,6 +660,8 @@ def _process_skycell_registration_binning(
 
     breaks = np.where(np.diff(pind[sort_ind]) > 0)[0] + 1
     breaks = np.append(breaks, len(sort_ind))
+    # ``breaks[i]:breaks[i+1]`` slices match the legacy loop (skips unmapped prefix).
+    group_starts = breaks[:-1]
 
     ps1_base = ps1_data
     ps1_mask_base = ps1_mask
@@ -413,39 +670,29 @@ def _process_skycell_registration_binning(
     pixel_counts = np.zeros((len(tess_pixels), num_offsets), dtype=np.int32)
     pixel_mask_counts = np.zeros((len(tess_pixels), num_offsets), dtype=np.int32)
 
-    for offset_idx, (dx, dy) in enumerate(offsets):
-        shift_df = shifts_dict[(dx, dy)]
-        row_idx = shift_df.index[shift_df["NAME"] == skycell_name].tolist()
+    offset_shifts = _shifts_for_skycell(shifts_dict, offsets, skycell_name)
 
-        if not row_idx:
+    for offset_idx, shift in enumerate(offset_shifts):
+        if shift is None:
             continue
 
-        sx = shift_df.loc[row_idx[0], "shift_x"]
-        sy = shift_df.loc[row_idx[0], "shift_y"]
-
+        sx, sy = shift
         ps1_shifted = np.roll(ps1_base, (sy, sx), axis=(0, 1))
         ps1_mask_shifted = np.roll(ps1_mask_base, (sy, sx), axis=(0, 1))
 
         ps1_rav = ps1_shifted.ravel()[sort_ind]
         ps1_mask_rav = ps1_mask_shifted.ravel()[sort_ind]
 
-        sums = np.zeros(len(breaks) - 1, dtype=np.float32)
-        counts = np.zeros(len(breaks) - 1, dtype=np.int32)
-        mask_counts = np.zeros(len(breaks) - 1, dtype=np.int32)
-
-        for i in range(len(breaks) - 1):
-            slice_data = ps1_rav[breaks[i] : breaks[i + 1]]
-            slice_mask = ps1_mask_rav[breaks[i] : breaks[i + 1]]
-
-            ignored_pixels = (slice_mask & ignore_mask) > 0
-
-            counts[i] = len(slice_data)
-            sums[i] = np.nansum(slice_data[~ignored_pixels])
-            mask_counts[i] = np.sum(slice_mask != 0)
+        sums, counts, mask_counts = _aggregate_sorted_groups(
+            ps1_rav,
+            ps1_mask_rav,
+            group_starts,
+            ignore_mask,
+        )
 
         pixel_sums[:, offset_idx] = sums
-        pixel_counts[:, offset_idx] = counts
-        pixel_mask_counts[:, offset_idx] = mask_counts
+        pixel_counts[:, offset_idx] = counts.astype(np.int32, copy=False)
+        pixel_mask_counts[:, offset_idx] = mask_counts.astype(np.int32, copy=False)
 
     if oversampling_factor > 1:
         os_width = t_x * oversampling_factor
@@ -511,22 +758,61 @@ def _run_skycell_batch_core(
     ignore_mask_bits: list[int] | None,
     progress_path: str | Path | None,
     load_ps1_arrays,
+    *,
+    log_level: str = "INFO",
+    total_batches: int | None = None,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_skycells: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     num_offsets = len(offsets)
     ignore_mask = _ignore_mask_from_bits(ignore_mask_bits)
+    debug = log_level.upper() == "DEBUG"
+    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
 
     all_indices: list[np.ndarray] = []
     all_sums: list[np.ndarray] = []
     all_counts: list[np.ndarray] = []
     all_mask_counts: list[np.ndarray] = []
 
+    batch_t0 = time.perf_counter()
+    regmap_time = 0.0
+    zarr_time = 0.0
+    binning_time = 0.0
+
     for reg_file, skycell_name in zip(reg_files, skycell_names):
+        skycell_regmap = 0.0
+        skycell_zarr = 0.0
+        skycell_binning = 0.0
+        ckpt_path = (
+            checkpoint_npz_path(ckpt_dir, skycell_name)
+            if checkpoint_skycells and ckpt_dir is not None
+            else None
+        )
         try:
+            if ckpt_path is not None and is_valid_skycell_checkpoint(ckpt_path):
+                contribution = load_skycell_checkpoint(ckpt_path)
+                if contribution[0].size > 0:
+                    all_indices.append(contribution[0])
+                    all_sums.append(contribution[1])
+                    all_counts.append(contribution[2])
+                    all_mask_counts.append(contribution[3])
+                if debug:
+                    print(f"[downsample] skycell {skycell_name} loaded from checkpoint")
+                continue
+
+            t_reg = time.perf_counter()
             with fits.open(reg_file) as hdul:
                 ps1_assignment = hdul[1].data.astype(int)
+            skycell_regmap = time.perf_counter() - t_reg
+            regmap_time += skycell_regmap
 
             try:
+                t_zarr = time.perf_counter()
                 ps1_data, ps1_mask = load_ps1_arrays(skycell_name)
+                skycell_zarr = time.perf_counter() - t_zarr
+                zarr_time += skycell_zarr
+
+                t_bin = time.perf_counter()
                 contribution = _process_skycell_registration_binning(
                     ps1_assignment=ps1_assignment,
                     ps1_data=ps1_data,
@@ -539,11 +825,21 @@ def _run_skycell_batch_core(
                     oversampling_factor=oversampling_factor,
                     ignore_mask=ignore_mask,
                 )
+                skycell_binning = time.perf_counter() - t_bin
+                binning_time += skycell_binning
                 if contribution is not None:
                     all_indices.append(contribution[0])
                     all_sums.append(contribution[1])
                     all_counts.append(contribution[2])
                     all_mask_counts.append(contribution[3])
+                    if ckpt_path is not None:
+                        save_skycell_checkpoint(
+                            ckpt_path,
+                            contribution[0],
+                            contribution[1],
+                            contribution[2],
+                            contribution[3],
+                        )
             except Exception as e:
                 print(f"Error processing PS1 data for skycell {skycell_name}: {e}")
                 continue
@@ -551,10 +847,23 @@ def _run_skycell_batch_core(
         except Exception as e:
             print(f"Error processing registration for skycell {skycell_name}: {e}")
         finally:
-            if progress_path is not None:
-                mark_downsample_skycell_done(progress_path, batch_idx)
+            if debug:
+                print(
+                    f"[downsample] skycell {skycell_name} regmap={skycell_regmap:.1f}s "
+                    f"zarr={skycell_zarr:.1f}s binning={skycell_binning:.1f}s"
+                )
 
-    print(f"Completed batch {batch_idx + 1}")
+    batch_elapsed = time.perf_counter() - batch_t0
+    n_skycells = len(reg_files)
+    if total_batches is not None and total_batches > 0:
+        batch_label = f"{batch_idx + 1}/{total_batches}"
+    else:
+        batch_label = str(batch_idx + 1)
+    print(
+        f"[downsample] batch {batch_label} done skycells={n_skycells} "
+        f"elapsed={batch_elapsed:.1f}s zarr={zarr_time:.1f}s regmap={regmap_time:.1f}s "
+        f"binning={binning_time:.1f}s"
+    )
     return _finalize_skycell_batch_results(
         all_indices, all_sums, all_counts, all_mask_counts, num_offsets
     )
@@ -615,35 +924,24 @@ def combine_sparse_downsample_results(
     out_w = roi_w * oversampling_factor
     combined_results = np.zeros((len(offsets), 3, out_h, out_w), dtype=np.float32)
 
-    for i, idx in enumerate(combined_indices):
-        if oversampling_factor > 1:
-            os_width = base_tess_shape[1] * oversampling_factor
-            y_os = idx // os_width
-            x_os = idx % os_width
-            y_base = y_os // oversampling_factor
-            x_base = x_os // oversampling_factor
-            sub_y = y_os % oversampling_factor
-            sub_x = x_os % oversampling_factor
+    valid, out_y, out_x = _decode_sparse_indices_to_roi(
+        combined_indices,
+        base_tess_shape,
+        roi_bounds,
+        oversampling_factor,
+        out_h,
+        out_w,
+    )
+    if not np.any(valid):
+        return combined_results
 
-            if x_min <= x_base < x_max and y_min <= y_base < y_max:
-                out_y = (y_base - y_min) * oversampling_factor + sub_y
-                out_x = (x_base - x_min) * oversampling_factor + sub_x
-            else:
-                continue
-        else:
-            y_base = idx // base_tess_shape[1]
-            x_base = idx % base_tess_shape[1]
-            if x_min <= x_base < x_max and y_min <= y_base < y_max:
-                out_y = y_base - y_min
-                out_x = x_base - x_min
-            else:
-                continue
+    sums_valid = combined_sums[valid]
+    counts_valid = combined_counts[valid]
+    mask_counts_valid = combined_mask_counts[valid]
 
-        if 0 <= out_y < combined_results.shape[2] and 0 <= out_x < combined_results.shape[3]:
-            for offset_idx in range(len(offsets)):
-                combined_results[offset_idx, 0, out_y, out_x] = combined_sums[i, offset_idx]
-                combined_results[offset_idx, 1, out_y, out_x] = combined_counts[i, offset_idx]
-                combined_results[offset_idx, 2, out_y, out_x] = combined_mask_counts[i, offset_idx]
+    combined_results[:, 0, out_y, out_x] = sums_valid.T
+    combined_results[:, 1, out_y, out_x] = counts_valid.T
+    combined_results[:, 2, out_y, out_x] = mask_counts_valid.T
 
     return combined_results
 
@@ -660,6 +958,10 @@ def process_skycell_batch(
     oversampling_factor: int = 1,
     ignore_mask_bits: list[int] | None = None,
     progress_path: str | Path | None = None,
+    log_level: str = "INFO",
+    total_batches: int | None = None,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_skycells: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Process a batch of skycells using sparse arrays for memory efficiency
@@ -688,6 +990,10 @@ def process_skycell_batch(
         ignore_mask_bits,
         progress_path,
         load_ps1_arrays,
+        log_level=log_level,
+        total_batches=total_batches,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_skycells=checkpoint_skycells,
     )
 
 
@@ -703,6 +1009,10 @@ def process_skycell_batch_from_arrays(
     oversampling_factor: int = 1,
     ignore_mask_bits: list[int] | None = None,
     progress_path: str | Path | None = None,
+    log_level: str = "INFO",
+    total_batches: int | None = None,
+    checkpoint_dir: str | Path | None = None,
+    checkpoint_skycells: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Process a batch of skycells from in-memory (data, mask) arrays.
@@ -730,6 +1040,10 @@ def process_skycell_batch_from_arrays(
         ignore_mask_bits,
         progress_path,
         load_ps1_arrays,
+        log_level=log_level,
+        total_batches=total_batches,
+        checkpoint_dir=checkpoint_dir,
+        checkpoint_skycells=checkpoint_skycells,
     )
 
 
@@ -875,9 +1189,12 @@ def save_fits_outputs(
                 roi_part = f"_x{rx0}-{rx1}_y{ry0}-{ry1}"
         os_part = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
 
-        output_filename = output_dir / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
-        hdu_list.writeto(output_filename, overwrite=True)
-        written_paths.append(str(output_filename))
+        output_filename = (
+            output_dir
+            / f"syndiff_template_s{sector:04d}_{camera}_{ccd}{roi_part}{os_part}"
+            f"_dx{dx:.3f}_dy{dy:.3f}{PIPELINE_FITS_EXT}"
+        )
+        written_paths.append(write_hdul_fits(output_filename, hdu_list))
 
     return written_paths
 
@@ -906,6 +1223,9 @@ def main(
     event_dir: str | Path | None = None,
     write_ps1_removed_stars_csv: bool = True,
     removed_stars_csv: str | Path | None = None,
+    log_level: str = "INFO",
+    stage_regmaps_to_scratch: bool | None = None,
+    checkpoint_skycells: bool = False,
 ) -> dict:
     # Resolve base paths (allow overrides)
     """Main.
@@ -935,11 +1255,20 @@ def main(
     event_dir : str | Path | None, optional, default ``None``
     write_ps1_removed_stars_csv : bool, optional, default ``True``
     removed_stars_csv : str | Path | None, optional, default ``None``
+    log_level : str, optional, default ``'INFO'``
+    stage_regmaps_to_scratch : bool | None, optional, default ``None``
+        When None, auto-enable on Condor (``_CONDOR_SCRATCH_DIR`` in env).
+    checkpoint_skycells : bool, optional, default ``False``
+        Write per-skycell sparse NPZ checkpoints under ``{output_dir}/_partial/``.
     
     Returns
     -------
     dict"""
     data_root = Path(data_root)
+    log_level = (log_level or "INFO").upper()
+    if log_level not in ("INFO", "DEBUG"):
+        raise ValueError(f"log_level must be INFO or DEBUG, got {log_level!r}")
+    run_t0 = time.perf_counter()
     if mapping_dir is None:
         mapping_root = data_root / "skycell_pixel_mapping"
     else:
@@ -954,14 +1283,26 @@ def main(
         output_base = Path(output_base)
 
     # Generate paths based on parameters
-    if oversampling_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{oversampling_factor}"
-
+    # mapping_root from resolve_config is already the SCC oversampling leaf.
     suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
-    SKYCELL_CSV_PATH = mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    csv_flat = mapping_root / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    csv_nested = mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    if oversampling_factor > 1 and not csv_flat.is_file() and not csv_nested.is_file():
+        # Legacy: oversampling nest outside sector tree
+        alt_root = mapping_root / f"oversampling_{oversampling_factor}"
+        csv_flat = alt_root / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+        csv_nested = alt_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+        if csv_flat.is_file() or csv_nested.is_file():
+            mapping_root = alt_root
+    SKYCELL_CSV_PATH = csv_flat if csv_flat.is_file() or not csv_nested.is_file() else csv_nested
     CONVOLVED_DATA_PATH = Path(convolved_dir)
-    REG_FILES_PATTERN = str(mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/*.fits.gz")
-    REG_MASTER_FILES_PATH = str(mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}.fits.gz")
+    leaf = SKYCELL_CSV_PATH.parent
+    REG_MASTER_FILES_PATH = str(
+        resolve_existing_fits_path(
+            leaf
+            / f"tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
+        )
+    )
     OUTPUT_DIR = output_base / f"sector{sector:04d}_camera{camera}_ccd{ccd}"
 
     # Processing parameters - lower n_jobs / skycells_per_batch for full-FFI runs
@@ -1072,15 +1413,34 @@ def main(
 
     # Precompute shifts for all offsets
     print("Precomputing shifts for all offsets...")
+    t_shifts = time.perf_counter()
     if progress_path is not None:
-        set_downsample_progress_phase(progress_path, "precomputing_shifts")
+        set_downsample_progress_phase(
+            progress_path,
+            "precomputing_shifts",
+            oversampling_factor=oversampling_factor,
+        )
     shifts_dict = precompute_shifts_for_offsets(
         tess_wcs, skycell_df, offsets, progress_path=progress_path
     )
+    shifts_elapsed = time.perf_counter() - t_shifts
 
-    # Get registration files
+    # Get registration files (any storage variant; prefer fz > gz > plain per stem)
     print("Getting registration files...")
-    reg_files_all = sorted(glob(REG_FILES_PATTERN))
+    t_batches = time.perf_counter()
+    by_stem: dict[str, str] = {}
+    for pattern in iter_fits_variant_globs():
+        for path in glob(str(leaf / pattern)):
+            name = Path(path).name
+            if not is_fits_storage_filename(name):
+                continue
+            stem = strip_fits_storage_suffix(name)
+            existing = by_stem.get(stem)
+            if existing is None or storage_suffix_rank(name) < storage_suffix_rank(
+                Path(existing).name
+            ):
+                by_stem[stem] = path
+    reg_files_all = sorted(by_stem.values())
     reg_files = [f for f in reg_files_all if "master_pixels2skycells" not in Path(f).name]
     skycell_names = [extract_skycell_name_from_reg_file(f) for f in reg_files]
 
@@ -1104,11 +1464,67 @@ def main(
     total_skycells = len(reg_files)
     if progress_path is not None and num_batches > 0:
         batch_sizes = [len(batch) for batch in reg_batches]
-        init_downsample_progress(progress_path, total_skycells, batch_sizes)
+        init_downsample_progress(
+            progress_path,
+            total_skycells,
+            batch_sizes,
+            oversampling_factor=oversampling_factor,
+        )
 
-    # Process batches in parallel
-    results = Parallel(n_jobs=N_JOBS)(
-        delayed(process_skycell_batch)(
+    do_stage_regmaps = resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch)
+    if do_stage_regmaps and reg_files:
+        try:
+            staged_paths, scratch_dir, n_staged, stage_elapsed = stage_regmap_files_to_scratch(
+                reg_files,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                oversampling_factor=oversampling_factor,
+            )
+            reg_files = staged_paths
+            if num_batches > 0:
+                reg_batches = np.array_split(reg_files, num_batches)
+            print(
+                f"[downsample] staged {n_staged}/{len(staged_paths)} regmaps to scratch "
+                f"{scratch_dir} in {stage_elapsed:.1f}s (zarr stays on NFS)"
+            )
+        except OSError as exc:
+            if getattr(exc, "errno", None) != errno.ENOSPC:
+                raise
+            # Undersized Condor scratch: drop partial copies and continue on NFS.
+            os_suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
+            scratch_dir = (
+                resolve_downsample_scratch_dir()
+                / f"syndiff_downsample_regmaps_{sector:04d}_{camera}_{ccd}{os_suffix}"
+            )
+            if scratch_dir.is_dir():
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+            warnings.warn(
+                f"[downsample] scratch staging hit ENOSPC ({exc}); "
+                "continuing with NFS regmap paths",
+                UserWarning,
+                stacklevel=1,
+            )
+            print(
+                "[downsample] scratch staging disabled after ENOSPC; "
+                "using NFS regmap paths"
+            )
+
+    partial_dir = checkpoint_dir_for_output(OUTPUT_DIR) if checkpoint_skycells else None
+    if partial_dir is not None:
+        completed = scan_completed_skycell_checkpoints(partial_dir)
+        if completed:
+            print(
+                f"[downsample] resume: {len(completed)} skycell checkpoints in {partial_dir}"
+            )
+
+    # Process batches in parallel. Progress is updated in the parent as each
+    # batch completes (NFS-safe; workers must not flock the sidecar).
+    from syndiff_pipeline.common.joblib_progress import parallel_map_with_optional_tqdm
+
+    def _run_one_batch(args):
+        i, reg_batch, name_batch = args
+        batch_result = process_skycell_batch(
             i,
             reg_batch,
             name_batch,
@@ -1119,12 +1535,43 @@ def main(
             roi_bounds,
             oversampling_factor=oversampling_factor,
             ignore_mask_bits=ignore_mask_bits,
-            progress_path=progress_path,
+            progress_path=None,
+            log_level=log_level,
+            total_batches=num_batches,
+            checkpoint_dir=partial_dir,
+            checkpoint_skycells=checkpoint_skycells,
         )
+        return i, len(reg_batch), batch_result
+
+    batch_args = [
+        (i, reg_batch, name_batch)
         for i, (reg_batch, name_batch) in enumerate(zip(reg_batches, name_batches))
-    )
+    ]
+
+    def _on_batch_done(item) -> None:
+        batch_idx, n_done, _batch_result = item
+        if progress_path is not None and n_done:
+            mark_downsample_skycells_done(progress_path, batch_idx, n_done)
+
+    if N_JOBS == 1 or len(batch_args) <= 1:
+        batch_items = []
+        for args in batch_args:
+            item = _run_one_batch(args)
+            _on_batch_done(item)
+            batch_items.append(item)
+    else:
+        batch_items = parallel_map_with_optional_tqdm(
+            (delayed(_run_one_batch)(args) for args in batch_args),
+            n_tasks=len(batch_args),
+            desc="downsample batches",
+            n_jobs_eff=N_JOBS,
+            on_result=_on_batch_done,
+        )
+    results = [batch_result for _i, _n, batch_result in batch_items]
+    batches_elapsed = time.perf_counter() - t_batches
 
     # Combine results using the sparse array approach
+    t_combine = time.perf_counter()
     if progress_path is not None and total_skycells > 0:
         set_downsample_progress_phase(
             progress_path, "combining", total_skycells=total_skycells
@@ -1139,14 +1586,23 @@ def main(
     )
     if not np.any(combined_results):
         raise RuntimeError("No PS1 convolved data loaded for any skycell")
+    combine_elapsed = time.perf_counter() - t_combine
 
     # Save outputs as FITS files
+    t_save = time.perf_counter()
     if progress_path is not None and total_skycells > 0:
         set_downsample_progress_phase(
             progress_path, "saving", total_skycells=total_skycells
         )
     print("Saving outputs...")
     written_paths = save_fits_outputs(output_dir=OUTPUT_DIR, sector=sector, camera=camera, ccd=ccd, results=combined_results, offsets=offsets, tess_header=tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
+    save_elapsed = time.perf_counter() - t_save
+    total_elapsed = time.perf_counter() - run_t0
+    print(
+        f"[downsample] timing: shifts={shifts_elapsed:.1f}s "
+        f"batches={batches_elapsed:.1f}s combine={combine_elapsed:.1f}s "
+        f"save={save_elapsed:.1f}s total={total_elapsed:.1f}s"
+    )
 
     # Record processing time
     total_time = time.time() - start_time
@@ -1273,6 +1729,12 @@ if __name__ == "__main__":
         action="store_true",
         help="Use only [0.0, 0.0] for fast testing; ignores --job-json offsets",
     )
+    parser.add_argument(
+        "--progress-path",
+        type=str,
+        default=None,
+        help="Write downsample.progress.json sidecar for syndiff progress monitoring",
+    )
     args = parser.parse_args()
 
     roi_cli = [args.x_min, args.y_min, args.x_max, args.y_max]
@@ -1337,4 +1799,5 @@ if __name__ == "__main__":
         event_dir=event_dir,
         write_ps1_removed_stars_csv=not args.skip_ps1_removed_star_gaia_csv,
         removed_stars_csv=args.removed_stars_csv,
+        progress_path=args.progress_path,
     )

@@ -7,44 +7,46 @@ Manual smoke test for the supervised `syndiff` pipeline on a shared cluster (HTC
 - [ ] `mamba activate syndiff` and `pip install -e .` from the repo root
 - [ ] `config/deployment.yaml` exists (copy from `deployment.yaml.example`) with valid `workspace_root` and `data_root` on shared storage
 - [ ] Submit host has Condor client tools and NFS mounts for `workspace_root`, `data_root`, and your conda env
-- [ ] Pick one smoke target: label like `s0023_c1_k3_2020ftl` (sector 23, camera 1, CCD 3, name `2020ftl` from `config/targets_example.csv`), or any target with templates already on disk for a diff-only path
+- [ ] Pick one smoke SCC (e.g. sector 23, camera 1, CCD 3) and one smoke event (transient name such as `2020ftl` from `config/targets_example.csv`, label `s0023_c1_k3_2020ftl`)
 
 Record results in a dated note (optional): `docs/cluster_smoke_YYYY-MM-DD.md`.
 
+There is **no combined end-to-end preset** — `syndiff template` (SCC-scoped) and `syndiff diff` (event-scoped) are separate submits. Run template first, then diff.
+
 ---
 
-## 1. Submit end-to-end run (one target)
+## 1. Submit template run (one SCC)
 
 ```bash
 mamba activate syndiff
 
-syndiff all submit \
+syndiff template submit \
   --site config \
   --config config/pipeline.yaml \
-  --targets config/targets_smoke.csv \
-  --run-id smoke_01
+  --scc config/scc_smoke.csv \
+  --run-id smoke_template_01
 ```
 
-For a **single-target** smoke (`<test>` = transient name such as `2020ftl`, label `s0023_c1_k3_2020ftl`): use a one-row `targets_smoke.csv` (copy the matching row from `targets_example.csv`). Supervised `submit` schedules every enabled row in `--targets`; `--target-name` is for foreground `syndiff diff run`, not batch submit. The `--config` flag is optional when `--site` is set.
+Use a one-row `scc_smoke.csv` (`sector,camera,ccd,enabled` — copy the SCC from the matching row of `targets_example.csv`; template submit does **not** take `--targets`). Supervised `submit` schedules every enabled row in `--scc`.
 
 Optional shortcuts for faster smoke:
 
-- `--stages tess_ffi_download,wcs_grouping,mapping,downsample,diff` — skip heavy `ps1_process` if convolved Zarr already exists
-- `--local` — run `diff` on the submit host instead of Condor (template stages still use their normal executors)
+- `--stages ps1_process,downsample` — skip earlier stages if mapping/Zarr already exist
 - `--force-rerun` — ignore existing artifacts for selected stages (new run only)
 
 **Pass criteria**
 
-- [ ] Command exits 0 and prints monitor hints including `syndiff progress --run-id smoke_01`
-- [ ] `{workspace_root}/runs/smoke_01/` created with frozen `config.yaml`, `targets.csv`, `run_meta.json`
+- [ ] Command exits 0 and prints monitor hints including `syndiff progress --run-id smoke_template_01`
+- [ ] `{workspace_root}/runs/smoke_template_01/` created with frozen `config.yaml`, `targets.csv` (normalized SCC CSV), `run_meta.json`
 - [ ] `syndiff daemon status --site config` shows a live supervisor PID
-- [ ] `runs/latest` symlink points at `smoke_01`
+- [ ] `runs/latest` symlink points at `smoke_template_01`
+- [ ] `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` populated after `downsample` succeeds
 
 ---
 
-## 1b. Diff-only smoke (`syndiff diff submit`)
+## 1b. Diff smoke (`syndiff diff submit --stages bind,diff`)
 
-Use when **template artifacts already exist** on disk (`tess_ffi`, WCS handoff JSON, downsampled templates). The scheduler verifies upstream outputs and runs only `diff` (mapping / PS1 stages are marked `external` and skipped when artifacts pass verify).
+Use once **template artifacts already exist** on disk for the smoke SCC (FFIs, mapping, template store). This submits the two-stage diff DAG for one event: `bind` (event WCS grouping + handoff) then `diff`.
 
 ```bash
 mamba activate syndiff
@@ -52,16 +54,20 @@ mamba activate syndiff
 syndiff diff submit \
   --site config \
   --targets config/targets_smoke.csv \
+  --stages bind,diff \
   --run-id smoke_diff_01
 ```
 
-Use a one-row `targets_smoke.csv` for a target with templates ready (e.g. `s0023_c1_k3_2020ftl`). Optional: `--local` to run `diff` on the submit host instead of Condor.
+**Important — always pass `--stages bind,diff` explicitly.** The bare `syndiff diff submit --targets ...` (no `--stages`) selects only `["diff"]`; `bind` is then marked `skipped` (not_selected) and never runs, so `diff` fails at runtime if `event_job.json` doesn't already exist for this event. See [template_pipeline.md → Overview](template_pipeline.md#overview) and [pipeline_state_machine_reference.md §3.2](pipeline_state_machine_reference.md).
+
+Use a one-row `targets_smoke.csv` for the smoke event (e.g. `s0023_c1_k3_2020ftl`). Optional: `--local` to run `diff` on the submit host instead of Condor.
 
 **Pass criteria**
 
-- [ ] Command exits 0; `syndiff progress --run-id smoke_diff_01` shows only `diff` (and brief verify scans) for the smoke target
-- [ ] `{workspace_root}/runs/smoke_diff_01/config.yaml` frozen; upstream template stages not re-queued when artifacts verify
-- [ ] After completion, sections 2–6 below apply with `--run-id smoke_diff_01` (monitor, verify diff, retry diff, reconcile manifests, inspect `events/{label}/ws/`)
+- [ ] Command exits 0; `syndiff progress --run-id smoke_diff_01` shows `bind` then `diff` (and brief verify scans) for the smoke target
+- [ ] `{workspace_root}/runs/smoke_diff_01/config.yaml` frozen; `mapping`/`ps1_download`/`ps1_process` marked n/a (not re-queued)
+- [ ] `bind` succeeds and writes `event_job.json` + `frames.csv` under `events/{event_name}/s{SSSS}_c{C}_k{K}/`
+- [ ] After completion, sections 2–6 below apply with `--run-id smoke_diff_01` (monitor, verify diff, retry diff, reconcile manifests, inspect `events/{event_name}/{scc_label}/ws/`)
 
 ---
 
@@ -70,10 +76,10 @@ Use a one-row `targets_smoke.csv` for a target with templates ready (e.g. `s0023
 (`syndiff monitor` is not a subcommand — use **`progress`** or **`status --watch`**.)
 
 ```bash
-syndiff progress --site config --run-id smoke_01
+syndiff progress --site config --run-id smoke_diff_01
 
 # optional: refresh every few seconds
-syndiff status --site config --run-id smoke_01 --watch
+syndiff status --site config --run-id smoke_diff_01 --watch
 ```
 
 **Pass criteria**
@@ -86,7 +92,7 @@ syndiff status --site config --run-id smoke_01 --watch
 **Logs**
 
 ```bash
-syndiff tail --site config --run-id smoke_01 \
+syndiff tail --site config --run-id smoke_diff_01 \
   --target s0023_c1_k3_2020ftl --stage diff
 ```
 
@@ -97,13 +103,13 @@ syndiff tail --site config --run-id smoke_01 \
 `verify` checks **filesystem outputs**, not SQLite schedule state.
 
 ```bash
-syndiff verify --site config --run-id smoke_01 --stages diff
+syndiff verify --site config --run-id smoke_diff_01 --stages diff
 ```
 
 Scope to one target:
 
 ```bash
-syndiff verify --site config --run-id smoke_01 \
+syndiff verify --site config --run-id smoke_diff_01 \
   --scc s0023_c1_k3_2020ftl --stages diff
 ```
 
@@ -119,7 +125,7 @@ syndiff verify --site config --run-id smoke_01 \
 Re-queue a completed or failed `diff` stage for one target. Downstream reset is on by default.
 
 ```bash
-syndiff retry --deployment config/deployment.yaml --run-id smoke_01 \
+syndiff retry --deployment config/deployment.yaml --run-id smoke_diff_01 \
   --scc s0023_c1_k3_2020ftl --stage diff
 ```
 
@@ -134,7 +140,7 @@ The diff worker overwrites outputs in place; stale files under `ws/` are not rem
 
 **Pass criteria**
 
-- [ ] CLI prints `Queued retry for diff on <label> in run smoke_01`
+- [ ] CLI prints `Queued retry for diff on <label> in run smoke_diff_01`
 - [ ] `diff` row returns to `pending` then `running` in `syndiff progress`
 - [ ] `{label}/diff.log` appends new output; `diff.status.json` updates with a new `launch_token`
 - [ ] After success, `verify --stages diff` is `[OK]` again
@@ -148,13 +154,13 @@ The diff worker overwrites outputs in place; stale files under `ws/` are not rem
 Backfill stable manifests under `{runs_root}/.manifests/` so future runs can skip expensive NFS scans.
 
 ```bash
-syndiff reconcile-manifests --site config --run-id smoke_01
+syndiff reconcile-manifests --site config --run-id smoke_diff_01
 ```
 
 Quiet mode (only lines where a manifest was written):
 
 ```bash
-syndiff reconcile-manifests --site config --run-id smoke_01 --quiet
+syndiff reconcile-manifests --site config --run-id smoke_diff_01 --quiet
 ```
 
 **Pass criteria**
@@ -165,41 +171,45 @@ syndiff reconcile-manifests --site config --run-id smoke_01 --quiet
 
 ---
 
-## 6. Expected artifacts under `events/{label}/` and workspace layout
+## 6. Expected artifacts under `events/{event_name}/{scc_label}/` and workspace layout
 
-Let `LABEL` = target label (e.g. `s0023_c1_k3_2020ftl`) and `WS` = `{workspace_root}` from `deployment.yaml`.
+Let `EVENT` = event name (e.g. `2020ftl`), `SCC` = SCC label (e.g. `s0023_c1_k3`), `LABEL` = full target label (`s0023_c1_k3_2020ftl`, used for `per_target/` and SQLite), and `WS` = `{workspace_root}` from `deployment.yaml`.
 
-### Per-target event directory
+### Per-event, per-SCC directory
 
 ```text
-{WS}/events/{LABEL}/
-  cluster_template_job.json       # after wcs_grouping
-  syndiff_ffi_frames.csv          # after wcs_grouping
+{WS}/events/{EVENT}/{SCC}/
+  event_job.json                  # after bind (legacy name: cluster_template_job.json)
+  frames.csv                      # after bind (legacy name: syndiff_ffi_frames.csv)
   wcs_drift_template_debug.png    # optional (plots enabled)
-  ps1_removed_stars.csv           # after downsample
+  ps1_removed_stars.csv           # written by `downsample` (linear geometry_mode)
   ws/
-    templates/                    # after downsample: symlink → {data_root}/shifted_downsampled/...
     master/                       # after diff: flat FITS mirror + tess_ffi link
     <pipeline_label>/             # e.g. hp_d, ep, lc_prf_on_diffs — per diff_config.yaml
-      syndiff_ffi_frames.csv      # or at event_dir root depending on stage
       shared_mask.fits
       hotpants_substamp_stars.csv
       lightcurve.csv              # when forced_photometry ran
       ...
 ```
 
+There is **no** `ws/templates` symlink — `diff` resolves templates directly from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
+
 Quick checks:
 
 ```bash
 WS=/path/from/deployment.yaml
-LABEL=s0023_c1_k3_2020ftl
+DATA=/path/from/deployment.yaml   # data_root
+EVENT=2020ftl
+SCC=s0023_c1_k3                   # event leaf label (unchanged)
+SCC_DATA=s0023/c1/k3              # nested data_root leaf
 
-test -f "$WS/events/$LABEL/cluster_template_job.json"
-test -f "$WS/events/$LABEL/ps1_removed_stars.csv"
-test -L "$WS/events/$LABEL/ws/templates" && test -d "$(readlink -f "$WS/events/$LABEL/ws/templates")"
-test -d "$WS/events/$LABEL/ws"
-test -f "$WS/events/$LABEL/ws/"*/hotpants_substamp_stars.csv 2>/dev/null || \
-  test -f "$WS/events/$LABEL/shared_mask.fits"
+test -f "$WS/events/$EVENT/$SCC/event_job.json"
+test -f "$WS/events/$EVENT/$SCC/frames.csv"
+test -d "$DATA/$SCC_DATA/templates/oversampling_1" && \
+  ls "$DATA/$SCC_DATA/templates/oversampling_1"/*.fits.fz >/dev/null 2>&1
+test -d "$WS/events/$EVENT/$SCC/ws"
+test -f "$WS/events/$EVENT/$SCC/ws/"*/hotpants_substamp_stars.csv 2>/dev/null || \
+  test -f "$WS/events/$EVENT/$SCC/shared_mask.fits"
 ```
 
 (Adjust glob paths to match your `diff_config.yaml` pipeline labels.)
@@ -212,26 +222,25 @@ test -f "$WS/events/$LABEL/ws/"*/hotpants_substamp_stars.csv 2>/dev/null || \
   targets.csv
   run_meta.json
   summary.json
-  per_target/{LABEL}/
+  per_target/{LABEL}/            # flat, keyed by Target.label() — e.g. s0023_c1_k3_2020ftl
     {stage}.log
     {stage}.status.json
     {stage}.manifest.json
     {stage}.condor.*          # when executor=condor
 ```
 
-### Science caches (under `data_root`, not `events/`)
+### Science caches (under `data_root/s{SSSS}/c{C}/k{K}/`, not `events/`)
 
-- `{data_root}/skycell_pixel_mapping/…` — mapping
-- `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` — PS1 download
-- `{data_root}/shifted_downsampled/…/syndiff_template_*.fits.gz` — downsample templates
+- `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_1/…` — mapping
+- `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` — PS1 download (unchanged path)
+- `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/…/syndiff_template_*.fits.fz` — `downsample` stage output
 
 **Pass criteria**
 
-- [ ] Handoff JSON and frame manifest exist under `events/{LABEL}/` before diff
-- [ ] `ps1_removed_stars.csv` present after downsample
-- [ ] After downsample (before diff): `events/{LABEL}/ws/templates` exists, is a symlink, and resolves to the downsample output directory under `{data_root}/shifted_downsampled/…` (contains `syndiff_template_*.fits*`)
-- [ ] Targets that completed downsample before the templates symlink feature: run `scripts/backfill_template_symlinks.py --site config` (add `--force` to refresh stale links)
-- [ ] `events/{LABEL}/ws/` contains at least one non-`master`, non-`templates` workspace label after diff
+- [ ] `event_job.json` and `frames.csv` exist under `events/{EVENT}/{SCC}/` before diff (written by `bind`)
+- [ ] `ps1_removed_stars.csv` present after `downsample` (linear geometry_mode)
+- [ ] Before diff: `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_1/` contains `syndiff_template_*.fits*` (or a complete field-mode manifest)
+- [ ] `events/{EVENT}/{SCC}/ws/` contains at least one non-`master` workspace label after diff
 - [ ] Run logs and status sidecars exist under `runs/{run_id}/per_target/{LABEL}/`
 
 ---
@@ -282,7 +291,8 @@ See [template_pipeline.md → HTCondor](template_pipeline.md#htcondor-integratio
 
 | Step | Command |
 |------|---------|
-| Submit | `syndiff all submit --site config --targets … --run-id <id>` |
+| Submit template | `syndiff template submit --site config --scc … --run-id <id>` |
+| Submit diff | `syndiff diff submit --site config --targets … --stages bind,diff --run-id <id>` |
 | Monitor | `syndiff progress --site config --run-id <id>` |
 | Verify diff | `syndiff verify --site config --run-id <id> --stages diff` |
 | Retry diff | `syndiff retry --deployment config/deployment.yaml --run-id <id> --scc <label> --stage diff` |

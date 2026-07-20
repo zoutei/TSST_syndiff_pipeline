@@ -20,12 +20,13 @@ CLI flags on `syndiff star run` override merged config for that foreground run.
 
 ```yaml
 deployment_file: deployment.yaml
-# ps1_zarr_path: /path/to/custom/ps1_skycells.zarr   # optional override
+# ps1_zarr_path: /path/to/custom/ps1_skycells.zarr   # rare override of shared store
 
 defaults:
   cutout_size: 96
   stamp_size: 24
   kernel_margin_px: 470
+  oversampling_factor: 1   # SCC templates/mapping oversampling_{N}/
   ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
   debug_plots: true
   max_ffis: null              # truncate manifest for debug runs
@@ -84,9 +85,10 @@ overrides:
 
 | Key | Default | Purpose |
 |-----|---------|---------|
-| `cutout_size` | 96 | Mini-template ROI side length (full-FFI pixels) |
-| `stamp_size` | 24 | Final diff-stamp window side (crop-local pixels) |
+| `cutout_size` | 96 | Mini-template ROI side length (full-FFI **native** pixels) |
+| `stamp_size` | 24 | Final diff-stamp window side (crop-local native pixels) |
 | `kernel_margin_px` | 470 | Convolution margin around stamp (Hotpants kernel extent) |
+| `oversampling_factor` | `1` | Must match template/mapping `F`. Selects `mapping/oversampling_{F}/` + `templates/oversampling_{F}/`; mini templates written with `OVERSAMP=F` when `F>1`. See [oversampled templates §10](../oversampled_templates.md#10-star-branch). |
 | `ps1_source` | `zarr_download` | PS1 skycell ingest mode (see below) |
 | `debug_plots` | `true` | Write segment / downsample / LC debug PNGs |
 | `max_ffis` | `null` | Limit frames processed (debug) |
@@ -119,8 +121,13 @@ Same shape as diff `forced_photometry` methods. Each entry needs unique `name` (
 | `psf` + `psf_type: prf` | (built at runtime from TESS_PRF) | same |
 | `psf` + `psf_type: epsf` | `inputs.epsf`; optional `fit_shape`, `aperture_radius`, `psf_grouper_min_separation` | same |
 
+Diff-pipeline forced photometry (four modes, full parameter tables including
+`subtract_sky`, `mask_sky_with_shared_mask`, `fitter: tessreduce`, nullable
+`phot_bkg_poly_order`): [forced_photometry.md](forced_photometry.md). Star-host
+tessreduce ePSF parity and the new aperture knobs are not yet mirrored here.
+
 PRF photometry requires the `PRF` package and TESS PRF data (same as diff stage).
-Gepsf photometry loads a per-frame `GriddedPSFModel` catalog from
+ePSF (photutils) photometry loads a per-frame `GriddedPSFModel` catalog from
 `{baseline_workspace}/{photometry.inputs.epsf}`. To build a missing catalog,
 add an enabled `epsf` block whose `output` matches that label; `epsf.inputs.diffs`
 optionally selects the source baseline difference workspace and defaults to
@@ -137,10 +144,9 @@ If no `epsf` block is present, the referenced catalog must already exist.
 
 Legacy CLI values: `zarr` → `zarr_download`, `download` → `stream`.
 
-Optional top-level `ps1_zarr_path` overrides `{data_root}/ps1_skycells.zarr`.
-To reuse the template pipeline's `ps1_download` cache, set it to
-`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`; the two stores use the same
-schema but have different default paths.
+Optional top-level `ps1_zarr_path` overrides the shared default
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` (same store as template
+`ps1_download`). Use only for unusual deployments.
 
 ## `star_targets.csv`
 

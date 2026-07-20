@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
 )
+from syndiff_pipeline.common.scc_paths import event_scc_leaf, scc_templates_dir
 from syndiff_pipeline.template_creation.orchestration.dispatch import _manifest_from_result
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (
@@ -21,6 +22,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
 )
@@ -44,22 +46,32 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
         target_dec=52.0,
         target_name="2020dgc",
     )
+    data_root = tmp / "data"
+    legacy_base = tmp / "shifted_downsampled"
     return ResolvedTargetConfig(
         target=target,
-        data_root=str(tmp / "data"),
-        ffi_dir=str(tmp / "data" / "tess_ffi"),
-        event_dir=str(tmp / "events" / target.label()),
+        data_root=str(data_root),
+        ffi_dir=str(data_root / "s0022" / "c3" / "k3" / "ffi"),
+        event_dir=str(
+            event_scc_leaf(tmp, target.event_name(), target.sector, target.camera, target.ccd)
+        ),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
-            downsample=DownsampleStageParams(single_offset=single_offset),
+            remap=RemapStageParams(),
+            downsample=DownsampleStageParams(
+                single_offset=single_offset,
+                output_base=str(legacy_base),
+            ),
         ),
-        mapping_root=str(tmp / "mapping"),
-        zarr_dir=str(tmp / "data" / "ps1_skycells_zarr"),
-        template_output_base=str(tmp / "shifted_downsampled"),
+        mapping_root=str(data_root / "s0022" / "c3" / "k3" / "mapping" / "oversampling_1"),
+        zarr_dir=str(data_root / "ps1_skycells_zarr"),
+        template_output_base=str(
+            scc_templates_dir(data_root, target.sector, target.camera, target.ccd, oversampling_factor=1)
+        ),
     )
 
 
@@ -82,11 +94,11 @@ def _write_cluster_job(event_dir: Path, offsets: list[tuple[float, float]]) -> N
 
 
 def _offset_fits_name(dx: float, dy: float) -> str:
-    return f"syndiff_template_s0022_3_3_dx{dx:.3f}_dy{dy:.3f}.fits.gz"
+    return f"syndiff_template_s0022_3_3_dx{dx:.3f}_dy{dy:.3f}.fits.fz"
 
 
 def _out_dir(resolved: ResolvedTargetConfig) -> Path:
-    base = Path(resolved.template_output_base)
+    base = Path(resolved.stages.downsample.output_base or resolved.template_output_base)
     return base / "sector0022_camera3_ccd3"
 
 
@@ -212,6 +224,22 @@ class TestVerifyDownsampleLegacyFits(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertIn("All 1 offset FITS present", result.message)
 
+    def test_legacy_gzip_fits_still_verifies(self):
+        offsets = [(0.0, 0.0)]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            resolved = _resolved(tmp, single_offset=False)
+            _write_cluster_job(Path(resolved.event_dir), offsets)
+            out_dir = _out_dir(resolved)
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            legacy_name = "syndiff_template_s0022_3_3_dx0.000_dy0.000.fits.gz"
+            (out_dir / legacy_name).write_bytes(b"fits")
+
+            result = verify_downsample(resolved)
+            self.assertTrue(result.ok)
+            self.assertIn("All 1 offset FITS present", result.message)
+
 
 class TestDownsampleManifestTemplateDirs(unittest.TestCase):
     def test_manifest_from_result_preserves_template_dir_meta(self):
@@ -220,7 +248,7 @@ class TestDownsampleManifestTemplateDirs(unittest.TestCase):
         result = {
             "expected_count": 2,
             "produced_count": 2,
-            "artifacts": [f"{physical}/a.fits.gz"],
+            "artifacts": [f"{physical}/a.fits.fz"],
             "template_dir_physical": physical,
             "template_dir_symlink": symlink,
         }
@@ -242,7 +270,7 @@ class TestDownsampleManifestTemplateDirs(unittest.TestCase):
                 manifest_path,
                 resolved,
                 "downsample",
-                [str(physical / "a.fits.gz")],
+                [str(physical / "a.fits.fz")],
                 1,
                 1,
                 meta={

@@ -12,12 +12,14 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.scc_paths import scc_ffi_dir
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (
     DownsampleStageParams,
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
 )
@@ -29,10 +31,11 @@ from syndiff_pipeline.template_creation.orchestration.verify import (
 
 def _resolved(tmp: Path) -> ResolvedTargetConfig:
     target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+    data_root = tmp / "data"
     return ResolvedTargetConfig(
         target=target,
-        data_root=str(tmp / "data"),
-        ffi_dir=str(tmp / "data" / "tess_ffi"),
+        data_root=str(data_root),
+        ffi_dir=str(scc_ffi_dir(data_root, target.sector, target.camera, target.ccd)),
         event_dir=str(tmp / "events" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
@@ -40,6 +43,7 @@ def _resolved(tmp: Path) -> ResolvedTargetConfig:
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
+            remap=RemapStageParams(),
             downsample=DownsampleStageParams(),
         ),
         mapping_root=str(tmp / "mapping"),
@@ -53,7 +57,7 @@ class TestStageAbsenceProbe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             resolved = _resolved(Path(tmpdir))
             self.assertEqual(
-                stage_absence_probe(resolved, "wcs_grouping"),
+                stage_absence_probe(resolved, "bind"),
                 AbsenceProbeResult.ABSENT,
             )
 
@@ -77,13 +81,7 @@ class TestStageAbsenceProbe(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp)
-            ffi_leaf = (
-                tmp
-                / "data"
-                / "tess_ffi"
-                / "s0022"
-                / "cam3_ccd3"
-            )
+            ffi_leaf = Path(resolved.ffi_dir)
             ffi_leaf.mkdir(parents=True)
             (ffi_leaf / "tess2020019142923-s0022-3-3-0165-s_ffic.fits").write_bytes(b"x")
             self.assertEqual(
@@ -134,7 +132,7 @@ class TestVerifyPassAbsenceProbe(unittest.TestCase):
             with tempfile.TemporaryDirectory() as tmpdir:
                 tmp_path = Path(tmpdir)
                 state, ctx, run_id, _runs_root = _minimal_run_setup(
-                    tmp_path, [target], active_stages=["wcs_grouping"]
+                    tmp_path, [target], active_stages=["diff"]
                 )
                 label = target.label()
                 state.update_stage_status(
@@ -156,7 +154,7 @@ class TestVerifyPassAbsenceProbe(unittest.TestCase):
 
                 self.assertEqual(scheduled, [])
                 self.assertTrue(
-                    state.external_verify_attempted(run_id, label, "wcs_grouping")
+                    state.external_verify_attempted(run_id, label, "downsample")
                 )
         finally:
             shutdown_verify_worker(wait=False)

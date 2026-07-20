@@ -26,6 +26,7 @@ from syndiff_pipeline.difference_imaging.stages.kernel_fit import (
     load_kernel_fit_meta,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    PIPELINE_FITS_EXT,
     resolve_pipeline_fits_path,
     strip_fits_suffix,
 )
@@ -105,9 +106,15 @@ def run_convolved_templates(
     hp: HotpantsParams,
     convolved_ws_dir: str,
     skip_existing: bool = True,
+    field_ctx=None,
+    manifest=None,
 ) -> pd.DataFrame:
     """
     Convolve each unique WCS-group template with the kernel from ``kernel_r2.npz``.
+
+    Field mode (``field_ctx`` set): instead of parsing linear ``dx/dy`` template
+    FITS, assemble each distinct ``group_id`` (from *manifest*) from the SCC field
+    store, convolve it, and key the convolved product by ``group_id``.
     """
     os.makedirs(convolved_ws_dir, exist_ok=True)
     csv_path = convolved_templates_csv_path(convolved_ws_dir)
@@ -131,18 +138,40 @@ def run_convolved_templates(
     hp_fit = replace(hp, hp_bgo=0)
     work = os.path.join(convolved_ws_dir, "_kernel_conv_tmp")
     os.makedirs(work, exist_ok=True)
+    sci_shape = tuple(crop_bounds.get("shape") or ())
+    if len(sci_shape) != 2:
+        sci_shape = (
+            int(crop_bounds["y_max"]) - int(crop_bounds["y_min"]),
+            int(crop_bounds["x_max"]) - int(crop_bounds["x_min"]),
+        )
     hp_config = build_hotpants_config(
         hp_fit,
         work,
         work,
         "kernel_conv_stub",
         write_stamps=False,
+        sci_shape=sci_shape,
     )
 
+    def _convolve_crop(template_crop: np.ndarray) -> np.ndarray:
+        from syndiff_pipeline.difference_imaging.stages.hotpants import (
+            resolve_hotpants_oversample,
+        )
+
+        factor = resolve_hotpants_oversample(
+            sci_shape,
+            template_crop.shape,
+            getattr(hp, "oversample", None),
+        )
+        return convolve_template_with_kernel_solution(
+            template_crop,
+            kernel_solution,
+            hp_config,
+            oversample=factor,
+            science_shape=sci_shape if factor > 1 else None,
+        )
+
     os.makedirs(convolved_ws_dir, exist_ok=True)
-    entries = _unique_template_entries(template_paths)
-    if not entries:
-        raise RuntimeError("No syndiff templates found to convolve")
 
     ref_header = None
     try:
@@ -153,29 +182,66 @@ def run_convolved_templates(
         log.warning("Could not build WCS header for convolved templates: %s", exc)
 
     rows: list[dict] = []
-    for entry in entries:
-        tmpl_path = entry["template_path"]
-        out_name = convolved_template_basename(tmpl_path)
-        out_path = os.path.join(convolved_ws_dir, out_name)
-        existing = resolve_pipeline_fits_path(
-            convolved_ws_dir, strip_fits_suffix(out_name)
+    if field_ctx is not None:
+        # Field mode: assemble + convolve one template per distinct group_id.
+        from syndiff_pipeline.difference_imaging.support.template_resolution import (
+            build_field_mode_template_loader,
         )
-        if skip_existing and existing is not None:
-            rows.append({**entry, "convolved_path": existing})
-            continue
 
-        template_crop = _load_template_cropped(tmpl_path, crop_bounds)
-        convolved = convolve_template_with_kernel_solution(
-            template_crop, kernel_solution, hp_config
+        if manifest is None or "group_id" not in getattr(manifest, "columns", []):
+            raise RuntimeError(
+                "convolved_templates field mode requires a manifest with group_id"
+            )
+        loader = build_field_mode_template_loader(field_ctx, crop_bounds)
+        gids = sorted(
+            {
+                int(g)
+                for g in manifest["group_id"].tolist()
+                if pd.notna(g) and int(g) >= 0
+            }
         )
-        _write_image_fits(out_path, convolved, header=ref_header)
-        rows.append({**entry, "convolved_path": out_path})
-        log.info(
-            "Convolved template dx=%.3f dy=%.3f -> %s",
-            entry["group_dx"],
-            entry["group_dy"],
-            out_path,
-        )
+        if not gids:
+            raise RuntimeError("No valid group_id in manifest for convolved_templates")
+        for gid in gids:
+            out_name = f"convolved_template_gid{gid}{PIPELINE_FITS_EXT}"
+            out_path = os.path.join(convolved_ws_dir, out_name)
+            existing = resolve_pipeline_fits_path(
+                convolved_ws_dir, strip_fits_suffix(out_name)
+            )
+            entry = {"group_id": int(gid), "group_dx": float("nan"), "group_dy": float("nan")}
+            if skip_existing and existing is not None:
+                rows.append({**entry, "convolved_path": existing})
+                continue
+            template_crop = loader(int(gid))
+            convolved = _convolve_crop(template_crop)
+            _write_image_fits(out_path, convolved, header=ref_header)
+            rows.append({**entry, "convolved_path": out_path})
+            log.info("Convolved field template group_id=%d -> %s", gid, out_path)
+    else:
+        entries = _unique_template_entries(template_paths)
+        if not entries:
+            raise RuntimeError("No syndiff templates found to convolve")
+        for entry in entries:
+            tmpl_path = entry["template_path"]
+            out_name = convolved_template_basename(tmpl_path)
+            out_path = os.path.join(convolved_ws_dir, out_name)
+            existing = resolve_pipeline_fits_path(
+                convolved_ws_dir, strip_fits_suffix(out_name)
+            )
+            if skip_existing and existing is not None:
+                rows.append({**entry, "convolved_path": existing})
+                continue
+
+            template_crop = _load_template_cropped(tmpl_path, crop_bounds)
+            convolved = _convolve_crop(template_crop)
+            _write_image_fits(out_path, convolved, header=ref_header)
+            rows.append({**entry, "convolved_path": out_path})
+            log.info(
+                "Convolved template dx=%.3f dy=%.3f -> %s",
+                entry["group_dx"],
+                entry["group_dy"],
+                out_path,
+            )
 
     table = pd.DataFrame(rows)
     table.to_csv(csv_path, index=False)
@@ -199,3 +265,13 @@ def lookup_convolved_path(
     raise FileNotFoundError(
         f"No convolved template for group_dx={group_dx} group_dy={group_dy}"
     )
+
+
+def lookup_convolved_path_by_group_id(table: pd.DataFrame, group_id: int) -> str:
+    """Return the convolved template path for a ``group_id`` (field mode)."""
+    if "group_id" not in table.columns:
+        raise FileNotFoundError("convolved templates table has no group_id column")
+    hit = table.loc[table["group_id"].astype("Int64") == int(group_id)]
+    if hit.empty:
+        raise FileNotFoundError(f"No convolved template for group_id={group_id}")
+    return str(hit.iloc[0]["convolved_path"])

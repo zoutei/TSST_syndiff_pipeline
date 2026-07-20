@@ -6,13 +6,16 @@ These documents describe the **science algorithms** behind each template pipelin
 
 | Document | Stage | Legacy script | Package module |
 |----------|-------|---------------|----------------|
+| [Field (distortion-aware) templates](../field_geometry.md) | `remap` + `downsample` (**default** `geometry_mode: field`) | — | `field_remap.py`, `field_downsample.py`, … |
+| [Oversampled templates + Hotpants stamp modes](../oversampled_templates.md) | `mapping` / `templates` / `diff` / `star` | — | `template_coverage.py`, `hotpants.py`, `kernel.py`, `star/*` |
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
 | [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
 | [WCS grouping](wcs_grouping.md) | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
-| [Multi-offset downsample](downsample_technical.md) | `downsample` | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
+| [Multi-offset downsample](downsample_technical.md) | `templates` (linear `geometry_mode`) | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
 | [Diff pipeline internals](diff_pipeline.md) | `diff` | — | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` |
+| [Forced photometry](forced_photometry.md) | `forced_photometry` (diff sub-stage) | — | `difference_imaging/stages/photometry.py` |
 | [Static masking](../masking.md) | `shared_mask` (diff sub-stage) | — | `difference_imaging/masking/` |
 | [Host-star light curves](../star_lightcurves.md) | `star` | — | `syndiff_pipeline/star/cli.py` |
 | [Star pipeline (technical)](star_pipeline.md) | `star` | — | `syndiff_pipeline/star/` |
@@ -39,7 +42,7 @@ There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the Sy
 
 ## Diff imaging
 
-**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Empirical/TNS/asteroid mask library: [`difference_imaging/masking/`](../../syndiff_pipeline/difference_imaging/masking/) — see [Static masking](../masking.md). Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
+**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Forced-photometry modes and parameters: [forced_photometry.md](forced_photometry.md). For oversampled templates (`F>1`) and Hotpants `stamp_mode` / `region_*`, see [oversampled templates](../oversampled_templates.md). Empirical/TNS/asteroid mask library: [`difference_imaging/masking/`](../../syndiff_pipeline/difference_imaging/masking/) — see [Static masking](../masking.md). Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
 
 ## Host-star light curves
 
@@ -55,6 +58,7 @@ There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the Sy
 | Document | Stage |
 |----------|-------|
 | [Unified background stage](background.md) | `background` — spatial / temporal Savitzky–Golay / strap on `ks_b` → `ks_b_s` |
+| [Forced photometry](forced_photometry.md) | `forced_photometry` — aperture / PRF / ePSF photutils / ePSF tessreduce |
 
 ## Typical data flow
 
@@ -64,7 +68,7 @@ wcs_grouping               →  {workspace_root}/events/{target_label}/cluster_t
 mapping (PanCAKES)         →  data_root/skycell_pixel_mapping/sector_*/camera_*/ccd_*/tess_s*_master_skycells_list.csv
 ps1_download               →  data_root/ps1_skycells_zarr/ps1_skycells.zarr
 ps1_process                →  data_root/convolved_results/sector_*_camera_*_ccd_*.zarr
-downsample                 →  data_root/shifted_downsampled/.../syndiff_template_*.fits.gz
+downsample                 →  data_root/shifted_downsampled/.../syndiff_template_*.fits.fz
 diff                       →  {workspace_root}/events/{target_label}/ws/{workspace_label}/
 star (after diff verify)   →  {workspace_root}/events/{target_label}/star[_run_id]/{gaia_source_id}/
 ```

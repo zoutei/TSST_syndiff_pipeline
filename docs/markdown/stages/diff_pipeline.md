@@ -1,5 +1,17 @@
 > **Package integration**: `syndiff` stage `diff` · package `syndiff_pipeline/difference_imaging/` · configured by `config/diff_config*.yaml`  
-> **Related docs**: [template pipeline guide](../template_pipeline.md) · [background stage](background.md)
+> **Related docs**: [template pipeline guide](../template_pipeline.md) · [background stage](background.md) · [field geometry](../field_geometry.md)
+
+> **Field mode:** with `geometry_mode: field` there are no `ws/templates` `dx/dy`
+> FITS — templates are **assembled per `group_id`** on demand from the SCC field
+> store (`ws/field_templates`). `shared_mask`, `hotpants`, and the
+> `kernel_fit`/`convolved_templates`/`kernel_subtract` engine are all field-aware
+> (convolved products are keyed by `group_id`). See [field geometry](../field_geometry.md).
+>
+> **Oversampling / stamp modes:** templates may be built at
+> `oversampling_factor F>1` (HR arrays, native crop bounds). Hotpants accepts
+> `oversample`, `stamp_mode` (`grid` \| `connected_regions`), and `region_*`.
+> Full parameter tables and invariants:
+> [oversampled templates](../oversampled_templates.md).
 
 # Difference-Imaging (`diff`) Stage — Internal Pipeline Reference
 
@@ -9,7 +21,7 @@ The orchestrator sees a single stage `diff` (`orchestration/stages.py`, `deps=("
 
 Preamble entries (no `kind`, must precede the first stage): `external_workspaces`, `workspace_inherit`.
 
-Required handoff from the template pipeline (all under `events/{label}/`): `cluster_template_job.json`, `syndiff_ffi_frames.csv`, and the `ws/templates` symlink to the downsampled `syndiff_template_*.fits.gz` files. **Exception:** an astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff, DS9 regions at startup, and the master FITS mirror.
+Required handoff from the template pipeline (all under `events/{label}/`): `cluster_template_job.json`, `syndiff_ffi_frames.csv`, and the `ws/templates` symlink to the downsampled `syndiff_template_*.fits.fz` files. **Exception:** an astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff, DS9 regions at startup, and the master FITS mirror.
 
 ---
 
@@ -36,8 +48,8 @@ Bundled straps / BSC: leave `straps_csv` / `bsc_catalog` unset (empty = packaged
 
 - Event root: `{workspace_root}/events/{target_label}/`; pipeline tree `events/{label}/ws/` (or `ws_{workspace_run_id}/`).
 - Per-sub-stage dirs: `ws/{label}/` where `label` comes from the stage's `output:` key (e.g. `hp_d`, `hp_c`, `hp_b`, `ep`, `lc_prf_on_diffs`).
-- Per-FFI FITS: `{tess_product_id}_{label}.fits.gz` (e.g. `tess2020019142923_hp_d.fits.gz`); see `support/ffi_naming.py`.
-- Root artifacts in `ws/`: `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `diff_config.yaml` (frozen copy), `tile_centers.json`.
+- Per-FFI FITS: `{tess_product_id}_{label}.fits.fz` (e.g. `tess2020019142923_hp_d.fits.fz`); see `support/ffi_naming.py`.
+- Root artifacts in `ws/`: `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `diff_config.yaml` (frozen copy), `tile_centers.json`.
 - Astrometry artifacts in the active workspace root (`ws/` or `ws_{workspace_run_id}/`): `astrometry_result.json`, optional `debug_plots/astrometry_mix.png` when `pipeline_plots: true`.
 - Meta workspace paired with a diffs label (`hp_d` → `hp_m`): `kernel_reconstruction.npz`, `phot_calib.csv`, `hotpants.progress.json`.
 - Optional flat mirror of all workspace FITS: `ws/master/` (symlinks, `master_fits_mirror: true`).
@@ -91,14 +103,37 @@ circles/crosses (bits 1/2; Gaia ∪ BSC for crosses), 13≤T&lt;18 `faint_star_s
 `mask_settings:` path override. Do not put maglims/strapsize/PS1 thresholds on
 the stage (legacy keys still work if explicit; prefer the mask file).
 
-Writes `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`,
+Writes `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`,
 `gaia_catalog_pipeline.csv`, frozen `mask_settings.yaml`. See [masking.md](../masking.md).
+
+When templates are oversampled (`OVERSAMP=F` or field OS store), the PS1
+`COUNT` plane is HR; syndiff **block-sums** each `F×F` block to native before
+comparing to `ps1_min_hit_count` so the mask stays science-shaped. See
+[oversampled templates §8](../oversampled_templates.md#8-shared-mask-and-ps1-count).
 
 ### `hotpants` (`stages/hotpants.py`)
 
 Per-FFI Hotpants: cropped science frame vs the PS1 template of that frame's WCS group. Runs in-memory through pyhotpants `Hotpants.run_pipeline()`; FITS written afterward.
 
-Outputs (per YAML `output:` block): diffs `ws/{diffs}/tess{pid}_{diffs}.fits.gz` (PRIMARY + NOISE + MASK), optional convolved model, Hotpants background, and stamps. Production default (`config/diff_config.yaml`): `write_convolved: false`, `write_bkg: true`, `write_stamps: false`. Also appends Hotpants status columns to `syndiff_ffi_frames.csv`.
+**Science crops are always native.** Template crops scale by `OVERSAMP` (or
+field OS) so an HR template of shape `science * F` is passed with
+`oversample=F` (inferred from shapes unless YAML sets `oversample` explicitly).
+`F>1` and `stamp_mode: connected_regions` force the pure-Python backend;
+`hp_force_convolve` must be `"t"`. Diffs / noise / mask / bkg outputs remain
+**native (LR)**.
+
+Optional YAML (beyond classical `hp_*` keys):
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `oversample` | inferred | Usually omit |
+| `use_c_extension` | auto | Forced off for `F>1` / connected regions |
+| `stamp_mode` | `grid` | `grid` \| `connected_regions` |
+| `region_*` | see guide | Only for `connected_regions` |
+
+Full tables: [oversampled templates §6](../oversampled_templates.md#6-hotpants-parameter-reference).
+
+Outputs (per YAML `output:` block): diffs `ws/{diffs}/tess{pid}_{diffs}.fits.fz` (PRIMARY + NOISE + MASK), optional convolved model, Hotpants background, and stamps. Production default (`config/diff_config.yaml`): `write_convolved: false`, `write_bkg: true`, `write_stamps: false`. Also appends Hotpants status columns to `syndiff_ffi_frames.csv`.
 
 When `write_kernel_solutions: true`, per-frame kernel vectors are persisted as `{diffs_label}_kernels/{product_id}_kernel.npz` (e.g. `hp_d_kernels/tess2020019142923_kernel.npz`) alongside the diffs workspace. Default is off; see §5.
 
@@ -106,9 +141,15 @@ When `write_kernel_solutions: true`, per-frame kernel vectors are persisted as `
 
 Fits **one target-level kernel** on the minimum-background FFI: Hotpants pass 1 (`hp_bgo=3`) → photutils background removal → Hotpants pass 2 (`hp_bgo=0`), extracting the kernel solution. Writes `ws/{output}/kernel_r2.npz` (`kernel_solution`, `kernel_image`, `basis`, substamps) and `kernel_fit_meta.json`.
 
+Uses the same Hotpants OS / stamp-mode wiring as `hotpants`. In field mode the
+native crop is scaled by `F` before assembling from the HR field store.
+
 ### `convolved_templates` (`stages/convolved_templates.py`)
 
-Convolves each unique WCS-group template with the fixed `kernel_r2.npz` solution (`convolve_template_with_kernel_solution()`). Writes `convolved_template_dx{X.XXX}_dy{Y.YYY}.fits.gz` plus a `convolved_templates.csv` manifest (`group_id`, `group_dx`, `group_dy`, `template_path`, `convolved_path`).
+Convolves each unique WCS-group template with the fixed `kernel_r2.npz` solution (`convolve_template_with_kernel_solution()`). Writes `convolved_template_dx{X.XXX}_dy{Y.YYY}.fits.fz` plus a `convolved_templates.csv` manifest (`group_id`, `group_dx`, `group_dy`, `template_path`, `convolved_path`).
+
+At `F>1`, reconvolve passes `oversample=F` and `science_shape=native`, scaling
+basis sigmas as `σ/F²` to match pyhotpants. Output convolved maps are native.
 
 ### `kernel_subtract` (`stages/kernel_subtract.py`)
 
@@ -134,7 +175,7 @@ Primary outputs under `ws/{output}/`:
 | `gridded_epsf_index.json` | `ffi_stem` → npz path mapping |
 | `epsf.progress.json` | Frame progress sidecar (also mirrored as `diff.epsf.progress.json` beside `diff.log`) |
 
-Legacy tile-stack bundles (for `sat_template` and tile-interpolated photometry) are still written: `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `group_epsf/group_epsf_{gid}.npz` (median gridded cube per WCS group). `tile_centers.json` is saved in `ws/` root (shared with `sat_template` and legacy ePSF photometry).
+Legacy tile-stack bundles are still written for ``sat_template`` (not for forced photometry): `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `group_epsf/group_epsf_{gid}.npz` (median gridded cube per WCS group). `tile_centers.json` is saved in `ws/` root for `sat_template`. Forced photometry with `psf_type: epsf` requires `gridded_epsf_index.json` only.
 
 Key YAML params: `tile_nx`, `tile_ny`, `epsf_oversample`, `psf_size`, `extract_size`, `min_stars_per_tile`, `mag_max_rp`, `epsf_maxiters`, `epsf_recentering_maxiters`, `epsf_n_jobs`.
 
@@ -155,17 +196,28 @@ Key YAML params: `mag_max_rp`, `fit_shape`, `aperture_radius`, `psf_grouper_min_
 
 ### `sat_template` (`stages/sat_template.py`) — see §6
 
-Builds per-group model images of bright stars as flux-scaled ePSF stamps: `ws/{output}/sat_tmpl_native_r1/group_{gid}.fits.gz` (2× oversampling path) and `sat_tmpl_hr_r1/group_{gid}.fits.gz` (9×).
+Builds per-group model images of bright stars as flux-scaled ePSF stamps: `ws/{output}/sat_tmpl_native_r1/group_{gid}.fits.fz` (2× oversampling path) and `sat_tmpl_hr_r1/group_{gid}.fits.fz` (9×).
 
-### `forced_photometry` (`stages/photometry.py`)
+### `forced_photometry` (`stages/photometry.py`) — see [forced_photometry.md](forced_photometry.md)
 
-Forced PSF and/or aperture photometry at the primary target and `additional_forced_targets`. PSF methods (`type: psf`) support:
+Forced PSF and/or aperture photometry at the primary target and
+`additional_forced_targets`. Four modes:
 
-- `psf_type: prf` — official TESS PRF (`PRF.TESS_PRF`)
-- `psf_type: epsf` with `inputs.epsf` pointing at a gridded ePSF workspace — per-frame `GriddedPSFModel` via `photutils.PSFPhotometry` (e.g. method name `gepsf` in `config/diff_config_2020ut_epsf_gepsf.yaml`)
-- `psf_type: epsf` without gridded index — legacy tile-interpolated group ePSF from `epsf_r1_smooth.npz`
+| Mode | YAML | Fitter |
+|------|------|--------|
+| Aperture | `type: aperture` | Square sum ± sky annulus (`subtract_sky`, `mask_sky_with_shared_mask`) |
+| PRF | `psf_type: prf` | Official TESS PRF + TESSreduce `create_psf` |
+| ePSF photutils | `psf_type: epsf` (default / `fitter: photutils`) | Per-frame `GriddedPSFModel` |
+| ePSF tessreduce | `psf_type: epsf`, `fitter: tessreduce` | Same BFGS as PRF on that frame’s gridded stamp |
 
-Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_name}.csv`), plus diagnostic plots when `pipeline_plots: true`. If `ws/{diffs_m}/phot_calib.csv` exists, kernel-sum zero-point calibration columns (`kernel_ref`, calibrated `flux`, `tmag`, `flux_jy`) are added.
+`psf_type: epsf` **requires** `gridded_epsf_index.json` under `inputs.epsf`
+(legacy tile-smooth fallback removed). Full parameter tables, dual-method
+examples, and CSV columns: [Forced photometry](forced_photometry.md).
+
+Writes `ws/{output}/lightcurve_{method}.csv` (and
+`lightcurve_{method}_{extra_name}.csv`), plus diagnostic plots when
+`pipeline_plots: true`. If `ws/{diffs}/phot_calib.csv` exists, kernel-sum
+zero-point calibration columns are added.
 
 ## 3. Production pipeline orders
 
@@ -176,7 +228,7 @@ Writes `ws/{output}/lightcurve_{method}.csv` (and `lightcurve_{method}_{extra_na
 | `config/diff_config_single_kernel.yaml` | `shared_mask` → `kernel_fit` → `convolved_templates` → `kernel_subtract` → `background` → `subtract` → `forced_photometry` |
 | `config/diff_config_multi_kernel.yaml` | same prefix → `background` → `hotpants` (round 2, `hp_bgo=0`) → `forced_photometry` |
 | `config/diff_config_multi_kernel_resume.yaml` | `workspace_inherit` → `background` → `hotpants` → `forced_photometry` |
-| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `workspace_inherit` (from `multi_hp_temp_calib`: `hp_d`, `hp_m`, shared mask, Gaia catalog, substamp stars) → `epsf` (3×3 grid) → `centroids` → `forced_photometry` (`gepsf`, `psf_type: epsf`) on `hp_d` |
+| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `workspace_inherit` (from `multi_hp_temp_calib`: `hp_d`, `hp_m`, shared mask, Gaia catalog, substamp stars) → `epsf` (3×3 grid) → `centroids` → `forced_photometry` (`psf_type: epsf`, photutils; prefer method names `epsf` / `epsf_bkg`) on `hp_d` |
 
 ## 4. Template resolution
 
@@ -210,7 +262,7 @@ This is the hook for swapping in modified templates: point `template_dir` (or th
 Intended purpose: model images of the **PS1-removed** (saturated) stars, per WCS group, for later subtraction. Actual behavior has two gaps that matter when planning star-subtraction work:
 
 1. **Star selection**: `execute.py: _load_removed_stars_in_crop()` returns the full Gaia catalog whenever `gaia_df` already carries crop-local `x`/`y` columns — which is always true after `shared_mask`. So in production runs `removed_stars_csv` (i.e. `events/{label}/ps1_removed_stars.csv` produced by downsample) is **ignored**, and the "sat" template contains *all* Gaia stars in the crop, not just removed ones.
-2. **Subtraction wiring**: outputs are per-group `group_{gid}.fits.gz`, but the `subtract` stage consumes per-frame `tess{pid}_{label}.fits.gz` planes. No code bridges the two; the example config `config/example/diff_config_b_epsf_sat_bkg.yaml` that pairs them is stale (it also references a removed `background_estimate` kind). `load_group_templates()` is unused outside the module.
+2. **Subtraction wiring**: outputs are per-group `group_{gid}.fits.fz`, but the `subtract` stage consumes per-frame `tess{pid}_{label}.fits.fz` planes. No code bridges the two; the example config `config/example/diff_config_b_epsf_sat_bkg.yaml` that pairs them is stale (it also references a removed `background_estimate` kind). `load_group_templates()` is unused outside the module.
 
 There is currently **no mechanism to subtract a single, chosen star from a template** via the main diff pipeline — see [host-star light curves](../star_lightcurves.md) and [star pipeline](star_pipeline.md) for the `syndiff star` workflow that builds per-host mini templates and star-only diff stamps from persisted per-frame Hotpants artifacts.
 
@@ -234,7 +286,7 @@ A frozen per-target copy of the effective config is written to `runs/.../per_tar
 
 | Goal | What to reuse | What to re-run |
 |------|---------------|----------------|
-| New photometry on existing diffs | `ws/hp_d/*.fits.gz` | `forced_photometry` only |
+| New photometry on existing diffs | `ws/hp_d/*.fits.fz` | `forced_photometry` only |
 | Modified templates, kernel-fit path | `kernel_r2.npz` + `kernel_fit_meta.json` | `convolved_templates` → `kernel_subtract` → (`background`/`subtract`) → `forced_photometry` |
 | Modified templates, hotpants path | shared mask, substamp stars | full `hotpants` (per-frame kernels re-fit) |
 | Continue a multi-kernel run | inherit labels via `workspace_inherit` + `workspace_run_id` | remaining stages in the new run id |

@@ -11,10 +11,18 @@ ManifestTuple = Optional[Tuple[int, int, List[str], Optional[dict]]]
 DIFF_VERIFY_UPSTREAM = frozenset(
     {
         "tess_ffi_download",
-        "wcs_grouping",
         "downsample",
     }
 )
+
+# Legacy stage names accepted by resolve_stage_name.
+_STAGE_LEGACY_ALIASES: dict[str, str] = {
+    "skycell_remap": "remap",
+    "wcs": "bind",
+    "wcs_grouping": "bind",
+}
+
+_RENAMED_STAGE_ALIASES = frozenset({"templates", "tmpl"})
 
 
 @dataclass
@@ -78,10 +86,14 @@ class StageSpec:
                 return stages.mapping.executor
             if self.name == "ps1_process":
                 return stages.ps1_process.executor
+            if self.name == "remap":
+                return stages.remap.executor
             if self.name == "diff":
                 return stages.diff.executor
             if self.name == "star":
                 return stages.star.executor
+            if self.name == "downsample":
+                return stages.downsample.executor
         return self.default_executor
 
 
@@ -159,11 +171,19 @@ class PipelineSpec:
         raw = str(name).strip()
         if not raw:
             raise ValueError("Stage name must not be empty")
+        if raw in _RENAMED_STAGE_ALIASES:
+            raise ValueError(
+                f"Stage name {raw!r} was renamed to 'downsample'; "
+                "use downsample (short: down) instead"
+            )
         if raw in self.stage_names:
             return raw
         short_to_full = {spec.short_name: spec.name for spec in self.stages}
         if raw in short_to_full:
             return short_to_full[raw]
+        legacy = _STAGE_LEGACY_ALIASES.get(raw)
+        if legacy and legacy in self.stage_names:
+            return legacy
         full_names = ", ".join(self.stage_names)
         short_names = ", ".join(sorted(short_to_full))
         raise ValueError(
@@ -283,7 +303,7 @@ class PipelineSpec:
     def artifact_verify_closure(self, active_stages: Sequence[str]) -> frozenset[str]:
         """Stages eligible for artifact verify in a partial run.
 
-        Diff-only runs verify tess_dl, wcs handoff, and downsample — not the
+        Diff-only runs verify tess_dl, downsample on disk, and bind handoff — not the
         full template chain (mapping, ps1_download, ps1_process).
         """
         active = set(active_stages)

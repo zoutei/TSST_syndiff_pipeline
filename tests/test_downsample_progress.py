@@ -34,7 +34,7 @@ class TestDownsampleProgressSidecar(unittest.TestCase):
 
     def test_init_and_mark_skycell_done(self):
         path = self.root / "downsample.progress.json"
-        init_progress(path, total_skycells=10, batch_sizes=[4, 3, 3])
+        init_progress(path, total_skycells=10, batch_sizes=[4, 3, 3], oversampling_factor=4)
 
         mark_skycell_done(path, 0)
         mark_skycell_done(path, 0)
@@ -43,6 +43,7 @@ class TestDownsampleProgressSidecar(unittest.TestCase):
         self.assertIsNotNone(state)
         assert state is not None
         self.assertEqual(state["skycells_done"], 3)
+        self.assertEqual(state["oversampling_factor"], 4)
         self.assertEqual(state["batches"]["0"]["done"], 2)
         self.assertEqual(state["batches"]["1"]["done"], 1)
 
@@ -64,6 +65,52 @@ class TestDownsampleProgressSidecar(unittest.TestCase):
         self.assertEqual(state["phase"], "precomputing_shifts")
         self.assertEqual(state["offsets_done"], 2)
         self.assertEqual(state["offsets_total"], 5)
+        self.assertIn("phase_started_at", state)
+
+    def test_phase_transition_records_elapsed(self):
+        path = self.root / "downsample.progress.json"
+        set_progress_phase(path, "precomputing_shifts", offsets_done=0, offsets_total=3)
+        set_progress_phase(path, "parallel_batches")
+        state = read_progress(path)
+        assert state is not None
+        self.assertEqual(state["phase"], "parallel_batches")
+        self.assertIn("phase_started_at", state)
+        self.assertIn("phase_elapsed_s", state)
+        self.assertIn("precomputing_shifts", state["phase_elapsed_s"])
+        self.assertGreaterEqual(state["phase_elapsed_s"]["precomputing_shifts"], 0.0)
+
+    def test_init_progress_preserves_phase_elapsed(self):
+        path = self.root / "downsample.progress.json"
+        set_progress_phase(path, "precomputing_shifts", offsets_done=1, offsets_total=2)
+        init_progress(path, total_skycells=4, batch_sizes=[2, 2])
+        state = read_progress(path)
+        assert state is not None
+        self.assertEqual(state["phase"], "parallel_batches")
+        self.assertIn("precomputing_shifts", state.get("phase_elapsed_s", {}))
+
+    def test_no_fcntl_flock_in_module(self):
+        import inspect
+
+        import syndiff_pipeline.template_creation.processing.downsample_progress as mod
+
+        src = inspect.getsource(mod)
+        self.assertNotIn("import fcntl", src)
+        self.assertNotIn("fcntl.flock", src)
+
+    def test_mark_skycells_done_batch(self):
+        from syndiff_pipeline.template_creation.processing.downsample_progress import (
+            mark_skycells_done,
+        )
+
+        path = self.root / "downsample.progress.json"
+        init_progress(path, total_skycells=5, batch_sizes=[3, 2])
+        mark_skycells_done(path, 0, 3)
+        mark_skycells_done(path, 1, 2)
+        state = read_progress(path)
+        assert state is not None
+        self.assertEqual(state["skycells_done"], 5)
+        self.assertEqual(state["batches"]["0"]["done"], 3)
+        self.assertEqual(state["batches"]["1"]["done"], 2)
 
 
 if __name__ == "__main__":

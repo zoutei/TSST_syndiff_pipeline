@@ -231,6 +231,7 @@ class TestStageShortNamesLightweight(unittest.TestCase):
             if mod not in before:
                 self.assertNotIn(mod, sys.modules)
         self.assertEqual(names["downsample"], "down")
+        self.assertEqual(names["remap"], "remap")
         self.assertEqual(names["diff"], "diff")
         self.assertEqual(names["star"], "star")
 

@@ -1,7 +1,6 @@
 """Integration tests for downsample sidecar progress under concurrency and lifecycle."""
 from __future__ import annotations
 
-import multiprocessing
 import sys
 import tempfile
 import unittest
@@ -25,10 +24,13 @@ from syndiff_pipeline.template_creation.processing.downsample_progress import (
 from syndiff_pipeline.template_creation.orchestration.stage_progress import read_log_progress
 
 
-def _worker_mark(path_str: str, batch_idx: int, count: int) -> None:
-    path = Path(path_str)
-    for _ in range(count):
-        mark_skycell_done(path, batch_idx)
+def _parent_mark(path_str: str, batch_idx: int, count: int) -> None:
+    """Parent-process progress updates (NFS-safe tmp+replace; not for workers)."""
+    from syndiff_pipeline.template_creation.processing.downsample_progress import (
+        mark_skycells_done,
+    )
+
+    mark_skycells_done(Path(path_str), batch_idx, count)
 
 
 class TestDownsampleProgressIntegration(unittest.TestCase):
@@ -37,17 +39,13 @@ class TestDownsampleProgressIntegration(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
 
-    def test_concurrent_workers_reach_exact_total(self):
+    def test_parent_marks_reach_exact_total(self):
         path = self.root / "downsample.progress.json"
         batch_sizes = [7, 7, 7, 6]
         init_progress(path, total_skycells=sum(batch_sizes), batch_sizes=batch_sizes)
 
-        ctx = multiprocessing.get_context("spawn")
-        with ctx.Pool(processes=4) as pool:
-            pool.starmap(
-                _worker_mark,
-                [(str(path), i, batch_sizes[i]) for i in range(len(batch_sizes))],
-            )
+        for i, size in enumerate(batch_sizes):
+            _parent_mark(str(path), i, size)
 
         state = read_progress(path)
         assert state is not None
@@ -116,7 +114,12 @@ class TestDownsampleProgressIntegration(unittest.TestCase):
         prog = read_log_progress(log_path, "downsample")
         self.assertEqual(prog.text, "7/20")
 
-    def test_process_skycell_batch_marks_each_skycell_on_failure(self):
+    def test_process_skycell_batch_parent_marks_after_failures(self):
+        """Workers no longer flock the sidecar; parent marks after the batch returns."""
+        from syndiff_pipeline.template_creation.processing.downsample_progress import (
+            mark_skycells_done,
+        )
+
         path = self.root / "downsample.progress.json"
         init_progress(path, total_skycells=2, batch_sizes=[2])
 
@@ -139,8 +142,9 @@ class TestDownsampleProgressIntegration(unittest.TestCase):
                 (10, 10),
                 Path("/nonexistent.zarr"),
                 (0, 0, 5, 5),
-                progress_path=path,
+                progress_path=None,
             )
+        mark_skycells_done(path, 0, 2)
 
         state = read_progress(path)
         assert state is not None

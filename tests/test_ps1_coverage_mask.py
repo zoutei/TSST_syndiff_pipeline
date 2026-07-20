@@ -90,6 +90,49 @@ class TestPs1CoverageMaskSynthetic(unittest.TestCase):
             self.assertTrue(np.all((mask[0:3, :] & 16) > 0))
             self.assertTrue(np.all((mask[3:, :] & 16) == 0))
 
+    def test_make_shared_mask_accepts_hr_count_via_loader(self):
+        # OVERSAMP=2 COUNT is 8x8 HR; ref is 4x4 native. Loader must block-sum.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "tmpl_os2.fits"
+            hdr = fits.Header()
+            hdr["XMIN"] = 0
+            hdr["YMIN"] = 0
+            hdr["XMAX"] = 4
+            hdr["YMAX"] = 4
+            hdr["OVERSAMP"] = 2
+            flux = np.ones((8, 8), dtype=np.float32)
+            count = np.full((8, 8), 2000, dtype=np.int32)  # native sum = 8000
+            count[0:2, :] = 100  # native row0 sum = 400 → below threshold
+            fits.HDUList(
+                [
+                    fits.PrimaryHDU(header=hdr),
+                    fits.ImageHDU(flux, header=hdr, name="FLUX_SUM"),
+                    fits.ImageHDU(count, header=hdr, name="COUNT"),
+                ]
+            ).writeto(p, overwrite=True)
+            crop = {
+                "x_min": 0,
+                "x_max": 4,
+                "y_min": 0,
+                "y_max": 4,
+                "shape": (4, 4),
+            }
+            ref = np.zeros((4, 4), dtype=np.float64)
+            gaia = pd.DataFrame({"x": [], "y": [], "mag": []})
+            mask = masking.make_shared_mask(
+                ref_image=ref,
+                gaia_df=gaia,
+                crop_bounds=crop,
+                straps_csv=str(tess_straps_csv()),
+                maglim=99.0,
+                strapsize=0,
+                template_path=str(p),
+                ps1_min_hit_count=5000,
+            )
+            self.assertEqual(mask.shape, (4, 4))
+            self.assertTrue(np.all((mask[0, :] & 16) > 0))
+            self.assertTrue(np.all((mask[1:, :] & 16) == 0))
+
 
 @unittest.skipUnless(
     REAL_TEMPLATE_PATH.is_file(),

@@ -71,37 +71,38 @@ Run-level `scan_queued` / `scan_running` in `progress` count only deps-eligible 
 `sc_q` is shown for `external` stages needing verify and selected `pending` stages whose dependencies are satisfied.
 ---
 
-## 2. Stage dependency DAG (7 stages)
+## 2. Stage dependency DAG (9 composed stages, two disconnected sub-graphs)
+
+`pipeline_spec.py` composes **six template stages + `bind` + `diff` + `star`** into one registry, but `create_run` (§3) always materializes **all nine** stage rows for every target regardless of which CLI noun (`template`/`diff`) submitted the run. Critically, the DAG itself has **no edge** between the template sub-graph and the diff sub-graph — `bind` has **zero** dependencies (not even `tess_ffi_download`), and `downsample` does not depend on `bind`:
 
 ```text
+Template sub-graph:
 tess_ffi_download
        │
        ▼
-  wcs_grouping ─────────────────────────────┐
-       │                                     │
-       ▼                                     │
-   mapping                                   │
-       │                                     │
-       ▼                                     │
- ps1_download                                │
-       │                                     │
-       ▼                                     │
-  ps1_process ───────────────────────────────┤
-                                             ▼
-                                       downsample
-                                             │
-                                             ▼
-                                            diff
+   mapping ──────────────┐
+       │                │
+       ▼                ▼
+ ps1_download         remap
+       │                │
+       ▼                │
+  ps1_process ─────────┴──▶ downsample
+
+Diff sub-graph (disconnected from the above in SQL dependency terms):
+bind → diff
 ```
 
 | Stage | Depends on |
 |-------|------------|
-| `wcs_grouping` | `tess_ffi_download` |
-| `mapping` | `wcs_grouping` |
+| `mapping` | `tess_ffi_download` |
 | `ps1_download` | `mapping` |
 | `ps1_process` | `ps1_download` (or `mapping` only when `ps1_source=stream`) |
-| `downsample` | `wcs_grouping`, `mapping`, `ps1_process` |
-| `diff` | `downsample` |
+| `remap` | `mapping` (pre-skipped in linear mode) |
+| `downsample` | `mapping`, `ps1_process`, `remap` (effective deps omit `remap` in linear mode) |
+| `bind` | *(none)* |
+| `diff` | `bind` |
+
+Legacy stage-name aliases (`resolve_stage_name` / `spec.py::_STAGE_LEGACY_ALIASES`): `skycell_remap`→`remap`, `wcs_grouping`→`bind`, `wcs`→`bind`. Stage names `templates` / `tmpl` are **rejected** (hard cut).
 
 ### Partial-run concepts
 
@@ -110,37 +111,38 @@ tess_ffi_download
 - Stages **in closure but not selected** → start `external`, then verify → `skipped`.
 - Stages **outside closure** → `apply_not_selected_skips` → immediate `skipped` (`not_selected`).
 
-### Upstream closure by `--stages`
+### Upstream closure by `--stages` (verified with `PipelineSpec.run_stage_closure`)
 
 | `--stages` | `run_stage_closure` |
 |------------|---------------------|
-| all 7 (preset `all`) | all 7 |
-| template preset (6 stages, no `diff`) | tess … down |
-| `diff` preset | tess … down, diff |
-| `mapping` | tess, wcs, mapping |
-| `downsample` | all 7 |
-| `mapping,downsample` | all 7 |
-| `wcs_grouping` | tess, wcs |
-| `ps1_process` | tess, wcs, mapping, ps1_dl, ps1_pr |
-| `ps1_process,downsample` | all 7 |
+| template preset (6 stages: `tess_ffi_download`…`downsample`) | tess, map, ps1_dl, ps1_pr, remap, down (all 6) |
+| `mapping` | tess, mapping |
+| `downsample` (or `mapping,downsample`) | tess, mapping, ps1_dl, ps1_pr, remap, downsample (all 6 template stages) |
+| `ps1_process` | tess, mapping, ps1_dl, ps1_pr |
+| `bind` | bind (alone — no deps) |
+| `diff` (default `diff` preset) | bind, diff (**not** any template stage — see below) |
+| `bind,downsample` | bind + all 6 template stages (still two disjoint components; nothing connects them) |
+
+Note there is **no `all` preset** anymore, and `--stages downsample` alone (or any subset including it) pulls in the **entire** template sub-graph.
 
 ### Diff-only artifact verify closure
 
-For `syndiff diff submit` (`--stages diff`), `artifact_verify_closure` is **narrower** than `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM`):
+For the default `syndiff diff submit` (`--stages diff`, i.e. `active_stages == {"diff"}`), `artifact_verify_closure` is a **special case**, not simply `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}`):
 
-| Stage | In run closure? | Artifact verify? |
+| Stage | In `run_stage_closure({"diff"})`? | In `artifact_verify_closure({"diff"})`? |
 |-------|-----------------|------------------|
-| `tess_ffi_download`, `wcs_grouping`, `downsample` | yes | yes |
-| `mapping`, `ps1_download`, `ps1_process` | yes | no — immediate **n/a** (`not_selected`) |
+| `bind` | **yes** (`diff` depends on it) | **no** — despite being DAG-upstream, `bind` is excluded from `DIFF_VERIFY_UPSTREAM`, so it is marked `skipped` (`not_selected`) immediately, without ever running or being checked on disk |
+| `tess_ffi_download`, `downsample` | **no** (no DAG edge to `diff`/`bind` at all) | **yes** — pulled in only by the `DIFF_VERIFY_UPSTREAM` special-case, then scanned on disk |
+| `mapping`, `ps1_download`, `ps1_process` | no | no — immediate **n/a** (`not_selected`) |
 | `diff` | yes (selected) | yes (before launch) |
 
-Only `tess_ffi_download`, `wcs_grouping`, and `downsample` are scanned on disk; mapping CSV and PS1 Zarr are not verified for diff-only runs.
+**Consequence**: on the default `diff` preset, `bind` never runs and is never verified — it is simply treated as satisfied. Pass **`--stages bind,diff`** explicitly whenever an event's `bind` handoff (`event_job.json`/`frames.csv`) might not already exist, otherwise `diff` will fail at execution time when it can't find the handoff.
 
 ---
 
 ## 3. Submission — initial status after `create_run`
 
-`create_run` inserts all 7 stages per target:
+`create_run` inserts all **8** composed stages per target (regardless of which noun submitted the run — see §2):
 
 - Stage ∈ `--stages` → **`pending`**
 - Stage ∉ `--stages` → **`external`**
@@ -155,45 +157,59 @@ Legend: **P** = pending, **E** = external, **S(n/a)** = skipped (not_selected)
 
 ### 3.1 Primary submission types
 
-**Template-only (6 stages, no `diff`)** — `syndiff template submit` default:
+**Template preset (6 stages, `tess_ffi_download`…`downsample`)** — `syndiff template submit` default (verified against `PipelineSpec.artifact_verify_closure`):
 
 | Stage | Template (6) | `mapping` only | `downsample` only | `mapping,downsample` |
 |-------|--------------|----------------|-------------------|----------------------|
 | `tess_ffi_download` | P | E | E | E |
-| `wcs_grouping` | P | E | E | E |
 | `mapping` | P | P | E | P |
 | `ps1_download` | P | S(n/a) | E | E |
 | `ps1_process` | P | S(n/a) | E | E |
+| `remap` | P | S(n/a) | E | E |
 | `downsample` | P | S(n/a) | P | P |
+| `bind` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 | `diff` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
+| `star` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 
-**Full end-to-end (7 stages)** — `syndiff all submit`: all seven stages start **P** (pending) unless stream-mode or supersede skips apply; `diff` is included.
+`create_run` always materializes all nine composed stages (§2), so a `template` run's SQLite rows include `bind`/`diff`/`star` too — all three sit outside `run_stage_closure` for every template-only `--stages` combination (there is no DAG edge from any template stage to `bind`), so they are marked **n/a** immediately.
+
+**There is no combined end-to-end preset** (`all` was removed); run `template submit` and `diff submit` as two separate submissions.
 
 ### 3.2 Diff preset (`syndiff diff submit`)
 
-| Stage | `diff` only |
-|-------|-------------|
-| `tess_ffi_download` | E (verify → skip) |
-| `wcs_grouping` | E (verify → skip) |
-| `mapping` | S(n/a) |
-| `ps1_download` | S(n/a) |
-| `ps1_process` | S(n/a) |
-| `downsample` | E (verify → skip) |
-| `diff` | P |
+| Stage | `diff` only (**default** — no `--stages`) | `--stages bind,diff` (explicit) |
+|-------|-------------|-----------------------------------|
+| `tess_ffi_download` | E (verify → skip) | **S(n/a)** — no longer verified! |
+| `mapping` | S(n/a) | S(n/a) |
+| `ps1_download` | S(n/a) | S(n/a) |
+| `ps1_process` | S(n/a) | S(n/a) |
+| `remap` | S(n/a) | S(n/a) |
+| `downsample` | E (verify → skip) | **S(n/a)** — no longer verified! |
+| `bind` | **S(n/a) — never runs, never checked on disk** | P (runs) |
+| `diff` | P | P |
+
+**Two distinct footguns, same root cause** (`spec.py::artifact_verify_closure` special-cases only the *exact* set `{"diff"}`):
+
+- **Default `--stages diff`**: `tess_ffi_download`/`downsample` get verified on disk (`DIFF_VERIFY_UPSTREAM`), but `bind` is skipped as not-selected and never actually runs. If the event's handoff doesn't already exist, `diff` fails at runtime.
+- **Explicit `--stages bind,diff`**: `bind` now runs, but because `active_stages` is `{"bind", "diff"}` rather than exactly `{"diff"}`, the `DIFF_VERIFY_UPSTREAM` special-case **does not fire** — `run_stage_closure({"bind","diff"}) == {"bind","diff"}` with no expansion, so `tess_ffi_download` and `downsample` fall **outside** the closure and are marked `skipped` (not_selected) without ever being scanned. `diff` will still fail at runtime if the template store is actually missing; it just won't get a `[FAIL]`-style verify warning first.
+
+There is currently no `--stages` combination that both runs `bind` **and** verifies `tess_ffi_download`/`downsample` on disk. Run `syndiff verify --targets ... --stages tess_ffi_download,downsample` separately beforehand if you want that on-disk check.
 
 ### 3.3 Other partial runs
 
 | `--stages` | Pending | External (verify path) | Skipped immediately (n/a) |
 |------------|---------|------------------------|---------------------------|
-| `tess_ffi_download` | tess | — | wcs, map, ps1_dl, ps1_pr, down |
-| `tess_ffi_download,wcs_grouping` | tess, wcs | — | map, ps1_dl, ps1_pr, down |
-| `wcs_grouping` | wcs | tess | map, ps1_dl, ps1_pr, down |
-| `ps1_process` | ps1_pr | tess, wcs, map, ps1_dl | down |
-| `ps1_process,downsample` | ps1_pr, down | tess, wcs, map, ps1_dl | — |
-| `mapping,ps1_process` | map, ps1_pr | tess, wcs, ps1_dl | down |
-| `mapping,ps1_process,downsample` | map, ps1_pr, down | tess, wcs, ps1_dl | — |
-| `ps1_download` | ps1_dl | tess, wcs, map | ps1_pr, down |
-| `wcs_grouping,downsample` | wcs, down | tess, map, ps1_dl, ps1_pr | — |
+| `tess_ffi_download` | tess | — | map, ps1_dl, ps1_pr, down, bind, diff, star |
+| `mapping` | map | tess | ps1_dl, ps1_pr, down, bind, diff, star |
+| `ps1_download` | ps1_dl | tess, map | ps1_pr, down, bind, diff, star |
+| `ps1_process` | ps1_pr | tess, map, ps1_dl | down, bind, diff, star |
+| `ps1_process,downsample` | ps1_pr, down | tess, map, ps1_dl | bind, diff, star |
+| `mapping,ps1_process` | map, ps1_pr | tess, ps1_dl | down, bind, diff, star |
+| `mapping,ps1_process,downsample` | map, ps1_pr, down | tess, ps1_dl | bind, diff, star |
+| `bind` | bind | — | tess, map, ps1_dl, ps1_pr, down, diff, star |
+| `bind,downsample` | bind, down | tess, map, ps1_dl, ps1_pr | diff, star |
+
+Note `bind` and the template stages never expand into each other's closures — `bind,downsample` runs both independently (two disjoint sub-DAGs), not as one combined chain.
 
 ### 3.4 `force_rerun=true` vs `false` on submit
 
@@ -265,11 +281,14 @@ Only stages in `runs.stages` (`active_stages`) are launched.
 
 ## 5. Normal submission — end-to-end walkthroughs
 
-### 5.1 Full run (all 7 stages)
+There is no combined "full run" preset anymore. A **template** submission and a **diff** submission are separate walkthroughs; `bind` and the template stages never share a closure.
+
+### 5.1 Template preset (5 stages) — `syndiff template submit`
 
 ```
-All stages: pending
-→ tess → wcs → mapping → ps1_dl → ps1_pr → downsample → diff (per target, pool-limited)
+Template stages: pending
+→ tess → mapping → ps1_dl → ps1_pr → remap → downsample (per target, pool-limited)
+bind, diff, star: n/a (outside closure of the 5-stage template preset)
 → run: success
 ```
 
@@ -277,63 +296,75 @@ All stages: pending
 
 ```
 tess: sc_q → skip
-wcs:  sc_q → skip
 map:  pend → runn → succ
-ps1_dl, ps1_pr, down: n/a
+ps1_dl, ps1_pr, down, bind, diff, star: n/a
 → run: success
 ```
 
 ### 5.3 `downsample` only
 
 ```
-tess, wcs, map, ps1_dl, ps1_pr: sc_q → skip (sequential verify)
+tess, map, ps1_dl, ps1_pr: sc_q → skip (sequential verify)
 down: pend → runn → succ
+bind, diff, star: n/a
 → run: success
 ```
 
 ### 5.4 `mapping,downsample`
 
 ```
-tess, wcs, ps1_dl, ps1_pr: sc_q → skip
+tess, ps1_dl, ps1_pr: sc_q → skip
 map:  pend → runn → succ
 down: pend → runn → succ  (after ps1_pr satisfied)
+bind, diff, star: n/a
 ```
 
 Mapping and downsample can overlap across different targets (separate resource pools).
 
-### 5.5 `wcs_grouping` only
+### 5.5 `bind` only
 
 ```
-tess: sc_q → skip
-wcs:  pend → runn → succ
-map, ps1_*, down: n/a
+bind: pend → runn → succ
+tess, map, ps1_dl, ps1_pr, down, diff, star: n/a (bind has no deps; no closure edge to template stages)
 → run: success
 ```
 
 ### 5.6 `ps1_process` only
 
 ```
-tess, wcs, map, ps1_dl: sc_q → skip (ps1_dl may be superseded once ps1_pr satisfied)
+tess, map, ps1_dl: sc_q → skip (ps1_dl may be superseded once ps1_pr satisfied)
 ps1_pr: pend → runn → succ
-down: n/a
+down, bind, diff, star: n/a
 → run: success
 ```
 
 ### 5.7 `ps1_process,downsample`
 
 ```
-tess, wcs, map, ps1_dl: sc_q → skip
+tess, map, ps1_dl: sc_q → skip
 ps1_pr: pend → runn → succ
 down:   pend → runn → succ
+bind, diff, star: n/a
 → run: success
 ```
 
-### 5.8 `diff` only (`syndiff diff submit`)
+### 5.8 `diff` only (`syndiff diff submit`, default — no `--stages`)
 
 ```
-tess, wcs, down: sc_q → skip   (DIFF_VERIFY_UPSTREAM only)
-map, ps1_dl, ps1_pr: n/a       (not artifact-verified)
-diff: pend → runn → succ
+tess, down: sc_q → skip   (DIFF_VERIFY_UPSTREAM only)
+map, ps1_dl, ps1_pr: n/a  (not artifact-verified)
+bind: n/a                 (NOT run — treated as already satisfied; see §3.2)
+diff: pend → runn → succ  (may fail at runtime if bind's handoff never actually ran)
+→ run: success (or failed, if diff can't find event_job.json)
+```
+
+### 5.8b `bind,diff` explicit (`syndiff diff submit --stages bind,diff`)
+
+```
+bind: pend → runn → succ  (now actually runs, writes event_job.json + frames.csv)
+tess, down: n/a            (DIFF_VERIFY_UPSTREAM special-case does NOT fire for {"bind","diff"} — see §3.2)
+map, ps1_dl, ps1_pr, star: n/a
+diff: pend → runn → succ  (after bind succeeds)
 → run: success
 ```
 
@@ -357,11 +388,12 @@ Run status → `canceled`.
 
 | Run type | Canceled | Untouched |
 |----------|----------|-----------|
-| Template (6) / All (7) | All non-terminal non-skipped | Prior `success`/`failed`/`skipped` |
-| `mapping` only | tess(E), wcs(E), mapping(P) | ps1_*, down (n/a skipped) |
-| `downsample` only | All 5 upstream(E) + down(P) | — |
-| `mapping,downsample` | tess, wcs, ps1_dl, ps1_pr(E) + map, down(P) | — |
-| `wcs_grouping` only | tess(E), wcs(P) | map..down (n/a) |
+| Template preset (5) | All non-terminal non-skipped template stages | Prior `success`/`failed`/`skipped`; `bind`/`diff`/`star` (already n/a) |
+| `mapping` only | tess(E), mapping(P) | ps1_*, down, bind, diff, star (n/a skipped) |
+| `downsample` only | All 4 upstream(E) + down(P) | bind, diff, star |
+| `mapping,downsample` | tess, ps1_dl, ps1_pr(E) + map, down(P) | bind, diff, star |
+| `bind` only | bind(P) | tess..down, diff, star (n/a) |
+| `diff` (default) | diff(P); (`bind` already n/a, untouched) | mapping, ps1_*, star |
 
 ---
 
@@ -441,7 +473,7 @@ Running workers continue until exit during pause.
 
 | Run type | Reopened | External upstream | Downstream n/a |
 |----------|----------|-------------------|----------------|
-| Template (6) / All (7) | failed/blocked/canceled + downstream → P | E unchanged | — |
+| Template preset (5) | failed/blocked/canceled + downstream → P | E unchanged | — |
 | `mapping` only | mapping → P; downstream → E briefly | E | Re-skipped next tick ✓ |
 | `mapping,downsample` | failed map/down → P | ps1 stays E ✓ | — |
 | `ps1_process` only | ps1_pr → P; down S → P briefly | E | down re-skipped next tick ✓ |
@@ -450,19 +482,19 @@ Running workers continue until exit during pause.
 
 | Run type | After retry | Outcome |
 |----------|-------------|---------|
-| **`mapping,downsample`** | map/down → P; ps1/tess/wcs in closure → E | ps1 sc_q → skip → down runs ✓ |
+| **`mapping,downsample`** | map/down → P; ps1/tess in closure → E | ps1 sc_q → skip → down runs ✓ |
 | **`downsample` only** | down → P; upstream → E | upstream sc_q → skip → down runs ✓ |
-| **`mapping` only** | map → P; tess/wcs → E; ps1/down → E → n/a | Works ✓ |
-| Template (6) / All (7) | All reset to pending | Works ✓ |
+| **`mapping` only** | map → P; tess → E; ps1/down → E → n/a | Works ✓ |
+| Template preset (5) | All reset to pending | Works ✓ |
 
-**Historical example:** `mapping_downsample_v1` hit this deadlock before the fix; after
+**Historical example:** `mapping_downsample_v1` hit this deadlock before the fix (predates the remap/downsample split); after
 deploy, `repair_orphaned_pending_upstream` auto-recovers such runs on the next daemon tick.
 
 ### 8.3 Targeted retry `--stage mapping` (reset_downstream=True)
 
-| Run type | map | tess/wcs | ps1_dl/pr | down |
+| Run type | map | tess | ps1_dl/pr | down |
 |----------|-----|----------|-----------|------|
-| Template (6) / All (7) | P | unchanged | P | P |
+| Template preset (5) | P | unchanged | P | P |
 | `mapping` only | P | E | P→S(n/a) next tick | P→S(n/a) next tick |
 | `mapping,downsample` | P | E | E | P |
 
@@ -485,7 +517,7 @@ deploy, `repair_orphaned_pending_upstream` auto-recovers such runs on the next d
 ### A. Normal `mapping,downsample` (happy path)
 
 ```
-tess:sc_q → skip | wcs:sc_q → skip | map:runn → succ
+tess:sc_q → skip | map:runn → succ
 ps1_dl:sc_q → skip | ps1_pr:sc_q → skip
 down:pend → runn → succ
 ```
@@ -493,14 +525,14 @@ down:pend → runn → succ
 ### B. `mapping` only (happy path)
 
 ```
-tess:sc_q → skip | wcs:sc_q → skip | map:runn → succ
+tess:sc_q → skip | map:runn → succ
 ps1_dl:n/a | ps1_pr:n/a | down:n/a
 ```
 
 ### C. `downsample` only (happy path)
 
 ```
-tess:sc_q → skip | wcs:sc_q → skip | map:sc_q → skip
+tess:sc_q → skip | map:sc_q → skip
 ps1_dl:sc_q → skip | ps1_pr:sc_q → skip
 down:pend → runn → succ
 ```
@@ -510,13 +542,13 @@ down:pend → runn → succ
 **After cancel:**
 
 ```
-map:canc | down:canc | tess/wcs/ps1:canc (if non-terminal)
+map:canc | down:canc | tess/ps1:canc (if non-terminal)
 ```
 
 **After retry:**
 
 ```
-map:pend | down:pend | tess:exte | wcs:exte | ps1_dl:exte | ps1_pr:exte
+map:pend | down:pend | tess:exte | ps1_dl:exte | ps1_pr:exte
 ```
 
 **Progression:**
@@ -531,11 +563,29 @@ ps1_dl:sc_q → skip | ps1_pr:sc_q → skip | map:runn → succ | down:runn → 
 map:pend (relaunch) | ps1:exte → sc_q → skip | down:pend → runn → succ  ✓
 ```
 
-### F. Full run + ps1_dl fails + bulk retry
+### F. Template preset + ps1_dl fails + bulk retry
 
 ```
 ps1_dl:pend | ps1_pr:pend (was success) | down:pend
 → ps1 chain must re-run before downsample  ✓ (intentional)
+```
+
+### G. `diff` only (default), then explicit `bind,diff` recovery
+
+```
+# First attempt: syndiff diff submit --targets ... (no --stages)
+tess:sc_q → skip | down:sc_q → skip
+bind:n/a (never runs)
+diff:pend → runn → FAILED (event_job.json missing)
+
+# Recovery: syndiff retry --stage bind --scc <event/scc> ...  is not sufficient —
+# bind was never a stage row eligible for retry-into-pending because it was
+# skipped (not_selected), not failed. Instead, resubmit with the stage explicitly:
+syndiff diff submit --targets ... --stages bind,diff --run-id <new_id>
+
+bind:pend → runn → succ  (writes event_job.json + frames.csv)
+tess, down: n/a  (DIFF_VERIFY_UPSTREAM special-case does not fire for {"bind","diff"})
+diff:pend → runn → succ
 ```
 
 ---
@@ -614,6 +664,7 @@ stateDiagram-v2
 | Retry without invalidating downstream | `syndiff retry --scc ... --stage ... --no-reset-downstream` |
 | Recover after kill on partial run | `syndiff retry` (auto-repairs orphan pending) |
 | Re-run from scratch | `submit --force-rerun` with **new** `--run-id` |
+| Ensure `bind` actually runs on first diff of a new event | `syndiff diff submit --stages bind,diff` (never rely on the bare `diff` default — see §3.2) |
 
 ---
 

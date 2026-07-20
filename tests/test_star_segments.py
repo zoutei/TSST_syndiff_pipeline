@@ -318,6 +318,33 @@ class TestFindOwningSkycellForHost(unittest.TestCase):
 
             self.assertTrue(result.empty)
 
+    def test_oversampled_lookup_uses_subpixel_center(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            ctx = self._write_mapping_fixtures(tmp)
+            # Native (7,7) with F=2 looks up HR (15,15) = 7*2+1.
+            with fits.open(ctx.master_mapping_fits) as hdul:
+                tess = np.asarray(hdul[1].data)
+            hr = np.repeat(np.repeat(tess, 2, axis=0), 2, axis=1)
+            hr[15, 15] = 0
+            fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(data=hr)]).writeto(
+                ctx.master_mapping_fits, overwrite=True
+            )
+            ctx.oversampling_factor = 2
+            host = _resolved_host()
+
+            with patch(
+                "syndiff_pipeline.star.star_segments.resolve_host_full_ffi_xy",
+                return_value=(7.0, 7.0),
+            ), patch(
+                "syndiff_pipeline.star.star_segments.world_ra_dec_to_pixel",
+                return_value=(2400.0, 2400.0),
+            ):
+                result = find_owning_skycell_for_host(ctx, host)
+
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result.iloc[0]["skycell_name"], "skycell.1.10")
+
 
 class TestDebugPlotsGating(unittest.TestCase):
     """``write_debug_plots`` should gate both segmentation and downsample PNGs."""
@@ -385,7 +412,7 @@ class TestDebugPlotsGating(unittest.TestCase):
             ),
             patch(
                 "syndiff_pipeline.star.star_segments.write_star_mini_templates",
-                return_value=[str(tmp / "mini_0_0.fits.gz")],
+                return_value=[str(tmp / "mini_0_0.fits.fz")],
             ),
             patch("syndiff_pipeline.star.star_segments.write_ps1_segment_overlay_png") as mock_seg_png,
             patch("syndiff_pipeline.star.star_segments.write_mini_template_downsample_png") as mock_ds_png,
@@ -405,7 +432,7 @@ class TestDebugPlotsGating(unittest.TestCase):
             result, mock_seg_png, mock_ds_png = self._run_with_mocks(
                 Path(tmpdir), write_debug_plots=True
             )
-            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.gz")])
+            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.fz")])
             mock_seg_png.assert_called_once()
             mock_ds_png.assert_called_once()
 
@@ -414,7 +441,7 @@ class TestDebugPlotsGating(unittest.TestCase):
             result, mock_seg_png, mock_ds_png = self._run_with_mocks(
                 Path(tmpdir), write_debug_plots=False
             )
-            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.gz")])
+            self.assertEqual(result.get("mini_template_paths"), [str(Path(tmpdir) / "mini_0_0.fits.fz")])
             mock_seg_png.assert_not_called()
             mock_ds_png.assert_not_called()
 

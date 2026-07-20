@@ -51,7 +51,7 @@ def _prepare_run_dir(tmp_path: Path, *, run_name: str = "star_run") -> tuple[Pat
     run_dir = handoff / "runs" / run_name
     targets = tmp_path / "targets.csv"
     _write_targets(targets)
-    logs.materialize_run_inputs(source_cfg, targets, run_dir)
+    logs.materialize_run_inputs(source_cfg, run_dir, source_targets=targets)
     (run_dir / "run_meta.json").write_text(
         f'{{"run_id": "{run_name}"}}', encoding="utf-8"
     )
@@ -74,7 +74,9 @@ class TestMaterializeRunInputs(unittest.TestCase):
             _write_targets(targets)
 
             run_dir = tmp_path / "runs" / "run_a"
-            cfg_path, targets_path = logs.materialize_run_inputs(source_cfg, targets, run_dir)
+            cfg_path, targets_path = logs.materialize_run_inputs(
+                source_cfg, run_dir, source_targets=targets
+            )
 
             self.assertEqual(cfg_path, str(run_dir / "config.yaml"))
             self.assertEqual(targets_path, str(run_dir / "targets.csv"))
@@ -96,12 +98,14 @@ class TestMaterializeRunInputs(unittest.TestCase):
             targets = tmp_path / "targets.csv"
             _write_targets(targets)
             run_dir = tmp_path / "run_a"
-            logs.materialize_run_inputs(source_cfg, targets, run_dir)
+            logs.materialize_run_inputs(source_cfg, run_dir, source_targets=targets)
 
             frozen_cfg = run_dir / "config.yaml"
             frozen_cfg.write_text("data_root: /frozen\nworkspace_root: /frozen\n", encoding="utf-8")
 
-            cfg_path, _ = logs.materialize_run_inputs(source_cfg, targets, run_dir)
+            cfg_path, _ = logs.materialize_run_inputs(
+                source_cfg, run_dir, source_targets=targets
+            )
             self.assertIn("/frozen", Path(cfg_path).read_text(encoding="utf-8"))
 
 
@@ -120,7 +124,7 @@ class TestResolveRunContext(unittest.TestCase):
             targets = tmp_path / "targets.csv"
             _write_targets(targets)
             run_dir = tmp_path / "run_a"
-            logs.materialize_run_inputs(source_cfg, targets, run_dir)
+            logs.materialize_run_inputs(source_cfg, run_dir, source_targets=targets)
             (run_dir / "run_meta.json").write_text(
                 '{"run_id": "run_a"}', encoding="utf-8"
             )
@@ -145,7 +149,7 @@ class TestResolveRunContext(unittest.TestCase):
             targets = tmp_path / "targets.csv"
             _write_targets(targets)
             run_dir = runs_root / "run_a"
-            logs.materialize_run_inputs(source_cfg, targets, run_dir)
+            logs.materialize_run_inputs(source_cfg, run_dir, source_targets=targets)
 
             ctx = resolve_run_context(run_id="run_a", runs_root=str(runs_root))
             self.assertEqual(ctx.run_id, "run_a")
@@ -164,7 +168,7 @@ class TestResolveRunContext(unittest.TestCase):
             self.assertEqual(ctx.run_id, "star_run")
             self.assertEqual(ctx.cfg.workspace_root, str(tmp_path / "handoff"))
 
-    def test_resolve_context_rejects_invalid_targets(self):
+    def test_resolve_context_accepts_targets_without_coords(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             _, run_dir = _prepare_run_dir(tmp_path)
@@ -173,8 +177,9 @@ class TestResolveRunContext(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaises(ValueError):
-                resolve_run_context(run_dir=run_dir)
+            ctx = resolve_run_context(run_dir=run_dir)
+            self.assertEqual(len(ctx.targets), 1)
+            self.assertTrue(ctx.targets[0].coords_missing())
 
     def test_resolve_control_context_by_run_id(self):
         with tempfile.TemporaryDirectory() as tmp:

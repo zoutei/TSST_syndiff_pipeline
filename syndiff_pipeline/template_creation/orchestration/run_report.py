@@ -17,7 +17,10 @@ from syndiff_pipeline.common.orchestration.state import (
     STATUS_FAILED,
     STATUS_PENDING,
     STATUS_SKIPPED,
+    RunDisplayContext,
+    deps_satisfied_from_map,
     stage_needs_artifact_verify_display,
+    stage_needs_artifact_verify_display_from_context,
 )
 
 if TYPE_CHECKING:
@@ -292,6 +295,61 @@ def format_progress_lines(
     return lines
 
 
+def _status_grid_rows(rows: list) -> list:
+    """Filter and sort stage rows for status-grid display.
+
+    Maps legacy SQLite names (e.g. ``templates``) onto canonical grid columns and
+    returns one entry per ``status_grid_stages()`` slot. Missing stages (e.g.
+    ``remap`` on runs created before that stage existed) are represented as
+    ``None`` placeholders.
+    """
+    from syndiff_pipeline.pipeline_spec import canonical_status_grid_stage, status_grid_stages
+
+    names = status_grid_stages()
+    allowed = set(names)
+    by_canon: dict[str, object] = {}
+    for row in rows:
+        canon = canonical_status_grid_stage(row.stage)
+        if canon not in allowed:
+            continue
+        existing = by_canon.get(canon)
+        if existing is None or row.stage == canon:
+            by_canon[canon] = row
+    return [by_canon.get(name) for name in names]
+
+
+def _format_status_grid_parts(
+    state: PipelineState,
+    run_id: str,
+    rows_for_target: list,
+    *,
+    active_stages: list[str] | None,
+    verifying_keys: set[tuple[str, str]] | None,
+    display: RunDisplayContext | None,
+) -> list[str]:
+    from syndiff_pipeline.pipeline_spec import stage_short_names, status_grid_stages
+
+    parts: list[str] = []
+    grid_stages = status_grid_stages()
+    for idx, row in enumerate(rows_for_target):
+        if row is None:
+            stage = grid_stages[idx]
+            short = stage_short_names().get(stage, stage)
+            parts.append(f"{short}:n/a")
+            continue
+        parts.append(
+            _format_stage_status_short(
+                state,
+                run_id,
+                row,
+                active_stages=active_stages,
+                verifying_keys=verifying_keys,
+                display=display,
+            )
+        )
+    return parts
+
+
 def format_status_grid(
     state: PipelineState,
     run_id: str,
@@ -309,28 +367,11 @@ def format_status_grid(
     Returns
     -------
     list[str]"""
-    rows = state.list_stage_runs(run_id)
+    display = state.load_run_display_context(run_id)
     by_target: dict[str, list] = {}
-    for r in rows:
+    for r in display.rows:
         by_target.setdefault(r.target_label, []).append(r)
-    from syndiff_pipeline.pipeline_spec import stage_names
 
-    names = stage_names()
-    stage_order = {name: i for i, name in enumerate(names)}
-
-    def _stage_sort_key(row) -> int:
-        """Stage sort key.
-        
-        Parameters
-        ----------
-        row
-        
-        Returns
-        -------
-        int"""
-        return stage_order.get(row.stage, len(names))
-
-    active_stages = state.get_active_stages(run_id)
     verifying_keys: set[tuple[str, str]] = set()
     if workspace_root:
         from syndiff_pipeline.common.orchestration.verify_status import read_verify_active_keys
@@ -339,17 +380,15 @@ def format_status_grid(
 
     lines: list[str] = []
     for label in sorted(by_target):
-        rows_for_target = sorted(by_target[label], key=_stage_sort_key)
-        parts = [
-            _format_stage_status_short(
-                state,
-                run_id,
-                r,
-                active_stages=active_stages,
-                verifying_keys=verifying_keys,
-            )
-            for r in rows_for_target
-        ]
+        rows_for_target = _status_grid_rows(by_target[label])
+        parts = _format_status_grid_parts(
+            state,
+            run_id,
+            rows_for_target,
+            active_stages=display.active_stages,
+            verifying_keys=verifying_keys,
+            display=display,
+        )
         lines.append(f"  {label}: {' | '.join(parts)}")
     return lines
 
@@ -361,6 +400,7 @@ def _format_stage_status_short(
     *,
     active_stages: list[str] | None = None,
     verifying_keys: set[tuple[str, str]] | None = None,
+    display: RunDisplayContext | None = None,
 ) -> str:
     """Format stage status short.
     
@@ -371,34 +411,63 @@ def _format_stage_status_short(
     row
     active_stages : list[str] | None, optional, default ``None``
     verifying_keys : set[tuple[str, str]] | None, optional, default ``None``
+    display : RunDisplayContext | None, optional, default ``None``
     
     Returns
     -------
     str"""
-    from syndiff_pipeline.pipeline_spec import stage_short_names
+    from syndiff_pipeline.pipeline_spec import canonical_status_grid_stage, stage_short_names
 
     short = stage_short_names().get(row.stage, row.stage)
+    if canonical_status_grid_stage(row.stage) != row.stage:
+        short = stage_short_names().get(
+            canonical_status_grid_stage(row.stage), short
+        )
+    key = (row.target_label, row.stage)
     if row.status == STATUS_SKIPPED:
-        reason = state.get_skip_reason(run_id, row.target_label, row.stage)
+        if display is not None:
+            reason = display.skip_reasons.get(key)
+        else:
+            reason = state.get_skip_reason(run_id, row.target_label, row.stage)
         if reason in (
             SKIP_REASON_STREAM,
             SKIP_REASON_NOT_SELECTED,
             SKIP_REASON_SUPERSEDED,
         ):
             return f"{short}:n/a"
-    stages = active_stages if active_stages is not None else state.get_active_stages(run_id)
-    key = (row.target_label, row.stage)
+    stages = (
+        active_stages
+        if active_stages is not None
+        else (display.active_stages if display is not None else state.get_active_stages(run_id))
+    )
     if verifying_keys and key in verifying_keys:
         return f"{short}:scan"
-    needs_verify = stage_needs_artifact_verify_display(
-        state, run_id, row.target_label, row.stage, row.status, stages
-    )
-    if needs_verify and not state.external_verify_complete(
-        run_id, row.target_label, row.stage
-    ):
-        if row.status == STATUS_PENDING and not state.deps_satisfied(
+    if display is not None:
+        needs_verify = stage_needs_artifact_verify_display_from_context(
+            display,
+            row.target_label,
+            row.stage,
+            row.status,
+            stages,
+            spec=state.pipeline_spec,
+        )
+        verify_complete = key in display.external_complete
+        deps_ok = deps_satisfied_from_map(
+            display.status_by_key,
+            row.target_label,
+            row.stage,
+            spec=state.pipeline_spec,
+        )
+    else:
+        needs_verify = stage_needs_artifact_verify_display(
+            state, run_id, row.target_label, row.stage, row.status, stages
+        )
+        verify_complete = state.external_verify_complete(
             run_id, row.target_label, row.stage
-        ):
+        )
+        deps_ok = state.deps_satisfied(run_id, row.target_label, row.stage)
+    if needs_verify and not verify_complete:
+        if row.status == STATUS_PENDING and not deps_ok:
             return f"{short}:pend"
         return f"{short}:sc_q"
     return f"{short}:{row.status[:4]}"
@@ -423,30 +492,24 @@ def format_target_status_line(
     Returns
     -------
     str | None"""
-    rows = [r for r in state.list_stage_runs(run_id) if r.target_label == target_label]
+    display = state.load_run_display_context(run_id)
+    rows = [r for r in display.rows if r.target_label == target_label]
     if not rows:
         return None
-    from syndiff_pipeline.pipeline_spec import stage_names
-
-    names = stage_names()
-    stage_order = {name: i for i, name in enumerate(names)}
-    rows_for_target = sorted(rows, key=lambda r: stage_order.get(r.stage, len(names)))
+    rows_for_target = _status_grid_rows(rows)
     verifying_keys: set[tuple[str, str]] = set()
     if workspace_root:
         from syndiff_pipeline.common.orchestration.verify_status import read_verify_active_keys
 
         verifying_keys = set(read_verify_active_keys(workspace_root, run_id))
-    active_stages = state.get_active_stages(run_id)
-    parts = [
-        _format_stage_status_short(
-            state,
-            run_id,
-            r,
-            active_stages=active_stages,
-            verifying_keys=verifying_keys,
-        )
-        for r in rows_for_target
-    ]
+    parts = _format_status_grid_parts(
+        state,
+        run_id,
+        rows_for_target,
+        active_stages=display.active_stages,
+        verifying_keys=verifying_keys,
+        display=display,
+    )
     return f"  {target_label}: {' | '.join(parts)}"
 
 

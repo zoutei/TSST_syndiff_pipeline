@@ -7,9 +7,10 @@ from pathlib import Path
 
 TEMPLATES_WS_LABEL = "templates"
 FFIS_WS_LABEL = "ffis"
+FIELD_TEMPLATES_WS_LABEL = "field_templates"
 _WS_SUBDIR = "ws"
 _HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
-_SKIP_WS_CHILDREN = frozenset({"master", "templates", FFIS_WS_LABEL})
+_SKIP_WS_CHILDREN = frozenset({"master", "templates", FFIS_WS_LABEL, FIELD_TEMPLATES_WS_LABEL})
 
 
 def _normalize_workspace_run_id(run_id: str | None) -> str | None:
@@ -58,6 +59,15 @@ def event_templates_symlink_path(
 ) -> Path:
     """Absolute path to ``{event_dir}/ws[_{run_id}]/templates``."""
     return _event_ws_symlink_path(event_dir, TEMPLATES_WS_LABEL, run_id=run_id)
+
+
+def event_field_templates_symlink_path(
+    event_dir: str | Path,
+    *,
+    run_id: str | None = None,
+) -> Path:
+    """Absolute path to ``{event_dir}/ws[_{run_id}]/field_templates``."""
+    return _event_ws_symlink_path(event_dir, FIELD_TEMPLATES_WS_LABEL, run_id=run_id)
 
 
 def event_ffis_symlink_path(
@@ -157,6 +167,22 @@ def ensure_event_templates_symlink(
         TEMPLATES_WS_LABEL,
         physical_template_dir,
         kind="template",
+        run_id=run_id,
+    )
+
+
+def ensure_event_field_templates_symlink(
+    event_dir: str | Path,
+    physical_field_store: str | Path,
+    *,
+    run_id: str | None = None,
+) -> Path:
+    """Create or refresh ``ws/field_templates`` → SCC ``field_templates/`` store."""
+    return _ensure_workspace_tree_symlink(
+        event_dir,
+        FIELD_TEMPLATES_WS_LABEL,
+        physical_field_store,
+        kind="field_template",
         run_id=run_id,
     )
 

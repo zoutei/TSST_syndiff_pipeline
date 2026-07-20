@@ -47,6 +47,7 @@ def generate_shared_mask_catalog(
     x_right_dead: int = 44,
     y_edge_strip: int = 30,
     template_path: str | None = None,
+    template_count_crop: np.ndarray | None = None,
     settings: MaskSettings | None = None,
     stage_mask_settings: str | None = None,
     site_dir: str | Path | None = None,
@@ -55,6 +56,7 @@ def generate_shared_mask_catalog(
     ps1_min_hit_count: int | None = None,
     wcs_table: pd.DataFrame | None = None,
     write_plots_dir: str | Path | None = None,
+    mask_params: object | None = None,
 ) -> MaskCatalog:
     """
     Resolve settings, build static FITS (+ TNS), load/generate asteroids, return catalog.
@@ -113,8 +115,12 @@ def generate_shared_mask_catalog(
         x_right_dead=x_right_dead,
         y_edge_strip=y_edge_strip,
         template_path=template_path,
+        template_count_crop=template_count_crop,
         output_dir=ws_root,
         tns_table=tns_table if settings.tns.include_in_static_fits else None,
+        sck=(int(sector), int(camera), int(ccd)),
+        data_root=str(data_root) if data_root else None,
+        mask_params=mask_params,
     )
 
     asteroid_iv = None

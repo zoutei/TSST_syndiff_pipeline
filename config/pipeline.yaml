@@ -12,6 +12,7 @@ stages:
     wcs_drift_savgol_polyorder: 2
     # Full-chip templates; use diff_config crop override for smaller differencing ROI.
     crop_mode: full
+    geometry_mode: field
   mapping:
     oversampling_factor: 1
     buffer: 200
@@ -27,8 +28,12 @@ stages:
     psf_sigma: 40.0
     projections_limit: null
   downsample:
+    geometry_mode: field
     ignore_mask_bits: [12]
     oversampling_factor: 1
+    # executor: local          # default; set condor + resource keys for heavy oversampled runs
+    # condor_request_cpus: 16
+    # condor_request_memory: 128000
   diff:
     executor: condor
   star:
@@ -37,7 +42,7 @@ stages:
 resources:
   network:
     max_concurrent: 1
-  cpu_light:
+  downsample:
     max_concurrent: 2
   mapping:
     max_concurrent: 6

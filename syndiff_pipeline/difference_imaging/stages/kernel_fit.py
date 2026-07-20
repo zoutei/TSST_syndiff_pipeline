@@ -152,6 +152,7 @@ def _run_hotpants_round(
         convolved_dir=work_dir,
         frame_stem=frame_stem,
         write_stamps=False,
+        sci_shape=sci.shape,
     )
     result = run_hotpants_frame(
         sci,
@@ -161,6 +162,8 @@ def _run_hotpants_round(
         ref_stars_xy,
         hp_config,
         collect_kernel_params=collect_kernel_params,
+        oversample=getattr(hp, "oversample", None),
+        use_c_extension=getattr(hp, "use_c_extension", None),
     )
     return result, hp_config
 
@@ -177,6 +180,7 @@ def run_kernel_fit(
     artifact_dir: Optional[str] = None,
     debug_ws_dir: Optional[str] = None,
     skip_existing: bool = True,
+    field_ctx=None,
     mask_catalog=None,
 ) -> KernelFitResult:
     """
@@ -215,20 +219,45 @@ def run_kernel_fit(
         manifest, weighting_factor=params.weighting_factor
     )
     product_id = tess_product_id_from_ffi_path(min_bg_path) or "unknown"
-    group_dx, group_dy, template_path = resolve_template_for_ffi(
-        output_dir, manifest, min_bg_path
-    )
+    if field_ctx is not None:
+        from syndiff_pipeline.difference_imaging.support.template_resolution import (
+            assemble_field_template_for_ffi,
+            group_id_for_ffi,
+        )
+
+        group_dx, group_dy = 0.0, 0.0
+        template_path = f"field:group_id={group_id_for_ffi(manifest, min_bg_path)}"
+        os_factor = max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
+        field_template = assemble_field_template_for_ffi(
+            field_ctx,
+            manifest,
+            min_bg_path,
+            crop=(
+                int(crop_bounds["x_min"]) * os_factor,
+                int(crop_bounds["x_max"]) * os_factor,
+                int(crop_bounds["y_min"]) * os_factor,
+                int(crop_bounds["y_max"]) * os_factor,
+            ),
+        )
+    else:
+        group_dx, group_dy, template_path = resolve_template_for_ffi(
+            output_dir, manifest, min_bg_path
+        )
+        field_template = None
 
     log.info(
-        "Kernel fit on min-background FFI %s (score=%.4f) template dx=%.3f dy=%.3f",
+        "Kernel fit on min-background FFI %s (score=%.4f) template %s",
         product_id,
         angle_score,
-        group_dx,
-        group_dy,
+        template_path if field_ctx is not None else f"dx={group_dx:.3f} dy={group_dy:.3f}",
     )
 
     ffi, err = _load_ffi_cropped(min_bg_path, crop_bounds)
-    template = _load_template_cropped(template_path, crop_bounds)
+    template = (
+        field_template
+        if field_template is not None
+        else _load_template_cropped(template_path, crop_bounds)
+    )
     header = wcs_grouping.crop_ffi_header(min_bg_path, crop_bounds)
 
     btjd = None

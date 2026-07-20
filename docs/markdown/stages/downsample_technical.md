@@ -1,7 +1,24 @@
-> **Package integration**: `syndiff` stage `downsample` · module `template_creation/processing/downsample.py` · legacy script `multi_offset_downsampling.py`  
+> **Package integration**: `syndiff` stage `templates` (legacy alias: `downsample`) · modules `template_creation/processing/downsample.py` (linear) and `field_downsample.py` (field) · legacy script `multi_offset_downsampling.py`  
 > **Orchestration docs**: [template pipeline guide](../template_pipeline.md)
 
 # Multi-Offset Downsampling — Detailed Technical Reference
+
+## Geometry modes
+
+| Mode | Config | This document | Output |
+|------|--------|---------------|--------|
+| **Field** (default) | `geometry_mode: field` | See [field templates](../field_geometry.md) | SCC sparse `contribs/` + on-demand assembly per `group_id` |
+| **Linear** (opt-out) | `geometry_mode: linear` | **Yes** — remainder of this file | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
+
+Linear mode measures drift at the science target and rolls each skycell's frozen
+regmap by a per-skycell PS1 integer shift derived from that single offset. Field mode
+measures drift at every skycell center, builds a hybrid roll+Exact assignment per
+`(skycell, sx, sy)`, and caches sparse contributions — it does **not** use the
+`precompute_shifts_for_offsets` / `numpy.roll` path described below.
+
+---
+
+## Linear mode
 
 `multi_offset_downsampling.py` projects convolved Pan-STARRS 1 (PS1) skycell images onto the TESS pixel grid, producing one downsampled template image per requested sub-pixel offset `(dx, dy)`. Each offset simulates a small pointing shift of the TESS telescope and generates an independent synthetic-difference template that matches the expected appearance of the sky under that pointing jitter. Output is a set of multi-extension FITS files, one per offset, containing flux sums, pixel counts, and mask counts at TESS resolution.
 
@@ -40,7 +57,7 @@ TESS Full-Frame Images (FFIs) are divided into individual **TESS pixels**, each 
 
 ### The Registration Map
 
-For each TESS sector/camera/CCD, the `pancakes_v2.py` script pre-computes a **registration map** — a per-skycell FITS image that assigns each PS1 pixel a linearized TESS pixel index. This mapping is stored as a compressed FITS file (`.fits.gz`) per skycell, plus a single master file (`master_pixels2skycells`) whose pixel data lists, for each TESS pixel, the index of its dominant skycell. This master file also carries the TESS WCS.
+For each TESS sector/camera/CCD, the `pancakes_v2.py` script pre-computes a **registration map** — a per-skycell FITS image that assigns each PS1 pixel a linearized TESS pixel index. This mapping is stored as a CFITSIO fpack FITS file (`.fits.fz`; legacy `.fits.gz` / `.fits` still readable) per skycell, plus a single master file (`master_pixels2skycells`) whose pixel data lists, for each TESS pixel, the index of its dominant skycell. This master file also carries the TESS WCS.
 
 ### Downsampling
 
@@ -64,6 +81,12 @@ data/convolved_results/sector_NNNN_camera_N_ccd_N.zarr
 
 When the registration map was generated with `--oversampling_factor N > 1`, each base TESS pixel is sub-divided into an N×N grid of virtual "oversampled" pixels, giving finer spatial resolution at the cost of a larger mapping. The downsampling code selects the correct oversampled mapping directory and decodes oversampled pixel indices back to base-pixel coordinates and sub-pixel positions.
 
+In the supervised pipeline, `N` is always nested as
+`{data_root}/s{SSSS}/c{C}/k{K}/mapping|templates/oversampling_{N}/` (including
+`N=1`). Diff and star consume those products with **native** crop bounds —
+see [oversampled templates](../oversampled_templates.md) for the operator-facing
+guide (headers, Hotpants `oversample` / `stamp_mode`, COUNT reduce, star OS).
+
 ---
 
 ## 2. Pipeline Overview
@@ -71,9 +94,9 @@ When the registration map was generated with `--oversampling_factor N > 1`, each
 ```mermaid
 flowchart TD
     subgraph inputs [Inputs]
-        MasterFITS["master_pixels2skycells.fits.gz\n(TESS WCS + mapping)"]
+        MasterFITS["master_pixels2skycells.fits.fz\n(TESS WCS + mapping)"]
         SkycellCSV["master_skycells_list.csv\n(skycell WCS metadata)"]
-        RegFITS["skycell reg files *.fits.gz\n(PS1→TESS pixel mapping)"]
+        RegFITS["skycell reg files *.fits.fz\n(PS1→TESS pixel mapping)"]
         ZarrStore["convolved_images.zarr\n(PS1 flux + mask)"]
     end
 
@@ -142,15 +165,15 @@ data/
 │   └── sector_NNNN/
 │       └── camera_N/
 │           └── ccd_N/
-│               ├── tess_sNNNN_N_N_master_pixels2skycells.fits.gz   ← master mapping + TESS WCS
+│               ├── tess_sNNNN_N_N_master_pixels2skycells.fits.fz   ← master mapping + TESS WCS
 │               ├── tess_sNNNN_N_N_master_skycells_list.csv          ← skycell WCS metadata
-│               └── skycell.PPPP.CCC_*.fits.gz                       ← per-skycell reg files
+│               └── skycell.PPPP.CCC_*.fits.fz                       ← per-skycell reg files
 │
 │   └── oversampling_N/                          ← used when --oversampling-factor N > 1
 │       └── sector_NNNN/camera_N/ccd_N/
-│           ├── tess_sNNNN_N_N_master_pixels2skycells_osN.fits.gz
+│           ├── tess_sNNNN_N_N_master_pixels2skycells_osN.fits.fz
 │           ├── tess_sNNNN_N_N_master_skycells_list_osN.csv
-│           └── skycell.PPPP.CCC_*.fits.gz
+│           └── skycell.PPPP.CCC_*.fits.fz
 │
 ├── convolved_results/                           ← default convolved_dir
 │   └── sector_NNNN_camera_N_ccd_N.zarr
@@ -159,7 +182,7 @@ data/
 │
 └── shifted_downsampled/                         ← default output_base
     └── sectorNNNN_cameraN_ccdN[_xX0-X1_yY0-Y1][_osN]/
-        └── syndiff_template_sNNNN_N_N[_roi][_osN]_dx0.000_dy0.000.fits.gz
+        └── syndiff_template_sNNNN_N_N[_roi][_osN]_dx0.000_dy0.000.fits.fz
 ```
 
 All three path roots (`mapping_dir`, `convolved_dir`, `output_base`) can be overridden independently via CLI flags.
@@ -325,7 +348,7 @@ Iterates over all `(dx, dy)` offsets and writes one multi-extension FITS file pe
 - Constructs the HDU list: `PRIMARY` (no data) + `FLUX_SUM` + `COUNT` + `MASK`.
 - Builds the output filename with optional ROI and oversampling suffixes:
   ```
-  syndiff_template_sNNNN_N_N[_xX0-X1_yY0-Y1][_osN]_dxD.DDD_dyD.DDD.fits.gz
+  syndiff_template_sNNNN_N_N[_xX0-X1_yY0-Y1][_osN]_dxD.DDD_dyD.DDD.fits.fz
   ```
   The ROI suffix is omitted when the ROI covers the full image with `x_min=0, y_min=0`.
 - Writes with `overwrite=True`.
@@ -351,7 +374,7 @@ End-to-end orchestration:
 7. **ROI prefiltering** — slices `tess_data` to the ROI (applying oversampling scale), takes `np.unique` of the mapping IDs, maps IDs to skycell names via `skycell_df.iloc[roi_ids]`, and drops skycells with no pixels in the ROI. This avoids loading Zarr data for skycells that cannot contribute to the output.
 8. **Zarr path** — calls `load_zarr_metadata`.
 9. **Shift precomputation** — calls `precompute_shifts_for_offsets`.
-10. **Registration file discovery** — globs `*.fits.gz` in the mapping directory, excludes the master file, extracts skycell names, filters to ROI-intersecting skycells only.
+10. **Registration file discovery** — resolves `*.fits.fz` / `*.fits.gz` / `*.fits` in the mapping directory, excludes the master file, extracts skycell names, filters to ROI-intersecting skycells only.
 11. **Batch splitting** — divides `reg_files` and `skycell_names` into chunks of `SKYCELLS_PER_BATCH=20` using `np.array_split`.
 12. **Parallel execution** — dispatches all batches with `joblib.Parallel(n_jobs=16)`.
 13. **Result assembly** — concatenates batch outputs, deduplicates by TESS pixel index (see [Section 6](#6-sparse-accumulation-and-deduplication)), scatters into the dense `combined_results` array of shape `(num_offsets, 3, out_h, out_w)`.
@@ -486,7 +509,7 @@ When `oversampling_factor F > 1`, the registration map was generated at `F` time
 
 ```
 skycell_pixel_mapping/oversampling_F/sector_NNNN/camera_N/ccd_N/
-    tess_sNNNN_N_N_master_pixels2skycells_osF.fits.gz
+    tess_sNNNN_N_N_master_pixels2skycells_osF.fits.fz
     tess_sNNNN_N_N_master_skycells_list_osF.csv
 ```
 
@@ -672,4 +695,4 @@ python multi_offset_downsampling.py 20 3 3 2>&1 | tee log/multi_offset_20_3_3.lo
 
 ## Orchestrator integration
 
-In the supervised pipeline, downsampling runs as the `downsample` stage after `wcs_grouping` writes `cluster_template_job.json`. Template FITS are written under `{data_root}/shifted_downsampled/…`; the orchestrator symlinks `events/{label}/ws/templates` to that directory and writes `ps1_removed_stars.csv` in the event dir. See the [template pipeline guide](../template_pipeline.md) for handoff inputs, verify rules, and the path to `diff`.
+In the supervised pipeline, this algorithm runs as the `templates` stage (config key/legacy alias: `downsample`), an SCC-scoped template stage — not the event-scoped `bind` stage (the current name for what this document calls `wcs_grouping`). For `geometry_mode: linear`, `templates` reads crop bounds and per-transient offsets from `bind`'s `event_job.json` (legacy name: `cluster_template_job.json`) if that event's handoff already exists on disk. Template output is written to the SCC's shared store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (`common/scc_paths.py::scc_templates_dir()`) — there is **no** `ws/templates` symlink; `diff` resolves the template directory from that SCC path directly. `templates` also writes `ps1_removed_stars.csv` in the event dir. See the [template pipeline guide](../template_pipeline.md) for handoff inputs, verify rules, and the path to `diff`.

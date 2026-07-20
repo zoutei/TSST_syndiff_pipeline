@@ -75,6 +75,23 @@ class SynDiffConfig:
     """Optional absolute path to the per-FFI manifest CSV. If empty, uses
     ``syndiff_ffi_frames.csv`` under ``output_dir`` (see ``paths.DEFAULT_MANIFEST_BASENAME``)."""
 
+    data_root: str = ""
+    """Deployment ``data_root`` (SCC trees, ``ffi_list``, provenance bookkeeping,
+    TNS / asteroid catalogs). Distinct from ``output_dir``/``ffi_dir``
+    (workspace-rooted). Populated from the site deployment file at freeze time;
+    used by the provenance glue (``orchestration/provenance_glue.py``) to locate
+    ``bookkeeping/`` for best-effort diff-artifact tracking. May be empty for
+    configs built outside the site-config flow (e.g. ad hoc scripts), in which
+    case provenance emission is a no-op."""
+
+    publish_scc: bool = False
+    """When true, finalized diff products are mirrored into the SCC-scoped diff
+    store (``s/c/k/diff/{stage_label}/{recipe_fp}/``) with workspace index
+    pointers (plan §14.2, decision #13). Default off until piloted."""
+
+    site_config_dir: str = ""
+    """Site config directory (for resolving ``mask_settings.yaml``)."""
+
     pipeline: list = field(default_factory=list)
     """Ordered list of stage dicts (``kind`` + fields). Required; :func:`run_pipeline`
     executes these stages in order."""
@@ -97,12 +114,6 @@ class SynDiffConfig:
     """Optional override for the decompressed BSC5 ``catalog`` file. When empty,
     the bundled ``syndiff_pipeline/resources/bsc5/catalog`` is used for
     bright-star saturation crosses in ``shared_mask``."""
-
-    data_root: str = ""
-    """SCC-wide data root (deployment ``data_root``). Used for TNS / asteroid catalogs."""
-
-    site_config_dir: str = ""
-    """Site config directory (for resolving ``mask_settings.yaml``)."""
 
     # ── Template paths: filled from template-pipeline handoff ─────────────────
     template_paths: dict = field(default_factory=dict)

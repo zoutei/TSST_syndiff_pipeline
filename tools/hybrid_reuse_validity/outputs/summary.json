@@ -1,0 +1,74 @@
+{
+  "ref_frame": "tess2020004172923-s0020-3-2-0165-s_ffic.fits.gz",
+  "gt_frames": [
+    "tess2020004172923-s0020-3-2-0165-s_ffic.fits.gz",
+    "tess2020013135923-s0020-3-2-0165-s_ffic.fits.gz",
+    "tess2020020065923-s0020-3-2-0165-s_ffic.fits.gz"
+  ],
+  "gt_ffi_pairs_same_int_key": 9,
+  "gt_ffi_pairs_total": 3132,
+  "gt_ffi_pair_same_int_frac": 0.0028735632183908046,
+  "gt_aligned_disagree_median": 0.007484784269356731,
+  "gt_aligned_disagree_max": 0.01621431784534157,
+  "gt_raw_disagree_median": 0.03714119005183499,
+  "inverse_by_manh": {
+    "0": {
+      "n": 9,
+      "disagree_median": 0.01,
+      "d_tess_mean_median": 0.00902695645958445
+    },
+    "1": {
+      "n": 133,
+      "disagree_median": 0.0145,
+      "d_tess_mean_median": 0.012191789833992186
+    },
+    "2": {
+      "n": 485,
+      "disagree_median": 0.02525,
+      "d_tess_mean_median": 0.020099424114692857
+    },
+    "3": {
+      "n": 697,
+      "disagree_median": 0.034125,
+      "d_tess_mean_median": 0.027644963031671594
+    },
+    "4": {
+      "n": 634,
+      "disagree_median": 0.0444375,
+      "d_tess_mean_median": 0.035469768311240046
+    },
+    "5": {
+      "n": 549,
+      "disagree_median": 0.055375,
+      "d_tess_mean_median": 0.04477565590665297
+    },
+    "6": {
+      "n": 385,
+      "disagree_median": 0.06525,
+      "d_tess_mean_median": 0.053745944715034556
+    },
+    "7": {
+      "n": 196,
+      "disagree_median": 0.0789375,
+      "d_tess_mean_median": 0.06611635442833108
+    },
+    "8": {
+      "n": 33,
+      "disagree_median": 0.092,
+      "d_tess_mean_median": 0.07739900343366249
+    },
+    "9": {
+      "n": 11,
+      "disagree_median": 0.102375,
+      "d_tess_mean_median": 0.08480307837638562
+    }
+  },
+  "inverse_vs_gt_agree_median": 1.0,
+  "inverse_vs_gt_agree_min": 1.0,
+  "same_int_worst_disagree_median": 0.010533333333333334,
+  "same_int_worst_disagree_max": 0.020533333333333334,
+  "same_int_typical_disagree_median": 0.003933333333333333,
+  "n_same_int_bins_tested": 69,
+  "corr_worst_disagree_vs_frac_dist": 0.9741624305448299,
+  "elapsed_s": 265.1110966205597
+}

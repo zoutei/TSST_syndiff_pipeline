@@ -28,7 +28,7 @@ def _minimal_ctx(tmp: str, **overrides) -> StarEventContext:
         event_dir=str(Path(tmp) / "event"),
         workspace_root=str(Path(tmp) / "workspace"),
         data_root=str(Path(tmp) / "data"),
-        cluster_job_path=str(Path(tmp) / "event" / "cluster_template_job.json"),
+        cluster_job_path=str(Path(tmp) / "event" / "event_job.json"),
         cluster_job={"x_min": 10, "y_min": 20, "x_max": 110, "y_max": 120, "shape": [100, 100]},
         crop_bounds={"x_min": 10, "y_min": 20, "x_max": 110, "y_max": 120, "shape": (100, 100)},
         mapping_dir=str(Path(tmp) / "data" / "skycell_pixel_mapping"),
@@ -38,7 +38,7 @@ def _minimal_ctx(tmp: str, **overrides) -> StarEventContext:
         ),
         master_mapping_fits=str(
             Path(tmp) / "data" / "skycell_pixel_mapping" / "sector_0020" / "camera_3" / "ccd_2"
-            / "tess_s0020_3_2_master_pixels2skycells.fits.gz"
+            / "tess_s0020_3_2_master_pixels2skycells.fits.fz"
         ),
         gaia_catalog_path=str(Path(tmp) / "data" / "catalogs" / "gaia.csv"),
         templates_dir=str(Path(tmp) / "templates"),
@@ -72,13 +72,13 @@ class TestStarContext(unittest.TestCase):
                 validate_star_prerequisites(ctx)
             message = str(cm.exception)
             self.assertIn("cluster_template_job.json", message)
-            self.assertIn("syndiff_ffi_frames.csv", message)
+            self.assertIn("frames.csv", message)
             self.assertIn("syndiff_template_", message)
             self.assertIn("baseline diff FITS", message)
             self.assertIn("write_convolved: true", message)
             self.assertIn("photutils background FITS", message)
             self.assertIn("write_kernel_solutions: true", message)
-            self.assertIn("shared_mask.fits.gz", message)
+            self.assertIn("shared_mask.fits.fz", message)
             self.assertIn("mapping CSV", message)
             self.assertIn("master_pixels2skycells", message)
             self.assertIn("Gaia catalog CSV", message)
@@ -108,16 +108,16 @@ class TestStarContext(unittest.TestCase):
             ):
                 directory.mkdir(parents=True, exist_ok=True)
 
-            (event / "cluster_template_job.json").write_text("{}", encoding="utf-8")
-            (event / "syndiff_ffi_frames.csv").write_text("product_id\n", encoding="utf-8")
+            (event / "event_job.json").write_text("{}", encoding="utf-8")
+            (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
             (templates / "syndiff_template_0.fits").write_bytes(b"")
-            (ws / "hp_d" / "tess123_hp_d.fits.gz").write_bytes(b"")
-            (ws / "hp_c" / "tess123_hp_c.fits.gz").write_bytes(b"")
-            (ws / "ks_b_s" / "tess123_ks_b_s.fits.gz").write_bytes(b"")
+            (ws / "hp_d" / "tess123_hp_d.fits.fz").write_bytes(b"")
+            (ws / "hp_c" / "tess123_hp_c.fits.fz").write_bytes(b"")
+            (ws / "ks_b_s" / "tess123_ks_b_s.fits.fz").write_bytes(b"")
             (ws / "hp_d_kernels" / "tess123_kernel.npz").write_bytes(b"")
-            (ws / "shared_mask.fits.gz").write_bytes(b"")
+            (ws / "shared_mask.fits.fz").write_bytes(b"")
             (mapping / "tess_s0020_3_2_master_skycells_list.csv").write_bytes(b"")
-            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.gz").write_bytes(b"")
+            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.fz").write_bytes(b"")
             (gaia / "gaia.csv").write_bytes(b"")
 
             ctx = _minimal_ctx(tmp)

@@ -18,22 +18,25 @@ def parallel_map_with_optional_tqdm(
     initializer=None,
     initargs=(),
     on_result=None,
+    prefer: str | None = None,
 ):
-    """Run *delayed_calls* with loky; show a tqdm bar when available."""
-    parallel_kwargs = {
+    """Run *delayed_calls* with loky; show a tqdm bar when available.
+
+    Always drains via ``return_as="generator"`` so ``on_result`` fires as each
+    task completes (NFS-safe parent-only progress updates). Falls back to a
+    blocking list collect only if the joblib build rejects ``return_as``.
+    """
+    parallel_kwargs: dict = {
         "n_jobs": n_jobs_eff,
         "backend": "loky",
     }
+    if prefer is not None:
+        parallel_kwargs["prefer"] = prefer
     if initializer is not None:
         parallel_kwargs["initializer"] = initializer
         parallel_kwargs["initargs"] = initargs
 
     def _collect(results_iter):
-        """Collect.
-        
-        Parameters
-        ----------
-        results_iter"""
         out = []
         for item in results_iter:
             if on_result is not None:
@@ -42,17 +45,21 @@ def parallel_map_with_optional_tqdm(
         return out
 
     try:
-        from tqdm.auto import tqdm
-    except ImportError:
-        return _collect(Parallel(**parallel_kwargs)(delayed_calls))
-    try:
         parallel_kwargs["return_as"] = "generator"
         gen = Parallel(**parallel_kwargs)(delayed_calls)
-        return _collect(tqdm(gen, total=n_tasks, desc=desc, unit="frame"))
     except TypeError:
-        log.debug("joblib Parallel(return_as=...) unavailable; running without tqdm bar.")
+        log.debug(
+            "joblib Parallel(return_as=...) unavailable; collecting after all tasks finish."
+        )
         parallel_kwargs.pop("return_as", None)
         return _collect(Parallel(**parallel_kwargs)(delayed_calls))
+
+    try:
+        from tqdm.auto import tqdm
+
+        return _collect(tqdm(gen, total=n_tasks, desc=desc, unit="task"))
+    except ImportError:
+        return _collect(gen)
 
 
 def tqdm_iter(tasks: list, desc: str):

@@ -13,12 +13,14 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from syndiff_pipeline.common.scc_paths import scc_ffi_dir
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (
     DownsampleStageParams,
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
 )
@@ -44,10 +46,11 @@ def _resolved(tmp: Path, csv_path: Path | None = None) -> ResolvedTargetConfig:
         if csv_path is not None
         else tmp / "skycell_pixel_mapping"
     )
+    data_root = tmp / "data"
     return ResolvedTargetConfig(
         target=target,
-        data_root=str(tmp / "data"),
-        ffi_dir=str(tmp / "data" / "tess_ffi"),
+        data_root=str(data_root),
+        ffi_dir=str(scc_ffi_dir(data_root, target.sector, target.camera, target.ccd)),
         event_dir=str(tmp / "events" / target.label()),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
@@ -55,6 +58,7 @@ def _resolved(tmp: Path, csv_path: Path | None = None) -> ResolvedTargetConfig:
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
+            remap=RemapStageParams(),
             downsample=DownsampleStageParams(),
         ),
         mapping_root=str(mapping_root),
@@ -100,7 +104,7 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp)
-            ffi_leaf = Path(resolved.ffi_dir) / "s0022" / "cam3_ccd3"
+            ffi_leaf = Path(resolved.ffi_dir)
             _write_tesscurl_manifest(
                 ffi_leaf / "tesscurl_sector_22_ffic.sh",
                 sector=22,
@@ -118,7 +122,7 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp)
-            ffi_leaf = Path(resolved.ffi_dir) / "s0022" / "cam3_ccd3"
+            ffi_leaf = Path(resolved.ffi_dir)
             names = [
                 "tess2020019142923-s0022-3-3-0165-s_ffic.fits",
                 "tess2020019142924-s0022-3-3-0166-s_ffic.fits",
@@ -135,7 +139,7 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp)
-            ffi_leaf = Path(resolved.ffi_dir) / "s0022" / "cam3_ccd3"
+            ffi_leaf = Path(resolved.ffi_dir)
             names = [
                 "tess2020019142923-s0022-3-3-0165-s_ffic.fits",
                 "tess2020019142924-s0022-3-3-0166-s_ffic.fits",
@@ -152,7 +156,7 @@ class TestVerifyTessFfiDownload(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             resolved = _resolved(tmp)
-            ffi_leaf = Path(resolved.ffi_dir) / "s0022" / "cam3_ccd3"
+            ffi_leaf = Path(resolved.ffi_dir)
             manifest_names = [
                 "tess2020019142923-s0022-3-3-0165-s_ffic.fits",
                 "tess2020019142924-s0022-3-3-0166-s_ffic.fits",

@@ -183,7 +183,7 @@ class TestLinkMasterWorkspace(unittest.TestCase):
             self.assertFalse(os.path.exists(legacy))
             self.assertTrue(os.path.islink(os.path.join(m_root, ffi.name)))
 
-    def test_prefers_gzip_when_both_exist(self):
+    def test_prefers_fpack_when_variants_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "event"
             ws = out / "ws"
@@ -192,13 +192,15 @@ class TestLinkMasterWorkspace(unittest.TestCase):
             stem = "tess2020_hp_d"
             (hp / f"{stem}.fits").write_bytes(b"legacy")
             (hp / f"{stem}.fits.gz").write_bytes(b"gzip")
+            (hp / f"{stem}.fits.fz").write_bytes(b"fpack")
 
             link_master_workspace(str(out))
             m_root = master_root(str(out))
-            link = os.path.join(m_root, f"{stem}.fits.gz")
+            link = os.path.join(m_root, f"{stem}.fits.fz")
             self.assertTrue(os.path.islink(link))
-            self.assertEqual(os.readlink(link), str((hp / f"{stem}.fits.gz").resolve()))
+            self.assertEqual(os.readlink(link), str((hp / f"{stem}.fits.fz").resolve()))
             self.assertFalse(os.path.exists(os.path.join(m_root, f"{stem}.fits")))
+            self.assertFalse(os.path.exists(os.path.join(m_root, f"{stem}.fits.gz")))
 
     def test_skips_hotpants_stamp_fits(self):
         with tempfile.TemporaryDirectory() as tmp:

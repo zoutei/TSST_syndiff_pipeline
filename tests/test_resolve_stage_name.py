@@ -20,7 +20,17 @@ class TestResolveStageName(unittest.TestCase):
     def test_short_name_resolves(self):
         self.assertEqual(resolve_stage_name("map"), "mapping")
         self.assertEqual(resolve_stage_name("down"), "downsample")
+        self.assertEqual(resolve_stage_name("downsample"), "downsample")
+        self.assertEqual(resolve_stage_name("remap"), "remap")
+        self.assertEqual(resolve_stage_name("skycell_remap"), "remap")
         self.assertEqual(resolve_stage_name("tess_dl"), "tess_ffi_download")
+
+    def test_templates_alias_raises(self):
+        with self.assertRaises(ValueError) as ctx:
+            resolve_stage_name("templates")
+        self.assertIn("downsample", str(ctx.exception))
+        with self.assertRaises(ValueError):
+            resolve_stage_name("tmpl")
 
     def test_unknown_raises(self):
         with self.assertRaises(ValueError) as ctx:

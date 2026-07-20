@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.common.fits_io import write_primary_hdu_fits
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.difference_imaging.masking import bits
 from syndiff_pipeline.difference_imaging.masking.detector import (
@@ -28,6 +29,59 @@ from syndiff_pipeline.difference_imaging.masking.faint_star_squares import faint
 from syndiff_pipeline.difference_imaging.masking.tessreduce_squares import Big_sat, Strap_mask
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_ps1_count_crop(
+    *,
+    ref_image: np.ndarray,
+    crop_bounds: dict,
+    template_path: str | None,
+    template_count_crop: np.ndarray | None,
+) -> np.ndarray | None:
+    """Load or accept a preassembled COUNT crop for PS1 coverage masking."""
+    if template_count_crop is not None:
+        return np.asarray(template_count_crop)
+    if not template_path:
+        return None
+    from syndiff_pipeline.common.template_coverage import load_template_count_cropped
+
+    return load_template_count_cropped(template_path, crop_bounds)
+
+
+def _write_shared_mask_fits(
+    mask: np.ndarray,
+    output_dir: str | Path,
+    *,
+    sck: tuple | None = None,
+    data_root: str | None = None,
+    mask_params: Any = None,
+) -> str:
+    """Write fpacked shared_mask and best-effort provenance emit."""
+    os.makedirs(output_dir, exist_ok=True)
+    out_path = os.path.join(str(output_dir), SHARED_MASK_FITS_BASENAME)
+    hdu = fits.PrimaryHDU(np.asarray(mask, dtype=np.int16))
+    write_primary_hdu_fits(out_path, hdu)
+    log.info(
+        "Shared mask written to %s  (masked pixels: %d / %d)",
+        out_path,
+        int((mask > 0).sum()),
+        mask.size,
+    )
+    if sck is not None and mask_params is not None:
+        try:
+            from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+
+            provenance_glue.emit_shared_mask_artifact(
+                sector=sck[0],
+                camera=sck[1],
+                ccd=sck[2],
+                params=mask_params,
+                location=out_path,
+                data_root=data_root,
+            )
+        except Exception:
+            log.debug("provenance emit (shared_mask) failed", exc_info=True)
+    return out_path
 
 
 def Cat_mask(
@@ -92,8 +146,12 @@ def make_shared_mask(
     x_right_dead: int = 44,
     y_edge_strip: int = 30,
     template_path: str | None = None,
+    template_count_crop: np.ndarray | None = None,
     ps1_min_hit_count: int = 5000,
     scale: float = 1.0,
+    sck: tuple | None = None,
+    data_root: str | None = None,
+    mask_params: Any = None,
 ) -> np.ndarray:
     """
     TESSreduce shared bitmask (bits 1/2/4/8/16 only; no 32/64/128).
@@ -135,10 +193,13 @@ def make_shared_mask(
         )
         mask = mask | (edge.astype(np.int16) * bits.EDGE)
 
-    if template_path and int(ps1_min_hit_count) > 0:
-        from syndiff_pipeline.common.template_coverage import load_template_count_cropped
-
-        count_crop = load_template_count_cropped(template_path, crop_bounds)
+    if (template_count_crop is not None or template_path) and int(ps1_min_hit_count) > 0:
+        count_crop = _resolve_ps1_count_crop(
+            ref_image=ref_image,
+            crop_bounds=crop_bounds,
+            template_path=template_path,
+            template_count_crop=template_count_crop,
+        )
         if count_crop is not None:
             if count_crop.shape != ref_image.shape:
                 raise ValueError(
@@ -154,14 +215,12 @@ def make_shared_mask(
             )
 
     if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-        out_path = os.path.join(output_dir, SHARED_MASK_FITS_BASENAME)
-        fits.PrimaryHDU(mask.astype(np.int16)).writeto(out_path, overwrite=True)
-        log.info(
-            "Shared mask written to %s  (masked pixels: %d / %d)",
-            out_path,
-            int((mask > 0).sum()),
-            mask.size,
+        _write_shared_mask_fits(
+            mask,
+            output_dir,
+            sck=sck,
+            data_root=data_root,
+            mask_params=mask_params,
         )
 
     return mask.astype(np.int16)
@@ -205,8 +264,12 @@ def build_static_mask(
     x_right_dead: int = 44,
     y_edge_strip: int = 30,
     template_path: str | None = None,
+    template_count_crop: np.ndarray | None = None,
     output_dir: str | Path | None = None,
     tns_table: pd.DataFrame | None = None,
+    sck: tuple | None = None,
+    data_root: str | None = None,
+    mask_params: Any = None,
 ) -> np.ndarray:
     """
     Build static shared bitmask.
@@ -247,8 +310,12 @@ def build_static_mask(
             x_right_dead=x_right_dead,
             y_edge_strip=y_edge_strip,
             template_path=template_path,
+            template_count_crop=template_count_crop,
             ps1_min_hit_count=shared.ps1_min_hit_count,
             scale=shared.scale,
+            sck=sck,
+            data_root=data_root,
+            mask_params=mask_params,
         )
 
     geo = load_geometry(settings.geometry_file)
@@ -313,10 +380,13 @@ def build_static_mask(
         )
         mask = mask | (edge.astype(np.int16) * bits.EDGE)
 
-    if template_path and int(shared.ps1_min_hit_count) > 0:
-        from syndiff_pipeline.common.template_coverage import load_template_count_cropped
-
-        count_crop = load_template_count_cropped(template_path, crop_bounds)
+    if (template_count_crop is not None or template_path) and int(shared.ps1_min_hit_count) > 0:
+        count_crop = _resolve_ps1_count_crop(
+            ref_image=ref_image,
+            crop_bounds=crop_bounds,
+            template_path=template_path,
+            template_count_crop=template_count_crop,
+        )
         if count_crop is not None:
             if count_crop.shape != ref_image.shape:
                 raise ValueError(
@@ -344,14 +414,11 @@ def build_static_mask(
 
     mask = mask.astype(np.int16)
     if output_dir is not None:
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
-        out_path = output_dir / SHARED_MASK_FITS_BASENAME
-        fits.PrimaryHDU(mask).writeto(out_path, overwrite=True)
-        log.info(
-            "Shared mask written to %s  (masked: %d / %d)",
-            out_path,
-            int((mask > 0).sum()),
-            mask.size,
+        _write_shared_mask_fits(
+            mask,
+            output_dir,
+            sck=sck,
+            data_root=data_root,
+            mask_params=mask_params,
         )
     return mask
