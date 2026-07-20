@@ -130,6 +130,28 @@ class TestRemapProgressSidecar(unittest.TestCase):
         self.assertEqual(prog.text, "grouping")
         self.assertEqual(prog.kind, "phase")
 
+    def test_no_fcntl_flock_in_module(self):
+        import inspect
+
+        import syndiff_pipeline.template_creation.processing.remap_progress as mod
+
+        src = inspect.getsource(mod)
+        self.assertNotIn("import fcntl", src)
+        self.assertNotIn("fcntl.flock", src)
+
+    def test_parent_callback_increments_like_parallel_drain(self):
+        """Simulate parent on_result drain (hotpants pattern)."""
+        path = self.root / "remap.progress.json"
+        init_progress(path)
+        init_exact_l4a_cache(path, 5)
+        statuses = ["write", "skip", "write", "fail", "skip"]
+        for _status in statuses:
+            mark_exact_l4a_done(path)
+        state = read_progress(path)
+        assert state is not None
+        self.assertEqual(state["exact_l4a_done"], 5)
+        self.assertEqual(state["exact_l4a_total"], 5)
+
 
 if __name__ == "__main__":
     unittest.main()
