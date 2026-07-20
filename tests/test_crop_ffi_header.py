@@ -117,12 +117,16 @@ class TestWriteDiffNoiseMaskFitsHeader(unittest.TestCase):
             diff = np.zeros((10, 10), dtype=np.float32)
             noise = np.ones((10, 10), dtype=np.float32)
 
-            write_diff_noise_mask_fits(str(out_path), diff, noise, None, header=hdr)
+            written = write_diff_noise_mask_fits(
+                str(out_path), diff, noise, None, header=hdr
+            )
 
-            with fits.open(out_path) as hdul:
+            from syndiff_pipeline.common.fits_io import open_fits
+
+            with open_fits(written) as hdul:
                 self.assertEqual(int(hdul[0].header["A_ORDER"]), 2)
                 self.assertTrue(str(hdul[0].header["CTYPE1"]).endswith("-SIP"))
-                self.assertEqual(hdul[1].header["EXTNAME"], "NOISE")
+                self.assertEqual(hdul["NOISE"].header["EXTNAME"], "NOISE")
 
 
 if __name__ == "__main__":

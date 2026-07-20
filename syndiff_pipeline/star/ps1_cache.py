@@ -7,6 +7,10 @@ from pathlib import Path
 
 import zarr
 
+from syndiff_pipeline.common.scc_paths import (
+    ps1_skycells_zarr_lock_path,
+    ps1_skycells_zarr_path,
+)
 from syndiff_pipeline.star.context import StarEventContext
 from syndiff_pipeline.star.site_config import normalize_ps1_source
 from syndiff_pipeline.template_creation.processing.ps1_download import (
@@ -24,8 +28,6 @@ from syndiff_pipeline.template_creation.processing.zarr_utils import (
 
 logger = logging.getLogger(__name__)
 
-PS1_SKYCELLS_ZARR_BASENAME = "ps1_skycells.zarr"
-
 
 def ps1_skycells_zarr_paths(
     ctx: StarEventContext,
@@ -36,13 +38,14 @@ def ps1_skycells_zarr_paths(
     Shared PS1 raw-band Zarr store (same layout as ``ps1_download``).
 
     Hierarchy: ``{projection_id}/{skycell_name}/{band, band_mask, band_wt}``
-    at ``{data_root}/ps1_skycells.zarr`` with lock file alongside.
+    at ``{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`` with lock file alongside.
     """
     if zarr_path_override:
         zarr_path = Path(zarr_path_override).expanduser().resolve()
+        lock_file = zarr_path.parent / f"{zarr_path.name}.lock"
     else:
-        zarr_path = Path(ctx.data_root) / PS1_SKYCELLS_ZARR_BASENAME
-    lock_file = zarr_path.parent / f"{zarr_path.name}.lock"
+        zarr_path = ps1_skycells_zarr_path(ctx.data_root)
+        lock_file = ps1_skycells_zarr_lock_path(ctx.data_root)
     return zarr_path, lock_file
 
 

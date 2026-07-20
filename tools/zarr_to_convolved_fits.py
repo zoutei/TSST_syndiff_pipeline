@@ -20,12 +20,16 @@ CLI inputs: sector, camera, ccd, skycell, mask, output, list, out-dir, zarr-path
 import argparse
 import logging
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 import zarr
 from astropy.io import fits
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from syndiff_pipeline.common.fits_io import write_primary_hdu_fits
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -99,8 +103,8 @@ def save_as_fits(data: np.ndarray, header: fits.Header, output_path: Path) -> bo
     try:
         hdu = fits.PrimaryHDU(data=data, header=header)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        hdu.writeto(output_path, overwrite=True)
-        logging.info(f"Wrote FITS: {output_path}")
+        written = write_primary_hdu_fits(output_path, hdu)
+        logging.info(f"Wrote FITS: {written}")
         return True
     except Exception as e:
         logging.error(f"Failed to write FITS {output_path}: {e}")

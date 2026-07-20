@@ -1,6 +1,8 @@
 # SynDiff documentation
 
 - [Documentation index](markdown/README.md)
+- [Field templates (default geometry)](markdown/field_geometry.md) — L0–L5, L4a/L4b, storage, ops
+- [Storage layout](markdown/storage_layout.md) (`workspace_root`/`data_root`, SCC + nested-event layout)
 - **Published site:** https://zoutei.github.io/TSST_syndiff_pipeline/
 
 ## Build HTML locally

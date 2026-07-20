@@ -19,7 +19,7 @@ from astropy.wcs import FITSFixedWarning
 
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
-from syndiff_pipeline.common.download import download_ffis, nested_ffi_dir
+from syndiff_pipeline.common.download import download_ffis
 from syndiff_pipeline.difference_imaging.orchestration.config import add_config_args, config_from_args
 
 log = logging.getLogger(__name__)
@@ -82,9 +82,7 @@ def main():
             cfg.sector,
             cfg.camera,
             cfg.ccd,
-            nested_ffi_dir(
-                cfg.sector, cfg.camera, cfg.ccd, root=cfg.ffi_dir
-            ),
+            str(cfg.ffi_dir),
         )
 
     run_pipeline(cfg, validate_only=args.validate_only)

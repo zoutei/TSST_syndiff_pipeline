@@ -39,9 +39,10 @@ class TestSyndiffTemplateDiscovery(unittest.TestCase):
             )
         return pd.DataFrame(rows)
 
-    def test_duplicate_legacy_and_gz_prefers_gz(self):
+    def test_duplicate_legacy_and_gz_prefers_fz(self):
         legacy = self._write("syndiff_template_s0015_1_4_dx-0.000_dy-0.000.fits")
-        canonical = self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.gz")
+        gz = self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.gz")
+        canonical = self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.fz")
         wcs = self._wcs_table([(5, 0.0, 0.0)])
 
         out = hotpants_runner.verify_syndiff_templates(
@@ -55,9 +56,25 @@ class TestSyndiffTemplateDiscovery(unittest.TestCase):
 
         self.assertEqual(out[5], str(canonical.resolve()))
         self.assertNotIn(str(legacy.resolve()), out.values())
+        self.assertNotIn(str(gz.resolve()), out.values())
+
+    def test_legacy_gz_still_discovered(self):
+        """Backward-compatible read: gzip-only templates still resolve."""
+        canonical = self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.gz")
+        wcs = self._wcs_table([(5, 0.0, 0.0)])
+
+        out = hotpants_runner.verify_syndiff_templates(
+            str(self.template_dir),
+            wcs,
+            {"x_min": 0, "x_max": 1024, "y_min": 0, "y_max": 1024},
+            sector=15,
+            camera=1,
+            ccd=4,
+        )
+        self.assertEqual(out[5], str(canonical.resolve()))
 
     def test_missing_group_raises(self):
-        self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.gz")
+        self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.fz")
         wcs = self._wcs_table([(5, 0.0, 0.0), (6, 0.01, 0.0)])
 
         with self.assertRaises(hotpants_runner.SyndiffTemplateDiscoveryError) as ctx:
@@ -73,7 +90,7 @@ class TestSyndiffTemplateDiscovery(unittest.TestCase):
         self.assertIn("group_id=6", str(ctx.exception))
 
     def test_ensure_propagates_missing_when_syndiff_files_present(self):
-        self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.gz")
+        self._write("syndiff_template_s0015_1_4_dx0.000_dy0.000.fits.fz")
         wcs = self._wcs_table([(5, 0.0, 0.0), (6, 0.01, 0.0)])
         cfg = SimpleNamespace(
             template_paths={},

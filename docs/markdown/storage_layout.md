@@ -21,7 +21,7 @@ Example paths (adjust for your site):
 | Term | Meaning |
 |------|---------|
 | **workspace** | The `workspace_root` directory — one SQLite DB, one supervisor, one `runs/` tree |
-| **event dir** | `{workspace_root}/events/{target_label}/` — handoff JSON + diff outputs for one target |
+| **event dir** | `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/` — handoff JSON + diff outputs for one event×SCC leaf |
 | **run dir** | `{workspace_root}/runs/{run_id}/` — frozen config and per-run stage sidecars |
 | **control dir** | `{workspace_root}/control/` — orchestrator-only files (SQLite, daemon, Discord) |
 | **workspace tree** | `events/{label}/ws/` (canonical) or `events/{label}/ws_{workspace_run_id}/` — diff sub-pipeline artifacts (and star outputs under `host_star/`) |
@@ -39,25 +39,26 @@ Only three top-level subtrees belong here long-term:
 {workspace_root}/
   control/                         # orchestrator state (see below)
   runs/                            # batch run bookkeeping
-  events/                          # per-target persistent outputs
-    {target_label}/                # e.g. s0023_c1_k3_2020ftl
-      cluster_template_job.json    # wcs_grouping handoff
-      syndiff_ffi_frames.csv       # frame manifest
-      ps1_removed_stars.csv        # crop-local Gaia (downsample)
+  events/                          # per-event nested SCC leaves
+    {event_name}/                  # e.g. 2020ftl
+      s{SSSS}_c{C}_k{K}/           # e.g. s0023_c1_k3
+      event_job.json               # bind handoff (was cluster_template_job.json)
+      frames.csv                   # frame manifest (was syndiff_ffi_frames.csv)
+      ps1_removed_stars.csv        # crop-local Gaia (templates stage; linear geometry_mode)
       ws/                          # canonical diff workspace tree (no workspace_run_id)
       ws_{workspace_run_id}/       # namespaced tree when diff_config sets workspace_run_id
         diff_config.yaml           # frozen copy for this tree
-        templates/                 # symlink → {data_root}/shifted_downsampled/... (after downsample)
+        templates/                 # (removed) templates resolve from data_root/s{SSSS}/c{C}/k{K}/templates/
         master/                    # flat FITS mirror + tess_ffi link (diff stage)
         debug_plots/               # PNG diagnostics when pipeline_plots: true
           wcs_drift_template_debug.png
-        shared_mask.fits.gz        # ws-root artifacts (see diff workspace table below)
+        shared_mask.fits.fz        # ws-root artifacts (see diff workspace table below)
         hotpants_substamp_stars.csv
         gaia_catalog_pipeline.csv
         targets.reg
         tile_centers.json
         {diffs_label}/             # e.g. hp_d — per-FFI difference FITS
-          tess{pid}_{diffs_label}.fits.gz
+          tess{pid}_{diffs_label}.fits.fz
         {diffs_label}_m/           # meta workspace paired with diffs (hp_d → hp_m)
           hotpants.progress.json
           kernel_reconstruction.npz
@@ -90,14 +91,14 @@ Only three top-level subtrees belong here long-term:
 
 ### Diff workspace trees (`ws/` / `ws_{workspace_run_id}/`)
 
-Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.gz` (`support/ffi_naming.py`). Star-branch outputs live under `host_star/` inside the baseline workspace (not a sibling `star_*` tree).
+Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.fz` (`support/ffi_naming.py`). SynDiff-produced FITS (and local TESS FFIs) are written as CFITSIO fpack (`.fits.fz`); readers also accept legacy `.fits.gz` and plain `.fits`. Star-branch outputs live under `host_star/` inside the baseline workspace (not a sibling `star_*` tree).
 
 | Path (under active `ws*` tree) | Stage / role |
 |--------------------------------|--------------|
-| `templates/` | Symlink to downsampled `syndiff_template_*.fits.gz` (or `paths.template_dir` override) |
+| `templates/` | **Removed.** Diff resolves `cfg.template_dir` from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` |
 | `master/` | Flat basename symlinks to all workspace FITS + optional `tess_ffi` link (`master_fits_mirror`); skips `host_star/` |
 | `debug_plots/` | Diagnostic PNGs when `pipeline_plots: true` (ePSF montages, light-curve figures, background GIFs) |
-| `shared_mask.fits.gz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `tile_centers.json` | `shared_mask`, ePSF, `sat_template`, legacy photometry |
+| `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `tile_centers.json` | `shared_mask`, ePSF, `sat_template`, legacy photometry |
 | `{diffs_label}/` | Hotpants or `kernel_subtract` difference images (e.g. `hp_d/`) |
 | `{diffs_label}_m/` | Meta workspace for a diffs label (`hp_d` → `hp_m`): `hotpants.progress.json`, `kernel_reconstruction.npz`, `phot_calib.csv` |
 | `{diffs_label}_kernels/{product_id}_kernel.npz` | Per-frame Hotpants `kernel_solution` (sibling of `{diffs_label}/`; only when `write_kernel_solutions: true`) |
@@ -167,46 +168,67 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
 
 ```text
 {data_root}/
-  tess_ffi/                        # tess_ffi_download (optional override via ffi_dir)
-    s{sector:04d}/cam{camera}_ccd{ccd}/
-      tess*_ffic.fits.gz           # calibrated FFIs (gzip after download)
-  skycell_pixel_mapping/           # mapping (PanCAKES)
-    sector_{SSSS}/camera_{C}/ccd_{K}/
-      tess_s{SSSS}_{C}_{K}_master_skycells_list.csv
-      ...
-  catalogs/                        # mapping-stage Gaia DR3 catalogs
-    sector_{SSSS}/camera_{C}/ccd_{K}/
-      gaia_catalog_s{SSSS}_{C}_{K}.csv
-  ps1_skycells_zarr/
-    ps1_skycells.zarr                # ps1_download (shared store; lock file alongside)
-    ps1_skycells.zarr.lock
-  ps1_skycells.zarr                  # star PS1 cache (same layout; used by syndiff star)
-  ps1_skycells.zarr.lock
-  convolved_results/
-    sector_{SSSS}_camera_{C}_ccd_{K}.zarr
-    sector_{SSSS}_camera_{C}_ccd_{K}_removed_stars.csv
-  shifted_downsampled/             # downsample template FITS (default output_base)
-    sector_{SSSS}_camera_{C}_ccd_{K}_x{X0}-{X1}_y{Y0}-{Y1}/
-      syndiff_template_*.fits.gz
+  s{SSSS}/c{C}/k{K}/               # nested SCC science leaf (scc_paths.scc_root)
+    ffi/                           # tess_ffi_download (all FFIs for this SCC)
+    catalogs/                      # Gaia DR3 (mapping stage)
+    convolved.zarr                 # ps1_process output
+    convolved_removed_stars.csv
+    ffi_list.parquet               # shared FFI header inventory (+ ffi_list.csv twin)
+    mapping/
+      oversampling_{N}/            # PanCAKES skycell maps
+    remap/
+      oversampling_{N}/            # field L2–L4 (schedule, groups, exact_cache)
+    remap_{NAME}/                  # optional named remap lane (stages.remap.store_name)
+      oversampling_{N}/
+    templates/
+      oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode)
+    templates_{NAME}/              # optional named templates lane (downsample.output_store_name)
+      oversampling_{N}/
+    debug_plots/                   # template-pipeline PNGs (shift schedule debug)
+    legacy/                        # archived pre-cutover artifacts
+    bookkeeping/                   # per-stage run_meta (mapping reference FFI, etc.)
+  ps1_skycells_zarr/               # shared PS1 raw-band cache (ps1_download + syndiff star)
+    ps1_skycells.zarr
 ```
 
-| Subtree | Stage |
-|---------|-------|
-| `tess_ffi/` | `tess_ffi_download` |
-| `skycell_pixel_mapping/` | `mapping` |
-| `catalogs/` | `mapping` (Gaia DR3) |
-| `ps1_skycells_zarr/` | `ps1_download` |
-| `convolved_results/` | `ps1_process` |
-| `shifted_downsampled/` | `downsample` |
+Path helpers live in `syndiff_pipeline/common/scc_paths.py`: `scc_label()` builds the orchestration/event label `s{SSSS}_c{C}_k{K}`; `scc_root()` builds the nested filesystem leaf `s{SSSS}/c{C}/k{K}/`. `scc_ffi_dir()`, `scc_catalogs_dir()`, `scc_convolved_zarr()`, `scc_convolved_removed_stars_csv()`, `scc_ffi_list_parquet()` / `scc_ffi_list_csv()`, `scc_mapping_dir()`, `scc_remap_dir()`, `scc_templates_dir()`, `scc_legacy_dir()`, `scc_bookkeeping_dir()` / `scc_bookkeeping_stage_dir()` all build off `scc_root()`. `ps1_skycells_zarr_dir()` / `ps1_skycells_zarr_path()` / `ps1_skycells_zarr_lock_path()` resolve the shared PS1 store under `data_root`. `oversampling_dirname(N)` always nests as `oversampling_{N}/`, including `N=1`. Event-scoped helpers: `event_root()` and `event_scc_leaf()` (`events/{event_name}/s{SSSS}_c{C}_k{K}/` — still a flat label leaf under the event).
 
-The two PS1 Zarr paths have the same internal schema but are separate defaults.
-`ps1_download` owns `ps1_skycells_zarr/ps1_skycells.zarr`; `syndiff star`
-owns `ps1_skycells.zarr`. Set `ps1_zarr_path` in `star_config.yaml` to the
-former when star should reuse the template-stage cache.
+Older top-level science trees (`tess_ffi/`, `skycell_pixel_mapping/`, `field_templates/`, `shifted_downsampled/`, `convolved_results/`, flat `catalogs/`, and `scc/s{SSSS}_c{C}_k{K}/`) are obsolete and are not read by current code.
 
-After `downsample`, the orchestrator creates `events/{label}/ws/templates` (or `ws_{workspace_run_id}/templates`) as a symlink to the physical template directory under `{data_root}/shifted_downsampled/…` (the sector/camera/CCD/crop subtree containing `syndiff_template_*.fits.gz`). Diff imaging resolves templates via this symlink (or an explicit `paths.template_dir` override in `diff_config.yaml`) and writes science products under the active workspace tree (see **Diff workspace trees** above).
+`ps1_download` and `syndiff star` share one PS1 Zarr store at
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. Optional top-level
+`ps1_zarr_path` in `star_config.yaml` overrides that location for unusual
+deployments.
 
-`events/{label}/ws*/master/` is a **flat FITS mirror** for Condor/shared-FS access: every workspace-label `*.fits` appears as a basename symlink, plus `master/tess_ffi` → `{data_root}/tess_ffi/` when configured. It does **not** hold template FITS.
+Diff imaging resolves templates from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`
+(or `templates_{NAME}/…` when `paths.template_store_name` is set; or an explicit
+`paths.template_dir` override). The `ws/templates` symlink is no longer created.
+
+With `geometry_mode: field`, L2–L4 artifacts live under
+`{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`:
+
+```text
+remap/oversampling_{N}/
+  remap_manifest.json
+  shift_schedule.npz / .json
+  template_group_shifts.parquet
+  template_groups.json
+  exact_cache/{skycell}_sx{±N}_sy{±N}_exact.npz
+  .lock
+```
+
+L5 sparse contribs and `template_manifest.json` live under
+`templates/oversampling_{N}/` (product path name; stage name is `downsample`).
+Code dual-reads legacy L2–L4 files colocated under `templates/` when
+`remap_manifest.json` is absent. Migrate with
+`syndiff_pipeline.template_creation.processing.migrate_field_remap_store.migrate_scc_remap_artifacts`
+(copy+verify; sources left in place). When `N>1`, field
+`base_tess_shape` / `roi_bounds` are oversampled pixels; see
+[oversampled templates §9](oversampled_templates.md#9-field-mode--oversampling).
+
+Linear template FITS at `N>1` carry native `XMIN`/`XMAX`/`YMIN`/`YMAX` plus `OVERSAMP=N`; array planes are shape `(native_h·N, native_w·N)`. Diff crops stay native and are scaled at load time (`common/template_coverage.py`).
+
+`events/{event}/s_c_k/ws*/master/` is a **flat FITS mirror** for Condor/shared-FS access: every workspace-label `*.fits` appears as a basename symlink, plus `master/tess_ffi` → SCC `ffi/` when configured. It does **not** hold template FITS.
 
 ---
 
@@ -222,52 +244,43 @@ Full daemon/liveness details: [template_runner_architecture.md — SQLite and NF
 
 ---
 
-## Legacy layout (pre-migration)
+## Provenance bookkeeping (`data_root/bookkeeping/`)
 
-Older workspaces may have:
+Content-addressed provenance (see `doc/template_bookkeeping_plan.md`) lives under `data_root`:
 
-1. **Flat target dirs** at `{workspace_root}/{target_label}/` instead of `events/{target_label}/`.
-2. **Orchestrator files at workspace root** (`pipeline_state.sqlite`, `daemon.*`, `discord_bot.*`) instead of under `control/`.
-3. **Path name `template_handoffs`** instead of `workspace`.
-
-Use the one-time migration script (below) before running a current `syndiff` supervisor against such a tree.
-
----
-
-## Migrating an existing workspace
-
-**Prerequisites:** stop the supervisor if it is running (`syndiff daemon stop --site …`).
-
-```bash
-mamba activate syndiff
-
-# Preview changes
-python scripts/migrate_workspace_layout.py \
-  --workspace-root /path/to/template_handoffs \
-  --rename-to /path/to/workspace \
-  --dry-run
-
-# Apply
-python scripts/migrate_workspace_layout.py \
-  --workspace-root /path/to/template_handoffs \
-  --rename-to /path/to/workspace
+```text
+{data_root}/bookkeeping/
+  provenance.db          # derived index (rebuildable via ``syndiff bookkeeping reindex``)
+  spool/                 # per-process JSONL sidecars drained by the supervisor
 ```
 
-Then update `deployment.yaml`:
+Shared PS1 stores (decision #14):
 
-```yaml
-workspace_root: /path/to/workspace
+```text
+{data_root}/ps1_skycells_zarr/
+  ps1_skycells.zarr/     # raw bands
+  ps1_combined.zarr/     # star-removed combined cells (PR4)
+  ps1_convolved.zarr/    # canonical convolved cells (PR5, gated)
 ```
 
-Restart the daemon (`syndiff daemon start --site …`) or let the next `submit` auto-start it.
+SCC-scoped diff store (PR-D2, `publish_scc: true` on finalized runs only):
 
-The script:
+```text
+{data_root}/s{SSSS}/c{C}/k{K}/diff/{stage_label}/{recipe_fp}/
+  tess<digits>_{label}.fits.fz   # mirrored diff products
+```
 
-1. Optionally renames the workspace directory (`template_handoffs` → `workspace`).
-2. Creates `control/` and moves SQLite, daemon, Discord, and deployment pointer files.
-3. Normalizes `events/{label}/` (moves flat `{label}/` dirs; resolves symlink indirection).
+Event workspaces record pointers in `ws/scc_diff_index.json` (no symlinks into `data_root`).
 
-Related one-time utility (not part of layout migration): `scripts/backfill_ps1_removed_stars.py` — writes missing `events/{label}/ps1_removed_stars.csv` for targets that completed downsample before that file was added.
+Operator commands:
+
+| Command | Purpose |
+|---------|---------|
+| `syndiff bookkeeping stats` | Row counts by kind/state |
+| `syndiff bookkeeping reindex` | Offline DB rebuild from disk |
+| `syndiff bookkeeping gc` | Report-only orphan/missing scan |
+| `syndiff bookkeeping pilot` | Phase-5 go/no-go checklist |
+| `syndiff bookkeeping convolved-gate` | PR5 gate before write cutover |
 
 ---
 

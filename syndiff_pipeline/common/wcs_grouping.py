@@ -49,7 +49,12 @@ warnings.filterwarnings("ignore", category=AstropyWarning)
 
 log = logging.getLogger(__name__)
 
-CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
+EVENT_JOB_FILENAME = "event_job.json"
+FRAMES_CSV_BASENAME = "frames.csv"
+# Legacy names (read-only fallback during migration)
+CLUSTER_TEMPLATE_JOB_FILENAME = EVENT_JOB_FILENAME
+LEGACY_CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
+LEGACY_FRAMES_CSV_BASENAME = "syndiff_ffi_frames.csv"
 WCS_DRIFT_TEMPLATE_DEBUG_FILENAME = "wcs_drift_template_debug.png"
 
 _VALID_CROP_MODES = frozenset({"full", "tl", "tr", "bl", "br"})
@@ -238,6 +243,52 @@ def select_ffis_with_valid_target_wcs(
     return selected
 
 
+def _wcs_table_row_from_header(
+    ffi_path: str,
+    logical_filename: str,
+    *,
+    wcs_ok: bool,
+    header,
+    date_obs,
+    target_coord: SkyCoord,
+    x0: float | None,
+    y0: float | None,
+) -> tuple[dict, float | None, float | None]:
+    """Build one WCS-table row and update anchor pixels when appropriate."""
+    row = {
+        "filename": logical_filename,
+        "path": ffi_path,
+        "wcs_ok": wcs_ok,
+        "DATE-OBS": date_obs,
+        "delta_x": np.nan,
+        "delta_y": np.nan,
+        "x_pix": np.nan,
+        "y_pix": np.nan,
+        "btjd": np.nan,
+    }
+    if wcs_ok and header is not None:
+        try:
+            wcs = _header_to_wcs(header)
+            x, y = world_ra_dec_to_pixel(wcs, target_coord.ra.deg, target_coord.dec.deg)
+            x, y = float(x), float(y)
+            row["x_pix"] = x
+            row["y_pix"] = y
+            if x0 is None:
+                x0, y0 = x, y
+            row["delta_x"] = x - x0
+            row["delta_y"] = y - y0
+            if date_obs:
+                t = Time(date_obs, format="isot", scale="utc")
+                try:
+                    row["btjd"] = float(t.btjd)
+                except AttributeError:
+                    row["btjd"] = float(t.jd) - 2457000.0
+        except Exception as exc:
+            log.warning(f"WCS computation failed for {logical_filename}: {exc}")
+            row["wcs_ok"] = False
+    return row, x0, y0
+
+
 def build_wcs_table(ffi_paths: list, target_ra: float,
                     target_dec: float) -> pd.DataFrame:
     """
@@ -266,49 +317,151 @@ def build_wcs_table(ffi_paths: list, target_ra: float,
 
     for ffi_path in ffi_paths:
         info = extract_wcs_from_ffi(ffi_path)
-        row = {
-            "filename": info["filename"],
-            "path": info["path"],
-            "wcs_ok": info["wcs_ok"],
-            "DATE-OBS": info["DATE-OBS"],
-            "delta_x": np.nan,
-            "delta_y": np.nan,
-            "x_pix": np.nan,
-            "y_pix": np.nan,
-            "btjd": np.nan,
-        }
-
-        if info["wcs_ok"]:
-            try:
-                wcs = _header_to_wcs(info["header"])
-                x, y = world_ra_dec_to_pixel(wcs, target_coord.ra.deg, target_coord.dec.deg)
-                x, y = float(x), float(y)
-                row["x_pix"] = x
-                row["y_pix"] = y
-
-                if x0 is None:
-                    x0, y0 = x, y
-
-                row["delta_x"] = x - x0
-                row["delta_y"] = y - y0
-
-                if info["DATE-OBS"]:
-                    t = Time(info["DATE-OBS"], format="isot", scale="utc")
-                    try:
-                        row["btjd"] = float(t.btjd)
-                    except AttributeError:
-                        # Older astropy: BTJD = BJD - 2457000.0
-                        row["btjd"] = float(t.jd) - 2457000.0
-            except Exception as exc:
-                log.warning(f"WCS computation failed for {info['filename']}: {exc}")
-                row["wcs_ok"] = False
-
+        row, x0, y0 = _wcs_table_row_from_header(
+            info["path"],
+            info["filename"],
+            wcs_ok=bool(info["wcs_ok"]),
+            header=info["header"],
+            date_obs=info["DATE-OBS"],
+            target_coord=target_coord,
+            x0=x0,
+            y0=y0,
+        )
         rows.append(row)
 
     df = pd.DataFrame(rows)
     n_ok = df["wcs_ok"].sum()
     log.info(f"WCS table built: {n_ok}/{len(df)} frames have valid WCS.")
     return df
+
+
+def build_wcs_table_from_cache(
+    ffi_list_df: pd.DataFrame,
+    ffi_paths: list,
+    target_ra: float,
+    target_dec: float,
+) -> pd.DataFrame:
+    """
+    Like :func:`build_wcs_table` but reads WCS from ``ffi_list`` rows (no FITS I/O).
+    """
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+    from syndiff_pipeline.common.wcs_header_cache import header_from_cached_row
+
+    target_coord = SkyCoord(ra=target_ra, dec=target_dec, unit="deg")
+    rows = []
+    x0, y0 = None, None
+    log.info(f"Building WCS table from ffi_list for {len(ffi_paths)} FFIs ...")
+
+    for ffi_path in ffi_paths:
+        logical = manifest_basename_from_local(ffi_path)
+        wcs_ok = False
+        header = None
+        date_obs = None
+        if logical in ffi_list_df.index:
+            cache_row = ffi_list_df.loc[logical]
+            wcs_ok = bool(cache_row.get("wcs_ok", False))
+            date_obs = cache_row.get("date_obs")
+            if pd.isna(date_obs):
+                date_obs = None
+            if wcs_ok:
+                try:
+                    header = header_from_cached_row(cache_row)
+                    wcs_ok = _wcs_header_complete(header)
+                except Exception:
+                    wcs_ok = False
+                    header = None
+        row, x0, y0 = _wcs_table_row_from_header(
+            ffi_path,
+            logical,
+            wcs_ok=wcs_ok,
+            header=header,
+            date_obs=date_obs,
+            target_coord=target_coord,
+            x0=x0,
+            y0=y0,
+        )
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    n_ok = df["wcs_ok"].sum()
+    log.info(f"WCS table built from cache: {n_ok}/{len(df)} frames have valid WCS.")
+    return df
+
+
+def select_ffis_with_valid_target_wcs_from_cache(
+    ffi_list_df: pd.DataFrame,
+    sorted_ffi_paths: list,
+    target_ra: Optional[float],
+    target_dec: Optional[float],
+    *,
+    max_ffis: Optional[int] = None,
+) -> list:
+    """Cache-only variant of :func:`select_ffis_with_valid_target_wcs`."""
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+    from syndiff_pipeline.common.wcs_header_cache import wcs_from_cached_row
+
+    if not sorted_ffi_paths:
+        return []
+    if max_ffis is None:
+        return list(sorted_ffi_paths)
+
+    if target_ra is None or target_dec is None:
+        raise ValueError(
+            "target_ra and target_dec are required when max_ffis is set "
+            "(needed to skip FFIs without usable WCS for the science target)."
+        )
+    cap = int(max_ffis)
+    if cap < 1:
+        return list(sorted_ffi_paths)
+
+    target_coord = SkyCoord(ra=target_ra, dec=target_dec, unit="deg")
+    selected = []
+    skipped = 0
+    log_first = 0
+    for ffi_path in sorted_ffi_paths:
+        logical = manifest_basename_from_local(ffi_path)
+        usable = False
+        if logical in ffi_list_df.index:
+            row = ffi_list_df.loc[logical]
+            if bool(row.get("wcs_ok", False)):
+                try:
+                    wcs = wcs_from_cached_row(row)
+                    x, y = world_ra_dec_to_pixel(
+                        wcs, target_coord.ra.deg, target_coord.dec.deg
+                    )
+                    usable = bool(np.isfinite(x) and np.isfinite(y))
+                except Exception:
+                    usable = False
+        if usable:
+            selected.append(ffi_path)
+            if len(selected) >= cap:
+                break
+        else:
+            skipped += 1
+            if log_first < 3:
+                log.info(
+                    "  Skipping %s (no usable WCS for target).",
+                    os.path.basename(ffi_path),
+                )
+                log_first += 1
+    if skipped > 3:
+        log.info(
+            "  ... and %d more FFI(s) skipped (no usable WCS for target).",
+            skipped - 3,
+        )
+    if len(selected) < cap:
+        raise RuntimeError(
+            f"Only {len(selected)} FFI(s) have usable WCS for the target among "
+            f"{len(sorted_ffi_paths)} on disk (need {cap} for max_ffis={cap}). "
+            "Check target_ra/dec, sector/camera/ccd, or FFI products; or lower max_ffis."
+        )
+    log.info(
+        "  Using %d FFI(s) with valid target WCS from ffi_list (max_ffis=%d; skipped %d unusable).",
+        len(selected),
+        cap,
+        skipped,
+    )
+    return selected
 
 
 def smooth_wcs_drift_savgol(
@@ -719,13 +872,40 @@ def summarize_template_groups(wcs_table: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
+def _event_job_path(output_dir: str | Path) -> str:
+    """Return path to live event job JSON, preferring ``event_job.json``."""
+    root = Path(output_dir)
+    live = root / EVENT_JOB_FILENAME
+    if live.is_file():
+        return str(live)
+    legacy = root / LEGACY_CLUSTER_TEMPLATE_JOB_FILENAME
+    if legacy.is_file():
+        return str(legacy)
+    return str(live)
+
+
+def _frames_csv_path(output_dir: str | Path) -> str:
+    """Return path to frames manifest CSV, preferring ``frames.csv``."""
+    root = Path(output_dir)
+    live = root / FRAMES_CSV_BASENAME
+    if live.is_file():
+        return str(live)
+    legacy = root / LEGACY_FRAMES_CSV_BASENAME
+    if legacy.is_file():
+        return str(legacy)
+    return str(live)
+
+
 def load_cluster_template_job(output_dir: str) -> dict:
-    """Load ``cluster_template_job.json`` from ``output_dir``."""
-    path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    """Load event job JSON from ``output_dir`` (``event_job.json`` or legacy name)."""
+    path = _event_job_path(output_dir)
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"Missing cluster handoff: {path}")
+        raise FileNotFoundError(f"Missing event handoff job: {path}")
     with open(path) as fh:
         return json.load(fh)
+
+
+load_event_job = load_cluster_template_job
 
 
 def crop_bounds_from_cluster_payload(payload: dict) -> dict:
@@ -758,40 +938,39 @@ def crop_bounds_from_cluster_payload(payload: dict) -> dict:
 
 
 def resolve_existing_fits_path(path: str | Path) -> Path:
-    """Return an on-disk FITS path, trying ``.fits.gz`` when the exact path is missing."""
-    ref_ffi_path = Path(os.path.expanduser(str(path)))
-    if ref_ffi_path.is_file():
-        return ref_ffi_path
-    if ref_ffi_path.suffix == ".gz":
-        candidate = ref_ffi_path.with_suffix("")
-        if candidate.is_file():
-            return candidate
-    elif ref_ffi_path.suffix == ".fits":
-        candidate = ref_ffi_path.with_suffix(ref_ffi_path.suffix + ".gz")
-        if candidate.is_file():
-            return candidate
-    raise FileNotFoundError(f"Could not find FITS file: {path}")
+    """Return an on-disk FITS path (``.fits.fz`` / ``.fits.gz`` / ``.fits``)."""
+    from syndiff_pipeline.common.fits_variants import resolve_fits_variant
+
+    return resolve_fits_variant(path)
 
 
 def try_resolve_existing_fits_path(path: str | Path) -> Path | None:
     """Like :func:`resolve_existing_fits_path`, but return ``None`` when missing."""
-    try:
-        return resolve_existing_fits_path(path)
-    except FileNotFoundError:
-        return None
+    from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
+
+    return try_resolve_fits_variant(path)
 
 
 def fits_path_exists(path: str | Path) -> bool:
-    """True when *path* resolves to an on-disk FITS file (plain or ``.gz``)."""
-    return try_resolve_existing_fits_path(path) is not None
+    """True when *path* resolves to an on-disk FITS file (any storage variant)."""
+    from syndiff_pipeline.common.fits_variants import fits_path_exists as _exists
+
+    return _exists(path)
 
 
 def canonical_fits_path_key(path: str | Path) -> str:
-    """Comparison key treating ``.fits`` and ``.fits.gz`` as the same file."""
-    expanded = os.path.abspath(os.path.expanduser(str(path)))
-    if expanded.endswith(".fits.gz"):
-        return expanded[:-3]
-    return expanded
+    """Comparison key treating ``.fits`` / ``.fits.gz`` / ``.fits.fz`` as the same file.
+
+    Uses ``realpath`` so a manifest written under a symlinked data_root (e.g.
+    an isolated ``data_field_pilot/tess_ffi`` → shared ``data/tess_ffi``) still
+    matches FFI paths resolved through the ``ws/ffis`` symlink. For a normal
+    non-symlinked layout this is identical to ``abspath``.
+    """
+    from syndiff_pipeline.common.fits_variants import (
+        canonical_fits_path_key as _canonical,
+    )
+
+    return _canonical(path)
 
 
 def ref_manifest_row_index(
@@ -803,7 +982,7 @@ def ref_manifest_row_index(
 
 
 def manifest_path_row_index(wcs_table: "pd.DataFrame") -> dict[str, int]:
-    """Map canonical FITS path key → positional row index (``.fits`` / ``.fits.gz``)."""
+    """Map canonical FITS path key → row index (``.fits`` / ``.gz`` / ``.fz``)."""
     path_col = "path" if "path" in wcs_table.columns else "filename"
     out: dict[str, int] = {}
     for i in range(len(wcs_table)):
@@ -818,10 +997,13 @@ def manifest_path_row_index(wcs_table: "pd.DataFrame") -> dict[str, int]:
 
 
 def open_fits_memmap(path: str | Path, **kwargs):
-    """Open a FITS file after resolving ``.fits`` / ``.fits.gz`` variants."""
-    if "memmap" not in kwargs:
-        kwargs["memmap"] = True
-    return fits.open(resolve_existing_fits_path(path), **kwargs)
+    """Open a FITS file after resolving storage variants.
+
+    Compressed variants (``.fits.fz``, ``.fits.gz``) default to ``memmap=False``.
+    """
+    from syndiff_pipeline.common.fits_io import open_fits
+
+    return open_fits(path, **kwargs)
 
 
 def load_reference_ffi_path(
@@ -835,7 +1017,7 @@ def load_reference_ffi_path(
     counterpart before returning.
     """
     raw: str | None = None
-    job = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    job = _event_job_path(output_dir)
     if os.path.isfile(job):
         with open(job) as fh:
             raw = str(json.load(fh)["reference_ffi_path"])
@@ -863,6 +1045,8 @@ def write_cluster_template_job_json(
     crop_bounds: Optional[dict] = None,
     crop_mode: str | None = None,
     crop_box_size: int | None = None,
+    geometry_mode: str | None = None,
+    grouping_quantum_ps1_px: float | None = None,
 ) -> str:
     """
     Write a JSON bundle for the cluster template job: reference FFI name/path,
@@ -874,6 +1058,11 @@ def write_cluster_template_job_json(
     crop_bounds : dict, optional
         From ``get_crop_bounds``. When given, writes ``x_min`` … ``y_max`` and
         ``shape`` ``[ny, nx]`` for downstream reload without separate crop JSON.
+    geometry_mode : str, optional
+        When ``"field"``, stamped into the job JSON for downstream stages.
+        Omitted for linear so existing linear payloads stay byte-compatible.
+    grouping_quantum_ps1_px : float, optional
+        Field-mode grouping quantum (typically 1.0 PS1 px).
     """
     def _json_val(x: Any) -> Union[int, float, str]:
         """Json val.
@@ -923,12 +1112,19 @@ def write_cluster_template_job_json(
         payload["crop_mode"] = str(crop_mode)
     if crop_box_size is not None:
         payload["crop_box_size"] = int(crop_box_size)
+    if geometry_mode == "field":
+        payload["geometry_mode"] = "field"
+        if grouping_quantum_ps1_px is not None:
+            payload["grouping_quantum_ps1_px"] = float(grouping_quantum_ps1_px)
     os.makedirs(output_dir, exist_ok=True)
-    out_path = os.path.join(output_dir, CLUSTER_TEMPLATE_JOB_FILENAME)
+    out_path = os.path.join(output_dir, EVENT_JOB_FILENAME)
     with open(out_path, "w") as fh:
         json.dump(payload, fh, indent=2)
-    log.info(f"Cluster template job JSON written to {out_path}")
+    log.info(f"Event job JSON written to {out_path}")
     return out_path
+
+
+write_event_job_json = write_cluster_template_job_json
 
 
 def plot_wcs_drift_and_template_assignment(

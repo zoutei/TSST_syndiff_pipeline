@@ -18,9 +18,6 @@ Usage:
 
 import argparse
 import logging
-import os
-
-# Add parent directory to path for imports
 import sys
 from pathlib import Path
 from typing import Optional
@@ -32,6 +29,7 @@ from astropy.io import fits
 sys.path.append(str(Path(__file__).parent.parent))
 
 from band_utils import combine_masks, combine_rizy_bands
+from syndiff_pipeline.common.fits_io import write_hdul_fits
 from zarr_utils import load_skycell_bands_masks_and_headers
 
 # Configure logging
@@ -134,12 +132,10 @@ def save_as_fits(data: np.ndarray, header: fits.Header, output_path: Path, weigh
         # Create output directory if needed
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Write to file
-        hdul.writeto(output_path, overwrite=True)
+        # Write via fits_io (plain + fpack)
+        written = write_hdul_fits(output_path, hdul)
 
-        os.system(f"fpack -F -Y {output_path}")
-
-        logging.info(f"Successfully saved FITS file: {output_path}")
+        logging.info(f"Successfully saved FITS file: {written}")
         return True
 
     except Exception as e:

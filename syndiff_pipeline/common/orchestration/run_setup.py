@@ -12,6 +12,7 @@ from syndiff_pipeline.common.orchestration.state import PipelineState
 class PostCreateRunSetupResult:
     """PostCreateRunSetupResult."""
     stream_skipped: int
+    linear_remap_skipped: int
     not_selected: int
     superseded: int
 
@@ -32,10 +33,12 @@ def apply_post_create_run_setup(
     stream_skipped = 0
     if cfg.stages.ps1_process.ps1_source == "stream":
         stream_skipped = state.apply_ps1_stream_download_skips(run_id, targets, cfg)
+    linear_remap_skipped = state.apply_linear_remap_skips(run_id, targets, cfg)
     not_selected = state.apply_not_selected_skips(run_id, targets, cfg)
     superseded = state.apply_superseded_skips(run_id, targets)
     return PostCreateRunSetupResult(
         stream_skipped=stream_skipped,
+        linear_remap_skipped=linear_remap_skipped,
         not_selected=not_selected,
         superseded=superseded,
     )

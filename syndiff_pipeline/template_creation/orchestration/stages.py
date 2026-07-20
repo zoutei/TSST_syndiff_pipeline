@@ -59,6 +59,50 @@ def _condor_resources_for_ps1_process(cfg):
     )
 
 
+def _downsample_effective_deps(stages) -> tuple[str, ...]:
+    """Downsample deps: field mode requires remap; linear omits it."""
+    base = ("mapping", "ps1_process")
+    ds = getattr(stages, "downsample", None)
+    wg = getattr(stages, "wcs_grouping", None)
+    mode = str(
+        getattr(ds, "geometry_mode", None)
+        or getattr(wg, "geometry_mode", None)
+        or "field"
+    ).lower()
+    if mode == "field":
+        return base + ("remap",)
+    return base
+
+
+def _condor_resources_for_remap(cfg):
+    """Condor resources for remap."""
+    from syndiff_pipeline.common.orchestration import condor
+
+    params = cfg.stages.remap
+    return condor.CondorResourceRequest(
+        request_cpus=params.condor_request_cpus,
+        request_memory_mb=params.condor_request_memory,
+        requirements=params.condor_requirements,
+        rank=params.condor_rank,
+    )
+
+
+def _condor_resources_for_downsample(cfg):
+    """Condor resources for downsample."""
+    from syndiff_pipeline.common.orchestration import condor
+
+    params = cfg.stages.downsample
+    disk_mb = getattr(params, "condor_request_disk", None)
+    request_disk_kb = None if disk_mb is None else int(disk_mb) * 1024
+    return condor.CondorResourceRequest(
+        request_cpus=params.condor_request_cpus,
+        request_memory_mb=params.condor_request_memory,
+        request_disk_kb=request_disk_kb,
+        requirements=params.condor_requirements,
+        rank=params.condor_rank,
+    )
+
+
 def _make_template_stage(
     name: str,
     short_name: str,
@@ -185,11 +229,10 @@ def _make_template_stage(
 
 TEMPLATE_STAGES: tuple[StageSpec, ...] = (
     _make_template_stage("tess_ffi_download", "tess_dl", (), pool="network"),
-    _make_template_stage("wcs_grouping", "wcs", ("tess_ffi_download",)),
     _make_template_stage(
         "mapping",
         "map",
-        ("wcs_grouping",),
+        ("tess_ffi_download",),
         pool="mapping",
         default_executor="condor",
         condor_resources=_condor_resources_for_mapping,
@@ -205,10 +248,20 @@ TEMPLATE_STAGES: tuple[StageSpec, ...] = (
         condor_resources=_condor_resources_for_ps1_process,
     ),
     _make_template_stage(
+        "remap",
+        "remap",
+        ("mapping",),
+        pool="remap",
+        default_executor="condor",
+        condor_resources=_condor_resources_for_remap,
+    ),
+    _make_template_stage(
         "downsample",
         "down",
-        ("wcs_grouping", "mapping", "ps1_process"),
-        pool="cpu_light",
+        ("mapping", "ps1_process", "remap"),
+        pool="downsample",
+        effective_deps=_downsample_effective_deps,
+        condor_resources=_condor_resources_for_downsample,
     ),
 )
 

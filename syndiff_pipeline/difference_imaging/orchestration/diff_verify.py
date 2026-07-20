@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
@@ -25,9 +26,35 @@ from syndiff_pipeline.difference_imaging.support.paths import (
     workspace_root,
 )
 
+# Guarded: provenance_glue itself never raises on import (it guards its own
+# common.provenance import internally), but this import is wrapped again here
+# per the task contract ("diff_verify works if the package is absent") in
+# case provenance_glue.py is missing/broken in a partial checkout.
+try:
+    from syndiff_pipeline.difference_imaging.orchestration import provenance_glue as _prov
+except Exception:  # pragma: no cover
+    _prov = None
+
 if TYPE_CHECKING:
     from syndiff_pipeline.common.orchestration.spec import StageRunContext
     from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
+
+log = logging.getLogger(__name__)
+
+# YAML pipeline "kind" -> provenance kind, for the per-FFI stages this module
+# can derive an exact required-fingerprint set for (registry §6). Stages not
+# listed here (forced_photometry, centroids, subtract, sat_template,
+# kernel_subtract, kernel_fit, convolved_templates, astrometry) always fall
+# open to the legacy marker check; kernel_subtract's diff_image recipe spans
+# two stage configs (KernelFitParams + KernelSubtractParams) resolved in a
+# different pipeline stage and is not reconstructed here — deliberately out
+# of scope for this pass (see PR-D1 report).
+_INDEXED_STAGE_KIND = {
+    "hotpants": "diff_image",
+    "epsf": "epsf",
+    "shared_mask": "shared_mask",
+    "background": "diff_background",
+}
 
 
 def resolve_diff_site_config_path(
@@ -277,6 +304,127 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
     return False
 
 
+def _label_for_indexed_stage(stage: dict, kind: str) -> Optional[str]:
+    """Workspace label a per-FFI provenance kind is keyed under, for one stage dict."""
+    if kind == "shared_mask":
+        return "shared_mask"
+    if kind == "diff_image":
+        o = stage.get("output") or {}
+        label = str(o.get("diffs", "")).strip()
+        return label or None
+    if kind in ("epsf", "diff_background"):
+        label = str(stage.get("output", "")).strip()
+        return label or None
+    return None
+
+
+def _params_for_indexed_stage(stage: dict):
+    """Reparse one stage dict into its strict param dataclass (registry §6 recipe source)."""
+    from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+        parse_background,
+        parse_epsf,
+        parse_hotpants,
+        parse_shared_mask,
+    )
+
+    kind = stage.get("kind")
+    try:
+        if kind == "hotpants":
+            return parse_hotpants(stage, 0)
+        if kind == "epsf":
+            return parse_epsf(stage, 0)
+        if kind == "shared_mask":
+            return parse_shared_mask(stage, 0)
+        if kind == "background":
+            return parse_background(stage, 0)
+    except Exception:
+        log.debug("diff_stage_complete_indexed: stage param reparse failed", exc_info=True)
+        return None
+    return None
+
+
+def diff_stage_complete_indexed(
+    cfg: SynDiffConfig, event_dir: str | Path, stage: dict
+) -> Optional[bool]:
+    """
+    Indexed per-FFI completeness for one diff *stage* (PR-D1 primary path).
+
+    Computes the stage's required per-FFI fingerprints from the frozen
+    ``ws/diff_config.yaml``-resolved params (the same recipe
+    ``emit_diff_artifact`` used at publish time) and the frame manifest's
+    required-product-id set, then answers via
+    ``ProvenanceStore.scc_stage_complete``.
+
+    Returns ``True``/``False`` when the store can answer authoritatively, or
+    ``None`` when it cannot — provenance package absent, ``cfg.data_root``
+    unset, unsupported stage kind, empty required set, unreadable
+    ``frames.csv``, or any store error. ``None`` means "fall open"; callers
+    must fall back to the legacy marker check on ``None``, never treat it as
+    False.
+    """
+    if _prov is None or not getattr(_prov, "PROVENANCE_AVAILABLE", False):
+        return None
+    if stage is None:
+        return None
+    kind = _INDEXED_STAGE_KIND.get(stage.get("kind"))
+    if kind is None:
+        return None
+    data_root = getattr(cfg, "data_root", "") or ""
+    if not data_root:
+        return None
+    label = _label_for_indexed_stage(stage, kind)
+    if not label:
+        return None
+    params = _params_for_indexed_stage(stage)
+    if params is None:
+        return None
+
+    try:
+        from syndiff_pipeline.difference_imaging.support.manifest import load_frame_manifest
+
+        frames_df = load_frame_manifest(str(event_dir))
+    except Exception:
+        log.debug("diff_stage_complete_indexed: frame manifest load failed", exc_info=True)
+        return None
+
+    pids = _prov.required_product_ids(frames_df)
+    if not pids:
+        return None
+
+    sector, camera, ccd = int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+    required_fps: list[str] = []
+    for pid in pids:
+        if kind == "shared_mask":
+            fp = _prov.diff_kind_fingerprint_shared_mask(sector, camera, ccd, params, label=label)
+        else:
+            fp = _prov.diff_kind_fingerprint(
+                kind,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                product_id=pid,
+                label=label,
+                params=params,
+            )
+        if fp is None:
+            return None
+        required_fps.append(fp)
+        if kind == "shared_mask":
+            # shared_mask has one node per SCC, not per FFI; one fingerprint suffices.
+            break
+
+    store = _prov.open_store(data_root)
+    if store is None:
+        return None
+    try:
+        return bool(store.scc_stage_complete(required_fps))
+    except Exception:
+        log.debug("diff_stage_complete_indexed: store query failed", exc_info=True)
+        return None
+    finally:
+        _prov.close_store(store)
+
+
 def diff_workspace_complete(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
     """True when handoff manifest and final pipeline outputs exist in the active workspace tree."""
     event_dir = Path(event_dir)
@@ -286,6 +434,18 @@ def diff_workspace_complete(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
     ws_dir = diff_workspace_root(cfg, event_dir)
     if not ws_dir.is_dir():
         return False
+
+    stage = _last_executable_stage(cfg)
+    if stage is not None:
+        try:
+            indexed = diff_stage_complete_indexed(cfg, event_dir, stage)
+        except Exception:
+            log.debug("diff_stage_complete_indexed raised; falling open", exc_info=True)
+            indexed = None
+        if indexed is not None:
+            return indexed
+
+    # Fail-open fallback: legacy last-stage marker check (unchanged).
     return _final_stage_complete(cfg, ws_dir)
 
 

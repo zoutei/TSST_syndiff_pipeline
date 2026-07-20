@@ -19,7 +19,8 @@ This directory is the **config root** passed to `syndiff --site config`.
 | `pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
 | `pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
 | `deployment.yaml` | Gitignored: `workspace_root`, `data_root`, credentials (copy from `deployment.yaml.example`) |
-| `targets_example.csv` | Example targets list for `--targets` |
+| `targets_example.csv` | Example event targets CSV for `syndiff diff --targets` |
+| `scc_example.csv` | Example SCC-only CSV (`sector,camera,ccd[,enabled]`) for `syndiff template --scc` |
 
 ## Foreground diff (two entry points)
 
@@ -39,7 +40,14 @@ legacy names are in `example/legacy/recipe_*.yaml` (read-only reference).
 
 ```bash
 cp config/deployment.yaml.example config/deployment.yaml   # first time
-syndiff all submit --site config --targets config/targets_example.csv --run-id my_run
+
+# Template DAG: SCC-only input, no event coordinates
+syndiff template submit --site config --scc config/scc_example.csv --run-id my_template_run
+
+# Diff DAG: event input, once templates exist. --stages bind,diff is required —
+# the bare `diff` preset does NOT run bind by default (see template_pipeline.md#overview).
+syndiff diff submit --site config --targets config/targets_example.csv \
+  --stages bind,diff --run-id my_diff_run
 ```
 
 **Host-star light curves** (after transient diff artifacts exist on disk):
@@ -83,30 +91,72 @@ CSV per method per target under `ws/<output>/`.
 - kind: forced_photometry
   inputs:
     diffs: hp_d
+    epsf: epsf_r1          # required if any method uses psf_type: epsf
   output: lc_photometry
   methods:
-    - name: prf
-      type: psf
-      psf_type: prf
     - name: ap3
       type: aperture
       tar_ap: 3
       sky_in: 5
       sky_out: 9
+      subtract_sky: true                 # false → primary LC uses raw flux
+      mask_sky_with_shared_mask: false   # true → exclude shared_mask catalog/cross bits from sky annulus
+
+    - name: prf
+      type: psf
+      psf_type: prf
+      phot_cutout_size: 15
+      phot_bkg_poly_order: 3   # null → flux-only (no poly surface); 0 → constant bkg
+      phot_snap: brightest     # brightest | ref | fixed
+
+    - name: epsf
+      type: psf
+      psf_type: epsf           # photutils GriddedPSFModel (default fitter: photutils)
+      fit_shape: 11
+      aperture_radius: 2.0
+      # psf_grouper_min_separation: null  # default; set a float only for multi-init grouping
+
+    - name: epsf_bkg
+      type: psf
+      psf_type: epsf
+      fitter: tessreduce       # TESSreduce create_psf BFGS on that frame's gridded stamp
+      phot_bkg_poly_order: 0
+      phot_cutout_size: 15
+      phot_snap: brightest
 ```
+
+| Mode | YAML | Fitter |
+|------|------|--------|
+| Aperture | `type: aperture` | Square sum ± sky annulus |
+| PRF | `type: psf`, `psf_type: prf` | Official TESS PRF + TESSreduce `create_psf` |
+| ePSF photutils | `psf_type: epsf` (default / `fitter: photutils`) | Per-frame `GriddedPSFModel` |
+| ePSF tessreduce | `psf_type: epsf`, `fitter: tessreduce` | Same BFGS as PRF; stamp from that frame's gridded ePSF |
+
+**ePSF requirement:** `psf_type: epsf` needs a modern gridded catalog
+(`gridded_epsf_index.json` under the ePSF workspace). Missing index raises a
+clear error; the legacy tile-smooth stack is not used for forced photometry.
 
 **CSV names:** primary → `lightcurve_{name}.csv`; extra targets from
 `additional_forced_targets` → `lightcurve_{name}_{target}.csv`.
 
-**PSF columns:** `btjd`, `flux`, `eflux`, `filename`, `group_id`.
+**PSF columns:** `btjd`, `flux`, `eflux`, `filename`, `group_id` (photutils also
+writes `x_fit`, `y_fit`).
 
-**Aperture columns:** same metadata plus `flux` (raw sum with sky), `flux_wo_sky`
-(sky-subtracted, primary science column), `sky`, and `eflux` (uncertainty on
-`flux_wo_sky`). Defaults match TESSreduce `diff_lc`: `tar_ap=3`, `sky_in=5`,
-`sky_out=9`.
+**Aperture columns:** same metadata plus `flux` (raw sum), `flux_wo_sky`
+(sky-subtracted), `sky`, and `eflux`. With `subtract_sky: true` (default), ZP and
+plots use `flux_wo_sky`; with `false`, they use raw `flux`. Defaults match
+TESSreduce `diff_lc`: `tar_ap=3`, `sky_in=5`, `sky_out=9`. Star masking for the
+sky annulus uses existing `shared_mask.fits.fz` (bits 1|2 = Gaia catalog + bright
+crosses), not a per-method mag cut.
 
 Top-level `psf_type` is no longer supported; migrate existing configs to a
 `methods` entry with `type: psf`.
+
+Allowed `fitter` values for `psf_type: epsf`: `photutils` (default) | `tessreduce`.
+`fitter` is forbidden on `psf_type: prf`.
+
+Full parameter tables, fitting steps, outputs, and dual-method examples:
+[docs/markdown/stages/forced_photometry.md](../docs/markdown/stages/forced_photometry.md).
 
 ## `background` (spatial → temporal → strap)
 
@@ -138,3 +188,13 @@ Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifact
 Every active `hotpants` stage in site and example diff configs sets **`write_kernel_solutions: true`**, which writes one `{product_id}_kernel.npz` per FFI under `ws/hp_d_kernels/`. The star pipeline reads these (plus `hp_c` convolved templates and `ks_b_s`/`ks_b` photometry background) and does **not** re-run Hotpants.
 
 For a workspace that already has `hp_d` but no kernels (e.g. `multi_hp_temp_calib` before backfill), run a one-time Hotpants-only backfill with [`diff_config_star_full_backfill.yaml`](diff_config_star_full_backfill.yaml) (`write_convolved: true` + `write_kernel_solutions: true`). See [docs/markdown/stages/star_pipeline.md](../docs/markdown/stages/star_pipeline.md).
+
+### Oversampling (`F`) and stamp modes
+
+Template `oversampling_factor` lives in `pipeline.yaml` (`stages.mapping` /
+`stages.templates`). Diff Hotpants accepts optional `oversample`,
+`stamp_mode` (`grid` \| `connected_regions`), `use_c_extension`, and
+`region_*` on the `kind: hotpants` stage. Star uses
+`defaults.oversampling_factor` in `star_config.yaml` (must match template
+`F`). Full parameter tables and recipes:
+[docs/markdown/oversampled_templates.md](../docs/markdown/oversampled_templates.md).

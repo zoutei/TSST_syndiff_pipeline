@@ -80,6 +80,10 @@ from astropy.io import fits
 from dask.diagnostics import Callback, ProgressBar
 from filelock import FileLock
 
+from syndiff_pipeline.common.scc_paths import (
+    PS1_SKYCELLS_ZARR_BASENAME,
+    PS1_SKYCELLS_ZARR_DIRNAME,
+)
 from syndiff_pipeline.template_creation.processing import csv_utils
 
 # --- Configuration ---
@@ -92,6 +96,7 @@ active_writers: list["ZarrWriter"] = []
 
 _WRITE_QUEUE_MAXSIZE = 4
 _WRITE_SENTINEL = object()
+_DEFAULT_ZARR_OUTPUT_DIR = str(Path("data") / PS1_SKYCELLS_ZARR_DIRNAME)
 
 logger = logging.getLogger(__name__)
 
@@ -1029,7 +1034,7 @@ def process_skycells_with_dask(root: zarr.Group, skycells: list, lock_file: Path
             active_dask_computations.remove(computation)
 
 
-def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_output_dir="data/ps1_skycells_zarr", use_local_files=False, local_data_path="data/ps1_skycells", log_level="ERROR", overwrite: bool = False):
+def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_output_dir=_DEFAULT_ZARR_OUTPUT_DIR, use_local_files=False, local_data_path="data/ps1_skycells", log_level="ERROR", overwrite: bool = False):
     """
     Download PS1 skycell data and store it in a single Zarr array.
 
@@ -1045,7 +1050,7 @@ def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_
         TESS CCD number.
     num_workers : int, default 8
         Number of parallel workers for Dask.
-    zarr_output_dir : str, default "data/ps1_skycells_zarr"
+    zarr_output_dir : str, default ``data/ps1_skycells_zarr``
         Directory for Zarr output.
     use_local_files : bool, default False
         Whether to use local FITS files instead of downloading when available.
@@ -1071,8 +1076,8 @@ def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_
     )
 
     zarr_output_dir = Path(zarr_output_dir)
-    zarr_output_file = zarr_output_dir / "ps1_skycells.zarr"
-    lock_file = zarr_output_dir / "ps1_skycells.zarr.lock"
+    zarr_output_file = zarr_output_dir / PS1_SKYCELLS_ZARR_BASENAME
+    lock_file = zarr_output_dir / f"{PS1_SKYCELLS_ZARR_BASENAME}.lock"
 
     # Local files configuration
     local_data_path = Path(local_data_path) if use_local_files else None
@@ -1086,17 +1091,23 @@ def download_and_store_ps1_data(sector=20, camera=3, ccd=3, num_workers=8, zarr_
         else:
             logging.info(f"Using local files from: {local_data_path}")
 
-    # Construct path to the skycell list CSV
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+    # Prefer SCC layout; fall back to legacy skycell_pixel_mapping tree.
     sector_str = f"sector_{sector:04d}"
     data_root = Path(zarr_output_dir).parent
-    skycell_list_csv = (
-        data_root
-        / "skycell_pixel_mapping"
-        / sector_str
-        / f"camera_{camera}"
-        / f"ccd_{ccd}"
-        / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list.csv"
+    skycell_list_csv = scc_mapping_master_skycells_csv(
+        data_root, sector, camera, ccd, oversampling_factor=1
     )
+    if not skycell_list_csv.exists():
+        skycell_list_csv = (
+            data_root
+            / "skycell_pixel_mapping"
+            / sector_str
+            / f"camera_{camera}"
+            / f"ccd_{ccd}"
+            / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list.csv"
+        )
 
     if not skycell_list_csv.exists():
         error_msg = f"Skycell list not found: {skycell_list_csv}"
@@ -1190,7 +1201,7 @@ def main():
     parser.add_argument("camera", type=int, help="TESS camera number")
     parser.add_argument("ccd", type=int, help="TESS CCD number")
     parser.add_argument("--num-workers", type=int, default=32, help="Number of parallel workers for Dask")
-    parser.add_argument("--zarr-output-dir", type=str, default="data/ps1_skycells_zarr", help="Directory for Zarr output")
+    parser.add_argument("--zarr-output-dir", type=str, default=_DEFAULT_ZARR_OUTPUT_DIR, help="Directory for Zarr output")
 
     parser.add_argument("--use-local-files", action="store_true", help="Use locally saved FITS files instead of downloading when available")
     parser.add_argument("--local-data-path", type=str, default="data/ps1_skycells", help="Path to local PS1 skycell data directory")

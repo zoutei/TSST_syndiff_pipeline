@@ -372,6 +372,32 @@ class TestReadLogProgress(unittest.TestCase):
         prog = read_log_progress(path, "mapping")
         self.assertEqual(prog.text, "moc_filter")
 
+    def test_mapping_skycell_tqdm_progress(self):
+        path = self._write_log(
+            "map.log",
+            "\n".join(
+                [
+                    "  MOC filtering complete.",
+                    "Processing individual skycell mappings...",
+                    "Processing skycells:  45%|████▌     | 123/274 [01:23<01:40,  1.50it/s]",
+                ]
+            ),
+        )
+        prog = read_log_progress(path, "mapping")
+        self.assertEqual(prog.text, "123/274")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_mapping_skycell_progress_after_moc_filter(self):
+        """Skycell fraction must win over earlier moc_filter phase marker."""
+        path = self._write_log(
+            "map.log",
+            "  MOC filtering complete.\n"
+            "Processing skycells: 100%|██████████| 274/274 [05:00<00:00,  0.91it/s]\n",
+        )
+        prog = read_log_progress(path, "mapping")
+        self.assertEqual(prog.text, "274/274")
+        self.assertEqual(prog.kind, "fraction")
+
     def test_wcs_grouping_elapsed_without_log(self):
         prog = read_log_progress(
             self.log_dir / "missing.log",
@@ -428,6 +454,7 @@ class TestCmdProgressDetail(unittest.TestCase):
         fake_state.count_by_status.return_value = {"running": 1, "success": 5}
         fake_state.get_run.return_value = {"status": "running"}
         fake_state.running_stage_runs.return_value = [running_row]
+        fake_state.list_stage_runs.return_value = []
 
         with mock.patch(
             "syndiff_pipeline.common.orchestration.cli._resolve_run_from_args",

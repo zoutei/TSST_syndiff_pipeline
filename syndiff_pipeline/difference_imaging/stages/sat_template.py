@@ -20,6 +20,7 @@ import pandas as pd
 from astropy.io import fits
 from scipy.ndimage import shift as nd_shift, zoom as nd_zoom
 
+from syndiff_pipeline.common.fits_io import write_image_fits
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     iter_pipeline_fits_paths,
     strip_fits_suffix,
@@ -284,7 +285,7 @@ def save_group_templates(sat_tmpl_native: dict, sat_tmpl_hr: dict,
         os.makedirs(sub, exist_ok=True)
         for gid, tmpl in tmpl_dict.items():
             out_path = workspace_frame_fits_path(sub, f"group_{gid}")
-            fits.writeto(out_path, tmpl.astype(np.float32), overwrite=True)
+            write_image_fits(out_path, tmpl.astype(np.float32))
         log.info(f"  Sat templates ({tag}) saved to {sub}/")
 
 

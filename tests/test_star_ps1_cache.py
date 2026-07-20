@@ -39,7 +39,7 @@ def _ctx(tmp: Path) -> StarEventContext:
         crop_bounds={"x_min": 0, "y_min": 0, "x_max": 20, "y_max": 20, "shape": (20, 20)},
         mapping_dir=str(tmp / "data" / "skycell_pixel_mapping"),
         mapping_csv=str(tmp / "data" / "mapping.csv"),
-        master_mapping_fits=str(tmp / "data" / "master.fits.gz"),
+        master_mapping_fits=str(tmp / "data" / "master.fits.fz"),
         gaia_catalog_path=str(tmp / "data" / "gaia.csv"),
         templates_dir=str(tmp / "templates"),
         reference_ffi_path=str(tmp / "ref.fits"),
@@ -62,9 +62,12 @@ class TestStarPs1Cache(unittest.TestCase):
             zarr_path, lock_file = ps1_skycells_zarr_paths(ctx)
             self.assertEqual(
                 zarr_path,
-                Path(tmpdir) / "data" / "ps1_skycells.zarr",
+                Path(tmpdir) / "data" / "ps1_skycells_zarr" / "ps1_skycells.zarr",
             )
-            self.assertEqual(lock_file, Path(tmpdir) / "data" / "ps1_skycells.zarr.lock")
+            self.assertEqual(
+                lock_file,
+                Path(tmpdir) / "data" / "ps1_skycells_zarr" / "ps1_skycells.zarr.lock",
+            )
 
     def test_ensure_skycell_cached_downloads_once(self):
         with tempfile.TemporaryDirectory() as tmpdir:

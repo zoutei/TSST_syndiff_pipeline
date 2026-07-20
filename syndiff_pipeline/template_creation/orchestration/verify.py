@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import List, Optional
 
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.fits_variants import (
+    FITS_STORAGE_SUFFIXES,
+    strip_fits_storage_suffix,
+    try_resolve_fits_variant,
+)
+from syndiff_pipeline.common.scc_paths import ps1_skycells_zarr_path, scc_convolved_zarr
+from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
 from syndiff_pipeline.common.orchestration.targets import Target
 
@@ -22,6 +29,11 @@ log = logging.getLogger(__name__)
 
 # Bump when the manifest JSON schema changes; a mismatch invalidates a manifest.
 MANIFEST_SCHEMA_VERSION = 2
+
+# Removed L4b-lite policies; manifests/sidecars claiming these must be rebuilt.
+_DEPRECATED_L4B_POLICIES = frozenset(
+    {"lite", "abutting_under_type1_wcs", "abutting_border"}
+)
 
 
 class AbsenceProbeResult(Enum):
@@ -136,6 +148,18 @@ def config_fingerprint(
                 str(pp.bright_star_mag_threshold),
             ]
         )
+    elif stage == "remap":
+        rm = resolved.stages.remap
+        mp = resolved.stages.mapping
+        parts.extend(
+            [
+                str(mp.oversampling_factor),
+                str(rm.cache_quantum_ps1_px),
+                str(rm.keying),
+                str(rm.intra_skycell_R),
+                str(rm.store_name or ""),
+            ]
+        )
     elif stage == "downsample":
         ds = resolved.stages.downsample
         parts.extend(
@@ -144,6 +168,10 @@ def config_fingerprint(
                 str(ds.single_offset),
                 str(list(ds.ignore_mask_bits)),
                 str(ds.output_base or resolved.template_output_base),
+                str(ds.output_store_name or ""),
+                str(resolved.downsample_remap_store_name or ""),
+                str(bool(ds.apply_intra_skycell)),
+                str(bool(ds.apply_inter_skycell)),
             ]
         )
     elif stage == "ps1_download":
@@ -372,11 +400,11 @@ def verify_tess_ffi_download(resolved: ResolvedTargetConfig) -> VerifyResult:
         expected_ffi_basenames,
         list_local_ffis,
         local_ffi_manifest_basenames,
-        nested_ffi_dir,
     )
 
     t = resolved.target
-    ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+    # resolve_config sets ffi_dir to the SCC ffi leaf already.
+    ffi_leaf = resolved.ffi_dir
     local_files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
     expected = expected_ffi_basenames(
         t.sector, t.camera, t.ccd, output_dir=ffi_leaf, local_only=True
@@ -446,32 +474,29 @@ def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
-    """Verify mapping.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    VerifyResult"""
+    """Verify mapping artifacts under the SCC oversampling leaf."""
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
     mapping_root = Path(resolved.mapping_root)
     if os_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{os_factor}"
         suffix = f"_os{os_factor}"
-    csv_path = (
+    # Prefer flat SCC leaf (post-migration); fall back to legacy nested layout.
+    csv_flat = (
+        mapping_root
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
+    )
+    csv_nested = (
         mapping_root
         / f"sector_{t.sector:04d}"
         / f"camera_{t.camera}"
         / f"ccd_{t.ccd}"
         / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
     )
+    csv_path = csv_flat if csv_flat.is_file() else csv_nested
     if csv_path.is_file():
         return VerifyResult("mapping", True, "Master skycells CSV exists", str(csv_path))
-    return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_path))
+    return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_flat))
 
 
 _PS1_DOWNLOAD_BANDS = ("r", "i", "z", "y")
@@ -599,7 +624,7 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
     Returns
     -------
     VerifyResult"""
-    zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+    zarr_path = ps1_skycells_zarr_path(resolved.data_root)
     if not zarr_path.exists():
         return VerifyResult(
             "ps1_download",
@@ -642,22 +667,21 @@ def verify_ps1_download(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 
 def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
-    """Mapping csv path.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    Path"""
+    """Mapping CSV path under the SCC oversampling leaf (flat or legacy nested)."""
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
     mapping_root = Path(resolved.mapping_root)
     if os_factor > 1:
-        mapping_root = mapping_root / f"oversampling_{os_factor}"
         suffix = f"_os{os_factor}"
+    csv_flat = (
+        mapping_root
+        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
+    )
+    if csv_flat.is_file() or not (
+        mapping_root / f"sector_{t.sector:04d}" / f"camera_{t.camera}" / f"ccd_{t.ccd}"
+    ).is_dir():
+        return csv_flat
     return (
         mapping_root
         / f"sector_{t.sector:04d}"
@@ -668,21 +692,9 @@ def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
 
 
 def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
-    """Convolved zarr path.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    Path"""
+    """Convolved zarr path for one SCC."""
     t = resolved.target
-    return (
-        Path(resolved.data_root)
-        / "convolved_results"
-        / f"sector_{t.sector:04d}_camera_{t.camera}_ccd_{t.ccd}.zarr"
-    )
+    return scc_convolved_zarr(resolved.data_root, t.sector, t.camera, t.ccd)
 
 
 def ps1_process_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
@@ -716,14 +728,401 @@ def event_dir_ps1_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path
 
 
 def clear_downsample_event_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
-    """Remove event-dir artifacts written by the downsample stage."""
+    """Remove event-dir artifacts written by the downsample stage.
+
+    Never deletes the shared SCC ``field_templates/`` store. Field mode may
+    rewrite event-local schedule/group sidecars on the next run; SCC contribs
+    are reused unless ``stages.downsample.rebuild_field_store: true``.
+    """
     removed: list[str] = []
+    event = Path(resolved.event_dir)
     csv_path = event_dir_ps1_removed_stars_csv_path(resolved)
-    if csv_path.is_file():
-        csv_path.unlink()
-        removed.append(str(csv_path))
-        log.info("Force rerun: removed file %s", csv_path)
+    candidates = [
+        csv_path,
+        event / "template_group_shifts.parquet",
+        event / "template_group_shifts.json",
+        event / "shift_schedule.npz",
+        event / "shift_schedule.json",
+    ]
+    for path in candidates:
+        if path.is_file():
+            path.unlink()
+            removed.append(str(path))
+            log.info("Force rerun: removed file %s", path)
     return removed
+
+
+def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
+    """Path to mapping's master TESS→skycell FITS for this SCC."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        _master_pixels2skycells_path,
+    )
+
+    t = resolved.target
+    os_factor = int(resolved.stages.mapping.oversampling_factor or 1)
+    return _master_pixels2skycells_path(
+        Path(resolved.mapping_root),
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=os_factor,
+    )
+
+
+def _count_npz_files(cache_dir: Path) -> int:
+    """Count materialized ``*.npz`` files under *cache_dir* (recursive).
+
+    Schema-v3 Exact caches live in skycell / pair subfolders; flat root ``*.npz``
+    alone is the legacy layout.
+    """
+    if not cache_dir.is_dir():
+        return 0
+    return sum(1 for p in cache_dir.rglob("*.npz") if p.is_file())
+
+
+def _has_flat_exact_npz(cache_dir: Path) -> bool:
+    """True if any ``*.npz`` sits directly under *cache_dir* (legacy flat layout)."""
+    if not cache_dir.is_dir():
+        return False
+    return any(p.is_file() for p in cache_dir.glob("*.npz"))
+
+def _legacy_manifest_rejection_reason(payload: dict, *, source: str) -> str | None:
+    """Reject pre-simplification manifests that used geometry toggles."""
+    if payload.get("include_abutting_border_exact"):
+        return (
+            f"{source} uses removed L4b-lite (include_abutting_border_exact); "
+            "rebuild remap with intra-skycell (exact_cache_l4a/) and inter-skycell "
+            "(exact_cache_l4b/) caches"
+        )
+    if "apply_hybrid_exact" in payload or "l4b_policy" in payload:
+        return (
+            f"{source} uses removed geometry toggles (apply_hybrid_exact / l4b_policy); "
+            "rebuild remap (stages.remap.rebuild_remap_cache: true and "
+            "rebuild_inter_skycell_cache: true)"
+        )
+    if "hybrid_R" in payload and "intra_skycell_R" not in payload:
+        return (
+            f"{source} uses legacy hybrid_R; rebuild remap for schema v2 manifest "
+            "(intra_skycell_R)"
+        )
+    policy = str(payload.get("l4b_policy", ""))
+    if policy in _DEPRECATED_L4B_POLICIES:
+        return (
+            f"{source} has deprecated l4b_policy={policy!r}; rebuild remap"
+        )
+    return None
+
+
+def _l4b_lite_rejection_reason(payload: dict, *, source: str) -> str | None:
+    """Alias for legacy manifest rejection (L4b-lite / toggle manifests)."""
+    return _legacy_manifest_rejection_reason(payload, source=source)
+
+
+def _polluted_legacy_exact_cache_reason(read_root: Path) -> str | None:
+    """Reject monolithic ``exact_cache/`` when pure ``exact_cache_l4a/`` is absent."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        EXACT_CACHE_L4A_DIRNAME,
+        EXACT_CACHE_LEGACY_DIRNAME,
+    )
+
+    legacy = read_root / EXACT_CACHE_LEGACY_DIRNAME
+    l4a = read_root / EXACT_CACHE_L4A_DIRNAME
+    if legacy.is_dir() and any(legacy.glob("*.npz")):
+        if not l4a.is_dir() or _count_npz_files(l4a) == 0:
+            return (
+                f"legacy polluted {EXACT_CACHE_LEGACY_DIRNAME}/ present without pure "
+                f"{EXACT_CACHE_L4A_DIRNAME}/; archive or delete legacy cache and rebuild "
+                "L4a (stages.remap.rebuild_remap_cache: true); do not reuse exact_cache/ "
+                "as L4a"
+            )
+    return None
+
+
+def _verify_remap_exact_caches(
+    read_root: Path,
+    payload: dict,
+    *,
+    require_intra_skycell: bool = True,
+    require_inter_skycell: bool = True,
+) -> str | None:
+    """Validate intra + inter exact cache layout and NPZ counts.
+
+    ``require_intra_skycell`` / ``require_inter_skycell`` control whether each
+    layer's on-disk cache must be present and complete (used by downsample when
+    geometry toggles skip a layer). Remap verify keeps both required.
+    """
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        EXACT_CACHE_L4A_DIRNAME,
+        EXACT_CACHE_L4B_DIRNAME,
+        REMAP_SCHEMA_VERSION,
+    )
+
+    schema = int(payload.get("schema_version", 0))
+    if schema < REMAP_SCHEMA_VERSION:
+        return (
+            f"remap_manifest schema_version={schema} is outdated; "
+            f"expected >={REMAP_SCHEMA_VERSION}; rebuild remap"
+        )
+
+    polluted = _polluted_legacy_exact_cache_reason(read_root)
+    if polluted:
+        return polluted
+
+    l4a_dir = read_root / EXACT_CACHE_L4A_DIRNAME
+    l4b_dir = read_root / EXACT_CACHE_L4B_DIRNAME
+
+    if schema >= 3:
+        check_flat_l4a = require_intra_skycell or l4a_dir.is_dir()
+        check_flat_l4b = require_inter_skycell or l4b_dir.is_dir()
+        if (check_flat_l4a and _has_flat_exact_npz(l4a_dir)) or (
+            check_flat_l4b and _has_flat_exact_npz(l4b_dir)
+        ):
+            return (
+                "legacy flat Exact NPZ files found under exact_cache_l4a/ or "
+                "exact_cache_l4b/ root; wipe Exact dirs and rebuild remap for "
+                "schema-v3 skycell/pair subfolders"
+            )
+        for name in (
+            "shift_epochs.parquet",
+            "pair_epochs.parquet",
+            "epoch_group_members.parquet",
+            "gid_epoch_index.npz",
+            "group_id_per_frame.npy",
+        ):
+            if not (read_root / name).is_file():
+                return (
+                    f"missing remap epoch artifact {name}; rebuild remap "
+                    "(schema v3)"
+                )
+        n_l4a_manifest = payload.get("n_shift_epochs", payload.get("n_intra_skycell_keys"))
+        n_l4b_manifest = payload.get(
+            "n_pair_epochs", payload.get("n_inter_skycell_pair_states")
+        )
+    else:
+        n_l4a_manifest = payload.get("n_intra_skycell_keys") or payload.get("n_exact_keys")
+        n_l4b_manifest = payload.get("n_inter_skycell_pair_states") or payload.get(
+            "n_l4b_pair_states"
+        )
+
+    if require_intra_skycell:
+        if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
+            if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
+                return (
+                    f"missing {EXACT_CACHE_L4A_DIRNAME}/ "
+                    f"(manifest n_shift_epochs/n_intra={n_l4a_manifest}); rebuild "
+                    "intra-skycell (stages.remap.rebuild_remap_cache: true)"
+                )
+
+        if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
+            on_disk = _count_npz_files(l4a_dir)
+            if on_disk < n_l4a_manifest:
+                return (
+                    f"intra-skycell cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
+                    f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
+                )
+
+    if require_inter_skycell:
+        if not l4b_dir.is_dir():
+            return (
+                f"missing {EXACT_CACHE_L4B_DIRNAME}/; rebuild inter-skycell "
+                "(stages.remap.rebuild_inter_skycell_cache: true)"
+            )
+        if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
+            on_disk = _count_npz_files(l4b_dir)
+            if on_disk < n_l4b_manifest:
+                return (
+                    f"inter-skycell cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
+                    f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
+                )
+        elif _count_npz_files(l4b_dir) == 0:
+            return (
+                f"inter-skycell requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
+            )
+    return None
+
+
+def _geometry_mode_for_resolved(resolved: ResolvedTargetConfig) -> str:
+    job = Path(resolved.event_dir) / "cluster_template_job.json"
+    if job.is_file():
+        try:
+            import json
+
+            payload = json.loads(job.read_text())
+            mode = payload.get("geometry_mode")
+            if mode:
+                return str(mode).lower()
+        except Exception:
+            pass
+    return str(
+        getattr(resolved.stages.wcs_grouping, "geometry_mode", None)
+        or getattr(resolved.stages.downsample, "geometry_mode", None)
+        or "field"
+    ).lower()
+
+
+def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify SCC field_templates store for geometry_mode: field."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        REMAP_MANIFEST_NAME,
+        remap_root,
+        resolve_remap_read_root,
+    )
+    from syndiff_pipeline.template_creation.processing.field_templates import (
+        field_templates_root,
+        verify_field_store,
+    )
+
+    t = resolved.target
+    ds = resolved.stages.downsample
+    mp = resolved.stages.mapping
+    store = field_templates_root(
+        resolved.data_root,
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=ds.oversampling_factor,
+        store_name=ds.output_store_name,
+    )
+    # Prefer absolute override when output_base is set (matches dispatch write path).
+    if ds.output_base:
+        store = Path(ds.output_base)
+    remap_store = remap_root(
+        resolved.data_root,
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=mp.oversampling_factor,
+        store_name=resolved.downsample_remap_store_name,
+    )
+    try:
+        read_root, _legacy = resolve_remap_read_root(remap_store, store)
+    except FileNotFoundError as exc:
+        return VerifyResult("downsample", False, str(exc), str(remap_store))
+    manifest_path = read_root / REMAP_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return VerifyResult(
+            "downsample",
+            False,
+            f"Field downsample requires {REMAP_MANIFEST_NAME} from remap stage",
+            str(read_root),
+        )
+    import json
+
+    try:
+        remap_payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return VerifyResult(
+            "downsample",
+            False,
+            f"Unreadable {REMAP_MANIFEST_NAME}: {exc}",
+            str(manifest_path),
+        )
+    lite_reason = _l4b_lite_rejection_reason(
+        remap_payload, source=REMAP_MANIFEST_NAME
+    )
+    if lite_reason:
+        return VerifyResult("downsample", False, lite_reason, str(manifest_path))
+    ds = resolved.stages.downsample
+    cache_reason = _verify_remap_exact_caches(
+        read_root,
+        remap_payload,
+        require_intra_skycell=bool(getattr(ds, "apply_intra_skycell", True)),
+        require_inter_skycell=bool(getattr(ds, "apply_inter_skycell", True)),
+    )
+    if cache_reason:
+        return VerifyResult("downsample", False, cache_reason, str(read_root))
+
+    assembly_path = store / "field_mode_assembly.json"
+    if assembly_path.is_file():
+        try:
+            assembly_payload = json.loads(assembly_path.read_text())
+            lite_reason = _l4b_lite_rejection_reason(
+                assembly_payload, source="field_mode_assembly.json"
+            )
+            if lite_reason:
+                return VerifyResult("downsample", False, lite_reason, str(assembly_path))
+        except (OSError, json.JSONDecodeError) as exc:
+            return VerifyResult(
+                "downsample",
+                False,
+                f"Unreadable field_mode_assembly.json: {exc}",
+                str(assembly_path),
+            )
+
+    # The SCC store is shared across events; each event records exactly the
+    # crop-filtered keys it required in field_contrib_keys.json (written only
+    # after a successful build). Verify against THAT — not the full-chip
+    # template_group_shifts, which would false-fail every cropped run.
+    marker = Path(resolved.event_dir) / "field_contrib_keys.json"
+    if not marker.is_file():
+        return VerifyResult(
+            "downsample",
+            False,
+            "Field downsample incomplete: missing field_contrib_keys.json marker",
+            str(store),
+        )
+    try:
+        keys_payload = json.loads(marker.read_text())
+        lite_reason = _l4b_lite_rejection_reason(
+            keys_payload, source="field_contrib_keys.json"
+        )
+        if lite_reason:
+            return VerifyResult("downsample", False, lite_reason, str(marker))
+        raw_keys = keys_payload.get("keys", [])
+        if raw_keys and any(len(k) != 4 for k in raw_keys):
+            return VerifyResult(
+                "downsample",
+                False,
+                "Field mode requires group-qualified contrib keys "
+                "[group_id, skycell, sx, sy]; rebuild downsample",
+                str(marker),
+            )
+        required = [
+            (int(k[0]), str(k[1]), int(k[2]), int(k[3])) for k in raw_keys
+        ]
+    except Exception as exc:
+        return VerifyResult(
+            "downsample", False, f"Unreadable field_contrib_keys.json: {exc}", str(store)
+        )
+    result = verify_field_store(
+        store, required_keys=required, require_nonempty=False
+    )
+    if not result["ok"]:
+        return VerifyResult(
+            "downsample",
+            False,
+            f"Field store incomplete: {'; '.join(result['reasons'])}",
+            str(store),
+        )
+    if required:
+        from syndiff_pipeline.template_creation.processing.field_templates import (
+            contrib_path,
+            load_contrib,
+        )
+
+        nonempty = 0
+        for key in required:
+            if len(key) == 4:
+                gid_i, skycell, sx_i, sy_i = key
+                p = contrib_path(store, skycell, sx_i, sy_i, group_id=int(gid_i))
+            else:
+                skycell, sx_i, sy_i = key
+                p = contrib_path(store, skycell, sx_i, sy_i)
+            if p.is_file() and len(load_contrib(p)["indices"]) > 0:
+                nonempty += 1
+        if nonempty == 0:
+            return VerifyResult(
+                "downsample",
+                False,
+                f"Field store has {len(required)} keys but all contribs empty",
+                str(store),
+            )
+    return VerifyResult(
+        "downsample",
+        True,
+        f"Field store OK ({store.name})",
+        str(store),
+    )
 
 
 def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
@@ -913,17 +1312,16 @@ def _downsample_expected_basenames(resolved: ResolvedTargetConfig) -> tuple[list
     base = Path(ds.output_base or resolved.template_output_base)
     basenames = [
         f"syndiff_template_s{t.sector:04d}_{t.camera}_{t.ccd}{roi_part}{os_part}"
-        f"_dx{float(dx):.3f}_dy{float(dy):.3f}.fits.gz"
+        f"_dx{float(dx):.3f}_dy{float(dy):.3f}{PIPELINE_FITS_EXT}"
         for dx, dy in offsets
     ]
     return basenames, base
 
 
 def _downsample_fits_filename_candidates(basename: str) -> list[str]:
-    """Canonical ``.fits.gz`` basename plus legacy uncompressed ``.fits``."""
-    if basename.endswith(".fits.gz"):
-        return [basename, basename[:-3]]
-    return [basename]
+    """Canonical ``.fits.fz`` basename plus legacy ``.fits.gz`` / ``.fits``."""
+    stem = strip_fits_storage_suffix(basename)
+    return [f"{stem}{sfx}" for sfx in FITS_STORAGE_SUFFIXES]
 
 
 def _find_downsample_fits(base: Path, t, basename: str) -> str | None:
@@ -958,15 +1356,30 @@ def expected_downsample_fits_paths(resolved: ResolvedTargetConfig) -> list[Path]
 
 
 def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
-    """Verify downsample.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    VerifyResult"""
+    """Verify SCC templates store (full-chip) or legacy per-event downsample outputs."""
+    store = Path(resolved.template_output_base)
+    if store.is_dir() and any(store.iterdir()):
+        return VerifyResult(
+            "downsample",
+            True,
+            f"SCC templates store present under {store.name}/",
+            str(store),
+        )
+    legacy = _verify_downsample_legacy(resolved)
+    return VerifyResult(
+        "downsample",
+        legacy.ok,
+        legacy.message,
+        legacy.path,
+        unknown=legacy.unknown,
+    )
+
+
+def _verify_downsample_legacy(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify downsample (linear offset FITS or field SCC store)."""
+    if _geometry_mode_for_resolved(resolved) == "field":
+        return verify_downsample_field_mode(resolved)
+
     t = resolved.target
     try:
         basenames, base = _downsample_expected_basenames(resolved)
@@ -1009,6 +1422,84 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
         True,
         f"All {n_expected} offset FITS present",
         sample,
+    )
+
+
+def verify_remap(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify SCC remap store (shift schedule, groups, remap_manifest)."""
+    import json
+
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        REMAP_MANIFEST_NAME,
+        remap_root,
+    )
+
+    t = resolved.target
+    mp = resolved.stages.mapping
+    rm = resolved.stages.remap
+    store = remap_root(
+        resolved.data_root,
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=mp.oversampling_factor,
+        store_name=rm.store_name,
+    )
+    manifest_path = store / REMAP_MANIFEST_NAME
+    if not manifest_path.is_file():
+        return VerifyResult(
+            "remap",
+            False,
+            f"Missing {REMAP_MANIFEST_NAME}",
+            str(store),
+        )
+    try:
+        payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return VerifyResult(
+            "remap",
+            False,
+            f"Unreadable {REMAP_MANIFEST_NAME}: {exc}",
+            str(manifest_path),
+        )
+    lite_reason = _l4b_lite_rejection_reason(payload, source=REMAP_MANIFEST_NAME)
+    if lite_reason:
+        return VerifyResult("remap", False, lite_reason, str(manifest_path))
+    cache_reason = _verify_remap_exact_caches(
+        store,
+        payload,
+    )
+    if cache_reason:
+        return VerifyResult("remap", False, cache_reason, str(store))
+    if float(payload.get("cache_quantum_ps1_px", -1)) != float(rm.cache_quantum_ps1_px):
+        return VerifyResult(
+            "remap",
+            False,
+            "remap_manifest cache_quantum_ps1_px does not match config",
+            str(manifest_path),
+        )
+    if str(payload.get("keying", "")) != str(rm.keying):
+        return VerifyResult(
+            "remap",
+            False,
+            "remap_manifest keying does not match config",
+            str(manifest_path),
+        )
+    schedule = store / "shift_schedule.npz"
+    groups = store / "template_group_shifts.parquet"
+    missing = [p.name for p in (schedule, groups) if not p.is_file()]
+    if missing:
+        return VerifyResult(
+            "remap",
+            False,
+            f"Remap store incomplete: missing {', '.join(missing)}",
+            str(store),
+        )
+    return VerifyResult(
+        "remap",
+        True,
+        f"Remap store OK ({store.name})",
+        str(manifest_path),
     )
 
 
@@ -1091,11 +1582,11 @@ def stage_absence_probe(
     meta: dict | None = None,
 ) -> AbsenceProbeResult:
     """Fast filesystem probe: skip full verify when outputs cannot exist."""
-    from syndiff_pipeline.common.download import list_local_ffis, nested_ffi_dir, tesscurl_script_path
+    from syndiff_pipeline.common.download import list_local_ffis, tesscurl_script_path
     from syndiff_pipeline.common.orchestration.event_ws_symlinks import event_templates_symlink_path
     from syndiff_pipeline.common.wcs_grouping import CLUSTER_TEMPLATE_JOB_FILENAME
 
-    if stage == "wcs_grouping":
+    if stage == "bind":
         job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
         return (
             AbsenceProbeResult.MAYBE_PRESENT
@@ -1113,7 +1604,7 @@ def stage_absence_probe(
 
     if stage == "tess_ffi_download":
         t = resolved.target
-        ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+        ffi_leaf = resolved.ffi_dir
         if list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd):
             return AbsenceProbeResult.MAYBE_PRESENT
         cached = tesscurl_script_path(ffi_leaf, t.sector)
@@ -1122,7 +1613,7 @@ def stage_absence_probe(
         return AbsenceProbeResult.ABSENT
 
     if stage == "ps1_download":
-        zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+        zarr_path = ps1_skycells_zarr_path(resolved.data_root)
         return (
             AbsenceProbeResult.MAYBE_PRESENT
             if zarr_path.exists()
@@ -1138,11 +1629,34 @@ def stage_absence_probe(
         )
 
     if stage == "downsample":
+        store = Path(resolved.template_output_base)
+        if store.is_dir() and any(store.iterdir()):
+            return AbsenceProbeResult.MAYBE_PRESENT
         job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
         templates_link = event_templates_symlink_path(resolved.event_dir)
         if job_path.is_file() or (
             templates_link.is_symlink() and templates_link.resolve().is_dir()
         ):
+            return AbsenceProbeResult.MAYBE_PRESENT
+        return AbsenceProbeResult.ABSENT
+
+    if stage == "remap":
+        from syndiff_pipeline.template_creation.processing.field_remap import (
+            REMAP_MANIFEST_NAME,
+            remap_root,
+        )
+
+        t = resolved.target
+        mp = resolved.stages.mapping
+        store = remap_root(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=mp.oversampling_factor,
+            store_name=resolved.stages.remap.store_name,
+        )
+        if (store / REMAP_MANIFEST_NAME).is_file():
             return AbsenceProbeResult.MAYBE_PRESENT
         return AbsenceProbeResult.ABSENT
 
@@ -1175,10 +1689,10 @@ def stage_absence_probe(
 
 VERIFY_FUNCS = {
     "tess_ffi_download": verify_tess_ffi_download,
-    "wcs_grouping": verify_wcs_grouping,
     "mapping": verify_mapping,
     "ps1_download": verify_ps1_download,
     "ps1_process": verify_ps1_process,
+    "remap": verify_remap,
     "downsample": verify_downsample,
     "diff": verify_diff,
 }
@@ -1258,6 +1772,25 @@ def collect_stage_artifacts(
             raise ValueError("diff artifact collection requires RunnerConfig")
         ctx = _diff_stage_context(resolved, runner_cfg, meta=meta)
         return DIFF_STAGE.collect_artifacts(ctx)
+    if stage == "remap":
+        from syndiff_pipeline.template_creation.processing.field_remap import (
+            REMAP_MANIFEST_NAME,
+            remap_root,
+        )
+
+        t = resolved.target
+        mp = resolved.stages.mapping
+        store = remap_root(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=mp.oversampling_factor,
+            store_name=resolved.stages.remap.store_name,
+        )
+        manifest = store / REMAP_MANIFEST_NAME
+        ok = manifest.is_file()
+        return 1, int(ok), [str(manifest)] if ok else [str(store)]
     if stage == "downsample":
         paths = expected_downsample_fits_paths(resolved)
         if ps1_process_removed_stars_csv_path(resolved).is_file():
@@ -1302,17 +1835,17 @@ def collect_stage_artifacts(
         return 1, int(ok), artifacts
     if stage == "ps1_download":
         expected = _expected_ps1_download_skycells(resolved)
-        zarr_path = Path(resolved.zarr_dir) / "ps1_skycells.zarr"
+        zarr_path = ps1_skycells_zarr_path(resolved.data_root)
         result = verify_ps1_download(resolved)
         produced = 0
         if result.ok:
             produced = len(expected)
         return len(expected), produced, [str(zarr_path)]
     if stage == "tess_ffi_download":
-        from syndiff_pipeline.common.download import expected_ffi_basenames, list_local_ffis, nested_ffi_dir
+        from syndiff_pipeline.common.download import expected_ffi_basenames, list_local_ffis
 
         t = resolved.target
-        ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+        ffi_leaf = resolved.ffi_dir
         expected = expected_ffi_basenames(t.sector, t.camera, t.ccd, output_dir=ffi_leaf) or []
         files = list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd)
         return len(expected), len(files), [str(p) for p in files]

@@ -128,6 +128,18 @@ HOTPANTS_ALLOWED = frozenset(
         "write_bkg",
         "write_stamps",
         "write_kernel_solutions",
+        "oversample",
+        "use_c_extension",
+        "stamp_mode",
+        "region_weight",
+        "region_max_diameter",
+        "region_bisect_on_reject",
+        "region_min_npix",
+        "region_max_area",
+        "region_connectivity",
+        "region_rss",
+        "region_max_bisects",
+        "region_weight_cap",
     }
 )
 
@@ -194,6 +206,7 @@ _METHOD_PSF_KEYS = frozenset(
         "name",
         "type",
         "psf_type",
+        "fitter",
         "phot_cutout_size",
         "phot_bkg_poly_order",
         "phot_snap",
@@ -217,6 +230,8 @@ _METHOD_APERTURE_KEYS = frozenset(
         "sky_in",
         "sky_out",
         "aperture_cutout_size",
+        "subtract_sky",
+        "mask_sky_with_shared_mask",
         "csv_basename",
     }
 )
@@ -355,6 +370,19 @@ class HotpantsParams:
     write_bkg: bool = True
     write_stamps: bool = True
     write_kernel_solutions: bool = False
+    # Oversampled templates / pure-Python stamp modes (pyhotpants >= 0.2).
+    oversample: Optional[int] = None  # None → infer from template vs science shapes
+    use_c_extension: Optional[bool] = None  # None → auto (False if OS>1 or connected)
+    stamp_mode: str = "grid"  # grid | connected_regions
+    region_weight: str = "npix"
+    region_max_diameter: float = 40.0
+    region_bisect_on_reject: bool = False
+    region_min_npix: Optional[int] = None
+    region_max_area: int = 0
+    region_connectivity: int = 8
+    region_rss: Optional[int] = None
+    region_max_bisects: int = 100
+    region_weight_cap: Optional[tuple] = None
 
 
 @dataclass
@@ -398,8 +426,9 @@ class PsfPhotometryMethodParams:
     """PsfPhotometryMethodParams."""
     name: str
     psf_type: str = "prf"
+    fitter: Optional[str] = None  # photutils | tessreduce; None → photutils for epsf
     phot_cutout_size: int = 15
-    phot_bkg_poly_order: int = 3
+    phot_bkg_poly_order: Optional[int] = 3  # None → no poly surface (flux-only)
     phot_snap: str = "brightest"
     psf_size: int = 11
     epsf_oversample: int = 2
@@ -409,7 +438,8 @@ class PsfPhotometryMethodParams:
     csv_basename: Optional[str] = None
     fit_shape: int = 11
     aperture_radius: float = 2.0
-    psf_grouper_min_separation: float = 10.0
+    # None → grouper=None for single-target forced photometry
+    psf_grouper_min_separation: Optional[float] = None
 
 
 @dataclass
@@ -420,6 +450,8 @@ class AperturePhotometryMethodParams:
     sky_in: int = 5
     sky_out: int = 9
     aperture_cutout_size: Optional[int] = None
+    subtract_sky: bool = True
+    mask_sky_with_shared_mask: bool = False
     csv_basename: Optional[str] = None
 
 
@@ -498,6 +530,26 @@ def _parse_psf_method(
     for n in ("tile_nx", "tile_ny"):
         if n not in kw:
             kw[n] = getattr(stage_defaults, n)
+    if "fitter" in kw and kw["fitter"] is not None:
+        fitter = str(kw["fitter"]).strip().lower()
+        if fitter not in ("photutils", "tessreduce"):
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+                f"fitter must be 'photutils' or 'tessreduce', got {kw['fitter']!r}"
+            )
+        kw["fitter"] = fitter
+    if "phot_bkg_poly_order" in kw and kw["phot_bkg_poly_order"] is not None:
+        kw["phot_bkg_poly_order"] = int(kw["phot_bkg_poly_order"])
+    if pt == "prf" and kw.get("fitter") is not None:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            "fitter is only valid with psf_type: epsf"
+        )
+    if pt == "prf" and (entry.get("inputs") or {}).get("epsf"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            "inputs.epsf is forbidden for psf_type: prf"
+        )
     p = PsfPhotometryMethodParams(name=_parse_method_name(entry["name"], pipeline_idx, method_idx), **kw)
     p.psf_type = pt
     inp = entry.get("inputs") or {}
@@ -634,6 +686,27 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
     if "hotpants_n_jobs" in stage:
         v = stage["hotpants_n_jobs"]
         hp.hotpants_n_jobs = None if v is None else int(v)
+    if "oversample" in stage:
+        v = stage["oversample"]
+        hp.oversample = None if v is None else int(v)
+    if "use_c_extension" in stage:
+        v = stage["use_c_extension"]
+        hp.use_c_extension = None if v is None else bool(v)
+    stamp_mode = str(getattr(hp, "stamp_mode", "grid") or "grid").strip()
+    if stamp_mode not in ("grid", "connected_regions"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] hotpants.stamp_mode must be "
+            f"'grid' or 'connected_regions', got {stamp_mode!r}"
+        )
+    hp.stamp_mode = stamp_mode
+    if "region_weight_cap" in stage and stage["region_weight_cap"] is not None:
+        cap = stage["region_weight_cap"]
+        if not (isinstance(cap, (list, tuple)) and len(cap) == 2):
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] hotpants.region_weight_cap must be "
+                f"[lo, hi], got {cap!r}"
+            )
+        hp.region_weight_cap = (float(cap[0]), float(cap[1]))
     return hp
 
 

@@ -1,7 +1,21 @@
 """
 photometry.py
 =============
-``forced_photometry`` pipeline stage — forced PSF photometry on difference images.
+``forced_photometry`` pipeline stage — forced photometry on difference images.
+
+Modes (per ``methods`` entry):
+  • aperture — square target + sky annulus (optional ``subtract_sky``,
+    optional ``mask_sky_with_shared_mask``)
+  • ``psf_type: prf`` — official TESS PRF + TESSreduce ``create_psf`` BFGS
+  • ``psf_type: epsf`` + ``fitter: photutils`` (default) — per-frame
+    ``GriddedPSFModel`` / ``PSFPhotometry`` (``grouper=None`` by default)
+  • ``psf_type: epsf`` + ``fitter: tessreduce`` — same BFGS as PRF using a
+    stamp from that frame's gridded ePSF
+
+``psf_type: epsf`` requires ``gridded_epsf_index.json``; the legacy tile-smooth
+stack is not used for forced photometry. ``phot_bkg_poly_order: null`` maps to
+``surface=False`` on the create_psf path.
+
 When ``cfg.n_jobs`` > 1, cutout I/O and per-epoch ``psf_flux`` use joblib **loky**
 (process pool); use ``n_jobs: 1`` for a fully serial run.
 
@@ -15,9 +29,6 @@ FITS are not read twice.
 ERROR, treated like TESSreduce ``ecut``: the fitter uses ``residual² / error``).
 When absent, photometry uses unit ``error`` (same as TESSreduce ``use_error_image=False``
 with flat weights).
-Supports two modes:
-  • 'epsf' — use the fitted empirical ePSF (EpsfLocator wrapper)
-  • 'prf'  — use the official TESS PRF (TESS_PRF from the PRF package)
 
 The ``create_psf`` class and ``polynomial_surface`` are vendored from the
 publicly available **TESSreduce** project.  ``EpsfLocator`` is a thin wrapper
@@ -580,6 +591,65 @@ class EpsfLocator:
         return out
 
 
+# Shared-mask bits for optional aperture sky exclusion (catalog + bright crosses).
+_SHARED_MASK_SKY_BITS = 3  # bit 1 | bit 2
+
+
+def _create_psf_surface_args(
+    phot_bkg_poly_order: Optional[int],
+) -> tuple[bool, int]:
+    """Map ``phot_bkg_poly_order`` to ``(surface, poly_order)`` for ``create_psf``.
+
+    ``None`` → flux-only (``surface=False``); ``0`` → constant background;
+    ``n`` → order-n polynomial surface.
+    """
+    if phot_bkg_poly_order is None:
+        return False, 0
+    return True, int(phot_bkg_poly_order)
+
+
+def epsf_stamp_from_gridded(
+    gridded_model,
+    x: float,
+    y: float,
+) -> tuple[np.ndarray, int]:
+    """
+    Nearest grid ePSF (oversampled) from a per-frame ``GriddedPSFModel``.
+
+    Returns
+    -------
+    epsf_2d : (over_size, over_size) float64, normalised to sum 1
+    oversample : int
+    """
+    grid = np.asarray(gridded_model.grid_xypos, dtype=np.float64)
+    d2 = (grid[:, 0] - float(x)) ** 2 + (grid[:, 1] - float(y)) ** 2
+    i = int(np.argmin(d2))
+    stamp = np.asarray(gridded_model.data[i], dtype=np.float64).copy()
+    s = float(np.nansum(stamp))
+    if s > 0:
+        stamp /= s
+    os_arr = np.atleast_1d(gridded_model.oversampling)
+    oversample = int(os_arr[0])
+    return stamp, oversample
+
+
+def make_epsf_locator_at(gridded_model, x: float, y: float) -> EpsfLocator:
+    """``EpsfLocator`` at crop-local (x, y) for TESSreduce-style ``create_psf``."""
+    stamp, oversample = epsf_stamp_from_gridded(gridded_model, x, y)
+    return EpsfLocator(stamp, oversample)
+
+
+def _combine_sky_mask_with_shared(
+    sky_mask: Optional[np.ndarray],
+    shared_cut: np.ndarray,
+) -> np.ndarray:
+    """OR ref-epoch sky mask with shared_mask catalog/cross bits."""
+    star = (np.asarray(shared_cut) & _SHARED_MASK_SKY_BITS) != 0
+    if sky_mask is None:
+        return star
+    return np.asarray(sky_mask, dtype=bool) | star
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ── PSF kernel builder (epsf or prf) ─────────────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -692,9 +762,16 @@ def forced_phot_gridded_epoch(
     *,
     error: np.ndarray | None = None,
     mask: np.ndarray | None = None,
+    local_bkg_estimator=None,
 ) -> tuple[float, float, float, float]:
     """
     Forced PSF photometry at crop-local (x, y) using a per-frame GriddedPSFModel.
+
+    Parameters
+    ----------
+    local_bkg_estimator : optional
+        photutils local-background estimator (e.g. ``LocalBackground``).
+        Default ``None`` matches production (no local background subtraction).
 
     Returns flux, eflux, x_fit, y_fit.
     """
@@ -710,7 +787,13 @@ def forced_phot_gridded_epoch(
 
     fit_shape = int(getattr(phot, "fit_shape", 11) or 11)
     aperture_radius = float(getattr(phot, "aperture_radius", 2.0) or 2.0)
-    grouper_sep = float(getattr(phot, "psf_grouper_min_separation", 10.0) or 10.0)
+    # None / omitted → no SourceGrouper (single-target forced photometry).
+    raw_sep = getattr(phot, "psf_grouper_min_separation", None)
+    grouper = None
+    if raw_sep is not None:
+        from photutils.psf import SourceGrouper
+
+        grouper = SourceGrouper(min_separation=float(raw_sep))
 
     err_use = error
     if err_use is not None:
@@ -721,14 +804,12 @@ def forced_phot_gridded_epoch(
             err_use = None
 
     try:
-        from photutils.psf import SourceGrouper
-
         psf_phot = PSFPhotometry(
             gridded_model,
             fit_shape=fit_shape,
             aperture_radius=aperture_radius,
-            grouper=SourceGrouper(min_separation=grouper_sep),
-            local_bkg_estimator=None,
+            grouper=grouper,
+            local_bkg_estimator=local_bkg_estimator,
         )
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
@@ -837,6 +918,190 @@ def _run_forced_photometry_gridded_single(
     if getattr(cfg, "pipeline_plots", False) and lightcurve_plot_path:
         dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
         title = plot_title_suffix or output_label or "gridded ePSF"
+        if plot_source_label:
+            title = f"{title} · {plot_source_label}"
+        write_lightcurve_diagnostic_plot(
+            lc_df,
+            output_dir,
+            dpi=dpi,
+            title_line=title,
+            png_path=lightcurve_plot_path,
+        )
+    return lc_df
+
+
+def _run_forced_photometry_gridded_tessreduce_single(
+    diff_paths: list,
+    target_xy: np.ndarray,
+    gridded_catalog,
+    wcs_table: pd.DataFrame,
+    cfg,
+    phot: PsfPhotometryMethodParams,
+    output_dir: str,
+    *,
+    ref_frame_index: Optional[int] = None,
+    lightcurve_csv_filename: Optional[str] = None,
+    lightcurve_plot_path: Optional[str] = None,
+    plot_title_suffix: Optional[str] = None,
+    plot_source_label: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_dir: Optional[str] = None,
+) -> pd.DataFrame:
+    """Forced photometry: per-frame gridded ePSF + TESSreduce ``create_psf`` BFGS."""
+    csv_name = lightcurve_csv_filename or "lightcurve.csv"
+    txy = np.asarray(target_xy, dtype=np.float64)
+    n_epochs = len(diff_paths)
+    phot_size = int(phot.phot_cutout_size)
+    snap = str(phot.phot_snap or "brightest").lower()
+    surface, poly_order = _create_psf_surface_args(phot.phot_bkg_poly_order)
+
+    btjd_col = (
+        wcs_table["btjd"].values
+        if "btjd" in wcs_table.columns
+        else np.full(n_epochs, np.nan)
+    )
+    gid_col = (
+        wcs_table["group_id"].values
+        if "group_id" in wcs_table.columns
+        else np.zeros(n_epochs, int)
+    )
+
+    # ---- phot_snap offsets (dx, dy) once, then reuse ----
+    sx = 0.0
+    sy = 0.0
+    if snap == "fixed":
+        pass
+    else:
+        snap_idx: Optional[int] = None
+        if snap == "ref":
+            ri = ref_frame_index
+            if (
+                ri is not None
+                and 0 <= ri < n_epochs
+                and diff_paths[ri] is not None
+                and os.path.exists(str(diff_paths[ri]))
+            ):
+                snap_idx = int(ri)
+        elif snap == "brightest":
+            best_tw = -1.0
+            for i, path in enumerate(diff_paths):
+                if path is None or not os.path.exists(str(path)):
+                    continue
+                tx_i, ty_i = float(txy[i, 0]), float(txy[i, 1])
+                if not (np.isfinite(tx_i) and np.isfinite(ty_i)):
+                    continue
+                try:
+                    data, sigma_full = read_diff_primary_and_noise_sigma(str(path))
+                    cut = _extract_cutout(data, tx_i, ty_i, phot_size)
+                    sc = (
+                        _extract_cutout(sigma_full, tx_i, ty_i, phot_size)
+                        if sigma_full is not None
+                        else None
+                    )
+                except Exception:
+                    continue
+                tw = _tessreduce_brightest_weight(cut, sc)
+                if tw > best_tw:
+                    best_tw = tw
+                    snap_idx = i
+        else:
+            log.warning(
+                "  Unknown phot_snap=%r for tessreduce ePSF; using fixed offsets",
+                snap,
+            )
+            snap_idx = None
+
+        if snap_idx is not None:
+            path = str(diff_paths[snap_idx])
+            tx_i, ty_i = float(txy[snap_idx, 0]), float(txy[snap_idx, 1])
+            stem = _ffi_stem_from_diff_path(path)
+            model = gridded_catalog.load_model(stem)
+            if model is not None and np.isfinite(tx_i) and np.isfinite(ty_i):
+                try:
+                    data, sigma_full = read_diff_primary_and_noise_sigma(path)
+                    cut = _extract_cutout(data, tx_i, ty_i, phot_size)
+                    sc = (
+                        _extract_cutout(sigma_full, tx_i, ty_i, phot_size)
+                        if sigma_full is not None
+                        else None
+                    )
+                    locator = make_epsf_locator_at(model, tx_i, ty_i)
+                    psf_obj = create_psf(locator, phot_size)
+                    psf_obj.source()
+                    psf_obj.psf_position(
+                        cut, error=_tessreduce_error_plane(sc, cut.shape)
+                    )
+                    sx = float(psf_obj.source_x)
+                    sy = float(psf_obj.source_y)
+                    log.info(
+                        "  tessreduce ePSF snap(%s=%s): dx=%.3f, dy=%.3f",
+                        snap,
+                        snap_idx,
+                        sx,
+                        sy,
+                    )
+                except Exception as exc:
+                    log.warning("  tessreduce ePSF snap failed: %s", exc)
+
+    records = []
+    for i, path in enumerate(diff_paths):
+        tx_i, ty_i = float(txy[i, 0]), float(txy[i, 1])
+        rec = {
+            "btjd": btjd_col[i] if i < len(btjd_col) else np.nan,
+            "group_id": gid_col[i] if i < len(gid_col) else 0,
+            "filename": os.path.basename(path) if path else "",
+            "flux": np.nan,
+            "eflux": np.nan,
+        }
+        if path is None or not os.path.exists(str(path)):
+            records.append(rec)
+            continue
+        if not (np.isfinite(tx_i) and np.isfinite(ty_i)):
+            records.append(rec)
+            continue
+        stem = _ffi_stem_from_diff_path(path)
+        model = gridded_catalog.load_model(stem)
+        if model is None:
+            log.warning("  No gridded ePSF for %s", stem)
+            records.append(rec)
+            continue
+        try:
+            data, sigma_full = read_diff_primary_and_noise_sigma(str(path))
+            cut = _extract_cutout(data, tx_i, ty_i, phot_size)
+            sc = (
+                _extract_cutout(sigma_full, tx_i, ty_i, phot_size)
+                if sigma_full is not None
+                else None
+            )
+            locator = make_epsf_locator_at(model, tx_i, ty_i)
+            psf_obj = create_psf(locator, phot_size)
+            psf_obj.source_x = sx
+            psf_obj.source_y = sy
+            error = _tessreduce_error_plane(sc, cut.shape)
+            psf_obj.psf_flux(
+                cut, error=error, surface=surface, poly_order=poly_order
+            )
+            rec["flux"] = float(psf_obj.flux)
+            rec["eflux"] = float(psf_obj.eflux)
+        except Exception as exc:
+            log.debug("  tessreduce ePSF flux failed frame %s: %s", i, exc)
+        records.append(rec)
+
+    lc_df = pd.DataFrame(records)
+    if diffs_dir:
+        lc_df = apply_zp_calibration_if_available(lc_df, diffs_dir)
+    out_csv = os.path.join(output_dir, csv_name)
+    os.makedirs(output_dir, exist_ok=True)
+    lc_df.to_csv(out_csv, index=False)
+    log.info(
+        "  tessreduce gridded ePSF light curve saved to %s (%d epochs)",
+        out_csv,
+        len(lc_df),
+    )
+
+    if getattr(cfg, "pipeline_plots", False) and lightcurve_plot_path:
+        dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+        title = plot_title_suffix or output_label or "tessreduce ePSF"
         if plot_source_label:
             title = f"{title} · {plot_source_label}"
         write_lightcurve_diagnostic_plot(
@@ -990,6 +1255,7 @@ def _forced_aperture_epoch_worker(
         cut_size,
         per_source,
         filename,
+        shared_mask_full,
     ) = task
     n_src = len(per_source)
     nan_rec = {
@@ -1020,6 +1286,10 @@ def _forced_aperture_epoch_worker(
         sigma_cut = None
         if sigma_full is not None:
             sigma_cut = _extract_cutout(sigma_full, tx, ty, cut_size)
+        sky_use = sky_mask
+        if shared_mask_full is not None:
+            shared_cut = _extract_cutout(shared_mask_full, tx, ty, cut_size)
+            sky_use = _combine_sky_mask_with_shared(sky_mask, shared_cut)
         try:
             flux, sky, flux_wo_sky, eflux = aperture_flux_on_cutout(
                 cut,
@@ -1027,7 +1297,7 @@ def _forced_aperture_epoch_worker(
                 ap_sky,
                 n_tar,
                 sigma=sigma_cut,
-                sky_mask=sky_mask,
+                sky_mask=sky_use,
             )
         except Exception:
             recs.append(dict(nan_rec))
@@ -1062,6 +1332,7 @@ def _run_aperture_photometry_multi(
     diffs_input: Optional[str] = None,
     diff_log_path: Optional[str] = None,
     diffs_dir: Optional[str] = None,
+    shared_mask: Optional[np.ndarray] = None,
 ) -> List[pd.DataFrame]:
     """Aperture forced photometry for multiple sources (one FITS read per epoch)."""
     if not targets:
@@ -1074,6 +1345,18 @@ def _run_aperture_photometry_multi(
     tar_ap = int(method.tar_ap)
     sky_in = int(method.sky_in)
     sky_out = int(method.sky_out)
+    subtract_sky = bool(getattr(method, "subtract_sky", True))
+    mask_sky = bool(getattr(method, "mask_sky_with_shared_mask", False))
+    flux_col = "flux_wo_sky" if subtract_sky else "flux"
+
+    shared_mask_arr: Optional[np.ndarray] = None
+    if mask_sky:
+        if shared_mask is None:
+            raise ValueError(
+                f"aperture method {method.name!r}: mask_sky_with_shared_mask=true "
+                "requires shared_mask.fits.fz (run shared_mask stage first)"
+            )
+        shared_mask_arr = np.asarray(shared_mask)
 
     for spec in targets:
         txy = np.asarray(spec.target_xy, dtype=np.float64)
@@ -1177,6 +1460,7 @@ def _run_aperture_photometry_multi(
                 cut_size,
                 per_source,
                 str(path) if path else "",
+                shared_mask_arr,
             )
         )
 
@@ -1225,7 +1509,7 @@ def _run_aperture_photometry_multi(
         lc_df = apply_zp_calibration_if_available(
             lc_df,
             diffs_dir,
-            flux_col="flux_wo_sky",
+            flux_col=flux_col,
             eflux_col="eflux",
         )
         out_path = os.path.join(output_dir, spec.csv_basename)
@@ -1250,7 +1534,7 @@ def _run_aperture_photometry_multi(
                 dpi=dpi,
                 title_line=title,
                 png_path=spec.plot_png_path,
-                flux_column="flux_wo_sky",
+                flux_column=flux_col,
             )
         out_dfs.append(lc_df)
 
@@ -1382,11 +1666,12 @@ def _forced_phot_flux_worker(
     psf_obj.source_y = float(source_y)
     error = _tessreduce_error_plane(sigma_cut, cut.shape)
     try:
+        surface, poly_order = _create_psf_surface_args(phot_bkg_poly_order)
         psf_obj.psf_flux(
             cut,
             error=error,
-            surface=True,
-            poly_order=phot_bkg_poly_order,
+            surface=surface,
+            poly_order=poly_order,
         )
         flux, eflux = psf_obj.flux, psf_obj.eflux
     except Exception as exc:
@@ -1530,11 +1815,12 @@ def _forced_phot_multi_flux_worker(
         psf_obj.source_y = float(sy)
         error = _tessreduce_error_plane(sigma_cut, cut.shape)
         try:
+            surface, poly_order = _create_psf_surface_args(phot_bkg_poly_order)
             psf_obj.psf_flux(
                 cut,
                 error=error,
-                surface=True,
-                poly_order=phot_bkg_poly_order,
+                surface=surface,
+                poly_order=poly_order,
             )
             flux, eflux = psf_obj.flux, psf_obj.eflux
         except Exception as exc:
@@ -2079,11 +2365,12 @@ def _run_forced_photometry_single(
 
             error = _tessreduce_error_plane(sigma_cutouts[i], cut.shape)
             try:
+                surface, poly_order = _create_psf_surface_args(phot.phot_bkg_poly_order)
                 psf_obj.psf_flux(
                     cut,
                     error=error,
-                    surface=True,
-                    poly_order=phot.phot_bkg_poly_order,
+                    surface=surface,
+                    poly_order=poly_order,
                 )
                 flux, eflux = psf_obj.flux, psf_obj.eflux
             except Exception as exc:
@@ -2116,7 +2403,7 @@ def _run_forced_photometry_single(
                     sy,
                     locator_bundle,
                     int(phot.phot_cutout_size),
-                    int(phot.phot_bkg_poly_order),
+                    phot.phot_bkg_poly_order,
                     btjd,
                     gid,
                     str(path) if path else "",
@@ -2278,7 +2565,7 @@ def run_forced_photometry_multi(
     parallel = n_jobs != 1 and n_epochs > 1
     snap = str(phot.phot_snap or "brightest").lower()
     phot_size = int(phot.phot_cutout_size)
-    poly_order = int(phot.phot_bkg_poly_order)
+    poly_order_arg = phot.phot_bkg_poly_order
 
     cli_progress_path = (
         str(progress_path_for_diff_log(diff_log_path))
@@ -2501,7 +2788,7 @@ def run_forced_photometry_multi(
                 btjd,
                 gid,
                 phot_size,
-                poly_order,
+                poly_order_arg,
                 per_source,
                 str(path) if path else "",
             )
@@ -2644,12 +2931,16 @@ def run_forced_photometry_stage(
     plot_path_fn=None,
     diffs_dir: Optional[str] = None,
     gridded_epsf_by_workspace: Optional[dict] = None,
+    shared_mask: Optional[np.ndarray] = None,
 ) -> dict[str, List[pd.DataFrame]]:
     """
     Run every configured forced-photometry method (PSF and/or aperture).
 
     ``target_specs`` entries are ``(target_xy, extra_name, tag, pt_dict)`` where
     ``extra_name`` is ``None`` for the primary target.
+
+    For ``psf_type: epsf`` a per-frame gridded ePSF catalog is required
+    (``gridded_epsf_index.json``); the legacy tile-smooth stack is not used.
     """
     results: dict[str, List[pd.DataFrame]] = {}
     gridded_epsf_by_workspace = gridded_epsf_by_workspace or {}
@@ -2677,13 +2968,26 @@ def run_forced_photometry_stage(
 
         if isinstance(method, PsfPhotometryMethodParams):
             epsf_ws = method.epsf_workspace or stage_epsf_workspace
-            use_gridded = (
-                method.psf_type == "epsf"
-                and epsf_ws
-                and epsf_ws in gridded_epsf_by_workspace
-            )
-            if use_gridded:
+            if method.psf_type == "epsf":
+                if not epsf_ws:
+                    raise ValueError(
+                        f"forced_photometry method {method.name!r}: psf_type 'epsf' "
+                        "requires inputs.epsf or per-method inputs.epsf"
+                    )
+                if epsf_ws not in gridded_epsf_by_workspace:
+                    raise ValueError(
+                        f"forced_photometry method {method.name!r}: psf_type 'epsf' "
+                        f"requires a gridded ePSF catalog under workspace {epsf_ws!r} "
+                        "(gridded_epsf_index.json). Rebuild the ePSF stage; the legacy "
+                        "tile-smooth stack is no longer used for forced photometry."
+                    )
                 catalog = gridded_epsf_by_workspace[epsf_ws]
+                fitter = (method.fitter or "photutils").strip().lower()
+                if fitter not in ("photutils", "tessreduce"):
+                    raise ValueError(
+                        f"forced_photometry method {method.name!r}: "
+                        f"fitter must be 'photutils' or 'tessreduce', got {method.fitter!r}"
+                    )
                 dfs = []
                 for target_xy, extra_name, _tag, _pt in target_specs:
                     csv_fname = lightcurve_csv_basename(
@@ -2694,44 +2998,52 @@ def run_forced_photometry_stage(
                     lc_plot_path = None
                     if getattr(cfg, "pipeline_plots", False) and plot_path_fn is not None:
                         lc_plot_path = plot_path_fn(method.name, extra_name)
-                    dfs.append(
-                        _run_forced_photometry_gridded_single(
-                            diff_paths=diff_paths,
-                            target_xy=target_xy,
-                            gridded_catalog=catalog,
-                            wcs_table=wcs_table,
-                            cfg=cfg,
-                            phot=method,
-                            output_dir=output_dir,
-                            lightcurve_csv_filename=csv_fname,
-                            lightcurve_plot_path=lc_plot_path,
-                            plot_title_suffix=plot_title_suffix,
-                            plot_source_label=extra_name or "primary",
-                            output_label=output_label,
-                            diffs_input=diffs_input,
-                            diff_log_path=diff_log_path,
-                            diffs_dir=diffs_dir,
+                    if fitter == "tessreduce":
+                        dfs.append(
+                            _run_forced_photometry_gridded_tessreduce_single(
+                                diff_paths=diff_paths,
+                                target_xy=target_xy,
+                                gridded_catalog=catalog,
+                                wcs_table=wcs_table,
+                                cfg=cfg,
+                                phot=method,
+                                output_dir=output_dir,
+                                ref_frame_index=ref_frame_index,
+                                lightcurve_csv_filename=csv_fname,
+                                lightcurve_plot_path=lc_plot_path,
+                                plot_title_suffix=plot_title_suffix,
+                                plot_source_label=extra_name or "primary",
+                                output_label=output_label,
+                                diffs_dir=diffs_dir,
+                            )
                         )
-                    )
+                    else:
+                        dfs.append(
+                            _run_forced_photometry_gridded_single(
+                                diff_paths=diff_paths,
+                                target_xy=target_xy,
+                                gridded_catalog=catalog,
+                                wcs_table=wcs_table,
+                                cfg=cfg,
+                                phot=method,
+                                output_dir=output_dir,
+                                lightcurve_csv_filename=csv_fname,
+                                lightcurve_plot_path=lc_plot_path,
+                                plot_title_suffix=plot_title_suffix,
+                                plot_source_label=extra_name or "primary",
+                                output_label=output_label,
+                                diffs_input=diffs_input,
+                                diff_log_path=diff_log_path,
+                                diffs_dir=diffs_dir,
+                            )
+                        )
             else:
-                if method.psf_type == "prf":
-                    over_size = 2 * method.psf_size + 1
-                    n_tiles = len(tile_centers) if tile_centers else (
-                        method.tile_ny * method.tile_nx
-                    )
-                    epsf_for_phot = np.zeros((n_tiles, over_size**2))
-                else:
-                    if not epsf_ws:
-                        raise ValueError(
-                            f"forced_photometry method {method.name!r}: psf_type 'epsf' "
-                            "requires inputs.epsf or per-method inputs.epsf"
-                        )
-                    if epsf_ws not in epsf_by_workspace:
-                        raise ValueError(
-                            f"forced_photometry method {method.name!r}: ePSF workspace "
-                            f"{epsf_ws!r} not loaded"
-                        )
-                    epsf_for_phot = epsf_by_workspace[epsf_ws]
+                # PRF: official TESS_PRF + create_psf (no ePSF workspace).
+                over_size = 2 * method.psf_size + 1
+                n_tiles = len(tile_centers) if tile_centers else (
+                    method.tile_ny * method.tile_nx
+                )
+                epsf_for_phot = np.zeros((n_tiles, over_size**2))
                 dfs = run_forced_photometry_multi(
                     diff_paths=diff_paths,
                     targets=phot_targets,
@@ -2763,6 +3075,7 @@ def run_forced_photometry_stage(
                 diffs_input=diffs_input,
                 diff_log_path=diff_log_path,
                 diffs_dir=diffs_dir,
+                shared_mask=shared_mask,
             )
         else:
             raise TypeError(f"unknown photometry method type: {type(method)!r}")

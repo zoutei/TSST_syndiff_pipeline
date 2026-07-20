@@ -13,9 +13,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration import logs
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    ensure_event_templates_symlink,
-)
+from syndiff_pipeline.common.scc_paths import event_scc_leaf
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
@@ -79,15 +77,25 @@ class TestVerifyDiffCli(unittest.TestCase):
             data_root=str(self.data),
         )
         _write_diff_policy(self.site / "diff_config.yaml")
-        template_leaf = self.data / "shifted_downsampled" / "sector0020_camera3_ccd3"
-        template_leaf.mkdir(parents=True)
-        (template_leaf / "group_1").mkdir()
-        (template_leaf / "group_1" / "ps1_template.fits").write_bytes(b"SIMPLE  = T")
-
         self.target = _target()
-        self.event_dir = self.handoff / "events" / self.target.label()
-        ensure_event_templates_symlink(self.event_dir, template_leaf)
-        (self.event_dir / "cluster_template_job.json").write_text(
+        self.event_dir = event_scc_leaf(
+            self.handoff,
+            self.target.event_name(),
+            self.target.sector,
+            self.target.camera,
+            self.target.ccd,
+        )
+        self.event_dir.mkdir(parents=True, exist_ok=True)
+        template_store = (
+            self.data
+            / "s0020" / "c3" / "k3"
+            / "templates"
+            / "oversampling_1"
+        )
+        template_store.mkdir(parents=True)
+        (template_store / "group_1").mkdir()
+        (template_store / "group_1" / "ps1_template.fits").write_bytes(b"SIMPLE  = T")
+        (self.event_dir / "event_job.json").write_text(
             json.dumps({"reference_ffi_path": "/tmp/ref.fits"}),
             encoding="utf-8",
         )

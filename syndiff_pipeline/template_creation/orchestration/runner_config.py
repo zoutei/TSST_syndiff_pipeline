@@ -27,7 +27,15 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     TemplateStageParams,
     parse_stage_params,
 )
-from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    ps1_skycells_zarr_dir,
+    scc_convolved_zarr,
+    scc_ffi_dir,
+    scc_mapping_dir,
+    scc_remap_dir,
+    scc_templates_dir,
+)
 from syndiff_pipeline.common.orchestration.workspace import (
     normalize_workspace_root,
     runs_root as runs_root,
@@ -98,6 +106,7 @@ class RunnerConfig:
     scheduler_heartbeat_interval_s: float = 30.0
     verify_max_workers: int = 1
     verify_budget_per_tick: int = 16
+    skip_artifact_verify: bool = False
     max_stage_attempts: int = 3
     requeue_backoff_s: float = 30.0
     condor_hold_timeout_s: float = 600.0
@@ -138,8 +147,10 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out[name] = ResourcePoolParams(max_concurrent=int(spec.get("max_concurrent", 1)))
     if "network" not in out:
         out["network"] = ResourcePoolParams(max_concurrent=3)
-    if "cpu_light" not in out:
-        out["cpu_light"] = ResourcePoolParams(max_concurrent=2)
+    if "downsample" not in out:
+        out["downsample"] = ResourcePoolParams(max_concurrent=2)
+    if "remap" not in out:
+        out["remap"] = ResourcePoolParams(max_concurrent=2)
     if "mapping" not in out:
         out["mapping"] = ResourcePoolParams(max_concurrent=6)
     if "ps1_process" not in out:
@@ -238,6 +249,9 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         verify_budget_per_tick=int(
             raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
         ),
+        skip_artifact_verify=bool(
+            raw.get("scheduler", {}).get("skip_artifact_verify", False)
+        ),
         max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
         requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
         condor_hold_timeout_s=float(
@@ -321,6 +335,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "mapping": asdict(cfg.stages.mapping),
         "ps1_download": asdict(cfg.stages.ps1_download),
         "ps1_process": asdict(cfg.stages.ps1_process),
+        "remap": asdict(cfg.stages.remap),
         "downsample": asdict(cfg.stages.downsample),
         "diff": asdict(cfg.stages.diff),
         "star": asdict(cfg.stages.star),
@@ -334,6 +349,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s,
         "verify_max_workers": cfg.verify_max_workers,
         "verify_budget_per_tick": cfg.verify_budget_per_tick,
+        "skip_artifact_verify": cfg.skip_artifact_verify,
         "max_stage_attempts": cfg.max_stage_attempts,
         "requeue_backoff_s": cfg.requeue_backoff_s,
         "condor_hold_timeout_s": cfg.condor_hold_timeout_s,
@@ -341,6 +357,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
     data.pop("scheduler_heartbeat_interval_s", None)
     data.pop("verify_max_workers", None)
     data.pop("verify_budget_per_tick", None)
+    data.pop("skip_artifact_verify", None)
     data.pop("max_stage_attempts", None)
     data.pop("requeue_backoff_s", None)
     data.pop("condor_hold_timeout_s", None)
@@ -414,7 +431,9 @@ def load_and_materialize_runner_config(
                 or raw.get("star_site_config"),
             )
             or "",
-            stages=parse_stage_params(raw.get("stages", {})),
+            # Frozen configs may contain keys from newer feature branches;
+            # drop unknowns so progress/status tools stay usable on main.
+            stages=parse_stage_params(raw.get("stages", {}), strict=False),
             resources=_parse_resources(raw.get("resources")),
             overrides=_normalize_override_paths(dict(raw.get("overrides", {}) or {}), base),
             scheduler_heartbeat_interval_s=float(
@@ -423,6 +442,9 @@ def load_and_materialize_runner_config(
             verify_max_workers=int(raw.get("scheduler", {}).get("verify_max_workers", 1)),
             verify_budget_per_tick=int(
                 raw.get("scheduler", {}).get("verify_budget_per_tick", 16)
+            ),
+            skip_artifact_verify=bool(
+                raw.get("scheduler", {}).get("skip_artifact_verify", False)
             ),
             max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
             requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
@@ -461,8 +483,10 @@ def _resolve_stage_path_fields(cfg: RunnerConfig, stages_raw: dict, base_dir: Pa
     base_dir : Path"""
     path_keys_by_stage = {
         "wcs_grouping": ("bkg_vector_path",),
+        "mapping": ("bkg_vector_path",),
         "ps1_download": ("local_data_path",),
         "ps1_process": ("catalog_path",),
+        "remap": (),
         "downsample": ("mapping_dir", "convolved_dir", "output_base"),
     }
     for stage_name, path_keys in path_keys_by_stage.items():
@@ -488,6 +512,9 @@ class ResolvedTargetConfig:
     mapping_root: str
     zarr_dir: str
     template_output_base: str
+    remap_output_base: str = ""
+    # Effective remap lane downsample reads (inherits remap.store_name when unset).
+    downsample_remap_store_name: str | None = None
     config_path: str = ""
 
 
@@ -533,6 +560,7 @@ def resolve_config(
         "mapping": cfg.stages.mapping.__dict__,
         "ps1_download": cfg.stages.ps1_download.__dict__,
         "ps1_process": cfg.stages.ps1_process.__dict__,
+        "remap": cfg.stages.remap.__dict__,
         "downsample": cfg.stages.downsample.__dict__,
     }
     override = cfg.overrides.get(target.scc_key()) or cfg.overrides.get(
@@ -545,21 +573,62 @@ def resolve_config(
     if override and override.get("data_root"):
         data_root = str(Path(override["data_root"]).expanduser())
 
-    event_dir = str(Path(cfg.workspace_root) / "events" / target.label())
-    mapping_root = str(Path(data_root) / "skycell_pixel_mapping")
-    zarr_dir = str(Path(data_root) / "ps1_skycells_zarr")
-    template_output_base = str(Path(data_root) / "shifted_downsampled")
+    t = target
+    mapping_os = int(merged_stages_raw.get("mapping", {}).get("oversampling_factor", 1) or 1)
+    templates_os = int(
+        merged_stages_raw.get("downsample", {}).get("oversampling_factor", 1) or 1
+    )
+    stages = parse_stage_params(merged_stages_raw)
+    # remap oversampling follows mapping (same as dispatch remap stage).
+    remap_os = mapping_os
+    remap_store_name = stages.remap.store_name
+    # Downsample INPUT: explicit remap_store_name, else inherit remap.store_name.
+    ds_remap_store = stages.downsample.remap_store_name
+    if ds_remap_store is None:
+        ds_remap_store = remap_store_name
+    tmpl_store = stages.downsample.output_store_name
+
+    event_dir = str(
+        event_scc_leaf(cfg.workspace_root, target.event_name(), t.sector, t.camera, t.ccd)
+    )
+    ffi_dir = str(scc_ffi_dir(data_root, t.sector, t.camera, t.ccd))
+    mapping_root = str(
+        scc_mapping_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=mapping_os)
+    )
+    zarr_dir = str(ps1_skycells_zarr_dir(data_root))
+    template_output_base = str(
+        scc_templates_dir(
+            data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=templates_os,
+            store_name=tmpl_store,
+        )
+    )
+    remap_output_base = str(
+        scc_remap_dir(
+            data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=remap_os,
+            store_name=remap_store_name,
+        )
+    )
 
     return ResolvedTargetConfig(
         target=target,
         data_root=data_root,
-        ffi_dir=cfg.ffi_dir,
+        ffi_dir=ffi_dir,
         event_dir=event_dir,
         skycell_wcs_csv=cfg.skycell_wcs_csv,
-        stages=parse_stage_params(merged_stages_raw),
+        stages=stages,
         mapping_root=mapping_root,
         zarr_dir=zarr_dir,
         template_output_base=template_output_base,
+        remap_output_base=remap_output_base,
+        downsample_remap_store_name=ds_remap_store,
         config_path=str(config_path) if config_path else "",
     )
 

@@ -49,6 +49,7 @@ from syndiff_pipeline.common.joblib_progress import (
     tqdm_iter,
 )
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import HotpantsParams
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
     init_progress_pair,
     progress_path_for_diff_log,
@@ -60,6 +61,11 @@ from syndiff_pipeline.difference_imaging.support.flux_calibration import (
     kernel_sum_at_center,
     tess_zp_from_kernel_sum,
     write_phot_calib_table,
+)
+from syndiff_pipeline.common.fits_variants import (
+    FITS_STORAGE_SUFFIXES,
+    is_fits_storage_filename,
+    storage_suffix_rank,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     iter_pipeline_fits_paths,
@@ -83,11 +89,13 @@ def write_diff_noise_mask_fits(
     mask_img: Optional[np.ndarray],
     *,
     header: Optional[fits.Header] = None,
-) -> None:
+) -> str:
     """
     Write one multi-extension FITS: PRIMARY = difference, extensions NOISE (1σ)
-    and MASK when provided. Uses float32 for all arrays.
+    and MASK when provided. Uses float32 for all arrays. Stored as ``.fits.fz``.
     """
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
+
     primary_hdr = fits.Header(header) if header is not None else None
     primary = fits.PrimaryHDU(
         np.asarray(diff_img, dtype=np.float32), header=primary_hdr
@@ -115,7 +123,7 @@ def write_diff_noise_mask_fits(
                 name="MASK",
             )
         )
-    fits.HDUList(hdul).writeto(out_path, overwrite=True)
+    return write_hdul_fits(out_path, fits.HDUList(hdul))
 
 
 def _write_image_fits(
@@ -123,15 +131,11 @@ def _write_image_fits(
     data: np.ndarray,
     *,
     header: Optional[fits.Header] = None,
-) -> None:
-    """Write a single 2D image FITS (float32), optionally with header."""
-    hdr = fits.Header(header) if header is not None else None
-    fits.writeto(
-        out_path,
-        np.asarray(data, dtype=np.float32),
-        header=hdr,
-        overwrite=True,
-    )
+) -> str:
+    """Write a single 2D image FITS (float32) as ``.fits.fz``."""
+    from syndiff_pipeline.common.fits_io import write_image_fits
+
+    return write_image_fits(out_path, data, header=header)
 
 
 # Loky workers: large read-only objects are set once per process via initializer
@@ -151,16 +155,30 @@ def _hotpants_loky_initializer(
     sci_workspace_dir: Optional[str] = None,
     sci_bkg_ws: Optional[str] = None,
     force_rerun: bool = False,
+    field_mode_context: Optional[Any] = None,
+    sck: Optional[tuple] = None,
+    data_root: Optional[str] = None,
+    publish_scc: bool = False,
+    workspace_root: Optional[str] = None,
     mask_catalog=None,
     btjd_by_product_id: Optional[dict] = None,
 ) -> None:
-    """Hotpants loky initializer (MaskCatalog + cadence lookup installed once per worker)."""
+    """Hotpants loky initializer (MaskCatalog + cadence lookup + field-mode loader)."""
     global _HOTPANTS_LOKY_PAYLOAD
+    template_loader = None
+    if field_mode_context is not None:
+        from syndiff_pipeline.difference_imaging.support.template_resolution import (
+            build_field_mode_template_loader,
+        )
+
+        template_loader = build_field_mode_template_loader(
+            field_mode_context, crop_bounds
+        )
     _HOTPANTS_LOKY_PAYLOAD = {
         "mask": mask,
         "ref_stars_xy": ref_stars_xy,
         "hp": hp,
-        "template_path_map": template_path_map,
+        "template_path_map": template_path_map or {},
         "crop_bounds": crop_bounds,
         "workspace_dirs": workspace_dirs,
         "round_id": round_id,
@@ -169,6 +187,11 @@ def _hotpants_loky_initializer(
         "sci_bkg_ws": sci_bkg_ws,
         "force_rerun": force_rerun,
         "template_cache": {},
+        "template_loader": template_loader,
+        "sck": sck,
+        "data_root": data_root,
+        "publish_scc": bool(publish_scc),
+        "workspace_root": workspace_root,
         "mask_catalog": mask_catalog,
         "btjd_by_product_id": btjd_by_product_id or {},
     }
@@ -204,7 +227,12 @@ def _hotpants_loky_run_task(
         legacy_diff_sidecar_bkg=p["legacy_bkg_sidecar"],
         sci_workspace_dir=p.get("sci_workspace_dir"),
         template_cache=p.get("template_cache"),
+        template_loader=p.get("template_loader"),
         force_rerun=bool(p.get("force_rerun")),
+        sck=p.get("sck"),
+        data_root=p.get("data_root"),
+        publish_scc=bool(p.get("publish_scc")),
+        workspace_root=p.get("workspace_root"),
         mask_catalog=p.get("mask_catalog"),
         btjd=p.get("btjd_by_product_id", {}).get(product_id),
     )
@@ -252,7 +280,7 @@ def frame_kernels_dir(diffs_dir: str) -> str:
     Sibling of *diffs_dir* with ``_kernels`` appended to its basename
     (``hp_d`` → ``hp_d_kernels``, ``ks_d`` → ``ks_d_kernels``).
     """
-    d = os.path.abspath(diffs_dir)
+    d = os.path.realpath(diffs_dir)
     parent = os.path.dirname(d)
     base = os.path.basename(d)
     return os.path.join(parent, f"{base}_kernels")
@@ -548,6 +576,7 @@ def build_hotpants_config(
     stamps_dir: Optional[str] = None,
     *,
     write_stamps: bool = True,
+    sci_shape: Optional[tuple[int, int]] = None,
 ):
     """Build hotpants config.
     
@@ -558,7 +587,10 @@ def build_hotpants_config(
     convolved_dir : str
     frame_stem : str
     stamps_dir : Optional[str], optional, default ``None``
-    write_stamps : bool, optional, default ``True``"""
+    write_stamps : bool, optional, default ``True``
+    sci_shape : Optional[tuple[int, int]], optional
+        Science (native) crop shape ``(ny, nx)`` for HotpantsConfig stamp layout.
+    """
     _, HotpantsConfig = _get_hotpants_classes()
 
     rkernel, sigma_gauss, deg_fixe, ngauss = _kernel_sigma_deg_for_basis(hp)
@@ -575,7 +607,7 @@ def build_hotpants_config(
             stamp_out_dir, f"{frame_stem}_stamps"
         )
 
-    hp_config = HotpantsConfig(
+    cfg_kwargs = dict(
         rkernel=int(kernel_halfwidth),
         ko=int(hp.hp_ko),
         bgo=int(hp.hp_bgo),
@@ -602,8 +634,28 @@ def build_hotpants_config(
         # Convolved model FITS written in-repo after run_pipeline (with cropped WCS).
         convolved_image_file=None,
         stamp_region_file=stamp_region_file,
+        stamp_mode=str(getattr(hp, "stamp_mode", "grid") or "grid"),
+        region_weight=str(getattr(hp, "region_weight", "npix") or "npix"),
+        region_max_diameter=float(getattr(hp, "region_max_diameter", 40.0)),
+        region_bisect_on_reject=bool(getattr(hp, "region_bisect_on_reject", False)),
+        region_max_area=int(getattr(hp, "region_max_area", 0) or 0),
+        region_connectivity=int(getattr(hp, "region_connectivity", 8) or 8),
+        region_max_bisects=int(getattr(hp, "region_max_bisects", 100) or 100),
     )
-    return hp_config
+    if sci_shape is not None:
+        cfg_kwargs["ny"] = int(sci_shape[0])
+        cfg_kwargs["nx"] = int(sci_shape[1])
+    region_min_npix = getattr(hp, "region_min_npix", None)
+    if region_min_npix is not None:
+        cfg_kwargs["region_min_npix"] = int(region_min_npix)
+    region_rss = getattr(hp, "region_rss", None)
+    if region_rss is not None:
+        cfg_kwargs["region_rss"] = int(region_rss)
+    region_weight_cap = getattr(hp, "region_weight_cap", None)
+    if region_weight_cap is not None:
+        cfg_kwargs["region_weight_cap"] = tuple(region_weight_cap)
+
+    return HotpantsConfig(**cfg_kwargs)
 
 
 def run_hotpants_frame(
@@ -615,6 +667,8 @@ def run_hotpants_frame(
     hp_config,
     *,
     collect_kernel_params: bool = True,
+    oversample: Optional[int] = None,
+    use_c_extension: Optional[bool] = None,
 ) -> dict:
     """Run Hotpants on in-memory template/science arrays."""
     Hotpants, _ = _get_hotpants_classes()
@@ -628,6 +682,27 @@ def run_hotpants_frame(
         "error_msg": "",
     }
     try:
+        factor = resolve_hotpants_oversample(
+            sci_array.shape, tmpl_array.shape, oversample
+        )
+        stamp_mode = str(getattr(hp_config, "stamp_mode", "grid") or "grid")
+        if factor > 1 and str(getattr(hp_config, "force_convolve", "t")) != "t":
+            raise ValueError(
+                "oversample>1 requires hp_force_convolve='t' (template convolution)"
+            )
+        if stamp_mode == "connected_regions":
+            if ref_stars_xy is None or len(np.asarray(ref_stars_xy)) == 0:
+                raise ValueError(
+                    "stamp_mode='connected_regions' requires a non-empty star_catalog"
+                )
+            use_c = False
+        elif factor > 1:
+            use_c = False
+        elif use_c_extension is None:
+            use_c = True
+        else:
+            use_c = bool(use_c_extension)
+
         hp = Hotpants(
             template_data=np.ascontiguousarray(tmpl_array, dtype=np.float64),
             image_data=np.ascontiguousarray(sci_array, dtype=np.float64),
@@ -638,6 +713,8 @@ def run_hotpants_frame(
             star_catalog=np.ascontiguousarray(ref_stars_xy, dtype=np.float64),
             config=hp_config,
             output_header=None,
+            use_c_extension=use_c,
+            oversample=factor,
         )
         res = hp.run_pipeline()
         result["diff"] = res.get("diff_image")
@@ -692,19 +769,15 @@ class TemplateCoverageError(Exception):
 
 
 def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
-    """Load template cropped.
-    
-    Parameters
-    ----------
-    tmpl_path : str
-    bounds : dict
-    
-    Returns
-    -------
-    np.ndarray"""
+    """Load template cropped to *bounds* (native FFI coords).
+
+    Oversampled templates (``OVERSAMP`` > 1) are sliced in high-res pixel space
+    while *bounds* remain base FFI coordinates.
+    """
     from syndiff_pipeline.common.template_coverage import (
         crop_bounds_subset_of_coverage,
         template_coverage_ffi_bounds,
+        template_crop_slices,
     )
 
     coverage = template_coverage_ffi_bounds(tmpl_path)
@@ -714,14 +787,49 @@ def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
             f"for {tmpl_path}"
         )
 
-    ox = coverage["x_min"]
-    oy = coverage["y_min"]
-    x0, x1 = bounds["x_min"] - ox, bounds["x_max"] - ox
-    y0, y1 = bounds["y_min"] - oy, bounds["y_max"] - oy
+    y_slice, x_slice = template_crop_slices(tmpl_path, bounds)
     with wcs_grouping.open_fits_memmap(tmpl_path) as hdul:
         if hdul[0].data is not None:
-            return hdul[0].data[y0:y1, x0:x1].astype(np.float64)
-        return hdul[1].data[y0:y1, x0:x1].astype(np.float64)
+            return hdul[0].data[y_slice, x_slice].astype(np.float64)
+        return hdul[1].data[y_slice, x_slice].astype(np.float64)
+
+
+def resolve_hotpants_oversample(
+    sci_shape: tuple[int, int],
+    tmpl_shape: tuple[int, int],
+    configured: int | None,
+) -> int:
+    """Resolve Hotpants ``oversample`` from config and array shapes."""
+    sci_ny, sci_nx = int(sci_shape[0]), int(sci_shape[1])
+    tmpl_ny, tmpl_nx = int(tmpl_shape[0]), int(tmpl_shape[1])
+    if configured is not None:
+        factor = int(configured)
+        if factor < 1:
+            raise ValueError(f"oversample must be >= 1, got {factor}")
+    elif (tmpl_ny, tmpl_nx) == (sci_ny, sci_nx):
+        factor = 1
+    elif tmpl_ny % sci_ny == 0 and tmpl_nx % sci_nx == 0:
+        fy = tmpl_ny // sci_ny
+        fx = tmpl_nx // sci_nx
+        if fy != fx:
+            raise ValueError(
+                f"Template shape {tmpl_shape} is not isotropic oversampling of "
+                f"science shape {sci_shape}"
+            )
+        factor = int(fy)
+    else:
+        raise ValueError(
+            f"Template shape {tmpl_shape} does not match science shape "
+            f"{sci_shape} (or an integer oversampling thereof)"
+        )
+
+    expected = (sci_ny * factor, sci_nx * factor)
+    if (tmpl_ny, tmpl_nx) != expected:
+        raise ValueError(
+            f"Template shape {tmpl_shape} != science {sci_shape} * oversample "
+            f"{factor} = {expected}"
+        )
+    return factor
 
 
 def _save_bkg_fits(
@@ -731,7 +839,7 @@ def _save_bkg_fits(
     *,
     header: Optional[fits.Header] = None,
 ) -> None:
-    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits.gz``."""
+    """Write ``bkg`` as ``{bkg_dir}/{basename}.fits.fz``."""
     os.makedirs(bkg_dir, exist_ok=True)
     _write_image_fits(
         workspace_frame_fits_path(bkg_dir, basename),
@@ -747,7 +855,7 @@ def _legacy_save_bkg_sidecar(
     *,
     header: Optional[fits.Header] = None,
 ) -> None:
-    """Write ``{diff_basename}_bkg.fits.gz`` next to the diff (legacy layout)."""
+    """Write ``{diff_basename}_bkg.fits.fz`` next to the diff (legacy layout)."""
     os.makedirs(diff_dir, exist_ok=True)
     _write_image_fits(
         workspace_frame_fits_path(diff_dir, f"{diff_basename}_bkg"),
@@ -811,15 +919,59 @@ def _process_one_frame(
     legacy_diff_sidecar_bkg: bool = False,
     sci_workspace_dir: Optional[str] = None,
     template_cache: Optional[dict] = None,
+    template_loader: Optional[Any] = None,
     force_rerun: bool = False,
+    sck: Optional[tuple] = None,
+    data_root: Optional[str] = None,
+    publish_scc: bool = False,
+    workspace_root: Optional[str] = None,
     mask_catalog=None,
     btjd=None,
 ):
-    """Process one frame."""
+    """Process one frame.
+
+    ``template_loader`` (field mode): load via ``template_loader(group_id)``
+    instead of ``template_path_map``. ``mask_catalog`` / ``btjd`` select the
+    per-cadence Hotpants mask (FAINT_CAT ignored).
+    """
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
 
     if not force_rerun:
+        diff_out_path = workspace_frame_fits_path(dirs.diffs, diff_stem)
+        if publish_scc and sck is not None and data_root and workspace_root:
+            try:
+                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                    try_materialize_workspace_artifact,
+                )
+
+                if try_materialize_workspace_artifact(
+                    publish_scc=True,
+                    data_root=data_root,
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    kind="diff_image",
+                    stage_label=diffs_label,
+                    product_id=product_id,
+                    label=diffs_label,
+                    params=hp,
+                    workspace_dest=diff_out_path,
+                    workspace_root=workspace_root,
+                ):
+                    return {
+                        "stem": diff_stem,
+                        "ffi_product_id": product_id,
+                        "group_id": group_id,
+                        "success": True,
+                        "skipped": True,
+                        "path": diff_out_path,
+                        "scc_store_hit": True,
+                    }
+            except Exception:
+                log.debug(
+                    "SCC diff-store materialize failed for %s", product_id, exc_info=True
+                )
         existing_diff = resolve_pipeline_fits_path(dirs.diffs, diff_stem)
         if existing_diff is not None:
             return {
@@ -864,8 +1016,8 @@ def _process_one_frame(
         sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, product_id, sci_crop.shape)
         sci_crop = sci_crop - sci_bkg
 
-    tmpl_path = template_path_map.get(group_id)
-    if tmpl_path is None:
+    tmpl_path = template_path_map.get(group_id) if template_path_map else None
+    if template_loader is None and tmpl_path is None:
         log.error("No template for group_id=%s; frame %s skipped.", group_id, product_id)
         return {
             "stem": diff_stem,
@@ -877,6 +1029,20 @@ def _process_one_frame(
 
     if template_cache is not None and group_id in template_cache:
         tmpl_crop = template_cache[group_id]
+    elif template_loader is not None:
+        try:
+            tmpl_crop = template_loader(int(group_id))
+        except Exception as exc:
+            log.error("template_loader failed for group_id=%s: %s", group_id, exc)
+            return {
+                "stem": diff_stem,
+                "ffi_product_id": product_id,
+                "group_id": group_id,
+                "success": False,
+                "error_msg": f"template_loader failed: {exc}",
+            }
+        if template_cache is not None:
+            template_cache[group_id] = tmpl_crop
     else:
         tmpl_crop = _load_template_cropped(tmpl_path, crop_bounds)
         if template_cache is not None:
@@ -905,6 +1071,7 @@ def _process_one_frame(
         frame_stem=diff_stem,
         stamps_dir=dirs.stamps,
         write_stamps=hp.write_stamps,
+        sci_shape=sci_crop.shape,
     )
 
     mask_array = _resolve_hotpants_mask_array(mask, mask_catalog, btjd)
@@ -917,6 +1084,8 @@ def _process_one_frame(
         ref_stars_xy=ref_stars_xy,
         hp_config=hp_config,
         collect_kernel_params=True,
+        oversample=getattr(hp, "oversample", None),
+        use_c_extension=getattr(hp, "use_c_extension", None),
     )
 
     if result["success"]:
@@ -949,6 +1118,33 @@ def _process_one_frame(
             log.error("Failed writing %s: %s", diff_out_path, exc)
             result["success"] = False
             result["error_msg"] = str(exc)
+        if result["success"] and sck is not None:
+            try:
+                inputs = []
+                ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
+                if ffi_fp:
+                    inputs.append(ffi_fp)
+                if tmpl_path:
+                    inputs.append(provenance_glue.template_input_edge(tmpl_path)["fingerprint"])
+                provenance_glue.emit_diff_artifact(
+                    kind="diff_image",
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=product_id,
+                    label=diffs_label,
+                    params=hp,
+                    location=diff_out_path,
+                    input_fingerprints=inputs,
+                    data_root=data_root,
+                    meta={"round_id": round_id, "group_id": group_id},
+                    publish_scc=publish_scc,
+                    workspace_root=workspace_root,
+                )
+            except Exception:
+                log.debug(
+                    "provenance emit (diff_image) failed for %s", product_id, exc_info=True
+                )
         if (
             hp.write_convolved
             and result["success"]
@@ -974,6 +1170,30 @@ def _process_one_frame(
             _save_bkg_fits(
                 result["bkg"], bkg_basename, dirs.bkg, header=crop_header
             )
+            if sck is not None:
+                try:
+                    ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
+                    provenance_glue.emit_diff_artifact(
+                        kind="diff_background",
+                        sector=sck[0],
+                        camera=sck[1],
+                        ccd=sck[2],
+                        product_id=product_id,
+                        label=bkg_label,
+                        params=hp,
+                        location=workspace_frame_fits_path(dirs.bkg, bkg_basename),
+                        input_fingerprints=[ffi_fp] if ffi_fp else [],
+                        data_root=data_root,
+                        meta={"round_id": round_id, "group_id": group_id, "producer": "hotpants"},
+                        publish_scc=publish_scc,
+                        workspace_root=workspace_root,
+                    )
+                except Exception:
+                    log.debug(
+                        "provenance emit (diff_background/hotpants) failed for %s",
+                        product_id,
+                        exc_info=True,
+                    )
         if kernel_sum is not None:
             result["kernel_sum"] = kernel_sum
         if tess_zp is not None:
@@ -1022,6 +1242,7 @@ def hotpants_loop(
     science: str = "ffi",
     diff_log_path: Optional[str] = None,
     force_rerun: bool = False,
+    field_mode_context: Optional[Any] = None,
     mask_catalog=None,
 ) -> list:
     """
@@ -1067,6 +1288,21 @@ def hotpants_loop(
 
     ref_stars_xy = ref_stars_df[["x", "y"]].values
     path_to_row = wcs_grouping.manifest_path_row_index(wcs_table)
+
+    # PR-D1 diff-provenance tracking: best-effort, never changes what/where is
+    # written (see orchestration/provenance_glue.py). Absent cfg.sector/etc or
+    # data_root, emit calls downstream simply no-op.
+    try:
+        prov_sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
+    except Exception:
+        prov_sck = None
+    prov_data_root = getattr(cfg, "data_root", "") or None
+    prov_publish_scc = bool(getattr(cfg, "publish_scc", False))
+    from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
+
+    prov_workspace_root = _workspace_root(
+        output_dir, run_id=getattr(cfg, "workspace_run_id", None)
+    )
 
     btjd_by_product_id: dict = {}
     btjd_col = None
@@ -1139,6 +1375,15 @@ def hotpants_loop(
 
     if n_workers == 1:
         template_cache: dict = {}
+        template_loader = None
+        if field_mode_context is not None:
+            from syndiff_pipeline.difference_imaging.support.template_resolution import (
+                build_field_mode_template_loader,
+            )
+
+            template_loader = build_field_mode_template_loader(
+                field_mode_context, crop_bounds
+            )
 
         def _serial_worker(args):
             """Serial worker.
@@ -1154,7 +1399,7 @@ def hotpants_loop(
                 product_id=product_id,
                 group_id=group_id,
                 hp=hp,
-                template_path_map=template_path_map,
+                template_path_map=template_path_map or {},
                 mask=mask,
                 crop_bounds=crop_bounds,
                 ref_stars_xy=ref_stars_xy,
@@ -1164,7 +1409,12 @@ def hotpants_loop(
                 legacy_diff_sidecar_bkg=legacy_bkg_sidecar,
                 sci_workspace_dir=sci_workspace_dir,
                 template_cache=template_cache,
+                template_loader=template_loader,
                 force_rerun=force_rerun,
+                sck=prov_sck,
+                data_root=prov_data_root,
+                publish_scc=prov_publish_scc,
+                workspace_root=prov_workspace_root,
                 mask_catalog=mask_catalog,
                 btjd=btjd_by_product_id.get(product_id),
             )
@@ -1198,6 +1448,11 @@ def hotpants_loop(
                 sci_workspace_dir,
                 sci_bkg_ws,
                 force_rerun,
+                field_mode_context,
+                prov_sck,
+                prov_data_root,
+                prov_publish_scc,
+                prov_workspace_root,
                 mask_catalog,
                 btjd_by_product_id,
             ),
@@ -1232,9 +1487,12 @@ def _is_diff_sidecar_path(path: str) -> bool:
     -------
     bool"""
     lower = path.lower()
-    return lower.endswith(
-        ("_bkg.fits.gz", "_stamps.fits.gz", "_bkg.fits", "_stamps.fits")
+    sidecar_suffixes = tuple(
+        f"{kind}{sfx}"
+        for sfx in FITS_STORAGE_SUFFIXES
+        for kind in ("_bkg", "_stamps")
     )
+    return lower.endswith(sidecar_suffixes)
 
 
 def collect_diff_paths(output_dir: str, round_id: int) -> list:
@@ -1254,7 +1512,7 @@ _SYNDIFF_TEMPLATE_RE = re.compile(
     r"^syndiff_template_s(?P<sector>\d+)_(?P<camera>\d+)_(?P<ccd>\d+)"
     r"(?P<roi>_x(?P<x0>\d+)-(?P<x1>\d+)_y(?P<y0>\d+)-(?P<y1>\d+))?"
     r"(?:_os\d+)?"
-    r"_dx(?P<dx>[+-]?\d*\.?\d+)_dy(?P<dy>[+-]?\d*\.?\d+)\.fits(?:\.gz)?$",
+    r"_dx(?P<dx>[+-]?\d*\.?\d+)_dy(?P<dy>[+-]?\d*\.?\d+)\.fits(?:\.fz|\.gz)?$",
     re.IGNORECASE,
 )
 
@@ -1336,10 +1594,11 @@ def _syndiff_template_preference_key(
 ) -> tuple[int, int, str]:
     """Sort key for choosing one template when legacy duplicates exist."""
     name = Path(parsed.path).name.lower()
-    prefer_gz = 0 if name.endswith(".fits.gz") else 1
+    # Lower storage_suffix_rank = preferred (fz > gz > plain).
+    prefer_storage = storage_suffix_rank(name)
     canonical_suffix = f"_dx{float(group_dx):.3f}_dy{float(group_dy):.3f}".lower()
     prefer_canonical = 0 if canonical_suffix in name else 1
-    return (prefer_gz, prefer_canonical, parsed.path)
+    return (prefer_storage, prefer_canonical, parsed.path)
 
 
 def _select_canonical_syndiff_template(
@@ -1429,8 +1688,8 @@ def verify_syndiff_templates(
 
     Returns ``group_id`` → absolute path. Raises :exc:`SyndiffTemplateDiscoveryError`
     if any group is missing. When multiple files match the same offsets (legacy
-    ``.fits`` plus canonical ``.fits.gz``), prefers ``.fits.gz`` and the downsample
-    ``dx{:.3f}_dy{:.3f}`` basename format.
+    ``.fits`` / ``.fits.gz`` plus canonical ``.fits.fz``), prefers ``.fits.fz`` and
+    the downsample ``dx{:.3f}_dy{:.3f}`` basename format.
     """
     root = Path(template_dir)
     if not root.is_dir():
@@ -1440,8 +1699,7 @@ def verify_syndiff_templates(
 
     parsed_files: list[ParsedSyndiffTemplate] = []
     for name in sorted(os.listdir(root)):
-        lower = name.lower()
-        if not (lower.endswith(".fits.gz") or lower.endswith(".fits")):
+        if not is_fits_storage_filename(name):
             continue
         full = root / name
         if not full.is_file():

@@ -43,7 +43,7 @@ class TestStageRetry(unittest.TestCase):
             state = PipelineState(str(Path(tmp) / "state.sqlite"))
             stages = [
                 "tess_ffi_download",
-                "wcs_grouping",
+                "bind",
                 "mapping",
                 "ps1_download",
                 "ps1_process",
@@ -83,7 +83,7 @@ class TestStageRetry(unittest.TestCase):
             state = PipelineState(str(Path(tmp) / "state.sqlite"))
             stages = [
                 "tess_ffi_download",
-                "wcs_grouping",
+                "bind",
                 "mapping",
                 "ps1_download",
                 "ps1_process",
@@ -91,7 +91,7 @@ class TestStageRetry(unittest.TestCase):
             ]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping", "mapping"):
+            for stage in ("tess_ffi_download", "bind", "mapping"):
                 state.update_stage_status("run_a", label, stage, STATUS_SUCCESS, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_download", STATUS_BLOCKED)
             state.update_stage_status("run_a", label, "ps1_process", STATUS_BLOCKED)
@@ -122,7 +122,7 @@ class TestStageRetry(unittest.TestCase):
             state = PipelineState(str(Path(tmp) / "state.sqlite"))
             stages = [
                 "tess_ffi_download",
-                "wcs_grouping",
+                "bind",
                 "mapping",
                 "ps1_download",
                 "ps1_process",
@@ -130,7 +130,7 @@ class TestStageRetry(unittest.TestCase):
             ]
             state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
             label = target.label()
-            for stage in ("tess_ffi_download", "wcs_grouping", "mapping", "ps1_process"):
+            for stage in ("tess_ffi_download", "bind", "mapping", "ps1_process"):
                 state.update_stage_status("run_a", label, stage, STATUS_SUCCESS, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_download", STATUS_FAILED, exit_code=1)
             state.update_stage_status("run_a", label, "downsample", STATUS_FAILED, exit_code=1)
@@ -162,8 +162,8 @@ class TestStageRetry(unittest.TestCase):
                 ["ps1_process", "downsample"],
             )
             label = target.label()
-            state.update_stage_status("run_a", label, "wcs_grouping", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status("run_a", label, "mapping", STATUS_SKIPPED, exit_code=0)
+            state.update_stage_status("run_a", label, "remap", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status("run_a", label, "ps1_process", STATUS_SUCCESS, exit_code=0)
             self.assertTrue(state.deps_satisfied("run_a", label, "downsample"))
 
@@ -189,7 +189,7 @@ class TestStageRetry(unittest.TestCase):
         self.assertEqual(reopen_status_for_retry("downsample", active), STATUS_PENDING)
         self.assertEqual(reopen_status_for_retry("ps1_download", active), STATUS_EXTERNAL)
         self.assertEqual(reopen_status_for_retry("ps1_process", active), STATUS_EXTERNAL)
-        self.assertEqual(reopen_status_for_retry("wcs_grouping", active), STATUS_EXTERNAL)
+        self.assertEqual(reopen_status_for_retry("bind", active), STATUS_EXTERNAL)
 
     def test_partial_run_retry_reopens_ps1_as_external(self):
         target = self._target()
@@ -222,7 +222,7 @@ class TestStageRetry(unittest.TestCase):
             state = PipelineState(str(Path(tmp) / "state.sqlite"))
             stages = [
                 "tess_ffi_download",
-                "wcs_grouping",
+                "bind",
                 "mapping",
                 "ps1_download",
                 "ps1_process",

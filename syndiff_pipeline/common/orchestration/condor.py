@@ -45,6 +45,7 @@ class CondorResourceRequest:
     """CondorResourceRequest."""
     request_cpus: int = 64
     request_memory_mb: int = 500_000
+    request_disk_kb: int | None = None
     requirements: str | None = "Memory >= 500000 && LoadAvg < 10"
     rank: str | None = "-LoadAvg"
 
@@ -278,6 +279,10 @@ def _format_condor_environment(*, request_cpus: int | None = None) -> str | None
         )
     if request_cpus is not None and int(request_cpus) > 0:
         parts.append(f"SYNDIFF_REQUEST_CPUS={int(request_cpus)}")
+        parts.append(f"SYNDIFF_HYBRID_MAX_JOBS={int(request_cpus)}")
+    benchmark_tag = os.environ.get("SYNDIFF_REMAP_BENCHMARK_TAG")
+    if benchmark_tag:
+        parts.append(f"SYNDIFF_REMAP_BENCHMARK_TAG={shlex.quote(benchmark_tag)}")
     if not parts:
         return None
     return " ".join(parts)
@@ -544,6 +549,8 @@ def write_submit_file(
         f"request_cpus = {resources.request_cpus}",
         f"request_memory = {resources.request_memory_mb}",
     ]
+    if resources.request_disk_kb is not None:
+        lines.append(f"request_disk = {int(resources.request_disk_kb)}")
     environment = _format_condor_environment(request_cpus=resources.request_cpus)
     if environment:
         lines.append(f'environment = "{environment}"')
@@ -585,12 +592,13 @@ def submit_job(
     _submission_times[cluster_id] = submit_epoch
     _record_cluster_submission(artifacts, cluster_id)
     log.info(
-        "Submitted Condor cluster %s for %s / %s (cpus=%s mem=%sMB req=%r rank=%r)",
+        "Submitted Condor cluster %s for %s / %s (cpus=%s mem=%sMB disk=%sKB req=%r rank=%r)",
         cluster_id,
         target_label,
         stage,
         resources.request_cpus,
         resources.request_memory_mb,
+        resources.request_disk_kb,
         resources.requirements,
         resources.rank,
     )

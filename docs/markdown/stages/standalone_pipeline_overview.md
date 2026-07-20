@@ -147,7 +147,7 @@ data/
 │       └── camera_X/
 │           └── ccd_X/
 │               ├── tess_sXXXX_X_X_master_skycells_list.csv
-│               └── TESS_sXXXX_X_X_skycell.*.fits.gz
+│               └── TESS_sXXXX_X_X_skycell.*.fits.fz
 ├── ps1_skycells_zarr/
 │   └── sector_XXXX_camera_X_ccd_X.zarr/
 └── convolved_results/

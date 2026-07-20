@@ -7,9 +7,11 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | Document | Audience | Contents |
 |----------|----------|----------|
 | [Main README](../../README.md) | All users | Project overview, pyhotpants + custom MOCPy, install, quick start |
-| [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, seven-stage template+diff DAG, independent star branch, Condor, config, workspace layout |
+| [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, five-stage template DAG + two-stage diff DAG (`bind`→`diff`), independent star branch, Condor, config, workspace layout |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
-| [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` filesystem reference |
+| [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
+| [Field (distortion-aware) templates](field_geometry.md) | Users / maintainers | **Default** `geometry_mode: field` — L0–L5, L4a/L4b, storage, verify, ops |
+| [Oversampled templates + Hotpants stamp modes](oversampled_templates.md) | Users / maintainers | `oversampling_factor` (`F`), native vs HR coords, Hotpants `stamp_mode` / `region_*`, star OS |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
 | [Cluster smoke checklist](cluster_smoke_checklist.md) | Ops | Manual validation on HTCondor + NFS after setup |
 | [Orchestration architecture](template_runner_architecture.md) | Maintainers | Spec-driven scheduler, SQLite state machine, verify/launch internals |
@@ -20,22 +22,25 @@ Documentation for the unreleased **syndiff-pipeline** project.
 
 ## Template pipeline — two documentation layers
 
-The pipeline has **orchestration docs** (how to run many SCCs with `syndiff all|template|diff`) and **algorithm docs** (what each stage does internally).
+The pipeline has **orchestration docs** (how to run SCCs with `syndiff template` and events with `syndiff diff`) and **algorithm docs** (what each stage does internally).
 
 ```
 docs/markdown/
 ├── template_pipeline.md          ← orchestration, scheduler, Condor, config, run lifecycle
 ├── syndiff_cli.md                ← CLI noun/verb reference
+├── storage_layout.md             ← SCC + nested-event on-disk layout
+├── field_geometry.md             ← default field templates (L0–L5, L4a/L4b F2)
+├── oversampled_templates.md      ← F>1 templates + Hotpants stamp_mode / region_*
 ├── masking.md                    ← empirical/TNS/asteroid masks (difference_imaging/masking)
 ├── star_lightcurves.md           ← host-star quick start (syndiff star)
 └── stages/
     ├── README.md                 ← index + script/module mapping
     ├── standalone_pipeline_overview.md   ← legacy single-FFI pipeline.py workflow
     ├── tess_ffi_download.md      ← FFI download stage
-    ├── wcs_grouping.md           ← drift measurement, template groups, reference FFI, crop
+    ├── wcs_grouping.md           ← drift measurement, template groups, reference FFI, crop (now the `bind` stage)
     ├── mapping_pancakes.md       ← PanCAKES (TESS↔PS1 pixel mapping) + Gaia download
     ├── ps1_process_technical.md  ← sliding-window convolution architecture + star removal
-    ├── downsample_technical.md   ← multi-offset downsampling onto TESS grid
+    ├── downsample_technical.md   ← multi-offset downsampling onto TESS grid (now the `templates` stage)
     ├── diff_pipeline.md          ← diff internal sub-stages, kernels, photometry
     ├── star_pipeline.md          ← host-star branch (technical)
     ├── star_config.md            ← star_config.yaml / star_targets schema
@@ -43,8 +48,10 @@ docs/markdown/
 ```
 
 **Improvement plans** live under [`.cursor/plans/`](../../.cursor/plans/).
-The spatially varying WCS template plan remains a design; the historical
-target-star plan is superseded by the implemented `syndiff star` branch.
+Field (distortion-aware) templates are implemented — see [field_geometry.md](field_geometry.md)
+(including hybrid Exact cache-key / reuse notes). Historical design memos under
+`doc/` were retired into that guide.
+The historical target-star plan is superseded by the implemented `syndiff star` branch.
 
 The stage deep-dives originated in an earlier standalone research workflow and
 are vendored here so this repository is self-contained.
@@ -53,19 +60,20 @@ are vendored here so this repository is self-contained.
 
 | Legacy script (`syndiff/`) | Package module (`syndiff_pipeline/`) | `syndiff` stage |
 |----------------------------|--------------------------------------|--------------------------|
-| `pancakes_v2.py` | `template_creation/processing/pancakes.py` | `mapping` |
+| `pancakes_v2.py` | `template_creation/processing/pancakes.py` + `processing/scc_reference_ffi.py` | `mapping` |
 | `download_and_store_zarr.py` | `template_creation/processing/ps1_download.py` | `ps1_download` |
 | `process_ps1.py` | `template_creation/processing/ps1_process.py` | `ps1_process` |
-| `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` | `downsample` |
-| — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` | `wcs_grouping` |
+| `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` (+ `field_downsample.py`) | `templates` (legacy config key/alias: `downsample`) |
+| — | `difference_imaging/orchestration/bind.py` + `common/wcs_grouping.py` | `bind` (diff DAG; legacy alias: `wcs_grouping`) |
 | — | `common/download.py` | `tess_ffi_download` |
 | — | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` | `diff` |
 
-The **`syndiff` orchestrator** adds WCS grouping for transient targets, a
-seven-stage template+diff DAG plus an independent `star` branch, SQLite
-bookkeeping, resource pools, detached scheduling, artifact verification, and
-HTCondor for `mapping`, `ps1_process`, `diff`, and `star`. The core template
-science algorithms match the standalone scripts.
+The **`syndiff` orchestrator** adds event-scoped WCS grouping (`bind`) for
+transients, an SCC-scoped five-stage template DAG plus a two-stage diff DAG
+(`bind`→`diff`) and an independent `star` branch, SQLite bookkeeping, resource
+pools, detached scheduling, artifact verification, and HTCondor for
+`mapping`, `ps1_process`, `diff`, and `star`. The core template science
+algorithms match the standalone scripts.
 
 ## Example diff configs
 

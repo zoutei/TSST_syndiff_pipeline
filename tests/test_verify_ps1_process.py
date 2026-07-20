@@ -18,6 +18,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     MappingStageParams,
     Ps1DownloadStageParams,
     Ps1ProcessStageParams,
+    RemapStageParams,
     TemplateStageParams,
     WcsGroupingStageParams,
     DownsampleStageParams,
@@ -35,23 +36,37 @@ def _resolved(tmp: Path, csv_path: Path, zarr_path: Path, projections_limit: int
         target_dec=16.0,
         target_name="2021aesq",
     )
-    mapping_root = csv_path.parent.parent.parent.parent
+    data_root = tmp / "data"
+    mapping_root = (
+        data_root
+        / "s0044" / "c2" / "k1"
+        / "mapping"
+        / "oversampling_1"
+    )
     return ResolvedTargetConfig(
         target=target,
-        data_root=str(zarr_path.parent.parent),
-        ffi_dir=str(tmp / "ffi"),
-        event_dir=str(tmp / "events" / target.label()),
+        data_root=str(data_root),
+        ffi_dir=str(data_root / "s0044" / "c2" / "k1" / "ffi"),
+        event_dir=str(
+            tmp
+            / "events"
+            / target.event_name()
+            / target.scc_label()
+        ),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
             wcs_grouping=WcsGroupingStageParams(),
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(projections_limit=projections_limit),
+            remap=RemapStageParams(),
             downsample=DownsampleStageParams(),
         ),
         mapping_root=str(mapping_root),
-        zarr_dir=str(tmp / "ps1_skycells_zarr"),
-        template_output_base=str(tmp / "shifted_downsampled"),
+        zarr_dir=str(data_root / "ps1_skycells_zarr"),
+        template_output_base=str(
+            data_root / "s0044" / "c2" / "k1" / "templates" / "oversampling_1"
+        ),
     )
 
 
@@ -64,9 +79,19 @@ class TestVerifyPs1Process(unittest.TestCase):
     def test_empty_zarr_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            csv_path = (
+                tmp
+                / "data"
+                / "s0044" / "c2" / "k1"
+                / "mapping"
+                / "oversampling_1"
+                / "sector_0044"
+                / "camera_2"
+                / "ccd_1"
+                / "tess_s0044_2_1_master_skycells_list.csv"
+            )
             self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
-            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             zarr_path.mkdir(parents=True)
             zarr.open(str(zarr_path), mode="w")
 
@@ -77,7 +102,17 @@ class TestVerifyPs1Process(unittest.TestCase):
     def test_partial_zarr_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            csv_path = (
+                tmp
+                / "data"
+                / "s0044" / "c2" / "k1"
+                / "mapping"
+                / "oversampling_1"
+                / "sector_0044"
+                / "camera_2"
+                / "ccd_1"
+                / "tess_s0044_2_1_master_skycells_list.csv"
+            )
             self._write_mapping_csv(
                 csv_path,
                 [
@@ -85,7 +120,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                     ("skycell.1520.081", "1520"),
                 ],
             )
-            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
 
@@ -97,7 +132,17 @@ class TestVerifyPs1Process(unittest.TestCase):
     def test_complete_zarr_passes(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            csv_path = (
+                tmp
+                / "data"
+                / "s0044" / "c2" / "k1"
+                / "mapping"
+                / "oversampling_1"
+                / "sector_0044"
+                / "camera_2"
+                / "ccd_1"
+                / "tess_s0044_2_1_master_skycells_list.csv"
+            )
             self._write_mapping_csv(
                 csv_path,
                 [
@@ -105,7 +150,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                     ("skycell.1520.081", "1520"),
                 ],
             )
-            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
@@ -119,9 +164,19 @@ class TestVerifyPs1Process(unittest.TestCase):
         # chunk must count as NOT saved (catches interrupted/empty writes).
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            csv_path = (
+                tmp
+                / "data"
+                / "s0044" / "c2" / "k1"
+                / "mapping"
+                / "oversampling_1"
+                / "sector_0044"
+                / "camera_2"
+                / "ccd_1"
+                / "tess_s0044_2_1_master_skycells_list.csv"
+            )
             self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
-            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")
 
@@ -135,9 +190,19 @@ class TestVerifyPs1Process(unittest.TestCase):
         # is mis-reported as 0/N and the stage is needlessly re-run.
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            csv_path = (
+                tmp
+                / "data"
+                / "s0044" / "c2" / "k1"
+                / "mapping"
+                / "oversampling_1"
+                / "sector_0044"
+                / "camera_2"
+                / "ccd_1"
+                / "tess_s0044_2_1_master_skycells_list.csv"
+            )
             self._write_mapping_csv(csv_path, [("skycell.1520.080", "1520")])
-            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0
@@ -153,7 +218,17 @@ class TestVerifyPs1Process(unittest.TestCase):
     def test_projections_limit_reduces_expected_count(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            csv_path = tmp / "skycell_pixel_mapping" / "sector_0044" / "camera_2" / "ccd_1" / "tess_s0044_2_1_master_skycells_list.csv"
+            csv_path = (
+                tmp
+                / "data"
+                / "s0044" / "c2" / "k1"
+                / "mapping"
+                / "oversampling_1"
+                / "sector_0044"
+                / "camera_2"
+                / "ccd_1"
+                / "tess_s0044_2_1_master_skycells_list.csv"
+            )
             self._write_mapping_csv(
                 csv_path,
                 [
@@ -162,7 +237,7 @@ class TestVerifyPs1Process(unittest.TestCase):
                     ("skycell.1922.042", "1922"),
                 ],
             )
-            zarr_path = tmp / "convolved_results" / "sector_0044_camera_2_ccd_1.zarr"
+            zarr_path = tmp / "data" / "s0044" / "c2" / "k1" / "convolved.zarr"
             root = zarr.open(str(zarr_path), mode="w")
             root.create_array("skycell.1520.080_data", shape=(8, 8), dtype="f4")[:] = 1.0
             root.create_array("skycell.1520.081_data", shape=(8, 8), dtype="f4")[:] = 1.0

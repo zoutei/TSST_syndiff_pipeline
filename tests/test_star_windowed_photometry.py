@@ -49,15 +49,15 @@ def _make_epsf_locator(psf_size: int = 11, os_factor: int = 2) -> EpsfLocator:
 class TestReadStarDiffStamp(unittest.TestCase):
     def test_round_trip_via_writer(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "stamp.fits.gz")
+            path = os.path.join(tmp, "stamp.fits.fz")
             stamp = np.arange(64, dtype=np.float32).reshape(8, 8)
-            diff_runner.write_star_diff_stamp(
+            written = diff_runner.write_star_diff_stamp(
                 path,
                 stamp,
                 window_origin=(100, 200),
                 host_local_xy=(104.5, 206.25),
             )
-            data, header = windowed_photometry.read_star_diff_stamp(path)
+            data, header = windowed_photometry.read_star_diff_stamp(written)
             np.testing.assert_allclose(data, stamp, rtol=1e-6)
             self.assertEqual(header["xmin"], 100)
             self.assertEqual(header["ymin"], 200)
@@ -115,14 +115,14 @@ class TestRunWindowedForcedPhotometry(unittest.TestCase):
             for i, flux in enumerate(fluxes):
                 stamp = np.full((25, 25), background, dtype=np.float64)
                 stamp[int(round(host_xy[1])), int(round(host_xy[0]))] += flux
-                path = os.path.join(tmp, "stamps", f"frame_{i}.fits.gz")
-                diff_runner.write_star_diff_stamp(
+                path = os.path.join(tmp, "stamps", f"frame_{i}.fits.fz")
+                written = diff_runner.write_star_diff_stamp(
                     path,
                     stamp.astype(np.float32),
                     window_origin=(50 + i, 60 + i),
                     host_local_xy=(50 + i + host_xy[0], 60 + i + host_xy[1]),
                 )
-                stamp_paths.append(path)
+                stamp_paths.append(written)
 
             out_dir = os.path.join(tmp, "lc")
             dfs = windowed_photometry.run_windowed_forced_photometry(
@@ -166,14 +166,14 @@ class TestRunWindowedForcedPhotometry(unittest.TestCase):
             for i, flux in enumerate(fluxes):
                 psf_model = epsf.locate(host_xy[0], host_xy[1], (25, 25))
                 stamp = background + flux * psf_model
-                path = os.path.join(tmp, "stamps", f"frame_{i}.fits.gz")
-                diff_runner.write_star_diff_stamp(
+                path = os.path.join(tmp, "stamps", f"frame_{i}.fits.fz")
+                written = diff_runner.write_star_diff_stamp(
                     path,
                     stamp.astype(np.float32),
                     window_origin=(10 + i, 20 + i),
                     host_local_xy=(10 + i + host_xy[0], 20 + i + host_xy[1]),
                 )
-                stamp_paths.append(path)
+                stamp_paths.append(written)
 
             out_dir = os.path.join(tmp, "lc")
             dfs = windowed_photometry.run_windowed_forced_photometry(

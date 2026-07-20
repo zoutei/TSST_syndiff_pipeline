@@ -60,7 +60,7 @@ overrides:
 
             policy = load_star_site_policy(policy_path)
             rows = load_star_targets(targets_path, site_dir=site)
-            row = find_star_target_row(rows, "20/3/2")
+            row = find_star_target_row(rows, "s0020_c3_k2")
             run_cfg = resolve_star_run_config(policy, row, site_dir=site)
 
             self.assertEqual(run_cfg.baseline.workspace_run_id, "row_ws")
@@ -112,7 +112,7 @@ photometry:
             )
             policy = load_star_site_policy(policy_path)
             rows = load_star_targets(targets_path, site_dir=site)
-            row = find_star_target_row(rows, "20/3/2")
+            row = find_star_target_row(rows, "s0020_c3_k2")
             with self.assertRaisesRegex(ValueError, "inputs.epsf='epsf_r1'"):
                 resolve_star_run_config(policy, row, site_dir=site)
 

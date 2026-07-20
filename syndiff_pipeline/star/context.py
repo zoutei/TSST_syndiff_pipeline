@@ -8,6 +8,7 @@ from pathlib import Path
 
 import yaml
 
+from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     require_deployment_path,
@@ -20,12 +21,16 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     _gaia_catalog_path,
     freeze_target_diff_config,
     load_diff_site_policy,
-    resolve_event_template_dir,
+    resolve_scc_template_dir,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    PIPELINE_FITS_EXT,
+    resolve_pipeline_artifact_path,
+)
 from syndiff_pipeline.difference_imaging.support.paths import (
     DEFAULT_MANIFEST_BASENAME,
-    STATIC_MASK_FITS_BASENAME,
+    SHARED_MASK_FITS_BASENAME,
     normalize_workspace_run_id,
     workspace_dir,
 )
@@ -63,6 +68,7 @@ class StarEventContext:
     baseline_phot_bkg_dir: str
     baseline_phot_bkg_label: str
     baseline_kernels_dir: str
+    oversampling_factor: int = 1
 
 
 def _resolve_hotpants_output_labels(
@@ -180,14 +186,62 @@ def _resolve_photutils_bkg_label(
     )
 
 
-def _mapping_paths(data_root: str, target: Target) -> tuple[str, str, str]:
-    mapping_dir = Path(data_root) / _DEFAULT_MAPPING_ROOT_NAME
-    rel = f"sector_{target.sector:04d}/camera_{target.camera}/ccd_{target.ccd}"
-    stem = f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}"
-    mapping_csv = str(mapping_dir / rel / f"{stem}_master_skycells_list.csv")
-    master_mapping_fits = str(
-        mapping_dir / rel / f"{stem}_master_pixels2skycells.fits.gz"
+def _mapping_paths(
+    data_root: str,
+    target: Target,
+    *,
+    oversampling_factor: int = 1,
+) -> tuple[str, str, str]:
+    from syndiff_pipeline.common.scc_paths import (
+        scc_mapping_dir,
+        scc_mapping_master_pixels2skycells,
+        scc_mapping_master_skycells_csv,
     )
+
+    os_factor = max(1, int(oversampling_factor))
+    mapping_dir = scc_mapping_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        oversampling_factor=os_factor,
+    )
+    mapping_csv = str(
+        scc_mapping_master_skycells_csv(
+            data_root,
+            target.sector,
+            target.camera,
+            target.ccd,
+            oversampling_factor=os_factor,
+        )
+    )
+    master_mapping_fits = str(
+        scc_mapping_master_pixels2skycells(
+            data_root,
+            target.sector,
+            target.camera,
+            target.ccd,
+            oversampling_factor=os_factor,
+        )
+    )
+    resolved_master = try_resolve_fits_variant(master_mapping_fits)
+    if resolved_master is not None:
+        master_mapping_fits = str(resolved_master)
+    # Fall back to legacy flat mapping tree when SCC nest is absent (older data_roots).
+    if not Path(mapping_csv).is_file():
+        legacy_dir = Path(data_root) / _DEFAULT_MAPPING_ROOT_NAME
+        rel = f"sector_{target.sector:04d}/camera_{target.camera}/ccd_{target.ccd}"
+        stem = f"tess_s{target.sector:04d}_{target.camera}_{target.ccd}"
+        suffix = f"_os{os_factor}" if os_factor > 1 else ""
+        legacy_csv = legacy_dir / rel / f"{stem}_master_skycells_list{suffix}.csv"
+        legacy_fits = legacy_dir / rel / f"{stem}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
+        resolved_legacy = try_resolve_fits_variant(legacy_fits)
+        if legacy_csv.is_file():
+            return (
+                str(legacy_dir),
+                str(legacy_csv),
+                str(resolved_legacy) if resolved_legacy is not None else str(legacy_fits),
+            )
     return str(mapping_dir), mapping_csv, master_mapping_fits
 
 
@@ -230,7 +284,15 @@ def _enrich_star_target_coords(
                 )
         except (KeyError, ValueError):
             pass
-    event_dir = Path(workspace_root).expanduser() / "events" / target.label()
+    from syndiff_pipeline.common.scc_paths import event_scc_leaf
+
+    event_dir = event_scc_leaf(
+        workspace_root,
+        target.event_name(),
+        target.sector,
+        target.camera,
+        target.ccd,
+    )
     coords = _target_coords_from_event_diff_configs(event_dir)
     if coords is not None:
         ra, dec = coords
@@ -289,8 +351,8 @@ def load_event_context(
     )
 
     event_dir = str(Path(cfg.output_dir).expanduser().resolve())
-    cluster_job_path = str(Path(event_dir) / wcs_grouping.CLUSTER_TEMPLATE_JOB_FILENAME)
-    with Path(cluster_job_path).open(encoding="utf-8") as fh:
+    cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
+    with Path(wcs_grouping._event_job_path(event_dir)).open(encoding="utf-8") as fh:
         cluster_job = json.load(fh)
     crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)
 
@@ -300,10 +362,35 @@ def load_event_context(
             f"Missing reference_ffi_path in {cluster_job_path}"
         )
 
-    try:
-        templates_dir = resolve_event_template_dir(event_dir)
-    except FileNotFoundError:
-        templates_dir = str(cfg.template_dir)
+    templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
+    os_factor = 1
+    template_store_name = None
+    if star_run_config is not None:
+        os_factor = max(1, int(star_run_config.oversampling_factor or 1))
+        template_store_name = star_run_config.template_store_name
+    expected_templates = resolve_scc_template_dir(
+        data_root,
+        target,
+        oversampling_factor=os_factor,
+        store_name=template_store_name,
+    )
+    if not templates_dir or not Path(templates_dir).is_dir():
+        templates_dir = str(expected_templates)
+    elif (
+        star_run_config is not None
+        and Path(templates_dir).resolve() != expected_templates.resolve()
+        and expected_templates.is_dir()
+    ):
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "star oversampling_factor=%s expects templates at %s but baseline "
+            "template_dir is %s; using star oversampling_factor store",
+            os_factor,
+            expected_templates,
+            templates_dir,
+        )
+        templates_dir = str(expected_templates)
 
     gaia_catalog_path = str(cfg.gaia_catalog)
     if not gaia_catalog_path:
@@ -316,7 +403,9 @@ def load_event_context(
             )
         )
 
-    mapping_dir, mapping_csv, master_mapping_fits = _mapping_paths(data_root, target)
+    mapping_dir, mapping_csv, master_mapping_fits = _mapping_paths(
+        data_root, target, oversampling_factor=os_factor
+    )
 
     baseline_run_id = normalize_workspace_run_id(baseline_workspace_run_id)
     baseline_workspace_dir = str(
@@ -372,6 +461,7 @@ def load_event_context(
         baseline_phot_bkg_dir=baseline_phot_bkg_dir,
         baseline_phot_bkg_label=phot_bkg_label,
         baseline_kernels_dir=baseline_kernels_dir,
+        oversampling_factor=os_factor,
     )
 
 
@@ -424,7 +514,21 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
         )
 
     templates_path = Path(ctx.templates_dir)
-    if not _dir_has_glob(str(templates_path), "syndiff_template_*"):
+    field_mode = str(ctx.cluster_job.get("geometry_mode") or "linear").lower() == "field"
+    if field_mode:
+        # Field mode: the "templates_dir" is the SCC field store; require its
+        # manifest + the per-event group-shift schedule instead of linear FITS.
+        if not (templates_path / "template_manifest.json").is_file():
+            missing.append(
+                f"no field template_manifest.json under {templates_path}; "
+                "run template downsample (geometry_mode: field) for this event"
+            )
+        if not (Path(ctx.event_dir) / "template_group_shifts.parquet").is_file():
+            missing.append(
+                f"template_group_shifts.parquet missing under {ctx.event_dir}; "
+                "run field template downsample for this event"
+            )
+    elif not _dir_has_glob(str(templates_path), "syndiff_template_*"):
         missing.append(
             f"no syndiff_template_* files under {templates_path}; "
             "run template downsample for this event"
@@ -460,10 +564,13 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "re-run the baseline hotpants stage with write_kernel_solutions: true"
         )
 
-    static_mask = Path(ctx.baseline_workspace_dir) / STATIC_MASK_FITS_BASENAME
-    if not static_mask.is_file():
+    shared_mask = resolve_pipeline_artifact_path(
+        ctx.baseline_workspace_dir, SHARED_MASK_FITS_BASENAME
+    )
+    if shared_mask is None:
         missing.append(
-            f"static mask ({STATIC_MASK_FITS_BASENAME}) missing at {static_mask}; "
+            f"shared_mask missing under {ctx.baseline_workspace_dir} "
+            f"(expected {SHARED_MASK_FITS_BASENAME} or legacy .fits.gz/.fits); "
             "run the shared_mask diff stage for this event"
         )
 
@@ -474,10 +581,10 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "run the mapping stage for this sector/camera/ccd"
         )
 
-    master_mapping = Path(ctx.master_mapping_fits)
-    if not master_mapping.is_file():
+    master_mapping = try_resolve_fits_variant(ctx.master_mapping_fits)
+    if master_mapping is None:
         missing.append(
-            f"master_pixels2skycells FITS missing at {master_mapping}; "
+            f"master_pixels2skycells FITS missing at {ctx.master_mapping_fits}; "
             "run the mapping stage for this sector/camera/ccd"
         )
 

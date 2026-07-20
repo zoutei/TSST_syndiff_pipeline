@@ -22,14 +22,21 @@ from .ffi_naming import (
     tess_product_id_from_ffi_path,
     workspace_frame_stem,
 )
-from .paths import DEFAULT_MANIFEST_BASENAME, workspace_dir
+from .paths import DEFAULT_MANIFEST_BASENAME, LEGACY_MANIFEST_BASENAME, workspace_dir
 
 
 def manifest_path_from_output_dir(output_dir: str, manifest_abspath: str | None = None) -> str:
     """Path to CSV; if *manifest_abspath* is None, use default under *output_dir*."""
     if manifest_abspath:
         return manifest_abspath
-    return os.path.join(os.path.abspath(output_dir), DEFAULT_MANIFEST_BASENAME)
+    root = os.path.abspath(output_dir)
+    live = os.path.join(root, DEFAULT_MANIFEST_BASENAME)
+    if os.path.isfile(live):
+        return live
+    legacy = os.path.join(root, LEGACY_MANIFEST_BASENAME)
+    if os.path.isfile(legacy):
+        return legacy
+    return live
 
 
 def load_frame_manifest(output_dir: str, manifest_path: str | None = None) -> pd.DataFrame:

@@ -1,8 +1,8 @@
 # Host-star light curves (`syndiff star`)
 
-Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants.
+Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants (and therefore has no Hotpants `stamp_mode`).
 
-Configuration is separate from the transient pipeline: see [star_config.md](stages/star_config.md) and the technical deep-dive [star_pipeline.md](stages/star_pipeline.md).
+Configuration is separate from the transient pipeline: see [star_config.md](stages/star_config.md) and the technical deep-dive [star_pipeline.md](stages/star_pipeline.md). When the baseline templates were built at `oversampling_factor F>1`, set the same `defaults.oversampling_factor` in `star_config.yaml` — details in [oversampled templates §10](oversampled_templates.md#10-star-branch).
 
 ## Quick start
 
@@ -34,14 +34,14 @@ Transient template + diff must have completed for the baseline workspace referen
 
 | Artifact | Typical label | Stage |
 |----------|---------------|-------|
-| `cluster_template_job.json` | `events/{label}/` | `wcs_grouping` |
-| `syndiff_ffi_frames.csv` | `events/{label}/` | `wcs_grouping` |
-| `syndiff_template_*` | `templates_dir` | `downsample` |
+| `event_job.json` (legacy: `cluster_template_job.json`) | `events/{event_name}/s{SSSS}_c{C}_k{K}/` | `bind` (diff DAG) |
+| `frames.csv` (legacy: `syndiff_ffi_frames.csv`) | `events/{event_name}/s{SSSS}_c{C}_k{K}/` | `bind` (diff DAG) |
+| `syndiff_template_*` | SCC's `templates/oversampling_{N}/` (`scc_templates_dir()`) | `templates` (legacy config key/alias: `downsample`) |
 | Convolved template | `hp_c` | `hotpants` (`write_convolved: true`) |
 | Kernel solutions | `hp_d_kernels/*_kernel.npz` | `hotpants` (`write_kernel_solutions: true`) |
 | Photutils background | `ks_b_s` or `ks_b` | `kernel_subtract` + `background` |
-| Shared mask | `shared_mask.fits.gz` | `shared_mask` |
-| Mapping + Gaia catalog | `data_root/skycell_pixel_mapping/…`, `catalogs/…` | `mapping` |
+| Shared mask | `shared_mask.fits.fz` | `shared_mask` |
+| Mapping + Gaia catalog | `data_root/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`, `.../catalogs/…` | `mapping` |
 
 Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline workspace: `ws/` when `baseline.workspace_run_id: none`, else `ws_{run_id}/`.
 
@@ -89,15 +89,14 @@ Controls how star loads PS1 skycells for mini-template isolation:
 
 | Mode | When to use |
 |------|-------------|
-| `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells.zarr` |
-| `zarr_local_only` | Batch runs with a pre-populated star cache, or with `ps1_zarr_path` pointed at the `ps1_download` store |
+| `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` |
+| `zarr_local_only` | Batch runs after `ps1_download` (or with a pre-populated shared store) |
 | `stream` | Always fetch from MAST (no zarr write); matches sector-20 stream template runs |
 
-The default star cache is `{data_root}/ps1_skycells.zarr`, while template
-`ps1_download` writes
-`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. To make
-`zarr_local_only` reuse the template cache, set top-level `ps1_zarr_path` in
-`star_config.yaml` to the latter path.
+Star and template `ps1_download` share
+`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. Optional top-level
+`ps1_zarr_path` in `star_config.yaml` overrides that path for unusual
+deployments.
 
 ## Photometry
 
@@ -116,16 +115,16 @@ CLI flags on `syndiff star run` override merged config: `--stars-file`, `--basel
 
 ## Outputs
 
-Under `{baseline_ws}/host_star/` (e.g. `events/{label}/ws_star_full_lc/host_star/` when `baseline.workspace_run_id: star_full_lc`, or `events/{label}/ws/host_star/` when baseline is `none`):
+Under `{baseline_ws}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/ws_star_full_lc/host_star/` when `baseline.workspace_run_id: star_full_lc`, or `events/{event_name}/s{SSSS}_c{C}_k{K}/ws/host_star/` when baseline is `none`):
 
 ```text
 {gaia_source_id}/
   identifier.json
   host_gaia_row.csv
   mini_templates/
-    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.gz
+    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.fz
   diff_stamps/
-    {product_id}.fits.gz
+    {product_id}.fits.fz
   lightcurve_ap3_gaia_{id}.csv
   lightcurve_prf_gaia_{id}.csv
   plots/                         # when debug_plots: true

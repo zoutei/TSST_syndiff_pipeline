@@ -28,6 +28,7 @@ from syndiff_pipeline.common.joblib_progress import (
     tqdm_iter,
 )
 from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     parse_workspace_frame_stem,
     strip_fits_suffix,
@@ -64,6 +65,11 @@ def _init_gridded_epsf_worker(
     output_dir: str,
     mask_2d: np.ndarray | None,
     skip_existing: bool = True,
+    sck: tuple | None = None,
+    data_root: str | None = None,
+    epsf_label: str | None = None,
+    publish_scc: bool = False,
+    workspace_root: str | None = None,
     mask_catalog=None,
     btjd_by_stem: dict | None = None,
 ) -> None:
@@ -77,6 +83,11 @@ def _init_gridded_epsf_worker(
             "output_dir": output_dir,
             "mask_2d": mask_2d,
             "skip_existing": bool(skip_existing),
+            "sck": sck,
+            "data_root": data_root,
+            "epsf_label": epsf_label,
+            "publish_scc": bool(publish_scc),
+            "workspace_root": workspace_root,
             "mask_catalog": mask_catalog,
             "btjd_by_stem": btjd_by_stem or {},
         }
@@ -573,6 +584,37 @@ def _fit_one_frame_task(
     out_path = gridded_epsf_npz_path(output_dir, ffi_stem)
     if ctx.get("skip_existing", True) and _is_valid_gridded_epsf_npz(out_path):
         return frame_idx, ffi_stem, True, None, None, True
+    if (
+        ctx.get("publish_scc")
+        and ctx.get("sck") is not None
+        and ctx.get("data_root")
+        and ctx.get("workspace_root")
+        and ctx.get("epsf_params") is not None
+    ):
+        try:
+            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                try_materialize_workspace_artifact,
+            )
+
+            sck = ctx["sck"]
+            if try_materialize_workspace_artifact(
+                publish_scc=True,
+                data_root=str(ctx["data_root"]),
+                sector=sck[0],
+                camera=sck[1],
+                ccd=sck[2],
+                kind="epsf",
+                stage_label=str(ctx.get("epsf_label") or "epsf"),
+                product_id=tess_product_id_from_ffi_path(ffi_stem) or ffi_stem,
+                label=str(ctx.get("epsf_label") or "epsf"),
+                params=ctx["epsf_params"],
+                workspace_dest=out_path,
+                workspace_root=ctx.get("workspace_root"),
+                suffix=".npz",
+            ) and _is_valid_gridded_epsf_npz(out_path):
+                return frame_idx, ffi_stem, True, None, None, True
+        except Exception:
+            log.debug("SCC diff-store epsf materialize failed for %s", ffi_stem, exc_info=True)
     if diff_path is None or not os.path.exists(diff_path):
         log.warning("  diff frame missing: %s", diff_path)
         return frame_idx, ffi_stem, False, None, None, False
@@ -598,6 +640,30 @@ def _fit_one_frame_task(
         grid_xypos,
         int(epsf_params.epsf_oversample),
     )
+
+    sck = ctx.get("sck")
+    if sck is not None:
+        try:
+            product_id = tess_product_id_from_ffi_path(ffi_stem) or ffi_stem
+            inputs = [provenance_glue.upstream_label_edge("diff_image", diff_path)["fingerprint"]]
+            provenance_glue.emit_diff_artifact(
+                kind="epsf",
+                sector=sck[0],
+                camera=sck[1],
+                ccd=sck[2],
+                product_id=product_id,
+                label=str(ctx.get("epsf_label") or "epsf"),
+                params=epsf_params,
+                location=out_path,
+                input_fingerprints=inputs,
+                data_root=ctx.get("data_root"),
+                is_fits=False,
+                publish_scc=bool(ctx.get("publish_scc")),
+                workspace_root=ctx.get("workspace_root"),
+            )
+        except Exception:
+            log.debug("provenance emit (epsf) failed for %s", ffi_stem, exc_info=True)
+
     return frame_idx, ffi_stem, True, grid_xypos, stack, False
 
 
@@ -616,6 +682,8 @@ def fit_gridded_epsf_all_frames(
     epsf_label: str | None = None,
     diffs_input: str | None = None,
     skip_existing: bool = True,
+    publish_scc: bool = False,
+    workspace_root: str | None = None,
 ) -> tuple[np.ndarray, list[tuple[float, float]], list[str], list[bool]]:
     """
     Fit gridded ePSF on every difference image (thread-parallel over frames).
@@ -690,12 +758,32 @@ def fit_gridded_epsf_all_frames(
             workspace_progress_path, cli_progress_path, success=_ok
         )
 
+    try:
+        prov_sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
+    except Exception:
+        prov_sck = None
+    prov_data_root = getattr(cfg, "data_root", "") or None
+    prov_publish_scc = publish_scc or bool(getattr(cfg, "publish_scc", False))
+    if workspace_root is None:
+        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
+
+        prov_workspace_root = _workspace_root(
+            cfg.output_dir, run_id=getattr(cfg, "workspace_run_id", None)
+        )
+    else:
+        prov_workspace_root = workspace_root
+
     worker_initargs = (
         gaia_df,
         epsf_params,
         output_dir,
         mask_2d,
         skip_existing,
+        prov_sck,
+        prov_data_root,
+        epsf_label,
+        prov_publish_scc,
+        prov_workspace_root,
         mask_catalog,
         btjd_by_stem or {},
     )

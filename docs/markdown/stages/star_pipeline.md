@@ -72,7 +72,11 @@ Kernels are read from `{baseline.diffs}_kernels/` (e.g. `hp_d_kernels/{product_i
 
 - Host position: full-FFI pixels via reference FFI WCS (`resolve_host_full_ffi_xy`).
 - Stamp windows: **crop-local** pixels (same as diff stage).
-- Mini-template downsample: registration indices are **full-FFI**; `XMIN`/`YMIN` in mini-template FITS are crop-local.
+- Mini-template downsample: registration indices are **full-FFI native**;
+  `XMIN`/`YMIN` in mini-template FITS are crop-local **native**. When
+  `defaults.oversampling_factor F>1`, mini planes are HR with `OVERSAMP=F` and
+  stamp convolution downsamples to native — see
+  [oversampled templates §10](../oversampled_templates.md#10-star-branch).
 
 ## Prerequisites
 
@@ -87,7 +91,7 @@ Kernels are read from `{baseline.diffs}_kernels/` (e.g. `hp_d_kernels/{product_i
 | Convolved templates (`hp_c`) | same workspace | `hotpants` with `write_convolved: true` |
 | Photutils background (`ks_b_s` / `ks_b`) | same workspace | `kernel_subtract` + optional `background` |
 | Kernel solutions | `{diffs}_kernels/*_kernel.npz` | `hotpants` with `write_kernel_solutions: true` |
-| `shared_mask.fits.gz` | workspace root | `shared_mask` |
+| `shared_mask.fits.fz` | workspace root | `shared_mask` |
 | `{inputs.epsf}/gridded_epsf_index.json` + per-frame NPZ | baseline workspace; optionally built by matching `epsf.output` | star `epsf_runner` or prior diff `epsf` stage |
 | Mapping CSV + master FITS | `data_root/skycell_pixel_mapping/…` | `mapping` |
 | Gaia catalog CSV | `data_root/catalogs/…` | `mapping` |
@@ -108,15 +112,11 @@ Site and example diff configs now set `write_kernel_solutions: true` on every ac
 
 ## PS1 ingest (`ps1_source`)
 
-Implemented in `ps1_cache.py`; same Zarr layout as `ps1_download`:
+Implemented in `ps1_cache.py`; same shared Zarr store as `ps1_download`:
 
 ```text
-{data_root}/ps1_skycells.zarr/{projection}/{skycell}/{band, band_mask, band_wt}
+{data_root}/ps1_skycells_zarr/ps1_skycells.zarr/{projection}/{skycell}/{band, band_mask, band_wt}
 ```
-
-The schema is shared, but the default paths are not: template `ps1_download`
-writes `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. To reuse that store,
-set top-level `ps1_zarr_path` in `star_config.yaml` to its full path.
 
 | Mode | Behavior |
 |------|----------|
@@ -124,13 +124,14 @@ set top-level `ps1_zarr_path` in `star_config.yaml` to its full path.
 | `zarr_download` | Download and cache on miss (default) |
 | `stream` | MAST every time; no zarr write |
 
-Optional `ps1_zarr_path` in `star_config.yaml` overrides the default store location. Legacy CLI values: `zarr` → `zarr_download`, `download` → `stream`.
+Optional `ps1_zarr_path` in `star_config.yaml` overrides the shared store
+location for unusual deployments. Legacy CLI values: `zarr` → `zarr_download`,
+`download` → `stream`.
 
-For batch star runs after a normal `ps1_download` stage, point `ps1_zarr_path`
-at that stage's store and prefer `zarr_local_only`. Without the override,
-pre-populate the star-specific default store or use `zarr_download`. For
-sector-wide astrometry campaigns that used `ps1_source: stream` in template
-processing (see [`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml)),
+For batch star runs after a normal `ps1_download` stage, prefer
+`zarr_local_only` (reads the same shared store). For sector-wide astrometry
+campaigns that used `ps1_source: stream` in template processing (see
+[`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml)),
 star can use `stream` or a pre-populated Zarr store.
 
 ## Outputs per Gaia host
@@ -142,9 +143,9 @@ Root: `{baseline_ws}/host_star/` (e.g. `ws_star_full_lc/host_star/`). Legacy sib
   identifier.json              # resolved TIC/Gaia, RA/Dec, resolution_method
   host_gaia_row.csv            # one-row Gaia-catalog-style record
   mini_templates/
-    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.gz
+    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.fz
   diff_stamps/
-    {product_id}.fits.gz       # crop-local stamp; headers XMIN, YMIN, HOSTX, HOSTY
+    {product_id}.fits.fz       # crop-local stamp; headers XMIN, YMIN, HOSTX, HOSTY
   lightcurve_{method}_gaia_{id}.csv
   plots/                       # when debug_plots: true
     ps1_segment_{skycell}.png

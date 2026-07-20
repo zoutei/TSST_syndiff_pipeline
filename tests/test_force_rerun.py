@@ -69,7 +69,7 @@ class TestForceRerun(unittest.TestCase):
                 "/targets.csv",
                 tmp,
                 [target],
-                ["wcs_grouping"],
+                ["bind"],
             )
             label = target.label()
             state.apply_not_selected_skips(
@@ -84,11 +84,11 @@ class TestForceRerun(unittest.TestCase):
             state.apply_force_rerun(
                 "run_a",
                 [label],
-                ["wcs_grouping", "downsample"],
+                ["bind", "downsample"],
             )
             self.assertEqual(
                 state.get_active_stages("run_a"),
-                ["wcs_grouping", "downsample"],
+                ["bind", "downsample"],
             )
             down = state.get_stage_run("run_a", label, "downsample")
             self.assertIsNotNone(down)
@@ -108,13 +108,13 @@ class TestForceRerun(unittest.TestCase):
             data_root = Path(tmp) / "data"
             convolved = (
                 data_root
-                / "convolved_results"
-                / "sector_0015_camera_1_ccd_4.zarr"
+                / "s0015" / "c1" / "k4"
+                / "convolved.zarr"
             )
             csv_path = (
                 data_root
-                / "convolved_results"
-                / "sector_0015_camera_1_ccd_4_removed_stars.csv"
+                / "s0015" / "c1" / "k4"
+                / "convolved_removed_stars.csv"
             )
             convolved.mkdir(parents=True)
             (convolved / "cell_0_data").write_text("x", encoding="utf-8")

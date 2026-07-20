@@ -13,8 +13,26 @@ _STAGE_SHORT_NAMES: dict[str, str] | None = None
 # Display-only short names for CLI progress/notifications. Kept in sync with
 # TEMPLATE_STAGES + diff/star without importing heavy stage modules.
 _STATIC_STAGE_SHORT_NAMES: dict[str, str] = {
+    "bind": "bind",
     "diff": "diff",
     "star": "star",
+}
+
+# Columns shown by ``syndiff status`` / Discord status grids (bind and star omitted).
+STATUS_GRID_STAGES: tuple[str, ...] = (
+    "tess_ffi_download",
+    "mapping",
+    "ps1_download",
+    "ps1_process",
+    "remap",
+    "downsample",
+    "diff",
+)
+
+# Legacy SQLite stage names from pre-downsample rename runs.
+STATUS_GRID_LEGACY_STAGE_ALIASES: dict[str, str] = {
+    "templates": "downsample",
+    "tmpl": "downsample",
 }
 
 
@@ -156,6 +174,16 @@ def stage_names() -> tuple[str, ...]:
     -------
     tuple[str, ...]"""
     return _pipeline().stage_names
+
+
+def status_grid_stages() -> tuple[str, ...]:
+    """Stages shown in ``syndiff status`` per-target grids."""
+    return STATUS_GRID_STAGES
+
+
+def canonical_status_grid_stage(stage: str) -> str:
+    """Map a SQLite stage name to its status-grid column (if any)."""
+    return STATUS_GRID_LEGACY_STAGE_ALIASES.get(stage, stage)
 
 
 def stage_short_names() -> dict[str, str]:

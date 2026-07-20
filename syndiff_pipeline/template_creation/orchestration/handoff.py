@@ -4,13 +4,20 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Optional
 
-from astropy.io import fits
-
 from syndiff_pipeline.common import wcs_grouping
-from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis, nested_ffi_dir
+from syndiff_pipeline.common.wcs_grouping import FRAMES_CSV_BASENAME
+from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis, manifest_basename_from_local
+from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
+from syndiff_pipeline.common.wcs_header_cache import (
+    ensure_scc_ffi_list,
+    ffi_list_is_complete,
+    header_from_cached_row,
+    load_ffi_list,
+)
 from syndiff_pipeline.difference_imaging.support.paths import pipeline_plots_root
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import WcsGroupingStageParams
@@ -19,15 +26,7 @@ log = logging.getLogger(__name__)
 
 
 def _norm_bkg_vector_path(p: Optional[str]) -> Optional[str]:
-    """Norm bkg vector path.
-    
-    Parameters
-    ----------
-    p : Optional[str]
-    
-    Returns
-    -------
-    Optional[str]"""
+    """Norm bkg vector path."""
     if p is None or (isinstance(p, str) and not str(p).strip()):
         return None
     return str(p)
@@ -53,18 +52,41 @@ def run_wcs_grouping(
     event_dir = resolved.event_dir
     os.makedirs(event_dir, exist_ok=True)
 
-    ffi_leaf = nested_ffi_dir(t.sector, t.camera, t.ccd, root=resolved.ffi_dir)
+    ffi_leaf = resolved.ffi_dir
     all_sorted = sorted(list_local_ffis(ffi_leaf, t.sector, t.camera, t.ccd))
     if not all_sorted:
         patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
         raise FileNotFoundError(f"No FFI files matching {patterns!r} under {ffi_leaf!r}")
 
-    ffi_paths = wcs_grouping.select_ffis_with_valid_target_wcs(
-        all_sorted, t.target_ra, t.target_dec, max_ffis=max_ffis
+    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(all_sorted, ffi_list_df):
+        log.info("FFI list missing/incomplete (%s); backfilling ...", ffi_list_path)
+        t0 = time.monotonic()
+        ffi_list_df = ensure_scc_ffi_list(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            all_sorted,
+            open_fits=wcs_grouping.open_fits_memmap,
+        )
+        log.info("FFI list ensure finished in %.1fs", time.monotonic() - t0)
+
+    ffi_paths = wcs_grouping.select_ffis_with_valid_target_wcs_from_cache(
+        ffi_list_df,
+        all_sorted,
+        t.target_ra,
+        t.target_dec,
+        max_ffis=max_ffis,
     )
     log.info("FFIs on disk: %d; processing: %d", len(all_sorted), len(ffi_paths))
 
-    wcs_table = wcs_grouping.build_wcs_table(ffi_paths, t.target_ra, t.target_dec)
+    t0 = time.monotonic()
+    wcs_table = wcs_grouping.build_wcs_table_from_cache(
+        ffi_list_df, ffi_paths, t.target_ra, t.target_dec
+    )
+    log.info("WCS table from ffi_list built in %.2fs", time.monotonic() - t0)
     wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
         wcs_table,
         window_length=wg.wcs_drift_savgol_window,
@@ -83,11 +105,13 @@ def run_wcs_grouping(
     )
     log.info("Reference FFI: %s", chosen_ref)
 
-    manifest_path = os.path.join(event_dir, "syndiff_ffi_frames.csv")
+    manifest_path = os.path.join(event_dir, FRAMES_CSV_BASENAME)
     wcs_table.to_csv(manifest_path, index=False)
 
-    with wcs_grouping.open_fits_memmap(chosen_ref) as hdul:
-        ref_header = hdul[1].header
+    logical = manifest_basename_from_local(chosen_ref)
+    if logical not in ffi_list_df.index:
+        raise KeyError(f"chosen reference FFI {logical!r} missing from ffi_list")
+    ref_header = header_from_cached_row(ffi_list_df.loc[logical])
     crop_bounds = wcs_grouping.resolve_crop_bounds_from_params(
         ref_header,
         x_min=x_min if x_min is not None else wg.x_min,
@@ -115,6 +139,10 @@ def run_wcs_grouping(
         crop_bounds=crop_bounds,
         crop_mode=wg.crop_mode,
         crop_box_size=wg.crop_box_size if wg.crop_mode == "target_box" else None,
+        geometry_mode=wg.geometry_mode if wg.geometry_mode == "field" else None,
+        grouping_quantum_ps1_px=(
+            wg.grouping_quantum_ps1_px if wg.geometry_mode == "field" else None
+        ),
     )
     wcs_grouping.plot_wcs_drift_and_template_assignment(
         wcs_table,

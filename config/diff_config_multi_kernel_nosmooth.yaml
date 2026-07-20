@@ -30,7 +30,7 @@ pipeline:
       from: multi_hp_temp_calib
       labels: [ks_b]
       root_artifacts:
-        - shared_mask.fits.gz
+        - shared_mask.fits.fz
         - hotpants_substamp_stars.csv
   - kind: hotpants
     inputs:

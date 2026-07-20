@@ -11,7 +11,7 @@ import pandas as pd
 from astropy.io import fits
 import numpy as np
 
-from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.common.scc_paths import event_scc_leaf
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.execute import _load_template_handoff
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
@@ -34,7 +34,7 @@ def _minimal_handoff(event_dir: Path, ref_fits: Path) -> None:
         "shape": [64, 64],
         "groups": [{"group_id": 0, "group_dx": 0.0, "group_dy": 0.0, "n_frames": 1}],
     }
-    (event_dir / "cluster_template_job.json").write_text(json.dumps(job), encoding="utf-8")
+    (event_dir / "event_job.json").write_text(json.dumps(job), encoding="utf-8")
     pd.DataFrame(
         {
             "path": [str(ref_fits)],
@@ -43,14 +43,14 @@ def _minimal_handoff(event_dir: Path, ref_fits: Path) -> None:
             "group_dy": [0.0],
             "wcs_ok": [True],
         }
-    ).to_csv(event_dir / "syndiff_ffi_frames.csv", index=False)
+    ).to_csv(event_dir / "frames.csv", index=False)
 
 
 class TestDiffHandoffBootstrap(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.event_dir = self.root / "events" / "s0020_c3_k3"
+        self.event_dir = event_scc_leaf(self.root, "2020ut", 20, 3, 3)
         ref = self.root / "ref.fits"
         data = np.zeros((64, 64), dtype=np.float32)
         hdu1 = fits.ImageHDU(data=data)
@@ -103,13 +103,13 @@ class TestDiffHandoffBootstrap(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _load_template_handoff(cfg, str(self.root / "empty"), None)
 
-    def test_validate_rejects_wcs_grouping_stage(self):
+    def test_validate_rejects_bind_stage(self):
         cfg = SynDiffConfig(
-            pipeline=[{"kind": "wcs_grouping"}],
+            pipeline=[{"kind": "bind"}],
         )
         with self.assertRaises(ValueError) as ctx:
             validate_pipeline(cfg)
-        self.assertIn("not a differencing stage", str(ctx.exception))
+        self.assertIn("unknown kind 'bind'", str(ctx.exception))
 
 
 if __name__ == "__main__":

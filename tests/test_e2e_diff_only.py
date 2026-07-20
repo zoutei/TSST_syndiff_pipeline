@@ -25,6 +25,7 @@ from syndiff_pipeline.common.orchestration.state import (
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.common.orchestration.verify_worker import reset_verify_worker_for_tests
 from syndiff_pipeline.common.orchestration.launcher import LaunchDescriptor
+from syndiff_pipeline.template_creation.orchestration.verify import AbsenceProbeResult
 from tests.site_fixtures import write_site_deployment
 
 
@@ -112,9 +113,9 @@ def _diff_only_run_setup(tmp_path: Path, target: Target, *, run_id: str = "run_a
 
 DIFF_VERIFY_STAGES = (
     "tess_ffi_download",
-    "wcs_grouping",
     "downsample",
 )
+DIFF_EXTERNAL_STAGES = DIFF_VERIFY_STAGES + ("bind",)
 DIFF_NOT_SELECTED_STAGES = (
     "mapping",
     "ps1_download",
@@ -138,6 +139,12 @@ class TestDiffOnlyE2E(unittest.TestCase):
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_EXTERNAL,
                 )
+            bind_row = state.get_stage_run(run_id, label, "bind")
+            self.assertEqual(bind_row.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason(run_id, label, "bind"),
+                SKIP_REASON_NOT_SELECTED,
+            )
             for stage in DIFF_NOT_SELECTED_STAGES:
                 row = state.get_stage_run(run_id, label, stage)
                 self.assertEqual(row.status, STATUS_SKIPPED)
@@ -153,9 +160,11 @@ class TestDiffOnlyE2E(unittest.TestCase):
             state, ctx, run_id = _diff_only_run_setup(tmp_path, target)
             label = target.label()
 
-            for stage in DIFF_VERIFY_STAGES:
-                row = state.get_stage_run(run_id, label, stage)
-                self.assertEqual(row.status, STATUS_EXTERNAL)
+            for stage in ("tess_ffi_download", "downsample"):
+                self.assertEqual(
+                    state.get_stage_run(run_id, label, stage).status,
+                    STATUS_EXTERNAL,
+                )
 
             launch_calls: list[str] = []
 
@@ -172,6 +181,9 @@ class TestDiffOnlyE2E(unittest.TestCase):
                 return stage in DIFF_VERIFY_STAGES
 
             with unittest.mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.verify.stage_absence_probe",
+                return_value=AbsenceProbeResult.MAYBE_PRESENT,
+            ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=complete,
             ), unittest.mock.patch(
@@ -188,11 +200,13 @@ class TestDiffOnlyE2E(unittest.TestCase):
                 for _ in range(4):
                     _tick_run(state, run_id, ctx)
 
-            for stage in DIFF_VERIFY_STAGES:
+            for stage in ("tess_ffi_download", "downsample"):
                 self.assertEqual(
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_SKIPPED,
                 )
+            bind_row = state.get_stage_run(run_id, label, "bind")
+            self.assertEqual(bind_row.status, STATUS_SKIPPED)
             for stage in DIFF_NOT_SELECTED_STAGES:
                 self.assertEqual(
                     state.get_skip_reason(run_id, label, stage),

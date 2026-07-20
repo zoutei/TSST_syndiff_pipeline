@@ -167,8 +167,11 @@ class TestStageParams(unittest.TestCase):
         self.assertEqual(p.methods[0].name, "epsf")
         self.assertEqual(p.methods[0].psf_type, "epsf")
         self.assertEqual(p.methods[0].phot_snap, "ref")
+        self.assertIsNone(p.methods[0].psf_grouper_min_separation)
         self.assertEqual(p.methods[1].name, "ap3")
         self.assertEqual(p.methods[1].tar_ap, 3)
+        self.assertTrue(p.methods[1].subtract_sky)
+        self.assertFalse(p.methods[1].mask_sky_with_shared_mask)
 
     def test_forced_photometry_duplicate_method_name_rejected(self):
         with self.assertRaises(ValueError):

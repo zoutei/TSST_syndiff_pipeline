@@ -81,6 +81,11 @@ def run_targets_path(run_directory: str | Path) -> Path:
     return Path(run_directory).expanduser().resolve() / "targets.csv"
 
 
+def run_scc_path(run_directory: str | Path) -> Path:
+    """Frozen SCC registry CSV (``scc.csv``) for template runs."""
+    return Path(run_directory).expanduser().resolve() / "scc.csv"
+
+
 def run_meta_path(run_directory: str | Path) -> Path:
     """Run meta path.
     
@@ -96,14 +101,26 @@ def run_meta_path(run_directory: str | Path) -> Path:
 
 def materialize_run_inputs(
     source_config: str | Path,
-    source_targets: str | Path,
     run_directory: str | Path,
+    *,
+    source_targets: str | Path | None = None,
+    source_scc: str | Path | None = None,
+    inline_scc_targets: list | None = None,
 ) -> Tuple[str, str]:
-    """Copy config and targets into *run_directory*; return absolute run-local paths."""
+    """Copy config and frozen inputs into *run_directory*; return absolute run-local paths.
+
+    Exactly one of *source_targets*, *source_scc*, or *inline_scc_targets* must be set.
+    Diff runs freeze ``targets.csv``; template runs freeze ``scc.csv``.
+    """
+    if sum(x is not None for x in (source_targets, source_scc, inline_scc_targets)) != 1:
+        raise ValueError(
+            "materialize_run_inputs requires exactly one of "
+            "source_targets, source_scc, or inline_scc_targets"
+        )
+
     rd = Path(run_directory).expanduser().resolve()
     rd.mkdir(parents=True, exist_ok=True)
     cfg_path = run_config_path(rd)
-    targets_path = run_targets_path(rd)
 
     if not cfg_path.is_file():
         from syndiff_pipeline.template_creation.orchestration.runner_config import (
@@ -113,11 +130,23 @@ def materialize_run_inputs(
 
         cfg = load_and_materialize_runner_config(source_config)
         write_runner_config(cfg, cfg_path)
-    if not targets_path.is_file():
-        src_targets = Path(source_targets).expanduser().resolve()
-        shutil.copy2(src_targets, targets_path)
 
-    return str(cfg_path), str(targets_path)
+    if source_targets is not None:
+        targets_path = run_targets_path(rd)
+        if not targets_path.is_file():
+            src_targets = Path(source_targets).expanduser().resolve()
+            shutil.copy2(src_targets, targets_path)
+        return str(cfg_path), str(targets_path)
+
+    scc_path = run_scc_path(rd)
+    if not scc_path.is_file():
+        if source_scc is not None:
+            shutil.copy2(Path(source_scc).expanduser().resolve(), scc_path)
+        else:
+            from syndiff_pipeline.common.orchestration.targets import write_sccs
+
+            write_sccs(scc_path, inline_scc_targets or [])
+    return str(cfg_path), str(scc_path)
 
 
 def ensure_run_layout(cfg_runs_root: str, run_id: str, meta: dict) -> Path:

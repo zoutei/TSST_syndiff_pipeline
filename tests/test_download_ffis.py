@@ -1,4 +1,4 @@
-"""Tests for TESS FFI download helpers (gzip-aware discovery)."""
+"""Tests for TESS FFI download helpers (fpack-aware discovery)."""
 from __future__ import annotations
 
 import gzip
@@ -22,8 +22,8 @@ if str(_ROOT) not in sys.path:
 from syndiff_pipeline.common.download import (
     _GZIP_MAGIC,
     _download_ffis_via_tesscurl,
-    _stream_url_to_gzip_fits,
-    compress_spoc_ffi_to_gzip,
+    _stream_url_to_fpack_fits,
+    compress_spoc_ffi_to_fpack,
     list_local_ffis,
     local_ffi_manifest_basenames,
     resolve_local_ffi_path,
@@ -32,21 +32,22 @@ from syndiff_pipeline.common.download import (
 
 
 class TestListLocalFfis(unittest.TestCase):
-    def test_prefers_fits_gz_over_fits(self):
+    def test_prefers_fits_fz_over_gz_and_fits(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             leaf = Path(tmpdir)
             stem = "tess2020019142923-s0022-3-3-0165-s_ffic"
             (leaf / f"{stem}.fits").write_bytes(b"raw")
-            gz_path = leaf / f"{stem}.fits.gz"
-            gz_path.write_bytes(b"gz")
+            (leaf / f"{stem}.fits.gz").write_bytes(b"gz")
+            fz_path = leaf / f"{stem}.fits.fz"
+            fz_path.write_bytes(b"fz")
 
             paths = list_local_ffis(str(leaf), sector=22, camera=3, ccd=3)
             self.assertEqual(len(paths), 1)
-            self.assertEqual(Path(paths[0]).name, gz_path.name)
+            self.assertEqual(Path(paths[0]).name, fz_path.name)
 
-    def test_manifest_basenames_map_gz_to_fits(self):
+    def test_manifest_basenames_map_fz_to_fits(self):
         paths = [
-            "/data/tess_ffi/s0022/cam3_ccd3/tess2020019142923-s0022-3-3-0165-s_ffic.fits.gz",
+            "/data/tess_ffi/s0022/cam3_ccd3/tess2020019142923-s0022-3-3-0165-s_ffic.fits.fz",
         ]
         basenames = local_ffi_manifest_basenames(paths)
         self.assertEqual(
@@ -56,22 +57,27 @@ class TestListLocalFfis(unittest.TestCase):
 
 
 class TestResolveLocalFfiPath(unittest.TestCase):
-    def test_prefers_gzip(self):
+    def test_prefers_fpack(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             stem = "tess2020019142923-s0022-3-3-0165-s_ffic.fits"
             plain = os.path.join(tmpdir, stem)
             gz = plain + ".gz"
+            fz = plain + ".fz"
             Path(plain).write_bytes(b"plain")
             Path(gz).write_bytes(b"gz")
+            Path(fz).write_bytes(b"fz")
             resolved = resolve_local_ffi_path(tmpdir, stem)
-            self.assertEqual(resolved, gz)
+            self.assertEqual(resolved, fz)
 
-    def test_falls_back_to_plain(self):
+    def test_falls_back_to_gz_then_plain(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             stem = "tess2020019142923-s0022-3-3-0165-s_ffic.fits"
             plain = os.path.join(tmpdir, stem)
             Path(plain).write_bytes(b"plain")
             self.assertEqual(resolve_local_ffi_path(tmpdir, stem), plain)
+            gz = plain + ".gz"
+            Path(gz).write_bytes(b"gz")
+            self.assertEqual(resolve_local_ffi_path(tmpdir, stem), gz)
 
 
 class TestCompressSpocFfi(unittest.TestCase):
@@ -82,14 +88,16 @@ class TestCompressSpocFfi(unittest.TestCase):
             )
             data = np.ones((4, 4), dtype=np.float32)
             fits.writeto(plain, data, overwrite=True)
-            gz = compress_spoc_ffi_to_gzip(plain)
+            fz = compress_spoc_ffi_to_fpack(plain)
             self.assertFalse(os.path.isfile(plain))
-            self.assertTrue(gz.endswith(".fits.gz"))
-            with fits.open(gz) as hdul:
+            self.assertTrue(fz.endswith(".fits.fz"))
+            from syndiff_pipeline.common.fits_io import open_fits
+
+            with open_fits(fz) as hdul:
                 np.testing.assert_array_equal(hdul[0].data, data)
 
 
-class TestStreamUrlToGzipFits(unittest.TestCase):
+class TestStreamUrlToFpackFits(unittest.TestCase):
     def _mock_urlopen_chunks(self, chunks: list[bytes]):
         class FakeResp:
             def __enter__(self):
@@ -112,40 +120,54 @@ class TestStreamUrlToGzipFits(unittest.TestCase):
             return_value=FakeResp(),
         )
 
-    def test_uncompressed_fits_streams_to_gzip_only(self):
+    def test_uncompressed_fits_streams_to_fpack_only(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             plain = io.BytesIO()
             data = np.ones((4, 4), dtype=np.float32)
             fits.writeto(plain, data, overwrite=True)
             plain.seek(0)
-            gz_dest = os.path.join(
-                tmpdir, "tess2020019142923-s0022-3-3-0165-s_ffic.fits.gz"
+            fz_dest = os.path.join(
+                tmpdir, "tess2020019142923-s0022-3-3-0165-s_ffic.fits.fz"
             )
-            plain_path = gz_dest[:-3]
+            plain_path = fz_dest[: -len(".fz")]
 
             with self._mock_urlopen_chunks([plain.read()]):
-                _stream_url_to_gzip_fits("https://example.invalid/file", gz_dest, 30.0)
+                _stream_url_to_fpack_fits(
+                    "https://example.invalid/file", fz_dest, 30.0
+                )
 
-            self.assertTrue(os.path.isfile(gz_dest))
+            self.assertTrue(os.path.isfile(fz_dest))
             self.assertFalse(os.path.isfile(plain_path))
-            with fits.open(gz_dest) as hdul:
+            from syndiff_pipeline.common.fits_io import open_fits
+
+            with open_fits(fz_dest) as hdul:
                 np.testing.assert_array_equal(hdul[0].data, data)
 
-    def test_pre_gzip_payload_not_double_compressed(self):
+    def test_pre_gzip_payload_gunzipped_then_fpacked(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            payload = _GZIP_MAGIC + b"rest-of-gzip-bytes"
-            gz_dest = os.path.join(
-                tmpdir, "tess2020019142923-s0022-3-3-0165-s_ffic.fits.gz"
+            buf = io.BytesIO()
+            data = np.ones((4, 4), dtype=np.float32)
+            fits.writeto(buf, data, overwrite=True)
+            gz_bytes = gzip.compress(buf.getvalue())
+            self.assertEqual(gz_bytes[:2], _GZIP_MAGIC)
+            fz_dest = os.path.join(
+                tmpdir, "tess2020019142923-s0022-3-3-0165-s_ffic.fits.fz"
             )
 
-            with self._mock_urlopen_chunks([payload]):
-                _stream_url_to_gzip_fits("https://example.invalid/file", gz_dest, 30.0)
+            with self._mock_urlopen_chunks([gz_bytes]):
+                _stream_url_to_fpack_fits(
+                    "https://example.invalid/file", fz_dest, 30.0
+                )
 
-            self.assertEqual(Path(gz_dest).read_bytes(), payload)
+            self.assertTrue(os.path.isfile(fz_dest))
+            from syndiff_pipeline.common.fits_io import open_fits
+
+            with open_fits(fz_dest) as hdul:
+                np.testing.assert_array_equal(hdul[0].data, data)
 
 
-class TestTesscurlDownloadGzip(unittest.TestCase):
-    def test_download_compresses_to_gz(self):
+class TestTesscurlDownloadFpack(unittest.TestCase):
+    def test_download_compresses_to_fz(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             bn = "tess2020019142923-s0022-3-3-0165-s_ffic.fits"
             script = (
@@ -160,23 +182,24 @@ class TestTesscurlDownloadGzip(unittest.TestCase):
                     return script.encode()
                 raise AssertionError(f"unexpected fetch {url}")
 
-            def fake_stream(url, gz_dest, timeout):
+            def fake_stream(url, fz_dest, timeout, on_plain_fits=None):
                 buf = io.BytesIO()
                 fits.writeto(buf, np.zeros((2, 2), dtype=np.float32), overwrite=True)
                 buf.seek(0)
-                with gzip.open(gz_dest, "wb") as out:
-                    out.write(buf.read())
+                plain = fz_dest[: -len(".fz")]
+                Path(plain).write_bytes(buf.read())
+                compress_spoc_ffi_to_fpack(plain)
 
             with unittest.mock.patch(
                 "syndiff_pipeline.common.download._fetch_bytes", side_effect=fake_fetch
             ), unittest.mock.patch(
-                "syndiff_pipeline.common.download._stream_url_to_gzip_fits",
+                "syndiff_pipeline.common.download._stream_url_to_fpack_fits",
                 side_effect=fake_stream,
             ):
                 paths = _download_ffis_via_tesscurl(22, 3, 3, tmpdir, overwrite=False)
 
             self.assertEqual(len(paths), 1)
-            self.assertTrue(paths[0].endswith(".fits.gz"))
+            self.assertTrue(paths[0].endswith(".fits.fz"))
             self.assertFalse(os.path.isfile(os.path.join(tmpdir, bn)))
             self.assertEqual(
                 spoc_ffi_basename_from_local(paths[0]),
@@ -206,17 +229,13 @@ class TestTesscurlDownloadGzip(unittest.TestCase):
                     return script.encode()
                 raise AssertionError(f"unexpected fetch {url}")
 
-            def fake_stream(url, gz_dest, timeout):
+            def fake_stream(url, fz_dest, timeout, on_plain_fits=None):
                 with lock:
                     active["n"] += 1
                     active["peak"] = max(active["peak"], active["n"])
                 try:
                     time.sleep(0.05)
-                    buf = io.BytesIO()
-                    fits.writeto(buf, np.zeros((2, 2), dtype=np.float32), overwrite=True)
-                    buf.seek(0)
-                    with gzip.open(gz_dest, "wb") as out:
-                        out.write(buf.read())
+                    Path(fz_dest).write_bytes(b"fz")
                 finally:
                     with lock:
                         active["n"] -= 1
@@ -224,7 +243,7 @@ class TestTesscurlDownloadGzip(unittest.TestCase):
             with unittest.mock.patch(
                 "syndiff_pipeline.common.download._fetch_bytes", side_effect=fake_fetch
             ), unittest.mock.patch(
-                "syndiff_pipeline.common.download._stream_url_to_gzip_fits",
+                "syndiff_pipeline.common.download._stream_url_to_fpack_fits",
                 side_effect=fake_stream,
             ):
                 paths = _download_ffis_via_tesscurl(
@@ -234,7 +253,7 @@ class TestTesscurlDownloadGzip(unittest.TestCase):
             self.assertEqual(len(paths), len(stems))
             self.assertGreaterEqual(active["peak"], 2)
             for path in paths:
-                self.assertTrue(path.endswith(".fits.gz"))
+                self.assertTrue(path.endswith(".fits.fz"))
 
 
 if __name__ == "__main__":

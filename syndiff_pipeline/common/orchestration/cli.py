@@ -51,7 +51,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 DIFF_STAGE = "diff"
-PRESET_NAMES = frozenset({"all", "template", "diff"})
+PRESET_NAMES = frozenset({"template", "diff"})
 
 
 def _template_stage_names() -> list[str]:
@@ -76,10 +76,6 @@ def preset_stages(preset: str) -> list[str]:
     """Return the stage list for a CLI execution preset."""
     if preset == "template":
         return _template_stage_names()
-    if preset == "all":
-        # ``star`` is a separate branch with its own target/config schemas and
-        # must only be launched through ``syndiff star``.
-        return _template_stage_names() + [DIFF_STAGE]
     if preset == "diff":
         return [DIFF_STAGE]
     raise ValueError(f"Unknown preset: {preset!r}")
@@ -450,18 +446,70 @@ def _monitoring_mode(args: argparse.Namespace) -> bool:
     return not getattr(args, "run_dir", None) and not getattr(args, "run_id", None)
 
 
+def _resolve_template_scope(args: argparse.Namespace):
+    """Resolve template SCC input to (optional source path, target list)."""
+    from syndiff_pipeline.common.orchestration.targets import load_sccs, scc_from_cli
+
+    has_inline = any(
+        getattr(args, name) is not None for name in ("sector", "camera", "ccd")
+    )
+    if getattr(args, "scc", None) and has_inline:
+        raise SystemExit("Use either --scc or --sector/--camera/--ccd, not both")
+    if getattr(args, "scc", None):
+        path = Path(args.scc).expanduser().resolve()
+        return str(path), load_sccs(path)
+    sector = getattr(args, "sector", None)
+    camera = getattr(args, "camera", None)
+    ccd = getattr(args, "ccd", None)
+    if sector is not None and camera is not None and ccd is not None:
+        return None, [scc_from_cli(sector, camera, ccd)]
+    if has_inline:
+        raise SystemExit("--sector, --camera, and --ccd must all be set together")
+    raise SystemExit("Template runs require --scc PATH or --sector, --camera, and --ccd")
+
+
+def _resolve_execution_targets(args: argparse.Namespace):
+    """Resolve targets for submit/run from preset-specific CLI args."""
+    from syndiff_pipeline.common.orchestration.targets import load_targets
+
+    preset = getattr(args, "preset", None)
+    if preset == "template":
+        return _resolve_template_scope(args)
+    if not getattr(args, "targets", None):
+        raise SystemExit("Diff runs require --targets")
+    path = str(Path(args.targets).expanduser().resolve())
+    return path, load_targets(path)
+
+
+def _patch_skip_artifact_verify(config_path: str) -> None:
+    """Set ``scheduler.skip_artifact_verify`` on a frozen run config."""
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+        write_runner_config,
+    )
+
+    rcfg = load_runner_config(config_path)
+    if rcfg.skip_artifact_verify:
+        return
+    rcfg.skip_artifact_verify = True
+    write_runner_config(rcfg, config_path)
+
+
 def _prepare_run_directory(
     source_config: str,
-    source_targets: str,
     run_id: str,
     runs_root: str,
     *,
     stages: list[str],
     detach: bool,
     force_rerun: bool,
+    source_targets: str | None = None,
+    source_scc: str | None = None,
+    inline_scc_targets: list | None = None,
     source_diff_config_path: str | None = None,
     source_star_config_path: str | None = None,
     workspace_run_id: str | None = None,
+    skip_artifact_verify: bool = False,
 ) -> Path:
     """Prepare run directory.
     
@@ -477,6 +525,7 @@ def _prepare_run_directory(
     source_diff_config_path : str | None, optional, default ``None``
     source_star_config_path : str | None, optional, default ``None``
     workspace_run_id : str | None, optional, default ``None``
+    skip_artifact_verify : bool, optional, default ``False``
     
     Returns
     -------
@@ -485,20 +534,54 @@ def _prepare_run_directory(
     run_directory.mkdir(parents=True, exist_ok=True)
     (run_directory / "per_target").mkdir(exist_ok=True)
 
-    config_path, targets_path = logs.materialize_run_inputs(
-        source_config, source_targets, run_directory
-    )
-    meta = {
-        "run_id": run_id,
-        "submitted_at": datetime.now(timezone.utc).isoformat(),
-        "source_config_path": str(Path(source_config).resolve()),
-        "source_targets_path": str(Path(source_targets).resolve()),
-        "config_path": config_path,
-        "targets_path": targets_path,
-        "stages": stages,
-        "detach": detach,
-        "force_rerun": force_rerun,
-    }
+    if source_targets is not None:
+        config_path, targets_path = logs.materialize_run_inputs(
+            source_config,
+            run_directory,
+            source_targets=source_targets,
+        )
+        meta = {
+            "run_id": run_id,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "source_config_path": str(Path(source_config).resolve()),
+            "source_targets_path": str(Path(source_targets).resolve()),
+            "config_path": config_path,
+            "targets_path": targets_path,
+            "stages": stages,
+            "detach": detach,
+            "force_rerun": force_rerun,
+        }
+    else:
+        from syndiff_pipeline.common.orchestration.targets import (
+            load_sccs,
+            write_normalized_targets,
+        )
+
+        config_path, scc_path = logs.materialize_run_inputs(
+            source_config,
+            run_directory,
+            source_scc=source_scc,
+            inline_scc_targets=inline_scc_targets,
+        )
+        scc_targets = inline_scc_targets or load_sccs(scc_path)
+        targets_path = str(logs.run_targets_path(run_directory))
+        write_normalized_targets(targets_path, scc_targets)
+        meta = {
+            "run_id": run_id,
+            "submitted_at": datetime.now(timezone.utc).isoformat(),
+            "source_config_path": str(Path(source_config).resolve()),
+            "config_path": config_path,
+            "scc_path": scc_path,
+            "targets_path": targets_path,
+            "stages": stages,
+            "detach": detach,
+            "force_rerun": force_rerun,
+        }
+        if source_scc:
+            meta["source_scc_path"] = str(Path(source_scc).resolve())
+    if skip_artifact_verify:
+        _patch_skip_artifact_verify(config_path)
+        meta["skip_artifact_verify"] = True
     if source_diff_config_path:
         meta["source_diff_config_path"] = str(Path(source_diff_config_path).resolve())
     if source_star_config_path:
@@ -576,11 +659,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
     -------
     int"""
     from syndiff_pipeline.common.orchestration.run_setup import apply_post_create_run_setup
-    from syndiff_pipeline.common.orchestration.targets import load_targets
     from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
 
     cfg = load_runner_config(args.config)
-    targets = load_targets(args.targets)
+    source_input_path, targets = _resolve_execution_targets(args)
     active, _stages_arg = _resolve_stages_arg(args)
     run_id = args.run_id or _default_run_id()
     runs_root = cfg.runs_dir()
@@ -588,20 +670,36 @@ def cmd_submit(args: argparse.Namespace) -> int:
     state = PipelineState(cfg.state_db_path)
     _reject_duplicate_run_id(state, run_id)
 
-    run_directory = _prepare_run_directory(
-        args.config,
-        args.targets,
-        run_id,
-        runs_root,
-        stages=active,
-        detach=True,
-        force_rerun=bool(args.force_rerun),
-        source_diff_config_path=cfg.diff_config_path or None,
-        workspace_run_id=getattr(args, "workspace_run_id", None),
-    )
-
     preset = getattr(args, "preset", None)
-    if getattr(args, "local", False) and preset in ("diff", "all"):
+    if preset == "template":
+        run_directory = _prepare_run_directory(
+            args.config,
+            run_id,
+            runs_root,
+            stages=active,
+            detach=True,
+            force_rerun=bool(args.force_rerun),
+            source_scc=source_input_path,
+            inline_scc_targets=targets if source_input_path is None else None,
+            source_diff_config_path=cfg.diff_config_path or None,
+            workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+        )
+    else:
+        run_directory = _prepare_run_directory(
+            args.config,
+            run_id,
+            runs_root,
+            stages=active,
+            detach=True,
+            force_rerun=bool(args.force_rerun),
+            source_targets=source_input_path,
+            source_diff_config_path=cfg.diff_config_path or None,
+            workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+        )
+
+    if getattr(args, "local", False) and preset == "diff":
         _patch_local_diff_executor(run_directory)
 
     state.create_run(
@@ -621,6 +719,10 @@ def cmd_submit(args: argparse.Namespace) -> int:
         )
     if setup.stream_skipped:
         print(f"Marked ps1_download n/a (stream_mode) for {setup.stream_skipped} target(s).")
+    if setup.linear_remap_skipped:
+        print(
+            f"Marked remap n/a (linear_geometry) for {setup.linear_remap_skipped} target(s)."
+        )
     if setup.not_selected:
         print(
             f"Marked {setup.not_selected} stage row(s) n/a "
@@ -678,31 +780,47 @@ def cmd_run(args: argparse.Namespace) -> int:
     -------
     int"""
     from syndiff_pipeline.common.orchestration.scheduler import run_scheduler
-    from syndiff_pipeline.common.orchestration.targets import load_targets
     from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
 
     if sys.stdout.isatty():
         print("Warning: foreground run blocks until complete; use 'submit' for detached runs.")
     run_id = args.run_id or _default_run_id()
     cfg = load_runner_config(args.config)
-    targets = load_targets(args.targets)
+    source_input_path, targets = _resolve_execution_targets(args)
     active, stages_arg = _resolve_stages_arg(args)
     runs_root = cfg.runs_dir()
 
     state = PipelineState(cfg.state_db_path)
     _reject_duplicate_run_id(state, run_id)
 
-    run_directory = _prepare_run_directory(
-        args.config,
-        args.targets,
-        run_id,
-        runs_root,
-        stages=active,
-        detach=False,
-        force_rerun=bool(args.force_rerun),
-        source_diff_config_path=cfg.diff_config_path or None,
-        workspace_run_id=getattr(args, "workspace_run_id", None),
-    )
+    preset = getattr(args, "preset", None)
+    if preset == "template":
+        run_directory = _prepare_run_directory(
+            args.config,
+            run_id,
+            runs_root,
+            stages=active,
+            detach=False,
+            force_rerun=bool(args.force_rerun),
+            source_scc=source_input_path,
+            inline_scc_targets=targets if source_input_path is None else None,
+            source_diff_config_path=cfg.diff_config_path or None,
+            workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+        )
+    else:
+        run_directory = _prepare_run_directory(
+            args.config,
+            run_id,
+            runs_root,
+            stages=active,
+            detach=False,
+            force_rerun=bool(args.force_rerun),
+            source_targets=source_input_path,
+            source_diff_config_path=cfg.diff_config_path or None,
+            workspace_run_id=getattr(args, "workspace_run_id", None),
+            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+        )
 
     return run_scheduler(
         run_id,
@@ -1618,6 +1736,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the message after sending",
     )
     sp_test.set_defaults(func=cmd_notify_test)
+
+    from syndiff_pipeline.common.provenance.cli import register_bookkeeping_subparser
+
+    register_bookkeeping_subparser(sub)
 
     return p
 

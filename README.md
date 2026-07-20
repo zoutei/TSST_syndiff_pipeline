@@ -10,20 +10,25 @@ TESS Full Frame Image (FFI) template building and difference-imaging pipeline fo
 
 ## Overview
 
-SynDiff is an end-to-end pipeline for TESS Full Frame Image (FFI) transient work: it builds PS1-based templates on the TESS pixel grid, then runs difference imaging and forced photometry at a science target. The unified **`syndiff`** CLI runs template creation first, then difference imaging — either end-to-end or one phase at a time.
+SynDiff is an end-to-end pipeline for TESS Full Frame Image (FFI) transient work: it builds PS1-based templates on the TESS pixel grid, then runs difference imaging and forced photometry at a science target. Template building is **SCC-scoped** (sector/camera/CCD; shared across every event that lands on it), while difference imaging is **event-scoped**. The `syndiff template` and `syndiff diff` CLI nouns submit these as two separate DAGs — there is no combined "run everything" preset.
 
 An independent **`star`** branch can then use a completed template+diff
 workspace to produce TIC/Gaia host-star light curves without re-running
 Hotpants.
 
-### Template creation (TESS FFIs + PS1 → `syndiff_template_*.fits`)
+### Template creation (TESS FFIs + PS1 → SCC-shared template store)
 
-1. **FFI download** — bulk download of calibrated TESS FFIs from MAST.
-2. **WCS grouping** — per-frame WCS, pixel drift of the science target, template offset groups; writes handoff JSON for diff.
-3. **Mapping (PanCAKES)** — map TESS pixels to PS1 skycells; Gaia catalog for the reference FFI. Uses a customized **[MOCPy](#forked-dependencies)** fork.
-4. **PS1 download** — fetch PS1 skycell cutouts into a shared Zarr store.
-5. **PS1 process** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-6. **Downsample** — combine convolved skycells at multiple sub-pixel offsets → `syndiff_template_*.fits.gz`.
+`syndiff template submit --scc sccs.csv` (SCC-only input; no event coordinates):
+
+1. **FFI download** (`tess_ffi_download`) — bulk download of calibrated TESS FFIs from MAST into `{data_root}/s{SSSS}/c{C}/k{K}/ffi/`.
+2. **Mapping (PanCAKES)** (`mapping`) — choose the SCC's mapping-epoch reference FFI (median-CRVAL anchor + Earth/Moon-angle cuts), map TESS pixels to PS1 skycells, and download the Gaia catalog for that reference FFI. Uses a customized **[MOCPy](#forked-dependencies)** fork.
+3. **PS1 download** (`ps1_download`) — fetch PS1 skycell cutouts into a shared Zarr store.
+4. **PS1 process** (`ps1_process`) — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
+5. **Templates** (`templates`; legacy config key/alias: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
+
+### Event binding (`syndiff diff submit --targets targets.csv --stages bind,diff`)
+
+The first diff-DAG stage, **`bind`**, measures the transient's per-frame WCS and pixel drift and writes the event handoff (`event_job.json` + `frames.csv`) under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`. **Important**: the bare `syndiff diff submit --targets ...` (no `--stages`) selects only `diff`, not `bind` — pass `--stages bind,diff` explicitly the first time you diff a new event. See [`docs/markdown/template_pipeline.md`](docs/markdown/template_pipeline.md#overview).
 
 ### Difference imaging (templates + FFIs → light curves)
 
@@ -41,7 +46,7 @@ Optional steps you can add to the `pipeline:` list:
 - **Background removal** — the unified `background` stage composes spatial, temporal, and strap corrections before optional `subtract`.
 - **Second round of differencing** — run Hotpants again on background-subtracted science images for cleaner residuals (see commented blocks in [`config/diff_config.yaml`](config/diff_config.yaml) and [`config/example/diff_config_c_second_hotpants.yaml`](config/example/diff_config_c_second_hotpants.yaml)).
 
-Run the full workflow with `syndiff all submit`, template building only with `syndiff template submit`, or diff only (when upstream artifacts already exist) with `syndiff diff submit`.
+Run template building with `syndiff template submit --scc sccs.csv`, then diff imaging (once templates exist) with `syndiff diff submit --targets targets.csv --stages bind,diff`.
 
 ---
 
@@ -89,23 +94,22 @@ For full template + diff runs, also install **custom MOCPy** (above) and ensure 
 
 ## Unified SynDiff pipeline (`syndiff`)
 
-The **`syndiff`** CLI orchestrates the full workflow behind one supervisor daemon and one SQLite state database — template building (TESS FFIs + PS1 → `syndiff_template_*.fits`) and difference imaging (config-driven Hotpants → photometry):
+The **`syndiff`** CLI orchestrates the full workflow behind one supervisor daemon and one SQLite state database — template building (TESS FFIs + PS1 → SCC-shared template store) and difference imaging (config-driven Hotpants → photometry). `template` and `diff` are separate DAGs with separate submits:
 
 ```text
-syndiff all submit      # template stages → diff
-syndiff template submit # template stages only
-syndiff diff submit     # diff only (verifies tess_dl + wcs handoff + downsample on disk)
-syndiff progress        # monitoring works the same for any run
+syndiff template submit --scc sccs.csv                   # template stages only
+syndiff diff submit --targets t.csv --stages bind,diff   # bind (event WCS) + diff
+syndiff progress                                          # monitoring works the same for any run
 ```
 
-Foreground debugging: `syndiff diff run --site config --targets t.csv --target-name 2020ut` (optional `--validate-only`).
+Foreground debugging: `syndiff diff run --site config --targets t.csv --target-name 2020ut` (optional `--validate-only`) — this path never runs `bind`; the event's handoff must already exist.
 
 | | Foreground (`syndiff diff run`) | Supervised (`syndiff * submit`) |
 |---|--------------------------------|----------------------------------|
 | **Purpose** | One target, current process | Multi-target batch + daemon |
 | **Config** | `--site config` (site policy) | `--site` → `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml` |
 | **State** | No SQLite | `{workspace_root}/control/pipeline_state.sqlite` |
-| **Outputs** | `events/{label}/ws/` | Same layout under `workspace_root` |
+| **Outputs** | `events/{event_name}/s{SSSS}_c{C}_k{K}/ws/` | Same layout under `workspace_root` |
 
 ### Setup (first time)
 
@@ -122,7 +126,7 @@ cp config/deployment.yaml.example config/deployment.yaml
 # Edit workspace_root, data_root, optional gaia_username/password, Discord keys
 ```
 
-Targets are always passed on the CLI (`--targets`), never embedded in config files.
+Targets are always passed on the CLI (`--scc` for template, `--targets` for diff/star), never embedded in config files.
 
 ### Quick start
 
@@ -131,14 +135,22 @@ mamba activate syndiff
 
 syndiff verify --site config --targets config/targets_example.csv
 
-syndiff all submit \
+syndiff template submit \
   --site config \
-  --targets config/targets_example.csv \
+  --scc config/scc_example.csv \
   --run-id batch_no5
 
 syndiff progress
 syndiff status --watch
-syndiff retry --deployment config/deployment.yaml --run-id batch_no5 \
+
+# once templates exist, bind + diff the event
+syndiff diff submit \
+  --site config \
+  --targets config/targets_example.csv \
+  --stages bind,diff \
+  --run-id diff_batch_no5
+
+syndiff retry --deployment config/deployment.yaml --run-id diff_batch_no5 \
   --scc s0023_c1_k3_2020ftl --stage diff
 ```
 
@@ -146,7 +158,7 @@ syndiff retry --deployment config/deployment.yaml --run-id batch_no5 \
 
 | Pattern | Examples |
 |---------|----------|
-| **Execute** | `syndiff all submit`, `syndiff template submit`, `syndiff diff submit`, `syndiff diff run --target-name …`, `syndiff star submit` |
+| **Execute** | `syndiff template submit`, `syndiff diff submit --stages bind,diff`, `syndiff diff run --target-name …`, `syndiff star submit` |
 | **Monitor** | `syndiff progress`, `syndiff status --watch`, `syndiff logs`, `syndiff tail` |
 | **Control** | `syndiff retry`, `syndiff pause`, `syndiff resume`, `syndiff kill` |
 | **Workspace** | `syndiff runs`, `syndiff active`, `syndiff daemon status`, `syndiff verify` |
@@ -159,9 +171,11 @@ After PS1 templates exist, the orchestrator **`diff`** stage runs a YAML-ordered
 diff policy (`shared_mask`, `hotpants`, `epsf`, `background`,
 `forced_photometry`, …). Foreground `--site config` uses
 [`config/diff_config.yaml`](config/diff_config.yaml); supervised submit uses
-the `diff_config:` path selected by `pipeline.yaml`. WCS handoff and templates
-come from template creation (`cluster_template_job.json`,
-`syndiff_ffi_frames.csv`, `events/{label}/ws/templates`).
+the `diff_config:` path selected by `pipeline.yaml`. The event handoff
+(`event_job.json`, `frames.csv`) comes from the **`bind`** stage; templates
+are resolved directly from the SCC's shared store
+(`{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`) — there is
+no `ws/templates` symlink.
 
 **Two foreground paths** (no daemon):
 
@@ -171,7 +185,7 @@ come from template creation (`cluster_template_job.json`,
 | Alternate diff policy | `syndiff diff run --config config/other_diff.yaml --deployment config/deployment.yaml --targets t.csv --target-name 2020ut` | Explicit diff policy + deployment |
 | Materialized YAML | `python -m syndiff_pipeline.difference_imaging.orchestration.cli --config config/example/diff_config_a_prf.yaml` | Pre-built per-target YAML under [`config/example/`](config/example/) |
 
-See [`config/README.md`](config/README.md) for site layout. Outputs live under `{workspace_root}/events/{label}/ws/`; full directory reference: [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md).
+See [`config/README.md`](config/README.md) for site layout. Outputs live under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/`; full directory reference: [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md).
 
 ---
 
@@ -184,8 +198,8 @@ See [`config/README.md`](config/README.md) for site layout. Outputs live under `
 | [`docs/README.md`](docs/README.md) | Documentation index and HTML build instructions |
 | [`docs/markdown/template_pipeline.md`](docs/markdown/template_pipeline.md) | `syndiff` orchestration, Condor, config, run lifecycle |
 | [`docs/markdown/syndiff_cli.md`](docs/markdown/syndiff_cli.md) | CLI noun/verb commands and stage modules |
-| [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md) | `workspace_root`, `data_root`, on-disk layout |
+| [`docs/markdown/storage_layout.md`](docs/markdown/storage_layout.md) | `workspace_root`, `data_root` (SCC + nested-event layout), on-disk layout |
 | [`docs/markdown/star_lightcurves.md`](docs/markdown/star_lightcurves.md) | Host-star quick start, prerequisites, and outputs |
-| [`docs/markdown/stages/`](docs/markdown/stages/README.md) | PanCAKES, PS1 process, downsample algorithms |
+| [`docs/markdown/stages/`](docs/markdown/stages/README.md) | PanCAKES, PS1 process, template-build algorithms |
 | [`docs/markdown/cluster_smoke_checklist.md`](docs/markdown/cluster_smoke_checklist.md) | Cluster smoke test after setup |
 | [`config/`](config/) | Site configs and example diff YAMLs |
