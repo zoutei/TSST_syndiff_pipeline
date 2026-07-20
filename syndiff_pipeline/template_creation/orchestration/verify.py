@@ -156,8 +156,7 @@ def config_fingerprint(
                 str(mp.oversampling_factor),
                 str(rm.cache_quantum_ps1_px),
                 str(rm.keying),
-                str(rm.apply_hybrid_exact),
-                str(rm.hybrid_R),
+                str(rm.intra_skycell_R),
             ]
         )
     elif stage == "downsample":
@@ -772,22 +771,36 @@ def _count_npz_files(cache_dir: Path) -> int:
     return sum(1 for p in cache_dir.glob("*.npz") if p.is_file())
 
 
-def _l4b_lite_rejection_reason(payload: dict, *, source: str) -> str | None:
-    """Return an operator-facing rebuild message when *payload* claims L4b-lite."""
+def _legacy_manifest_rejection_reason(payload: dict, *, source: str) -> str | None:
+    """Reject pre-simplification manifests that used geometry toggles."""
     if payload.get("include_abutting_border_exact"):
         return (
             f"{source} uses removed L4b-lite (include_abutting_border_exact); "
-            "rebuild remap with pure L4a (exact_cache_l4a/) and optional F2 L4b "
-            "(exact_cache_l4b/); do not reuse polluted exact_cache/"
+            "rebuild remap with intra-skycell (exact_cache_l4a/) and inter-skycell "
+            "(exact_cache_l4b/) caches"
         )
-    policy = str(payload.get("l4b_policy", "none"))
+    if "apply_hybrid_exact" in payload or "l4b_policy" in payload:
+        return (
+            f"{source} uses removed geometry toggles (apply_hybrid_exact / l4b_policy); "
+            "rebuild remap (stages.remap.rebuild_remap_cache: true and "
+            "rebuild_inter_skycell_cache: true)"
+        )
+    if "hybrid_R" in payload and "intra_skycell_R" not in payload:
+        return (
+            f"{source} uses legacy hybrid_R; rebuild remap for schema v2 manifest "
+            "(intra_skycell_R)"
+        )
+    policy = str(payload.get("l4b_policy", ""))
     if policy in _DEPRECATED_L4B_POLICIES:
         return (
-            f"{source} has deprecated l4b_policy={policy!r}; use none|pair_state "
-            "and rebuild (rebuild_remap_cache / rebuild_l4b_cache); do not reuse "
-            "polluted exact_cache/ as L4a"
+            f"{source} has deprecated l4b_policy={policy!r}; rebuild remap"
         )
     return None
+
+
+def _l4b_lite_rejection_reason(payload: dict, *, source: str) -> str | None:
+    """Alias for legacy manifest rejection (L4b-lite / toggle manifests)."""
+    return _legacy_manifest_rejection_reason(payload, source=source)
 
 
 def _polluted_legacy_exact_cache_reason(read_root: Path) -> str | None:
@@ -813,74 +826,62 @@ def _polluted_legacy_exact_cache_reason(read_root: Path) -> str | None:
 def _verify_remap_exact_caches(
     read_root: Path,
     payload: dict,
-    *,
-    config_l4b_policy: str,
 ) -> str | None:
-    """Validate dual-cache layout and NPZ counts for the remap manifest."""
+    """Validate intra + inter exact cache layout and NPZ counts."""
     from syndiff_pipeline.template_creation.processing.field_remap import (
         EXACT_CACHE_L4A_DIRNAME,
         EXACT_CACHE_L4B_DIRNAME,
+        REMAP_SCHEMA_VERSION,
     )
 
-    manifest_policy = str(payload.get("l4b_policy", "none"))
-    if manifest_policy not in ("none", "pair_state"):
+    schema = int(payload.get("schema_version", 0))
+    if schema < REMAP_SCHEMA_VERSION:
         return (
-            f"remap_manifest l4b_policy={manifest_policy!r} is invalid; "
-            "use none|pair_state and rebuild"
+            f"remap_manifest schema_version={schema} is outdated; "
+            f"expected >={REMAP_SCHEMA_VERSION}; rebuild remap"
         )
-    if config_l4b_policy != manifest_policy:
-        return (
-            f"remap_manifest l4b_policy={manifest_policy!r} does not match config "
-            f"({config_l4b_policy!r}); rebuild remap or align config"
-        )
-
-    apply_hybrid = bool(payload.get("apply_hybrid_exact", True))
-    if not apply_hybrid:
-        return None
 
     polluted = _polluted_legacy_exact_cache_reason(read_root)
     if polluted:
         return polluted
 
     l4a_dir = read_root / EXACT_CACHE_L4A_DIRNAME
+    n_l4a_manifest = payload.get("n_intra_skycell_keys") or payload.get("n_exact_keys")
     if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
-        n_expected = payload.get("n_exact_keys")
-        if isinstance(n_expected, int) and n_expected > 0:
+        if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
             return (
-                f"missing pure {EXACT_CACHE_L4A_DIRNAME}/ "
-                f"(manifest n_exact_keys={n_expected}); rebuild L4a "
+                f"missing {EXACT_CACHE_L4A_DIRNAME}/ "
+                f"(manifest n_intra_skycell_keys={n_l4a_manifest}); rebuild intra-skycell "
                 "(stages.remap.rebuild_remap_cache: true)"
             )
 
-    n_l4a_manifest = payload.get("n_exact_keys")
     if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
         on_disk = _count_npz_files(l4a_dir)
         if on_disk < n_l4a_manifest:
             return (
-                f"L4a cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
+                f"intra-skycell cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
                 f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
             )
-
-    if manifest_policy != "pair_state":
-        return None
 
     l4b_dir = read_root / EXACT_CACHE_L4B_DIRNAME
     if not l4b_dir.is_dir():
         return (
-            f"pair_state requires {EXACT_CACHE_L4B_DIRNAME}/; rebuild L4b "
-            "(stages.remap.rebuild_l4b_cache: true)"
+            f"missing {EXACT_CACHE_L4B_DIRNAME}/; rebuild inter-skycell "
+            "(stages.remap.rebuild_inter_skycell_cache: true)"
         )
-    n_l4b_manifest = payload.get("n_l4b_pair_states")
+    n_l4b_manifest = payload.get("n_inter_skycell_pair_states") or payload.get(
+        "n_l4b_pair_states"
+    )
     if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
         on_disk = _count_npz_files(l4b_dir)
         if on_disk < n_l4b_manifest:
             return (
-                f"L4b cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
-                f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild L4b"
+                f"inter-skycell cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
+                f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
             )
     elif _count_npz_files(l4b_dir) == 0:
         return (
-            f"pair_state requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild L4b"
+            f"inter-skycell requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
         )
     return None
 
@@ -966,7 +967,6 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
     cache_reason = _verify_remap_exact_caches(
         read_root,
         remap_payload,
-        config_l4b_policy=str(ds.l4b_policy or rm.l4b_policy or "none"),
     )
     if cache_reason:
         return VerifyResult("downsample", False, cache_reason, str(read_root))
@@ -1008,34 +1008,17 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
         if lite_reason:
             return VerifyResult("downsample", False, lite_reason, str(marker))
         raw_keys = keys_payload.get("keys", [])
-        l4b_policy = str(keys_payload.get("l4b_policy", "none"))
-        if l4b_policy == "pair_state":
-            if raw_keys and any(len(k) != 4 for k in raw_keys):
-                return VerifyResult(
-                    "downsample",
-                    False,
-                    "pair_state requires group-qualified contrib keys "
-                    "[group_id, skycell, sx, sy]; rebuild downsample",
-                    str(marker),
-                )
-            config_policy = str(ds.l4b_policy or "none")
-            if config_policy != "pair_state":
-                return VerifyResult(
-                    "downsample",
-                    False,
-                    f"field_contrib_keys.json l4b_policy=pair_state but config has "
-                    f"{config_policy!r}; align stages.downsample.l4b_policy",
-                    str(marker),
-                )
-        group_scoped = l4b_policy == "pair_state" or int(
-            keys_payload.get("schema_version", 1)
-        ) >= 2 and len(raw_keys[0]) == 4 if raw_keys else False
-        if group_scoped:
-            required = [
-                (int(k[0]), str(k[1]), int(k[2]), int(k[3])) for k in raw_keys
-            ]
-        else:
-            required = [(str(k[0]), int(k[1]), int(k[2])) for k in raw_keys]
+        if raw_keys and any(len(k) != 4 for k in raw_keys):
+            return VerifyResult(
+                "downsample",
+                False,
+                "Field mode requires group-qualified contrib keys "
+                "[group_id, skycell, sx, sy]; rebuild downsample",
+                str(marker),
+            )
+        required = [
+            (int(k[0]), str(k[1]), int(k[2]), int(k[3])) for k in raw_keys
+        ]
     except Exception as exc:
         return VerifyResult(
             "downsample", False, f"Unreadable field_contrib_keys.json: {exc}", str(store)
@@ -1423,7 +1406,6 @@ def verify_remap(resolved: ResolvedTargetConfig) -> VerifyResult:
     cache_reason = _verify_remap_exact_caches(
         store,
         payload,
-        config_l4b_policy=str(rm.l4b_policy or "none"),
     )
     if cache_reason:
         return VerifyResult("remap", False, cache_reason, str(store))

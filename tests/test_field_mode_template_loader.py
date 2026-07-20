@@ -38,6 +38,7 @@ class TestFieldModeLoader(unittest.TestCase):
                 indices=np.array([14], dtype=np.int64),
                 flux_sum=np.array([6.0]),
                 count=np.array([2.0]),
+                group_id=0,
             )
             shifts = pd.DataFrame(
                 {
@@ -95,8 +96,6 @@ class TestFieldModeLoader(unittest.TestCase):
         if schema_version >= 2:
             payload.update(
                 {
-                    "l4b_policy": "pair_state",
-                    "require_l4b_cache": True,
                     "group_scoped_contribs": True,
                 }
             )
@@ -146,6 +145,7 @@ class TestFieldModeLoader(unittest.TestCase):
                 indices=np.array([77], dtype=np.int64),
                 flux_sum=np.array([8.0]),
                 count=np.array([2.0]),
+                group_id=0,
             )
             shifts = pd.DataFrame(
                 {

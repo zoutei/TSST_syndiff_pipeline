@@ -319,8 +319,7 @@ def remap_store_recipe_params(resolved) -> dict:
         "oversampling_factor": mp.oversampling_factor,
         "cache_quantum_ps1_px": rm.cache_quantum_ps1_px,
         "keying": rm.keying,
-        "apply_hybrid_exact": rm.apply_hybrid_exact,
-        "hybrid_R": rm.hybrid_R,
+        "intra_skycell_R": rm.intra_skycell_R,
     }
 
 

@@ -1,4 +1,4 @@
-"""Verify rejects L4b-lite manifests and enforces dual-cache pair_state layout."""
+"""Verify rejects legacy toggle manifests and enforces dual-cache field layout."""
 
 from __future__ import annotations
 
@@ -43,12 +43,20 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
 )
 
 
-def _resolved(
-    tmp: Path,
-    *,
-    l4b_policy: str = "none",
-    downsample_l4b_policy: str | None = None,
-) -> ResolvedTargetConfig:
+def _v2_manifest(**overrides) -> dict:
+    payload = {
+        "schema_version": 2,
+        "cache_quantum_ps1_px": 1.0,
+        "keying": "absolute",
+        "intra_skycell_R": 1,
+        "n_intra_skycell_keys": 0,
+        "n_inter_skycell_pair_states": 0,
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _resolved(tmp: Path) -> ResolvedTargetConfig:
     target = Target(20, 1, 1, 210.0, 81.0, "2020ut")
     data_root = tmp / "data"
     return ResolvedTargetConfig(
@@ -64,13 +72,8 @@ def _resolved(
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
-            remap=RemapStageParams(l4b_policy=l4b_policy),
-            downsample=DownsampleStageParams(
-                geometry_mode="field",
-                l4b_policy=downsample_l4b_policy
-                if downsample_l4b_policy is not None
-                else l4b_policy,
-            ),
+            remap=RemapStageParams(),
+            downsample=DownsampleStageParams(geometry_mode="field"),
         ),
         mapping_root=str(data_root / "s0020" / "c1" / "k1" / "mapping" / "oversampling_1"),
         zarr_dir=str(data_root / "ps1_skycells_zarr"),
@@ -118,12 +121,7 @@ def _write_remap_store(
     return store
 
 
-def _write_field_store(
-    resolved: ResolvedTargetConfig,
-    *,
-    group_scoped: bool = False,
-    l4b_policy: str = "none",
-) -> Path:
+def _write_field_store(resolved: ResolvedTargetConfig) -> Path:
     t = resolved.target
     store = field_templates_root(
         resolved.data_root,
@@ -138,32 +136,23 @@ def _write_field_store(
         json.dumps(
             {
                 "schema_version": 2,
-                "l4b_policy": l4b_policy,
-                "group_scoped_contribs": group_scoped,
+                "group_scoped_contribs": True,
             }
         )
         + "\n"
     )
-    contrib_dir = store / "contribs"
-    contrib_dir.mkdir(parents=True, exist_ok=True)
-    if group_scoped:
-        p = contrib_path(store, "skycell.1.1", 0, 0, group_id=7)
-        keys = [[7, "skycell.1.1", 0, 0]]
-        schema_version = 2
-    else:
-        p = contrib_path(store, "skycell.1.1", 0, 0)
-        keys = [["skycell.1.1", 0, 0]]
-        schema_version = 1
+    p = contrib_path(store, "skycell.1.1", 0, 0, group_id=7)
+    keys = [[7, "skycell.1.1", 0, 0]]
     import numpy as np
 
+    p.parent.mkdir(parents=True, exist_ok=True)
     np.savez(p, indices=np.array([1], dtype=np.int32), flux_sum=np.array([1.0]))
     event_dir = Path(resolved.event_dir)
     event_dir.mkdir(parents=True, exist_ok=True)
     (event_dir / "field_contrib_keys.json").write_text(
         json.dumps(
             {
-                "schema_version": schema_version,
-                "l4b_policy": l4b_policy,
+                "schema_version": 2,
                 "keys": keys,
             }
         )
@@ -172,51 +161,41 @@ def _write_field_store(
     return store
 
 
-class TestVerifyRejectsL4bLite(unittest.TestCase):
+class TestVerifyRejectsLegacyManifests(unittest.TestCase):
     def test_verify_remap_rejects_include_abutting_border_exact(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "include_abutting_border_exact": True,
-                    "l4b_policy": "none",
-                },
+                manifest=_v2_manifest(include_abutting_border_exact=True),
             )
             result = verify_remap(resolved)
             self.assertFalse(result.ok)
             self.assertIn("include_abutting_border_exact", result.message)
-            self.assertIn("exact_cache_l4a", result.message)
 
-    def test_verify_remap_rejects_lite_policy(self):
+    def test_verify_remap_rejects_toggle_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
                 manifest={
+                    "schema_version": 2,
                     "cache_quantum_ps1_px": 1.0,
                     "keying": "absolute",
-                    "l4b_policy": "lite",
+                    "apply_hybrid_exact": True,
+                    "l4b_policy": "none",
                 },
             )
             result = verify_remap(resolved)
             self.assertFalse(result.ok)
-            self.assertIn("deprecated l4b_policy", result.message)
+            self.assertIn("removed geometry toggles", result.message)
 
     def test_verify_remap_rejects_polluted_legacy_exact_cache(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "apply_hybrid_exact": True,
-                    "l4b_policy": "none",
-                    "n_exact_keys": 2,
-                },
+                manifest=_v2_manifest(n_intra_skycell_keys=2),
                 legacy_npz=2,
             )
             result = verify_remap(resolved)
@@ -225,126 +204,110 @@ class TestVerifyRejectsL4bLite(unittest.TestCase):
             self.assertIn(EXACT_CACHE_LEGACY_DIRNAME, result.message)
 
 
-class TestVerifyPairStateDualCache(unittest.TestCase):
-    def test_verify_remap_pair_state_requires_l4b_dir(self):
+class TestVerifyFieldDualCache(unittest.TestCase):
+    def test_verify_remap_requires_inter_skycell_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolved = _resolved(Path(tmpdir), l4b_policy="pair_state")
+            resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "apply_hybrid_exact": True,
-                    "l4b_policy": "pair_state",
-                    "n_exact_keys": 2,
-                    "n_l4b_pair_states": 1,
-                },
+                manifest=_v2_manifest(
+                    n_intra_skycell_keys=2,
+                    n_inter_skycell_pair_states=1,
+                ),
                 l4a_npz=2,
             )
             result = verify_remap(resolved)
             self.assertFalse(result.ok)
             self.assertIn(EXACT_CACHE_L4B_DIRNAME, result.message)
 
-    def test_verify_remap_pair_state_count_mismatch(self):
+    def test_verify_remap_intra_cache_count_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolved = _resolved(Path(tmpdir), l4b_policy="pair_state")
+            resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "apply_hybrid_exact": True,
-                    "l4b_policy": "pair_state",
-                    "n_exact_keys": 3,
-                    "n_l4b_pair_states": 2,
-                },
+                manifest=_v2_manifest(
+                    n_intra_skycell_keys=3,
+                    n_inter_skycell_pair_states=1,
+                ),
                 l4a_npz=2,
                 l4b_npz=1,
             )
             result = verify_remap(resolved)
             self.assertFalse(result.ok)
-            self.assertIn("L4a cache incomplete", result.message)
+            self.assertIn("intra-skycell cache incomplete", result.message)
 
-    def test_verify_remap_pair_state_ok(self):
+    def test_verify_remap_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolved = _resolved(Path(tmpdir), l4b_policy="pair_state")
+            resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "apply_hybrid_exact": True,
-                    "l4b_policy": "pair_state",
-                    "n_exact_keys": 2,
-                    "n_l4b_pair_states": 1,
-                },
+                manifest=_v2_manifest(
+                    n_intra_skycell_keys=2,
+                    n_inter_skycell_pair_states=1,
+                ),
                 l4a_npz=2,
                 l4b_npz=1,
             )
             result = verify_remap(resolved)
             self.assertTrue(result.ok)
 
-    def test_verify_downsample_pair_state_requires_gid_keys(self):
+    def test_verify_downsample_requires_gid_keys(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolved = _resolved(Path(tmpdir), l4b_policy="pair_state")
+            resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "apply_hybrid_exact": True,
-                    "l4b_policy": "pair_state",
-                    "n_exact_keys": 1,
-                    "n_l4b_pair_states": 1,
-                },
+                manifest=_v2_manifest(
+                    n_intra_skycell_keys=1,
+                    n_inter_skycell_pair_states=1,
+                ),
                 l4a_npz=1,
                 l4b_npz=1,
             )
-            _write_field_store(resolved, group_scoped=False, l4b_policy="pair_state")
+            store = field_templates_root(
+                resolved.data_root, 20, 1, 1, oversampling_factor=1
+            )
+            store.mkdir(parents=True, exist_ok=True)
+            (store / MANIFEST_NAME).write_text("{}")
+            event_dir = Path(resolved.event_dir)
+            event_dir.mkdir(parents=True, exist_ok=True)
+            (event_dir / "field_contrib_keys.json").write_text(
+                json.dumps({"schema_version": 1, "keys": [["skycell.1.1", 0, 0]]})
+            )
             result = verify_downsample_field_mode(resolved)
             self.assertFalse(result.ok)
             self.assertIn("group-qualified", result.message)
 
-    def test_verify_downsample_pair_state_ok(self):
+    def test_verify_downsample_ok(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            resolved = _resolved(Path(tmpdir), l4b_policy="pair_state")
+            resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest={
-                    "cache_quantum_ps1_px": 1.0,
-                    "keying": "absolute",
-                    "apply_hybrid_exact": True,
-                    "l4b_policy": "pair_state",
-                    "n_exact_keys": 1,
-                    "n_l4b_pair_states": 1,
-                },
+                manifest=_v2_manifest(
+                    n_intra_skycell_keys=1,
+                    n_inter_skycell_pair_states=1,
+                ),
                 l4a_npz=1,
                 l4b_npz=1,
             )
-            _write_field_store(resolved, group_scoped=True, l4b_policy="pair_state")
+            _write_field_store(resolved)
             result = verify_downsample_field_mode(resolved)
             self.assertTrue(result.ok)
 
 
-class TestStageParamsL4bPolicy(unittest.TestCase):
-    def test_rejects_invalid_l4b_policy(self):
+class TestStageParamsFieldGeometry(unittest.TestCase):
+    def test_rejects_removed_remap_keys(self):
         with self.assertRaises(ValueError) as ctx:
-            parse_stage_params({"remap": {"l4b_policy": "lite"}})
+            parse_stage_params({"remap": {"l4b_policy": "pair_state"}})
         self.assertIn("l4b_policy", str(ctx.exception))
 
-    def test_accepts_pair_state_and_require_l4b_cache(self):
-        stages = parse_stage_params(
-            {
-                "remap": {"l4b_policy": "pair_state"},
-                "downsample": {
-                    "l4b_policy": "pair_state",
-                    "require_l4b_cache": True,
-                },
-            }
-        )
-        self.assertEqual(stages.remap.l4b_policy, "pair_state")
-        self.assertEqual(stages.downsample.l4b_policy, "pair_state")
-        self.assertTrue(stages.downsample.require_l4b_cache)
+    def test_rejects_removed_downsample_keys(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_stage_params({"downsample": {"apply_hybrid_exact": True}})
+        self.assertIn("apply_hybrid_exact", str(ctx.exception))
+
+    def test_accepts_intra_skycell_R(self):
+        stages = parse_stage_params({"remap": {"intra_skycell_R": 2}})
+        self.assertEqual(stages.remap.intra_skycell_R, 2)
 
 
 if __name__ == "__main__":

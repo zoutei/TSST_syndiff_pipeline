@@ -80,8 +80,6 @@ class TestFrozenConfigCompat(unittest.TestCase):
                 "downsample": {
                     "geometry_mode": "field",
                     "materialize_fits": False,
-                    "hybrid_R": 1,
-                    "apply_hybrid_exact": True,
                     "rebuild_field_store": False,
                 },
             }
@@ -89,7 +87,6 @@ class TestFrozenConfigCompat(unittest.TestCase):
         self.assertEqual(stages.wcs_grouping.geometry_mode, "field")
         self.assertEqual(stages.downsample.geometry_mode, "field")
         self.assertFalse(stages.downsample.materialize_fits)
-        self.assertTrue(stages.downsample.apply_hybrid_exact)
         self.assertFalse(stages.downsample.rebuild_field_store)
 
     def test_strict_parse_rejects_unknown_drift_field_block(self):
