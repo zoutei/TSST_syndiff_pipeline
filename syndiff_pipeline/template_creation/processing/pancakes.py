@@ -1175,10 +1175,12 @@ def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, o
     mapping_array[mapping_array == -1] = -1  # Ensure -1 for unmapped pixels
 
     # Create FITS file with oversampling subdirectory if needed
-    if oversampling_factor > 1:
-        file_path = os.path.join(output_path, f"oversampling_{oversampling_factor}", f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}", file_name)
-    else:
-        file_path = os.path.join(output_path, f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}", file_name)
+    from syndiff_pipeline.common.scc_paths import mapping_write_dir
+
+    sector_base = mapping_write_dir(
+        output_path, sector, camera_id, ccd_id, oversampling_factor=oversampling_factor
+    )
+    file_path = os.path.join(sector_base, file_name)
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     primary_hdu = fits.PrimaryHDU(header=new_fits_header)
     image_hdu = fits.ImageHDU(data=np.int64(mapping_array), header=new_fits_header_extended)
@@ -1196,25 +1198,17 @@ def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, o
 
 def master_skycells_csv_paths(output_path, sector, camera_id, ccd_id, oversampling_factor=1):
     """Return (partial_csv_path, final_csv_path) for mapping stage outputs."""
+    from syndiff_pipeline.common.scc_paths import mapping_write_dir
+
     if oversampling_factor > 1:
         file_stem = (
             f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list_os{oversampling_factor}"
         )
-        base_path = os.path.join(
-            output_path,
-            f"oversampling_{oversampling_factor}",
-            f"sector_{sector:04d}",
-            f"camera_{camera_id}",
-            f"ccd_{ccd_id}",
-        )
     else:
         file_stem = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_skycells_list"
-        base_path = os.path.join(
-            output_path,
-            f"sector_{sector:04d}",
-            f"camera_{camera_id}",
-            f"ccd_{ccd_id}",
-        )
+    base_path = mapping_write_dir(
+        output_path, sector, camera_id, ccd_id, oversampling_factor=oversampling_factor
+    )
     return (
         os.path.join(base_path, f"{file_stem}.partial.csv"),
         os.path.join(base_path, f"{file_stem}.csv"),
@@ -1264,12 +1258,15 @@ def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_na
         oversampling_factor (int): Oversampling factor (default: 1)
     """
     # Create filename with oversampling suffix if needed
+    from syndiff_pipeline.common.scc_paths import mapping_write_dir
+
     if oversampling_factor > 1:
         file_name = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_pixels2skycells_os{oversampling_factor}.fits"
-        base_path = os.path.join(output_path, f"oversampling_{oversampling_factor}", f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
     else:
         file_name = f"tess_s{sector:04d}_{camera_id}_{ccd_id}_master_pixels2skycells.fits"
-        base_path = os.path.join(output_path, f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
+    base_path = mapping_write_dir(
+        output_path, sector, camera_id, ccd_id, oversampling_factor=oversampling_factor
+    )
 
     partial_csv, _final_csv = master_skycells_csv_paths(
         output_path, sector, camera_id, ccd_id, oversampling_factor

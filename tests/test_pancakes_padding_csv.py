@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import unittest
@@ -34,6 +35,15 @@ class TestMasterSkycellsCsvPaths(unittest.TestCase):
                 partial_os.endswith("tess_s0044_2_1_master_skycells_list_os2.partial.csv")
             )
             self.assertTrue(final_os.endswith("tess_s0044_2_1_master_skycells_list_os2.csv"))
+
+    def test_oversampling_paths_when_output_already_scoped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scoped = os.path.join(tmp, "oversampling_4")
+            os.makedirs(scoped, exist_ok=True)
+            partial, final = master_skycells_csv_paths(scoped, 20, 1, 1, oversampling_factor=4)
+            self.assertTrue(partial.startswith(scoped + os.sep))
+            self.assertIn("tess_s0020_1_1_master_skycells_list_os4", partial)
+            self.assertNotIn("sector_0020", partial)
 
     def test_prepare_and_finalize_publish_final_csv(self):
         with tempfile.TemporaryDirectory() as tmp:
