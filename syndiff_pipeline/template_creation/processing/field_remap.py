@@ -729,10 +729,14 @@ def _init_remap_worker(payload: dict[str, Any]) -> None:
     )
 
     _REMAP_WORKER = dict(payload)
-    master_path = _REMAP_WORKER.pop("master_path", None)
+    master_path = _REMAP_WORKER.get("master_path")
     if master_path and _REMAP_WORKER.get("master") is None:
-        master, _name_to_id = _master_skycell_id_map(Path(master_path))
+        master, name_to_id = _master_skycell_id_map(Path(master_path))
         _REMAP_WORKER["master"] = master
+        if not _REMAP_WORKER.get("idx_to_name"):
+            _REMAP_WORKER["idx_to_name"] = {
+                int(v): str(k) for k, v in name_to_id.items()
+            }
     tpix, _ = create_tess_pixel_coordinates(
         tuple(_REMAP_WORKER["base_tess_shape"]),
         int(_REMAP_WORKER["oversampling_factor"]),
@@ -749,6 +753,22 @@ def _ensure_remap_worker(payload: dict[str, Any]) -> None:
 def _reset_remap_worker() -> None:
     global _REMAP_WORKER
     _REMAP_WORKER = {}
+
+
+def _ensure_worker_master_tables() -> dict[int, str]:
+    """Return ``idx_to_name``, loading ``master`` from FITS at most once per worker."""
+    idx_to_name: dict[int, str] = dict(_REMAP_WORKER.get("idx_to_name") or {})
+    if _REMAP_WORKER.get("master") is not None:
+        return idx_to_name
+    master_path = _REMAP_WORKER.get("master_path")
+    if not master_path:
+        return idx_to_name
+    master, name_to_id = _master_skycell_id_map(Path(master_path))
+    _REMAP_WORKER["master"] = master
+    if not idx_to_name:
+        idx_to_name = {int(v): str(k) for k, v in name_to_id.items()}
+        _REMAP_WORKER["idx_to_name"] = idx_to_name
+    return idx_to_name
 
 
 def _reset_joblib_executor_args() -> None:
@@ -1049,7 +1069,7 @@ def _l4b_rim_pair_batch(
     if not epochs:
         return []
 
-    idx_to_name = _REMAP_WORKER["idx_to_name"]
+    idx_to_name = _ensure_worker_master_tables()
     name_lo = idx_to_name.get(int(id_lo))
     name_hi = idx_to_name.get(int(id_hi))
     if name_lo is None or name_hi is None:
@@ -1061,6 +1081,13 @@ def _l4b_rim_pair_batch(
         return ["skip"] * len(epochs)
 
     master = _REMAP_WORKER["master"]
+    if master is None:
+        log.warning(
+            "L4b pair-state ids %d|%d missing master map; skipping batch",
+            id_lo,
+            id_hi,
+        )
+        return ["skip"] * len(epochs)
     ids_lo, ids_hi = shared_abutting_border_tess_ids(master, id_lo, id_hi)
     # Warm PS1 catalog rows once per border (shared across epochs).
     _worker_ps1_info(name_lo)
@@ -1647,6 +1674,8 @@ def run_field_remap_scc(
             ffi_list_df=ffi_list_df,
             frame_filenames=frame_filenames,
             frames_df=frames_df,
+            master_path=master_path,
+            idx_to_name=idx_to_name,
         )
         if progress_file is not None:
             import os as _os
@@ -1827,6 +1856,16 @@ def run_field_remap_scc(
                 l4b_elapsed_s,
                 l4b_rate,
             )
+            if (
+                n_inter_skycell_pair_states > 0
+                and n_inter_skycell_written == 0
+                and not any(exact_l4b_dir.rglob("*_rim.npz"))
+            ):
+                raise RuntimeError(
+                    f"L4b rim cache wrote 0 of {n_inter_skycell_pair_states} "
+                    "pair-epochs and exact_cache_l4b is empty; check remap.log "
+                    "for skipped batches"
+                )
             if progress_file is not None:
                 remap_progress.set_perf_metadata(
                     progress_file,
