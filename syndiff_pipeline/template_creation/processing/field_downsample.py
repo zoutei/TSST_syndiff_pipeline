@@ -770,11 +770,15 @@ def run_field_downsample_scc(
     epoch_index_path = remap_read / GID_EPOCH_INDEX_NPZ
     if epoch_index_path.is_file():
         t_m = _time.perf_counter()
-        epoch_index = load_gid_epoch_index(epoch_index_path)
+        epoch_index = load_gid_epoch_index(
+            epoch_index_path,
+            include_inter=bool(apply_inter_skycell),
+        )
         log.info(
-            "Loaded gid_epoch_index (%d intra, %d inter keys) in %.1fs",
+            "Loaded gid_epoch_index (%d intra, %d inter keys; include_inter=%s) in %.1fs",
             len(epoch_index.get("l4a", {})),
             len(epoch_index.get("l4b", {})),
+            bool(apply_inter_skycell),
             _time.perf_counter() - t_m,
         )
     if not scc_only:

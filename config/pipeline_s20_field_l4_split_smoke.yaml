@@ -38,13 +38,9 @@ stages:
     # synthesized (not dropped) so every FFI still gets remap/template.
     raw_drift_outlier_sigma: 5.0
     n_jobs: 32
-    # Full-chip Condor: skip local scratch copy (~2.5GB maps > default 2GB slot).
-    stage_regmaps_to_scratch: false
     executor: condor
     condor_request_cpus: 32
     condor_request_memory: 128000
-    # Modest disk: staging is off; 10GB request matched 0 slots on this pool.
-    condor_request_disk: 4096
     condor_requirements: "Memory >= 128000 && LoadAvg < 10"
     condor_rank: "-LoadAvg"
   downsample:
