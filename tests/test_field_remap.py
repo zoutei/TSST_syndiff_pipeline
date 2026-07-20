@@ -299,3 +299,52 @@ def test_init_remap_worker_loads_master_from_path(monkeypatch, tmp_path: Path):
     }
     fr._init_remap_worker(payload)
     np.testing.assert_array_equal(fr._REMAP_WORKER["master"], master)
+    assert fr._REMAP_WORKER["idx_to_name"] == {1: "skycell.0.0"}
+    assert fr._REMAP_WORKER["master_path"] == str(master_path)
+
+
+def test_init_remap_worker_keeps_idx_to_name_from_payload(monkeypatch, tmp_path: Path):
+    import syndiff_pipeline.template_creation.processing.field_remap as fr
+    import syndiff_pipeline.template_creation.processing.pancakes as pancakes
+
+    master = np.arange(4, dtype=np.int32).reshape(2, 2)
+    master_path = tmp_path / "master.fits"
+    idx_to_name = {10: "skycell.1.1", 20: "skycell.1.2"}
+
+    monkeypatch.setattr(
+        fr,
+        "_master_skycell_id_map",
+        lambda _path: (master, {"skycell.9.9": 99}),
+    )
+    monkeypatch.setattr(
+        pancakes,
+        "create_tess_pixel_coordinates",
+        lambda shape, os: (np.zeros((2, 2)), None),
+    )
+
+    fr._reset_remap_worker()
+    payload = {
+        "base_tess_shape": (2, 2),
+        "oversampling_factor": 1,
+        "master": None,
+        "master_path": str(master_path),
+        "idx_to_name": idx_to_name,
+        "scratch_regmaps": {},
+        "wcs_mode": "event",
+        "frames_df": None,
+        "ffi_list_df": None,
+        "frame_filenames": None,
+        "skycell_rows": {},
+        "mapping_root": str(tmp_path),
+        "sector": 1,
+        "camera": 1,
+        "ccd": 1,
+        "schedule": _minimal_schedule(),
+        "intra_skycell_R": 1,
+        "exact_l4a_dir": str(tmp_path),
+        "exact_l4b_dir": str(tmp_path),
+        "rebuild_remap_cache": False,
+        "rebuild_inter_skycell_cache": False,
+    }
+    fr._init_remap_worker(payload)
+    assert fr._REMAP_WORKER["idx_to_name"] == idx_to_name

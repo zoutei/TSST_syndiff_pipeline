@@ -327,3 +327,54 @@ def test_l4b_pair_batch_calls_border_ids_once(monkeypatch):
     assert statuses == ["skip", "skip", "skip"]
     assert calls == [(10, 20)]
     assert one_epoch_calls == [(10, 20, 0), (10, 20, 1), (10, 20, 2)]
+
+
+def test_l4b_reused_l4a_worker_loads_master_once(monkeypatch):
+    """Simulate loky reuse: L4a init leaves idx_to_name but no master ndarray."""
+    import syndiff_pipeline.template_creation.processing.field_remap as fr
+    import syndiff_pipeline.template_creation.processing.field_hybrid_exact as hy
+
+    master = np.array([[10, 20]], dtype=np.int32)
+    map_calls = 0
+
+    def fake_map(_path):
+        nonlocal map_calls
+        map_calls += 1
+        return master, {"skycell.1.1": 10, "skycell.1.2": 20}
+
+    def fake_shared(_master, id_a, id_b):
+        return (
+            np.array([1], dtype=np.int32),
+            np.array([2], dtype=np.int32),
+        )
+
+    def fake_one_epoch(*_args, **_kwargs):
+        return "write"
+
+    monkeypatch.setattr(fr, "_master_skycell_id_map", fake_map)
+    monkeypatch.setattr(hy, "shared_abutting_border_tess_ids", fake_shared)
+    monkeypatch.setattr(fr, "_l4b_rim_one_epoch", fake_one_epoch)
+    monkeypatch.setattr(
+        fr,
+        "_worker_ps1_info",
+        lambda skycell: pd.Series({"NAME": skycell}),
+    )
+
+    fr._reset_remap_worker()
+    # L4a-style worker state: idx_to_name from payload, master not loaded yet.
+    fr._REMAP_WORKER.update(
+        {
+            "exact_l4b_dir": "/tmp/l4b_unused",
+            "rebuild_inter_skycell_cache": False,
+            "master_path": "/fake/master.fits",
+            "idx_to_name": {10: "skycell.1.1", 20: "skycell.1.2"},
+            "master": None,
+            "skycell_rows": {},
+        }
+    )
+
+    epochs = [(0, 0, 0, 1, 0, 0)]
+    statuses = _l4b_rim_pair_batch(10, 20, epochs)
+    assert statuses == ["write"]
+    assert map_calls == 1
+    assert fr._REMAP_WORKER["master"] is not None
