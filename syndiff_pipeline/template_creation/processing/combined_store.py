@@ -60,6 +60,11 @@ KIND = "combined_skycell"
 # new fingerprints for otherwise-identical inputs.
 COMBINED_RECIPE_SCHEMA_VERSION = 1
 
+# Same "hand-bumped code_version" contract (decision #5), but for the
+# raw_skycell input-fingerprint helper below (bump if the version-token
+# shape in ``_raw_skycell_version_token`` ever changes).
+RAW_SKYCELL_SCHEMA_VERSION = 1
+
 # ---------------------------------------------------------------------------
 # Store location (decision #14): all three PS1 stores live under the
 # existing ps1_skycells_zarr/ folder. scc_paths.py is owned by a concurrent
@@ -75,6 +80,11 @@ COMBINED_RECIPE_SCHEMA_VERSION = 1
 
 PS1_SKYCELLS_ZARR_DIRNAME = "ps1_skycells_zarr"
 COMBINED_ZARR_BASENAME = "ps1_combined.zarr"
+
+# Raw grizy PS1 skycell store (plan §7: "ps1_skycells.zarr # raw grizy
+# (exists, unchanged)"), read-only from this module's point of view -- used
+# only to derive a cheap raw-input version token, never to load pixel data.
+RAW_ZARR_BASENAME = "ps1_skycells.zarr"
 
 _ARRAYS_FILENAME = "arrays.npz"
 _HEADERS_FILENAME = "headers.json"
@@ -478,6 +488,107 @@ def gaia_version_stamp(catalog_path: str | None) -> str:
         return f"{catalog_path}:unknown"
 
 
+# ---------------------------------------------------------------------------
+# raw_skycell input fingerprint (bug fix: combined_skycell's Merkle
+# fingerprint must incorporate its upstream raw_skycell identity -- plan §6
+# registry row "combined_skycell inputs: raw_skycell, source_catalog";
+# decision #6 "raw skycells version on (size, mtime, download_batch_id)").
+#
+# gaia_version (-> source_catalog) is deliberately NOT re-folded in here: it
+# is already threaded into ``combined_recipe``/``combined_recipe_id`` (see
+# ``gaia_version_stamp`` above and its call site in
+# ``run_modern_sliding_window_pipeline``), so it already changes
+# ``combined_fingerprint`` via ``recipe_id_value`` -- adding it again as an
+# input_fingerprint would be redundant, not a second signal.
+# ---------------------------------------------------------------------------
+
+
+def _ps1_raw_zarr_root(data_root: str | Path) -> Path:
+    return Path(data_root).expanduser() / PS1_SKYCELLS_ZARR_DIRNAME / RAW_ZARR_BASENAME
+
+
+def _raw_skycell_group_dir(data_root: str | Path, projection: str, skycell: str) -> Path:
+    """Directory of one raw skycell's zarr group.
+
+    Mirrors ``zarr_utils.load_skycell_bands_masks_and_headers``'s key
+    resolution: ``skycell`` is already the full ``skycell.PROJ.CELL`` id
+    (starts with ``"skycell."``) when passed straight from a caller that
+    hasn't split it, or -- as this module normally has it, via
+    ``_projection_and_cell`` -- just the trailing cell number, in which case
+    it's rebuilt as ``{projection}.{cell}``.
+    """
+    skycell_str = str(skycell)
+    skycell_key = skycell_str if skycell_str.startswith("skycell.") else f"{projection}.{skycell_str}"
+    return _ps1_raw_zarr_root(data_root) / str(projection) / skycell_key
+
+
+def _raw_skycell_version_token(data_root: str | Path, projection: str, skycell: str) -> dict:
+    """Cheap, non-recursive on-disk version token for one raw PS1 skycell.
+
+    Decision #5 ("per-cell checksums are too costly on the hot path") rules
+    out opening/checksumming the raw FITS pixel data here. Decision #6's
+    ideal identity is ``(size, mtime, download_batch_id)``, but no
+    ``download_batch_id`` is stamped anywhere in this codebase yet (grepped
+    ``ps1_download.py``: nothing records one). So this uses the cheapest
+    available proxy instead: a single ``os.scandir`` of the raw zarr store's
+    per-skycell group directory (``ps1_skycells_zarr/ps1_skycells.zarr/
+    {projection}/{skycell_key}/``) -- one directory listing plus one
+    ``stat()`` per immediate entry (band arrays/subgroups + metadata files),
+    never walking into chunk data. ``ps1_download.store_skycell_batch``
+    replaces this skycell's array subdirectories wholesale on a re-download,
+    so at least one immediate entry's size/mtime changes even though no
+    chunk is ever opened here -- the same "stat, don't read" shape as
+    ``gaia_version_stamp`` above.
+
+    Returns a JSON-safe dict (fed through ``recipe_id``/``fingerprint``,
+    never persisted directly). ``{"status": "missing"}`` when the raw store
+    or this skycell's group isn't present on disk -- deliberately a stable,
+    distinct value (not silently omitted) so a skycell that doesn't exist
+    yet and one that later appears always mint different fingerprints.
+    """
+    group_dir = _raw_skycell_group_dir(data_root, projection, skycell)
+    try:
+        entries = list(os.scandir(group_dir))
+    except OSError:
+        return {"status": "missing"}
+
+    total_size = 0
+    newest_mtime_ns = 0
+    names: list[str] = []
+    for entry in entries:
+        try:
+            st = entry.stat()
+        except OSError:
+            continue
+        total_size += st.st_size
+        newest_mtime_ns = max(newest_mtime_ns, st.st_mtime_ns)
+        names.append(entry.name)
+
+    return {
+        "status": "present",
+        "n_entries": len(names),
+        "total_size": total_size,
+        "newest_mtime_ns": newest_mtime_ns,
+    }
+
+
+def raw_skycell_input_fingerprint(data_root: str | Path, projection: str, skycell: str) -> str:
+    """``raw_skycell``-kind Merkle fingerprint for one PS1 skycell, suitable
+    as a ``combined_fingerprint(..., input_fingerprints=[...])`` entry.
+
+    Computed the same way for every caller (seed lookup and publish both
+    call this function with the same ``(data_root, projection, skycell)``),
+    which is what keeps lookup and publish symmetric: a cache built under
+    fingerprint A is only ever matched by a lookup that also derives
+    fingerprint A. See ``_raw_skycell_version_token`` for what the token
+    covers and why.
+    """
+    token = _raw_skycell_version_token(data_root, projection, skycell)
+    rid = _compute_recipe_id("raw_skycell", token, RAW_SKYCELL_SCHEMA_VERSION)
+    spatial_key = {"projection": str(projection), "skycell": str(skycell)}
+    return _compute_fingerprint("raw_skycell", spatial_key, rid, ())
+
+
 def _projection_and_cell(skycell_id: str) -> tuple[str, str] | None:
     """Split ``skycell.PROJ.CELL`` into (``skycell.PROJ``, ``CELL``)."""
     parts = str(skycell_id).split(".")
@@ -500,7 +611,8 @@ def seed_band_cache_from_combined_store(
             continue
         projection, cell = parsed
         try:
-            fp = combined_fingerprint(projection, cell, rid)
+            raw_fp = raw_skycell_input_fingerprint(data_root, projection, cell)
+            fp = combined_fingerprint(projection, cell, rid, [raw_fp])
             loaded = try_load_combined_cell(data_root, projection, cell, fp)
         except Exception:
             logger.warning(
