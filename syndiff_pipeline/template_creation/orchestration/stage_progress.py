@@ -270,6 +270,8 @@ def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
         return None
 
     phase = data.get("phase")
+    if phase == "setup":
+        return StageProgress("setup", "phase")
     if phase in ("combining", "saving"):
         return StageProgress(str(phase), "phase")
     if phase == "precomputing_shifts":
