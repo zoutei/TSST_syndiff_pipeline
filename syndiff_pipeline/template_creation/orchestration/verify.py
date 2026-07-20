@@ -765,11 +765,21 @@ def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
 
 
 def _count_npz_files(cache_dir: Path) -> int:
-    """Count materialized ``*.npz`` files directly under *cache_dir*."""
+    """Count materialized ``*.npz`` files under *cache_dir* (recursive).
+
+    Schema-v3 Exact caches live in skycell / pair subfolders; flat root ``*.npz``
+    alone is the legacy layout.
+    """
     if not cache_dir.is_dir():
         return 0
-    return sum(1 for p in cache_dir.glob("*.npz") if p.is_file())
+    return sum(1 for p in cache_dir.rglob("*.npz") if p.is_file())
 
+
+def _has_flat_exact_npz(cache_dir: Path) -> bool:
+    """True if any ``*.npz`` sits directly under *cache_dir* (legacy flat layout)."""
+    if not cache_dir.is_dir():
+        return False
+    return any(p.is_file() for p in cache_dir.glob("*.npz"))
 
 def _legacy_manifest_rejection_reason(payload: dict, *, source: str) -> str | None:
     """Reject pre-simplification manifests that used geometry toggles."""
@@ -846,13 +856,43 @@ def _verify_remap_exact_caches(
         return polluted
 
     l4a_dir = read_root / EXACT_CACHE_L4A_DIRNAME
-    n_l4a_manifest = payload.get("n_intra_skycell_keys") or payload.get("n_exact_keys")
+    l4b_dir = read_root / EXACT_CACHE_L4B_DIRNAME
+
+    if schema >= 3:
+        if _has_flat_exact_npz(l4a_dir) or _has_flat_exact_npz(l4b_dir):
+            return (
+                "legacy flat Exact NPZ files found under exact_cache_l4a/ or "
+                "exact_cache_l4b/ root; wipe Exact dirs and rebuild remap for "
+                "schema-v3 skycell/pair subfolders"
+            )
+        for name in (
+            "shift_epochs.parquet",
+            "pair_epochs.parquet",
+            "epoch_group_members.parquet",
+            "gid_epoch_index.npz",
+            "group_id_per_frame.npy",
+        ):
+            if not (read_root / name).is_file():
+                return (
+                    f"missing remap epoch artifact {name}; rebuild remap "
+                    "(schema v3)"
+                )
+        n_l4a_manifest = payload.get("n_shift_epochs", payload.get("n_intra_skycell_keys"))
+        n_l4b_manifest = payload.get(
+            "n_pair_epochs", payload.get("n_inter_skycell_pair_states")
+        )
+    else:
+        n_l4a_manifest = payload.get("n_intra_skycell_keys") or payload.get("n_exact_keys")
+        n_l4b_manifest = payload.get("n_inter_skycell_pair_states") or payload.get(
+            "n_l4b_pair_states"
+        )
+
     if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
         if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
             return (
                 f"missing {EXACT_CACHE_L4A_DIRNAME}/ "
-                f"(manifest n_intra_skycell_keys={n_l4a_manifest}); rebuild intra-skycell "
-                "(stages.remap.rebuild_remap_cache: true)"
+                f"(manifest n_shift_epochs/n_intra={n_l4a_manifest}); rebuild "
+                "intra-skycell (stages.remap.rebuild_remap_cache: true)"
             )
 
     if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
@@ -863,15 +903,11 @@ def _verify_remap_exact_caches(
                 f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
             )
 
-    l4b_dir = read_root / EXACT_CACHE_L4B_DIRNAME
     if not l4b_dir.is_dir():
         return (
             f"missing {EXACT_CACHE_L4B_DIRNAME}/; rebuild inter-skycell "
             "(stages.remap.rebuild_inter_skycell_cache: true)"
         )
-    n_l4b_manifest = payload.get("n_inter_skycell_pair_states") or payload.get(
-        "n_l4b_pair_states"
-    )
     if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
         on_disk = _count_npz_files(l4b_dir)
         if on_disk < n_l4b_manifest:

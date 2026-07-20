@@ -43,16 +43,22 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
 )
 
 
-def _v2_manifest(**overrides) -> dict:
+def _v3_manifest(**overrides) -> dict:
     payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "cache_quantum_ps1_px": 1.0,
         "keying": "absolute",
         "intra_skycell_R": 1,
+        "n_shift_epochs": 0,
+        "n_pair_epochs": 0,
         "n_intra_skycell_keys": 0,
         "n_inter_skycell_pair_states": 0,
     }
     payload.update(overrides)
+    if "n_intra_skycell_keys" in overrides and "n_shift_epochs" not in overrides:
+        payload["n_shift_epochs"] = int(overrides["n_intra_skycell_keys"])
+    if "n_inter_skycell_pair_states" in overrides and "n_pair_epochs" not in overrides:
+        payload["n_pair_epochs"] = int(overrides["n_inter_skycell_pair_states"])
     return payload
 
 
@@ -103,16 +109,42 @@ def _write_remap_store(
     (store / REMAP_MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n")
     (store / "shift_schedule.npz").write_bytes(b"npz")
     (store / "template_group_shifts.parquet").write_bytes(b"parquet")
+    # Schema-v3 epoch stub artifacts (required whenever Exact NPZs are claimed)
+    if l4a_npz or l4b_npz or True:
+        import numpy as np
+        (store / "shift_epochs.parquet").write_bytes(b"parquet")
+        (store / "pair_epochs.parquet").write_bytes(b"parquet")
+        (store / "epoch_group_members.parquet").write_bytes(b"parquet")
+        np.savez_compressed(
+            store / "gid_epoch_index.npz",
+            l4a_skycell=np.array([], dtype=object),
+            l4a_gid=np.zeros(0, dtype=np.int32),
+            l4a_sx=np.zeros(0, dtype=np.int32),
+            l4a_sy=np.zeros(0, dtype=np.int32),
+            l4a_epoch_id=np.zeros(0, dtype=np.int32),
+            l4b_pair_lo=np.zeros(0, dtype=np.int32),
+            l4b_pair_hi=np.zeros(0, dtype=np.int32),
+            l4b_gid=np.zeros(0, dtype=np.int32),
+            l4b_sx_lo=np.zeros(0, dtype=np.int32),
+            l4b_sy_lo=np.zeros(0, dtype=np.int32),
+            l4b_sx_hi=np.zeros(0, dtype=np.int32),
+            l4b_sy_hi=np.zeros(0, dtype=np.int32),
+            l4b_pair_epoch_id=np.zeros(0, dtype=np.int32),
+        )
+        np.save(store / "group_id_per_frame.npy", np.zeros(1, dtype=np.int32))
     if l4a_npz:
         l4a = store / EXACT_CACHE_L4A_DIRNAME
         l4a.mkdir(parents=True, exist_ok=True)
         for i in range(l4a_npz):
-            (l4a / f"skycell.1.{i}_sx+0_sy+0_exact.npz").write_bytes(b"npz")
+            cell = l4a / f"skycell.1.{i}"
+            cell.mkdir(parents=True, exist_ok=True)
+            (cell / f"e0_sx+1_sy+0_exact.npz").write_bytes(b"npz")
     if l4b_npz:
         l4b = store / EXACT_CACHE_L4B_DIRNAME
-        l4b.mkdir(parents=True, exist_ok=True)
+        pair = l4b / "pair_10__20"
+        pair.mkdir(parents=True, exist_ok=True)
         for i in range(l4b_npz):
-            (l4b / f"pair_10__20_sx+0_sy+0_sx+1_sy+0_rim.npz").write_bytes(b"npz")
+            (pair / f"e{i}_sx+0_sy+0_sx+1_sy+0_rim.npz").write_bytes(b"npz")
     if legacy_npz:
         legacy = store / EXACT_CACHE_LEGACY_DIRNAME
         legacy.mkdir(parents=True, exist_ok=True)
@@ -167,7 +199,7 @@ class TestVerifyRejectsLegacyManifests(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(include_abutting_border_exact=True),
+                manifest=_v3_manifest(include_abutting_border_exact=True),
             )
             result = verify_remap(resolved)
             self.assertFalse(result.ok)
@@ -195,7 +227,7 @@ class TestVerifyRejectsLegacyManifests(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(n_intra_skycell_keys=2),
+                manifest=_v3_manifest(n_intra_skycell_keys=2),
                 legacy_npz=2,
             )
             result = verify_remap(resolved)
@@ -210,7 +242,7 @@ class TestVerifyFieldDualCache(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(
+                manifest=_v3_manifest(
                     n_intra_skycell_keys=2,
                     n_inter_skycell_pair_states=1,
                 ),
@@ -225,7 +257,7 @@ class TestVerifyFieldDualCache(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(
+                manifest=_v3_manifest(
                     n_intra_skycell_keys=3,
                     n_inter_skycell_pair_states=1,
                 ),
@@ -241,7 +273,7 @@ class TestVerifyFieldDualCache(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(
+                manifest=_v3_manifest(
                     n_intra_skycell_keys=2,
                     n_inter_skycell_pair_states=1,
                 ),
@@ -256,7 +288,7 @@ class TestVerifyFieldDualCache(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(
+                manifest=_v3_manifest(
                     n_intra_skycell_keys=1,
                     n_inter_skycell_pair_states=1,
                 ),
@@ -282,7 +314,7 @@ class TestVerifyFieldDualCache(unittest.TestCase):
             resolved = _resolved(Path(tmpdir))
             _write_remap_store(
                 resolved,
-                manifest=_v2_manifest(
+                manifest=_v3_manifest(
                     n_intra_skycell_keys=1,
                     n_inter_skycell_pair_states=1,
                 ),

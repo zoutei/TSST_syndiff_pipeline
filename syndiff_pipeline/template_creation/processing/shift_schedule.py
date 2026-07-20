@@ -705,9 +705,9 @@ def build_skycell_shift_schedule(
 class GroupAssignment:
     """Signature-based template grouping derived from a :class:`ShiftSchedule`."""
 
-    group_id_per_frame: np.ndarray   # (F,) i4, -1 for invalid frames
-    groups: list[dict]                # [{group_id, n_frames, signature_hash}, ...]
-    shifts_df: pd.DataFrame           # template_group_shifts schema (§1.2)
+    group_id_per_frame: np.ndarray  # (F,) i4 — every frame gets a real group_id (≥0)
+    groups: list[dict]  # [{group_id, n_frames, signature_hash, frame_lo, frame_hi}, ...]
+    shifts_df: pd.DataFrame  # template_group_shifts schema (§1.2)
 
 
 def assign_groups_from_schedule(
@@ -725,9 +725,12 @@ def assign_groups_from_schedule(
     when the grouping quantum is exactly 1.0 PS1 px (they already embody
     hysteresis, which naive re-quantization of the float arrays would not),
     otherwise the float arrays freshly quantized at the given quantum.
-    ``group_id`` is the first-appearance dense rank of each distinct
-    signature among valid frames (0, 1, 2, ... in the order the signature
-    is first seen); invalid frames get ``-1``.
+
+    ``group_id`` is a dense id per **contiguous signature island**: consecutive
+    frames with the same signature share one id; when the signature changes,
+    a new id is allocated even if that signature appeared earlier. Every frame
+    participates — including missing-WCS / sigma-clipped frames whose shifts
+    were synthesized — so templates are still built (no ``group_id=-1``).
 
     Each group's representative frame (its first member) supplies one
     ``template_group_shifts`` row per skycell: ``sx_int``/``sy_int`` as
@@ -740,7 +743,8 @@ def assign_groups_from_schedule(
       elsewhere (downstream cache/downsample layers).
 
     ``signature_hash`` is the sha1 hexdigest of the group's sorted
-    ``(skycell, sx_int, sy_int, cache_key)`` tuples.
+    ``(skycell, sx_int, sy_int, cache_key)`` tuples. Duplicate hashes across
+    temporally split islands of the same signature are expected.
     """
     if keying not in ("phase", "absolute"):
         raise ValueError(f"keying must be 'phase' or 'absolute', got {keying!r}")
@@ -755,19 +759,24 @@ def assign_groups_from_schedule(
         gy = quantize_shift(schedule.sy_float.astype(np.float64), grouping_quantum_ps1_px)
 
     group_id_per_frame = np.full(n_frames, -1, dtype=np.int32)
-    signature_to_group: dict[tuple, int] = {}
     representative_frames: list[int] = []
+    island_frame_lo: list[int] = []
+    island_frame_hi: list[int] = []
+    prev_sig: tuple | None = None
+    current_gid = -1
 
     for f in range(n_frames):
-        if not schedule.frame_valid[f]:
-            continue
+        # Always use scheduled shifts (synthesized for non-measurable frames).
         sig = tuple(zip(gx[f].tolist(), gy[f].tolist()))
-        gid = signature_to_group.get(sig)
-        if gid is None:
-            gid = len(representative_frames)
-            signature_to_group[sig] = gid
+        if prev_sig is None or sig != prev_sig:
+            current_gid = len(representative_frames)
             representative_frames.append(f)
-        group_id_per_frame[f] = gid
+            island_frame_lo.append(f)
+            island_frame_hi.append(f)
+            prev_sig = sig
+        else:
+            island_frame_hi[current_gid] = f
+        group_id_per_frame[f] = current_gid
 
     rows: list[dict] = []
     groups: list[dict] = []
@@ -809,6 +818,8 @@ def assign_groups_from_schedule(
                 "group_id": gid,
                 "n_frames": n_frames_in_group,
                 "signature_hash": signature_hash,
+                "frame_lo": int(island_frame_lo[gid]),
+                "frame_hi": int(island_frame_hi[gid]),
             }
         )
 
@@ -836,6 +847,258 @@ def _build_shifts_dataframe(rows: list[dict]) -> pd.DataFrame:
         return pd.DataFrame({col: pd.Series(dtype=dt) for col, dt in dtypes.items()})
     df = pd.DataFrame(rows)
     return df.astype(dtypes)
+
+
+def middle_rep_frame_index(
+    frame_indices: np.ndarray | Sequence[int],
+    frame_origin: np.ndarray | None = None,
+) -> int:
+    """Middle realizing frame for an epoch (prefer measured origins).
+
+    Prefer the middle index among ``FRAME_ORIGIN_MEASURED`` frames in
+    ``frame_indices``. If none are measured (all synthesized), use the middle
+    of all frames in the interval. Exact WCS should still prefer a measured
+    FFI when available.
+    """
+    frames = np.asarray(list(frame_indices), dtype=np.int64)
+    if frames.size == 0:
+        raise ValueError("middle_rep_frame_index requires at least one frame")
+    frames = np.unique(frames)
+    frames.sort()
+    if frame_origin is not None:
+        origin = np.asarray(frame_origin)
+        measured = frames[origin[frames] == FRAME_ORIGIN_MEASURED]
+        if measured.size:
+            return int(measured[len(measured) // 2])
+    return int(frames[len(frames) // 2])
+
+
+def build_shift_epochs(
+    schedule: ShiftSchedule,
+    group_id_per_frame: np.ndarray,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build L4a shift epochs (contiguous constant ``(sx,sy)`` per skycell).
+
+    Returns
+    -------
+    epochs_df
+        One row per nonzero ``(skycell, sx, sy)`` contiguous run.
+    members_df
+        ``kind='l4a'`` rows mapping ``(skycell, epoch_id, group_id)``.
+    """
+    group_id_per_frame = np.asarray(group_id_per_frame, dtype=np.int32)
+    n_frames, n_cells = schedule.sx_int.shape
+    if group_id_per_frame.shape != (n_frames,):
+        raise ValueError(
+            f"group_id_per_frame shape {group_id_per_frame.shape} != ({n_frames},)"
+        )
+    origin = schedule.frame_origin
+    if origin is None:
+        origin = np.zeros(n_frames, dtype=np.int8)
+
+    epoch_rows: list[dict] = []
+    member_rows: list[dict] = []
+
+    for c in range(n_cells):
+        skycell = str(schedule.skycell_names[c])
+        sx_col = schedule.sx_int[:, c]
+        sy_col = schedule.sy_int[:, c]
+        epoch_id = 0
+        f = 0
+        while f < n_frames:
+            sx_i = int(sx_col[f])
+            sy_i = int(sy_col[f])
+            f0 = f
+            f += 1
+            while f < n_frames and int(sx_col[f]) == sx_i and int(sy_col[f]) == sy_i:
+                f += 1
+            f1 = f - 1
+            if sx_i == 0 and sy_i == 0:
+                continue
+            frames = np.arange(f0, f1 + 1, dtype=np.int64)
+            gids = np.unique(group_id_per_frame[frames])
+            gids = gids[gids >= 0]
+            rep = middle_rep_frame_index(frames, origin)
+            n_meas = int(np.sum(origin[frames] == FRAME_ORIGIN_MEASURED))
+            epoch_rows.append(
+                {
+                    "epoch_id": np.int32(epoch_id),
+                    "skycell": skycell,
+                    "sx_int": np.int32(sx_i),
+                    "sy_int": np.int32(sy_i),
+                    "frame_lo": np.int32(f0),
+                    "frame_hi": np.int32(f1),
+                    "n_frames": np.int32(f1 - f0 + 1),
+                    "n_measured_frames": np.int32(n_meas),
+                    "gid_begin": np.int32(group_id_per_frame[f0]),
+                    "gid_end": np.int32(group_id_per_frame[f1]),
+                    "n_groups": np.int32(len(gids)),
+                    "rep_frame_index": np.int32(rep),
+                }
+            )
+            for gid in gids:
+                member_rows.append(
+                    {
+                        "kind": "l4a",
+                        "scope_key": skycell,
+                        "epoch_id": np.int32(epoch_id),
+                        "group_id": np.int32(gid),
+                    }
+                )
+            epoch_id += 1
+
+    epochs_df = _shift_epochs_dataframe(epoch_rows)
+    members_df = _epoch_members_dataframe(member_rows)
+    return epochs_df, members_df
+
+
+def build_pair_epochs(
+    schedule: ShiftSchedule,
+    group_id_per_frame: np.ndarray,
+    *,
+    pair_ids: np.ndarray,
+    pair_idx: np.ndarray,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build L4b pair epochs (contiguous constant 4-tuple per abutting border)."""
+    group_id_per_frame = np.asarray(group_id_per_frame, dtype=np.int32)
+    pair_ids = np.asarray(pair_ids, dtype=np.int32)
+    pair_idx = np.asarray(pair_idx, dtype=np.int32)
+    n_frames = int(schedule.sx_int.shape[0])
+    if group_id_per_frame.shape != (n_frames,):
+        raise ValueError(
+            f"group_id_per_frame shape {group_id_per_frame.shape} != ({n_frames},)"
+        )
+    origin = schedule.frame_origin
+    if origin is None:
+        origin = np.zeros(n_frames, dtype=np.int8)
+
+    epoch_rows: list[dict] = []
+    member_rows: list[dict] = []
+
+    if pair_ids.size == 0:
+        return _pair_epochs_dataframe([]), _epoch_members_dataframe([])
+
+    for p in range(pair_ids.shape[0]):
+        id_lo = int(pair_ids[p, 0])
+        id_hi = int(pair_ids[p, 1])
+        ca = int(pair_idx[p, 0])
+        cb = int(pair_idx[p, 1])
+        scope = f"pair_{id_lo}__{id_hi}"
+        sx_a = schedule.sx_int[:, ca]
+        sy_a = schedule.sy_int[:, ca]
+        sx_b = schedule.sx_int[:, cb]
+        sy_b = schedule.sy_int[:, cb]
+        pair_epoch_id = 0
+        f = 0
+        while f < n_frames:
+            key = (
+                int(sx_a[f]),
+                int(sy_a[f]),
+                int(sx_b[f]),
+                int(sy_b[f]),
+            )
+            f0 = f
+            f += 1
+            while f < n_frames and (
+                int(sx_a[f]),
+                int(sy_a[f]),
+                int(sx_b[f]),
+                int(sy_b[f]),
+            ) == key:
+                f += 1
+            f1 = f - 1
+            sx_lo, sy_lo, sx_hi, sy_hi = key
+            frames = np.arange(f0, f1 + 1, dtype=np.int64)
+            gids = np.unique(group_id_per_frame[frames])
+            gids = gids[gids >= 0]
+            rep = middle_rep_frame_index(frames, origin)
+            n_meas = int(np.sum(origin[frames] == FRAME_ORIGIN_MEASURED))
+            epoch_rows.append(
+                {
+                    "pair_epoch_id": np.int32(pair_epoch_id),
+                    "id_lo": np.int32(id_lo),
+                    "id_hi": np.int32(id_hi),
+                    "sx_lo": np.int32(sx_lo),
+                    "sy_lo": np.int32(sy_lo),
+                    "sx_hi": np.int32(sx_hi),
+                    "sy_hi": np.int32(sy_hi),
+                    "frame_lo": np.int32(f0),
+                    "frame_hi": np.int32(f1),
+                    "n_frames": np.int32(f1 - f0 + 1),
+                    "n_measured_frames": np.int32(n_meas),
+                    "gid_begin": np.int32(group_id_per_frame[f0]),
+                    "gid_end": np.int32(group_id_per_frame[f1]),
+                    "n_groups": np.int32(len(gids)),
+                    "rep_frame_index": np.int32(rep),
+                }
+            )
+            for gid in gids:
+                member_rows.append(
+                    {
+                        "kind": "l4b",
+                        "scope_key": scope,
+                        "epoch_id": np.int32(pair_epoch_id),
+                        "group_id": np.int32(gid),
+                    }
+                )
+            pair_epoch_id += 1
+
+    return _pair_epochs_dataframe(epoch_rows), _epoch_members_dataframe(member_rows)
+
+
+def _shift_epochs_dataframe(rows: list[dict]) -> pd.DataFrame:
+    dtypes = {
+        "epoch_id": "int32",
+        "skycell": "object",
+        "sx_int": "int32",
+        "sy_int": "int32",
+        "frame_lo": "int32",
+        "frame_hi": "int32",
+        "n_frames": "int32",
+        "n_measured_frames": "int32",
+        "gid_begin": "int32",
+        "gid_end": "int32",
+        "n_groups": "int32",
+        "rep_frame_index": "int32",
+    }
+    if not rows:
+        return pd.DataFrame({col: pd.Series(dtype=dt) for col, dt in dtypes.items()})
+    return pd.DataFrame(rows).astype(dtypes)
+
+
+def _pair_epochs_dataframe(rows: list[dict]) -> pd.DataFrame:
+    dtypes = {
+        "pair_epoch_id": "int32",
+        "id_lo": "int32",
+        "id_hi": "int32",
+        "sx_lo": "int32",
+        "sy_lo": "int32",
+        "sx_hi": "int32",
+        "sy_hi": "int32",
+        "frame_lo": "int32",
+        "frame_hi": "int32",
+        "n_frames": "int32",
+        "n_measured_frames": "int32",
+        "gid_begin": "int32",
+        "gid_end": "int32",
+        "n_groups": "int32",
+        "rep_frame_index": "int32",
+    }
+    if not rows:
+        return pd.DataFrame({col: pd.Series(dtype=dt) for col, dt in dtypes.items()})
+    return pd.DataFrame(rows).astype(dtypes)
+
+
+def _epoch_members_dataframe(rows: list[dict]) -> pd.DataFrame:
+    dtypes = {
+        "kind": "object",
+        "scope_key": "object",
+        "epoch_id": "int32",
+        "group_id": "int32",
+    }
+    if not rows:
+        return pd.DataFrame({col: pd.Series(dtype=dt) for col, dt in dtypes.items()})
+    return pd.DataFrame(rows).astype(dtypes)
 
 
 def write_group_artifacts(
