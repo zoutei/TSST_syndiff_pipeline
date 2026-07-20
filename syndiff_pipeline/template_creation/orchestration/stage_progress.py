@@ -242,10 +242,12 @@ def _parse_ps1_process(text: str) -> StageProgress | None:
     return _phase_from_text(text)
 
 
-def _downsample_progress_label(done: int, total: int, data: dict) -> str:
-    """Format skycell fraction, tagging oversampling when os > 1."""
+def _downsample_progress_label(
+    done: int, total: int, data: dict, *, prefix: str | None = None
+) -> str:
+    """Format skycell/composite-key fraction, tagging oversampling when os > 1."""
     os_factor = int(data.get("oversampling_factor") or 1)
-    base = f"{done}/{total}"
+    base = f"{prefix} {done}/{total}" if prefix else f"{done}/{total}"
     if os_factor > 1:
         return f"{base} os{os_factor}"
     return base
@@ -276,6 +278,29 @@ def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
         if offsets_done is not None and offsets_total is not None:
             return StageProgress(f"shifts {offsets_done}/{offsets_total}", "phase")
         return StageProgress("precomputing_shifts", "phase")
+
+    # Field L5: composite-key / skycell-batch progress
+    if data.get("geometry_mode") == "field" or phase == "field_composite_keys":
+        ck_total = int(data.get("composite_keys_total", 0) or 0)
+        ck_done = int(data.get("composite_keys_done", 0) or 0)
+        if phase == "complete" and ck_total > 0:
+            return StageProgress(
+                _downsample_progress_label(ck_total, ck_total, data, prefix="ckeys"),
+                "fraction",
+            )
+        if ck_total > 0:
+            return StageProgress(
+                _downsample_progress_label(ck_done, ck_total, data, prefix="ckeys"),
+                "fraction",
+            )
+        sk_total = int(data.get("total_skycells", 0) or 0)
+        sk_done = int(data.get("skycells_done", 0) or 0)
+        if sk_total > 0:
+            return StageProgress(
+                _downsample_progress_label(sk_done, sk_total, data),
+                "fraction",
+            )
+
     if phase == "complete":
         total = int(data.get("total_skycells", 0))
         if total > 0:

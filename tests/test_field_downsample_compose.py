@@ -292,3 +292,369 @@ def test_assemble_loads_group_qualified_contrib():
             group_id=2,
         )
         assert float(out["flux_sum"].ravel()[5]) == 42.0
+
+
+def test_composite_key_differs_when_neighbour_shift_differs():
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _composite_key_for_group,
+        _neighbours_by_skycell_id,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = _neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    k0 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=1,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)},
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=None,
+    )
+    k1 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=1,
+        sx_int=1,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (1, 0), "skycell.1.2": (2, 0)},
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=None,
+    )
+    assert k0 != k1
+
+
+def test_composite_key_zero_shift_differs_on_neighbour_l4b():
+    """(0,0) own-shift must still separate groups with different neighbour geometry."""
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _composite_key_for_group,
+        _neighbours_by_skycell_id,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = _neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    k0 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=0,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (0, 0), "skycell.1.2": (0, 1)},
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=None,
+    )
+    k1 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=1,
+        sx_int=0,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (0, 0), "skycell.1.2": (2, 0)},
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=None,
+    )
+    assert k0 != k1
+    assert k0[0] == 0 and k0[1] == 0
+    assert k0 != ("zero",)
+
+
+def test_composite_key_zero_shift_epoch_uses_roll0_sentinel():
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _composite_key_for_group,
+        _neighbours_by_skycell_id,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = _neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    # Minimal epoch index: only L4b pair epochs for (0,0) vs neighbour shifts.
+    epoch_index = {
+        "l4a": {},
+        "l4b": {
+            (10, 20, 0, 0, 0, 0, 1): 11,
+            (10, 20, 1, 0, 0, 2, 0): 22,
+        },
+    }
+    k0 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=0,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (0, 0), "skycell.1.2": (0, 1)},
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=epoch_index,
+    )
+    k1 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=1,
+        sx_int=0,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (0, 0), "skycell.1.2": (2, 0)},
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=epoch_index,
+    )
+    assert k0[0] == "roll0"
+    assert k1[0] == "roll0"
+    assert k0 != k1
+
+
+def test_any_nonempty_contrib_finds_late_key(tmp_path: Path):
+    """All-skip resume must not false-fail when only late sorted keys are nonempty."""
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _any_nonempty_contrib,
+    )
+
+    store = tmp_path / "templates"
+    (store / "contribs").mkdir(parents=True)
+    # First 8 keys empty; key 20 nonempty (beyond the old first-8 sample).
+    key_list = []
+    for i in range(24):
+        gid = i
+        skycell = f"skycell.1.{i % 3 + 1}"
+        # Normalize to real-looking names used by contrib_path
+        skycell = "skycell.1.1" if i < 20 else "skycell.9.9"
+        key_list.append((gid, skycell, 0, 0))
+        write_contrib(
+            store,
+            skycell,
+            0,
+            0,
+            group_id=gid,
+            indices=(
+                np.array([1], dtype=np.int64)
+                if i == 20
+                else np.array([], dtype=np.int64)
+            ),
+            flux_sum=(
+                np.array([1.0]) if i == 20 else np.array([], dtype=np.float64)
+            ),
+            count=(
+                np.array([1.0]) if i == 20 else np.array([], dtype=np.float64)
+            ),
+        )
+    assert _any_nonempty_contrib(store, key_list)
+    # Only empties → False
+    empty_keys = key_list[:8]
+    assert not _any_nonempty_contrib(store, empty_keys)
+
+
+def test_composite_key_merges_identical_neighbour_geometry():
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _build_skycell_composite_index,
+        _composite_key_for_group,
+        _neighbours_by_skycell_id,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = _neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    shifts = {"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)}
+    k0 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=1,
+        sy_int=0,
+        group_shifts=shifts,
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=None,
+    )
+    k1 = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=1,
+        sx_int=1,
+        sy_int=0,
+        group_shifts=shifts,
+        neighbour_ids=neighbours[10],
+        id_to_name=id_to_name,
+        epoch_index=None,
+    )
+    assert k0 == k1
+
+    key_list = [
+        (0, "skycell.1.1", 1, 0),
+        (1, "skycell.1.1", 1, 0),
+        (2, "skycell.1.1", 1, 0),
+    ]
+    group_shifts_by_gid = {0: shifts, 1: shifts, 2: shifts}
+    index = _build_skycell_composite_index(
+        key_list=key_list,
+        group_shifts_by_gid=group_shifts_by_gid,
+        name_to_id=name_to_id,
+        id_to_name=id_to_name,
+        neighbours_by_id=neighbours,
+        epoch_index=None,
+    )
+    assert len(index["skycell.1.1"]) == 1
+    assert len(next(iter(index["skycell.1.1"].values()))) == 3
+
+
+def test_l5_skycell_batch_loads_regmap_and_zarr_once(monkeypatch, tmp_path: Path):
+    import syndiff_pipeline.template_creation.processing.field_downsample as fd
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = fd._neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    store = tmp_path / "templates"
+    (store / "contribs").mkdir(parents=True)
+
+    regmap_calls: list[str] = []
+    zarr_calls: list[str] = []
+
+    def fake_read(skycell: str) -> np.ndarray:
+        regmap_calls.append(skycell)
+        return np.arange(12, dtype=np.int32).reshape(4, 3)
+
+    def fake_zarr(_zstore, skycell: str):
+        zarr_calls.append(skycell)
+        data = np.ones((4, 3), dtype=np.float32)
+        mask = np.zeros((4, 3), dtype=np.int32)
+        return data, mask
+
+    monkeypatch.setattr(fd, "_read_regmap_assignment_l5", fake_read)
+    monkeypatch.setattr(fd, "_load_zarr_skycell", fake_zarr)
+    monkeypatch.setattr(
+        fd,
+        "_bin_skycell_contrib",
+        lambda **kwargs: (
+            np.array([1], dtype=np.int64),
+            np.array([1.0]),
+            np.array([1.0]),
+            np.array([0.0]),
+        ),
+    )
+
+    shifts = {"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)}
+    buckets = {
+        (1, 0, ((20, 0, 1),)): [(0, 1, 0), (1, 1, 0), (2, 1, 0)],
+    }
+    fd._reset_l5_worker()
+    fd._init_l5_worker(
+        {
+            "store": str(store),
+            "rebuild_field_store": True,
+            "mapping_root": str(tmp_path),
+            "sector": 1,
+            "camera": 1,
+            "ccd": 1,
+            "oversampling_factor": 1,
+            "scratch_regmaps": {},
+            "zarr_path": str(tmp_path / "dummy.zarr"),
+            "zstore": object(),  # skip real zarr open; _load_zarr_skycell mocked
+            "name_to_id": name_to_id,
+            "id_to_name": id_to_name,
+            "master_map": master,
+            "pair_ids": abutting_undirected_pairs(master),
+            "neighbours_by_id": neighbours,
+            "group_shifts_by_gid": {0: shifts, 1: shifts, 2: shifts},
+            "epoch_index": None,
+            "exact_cache_l4a_dir": str(tmp_path / "l4a"),
+            "exact_cache_l4b_dir": str(tmp_path / "l4b"),
+            "base_tess_shape": (4, 6),
+            "roi_bounds": (0, 0, 6, 4),
+            "ignore_mask": 0,
+            "intra_skycell_R": 1,
+        }
+    )
+    # Bypass compose (would need caches); force zero-key path via patched buckets
+    # that still go through compose — monkeypatch compose to identity.
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_hybrid_exact.compose_group_hybrid_assignment",
+        lambda frozen, **kwargs: (frozen, {"n_l4b_patches": 0, "cache_hit": True}),
+    )
+    result = fd._l5_skycell_batch("skycell.1.1", buckets)
+    fd._reset_l5_worker()
+
+    assert regmap_calls == ["skycell.1.1"]
+    assert zarr_calls == ["skycell.1.1"]
+    assert result["n_writes"] == 3
+    assert result["n_compose"] == 1
+    for gid in (0, 1, 2):
+        assert contrib_path(store, "skycell.1.1", 1, 0, group_id=gid).is_file()
+
+
+def test_write_contrib_atomic_no_lock(tmp_path: Path):
+    """Concurrent-safe atomic replace leaves a readable NPZ without store lock."""
+    from syndiff_pipeline.template_creation.processing.field_templates import (
+        load_contrib,
+    )
+
+    store = tmp_path / "store"
+    (store / "contribs").mkdir(parents=True)
+    out = write_contrib(
+        store,
+        "skycell.1.1",
+        0,
+        0,
+        group_id=7,
+        indices=np.array([3, 4], dtype=np.int64),
+        flux_sum=np.array([1.5, 2.5]),
+        count=np.array([1.0, 1.0]),
+    )
+    assert out.is_file()
+    assert not list(out.parent.glob(".*.tmp.npz"))
+    data = load_contrib(out)
+    assert list(data["indices"]) == [3, 4]
+
+
+def test_roi_prefilter_bins_match_full_then_filter():
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _bin_skycell_contrib,
+    )
+
+    assignment = np.array([[0, 1, 2], [6, 7, 8]], dtype=np.int32)
+    ps1 = np.ones((2, 3), dtype=np.float32)
+    mask = np.zeros((2, 3), dtype=np.int32)
+    # Full chip 3x3 → indices 0..8; ROI keeps only x in [0,2) → drop col 2
+    full = _bin_skycell_contrib(
+        assignment=assignment,
+        ps1_data=ps1,
+        ps1_mask=mask,
+        sx_int=0,
+        sy_int=0,
+        base_tess_shape=(3, 3),
+        roi_bounds=(0, 0, 3, 3),
+        ignore_mask=0,
+    )
+    cropped = _bin_skycell_contrib(
+        assignment=assignment,
+        ps1_data=ps1,
+        ps1_mask=mask,
+        sx_int=0,
+        sy_int=0,
+        base_tess_shape=(3, 3),
+        roi_bounds=(0, 0, 2, 3),
+        ignore_mask=0,
+    )
+    assert full is not None and cropped is not None
+    assert set(cropped[0]).issubset(set(full[0]))
+    assert 2 not in set(cropped[0])
+    assert 8 not in set(cropped[0])

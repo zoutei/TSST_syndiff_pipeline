@@ -262,7 +262,14 @@ def write_contrib(
     mask_count: np.ndarray | None = None,
     group_id: int | None = None,
 ) -> Path:
-    """Write one sparse contrib NPZ under lock. ``indices`` are flat TESS pixel ids."""
+    """Write one sparse contrib NPZ via temp file + atomic replace.
+
+    No store-wide lock: concurrent writers use distinct final paths
+    (``…_gid{N}.npz``) and NFS-safe ``Path.replace``.
+    """
+    import os
+    import tempfile
+
     root = Path(store_root)
     out = contrib_path(root, skycell, sx_int, sy_int, group_id=group_id)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -276,8 +283,19 @@ def write_contrib(
     }
     if mask_count is not None:
         payload["mask_count"] = np.asarray(mask_count, dtype=np.float64)
-    with field_store_lock(root):
-        np.savez_compressed(out, **payload)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.",
+        suffix=".tmp.npz",
+        dir=str(out.parent),
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        np.savez_compressed(tmp_path, **payload)
+        tmp_path.replace(out)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
     return out
 
 
