@@ -68,7 +68,8 @@ def resolve_scc_reference_ffi(
     """
     Choose the mapping-epoch reference FFI for one SCC and persist bookkeeping.
 
-    Returns the absolute path to the reference FFI FITS file.
+    Returns the absolute path to the on-disk reference FFI (``.fits``,
+    ``.fits.gz``, or ``.fits.fz`` — whichever exists).
     """
     t = resolved.target
     meta_path = mapping_run_meta_path(resolved)
@@ -84,9 +85,21 @@ def resolve_scc_reference_ffi(
         cached = _read_run_meta(meta_path)
         if cached:
             ref = str(cached.get("reference_ffi_path") or "").strip()
-            if ref and wcs_grouping.fits_path_exists(ref):
-                log.info("Using cached SCC reference FFI from %s", meta_path)
-                return os.path.abspath(ref)
+            resolved_ref = _resolve_existing_ffi_path(resolved, ref) if ref else None
+            if resolved_ref:
+                if os.path.abspath(resolved_ref) != os.path.abspath(ref):
+                    log.info(
+                        "Cached SCC reference FFI remapped %s → %s",
+                        ref,
+                        resolved_ref,
+                    )
+                    payload = dict(cached)
+                    payload["reference_ffi_path"] = resolved_ref
+                    payload["reference_ffi_basename"] = os.path.basename(resolved_ref)
+                    _write_run_meta(meta_path, payload)
+                else:
+                    log.info("Using cached SCC reference FFI from %s", meta_path)
+                return resolved_ref
 
     ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
     if not ffi_paths:
@@ -150,7 +163,8 @@ def resolve_scc_reference_ffi(
         )
         selection_rule = "scc_median_crval_anchor"
 
-    ref_abs = os.path.abspath(ref)
+    ref_resolved = _resolve_existing_ffi_path(resolved, ref) or os.path.abspath(ref)
+    ref_abs = os.path.abspath(ref_resolved)
     payload = {
         "reference_ffi_path": ref_abs,
         "reference_ffi_basename": os.path.basename(ref_abs),
@@ -167,25 +181,38 @@ def resolve_scc_reference_ffi(
 
 
 def load_mapping_reference_ffi(resolved: ResolvedTargetConfig) -> str | None:
-    """Load persisted mapping reference FFI path, or ``None`` if absent."""
+    """Load persisted mapping reference FFI path, or ``None`` if absent.
+
+    Accepts bookkeeping that still names ``.fits.gz`` / ``.fits`` after a
+    migration to ``.fits.fz`` (or the reverse).
+    """
     cached = _read_run_meta(mapping_run_meta_path(resolved))
     if not cached:
         return None
     ref = str(cached.get("reference_ffi_path") or "").strip()
-    if ref and wcs_grouping.fits_path_exists(ref):
-        return os.path.abspath(ref)
-    return None
+    if not ref:
+        return None
+    return _resolve_existing_ffi_path(resolved, ref)
 
 
 def _resolve_existing_ffi_path(resolved: ResolvedTargetConfig, value: str) -> str | None:
-    """Resolve a basename or absolute path to an on-disk FFI."""
+    """Resolve a basename or absolute path to an on-disk FFI (any storage suffix)."""
     raw = str(value).strip()
     if not raw:
         return None
     candidate = Path(raw).expanduser()
-    if candidate.is_file():
-        return str(candidate.resolve())
+    resolved_variant = wcs_grouping.try_resolve_existing_fits_path(candidate)
+    if resolved_variant is not None:
+        return str(resolved_variant.resolve())
     from syndiff_pipeline.common.download import resolve_local_ffi_path
 
     local = resolve_local_ffi_path(resolved.ffi_dir, raw)
-    return local
+    if local:
+        return local
+    # Basename-only: try stem lookup under ffi_dir via variant helper.
+    local_variant = wcs_grouping.try_resolve_existing_fits_path(
+        Path(resolved.ffi_dir) / Path(raw).name
+    )
+    if local_variant is not None:
+        return str(local_variant.resolve())
+    return None
