@@ -25,6 +25,25 @@ Required handoff from the template pipeline (all under `events/{label}/`): `clus
 
 ---
 
+## 0. Config ownership (`diff_config` vs `mask_settings`)
+
+Site authoring is intentionally split:
+
+| File | Owns |
+|------|------|
+| `diff_config.yaml` `defaults:` / top-level | Multi-stage knobs: crop, `n_jobs`, `max_ffis`, `workspace_run_id`, `pipeline_plots*`, `master_fits_mirror`, `additional_forced_targets` |
+| `diff_config.yaml` `pipeline:` `kind:` blocks | Stage-only knobs. **Omit keys that match dataclass defaults** in `stage_params.py` |
+| `mask_settings.yaml` (optional sibling) | Mask geometry/policy (style, maglims, strap/edge/PS1 *policy*, TNS, asteroids). **Not** embedded in `diff_config` |
+| `deployment.yaml` | `workspace_root`, `data_root`, credentials |
+
+`- kind: shared_mask` does **not** require a `mask_settings:` path. Resolve order is stage path → `{ws}/mask_settings.yaml` → site `mask_settings.yaml` → packaged defaults. An existing `{ws}/mask_settings.yaml` wins over later site edits until removed/replaced. See [masking.md](../masking.md).
+
+Frozen `{ws}/diff_config.yaml` is a **slim snapshot** (`cfg_to_snapshot_dict`): empties, SynDiffConfig defaults, and bundled `straps_csv`/`bsc_catalog` paths are omitted; pipeline stages drop keys equal to their param-dataclass defaults. Legacy full dumps still load via `load_config`.
+
+Bundled straps / BSC: leave `straps_csv` / `bsc_catalog` unset (empty = packaged resource at use time). Do not expect absolute bundled paths in the frozen snapshot.
+
+---
+
 ## 1. Workspace layout and naming
 
 - Event root: `{workspace_root}/events/{target_label}/`; pipeline tree `events/{label}/ws/` (or `ws_{workspace_run_id}/`).
@@ -68,9 +87,24 @@ syndiff diff run --site config/ \
 
 Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 
-### `shared_mask` (`stages/masking.py`)
+### `shared_mask` (`stages/masking.py` → `syndiff_pipeline.difference_imaging.masking`)
 
-Builds the shared bitmask (Gaia magnitude bins, bright-star crosses, BSC, TESS straps, optional PS1 coverage from the reference template when `ps1_min_hit_count > 0`) and selects isolated Hotpants reference stars (mag 13.5–14.5 default). Writes `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`.
+Builds the shared bitmask and selects isolated Hotpants reference stars.
+**Default style is empirical** (see [masking.md](../masking.md)): T&lt;13 empirical
+circles/crosses (bits 1/2; Gaia ∪ BSC for crosses), 13≤T&lt;18 `faint_star_squares`
+(bit 32), straps/edges/PS1 (4/8/16), optional TNS (64) and per-cadence asteroids
+(128 via `MaskCatalog`). Rollback: site `mask_settings.yaml` with
+`shared.style: tessreduce` (bits 1/2/4/8/16 only).
+
+**Config:** mask policy comes from `mask_settings.yaml` (sibling of
+`diff_config.yaml`, or packaged defaults). Stage YAML only needs
+`- kind: shared_mask` plus optional Hotpants ref-star selection keys
+(`ref_mag_*`, `ref_isolation_*`, `ref_separation_px`) or an explicit
+`mask_settings:` path override. Do not put maglims/strapsize/PS1 thresholds on
+the stage (legacy keys still work if explicit; prefer the mask file).
+
+Writes `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`,
+`gaia_catalog_pipeline.csv`, frozen `mask_settings.yaml`. See [masking.md](../masking.md).
 
 When templates are oversampled (`OVERSAMP=F` or field OS store), the PS1
 `COUNT` plane is HR; syndiff **block-sums** each `F×F` block to native before
@@ -131,7 +165,7 @@ Per-frame linear combination of workspace planes (or the virtual cropped `ffi` l
 
 ### `epsf` (`stages/epsf.py`, `stages/gridded_epsf.py`)
 
-Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction rejects pixels flagged in `shared_mask` **only** for bits 2 and 4 (bright-star crosses and TESS straps); catalog-source bit 1 is ignored so Gaia ePSF stars are kept.
+Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction uses per-FFI `mask_at` and **ignores bits 1|2|32** (bright catalog / saturation crosses / faint squares) so Gaia ePSF stars are kept; any other set bit (4/8/16/64/128) rejects. See [masking.md](../masking.md).
 
 Primary outputs under `ws/{output}/`:
 

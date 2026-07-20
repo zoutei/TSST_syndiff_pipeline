@@ -1,0 +1,30 @@
+# Site mask policy (copy to site config/mask_settings.yaml).
+# Sibling of diff_config.yaml — do NOT embed these knobs in diff_config.
+# Default style is empirical (behavior change vs TESSreduce-only masks).
+# Set shared.style: tessreduce to keep legacy bit layout (1/2/4/8/16 only).
+# Resolve: stage mask_settings path → ws/mask_settings.yaml → this file → packaged defaults.
+geometry_file: null
+shared:
+  style: empirical          # or tessreduce
+  bright_maglim: 13.0
+  faint_maglim: 18.0
+  scale: 1.0
+  strapsize: 6
+  include_straps: true
+  include_edges: true
+  ps1_min_hit_count: 5000
+tns:
+  enabled: true             # default on; set false to skip
+  public_csv: null          # default: {data_root}/catalogs/tns/tns_public_objects.csv
+  # download_url omitted — code default DEFAULT_TNS_PUBLIC_ZIP_URL in masking/tns.py
+  include_in_static_fits: true
+  paint_union_fits: false
+asteroids:
+  enabled: true             # default on; set false to skip
+  vmag_lim: 20.0
+  intervals_dir: null       # default SCC catalogs/.../asteroids/
+  # orbit_times_path / orbit_times_url omitted — defaults:
+  #   {data_root}/catalogs/TESS_orbit_times.csv
+  #   https://tess.mit.edu/public/files/TESS_orbit_times.csv
+  # Auto-downloads when missing or when the sector is absent from the CSV.
+  run_discover: true        # sbident discover when candidates.parquet missing

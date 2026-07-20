@@ -422,17 +422,23 @@ def resolve_diff_config(
         )
 
     optional_paths = {}
-    for key in ("median_mask_path", "straps_csv", "bsc_catalog", "removed_stars_csv", "manifest"):
+    for key in ("straps_csv", "bsc_catalog", "removed_stars_csv", "manifest"):
         val = merged_paths.get(key) or deployment.get(key)
         if val:
             optional_paths[key] = resolve_config_path(str(val), data_root_path)
 
-    if not optional_paths.get("straps_csv"):
-        from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
-            tess_straps_csv,
+    deprecated_median = merged_paths.get("median_mask_path") or deployment.get(
+        "median_mask_path"
+    )
+    if deprecated_median:
+        log.warning(
+            "median_mask_path is no longer used (TGLC median_mask support removed); "
+            "ignoring %r",
+            deprecated_median,
         )
 
-        optional_paths["straps_csv"] = str(tess_straps_csv())
+    # straps_csv / bsc_catalog unset → packaged defaults at use time (do not
+    # inject absolute bundled paths into SynDiffConfig / frozen snapshots).
 
     pipeline = copy.deepcopy(policy.pipeline)
     if override.get("pipeline"):
@@ -451,6 +457,7 @@ def resolve_diff_config(
         camera=target.camera,
         ccd=target.ccd,
         data_root=str(data_root),
+        site_config_dir=str(Path(site_dir).expanduser().resolve()),
         **optional_paths,
     )
     for key, val in merged_defaults.items():

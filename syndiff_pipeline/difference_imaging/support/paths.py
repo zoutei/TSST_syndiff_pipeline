@@ -28,7 +28,10 @@ DEFAULT_MANIFEST_BASENAME = "frames.csv"
 LEGACY_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
 HOTPANTS_SUBSTAMP_STARS_BASENAME = "hotpants_substamp_stars.csv"
 TARGETS_DS9_REGION_BASENAME = "targets.reg"
+# Canonical on-disk static bitmask (int16, fpacked). Legacy .fits.gz/.fits
+# are still resolved by resolve_pipeline_artifact_path at read time.
 SHARED_MASK_FITS_BASENAME = "shared_mask.fits.fz"
+STATIC_MASK_FITS_BASENAME = SHARED_MASK_FITS_BASENAME  # alias (main naming)
 GAIA_CATALOG_PIPELINE_BASENAME = "gaia_catalog_pipeline.csv"
 DIFF_CONFIG_SNAPSHOT_BASENAME = "diff_config.yaml"
 
@@ -69,6 +72,8 @@ __all__ = [
     "FFIS_WS_LABEL",
     "HOST_STAR_WS_LABEL",
     "TEMPLATES_WS_LABEL",
+    "SHARED_MASK_FITS_BASENAME",
+    "STATIC_MASK_FITS_BASENAME",
     "ensure_event_ffis_symlink",
     "ensure_event_templates_symlink",
     "event_ffis_symlink_path",

@@ -115,26 +115,15 @@ def assert_workspace_config_lock(ws_root: str | Path, cfg: SynDiffConfig) -> Non
         )
 
 
-def _cfg_to_dict(cfg: SynDiffConfig) -> dict:
-    """Cfg to dict.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    
-    Returns
-    -------
-    dict"""
-    from dataclasses import asdict
-
-    return asdict(cfg)
-
-
 def write_immutable_workspace_config_snapshot(
     ctx: PipelineInvocationContext,
     cfg: SynDiffConfig,
 ) -> None:
     """Write frozen diff config once; skip on re-run; chmod read-only."""
+    from syndiff_pipeline.difference_imaging.orchestration.config import (
+        cfg_to_snapshot_dict,
+    )
+
     ws_root = Path(ctx.workspace_root_path())
     snap = _snapshot_path(ws_root)
     fp_path = _fingerprint_path(ws_root)
@@ -155,7 +144,12 @@ def write_immutable_workspace_config_snapshot(
     os.makedirs(ws_root, exist_ok=True)
     tmp = snap.with_name(f"{snap.name}.tmp.{os.getpid()}")
     with open(tmp, "w", encoding="utf-8") as fh:
-        yaml.dump(_cfg_to_dict(cfg), fh, default_flow_style=False, sort_keys=False)
+        yaml.dump(
+            cfg_to_snapshot_dict(cfg),
+            fh,
+            default_flow_style=False,
+            sort_keys=False,
+        )
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, snap)

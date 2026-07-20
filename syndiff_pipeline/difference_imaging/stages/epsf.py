@@ -223,44 +223,99 @@ def load_epsf_smooth(output_dir: str, round_id: int) -> tuple:
 # ── Per-frame gridded ePSF fitting (photutils) ────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════════
 
-# shared_mask bit values used for ePSF star rejection (see masking.Source_mask):
-#   value 2 — very bright star crosses (Big_sat)
-#   value 4 — TESS straps
-# Catalog Gaia sources (value 1) must NOT be excluded — those are the ePSF stars.
-EPSF_SHARED_MASK_BITS = 2 | 4
+# Static-mask bits ignored for ePSF star rejection:
+# BRIGHT_CAT | SAT_CROSS | FAINT_CAT (1|2|32) — all catalog star stamps incl. crosses.
+# Any other set bit rejects (straps, edges, PS1, TNS, asteroids).
+from syndiff_pipeline.difference_imaging.masking.bits import EPSF_IGNORE_BITS, epsf_reject_mask
+
+EPSF_SHARED_MASK_BITS = EPSF_IGNORE_BITS  # legacy name; means "ignored" bits
+EPSF_STATIC_MASK_BITS = EPSF_IGNORE_BITS
 
 
-def _load_shared_mask_2d(shared_mask_path: str | None, shape: tuple[int, int]) -> np.ndarray | None:
+def _load_static_mask_2d(
+    static_mask_path: str | None, shape: tuple[int, int]
+) -> np.ndarray | None:
     """
-    Load boolean bad-pixel mask for ePSF star extraction, if available.
+    Load boolean reject mask for ePSF from a static mask FITS (fallback path).
 
-    Only bits with values 2 and 4 (bright-star crosses and straps) are used.
-    Catalog-source bit 1 is ignored so Gaia ePSF stars are not removed.
+    Prefer :func:`epsf_reject_mask_at` with a ``MaskCatalog`` so asteroid bit
+    128 is included per FFI. This path only sees the on-disk static layer.
     """
-    if not shared_mask_path or not os.path.isfile(shared_mask_path):
+    if not static_mask_path or not os.path.isfile(static_mask_path):
         return None
     try:
-        data = fits.getdata(shared_mask_path)
+        data = fits.getdata(static_mask_path)
         if data is None:
             return None
         mask = np.asarray(data)
         if mask.shape != shape:
             return None
-        return (mask.astype(np.int64) & EPSF_SHARED_MASK_BITS) != 0
+        return epsf_reject_mask(mask)
     except Exception as exc:
-        log.debug("shared mask for ePSF not loaded: %s", exc)
+        log.debug("static mask for ePSF not loaded: %s", exc)
         return None
+
+
+# Backward-compatible alias
+_load_shared_mask_2d = _load_static_mask_2d
+
+
+def epsf_reject_mask_at(mask_catalog, time=None) -> np.ndarray:
+    """Boolean ePSF reject mask for one epoch (in-memory ``mask_at``, no FITS I/O)."""
+    return epsf_reject_mask(mask_catalog.mask_at(time, which="full"))
+
+
+def btjd_by_stem_from_manifest(wcs_table) -> dict:
+    """Map TESS product id / stem → BTJD from the frame manifest."""
+    import pandas as pd
+
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        tess_product_id_from_ffi_path,
+    )
+
+    out: dict = {}
+    if wcs_table is None or len(wcs_table) == 0:
+        return out
+    btjd_col = None
+    for c in ("btjd", "BTJD", "tjd", "TJD", "jd", "JD"):
+        if c in wcs_table.columns:
+            btjd_col = c
+            break
+    if btjd_col is None:
+        return out
+
+    if "product_id" in wcs_table.columns:
+        stems = wcs_table["product_id"].astype(str)
+    elif "filename" in wcs_table.columns:
+        stems = wcs_table["filename"].map(
+            lambda x: tess_product_id_from_ffi_path(str(x)) or ""
+        )
+    elif "path" in wcs_table.columns:
+        stems = wcs_table["path"].map(
+            lambda x: tess_product_id_from_ffi_path(str(x)) or ""
+        )
+    else:
+        return out
+
+    btjd = pd.to_numeric(wcs_table[btjd_col], errors="coerce")
+    for stem, t in zip(stems, btjd):
+        if stem and np.isfinite(t):
+            out[str(stem)] = float(t)
+    return out
 
 
 def fit_epsf_all_frames(diff_paths: list,
                          gaia_df: pd.DataFrame,
-                         col_corr_2d: np.ndarray,
                          cfg,
                          epsf,
                          output_dir: str = None,
                          round_id: int = 1,
                          *,
                          shared_mask_path: str | None = None,
+                         static_mask_path: str | None = None,
+                         mask_catalog=None,
+                         btjd_by_stem: dict | None = None,
+                         wcs_table: pd.DataFrame | None = None,
                          diff_log_path: str | None = None,
                          epsf_label: str | None = None,
                          diffs_input: str | None = None) -> tuple:
@@ -271,26 +326,27 @@ def fit_epsf_all_frames(diff_paths: list,
     ----------
     diff_paths  : list of str (FITS files from hotpants)
     gaia_df     : pd.DataFrame (crop-local Gaia catalog)
-    col_corr_2d : 2D ndarray — legacy arg; mask uses shared_mask when given
     cfg         : SynDiffConfig
     epsf        : EpsfParams
     output_dir  : str, optional
     round_id    : int
-    shared_mask_path : optional path to shared_mask.fits for star masking
-
-    Returns
-    -------
-    epsf_stack, tile_centers, ffi_stems, epsf_ok
+    shared_mask_path : deprecated alias of ``static_mask_path``
+    static_mask_path : optional on-disk static mask FITS (fallback if no catalog)
+    mask_catalog : optional ``MaskCatalog`` — preferred; per-FFI ``mask_at`` (no FITS I/O)
+    btjd_by_stem : optional stem→BTJD map (built from ``wcs_table`` when omitted)
+    wcs_table : optional frame manifest for BTJD lookup
     """
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
+    mask_path = static_mask_path or shared_mask_path
+    if btjd_by_stem is None and wcs_table is not None:
+        btjd_by_stem = btjd_by_stem_from_manifest(wcs_table)
+
     mask_2d = None
     first_path = next((p for p in diff_paths if p and os.path.exists(p)), None)
-    if shared_mask_path and first_path:
+    if mask_catalog is None and mask_path and first_path:
         shape = fits.getdata(first_path).shape
-        mask_2d = _load_shared_mask_2d(shared_mask_path, shape)
-    elif col_corr_2d is not None and first_path is None and col_corr_2d is not None:
-        mask_2d = col_corr_2d <= 0
+        mask_2d = _load_static_mask_2d(mask_path, shape)
 
     if output_dir is None:
         raise ValueError("fit_epsf_all_frames requires output_dir for gridded ePSF")
@@ -302,6 +358,8 @@ def fit_epsf_all_frames(diff_paths: list,
         epsf,
         output_dir,
         mask_2d=mask_2d,
+        mask_catalog=mask_catalog,
+        btjd_by_stem=btjd_by_stem,
         round_id=round_id,
         diff_log_path=diff_log_path,
         epsf_label=epsf_label,
@@ -315,16 +373,14 @@ def fit_epsf_all_frames(diff_paths: list,
 
 def fit_epsf_tiled(diff_image: np.ndarray,
                    gaia_df: pd.DataFrame,
-                   col_corr_2d: np.ndarray,
                    cfg,
                    epsf,
-                   frame_label: str = "") -> tuple:
+                   frame_label: str = "",
+                   *,
+                   mask_2d: np.ndarray | None = None) -> tuple:
     """Fit gridded ePSF on a single difference image (test / debug helper)."""
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
-    mask_2d = None
-    if col_corr_2d is not None and col_corr_2d.shape == diff_image.shape:
-        mask_2d = col_corr_2d <= 0
     _model, tile_centers, stack = gridded_epsf.build_gridded_psf_for_frame(
         diff_image,
         gaia_df,
@@ -436,98 +492,6 @@ def add_tess_flux_ratio(gaia_df: pd.DataFrame) -> pd.DataFrame:
     max_flux = np.nanmax(df["tess_flux"].values)
     df["tess_flux_ratio"] = df["tess_flux"] / max_flux if max_flux > 0 else df["tess_flux"]
     return df
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ── Median mask (column correction) ──────────────────────────────────────────
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# Bad CCD columns in CCD coordinates (0-based)
-_BAD_COLS_CCD = [171, 172, 1024]
-
-
-def _column_correction_from_full_vals(
-    vals: np.ndarray, x0: int, x1: int, nx_crop: int
-) -> np.ndarray:
-    """Per-crop-column correction: crop column j maps to full-chip column ``x0 + j``."""
-    out = np.ones(nx_crop, dtype=np.float64)
-    for j in range(nx_crop):
-        ffi_x = x0 + j
-        if 0 <= ffi_x < len(vals):
-            out[j] = float(vals[ffi_x])
-    return out
-
-
-def build_median_mask_correction(median_mask_path: str,
-                                  camera: int, ccd: int,
-                                  crop_bounds: dict) -> np.ndarray:
-    """
-    Load the TGLC median mask FITS and extract the column-correction 1D array
-    for the crop region.
-
-    The median_mask.fits file has one row per (camera, ccd) combination.
-    The correction is tiled into a 2D array matching the crop shape, then
-    bad columns are zeroed out.
-
-    Parameters
-    ----------
-    median_mask_path : str
-    camera, ccd : int
-    crop_bounds : dict  (from wcs_grouping.get_crop_bounds)
-
-    Returns
-    -------
-    2D ndarray of shape (ny_crop, nx_crop), float64
-        Values are the column correction factors; 0 = bad column.
-    """
-    ny_crop, nx_crop = crop_bounds["shape"]
-    col_corr = np.ones(nx_crop, dtype=np.float64)
-
-    if not os.path.exists(median_mask_path):
-        log.warning(f"median_mask.fits not found at {median_mask_path}. "
-                    "Using uniform column correction = 1.")
-        return np.tile(col_corr, (ny_crop, 1))
-
-    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
-
-    with open_fits_memmap(median_mask_path) as hdul:
-        # Find the row matching (camera, ccd)
-        data = hdul[1].data if len(hdul) > 1 else hdul[0].data
-        if data is None:
-            log.warning("median_mask.fits has no data. Using uniform correction.")
-            return np.tile(col_corr, (ny_crop, 1))
-
-        # Attempt structured table lookup
-        cam_col = [c for c in data.dtype.names if "cam" in c.lower()]
-        ccd_col = [c for c in data.dtype.names if "ccd" in c.lower()]
-        if cam_col and ccd_col:
-            row_mask = (data[cam_col[0]] == camera) & (data[ccd_col[0]] == ccd)
-            if row_mask.any():
-                row = data[row_mask][0]
-                # Column correction values are stored after the metadata columns
-                val_keys = [k for k in data.dtype.names if k not in cam_col + ccd_col]
-                vals = np.array([row[k] for k in val_keys], dtype=np.float64)
-                x0, x1 = crop_bounds["x_min"], crop_bounds["x_max"]
-                col_corr = _column_correction_from_full_vals(vals, x0, x1, nx_crop)
-            else:
-                log.warning(f"No median_mask row for camera={camera}, ccd={ccd}.")
-        else:
-            # Plain 2D array — use row index = (camera-1)*4 + (ccd-1)
-            row_idx = (camera - 1) * 4 + (ccd - 1)
-            if data.ndim == 2 and row_idx < data.shape[0]:
-                vals = data[row_idx].astype(np.float64)
-                x0, x1 = crop_bounds["x_min"], crop_bounds["x_max"]
-                col_corr = _column_correction_from_full_vals(vals, x0, x1, nx_crop)
-
-    # Zero out known bad columns (convert from CCD coords to crop-local)
-    x_min = crop_bounds["x_min"]
-    for bad_col in _BAD_COLS_CCD:
-        local = bad_col - x_min
-        if 0 <= local < nx_crop:
-            col_corr[local] = 0.0
-
-    col_corr_2d = np.tile(col_corr, (ny_crop, 1))
-    return col_corr_2d
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

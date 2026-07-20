@@ -77,14 +77,16 @@ def validate_stage_keys(
 SHARED_MASK_ALLOWED = frozenset(
     {
         "kind",
+        # Legacy aliases for mask_settings.shared.* (explicit stage key only; prefer mask_settings.yaml)
         "gaia_mag_bright",
         "strapsize",
+        "ps1_min_hit_count",
         "ref_mag_min",
         "ref_mag_max",
         "ref_isolation_mag",
         "ref_isolation_px",
         "ref_separation_px",
-        "ps1_min_hit_count",
+        "mask_settings",
     }
 )
 
@@ -309,15 +311,39 @@ class AstrometryParams:
 
 @dataclass
 class SharedMaskParams:
-    """SharedMaskParams."""
-    gaia_mag_bright: float = 13.0
-    strapsize: int = 6
+    """Hotpants ref-star selection + optional mask_settings path.
+
+    Mask geometry/policy (maglims, straps, TNS, asteroids) lives in
+    ``mask_settings.yaml``, not here. Legacy stage keys ``gaia_mag_bright``,
+    ``strapsize``, and ``ps1_min_hit_count`` are still allowed in YAML and
+    applied only when explicitly present (see ``legacy_mask_stage_overrides``).
+    """
+
     ref_mag_min: float = 13.5
     ref_mag_max: float = 14.5
     ref_isolation_mag: float = 13.5
     ref_isolation_px: int = 8
     ref_separation_px: int = 10
-    ps1_min_hit_count: int = 5000
+    mask_settings: Optional[str] = None
+
+
+_LEGACY_MASK_STAGE_KEYS = frozenset(
+    {"gaia_mag_bright", "strapsize", "ps1_min_hit_count"}
+)
+
+
+def legacy_mask_stage_overrides(stage: dict) -> dict[str, Any]:
+    """
+    Return explicit legacy shared_mask stage overrides for mask_settings.
+
+    Only keys present on the stage dict are returned (dataclass defaults must
+    not clobber ``mask_settings.yaml``).
+    """
+    out: dict[str, Any] = {}
+    for key in _LEGACY_MASK_STAGE_KEYS:
+        if key in stage and stage[key] is not None:
+            out[key] = stage[key]
+    return out
 
 
 @dataclass

@@ -17,6 +17,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Orchestration architecture](template_runner_architecture.md) | Maintainers | Spec-driven scheduler, SQLite state machine, verify/launch internals |
 | [State machine reference](pipeline_state_machine_reference.md) | Maintainers | Status transitions, partial runs, retry/cancel matrices |
 | [Config guide](../../config/README.md) | All users | `pipeline.yaml`, `diff_config.yaml`, deployment, example YAMLs |
+| [Static masking](masking.md) | Diff/star users | Empirical/TNS/asteroid masks (`difference_imaging/masking/`); `mask_settings.yaml` |
 | [Site configs](../../config/) | Quick start | `pipeline.yaml`, `diff_config.yaml`, deployment template |
 
 ## Template pipeline — two documentation layers
@@ -30,6 +31,8 @@ docs/markdown/
 ├── storage_layout.md             ← SCC + nested-event on-disk layout
 ├── field_geometry.md             ← default field templates (L0–L5, L4a/L4b F2)
 ├── oversampled_templates.md      ← F>1 templates + Hotpants stamp_mode / region_*
+├── masking.md                    ← empirical/TNS/asteroid masks (difference_imaging/masking)
+├── star_lightcurves.md           ← host-star quick start (syndiff star)
 └── stages/
     ├── README.md                 ← index + script/module mapping
     ├── standalone_pipeline_overview.md   ← legacy single-FFI pipeline.py workflow
@@ -42,7 +45,6 @@ docs/markdown/
     ├── star_pipeline.md          ← host-star branch (technical)
     ├── star_config.md            ← star_config.yaml / star_targets schema
     └── background.md             ← Savitzky–Golay temporal smooth of ks_b (kernel_subtract bkg)
-├── star_lightcurves.md           ← host-star quick start (syndiff star)
 ```
 
 **Improvement plans** live under [`.cursor/plans/`](../../.cursor/plans/).
@@ -64,7 +66,7 @@ are vendored here so this repository is self-contained.
 | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` (+ `field_downsample.py`) | `templates` (legacy config key/alias: `downsample`) |
 | — | `difference_imaging/orchestration/bind.py` + `common/wcs_grouping.py` | `bind` (diff DAG; legacy alias: `wcs_grouping`) |
 | — | `common/download.py` | `tess_ffi_download` |
-| — | `difference_imaging/orchestration/execute.py` | `diff` |
+| — | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` | `diff` |
 
 The **`syndiff` orchestrator** adds event-scoped WCS grouping (`bind`) for
 transients, an SCC-scoped five-stage template DAG plus a two-stage diff DAG
