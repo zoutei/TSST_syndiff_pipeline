@@ -79,7 +79,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             ]
         )
 
-    def _seed_legacy_contribs(self) -> None:
+    def _seed_group_contribs(self) -> None:
         write_contrib(
             self.store,
             "skycell.1.1",
@@ -88,6 +88,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             indices=np.array([_flat(1, 2)], dtype=np.int64),
             flux_sum=np.array([10.0]),
             count=np.array([2.0]),
+            group_id=0,
         )
         write_contrib(
             self.store,
@@ -97,6 +98,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             indices=np.array([_flat(4, 5)], dtype=np.int64),
             flux_sum=np.array([20.0]),
             count=np.array([4.0]),
+            group_id=1,
         )
 
     def _seed_pair_state_contribs(self) -> None:
@@ -125,7 +127,6 @@ class TestMaterializeFieldFits(unittest.TestCase):
                 {
                     "schema_version": 2,
                     "group_scoped_contribs": True,
-                    "l4b_policy": "pair_state",
                 }
             )
             + "\n"
@@ -136,7 +137,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
         side_effect=_plain_write_field_group_fits,
     )
     def test_materialize_writes_fits_per_group_matching_assemble(self, _mock_write):
-        self._seed_legacy_contribs()
+        self._seed_group_contribs()
         shifts_df = self._shifts_legacy()
         shifts_df.to_parquet(self.store / "template_group_shifts.parquet")
         write_template_manifest(
@@ -161,14 +162,10 @@ class TestMaterializeFieldFits(unittest.TestCase):
             camera=3,
             ccd=3,
             base_tess_shape=(NY, NX),
-            group_scoped_contribs=False,
             provenance={
-                "apply_hybrid_exact": True,
-                "hybrid_R": 1,
-                "l4b_policy": "none",
-                "require_l4b_cache": False,
-                "n_exact_keys": 12,
-                "n_l4b_pair_states": 0,
+                "intra_skycell_R": 1,
+                "n_intra_skycell_keys": 12,
+                "n_inter_skycell_pair_states": 0,
             },
         )
 
@@ -179,7 +176,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
                 shifts_df,
                 gid,
                 shape=(NY, NX),
-                group_scoped_contribs=False,
+                group_scoped_contribs=True,
             )
             fits_path = find_field_fits_by_group_id(self.store, gid)
             self.assertIsNotNone(fits_path)
@@ -192,8 +189,8 @@ class TestMaterializeFieldFits(unittest.TestCase):
             )
 
         sidecar = json.loads((self.store / "materialized_fits.json").read_text())
-        self.assertEqual(sidecar["provenance"]["l4b_policy"], "none")
-        self.assertEqual(sidecar["provenance"]["n_exact_keys"], 12)
+        self.assertEqual(sidecar["provenance"]["intra_skycell_R"], 1)
+        self.assertEqual(sidecar["provenance"]["n_intra_skycell_keys"], 12)
 
     @mock.patch(
         "syndiff_pipeline.template_creation.processing.field_downsample.write_field_group_fits",
@@ -211,7 +208,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             camera=1,
             ccd=1,
             base_tess_shape=(NY, NX),
-            provenance={"l4b_policy": "pair_state", "hybrid_R": 1},
+            provenance={"intra_skycell_R": 1},
         )
 
         flux_g0 = assemble_field_group_flux(
@@ -255,7 +252,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             )
 
     def test_materialize_false_writes_no_fits(self):
-        self._seed_legacy_contribs()
+        self._seed_group_contribs()
         fits_dir = self.store / "fits"
         self.assertFalse(fits_dir.exists())
         # Lazy-only path: no call to materialize_field_fits_for_store.

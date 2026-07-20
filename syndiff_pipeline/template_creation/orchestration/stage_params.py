@@ -77,11 +77,9 @@ REMAP_ALLOWED = frozenset(
     {
         "cache_quantum_ps1_px",
         "keying",
-        "apply_hybrid_exact",
-        "hybrid_R",
-        "l4b_policy",
+        "intra_skycell_R",
         "rebuild_remap_cache",
-        "rebuild_l4b_cache",
+        "rebuild_inter_skycell_cache",
         "raw_drift_outlier_sigma",
         "n_jobs",
         "executor",
@@ -113,11 +111,7 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "condor_rank",
         "geometry_mode",
         "materialize_fits",
-        "hybrid_R",
-        "apply_hybrid_exact",
         "rebuild_field_store",
-        "l4b_policy",
-        "require_l4b_cache",
         "prematerialize_top_n",
     }
 )
@@ -247,14 +241,12 @@ class RemapStageParams:
     """RemapStageParams."""
     cache_quantum_ps1_px: float = 1.0
     keying: str = "absolute"
-    apply_hybrid_exact: bool = True
-    hybrid_R: int = 1
-    # ``none`` = L4b off (L4a-only hybrid); ``pair_state`` = F2 rim under shared WCS.
-    l4b_policy: str = "none"
+    # Intra-skycell (L4a) boundary dilation radius; inter-skycell (L4b) is always on.
+    intra_skycell_R: int = 1
     # Pre-SG MAD gate on raw TESS drift (per orbit). ``None`` disables.
     raw_drift_outlier_sigma: float | None = 5.0
     rebuild_remap_cache: bool = False
-    rebuild_l4b_cache: bool = False
+    rebuild_inter_skycell_cache: bool = False
     n_jobs: int = 16
     executor: str = "condor"
     condor_request_cpus: int = 32
@@ -285,13 +277,7 @@ class DownsampleStageParams:
     condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
     geometry_mode: str = "field"
     materialize_fits: bool = False
-    hybrid_R: int = 1
-    apply_hybrid_exact: bool = True
     rebuild_field_store: bool = False
-    # Must match ``stages.remap.l4b_policy`` for hybrid downsample.
-    l4b_policy: str = "none"
-    # When ``None``, defaults to ``True`` iff ``l4b_policy=pair_state`` (fail-loud on miss).
-    require_l4b_cache: bool | None = None
     prematerialize_top_n: int | None = None
     condor_rank: str | None = "-LoadAvg"
 
@@ -393,12 +379,6 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     remap_keying = str(rm.get("keying", "absolute"))
     if remap_keying not in ("absolute", "phase"):
         raise ValueError("stages.remap.keying must be 'absolute' or 'phase'")
-    remap_l4b_policy = str(rm.get("l4b_policy", "none"))
-    if remap_l4b_policy not in ("none", "pair_state"):
-        raise ValueError("stages.remap.l4b_policy must be 'none' or 'pair_state'")
-    downsample_l4b_policy = str(ds.get("l4b_policy", "none"))
-    if downsample_l4b_policy not in ("none", "pair_state"):
-        raise ValueError("stages.downsample.l4b_policy must be 'none' or 'pair_state'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),

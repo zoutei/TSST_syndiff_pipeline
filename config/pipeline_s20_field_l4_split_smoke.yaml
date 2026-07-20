@@ -1,0 +1,85 @@
+# SCC smoke: intra-skycell + inter-skycell exact on existing s0020 mapping.
+# Rebuilds polluted legacy exact_cache/ → exact_cache_l4a/ + exact_cache_l4b/.
+# Usage (site is a config *directory*; this file is used via --config):
+#   mamba activate syndiff
+#   syndiff template submit \
+#     --config config/pipeline_s20_field_l4_split_smoke.yaml \
+#     --scc config/scc_s20_c1_k1.csv \
+#     --stages remap,downsample \
+#     --run-id s20_c1_k1_l4_split_smoke
+# Then optionally: --scc config/scc_s20_c3_k3.csv --run-id s20_c3_k3_l4_split_smoke
+deployment_file: deployment.yaml
+diff_config: diff_config_single_kernel.yaml
+star_config: star_config.yaml
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+    crop_mode: full
+  mapping:
+    oversampling_factor: 1
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  remap:
+    intra_skycell_R: 1
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    # Pre-SG MAD gate on raw TESS drift (per orbit); missing-WCS frames are
+    # synthesized (not dropped) so every FFI still gets remap/template.
+    raw_drift_outlier_sigma: 5.0
+    n_jobs: 16
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  downsample:
+    geometry_mode: field
+    rebuild_field_store: true
+    materialize_fits: false
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    n_jobs: 16
+    executor: condor
+    condor_request_cpus: 16
+    condor_request_memory: 128000
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  diff:
+    executor: condor
+  star:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 2
+  remap:
+    max_concurrent: 1
+  ps1_process:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+  star:
+    max_concurrent: 2
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

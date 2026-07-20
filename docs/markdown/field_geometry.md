@@ -43,21 +43,8 @@ Defaults (no YAML required beyond a normal site):
 |------|---------|---------|
 | `stages.wcs_grouping.geometry_mode` | `field` | Event bind records field geometry |
 | `stages.downsample.geometry_mode` | `field` | L5 uses `field_downsample` |
-| `stages.remap.apply_hybrid_exact` | `true` | L4a Exact on R=1 seam/rim |
-| `stages.remap.l4b_policy` | `none` | L4b F2 off until you set `pair_state` |
-| `stages.downsample.l4b_policy` | `none` | Must match remap when enabling F2 |
-
-Enable true Type-II (F2) L4b:
-
-```yaml
-stages:
-  remap:
-    l4b_policy: pair_state
-    raw_drift_outlier_sigma: 5.0   # pre-SG MAD gate; null disables
-  downsample:
-    l4b_policy: pair_state
-    require_l4b_cache: true       # fail-loud on missing L4b NPZs
-```
+| `stages.remap.intra_skycell_R` | `1` | Intra-skycell Exact dilation radius |
+| Intra-skycell + inter-skycell exact | always on | No YAML toggles in field mode |
 
 Opt out to linear:
 
@@ -93,8 +80,8 @@ rim** (~0.3–0.8% of pixels). Field mode Exact-patches those bands.
 3. Integer-quantize each skycell’s PS1 shift with hysteresis.
 4. Group frames by full-chip shift **signature** → `group_id`.
 5. Roll each skycell’s frozen L0 regmap independently.
-6. Exact-patch the R=1 seam/rim (**L4a**) and, when enabled, the inter-skycell
-   rim under a shared WCS (**L4b F2**, `l4b_policy: pair_state`).
+6. Exact-patch the R=1 seam/rim (**intra-skycell / L4a**) and the inter-skycell
+   abutting rim under a shared WCS (**inter-skycell / L4b F2**).
 7. Bin PS1 flux into sparse `contribs/` and assemble per `group_id` at diff time.
 
 ---
@@ -105,7 +92,7 @@ rim** (~0.3–0.8% of pixels). Field mode Exact-patches those bands.
 |--------|-----------------|------------------|
 | Drift measured at | Every skycell center | Science target only |
 | Template groups | ~10²–10³ full-chip signatures | ~19 target-anchored |
-| Regmap geometry | Roll + L4a (+ optional L4b F2) | Integer roll of frozen L0 |
+| Regmap geometry | Roll + intra-skycell (L4a) + inter-skycell (L4b F2) | Integer roll of frozen L0 |
 | Output | SCC `contribs/` + on-demand assemble | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
 | Event dependency at build | None (SCC-wide) | Requires `event_job.json` |
 | Template DAG | Includes `remap` before `downsample` | `remap` pre-skipped |
@@ -120,8 +107,8 @@ rim** (~0.3–0.8% of pixels). Field mode Exact-patches those bands.
 | **L0** | Frozen PS1→TESS ownership at mapping-epoch WCS | `mapping` → `mapping/oversampling_{N}/` | `pancakes.py` |
 | **L2** | Per-skycell PS1 drift time series | `remap` → `shift_schedule.npz` | `shift_schedule.py`, `field_remap.py` |
 | **L3** | Hysteresis integer `(sx,sy)`; signature → `group_id` | Same remap store | `shift_schedule.py` |
-| **L4a** | Exact-patch R=1 seam/rim (~9% footprint) | `exact_cache_l4a/` | `hybrid_regmaps.py`, `field_hybrid_exact.py` |
-| **L4b (F2)** | Shared-WCS abutting rim (~1.9%) | `exact_cache_l4b/` when `pair_state` | `field_abutting.py`, `field_hybrid_exact.py` |
+| **L4a** | Intra-skycell Exact | Exact-patch R=1 seam/rim (~9% footprint) | `exact_cache_l4a/` | `hybrid_regmaps.py`, `field_hybrid_exact.py` |
+| **L4b (F2)** | Inter-skycell Exact | Shared-WCS abutting rim (~1.9%) | `exact_cache_l4b/` | `field_abutting.py`, `field_hybrid_exact.py` |
 | **L5** | Compose L4a→L4b; bin PS1; sum contribs per `group_id` | `downsample` → `templates/…/contribs/` | `field_downsample.py`, `field_templates.py` |
 
 ```text
@@ -200,7 +187,8 @@ as L4a. Verify rejects it when `exact_cache_l4a/` is missing; rebuild with
 
 ## L4b: Type II F2 Exact (inter-skycell rim)
 
-Off by default (`l4b_policy: none`). When `l4b_policy: pair_state`:
+Always on in field mode (no YAML toggle). Remap builds `exact_cache_l4b/` for every
+abutting master pair and unique neighbour shift 4-tuple.
 
 | Item | Spec |
 |------|------|
@@ -210,35 +198,33 @@ Off by default (`l4b_policy: none`). When `l4b_policy: pair_state`:
 | WCS | First valid frame realizing that 4-tuple (`rep_frame_index`) |
 | Cache | `exact_cache_l4b/pair_{id_lo}__{id_hi}_…_rim.npz` |
 
-There is **no** `lite` policy. Manifests with `include_abutting_border_exact` or
-`l4b_policy` in `{lite, abutting_under_type1_wcs}` are rejected on verify.
+Legacy manifests with `include_abutting_border_exact`, `l4b_policy`, or
+`apply_hybrid_exact` are rejected on verify — rebuild remap with schema v2.
 
 ---
 
 ## L5: compose, bin, assemble
 
-### Architecture A (group-scoped contribs)
+### Group-scoped contribs (always)
 
-When `l4b_policy=pair_state`, neighbour shifts can differ across `group_id`s that
-share the same Type I key `(skycell,sx,sy)` (~48% of keys on s0020/c3/k3). L5
-therefore writes **group-qualified** contribs:
+Neighbour shifts can differ across `group_id`s that share the same intra-skycell
+key `(skycell,sx,sy)` (~48% of keys on s0020/c3/k3). L5 therefore always writes
+**group-qualified** contribs:
 
 ```text
-contribs/{skycell}_sx{±}_sy{±}_gid{N}.npz     # pair_state
-contribs/{skycell}_sx{±}_sy{±}.npz             # l4b_policy=none (legacy key)
+contribs/{skycell}_sx{±}_sy{±}_gid{N}.npz
 ```
 
 ### Compose order (per group context)
 
 1. Load L0 `TESS_PIXEL_MAP`.
-2. Build L4a hybrid (roll + Exact patch from `exact_cache_l4a/`).
-3. For each master abutting neighbour B, load the matching L4b rim NPZ using
+2. Build intra-skycell hybrid (roll + Exact patch from `exact_cache_l4a/`).
+3. For each master abutting neighbour B, load the matching inter-skycell rim NPZ using
    **this group’s** `(sx_B, sy_B)`; patch A’s rim (`abutting_rim_ps1_mask`).
-   **L4b wins on overlap.**
+   **Inter-skycell wins on overlap.**
 4. Bin PS1 with `assignment=hybrid_map`, `sx_int=0`, `sy_int=0` (do not data-roll
    PS1 when hybrid is used).
-5. Missing required Exact → **fail** (`require_l4b_cache` / require L4a). No
-   silent roll fallback when hybrid is required.
+5. Missing required Exact caches → **fail**. No silent roll fallback.
 
 ### Consumers
 
@@ -262,13 +248,11 @@ stages:
     crop_mode: target_box         # diff crop only; field store is full-chip
     crop_box_size: 1024
 
-  remap:                          # L2–L4
-    apply_hybrid_exact: true
-    hybrid_R: 1
-    l4b_policy: none              # or pair_state
+  remap:                          # L2–L4 (field mode only)
+    intra_skycell_R: 1            # sole geometry tuning knob
     raw_drift_outlier_sigma: 5.0  # or null to disable
     rebuild_remap_cache: false
-    rebuild_l4b_cache: false
+    rebuild_inter_skycell_cache: false
     cache_quantum_ps1_px: 1.0
     keying: absolute
     n_jobs: 16
@@ -276,15 +260,14 @@ stages:
     condor_request_memory: 128000
 
   downsample:                     # L5
-    geometry_mode: field          # DEFAULT
-    apply_hybrid_exact: true
-    hybrid_R: 1
-    l4b_policy: none              # must match remap for F2
-    require_l4b_cache: null       # auto-true when pair_state
+    geometry_mode: field          # DEFAULT; set linear to opt out
     rebuild_field_store: false
     materialize_fits: false
     n_jobs: 16
 ```
+
+Removed keys (`apply_hybrid_exact`, `l4b_policy`, `require_l4b_cache`, `hybrid_R`
+on downsample) are **rejected at parse** — use the shape above.
 
 Set `geometry_mode` under **both** `wcs_grouping` and `downsample`. The
 downsample dataclass default is `field`, but an explicit mismatch with
@@ -303,14 +286,14 @@ downsample dataclass default is `field`, but an explicit mismatch with
   template_group_shifts.parquet
   template_groups.json
   exact_cache_l4a/{skycell}_sx{±N}_sy{±N}_exact.npz
-  exact_cache_l4b/pair_{id}__{id}_…_rim.npz               # pair_state only
+  exact_cache_l4b/pair_{id}__{id}_…_rim.npz
   exact_cache_legacy_polluted/                            # migrated lite; do not use
   .lock
 
 {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/ # downsample (L5)
   template_manifest.json
   field_mode_assembly.json          # schema v1|v2
-  contribs/…[_gid{N}].npz
+  contribs/…_gid{N}.npz
   fits/syndiff_field_s{SSSS}_{C}_{K}[_os{N}]_gid{N}.fits.fz  # optional
   materialized_fits.json
   .lock
@@ -367,10 +350,11 @@ Do not parse field products with the linear `dx/dy` filename regex.
 
 Verify rejects:
 
+- Legacy manifests with `apply_hybrid_exact`, `l4b_policy`, or `hybrid_R` (schema v1)
 - `include_abutting_border_exact` / lite `l4b_policy` values
 - Polluted `exact_cache/` without `exact_cache_l4a/`
-- `pair_state` without both cache dirs (and NPZ count fingerprints)
-- `pair_state` contrib keys that are not group-qualified 4-tuples
+- Missing `exact_cache_l4a/` or `exact_cache_l4b/` (both required in field mode)
+- Contrib keys that are not group-qualified 4-tuples `(group_id, skycell, sx, sy)`
 
 Intentional rebuild:
 
@@ -378,7 +362,7 @@ Intentional rebuild:
 stages:
   remap:
     rebuild_remap_cache: true
-    rebuild_l4b_cache: true
+    rebuild_inter_skycell_cache: true
   downsample:
     rebuild_field_store: true
 ```
@@ -390,8 +374,8 @@ stages:
 - Field mode has **~10²–10³ groups**, so `convolved_templates` runs one template
   per `group_id` (can be slow on a full frame set).
 - Hybrid Exact workers cap at `min(n_jobs, SYNDIFF_HYBRID_MAX_JOBS=24, CPUs)`.
-- L4a+L4b F2 remap is order **~7 h CPU** per SCC-class gate; use Condor memory
-  ≥128 GB for remap when enabling `pair_state`.
+- Intra-skycell + inter-skycell remap is order **~7 h CPU** per SCC-class gate; use
+  Condor memory ≥128 GB for remap on full chips.
 - Pre-SG MAD outlier gate + missing-WCS synthesis (not a post-hoc median
   PS1-shift drop) keeps L4a keys from exploding while every FFI still gets a
   shift assignment.
@@ -426,4 +410,4 @@ stages:
 | Type I / L4a | Intra-skycell seam/rim Exact |
 | Type II / L4b F2 | Inter-skycell abutting-rim Exact under shared WCS |
 | Signature / `group_id` | Full-chip vector of per-skycell integer shifts |
-| Architecture A | Group-qualified contribs when neighbour context collides |
+| Architecture A | Group-qualified contribs when neighbour context collides (always on) |

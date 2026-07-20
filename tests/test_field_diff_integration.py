@@ -43,11 +43,13 @@ def field_store(tmp_path):
         store, "skycell.1.1", 1, 0,
         indices=np.array([_flat(2, 3)]), flux_sum=np.array([100.0]),
         count=np.array([2.0]), mask_count=np.array([0.0]),
+        group_id=0,
     )
     write_contrib(
         store, "skycell.2.2", 0, 0,
         indices=np.array([_flat(5, 6)]), flux_sum=np.array([50.0]),
         count=np.array([1.0]), mask_count=np.array([0.0]),
+        group_id=0,
     )
     shifts_df = pd.DataFrame(
         [
@@ -116,9 +118,9 @@ def test_assemble_template_for_ffi_by_name(field_store):
 
 def test_verify_field_store_marker(field_store):
     store, _ = field_store
-    keys = [("skycell.1.1", 1, 0), ("skycell.2.2", 0, 0)]
+    keys = [(0, "skycell.1.1", 1, 0), (0, "skycell.2.2", 0, 0)]
     assert verify_field_store(store, required_keys=keys)["ok"]
-    bad = verify_field_store(store, required_keys=keys + [("skycell.9.9", 3, 3)])
+    bad = verify_field_store(store, required_keys=keys + [(0, "skycell.9.9", 3, 3)])
     assert not bad["ok"]
 
 

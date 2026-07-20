@@ -83,9 +83,8 @@ def contrib_basename(
 ) -> str:
     """Filename for one sparse contribution key.
 
-    When ``group_id`` is set (Architecture A / ``l4b_policy=pair_state``), the
-    basename is group-qualified: ``{skycell}_sx…_sy…_gid{N}.npz``. Legacy
-    L4a-only stores omit ``_gid``.
+    When ``group_id`` is set, the basename is group-qualified:
+    ``{skycell}_sx…_sy…_gid{N}.npz``. Field mode always uses ``_gid``.
     """
     name = str(skycell).strip()
     if not name.startswith("skycell."):
@@ -185,23 +184,29 @@ def build_field_fits_header(
         hdr["ROIW"] = (x_max - x_min, "ROI width in base TESS pixels")
         hdr["ROIH"] = (y_max - y_min, "ROI height in base TESS pixels")
     if provenance:
-        if "apply_hybrid_exact" in provenance:
-            hdr["HYBEXACT"] = (
-                bool(provenance["apply_hybrid_exact"]),
-                "Hybrid L4a/L4b compose at bin time",
+        if "intra_skycell_R" in provenance:
+            hdr["INTRA_R"] = (int(provenance["intra_skycell_R"]), "Intra-skycell dilation R")
+        elif "hybrid_R" in provenance:
+            hdr["INTRA_R"] = (int(provenance["hybrid_R"]), "Intra-skycell dilation R")
+        if "n_intra_skycell_keys" in provenance and provenance["n_intra_skycell_keys"] is not None:
+            hdr["NINTRKEY"] = (
+                int(provenance["n_intra_skycell_keys"]),
+                "Intra-skycell exact cache keys",
             )
-        if "hybrid_R" in provenance:
-            hdr["HYBRID_R"] = (int(provenance["hybrid_R"]), "L4a boundary dilation R")
-        if "l4b_policy" in provenance:
-            hdr.set("HIERARCH SYNDIFF L4B POLICY", str(provenance["l4b_policy"]))
-        if "require_l4b_cache" in provenance:
-            hdr["REQL4B"] = (bool(provenance["require_l4b_cache"]), "Require L4b cache hits")
-        if "n_exact_keys" in provenance and provenance["n_exact_keys"] is not None:
-            hdr["NL4AKEY"] = (int(provenance["n_exact_keys"]), "L4a exact cache keys")
-        if "n_l4b_pair_states" in provenance and provenance["n_l4b_pair_states"] is not None:
-            hdr["NL4BPAIR"] = (
+        elif "n_exact_keys" in provenance and provenance["n_exact_keys"] is not None:
+            hdr["NINTRKEY"] = (int(provenance["n_exact_keys"]), "Intra-skycell exact cache keys")
+        if (
+            "n_inter_skycell_pair_states" in provenance
+            and provenance["n_inter_skycell_pair_states"] is not None
+        ):
+            hdr["NINTERPR"] = (
+                int(provenance["n_inter_skycell_pair_states"]),
+                "Inter-skycell pair-state cache keys",
+            )
+        elif "n_l4b_pair_states" in provenance and provenance["n_l4b_pair_states"] is not None:
+            hdr["NINTERPR"] = (
                 int(provenance["n_l4b_pair_states"]),
-                "L4b pair-state cache keys",
+                "Inter-skycell pair-state cache keys",
             )
     return hdr
 

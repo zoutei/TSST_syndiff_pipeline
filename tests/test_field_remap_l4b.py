@@ -1,4 +1,4 @@
-"""Integration tests for remap L4b F2 rim Exact cache writer."""
+"""Integration tests for remap inter-skycell (L4b) rim Exact cache writer."""
 
 from __future__ import annotations
 
@@ -78,7 +78,7 @@ def _expected_pair_state_count(schedule: ShiftSchedule, master: np.ndarray) -> i
 
 @pytest.fixture
 def remap_l4b_env(tmp_path: Path, monkeypatch):
-    """Minimal remap store with mocked WCS/catalog/Exact for L4b-only run."""
+    """Minimal remap store with mocked WCS/catalog/Exact for inter-skycell run."""
     data_root = tmp_path / "data"
     sector, camera, ccd = 1, 1, 1
     store = remap_root(data_root, sector, camera, ccd, oversampling_factor=1)
@@ -127,6 +127,10 @@ def remap_l4b_env(tmp_path: Path, monkeypatch):
             {"NAME": str(skycell), "RA": 0.0, "DEC": 0.0}
         ),
     )
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_hybrid_exact.candidate_tess_ids_for_l4a",
+        lambda *a, **k: (np.array([], dtype=np.int32), np.zeros((4, 4), dtype=bool)),
+    )
 
     rim_a = np.array([101, 102], dtype=np.int32)
     rim_b = np.array([201, 202], dtype=np.int32)
@@ -160,7 +164,7 @@ def remap_l4b_env(tmp_path: Path, monkeypatch):
     }
 
 
-def test_l4b_pair_state_writes_expected_npzs(remap_l4b_env):
+def test_inter_skycell_writes_expected_npzs(remap_l4b_env):
     env = remap_l4b_env
     result = run_field_remap_scc(
         sector=env["sector"],
@@ -170,32 +174,29 @@ def test_l4b_pair_state_writes_expected_npzs(remap_l4b_env):
         event_dir=env["event_dir"],
         mapping_root=Path("/fake/mapping"),
         base_tess_shape=(4, 6),
-        apply_hybrid_exact=False,
-        l4b_policy="pair_state",
         scc_only=False,
         store_root=env["store"],
     )
 
     l4b_dir = env["store"] / EXACT_CACHE_L4B_DIRNAME
     npz_files = sorted(l4b_dir.glob("pair_*_rim.npz"))
-    assert result["n_l4b_pair_states"] == env["expected_n"]
-    assert result["n_l4b_written"] == env["expected_n"]
+    assert result["n_inter_skycell_pair_states"] == env["expected_n"]
+    assert result["n_inter_skycell_written"] == env["expected_n"]
     assert len(npz_files) == env["expected_n"]
 
     manifest = json.loads((env["store"] / REMAP_MANIFEST_NAME).read_text())
-    assert manifest["l4b_policy"] == "pair_state"
-    assert manifest["n_l4b_pair_states"] == env["expected_n"]
+    assert manifest["n_inter_skycell_pair_states"] == env["expected_n"]
     assert manifest["schema_version"] == 2
+    assert "l4b_policy" not in manifest
 
     with np.load(npz_files[0]) as z:
         assert "exact_tid_lo" in z
         assert "exact_tid_hi" in z
         assert "rep_frame_index" in z
-        assert str(z["l4b_policy"]) == "pair_state"
         assert int(z["id_lo"]) <= int(z["id_hi"])
 
 
-def test_l4b_basename_undirected(remap_l4b_env):
+def test_inter_skycell_basename_undirected(remap_l4b_env):
     env = remap_l4b_env
     run_field_remap_scc(
         sector=env["sector"],
@@ -205,21 +206,18 @@ def test_l4b_basename_undirected(remap_l4b_env):
         event_dir=env["event_dir"],
         mapping_root=Path("/fake/mapping"),
         base_tess_shape=(4, 6),
-        apply_hybrid_exact=False,
-        l4b_policy="pair_state",
         scc_only=False,
         store_root=env["store"],
     )
     l4b_dir = env["store"] / EXACT_CACHE_L4B_DIRNAME
     names = {p.name for p in l4b_dir.glob("*.npz")}
-    # Same pair-state keyed from either endpoint order must collide to one file.
     canonical = l4b_rim_cache_basename(10, 20, 0, 0, 1, 0)
     swapped = l4b_rim_cache_basename(20, 10, 1, 0, 0, 0)
     assert canonical == swapped
     assert canonical in names
 
 
-def test_l4b_skips_existing_unless_rebuild(remap_l4b_env):
+def test_inter_skycell_skips_existing_unless_rebuild(remap_l4b_env):
     env = remap_l4b_env
     kwargs = dict(
         sector=env["sector"],
@@ -229,15 +227,13 @@ def test_l4b_skips_existing_unless_rebuild(remap_l4b_env):
         event_dir=env["event_dir"],
         mapping_root=Path("/fake/mapping"),
         base_tess_shape=(4, 6),
-        apply_hybrid_exact=False,
-        l4b_policy="pair_state",
         scc_only=False,
         store_root=env["store"],
     )
     first = run_field_remap_scc(**kwargs)
     second = run_field_remap_scc(**kwargs)
-    assert first["n_l4b_written"] == env["expected_n"]
-    assert second["n_l4b_written"] == 0
+    assert first["n_inter_skycell_written"] == env["expected_n"]
+    assert second["n_inter_skycell_written"] == 0
 
-    third = run_field_remap_scc(**kwargs, rebuild_l4b_cache=True)
-    assert third["n_l4b_written"] == env["expected_n"]
+    third = run_field_remap_scc(**kwargs, rebuild_inter_skycell_cache=True)
+    assert third["n_inter_skycell_written"] == env["expected_n"]

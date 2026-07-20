@@ -202,11 +202,7 @@ def run_field_downsample_scc(
     crop_filter_skycells: bool = True,
     store_root: str | Path | None = None,
     remap_store_root: str | Path | None = None,
-    apply_hybrid_exact: bool = True,
-    hybrid_R: int = 1,
     rebuild_field_store: bool = False,
-    l4b_policy: str | None = None,
-    require_l4b_cache: bool | None = None,
     stage_regmaps_to_scratch: bool | None = None,
     scc_only: bool = False,
     ffi_dir: str | Path | None = None,
@@ -215,9 +211,9 @@ def run_field_downsample_scc(
     """
     Bin sparse contribs into the SCC templates store (L5 only).
 
-    Requires remap artifacts under ``remap/oversampling_{N}/`` (or legacy
-    colocated schedule/cache under ``templates/``). Does not compute Exact
-    remaps; reads ``exact_cache_l4a/`` and merges when ``apply_hybrid_exact`` is set.
+    Requires remap artifacts under ``remap/oversampling_{N}/``. Reads
+    intra-skycell and inter-skycell exact caches and always writes
+    group-qualified contribs (``_gid{N}``).
 
     Parameters ``ffi_dir`` and ``ref_ffi_path`` are accepted for dispatch
     compatibility but ignored (remap must run separately).
@@ -228,7 +224,6 @@ def run_field_downsample_scc(
 
     from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
         compose_group_hybrid_assignment,
-        hybrid_assignment_from_exact_cache,
     )
 
     del ffi_dir, ref_ffi_path  # remap stage owns schedule build inputs
@@ -249,23 +244,19 @@ def run_field_downsample_scc(
 
     remap_read, _legacy = resolve_remap_read_root(remap_store, store)
     remap_manifest = _load_remap_manifest(remap_read)
+    intra_skycell_R = 1
     if remap_manifest:
-        apply_hybrid_exact = bool(
-            remap_manifest.get("apply_hybrid_exact", apply_hybrid_exact)
+        intra_skycell_R = int(
+            remap_manifest.get(
+                "intra_skycell_R",
+                remap_manifest.get("hybrid_R", intra_skycell_R),
+            )
         )
-        hybrid_R = int(remap_manifest.get("hybrid_R", hybrid_R))
         cache_quantum_ps1_px = float(
             remap_manifest.get("cache_quantum_ps1_px", cache_quantum_ps1_px)
         )
         keying = str(remap_manifest.get("keying", keying))
-        if l4b_policy is None:
-            l4b_policy = str(remap_manifest.get("l4b_policy", "none"))
-    l4b_policy = str(l4b_policy or "none")
-    if l4b_policy not in ("none", "pair_state"):
-        raise ValueError(f"l4b_policy must be 'none' or 'pair_state', got {l4b_policy!r}")
-    if require_l4b_cache is None:
-        require_l4b_cache = l4b_policy == "pair_state"
-    group_scoped_contribs = l4b_policy == "pair_state"
+    group_scoped_contribs = True
 
     schedule_path = remap_read / "shift_schedule.npz"
     if not schedule_path.is_file():
@@ -429,11 +420,10 @@ def run_field_downsample_scc(
         ps1_data: np.ndarray,
         ps1_mask: np.ndarray,
         *,
-        group_id: int | None = None,
-        group_shifts: dict[str, tuple[int, int]] | None = None,
+        group_id: int,
+        group_shifts: dict[str, tuple[int, int]],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
-        use_hybrid = bool(apply_hybrid_exact) and not (int(sx_i) == 0 and int(sy_i) == 0)
-        if not use_hybrid:
+        if int(sx_i) == 0 and int(sy_i) == 0:
             return _bin_skycell_contrib(
                 assignment=assignment_map,
                 ps1_data=ps1_data,
@@ -451,32 +441,22 @@ def run_field_downsample_scc(
         if skycell_id is None:
             raise KeyError(f"skycell {skycell!r} missing from master id map")
 
-        if group_scoped_contribs:
-            assert group_id is not None and group_shifts is not None
-            hybrid_map, meta = compose_group_hybrid_assignment(
-                assignment_map,
-                skycell=str(skycell),
-                skycell_id=int(skycell_id),
-                sx_int=int(sx_i),
-                sy_int=int(sy_i),
-                master=master_map,
-                group_shifts=group_shifts,
-                name_to_id=name_to_id,
-                l4a_cache_path=l4a_cache_path,
-                l4b_cache_dir=exact_cache_l4b_dir,
-                hybrid_R=int(hybrid_R),
-                apply_l4b=True,
-                require_l4a_cache=True,
-                require_l4b_cache=bool(require_l4b_cache),
-            )
-        else:
-            hybrid_map, meta = hybrid_assignment_from_exact_cache(
-                assignment_map,
-                sx_i,
-                sy_i,
-                l4a_cache_path,
-                hybrid_R=int(hybrid_R),
-            )
+        hybrid_map, meta = compose_group_hybrid_assignment(
+            assignment_map,
+            skycell=str(skycell),
+            skycell_id=int(skycell_id),
+            sx_int=int(sx_i),
+            sy_int=int(sy_i),
+            master=master_map,
+            group_shifts=group_shifts,
+            name_to_id=name_to_id,
+            l4a_cache_path=l4a_cache_path,
+            l4b_cache_dir=exact_cache_l4b_dir,
+            hybrid_R=int(intra_skycell_R),
+            apply_l4b=True,
+            require_l4a_cache=True,
+            require_l4b_cache=True,
+        )
         log.debug(
             "L5 hybrid %s sx=%+d sy=%+d gid=%s cache=%s l4b_patches=%s",
             skycell,
@@ -497,9 +477,8 @@ def run_field_downsample_scc(
             ignore_mask=ignore_mask,
         )
 
-    def _one(skycell: str, sx_i: int, sy_i: int, group_id: int | None = None) -> str:
-        gid_kw = {"group_id": group_id} if group_id is not None else {}
-        out = contrib_path(store, skycell, sx_i, sy_i, **gid_kw)
+    def _one(skycell: str, sx_i: int, sy_i: int, group_id: int) -> str:
+        out = contrib_path(store, skycell, sx_i, sy_i, group_id=int(group_id))
         if out.is_file() and not rebuild_field_store:
             return "skip"
         if out.is_file() and rebuild_field_store:
@@ -519,9 +498,7 @@ def run_field_downsample_scc(
                 assignment_map = np.asarray(hdul[1].data)
         zs = zarr.open(str(zarr_path), mode="r")
         ps1_data, ps1_mask = _load_zarr_skycell(zs, skycell)
-        group_shifts = (
-            group_shifts_by_gid.get(int(group_id)) if group_id is not None else None
-        )
+        group_shifts = group_shifts_by_gid[int(group_id)]
         binned = _compose_and_bin(
             skycell,
             sx_i,
@@ -529,45 +506,34 @@ def run_field_downsample_scc(
             assignment_map,
             ps1_data,
             ps1_mask,
-            group_id=group_id,
+            group_id=int(group_id),
             group_shifts=group_shifts,
         )
-        _write_binned(skycell, sx_i, sy_i, binned, group_id=group_id)
+        _write_binned(skycell, sx_i, sy_i, binned, group_id=int(group_id))
         return "write"
 
-    if group_scoped_contribs:
-        key_list = sorted(
-            (
-                int(r.group_id),
-                str(r.skycell),
-                int(r.sx_int),
-                int(r.sy_int),
-            )
-            for r in shifts_df.itertuples(index=False)
-            if (str(r.skycell), int(r.sx_int), int(r.sy_int)) in keys
+    key_list = sorted(
+        (
+            int(r.group_id),
+            str(r.skycell),
+            int(r.sx_int),
+            int(r.sy_int),
         )
-    else:
-        key_list = sorted(keys)
+        for r in shifts_df.itertuples(index=False)
+        if (str(r.skycell), int(r.sx_int), int(r.sy_int)) in keys
+    )
 
     n_jobs_eff = max(1, min(int(n_jobs), len(key_list) or 1))
-    if apply_hybrid_exact:
-        hybrid_cap = int(_os.environ.get("SYNDIFF_HYBRID_MAX_JOBS", "24"))
-        avail = len(_os.sched_getaffinity(0)) if hasattr(_os, "sched_getaffinity") else (
-            _os.cpu_count() or hybrid_cap
-        )
-        n_jobs_eff = min(n_jobs_eff, max(1, hybrid_cap), max(1, avail))
-    if group_scoped_contribs:
-        if n_jobs_eff == 1 or len(key_list) <= 1:
-            statuses = [_one(s, x, y, gid) for gid, s, x, y in key_list]
-        else:
-            statuses = Parallel(n_jobs=n_jobs_eff, prefer="processes")(
-                delayed(_one)(s, x, y, gid) for gid, s, x, y in key_list
-            )
-    elif n_jobs_eff == 1 or len(key_list) <= 1:
-        statuses = [_one(s, x, y) for s, x, y in key_list]
+    hybrid_cap = int(_os.environ.get("SYNDIFF_HYBRID_MAX_JOBS", "24"))
+    avail = len(_os.sched_getaffinity(0)) if hasattr(_os, "sched_getaffinity") else (
+        _os.cpu_count() or hybrid_cap
+    )
+    n_jobs_eff = min(n_jobs_eff, max(1, hybrid_cap), max(1, avail))
+    if n_jobs_eff == 1 or len(key_list) <= 1:
+        statuses = [_one(s, x, y, gid) for gid, s, x, y in key_list]
     else:
         statuses = Parallel(n_jobs=n_jobs_eff, prefer="processes")(
-            delayed(_one)(s, x, y) for s, x, y in key_list
+            delayed(_one)(s, x, y, gid) for gid, s, x, y in key_list
         )
     n_written = sum(1 for s in statuses if s == "write")
     n_skipped = sum(1 for s in statuses if s == "skip")
@@ -595,30 +561,22 @@ def run_field_downsample_scc(
         "roi_bounds": list(roi_bounds),
         "oversampling_factor": int(oversampling_factor),
         "ignore_mask": int(ignore_mask),
-        "apply_hybrid_exact": bool(apply_hybrid_exact),
-        "hybrid_R": int(hybrid_R),
-        "l4b_policy": l4b_policy,
-        "require_l4b_cache": bool(require_l4b_cache),
-        "group_scoped_contribs": bool(group_scoped_contribs),
+        "intra_skycell_R": int(intra_skycell_R),
+        "group_scoped_contribs": True,
         "materialize_fits": bool(materialize_fits),
-        "architecture_note": (
-            "Architecture A: group-qualified contribs when l4b_policy=pair_state"
-            if group_scoped_contribs
-            else "L4a-only / legacy (skycell,sx,sy) contrib keys"
-        ),
+        "architecture_note": "Group-qualified contribs (_gid{N}); intra + inter exact always on",
         "flux_note": (
             "Field contribs are in convolved/PS1 flux units; Hotpants may need "
             "a per-event flux scale vs linear ADU templates (~1e3–1e4)."
         ),
     }
     fits_provenance = {
-        "apply_hybrid_exact": bool(apply_hybrid_exact),
-        "hybrid_R": int(hybrid_R),
-        "l4b_policy": l4b_policy,
-        "require_l4b_cache": bool(require_l4b_cache),
-        "group_scoped_contribs": bool(group_scoped_contribs),
-        "n_exact_keys": remap_manifest.get("n_exact_keys"),
-        "n_l4b_pair_states": remap_manifest.get("n_l4b_pair_states", 0),
+        "intra_skycell_R": int(intra_skycell_R),
+        "group_scoped_contribs": True,
+        "n_intra_skycell_keys": remap_manifest.get("n_intra_skycell_keys")
+        or remap_manifest.get("n_exact_keys"),
+        "n_inter_skycell_pair_states": remap_manifest.get("n_inter_skycell_pair_states")
+        or remap_manifest.get("n_l4b_pair_states", 0),
         "exact_cache_l4a_dir": str(exact_cache_l4a_dir),
         "exact_cache_l4b_dir": str(exact_cache_l4b_dir),
         "remap_root": str(remap_store),
@@ -634,7 +592,7 @@ def run_field_downsample_scc(
             base_tess_shape=base_tess_shape,
             roi_bounds=roi_bounds,
             oversampling_factor=int(oversampling_factor),
-            group_scoped_contribs=bool(group_scoped_contribs),
+            group_scoped_contribs=True,
             provenance=fits_provenance,
         )
         sidecar["materialized_fits"] = materialized_fits
@@ -644,18 +602,13 @@ def run_field_downsample_scc(
         store,
         required_keys=list(key_list),
         require_nonempty=False,
-        group_id=None if group_scoped_contribs else None,
     )
     if not v["ok"]:
         raise RuntimeError(f"field store incomplete: {v['reasons']}")
     nonempty = 0
     for key in key_list:
-        if group_scoped_contribs:
-            gid_i, skycell, sx_i, sy_i = key
-            p = contrib_path(store, skycell, sx_i, sy_i, group_id=int(gid_i))
-        else:
-            skycell, sx_i, sy_i = key
-            p = contrib_path(store, skycell, sx_i, sy_i)
+        gid_i, skycell, sx_i, sy_i = key
+        p = contrib_path(store, skycell, sx_i, sy_i, group_id=int(gid_i))
         if not p.is_file():
             continue
         from syndiff_pipeline.template_creation.processing.field_templates import (
@@ -673,19 +626,15 @@ def run_field_downsample_scc(
 
     if not scc_only:
         event_dir.mkdir(parents=True, exist_ok=True)
-        if group_scoped_contribs:
-            serialized_keys = [
-                [int(gid), str(s), int(x), int(y)] for gid, s, x, y in key_list
-            ]
-        else:
-            serialized_keys = [[str(s), int(x), int(y)] for s, x, y in key_list]
+        serialized_keys = [
+            [int(gid), str(s), int(x), int(y)] for gid, s, x, y in key_list
+        ]
         (event_dir / "field_contrib_keys.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 2 if group_scoped_contribs else 1,
+                    "schema_version": 2,
                     "store_root": str(store),
                     "remap_root": str(remap_store),
-                    "l4b_policy": l4b_policy,
                     "n_contrib_keys": len(key_list),
                     "keys": serialized_keys,
                 }
@@ -701,11 +650,8 @@ def run_field_downsample_scc(
         "n_contribs_written": n_written,
         "n_contribs_skipped": n_skipped,
         "geometry_mode": "field",
-        "apply_hybrid_exact": bool(apply_hybrid_exact),
-        "hybrid_R": int(hybrid_R),
-        "l4b_policy": l4b_policy,
-        "require_l4b_cache": bool(require_l4b_cache),
-        "group_scoped_contribs": bool(group_scoped_contribs),
+        "intra_skycell_R": int(intra_skycell_R),
+        "group_scoped_contribs": True,
         "rebuild_field_store": bool(rebuild_field_store),
         "materialize_fits": bool(materialize_fits),
         "materialized_fits": materialized_fits,
@@ -749,16 +695,19 @@ def _group_shifts_present(
 
 
 def _store_uses_group_scoped_contribs(store_root: str | Path) -> bool:
+    """Field mode always uses group-qualified contrib keys."""
     sidecar_path = Path(store_root) / "field_mode_assembly.json"
     if sidecar_path.is_file():
         try:
             payload = json.loads(sidecar_path.read_text())
             if "group_scoped_contribs" in payload:
                 return bool(payload["group_scoped_contribs"])
-            return str(payload.get("l4b_policy", "none")) == "pair_state"
+            # Legacy sidecars without the flag may have unqualified contribs.
+            if payload.get("l4b_policy") == "none":
+                return False
         except Exception:
             pass
-    return False
+    return True
 
 
 def assemble_field_group_flux(

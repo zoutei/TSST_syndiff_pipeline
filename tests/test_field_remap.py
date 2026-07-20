@@ -7,6 +7,8 @@ from pathlib import Path
 
 import numpy as np
 
+from unittest.mock import MagicMock
+
 from syndiff_pipeline.template_creation.processing.field_remap import (
     EXACT_CACHE_L4A_DIRNAME,
     REMAP_MANIFEST_NAME,
@@ -79,8 +81,12 @@ def test_run_field_remap_scc_writes_layout(tmp_path: Path, monkeypatch):
     store = remap_root(data_root, sector, camera, ccd, oversampling_factor=1)
     event_dir = tmp_path / "event"
     event_dir.mkdir()
+    (event_dir / "frames.csv").write_text(
+        "path\n/data/f0.fits\n/data/f1.fits\n/data/f2.fits\n"
+    )
 
     schedule = _minimal_schedule(n_frames=3, n_skycells=2)
+    schedule.meta["frame_filenames"] = ["f0.fits", "f1.fits", "f2.fits"]
     assignment = assign_groups_from_schedule(
         schedule,
         grouping_quantum_ps1_px=1.0,
@@ -101,6 +107,22 @@ def test_run_field_remap_scc_writes_layout(tmp_path: Path, monkeypatch):
         "syndiff_pipeline.template_creation.processing.field_remap.assign_groups_from_schedule",
         lambda *a, **k: assignment,
     )
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_remap._master_skycell_id_map",
+        lambda _path: (np.zeros((2, 2), dtype=np.int32), {}),
+    )
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_remap._master_pixels2skycells_path",
+        lambda *a, **k: tmp_path / "master.fits",
+    )
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_abutting.abutting_undirected_pairs",
+        lambda master: np.zeros((0, 2), dtype=np.int32),
+    )
+    monkeypatch.setattr(
+        "syndiff_pipeline.template_creation.processing.field_remap._load_frame_wcs",
+        lambda _df, _i: MagicMock(name="tess_wcs"),
+    )
 
     result = run_field_remap_scc(
         sector=sector,
@@ -111,8 +133,7 @@ def test_run_field_remap_scc_writes_layout(tmp_path: Path, monkeypatch):
         mapping_root=tmp_path / "mapping",
         base_tess_shape=(10, 12),
         oversampling_factor=1,
-        apply_hybrid_exact=False,
-        scc_only=True,
+        scc_only=False,
         store_root=store,
     )
 
@@ -128,7 +149,9 @@ def test_run_field_remap_scc_writes_layout(tmp_path: Path, monkeypatch):
     assert manifest["n_groups"] == len(assignment.groups)
     assert manifest["reference_ffi"] == "/data/ref.fits"
     assert manifest["exact_cache_l4a"] == EXACT_CACHE_L4A_DIRNAME
-    assert (store / EXACT_CACHE_L4A_DIRNAME).exists() is False
+    assert manifest["exact_cache_l4b"] == "exact_cache_l4b"
+    assert (store / EXACT_CACHE_L4A_DIRNAME).is_dir()
+    assert (store / "exact_cache_l4b").is_dir()
 
 
 def test_remap_root_matches_scc_paths(tmp_path: Path):

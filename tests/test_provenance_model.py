@@ -30,8 +30,7 @@ def _fake_resolved(**overrides):
     remap = SimpleNamespace(
         cache_quantum_ps1_px=1.0,
         keying="absolute",
-        apply_hybrid_exact=True,
-        hybrid_R=1,
+        intra_skycell_R=1,
     )
     downsample = SimpleNamespace(
         oversampling_factor=2,
@@ -167,8 +166,7 @@ class TestTemplateRecipeParamsBuilders(unittest.TestCase):
                 "oversampling_factor": 2,
                 "cache_quantum_ps1_px": 1.0,
                 "keying": "absolute",
-                "apply_hybrid_exact": True,
-                "hybrid_R": 1,
+                "intra_skycell_R": 1,
             },
         )
 
