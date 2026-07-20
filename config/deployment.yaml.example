@@ -6,7 +6,6 @@ data_root: /astro/armin/koji/syndiff/data
 
 # Optional override only for non-standard layouts:
 # ffi_dir: /other/path/tess_ffi
-# median_mask_path: /other/path/median_mask.fits
 # straps_csv: /other/path/tess_straps.csv
 
 # Gaia TAP+ credentials (mapping stage)

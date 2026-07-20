@@ -14,8 +14,9 @@ These documents describe the **science algorithms** behind each template pipelin
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
 | [Multi-offset downsample](downsample_technical.md) | `templates` (linear `geometry_mode`) | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
-| [Diff pipeline internals](diff_pipeline.md) | `diff` | — | `difference_imaging/orchestration/execute.py` + `difference_imaging/stages/` |
+| [Diff pipeline internals](diff_pipeline.md) | `diff` | — | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` |
 | [Forced photometry](forced_photometry.md) | `forced_photometry` (diff sub-stage) | — | `difference_imaging/stages/photometry.py` |
+| [Static masking](../masking.md) | `shared_mask` (diff sub-stage) | — | `difference_imaging/masking/` |
 | [Host-star light curves](../star_lightcurves.md) | `star` | — | `syndiff_pipeline/star/cli.py` |
 | [Star pipeline (technical)](star_pipeline.md) | `star` | — | `syndiff_pipeline/star/` |
 | [Star configuration](star_config.md) | — | — | `config/star_config.yaml`, `star_targets.csv` |
@@ -41,7 +42,7 @@ There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the Sy
 
 ## Diff imaging
 
-**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Forced-photometry modes and parameters: [forced_photometry.md](forced_photometry.md). For oversampled templates (`F>1`) and Hotpants `stamp_mode` / `region_*`, see [oversampled templates](../oversampled_templates.md). Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
+**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Forced-photometry modes and parameters: [forced_photometry.md](forced_photometry.md). For oversampled templates (`F>1`) and Hotpants `stamp_mode` / `region_*`, see [oversampled templates](../oversampled_templates.md). Empirical/TNS/asteroid mask library: [`difference_imaging/masking/`](../../syndiff_pipeline/difference_imaging/masking/) — see [Static masking](../masking.md). Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
 
 ## Host-star light curves
 

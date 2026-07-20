@@ -8,6 +8,7 @@ This directory is the **config root** passed to `syndiff --site config`.
 |------|------|
 | `pipeline.yaml` | Orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
 | `diff_config.yaml` | Site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor |
+| `mask_settings.example.yaml` | Copy to site `mask_settings.yaml` for empirical/TNS/asteroid mask policy (`difference_imaging/masking`) |
 | `diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `ks_b_s`, per-frame kernels; `write_convolved: false`) |
 | `diff_config_star_full_backfill.yaml` | One-time Hotpants backfill (`write_convolved` + `write_kernel_solutions`) for star |
 | `star_config.yaml` | Site star policy: baseline labels, photometry, `ps1_source`, SCC overrides |
