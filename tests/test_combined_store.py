@@ -104,6 +104,178 @@ def test_fingerprint_deterministic_and_sensitive_to_spatial_key_and_inputs():
 
 
 # ---------------------------------------------------------------------------
+# raw_skycell input fingerprint (bug fix: seed_band_cache_from_combined_store
+# / publish_combined_cell's caller in ps1_process.py must thread a real
+# raw_skycell input fingerprint into combined_fingerprint, so a re-downloaded
+# raw skycell mints a different combined_fingerprint instead of silently
+# serving stale cached data forever -- plan §6 combined_skycell inputs =
+# raw_skycell, source_catalog).
+# ---------------------------------------------------------------------------
+
+
+def _write_raw_skycell(data_root: Path, projection: str, cell: str, content: bytes) -> Path:
+    group_dir = data_root / "ps1_skycells_zarr" / "ps1_skycells.zarr" / projection / f"{projection}.{cell}"
+    group_dir.mkdir(parents=True, exist_ok=True)
+    (group_dir / "r.dat").write_bytes(content)
+    return group_dir
+
+
+def test_raw_skycell_input_fingerprint_missing_store_is_stable(tmp_path: Path):
+    fp1 = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+    fp2 = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+    assert fp1 == fp2
+    assert isinstance(fp1, str) and fp1
+
+
+def test_raw_skycell_input_fingerprint_present_differs_from_missing(tmp_path: Path):
+    missing_fp = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+    _write_raw_skycell(tmp_path, "skycell.1234", "000", b"raw-bytes-v1")
+    present_fp = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+    assert present_fp != missing_fp
+
+
+def test_raw_skycell_input_fingerprint_stable_for_unchanged_on_disk_state(tmp_path: Path):
+    _write_raw_skycell(tmp_path, "skycell.1234", "000", b"raw-bytes-v1")
+    fp1 = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+    fp2 = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+    assert fp1 == fp2
+
+
+def test_raw_skycell_input_fingerprint_changes_when_version_token_changes(tmp_path: Path):
+    """Direct proxy for decision #6: a different on-disk raw-skycell state
+    (simulating a re-download that changes size/mtime) must mint a different
+    ``raw_skycell`` input fingerprint.
+    """
+    _write_raw_skycell(tmp_path, "skycell.1234", "000", b"raw-bytes-v1")
+    fp_before = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+
+    # Re-download: different size (and, on any real filesystem, a newer mtime).
+    _write_raw_skycell(tmp_path, "skycell.1234", "000", b"raw-bytes-v2-different-length")
+    fp_after = cs.raw_skycell_input_fingerprint(tmp_path, "skycell.1234", "000")
+
+    assert fp_before != fp_after
+
+
+def test_combined_fingerprint_changes_when_raw_skycell_version_token_changes(tmp_path: Path):
+    """The actual bug fix, proven at the ``combined_fingerprint`` level: two
+    different raw-skycell version tokens for the same projection+skycell+
+    recipe must produce different ``combined_fingerprint`` results.
+    """
+    projection, cell = "skycell.1234", "000"
+    recipe = cs.combined_recipe()
+    rid = cs.combined_recipe_id(recipe)
+
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+    raw_fp_v1 = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+    fp_v1 = cs.combined_fingerprint(projection, cell, rid, [raw_fp_v1])
+
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v2-different-length")
+    raw_fp_v2 = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+    fp_v2 = cs.combined_fingerprint(projection, cell, rid, [raw_fp_v2])
+
+    assert raw_fp_v1 != raw_fp_v2
+    assert fp_v1 != fp_v2
+
+
+def test_seed_and_publish_call_sites_compute_identical_raw_skycell_input_fingerprint(
+    tmp_path: Path,
+):
+    """Symmetry check: ``seed_band_cache_from_combined_store`` (lookup) and
+    the ``publish_combined_cell`` caller in ``ps1_process.py`` (publish) both
+    derive their ``raw_skycell`` input fingerprint via
+    ``raw_skycell_input_fingerprint(data_root, projection, cell)`` -- same
+    arguments, same function -- so a lookup for unchanged raw-skycell state
+    always resolves to exactly what was published, and real cache hits still
+    occur. This is what ``test_seed_lookup_round_trip_hit_then_miss`` below
+    exercises end-to-end; here the two "sides" are isolated directly.
+    """
+    projection, cell = "skycell.1234", "000"
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+
+    # "publish" side, e.g. ps1_process.py's _publish_combined closure.
+    publish_side_fp = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+    # "seed" side, e.g. seed_band_cache_from_combined_store's per-name loop.
+    seed_side_fp = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+
+    assert publish_side_fp == seed_side_fp
+
+
+def test_seed_lookup_round_trip_hit_then_miss_after_redownload(tmp_path: Path):
+    """Full round-trip (plan §17 failure-matrix intent): publish with
+    version-token A, seed-lookup with version-token A hits; seed-lookup with
+    version-token B (simulating a re-download) misses and correctly falls
+    back to recompute rather than silently serving stale cached data.
+    """
+    combined_image, combined_mask, headers_data, removed_stars = _payload()
+    projection, cell = "skycell.1234", "000"
+    skycell_id = f"{projection}.{cell}"
+    recipe = cs.combined_recipe()
+
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+    raw_fp_a = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+
+    info = cs.publish_combined_cell(
+        tmp_path,
+        projection,
+        cell,
+        combined_image=combined_image,
+        combined_mask=combined_mask,
+        headers_data=headers_data,
+        removed_stars=removed_stars,
+        recipe=recipe,
+        input_fingerprints=[raw_fp_a],
+    )
+    assert info is not None
+
+    # Version-token A (unchanged raw skycell): seed lookup hits.
+    hits = cs.seed_band_cache_from_combined_store(tmp_path, [skycell_id], recipe)
+    assert skycell_id in hits
+    np.testing.assert_array_equal(hits[skycell_id]["combined_image"], combined_image)
+
+    # Simulate a raw-skycell re-download: version token B.
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v2-different-length")
+
+    hits_after_redownload = cs.seed_band_cache_from_combined_store(tmp_path, [skycell_id], recipe)
+    assert skycell_id not in hits_after_redownload
+
+
+def test_seed_band_cache_from_combined_store_threads_raw_skycell_fingerprint(tmp_path: Path):
+    """``seed_band_cache_from_combined_store`` must actually use
+    ``raw_skycell_input_fingerprint`` in its lookup (not silently default to
+    ``()`` as before the fix) -- proven by publishing under the fingerprint
+    ``combined_fingerprint`` would produce with NO input_fingerprints (the
+    pre-fix behavior) and confirming the seed lookup does *not* find it, even
+    though the underlying raw skycell is present.
+    """
+    combined_image, combined_mask, headers_data, removed_stars = _payload()
+    projection, cell = "skycell.1234", "000"
+    skycell_id = f"{projection}.{cell}"
+    recipe = cs.combined_recipe()
+
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+
+    # Publish under the OLD (pre-fix) fingerprint shape: no input_fingerprints.
+    stale_info = cs.publish_combined_cell(
+        tmp_path,
+        projection,
+        cell,
+        combined_image=combined_image,
+        combined_mask=combined_mask,
+        headers_data=headers_data,
+        removed_stars=removed_stars,
+        recipe=recipe,
+    )
+    assert stale_info is not None
+
+    hits = cs.seed_band_cache_from_combined_store(tmp_path, [skycell_id], recipe)
+    assert skycell_id not in hits, (
+        "seed lookup found a cell published without a raw_skycell input "
+        "fingerprint -- seed_band_cache_from_combined_store is not threading "
+        "raw_skycell_input_fingerprint into its combined_fingerprint() call"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Publish / load round-trip
 # ---------------------------------------------------------------------------
 

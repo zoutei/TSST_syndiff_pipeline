@@ -154,6 +154,14 @@ class ProcessingState:
     next_row_id: Optional[int] = None
     cell_locations: dict[str, tuple[int, int, int, int]] = None
     next_cell_locations: dict[str, tuple[int, int, int, int]] = None
+    # Per-cell lineage metadata ({"headers_data": ..., "removed_stars": ...})
+    # carried alongside cell_locations/current_masks so the shared
+    # convolved-store canonical snapshot (plan §13, decision #3) can publish
+    # with the exact headers/removed-star records the cell's combined-store
+    # publish used, without re-reading anything from disk. Swapped in lockstep
+    # with cell_locations/current_masks in advance_sliding_window.
+    cell_metadata: dict[str, dict] = None
+    next_cell_metadata: dict[str, dict] = None
 
     def __post_init__(self):
         """Post init."""
@@ -161,6 +169,10 @@ class ProcessingState:
             self.current_masks = {}
         if self.next_masks is None:
             self.next_masks = {}
+        if self.cell_metadata is None:
+            self.cell_metadata = {}
+        if self.next_cell_metadata is None:
+            self.next_cell_metadata = {}
         if self.cell_locations is None:
             self.cell_locations = {}
         if self.next_cell_locations is None:
@@ -187,6 +199,9 @@ def advance_sliding_window(state: ProcessingState) -> None:
     state.cell_locations.clear()
     state.cell_locations.update(state.next_cell_locations)
     state.next_cell_locations.clear()
+    state.cell_metadata.clear()
+    state.cell_metadata.update(state.next_cell_metadata)
+    state.next_cell_metadata.clear()
     gc.collect()
 
 
@@ -660,9 +675,6 @@ def process_coordinator(
     bright_star_mag_threshold: float = 13.0,
     combined_store_data_root: Optional[str] = None,
     combined_store_recipe=None,
-    convolved_store_data_root: Optional[str] = None,
-    convolved_store_recipe=None,
-    psf_sigma: float = 60.0,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -677,12 +689,25 @@ def process_coordinator(
     When ``combined_store_data_root``/``combined_store_recipe`` are set, freshly
     computed regular (non padding-role) results are published to the shared
     combined-skycell store (Phase 1, ``combined_store.py``). Best-effort only.
+
+    Does NOT publish to the shared convolved-skycell store. An earlier
+    version of this function convolved each isolated regular cell here (zero
+    row/neighbor context) and published that as the "same_projection_only"
+    canonical cell -- that was architecturally wrong (see plan §13, decision
+    #3): the real canonical convolution needs the same-projection-padded ROW
+    master array, which only exists in ``process_row_step_from_queue``
+    (a different function, running on the main thread, not this
+    background-thread coordinator). The correct publish now happens there,
+    from a snapshot of ``state.current_array`` taken right after
+    ``apply_cross_row_padding`` and before ``apply_cross_projection_padding``.
+    See ``_publish_canonical_convolved_snapshot`` below.
     """
     _publish_combined = None
     if combined_store_data_root is not None and combined_store_recipe is not None:
         from syndiff_pipeline.template_creation.processing.combined_store import (
             _projection_and_cell,
             publish_combined_cell,
+            raw_skycell_input_fingerprint,
         )
 
         def _publish_combined(result: dict) -> Optional[dict]:
@@ -690,6 +715,11 @@ def process_coordinator(
             if parsed is None:
                 return None
             projection, cell = parsed
+            # Same helper, same (data_root, projection, cell) shape as the
+            # seed-lookup path in seed_band_cache_from_combined_store, so the
+            # two sides stay symmetric (a lookup only ever hits a fingerprint
+            # this call site actually published under).
+            raw_fp = raw_skycell_input_fingerprint(combined_store_data_root, projection, cell)
             return publish_combined_cell(
                 combined_store_data_root,
                 projection,
@@ -699,41 +729,8 @@ def process_coordinator(
                 headers_data=result.get("headers_data"),
                 removed_stars=result.get("removed_stars"),
                 recipe=combined_store_recipe,
+                input_fingerprints=[raw_fp],
                 producer="ps1_process",
-            )
-    _publish_convolved = None
-    if convolved_store_data_root is not None and convolved_store_recipe is not None:
-        from syndiff_pipeline.template_creation.processing.combined_store import (
-            _projection_and_cell as _proj_and_cell,
-        )
-        from syndiff_pipeline.template_creation.processing.convolved_store import (
-            publish_convolved_cell,
-        )
-
-        def _publish_convolved(result: dict, combined_pub: Optional[dict]) -> None:
-            if not combined_pub or not combined_pub.get("fingerprint"):
-                return
-            parsed = _proj_and_cell(result["skycell_id"])
-            if parsed is None:
-                return
-            projection, cell = parsed
-            img = np.asarray(result["combined_image"], dtype=np.float64)
-            mask = np.asarray(result["combined_mask"])
-            nan_mask = np.isnan(img)
-            work = img.copy()
-            work[nan_mask] = 0.0
-            conv = convolution_utils.apply_gaussian_convolution(work, sigma=psf_sigma)
-            conv[nan_mask] = np.nan
-            publish_convolved_cell(
-                convolved_store_data_root,
-                projection,
-                cell,
-                convolved_image=conv,
-                convolved_mask=mask,
-                headers_data=result.get("headers_data") or {},
-                removed_stars=result.get("removed_stars", []),
-                recipe=convolved_store_recipe,
-                combined_fingerprint=str(combined_pub["fingerprint"]),
             )
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
     if band_cache is None:
@@ -785,23 +782,12 @@ def process_coordinator(
                                     }
                                     logger.info(f"[ProcessCoordinator] Cached padding source {result['skycell_id']}")
                                 else:
-                                    combined_pub = None
                                     if _publish_combined is not None:
                                         try:
-                                            combined_pub = _publish_combined(result)
+                                            _publish_combined(result)
                                         except Exception:
                                             logger.warning(
                                                 "[ProcessCoordinator] Combined-store publish "
-                                                "failed for %s (non-fatal)",
-                                                result["skycell_id"],
-                                                exc_info=True,
-                                            )
-                                    if _publish_convolved is not None:
-                                        try:
-                                            _publish_convolved(result, combined_pub)
-                                        except Exception:
-                                            logger.warning(
-                                                "[ProcessCoordinator] Convolved-store publish "
                                                 "failed for %s (non-fatal)",
                                                 result["skycell_id"],
                                                 exc_info=True,
@@ -1363,6 +1349,139 @@ def _evict_band_cache_for_step(
                 logger.debug(f"[BandCache] Evicted {name}")
 
 
+def _publish_canonical_convolved_snapshot(
+    state: ProcessingState,
+    projection: str,
+    psf_sigma: float,
+    convolved_store_data_root: str,
+    combined_store_recipe,
+    convolved_store_recipe,
+) -> None:
+    """Publish the same-projection-only canonical convolved cell for every
+    cell currently placed in ``state.current_array`` (plan §13, decision #3).
+
+    MUST be called by the caller exactly between ``apply_cross_row_padding``
+    and ``apply_cross_projection_padding`` -- see the call site in
+    ``process_row_step_from_queue`` for why that's the only correct point.
+
+    Takes an independent COPY of ``state.current_array``; the live array used
+    by the unchanged main convolution path (``process_row_step_from_queue``
+    step 5) is never touched here, and this function never raises past its
+    own boundary (best-effort, mirrors every other shared-store publish call
+    site in this module).
+
+    For each cell, the upstream ``combined_skycell`` fingerprint is
+    *recomputed* the same deterministic way ``combined_store.py``'s own
+    seed-lookup path does (``raw_skycell_input_fingerprint`` +
+    ``combined_fingerprint``), then checked against what is *actually
+    published on disk* -- never trusted blindly. This works uniformly
+    whether the cell was freshly SEP-processed-and-published this run, or
+    came from a combined-store cache hit (regular or dual-role-via-padding),
+    without needing to thread a fingerprint value across the
+    process_coordinator/sequential_processor thread boundary. Cells whose
+    combined-store record isn't actually present on disk (e.g. a dual-role
+    cell that was only ever cached as a padding source and never published
+    this run) are skipped for this publish -- never fabricated.
+
+    headers_data/removed_stars come from ``state.cell_metadata`` (populated
+    in lockstep with ``state.cell_locations``/``state.current_masks`` at row
+    load time from the exact same bundle dict ``_publish_combined`` used) --
+    the in-memory record, not a re-read from disk, since it is exactly what
+    a fresh combined-store publish for this cell would have written.
+    """
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        _projection_and_cell,
+        combined_cell_dir,
+        combined_fingerprint as _combined_fingerprint,
+        combined_recipe_id,
+        raw_skycell_input_fingerprint,
+    )
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        publish_convolved_cell,
+    )
+
+    try:
+        snapshot = state.current_array.copy()
+        nan_mask = np.isnan(snapshot)
+        snapshot[nan_mask] = 0.0
+        convolved_snapshot = convolution_utils.apply_gaussian_convolution(snapshot, sigma=psf_sigma)
+        convolved_snapshot[nan_mask] = np.nan
+        canonical_results = extract_cell_results(convolved_snapshot, state.cell_locations)
+    except Exception:
+        logger.warning(
+            "[SequentialProcessor] Canonical same-projection convolution snapshot "
+            "failed for projection %s (shared convolved-store publish skipped for "
+            "this row, non-fatal)",
+            projection,
+            exc_info=True,
+        )
+        return
+
+    try:
+        rid = combined_recipe_id(combined_store_recipe)
+    except Exception:
+        logger.warning(
+            "[SequentialProcessor] Could not compute combined_recipe_id for shared "
+            "convolved-store publish (skipping this row, non-fatal)",
+            exc_info=True,
+        )
+        return
+
+    for cell_name, convolved_image in canonical_results.items():
+        try:
+            parsed = _projection_and_cell(cell_name)
+            if parsed is None:
+                continue
+            cell_projection, cell = parsed
+
+            raw_fp = raw_skycell_input_fingerprint(convolved_store_data_root, cell_projection, cell)
+            fp = _combined_fingerprint(cell_projection, cell, rid, [raw_fp])
+
+            cell_dir = combined_cell_dir(convolved_store_data_root, cell_projection, cell, fp)
+            if not (cell_dir / "arrays.npz").is_file():
+                # No actually-published combined_skycell record under this
+                # fingerprint (e.g. a dual-role cell reused from band_cache
+                # this run without ever going through _publish_combined).
+                # Never fabricate a combined_fingerprint edge to nothing.
+                logger.debug(
+                    "[SequentialProcessor] No published combined_skycell record "
+                    "for %s (fp=%s); skipping shared convolved-store publish for "
+                    "this cell.",
+                    cell_name,
+                    fp,
+                )
+                continue
+
+            mask = state.current_masks.get(cell_name)
+            if mask is None:
+                logger.debug(
+                    "[SequentialProcessor] No mask available for %s; skipping "
+                    "shared convolved-store publish for this cell.",
+                    cell_name,
+                )
+                continue
+
+            meta = state.cell_metadata.get(cell_name, {})
+            publish_convolved_cell(
+                convolved_store_data_root,
+                cell_projection,
+                cell,
+                convolved_image=convolved_image,
+                convolved_mask=mask,
+                headers_data=meta.get("headers_data") or {},
+                removed_stars=meta.get("removed_stars", []),
+                recipe=convolved_store_recipe,
+                combined_fingerprint=fp,
+            )
+        except Exception:
+            logger.warning(
+                "[SequentialProcessor] Shared convolved-store publish failed for "
+                "%s (non-fatal)",
+                cell_name,
+                exc_info=True,
+            )
+
+
 def process_row_step_from_queue(
     state: ProcessingState,
     config: MasterArrayConfig,
@@ -1383,10 +1502,21 @@ def process_row_step_from_queue(
     band_cache_uses: dict = None,
     row_padding_map: dict = None,
     bright_star_mag_threshold: float = 13.0,
+    convolved_store_data_root: Optional[str] = None,
+    combined_store_recipe=None,
+    convolved_store_recipe=None,
 ) -> tuple[dict, dict, list[dict]]:
     """
     Encapsulates the logic for processing a single row step in the sliding window.
     It loads necessary data, applies padding, performs convolution, and extracts results.
+
+    When ``convolved_store_recipe``/``convolved_store_data_root``/
+    ``combined_store_recipe`` are all set, also publishes each cell's
+    same-projection-only canonical convolved result to the shared convolved
+    store (plan §13, decision #3) via ``_publish_canonical_convolved_snapshot``
+    -- see that function's docstring for exactly where/why. Best-effort only;
+    never affects the return values below or the unchanged main convolution
+    path (step 5).
 
     Returns:
         (results_data, results_masks, row_removed_stars) where row_removed_stars is
@@ -1417,6 +1547,16 @@ def process_row_step_from_queue(
         positions, masks = assemble_row_from_bundles(state.current_array, current_row_bundles, config)
         state.cell_locations.update(positions)
         state.current_masks.update(masks)
+        state.cell_metadata.update(
+            {
+                bundle["skycell_id"]: {
+                    "headers_data": bundle.get("headers_data") or {},
+                    "removed_stars": bundle.get("removed_stars", []),
+                }
+                for bundle in current_row_bundles
+                if bundle["skycell_id"] in positions
+            }
+        )
         state.current_row_id = current_row_id
         logger.info(f"[SequentialProcessor] Built current row ID {current_row_id} with {len(positions)} cells.")
 
@@ -1446,6 +1586,16 @@ def process_row_step_from_queue(
         positions, masks = assemble_row_from_bundles(state.next_array, next_row_bundles, config)
         state.next_cell_locations.update(positions)
         state.next_masks.update(masks)
+        state.next_cell_metadata.update(
+            {
+                bundle["skycell_id"]: {
+                    "headers_data": bundle.get("headers_data") or {},
+                    "removed_stars": bundle.get("removed_stars", []),
+                }
+                for bundle in next_row_bundles
+                if bundle["skycell_id"] in positions
+            }
+        )
         state.next_row_id = next_row_id
         logger.info(f"[SequentialProcessor] Prepared next row ID {next_row_id} with {len(state.next_cell_locations)} cells.")
 
@@ -1461,6 +1611,7 @@ def process_row_step_from_queue(
         state.next_array.fill(np.nan)
         state.next_cell_locations.clear()
         state.next_masks.clear()
+        state.next_cell_metadata.clear()
         state.next_row_id = None
         logger.info("[SequentialProcessor] No next row to prepare.")
 
@@ -1469,6 +1620,32 @@ def process_row_step_from_queue(
 
     # np.savez(f"debug_cross_proj_row_{current_row_id}.npz", state=state, config=config, metadata=metadata, current_row_id=current_row_id, next_row_id=next_row_id, zarr_path=zarr_path, csv_path=csv_path)
     # raise RuntimeError("Debug stop")
+
+    # 3b. Shared convolved-store canonical snapshot (plan §13, decision #3).
+    # Must run exactly here: AFTER cross-row (same-projection) padding has
+    # been baked into state.current_array, but BEFORE cross-projection
+    # padding (step 4, below) touches it -- this is the only point in the
+    # row's lifecycle where state.current_array holds the same-projection-
+    # only master array the canonical cell definition requires. Operates on
+    # an independent copy; never mutates state.current_array, so the
+    # unchanged main path (step 5) and its output are unaffected regardless
+    # of whether this runs. Fully gated off (zero work, zero import) unless
+    # all three of convolved_store_recipe/convolved_store_data_root/
+    # combined_store_recipe are set, i.e. only when the caller opted into
+    # use_shared_convolved_store=True.
+    if (
+        convolved_store_recipe is not None
+        and convolved_store_data_root
+        and combined_store_recipe is not None
+    ):
+        _publish_canonical_convolved_snapshot(
+            state,
+            projection,
+            psf_sigma,
+            convolved_store_data_root,
+            combined_store_recipe,
+            convolved_store_recipe,
+        )
 
     # 4. Apply Cross-Projection Padding (if applicable)
     if csv_path:
@@ -1539,6 +1716,9 @@ def sequential_processor(
     band_cache_uses: dict = None,
     row_padding_map: dict = None,
     bright_star_mag_threshold: float = 13.0,
+    convolved_store_data_root: Optional[str] = None,
+    combined_store_recipe=None,
+    convolved_store_recipe=None,
 ):
     """
     SPEC: This is Stage 3. It iterates through projections sequentially,
@@ -1610,6 +1790,9 @@ def sequential_processor(
                     band_cache_uses=band_cache_uses,
                     row_padding_map=row_padding_map,
                     bright_star_mag_threshold=bright_star_mag_threshold,
+                    convolved_store_data_root=convolved_store_data_root,
+                    combined_store_recipe=combined_store_recipe,
+                    convolved_store_recipe=convolved_store_recipe,
                 )
 
                 all_removed_stars.extend(row_removed_stars)
@@ -1887,9 +2070,6 @@ def run_modern_sliding_window_pipeline(
         kwargs={
             "combined_store_data_root": data_root,
             "combined_store_recipe": combined_store_recipe,
-            "convolved_store_data_root": data_root if use_shared_convolved_store else None,
-            "convolved_store_recipe": convolved_store_recipe,
-            "psf_sigma": psf_sigma,
         },
         daemon=True,
     )
@@ -1979,6 +2159,9 @@ def run_modern_sliding_window_pipeline(
                 band_cache_uses=band_cache_uses,
                 row_padding_map=row_padding_map,
                 bright_star_mag_threshold=bright_star_mag_threshold,
+                convolved_store_data_root=data_root if use_shared_convolved_store else None,
+                combined_store_recipe=combined_store_recipe,
+                convolved_store_recipe=convolved_store_recipe,
             )
 
             # --- Write Removed Stars CSV ---
