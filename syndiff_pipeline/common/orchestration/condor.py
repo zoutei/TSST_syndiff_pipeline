@@ -279,6 +279,10 @@ def _format_condor_environment(*, request_cpus: int | None = None) -> str | None
         )
     if request_cpus is not None and int(request_cpus) > 0:
         parts.append(f"SYNDIFF_REQUEST_CPUS={int(request_cpus)}")
+        parts.append(f"SYNDIFF_HYBRID_MAX_JOBS={int(request_cpus)}")
+    benchmark_tag = os.environ.get("SYNDIFF_REMAP_BENCHMARK_TAG")
+    if benchmark_tag:
+        parts.append(f"SYNDIFF_REMAP_BENCHMARK_TAG={shlex.quote(benchmark_tag)}")
     if not parts:
         return None
     return " ".join(parts)

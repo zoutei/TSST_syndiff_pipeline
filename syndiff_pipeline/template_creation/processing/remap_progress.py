@@ -206,6 +206,19 @@ def mark_exact_done(path: Path | str) -> None:
     mark_exact_l4a_done(path)
 
 
+def set_perf_metadata(path: Path | str, **fields: Any) -> None:
+    """Attach benchmark metadata (n_jobs, staging stats, run tag) to the sidecar."""
+
+    def mutator(state: dict[str, Any]) -> None:
+        perf = state.get("perf")
+        if not isinstance(perf, dict):
+            perf = {}
+        perf.update(fields)
+        state["perf"] = perf
+
+    _update_atomic(Path(path), mutator)
+
+
 def read_progress(path: Path | str) -> dict[str, Any] | None:
     """Load sidecar state, or ``None`` if missing/unreadable."""
     path = Path(path)
