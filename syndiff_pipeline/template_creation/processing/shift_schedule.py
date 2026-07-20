@@ -5,10 +5,25 @@ Per-skycell PS1-pixel shift schedule and signature-based template grouping
 for distortion-aware templates: measures real per-frame WCS drift directly
 at each skycell center (no interpolation -- every skycell's own sky position
 is round-tripped through that frame's own WCS), Savitzky-Golay smooths each
-skycell's time series per orbit segment, converts the smoothed TESS-pixel
-drift to a hysteresis-rounded PS1-pixel shift schedule, and turns the
-schedule into signature-based template groups plus the frozen
+skycell's time series per **TESS orbit segment**, converts the smoothed
+TESS-pixel drift to a hysteresis-rounded PS1-pixel shift schedule, and turns
+the schedule into signature-based template groups plus the frozen
 ``template_group_shifts.parquet`` / ``template_groups.json`` handoff.
+
+Non-measurable frames (missing WCS or pre-SG 5σ MAD outliers) are **not
+dropped**: their shifts are synthesized so every FFI still participates in
+remap and template (L5).  Provenance is stored in ``frame_origin`` (NPZ) and
+``frames_missing_wcs`` / ``frames_sigma_clipped`` (JSON sidecar).
+
+Synthesis policy (v1):
+  - Interior gaps: hold last measurable quantized ``(sx_int, sy_int)``;
+    floats = ``float(int)``.
+  - Leading / trailing gaps: flat-line extrapolation (constant = first /
+    last measurable float and int values).
+
+Orbit segments prefer the MIT ``TESS_orbit_times.csv`` (via
+``ensure_tess_orbit_times_csv``); ``sector`` + ``frame_times`` are required
+(no btjd-gap fallback).
 
 Ports validated prototype logic into the package (per project policy, this
 module does not import from the scratch dirs):
@@ -23,20 +38,10 @@ module does not import from the scratch dirs):
   (``quantize_shift``, ``encode_quantized_shift``).
 - per-orbit-segment Savitzky-Golay smoothing (``_split_orbit_segments``,
   ``_sg_smooth_series``): relocated from the now-deleted
-  ``common/wcs_drift_field.py`` (the sparse anchor-grid interpolation layer
-  this module used to depend on -- measuring exact WCS drift at all ~1000
-  real skycell centers costs the same as a 30-point anchor grid once
-  per-frame WCS access is cache-backed, so the interpolation approximation
-  bought nothing and was deleted; see
-  ``dev/distortion_aware_template/layer1_interpolation_accuracy.ipynb``).
+  ``common/wcs_drift_field.py``.
 
-See ``docs/markdown/field_geometry.md`` (Cache keys and reuse; Storage) for
-the grouping-quantum-vs-cache-quantum and phase-vs-absolute-keying
-distinctions: the grouping quantum controls template *count*, the cache
-quantum controls per-skycell regmap *geometric accuracy* (independent
-knobs, may differ). Schema of ``template_group_shifts.parquet`` /
-``template_groups.json`` is defined by this module
-(``SCHEMA_VERSION`` / ``write_group_artifacts``).
+See ``docs/markdown/field_geometry.md`` for grouping/cache quantum details
+and the synthesis / ``frame_origin`` bookkeeping policy.
 """
 
 from __future__ import annotations
@@ -61,6 +66,13 @@ from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts im
 log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
+
+# Per-frame provenance in shift_schedule.npz ``frame_origin`` (int8).
+FRAME_ORIGIN_MEASURED = 0
+FRAME_ORIGIN_SYNTH_MISSING_WCS = 1
+FRAME_ORIGIN_SYNTH_SIGMA_CLIPPED = 2
+
+SYNTHESIS_POLICY = "interior_hold_quantized_edges_flat"
 
 
 # ── Savitzky-Golay smoothing (relocated from common/wcs_drift_field.py) ────
@@ -110,6 +122,165 @@ def _split_orbit_segments(
             start = i
     bounds.append((start, n_frames))
     return np.array(bounds, dtype=np.int64)
+
+
+def _split_orbit_segments_from_csv(
+    sector: int,
+    frame_times: Sequence[str],
+    csv_path: str | Path,
+) -> np.ndarray:
+    """
+    Split ``[0, n_frames)`` into ``[start, end)`` segments using MIT
+    ``TESS_orbit_times.csv`` windows for ``sector``.
+
+    Each frame is assigned the orbit row whose ``[Start of Orbit, End of Orbit]``
+    contains its ``date_obs``. Boundaries are placed wherever the assigned
+    orbit index changes between consecutive frames. Frames outside all
+    windows get orbit id ``-1`` (still produce a segment if they cluster).
+    """
+    from astropy.time import Time
+
+    n_frames = len(frame_times)
+    if n_frames == 0:
+        return np.array([[0, 0]], dtype=np.int64)
+
+    orbit_df = pd.read_csv(csv_path, skipfooter=1, engine="python")
+    sector_str = str(int(sector))
+    rows = orbit_df[orbit_df["Sector"].astype(str) == sector_str].reset_index(drop=True)
+    if rows.empty:
+        raise ValueError(f"No orbit rows for sector {sector_str} in {csv_path}")
+
+    starts = [
+        Time(str(v).replace(" ", "T"), format="isot", scale="utc").mjd
+        for v in rows["Start of Orbit"]
+    ]
+    ends = [
+        Time(str(v).replace(" ", "T"), format="isot", scale="utc").mjd
+        for v in rows["End of Orbit"]
+    ]
+
+    orbit_ids = np.full(n_frames, -1, dtype=np.int32)
+    for i, ts in enumerate(frame_times):
+        if ts is None or (isinstance(ts, float) and not np.isfinite(ts)):
+            continue
+        try:
+            mjd = Time(str(ts).replace(" ", "T"), format="isot", scale="utc").mjd
+        except Exception:
+            continue
+        for oi, (s, e) in enumerate(zip(starts, ends)):
+            if s <= mjd <= e:
+                orbit_ids[i] = oi
+                break
+
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for i in range(1, n_frames):
+        if orbit_ids[i] != orbit_ids[i - 1]:
+            bounds.append((start, i))
+            start = i
+    bounds.append((start, n_frames))
+    return np.array(bounds, dtype=np.int64)
+
+
+def _reject_raw_drift_outliers(
+    drift_raw: np.ndarray,
+    measurable: np.ndarray,
+    segment_bounds: np.ndarray,
+    sigma: float,
+) -> tuple[np.ndarray, list[dict]]:
+    """
+    Per orbit segment, MAD-based rejection on frame-level median |tess drift|.
+
+    Modifies ``measurable`` in place (sets outliers False). Returns the
+    newly rejected frame indices and audit rows for the JSON sidecar.
+    """
+    if sigma is None or not np.isfinite(sigma) or float(sigma) <= 0:
+        return np.array([], dtype=np.int64), []
+
+    sigma = float(sigma)
+    mag = np.hypot(drift_raw[:, :, 0], drift_raw[:, :, 1])
+    with np.errstate(all="ignore"):
+        # NaN frames (non-measurable) yield All-NaN rows; ignore the warning.
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            frame_med = np.nanmedian(mag, axis=1)
+
+    newly: list[int] = []
+    audit: list[dict] = []
+    for seg_start, seg_end in segment_bounds:
+        seg = slice(int(seg_start), int(seg_end))
+        cand = measurable[seg] & np.isfinite(frame_med[seg])
+        if int(cand.sum()) < 3:
+            continue
+        vals = frame_med[seg][cand]
+        med = float(np.median(vals))
+        mad = float(np.median(np.abs(vals - med)))
+        # Floor the scale so a single huge spike among identical quiet frames
+        # is still rejected (MAD would otherwise be exactly 0).
+        scale = max(mad, 1e-3)
+        thresh = sigma * 1.4826 * scale
+        local_idx = np.flatnonzero(cand)
+        for li in local_idx:
+            f = int(seg_start) + int(li)
+            if abs(float(frame_med[f]) - med) > thresh:
+                measurable[f] = False
+                newly.append(f)
+                audit.append(
+                    {
+                        "frame": f,
+                        "median_tess_drift_px": float(frame_med[f]),
+                        "segment": [int(seg_start), int(seg_end)],
+                    }
+                )
+    return np.asarray(newly, dtype=np.int64), audit
+
+
+def _synthesize_shift_gaps(
+    sx_float: np.ndarray,
+    sy_float: np.ndarray,
+    sx_int: np.ndarray,
+    sy_int: np.ndarray,
+    measurable: np.ndarray,
+) -> None:
+    """
+    Fill non-measurable frames in place.
+
+    Interior: hold last measurable quantized ints (floats = float(int)).
+    Leading / trailing: flat-line from first / last measurable float+int.
+    """
+    n_frames, n_cells = sx_float.shape
+    meas_idx = np.flatnonzero(measurable)
+    if meas_idx.size == 0:
+        log.warning("Shift schedule: no measurable frames; cannot synthesize gaps")
+        return
+
+    first = int(meas_idx[0])
+    last = int(meas_idx[-1])
+
+    for c in range(n_cells):
+        if first > 0:
+            sx_float[:first, c] = sx_float[first, c]
+            sy_float[:first, c] = sy_float[first, c]
+            sx_int[:first, c] = sx_int[first, c]
+            sy_int[:first, c] = sy_int[first, c]
+
+        if last < n_frames - 1:
+            sx_float[last + 1 :, c] = sx_float[last, c]
+            sy_float[last + 1 :, c] = sy_float[last, c]
+            sx_int[last + 1 :, c] = sx_int[last, c]
+            sy_int[last + 1 :, c] = sy_int[last, c]
+
+        prev = first
+        for f in range(first + 1, last + 1):
+            if measurable[f]:
+                prev = f
+                continue
+            sx_int[f, c] = sx_int[prev, c]
+            sy_int[f, c] = sy_int[prev, c]
+            sx_float[f, c] = float(sx_int[prev, c])
+            sy_float[f, c] = float(sy_int[prev, c])
 
 
 # ── quantization / cache-key encoding (ported from 03_seam_remap.py) ───────
@@ -180,7 +351,9 @@ def hysteresis_round_series(frac: np.ndarray, margin: float = 0.1) -> np.ndarray
     Ported from ``scripts/verify_seam_remap/01_shift_schedule.py``.
     """
     n = len(frac)
-    out = np.empty(n, dtype=np.int16)
+    # int32: PS1 shifts can exceed int16 after fpack/WCS cache rebuilds or
+    # large skycell offsets (int16 overflowed at e.g. -69523).
+    out = np.empty(n, dtype=np.int32)
     if n == 0:
         return out
     current = int(round(float(frac[0])))
@@ -195,20 +368,25 @@ def hysteresis_round_series(frac: np.ndarray, margin: float = 0.1) -> np.ndarray
     return out
 
 
-def _hysteresis_round_with_fill(
-    values: np.ndarray, valid: np.ndarray, margin: float
+def _hysteresis_round_measurable(
+    values: np.ndarray, measurable: np.ndarray, margin: float
 ) -> np.ndarray:
     """
-    Fill invalid entries by linear interpolation between valid neighbors
-    (constant before the first / after the last valid entry, i.e. ``np.interp``
-    default extrapolation), then hysteresis-round the filled series.
+    Hysteresis-round **measurable** frames only.
+
+    Non-measurable slots are left as ``0`` and filled later by
+    :func:`_synthesize_shift_gaps`. Measurable frames are hysteresis-rounded
+    as a time-ordered subsequence (gaps are skipped — no linear interpolation
+    into the hysteresis state).
     """
-    filled = np.asarray(values, dtype=np.float64).copy()
-    valid_idx = np.flatnonzero(valid)
-    invalid_idx = np.flatnonzero(~valid)
-    if invalid_idx.size:
-        filled[invalid_idx] = np.interp(invalid_idx, valid_idx, filled[valid_idx])
-    return hysteresis_round_series(filled, margin)
+    n = len(values)
+    out = np.zeros(n, dtype=np.int32)
+    meas_idx = np.flatnonzero(np.asarray(measurable, dtype=bool))
+    if meas_idx.size == 0:
+        return out
+    meas_vals = np.asarray(values, dtype=np.float64)[meas_idx]
+    out[meas_idx] = hysteresis_round_series(meas_vals, margin)
+    return out
 
 
 def build_rle_dataframe(
@@ -259,10 +437,11 @@ class ShiftSchedule:
     skycell_names: np.ndarray   # (C,)
     sx_float: np.ndarray        # (F, C) f4 — drift-field-derived shift, smoothed
     sy_float: np.ndarray        # (F, C) f4
-    sx_int: np.ndarray          # (F, C) i2 — hysteresis-rounded
-    sy_int: np.ndarray          # (F, C) i2
-    frame_valid: np.ndarray     # (F,) bool
+    sx_int: np.ndarray          # (F, C) i4 — hysteresis-rounded
+    sy_int: np.ndarray          # (F, C) i4
+    frame_valid: np.ndarray     # (F,) bool — True for all frames after synthesis
     meta: dict
+    frame_origin: np.ndarray | None = None  # (F,) i1 — see FRAME_ORIGIN_* constants
 
     def to_rle_dataframe(self) -> pd.DataFrame:
         """Run-length-encoded integer shift segments; see :func:`build_rle_dataframe`."""
@@ -272,6 +451,9 @@ class ShiftSchedule:
         """Write the NPZ arrays plus a JSON sidecar (same stem, ``.json``)."""
         npz_path = Path(npz_path)
         npz_path.parent.mkdir(parents=True, exist_ok=True)
+        origin = self.frame_origin
+        if origin is None:
+            origin = np.zeros(self.frame_valid.shape[0], dtype=np.int8)
         np.savez(
             npz_path,
             skycell_names=self.skycell_names,
@@ -280,6 +462,7 @@ class ShiftSchedule:
             sx_int=self.sx_int,
             sy_int=self.sy_int,
             frame_valid=self.frame_valid,
+            frame_origin=np.asarray(origin, dtype=np.int8),
         )
         json_path = npz_path.with_suffix(".json")
         with open(json_path, "w") as fh:
@@ -301,14 +484,21 @@ class ShiftSchedule:
         else:
             log.warning("Shift schedule sidecar JSON missing: %s", json_path)
 
+        frame_valid = arrays["frame_valid"]
+        if "frame_origin" in arrays:
+            frame_origin = np.asarray(arrays["frame_origin"], dtype=np.int8)
+        else:
+            frame_origin = np.zeros(len(frame_valid), dtype=np.int8)
+
         return cls(
             skycell_names=arrays["skycell_names"],
             sx_float=arrays["sx_float"],
             sy_float=arrays["sy_float"],
             sx_int=arrays["sx_int"],
             sy_int=arrays["sy_int"],
-            frame_valid=arrays["frame_valid"],
+            frame_valid=frame_valid,
             meta=meta,
+            frame_origin=frame_origin,
         )
 
 
@@ -318,48 +508,56 @@ def build_skycell_shift_schedule(
     ref_wcs: WCS,
     *,
     btjd: np.ndarray | None = None,
+    frame_times: Sequence[str] | None = None,
+    sector: int | None = None,
     savgol_window: int = 11,
     savgol_polyorder: int = 2,
     orbit_gap_threshold_days: float = 0.5,
     hysteresis_margin: float = 0.1,
+    raw_drift_outlier_sigma: float | None = 5.0,
+    orbit_csv_path: str | Path | None = None,
 ) -> ShiftSchedule:
     """
     Measure real per-frame WCS drift directly at every skycell center and
     convert it to a hysteresis-rounded PS1-pixel shift schedule.
 
-    ``frames`` is ``(filename, WCS-or-None)`` in manifest row order (as
-    returned by :func:`syndiff_pipeline.common.wcs_grouping.build_frame_wcs_objects`,
-    normally cache-backed so this costs no FFI file access on a cache hit).
-    For each row of ``skycell_df`` (must have ``NAME``, ``RA``, ``DEC`` plus
-    the PS1 WCS header columns :func:`build_ps1_wcs` needs): the skycell
-    center's sky position is round-tripped through **every frame's own WCS**
-    directly (``world_to_pixel_values(ra, dec) - (x_ref, y_ref)``, the same
-    primitive the old anchor-grid drift field used, just evaluated at real
-    skycell centers instead of a 30-point proxy grid -- no interpolation).
-    The resulting per-skycell TESS-pixel drift series is Savitzky-Golay
-    smoothed per orbit segment (segments split wherever the ``btjd`` gap
-    exceeds ``orbit_gap_threshold_days``), converted to a PS1-pixel shift via
-    :func:`compute_ps1_shift_vectorized`, and hysteresis-rounded.
+    ``frames`` is ``(filename, WCS-or-None)`` in manifest row order. Frames
+    with ``WCS is None`` (missing / ``wcs_ok=False``) are non-measurable:
+    they do not enter Savitzky–Golay, and their shifts are synthesized
+    after the measurable path (see module docstring).
 
-    Invalid frames (WCS ``None``, or wherever the round-trip evaluates to
-    NaN) stay NaN in ``sx_float``/``sy_float``. The int arrays carry the last
-    valid value forward: gaps are filled by linear interpolation between
-    valid neighbors before hysteresis rounding, and frames before the first
-    valid frame copy its value.
+    Orbit segments: **requires** ``sector`` and ``frame_times`` and splits with
+    MIT ``TESS_orbit_times.csv`` (bundled via ``ensure_tess_orbit_times_csv``
+    unless ``orbit_csv_path`` is given). There is no btjd-gap fallback.
+
+    Pre-SG outlier gate: per orbit segment, frames whose median |TESS
+    drift| exceeds ``raw_drift_outlier_sigma``×MAD are marked non-measurable
+    (``None`` disables). After synthesis every frame has ``frame_valid=True``.
     """
     from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
+    if sector is None or frame_times is None:
+        raise ValueError(
+            "build_skycell_shift_schedule requires sector and frame_times "
+            "(MIT TESS_orbit_times.csv; no btjd-gap fallback)"
+        )
 
     skycell_names = np.array([str(name) for name in skycell_df["NAME"]])
     n_cells = len(skycell_df)
     n_frames = len(frames)
+    filenames = [str(fn) for fn, _ in frames]
+
+    if len(frame_times) != n_frames:
+        raise ValueError(
+            f"frame_times length ({len(frame_times)}) does not match frames length ({n_frames})"
+        )
 
     ra = skycell_df["RA"].to_numpy(dtype=np.float64)
     dec = skycell_df["DEC"].to_numpy(dtype=np.float64)
     x_ref, y_ref = world_ra_dec_to_pixel(ref_wcs, ra, dec)
 
-    # (F, C) TESS-pixel drift at every real skycell center, one WCS round
-    # trip per frame (vectorized over all skycells at once).
-    frame_valid = np.zeros(n_frames, dtype=bool)
+    frame_origin = np.full(n_frames, FRAME_ORIGIN_SYNTH_MISSING_WCS, dtype=np.int8)
+    frame_measurable = np.zeros(n_frames, dtype=bool)
     drift_raw = np.full((n_frames, n_cells, 2), np.nan, dtype=np.float64)
     for i, (_, wcs_f) in enumerate(frames):
         if wcs_f is None:
@@ -371,16 +569,41 @@ def build_skycell_shift_schedule(
             continue
         drift_raw[i, :, 0] = np.asarray(fx, dtype=np.float64) - x_ref
         drift_raw[i, :, 1] = np.asarray(fy, dtype=np.float64) - y_ref
-        frame_valid[i] = True
+        if np.isfinite(drift_raw[i]).all():
+            frame_measurable[i] = True
+            frame_origin[i] = FRAME_ORIGIN_MEASURED
+        else:
+            frame_origin[i] = FRAME_ORIGIN_SYNTH_MISSING_WCS
 
     if btjd is not None and len(btjd) != n_frames:
         raise ValueError(f"btjd length ({len(btjd)}) does not match frames length ({n_frames})")
-    segment_bounds = _split_orbit_segments(btjd, n_frames, float(orbit_gap_threshold_days))
+
+    if orbit_csv_path is None:
+        from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
+            ensure_tess_orbit_times_csv,
+        )
+
+        csv_path = ensure_tess_orbit_times_csv()
+    else:
+        csv_path = Path(orbit_csv_path)
+    segment_bounds = _split_orbit_segments_from_csv(int(sector), frame_times, csv_path)
+    orbit_segment_source = "tess_orbit_times_csv"
+
+    sigma_audit: list[dict] = []
+    if raw_drift_outlier_sigma is not None:
+        newly, sigma_audit = _reject_raw_drift_outliers(
+            drift_raw, frame_measurable, segment_bounds, float(raw_drift_outlier_sigma)
+        )
+        for f in newly:
+            frame_origin[int(f)] = FRAME_ORIGIN_SYNTH_SIGMA_CLIPPED
+        for row in sigma_audit:
+            f = int(row["frame"])
+            row["filename"] = filenames[f] if f < len(filenames) else ""
 
     drift_smooth = drift_raw.copy()
     for seg_start, seg_end in segment_bounds:
         seg = slice(int(seg_start), int(seg_end))
-        seg_valid = frame_valid[seg]
+        seg_valid = frame_measurable[seg]
         if int(seg_valid.sum()) < 3:
             continue
         for c in range(n_cells):
@@ -391,8 +614,8 @@ def build_skycell_shift_schedule(
 
     sx_float = np.full((n_frames, n_cells), np.nan, dtype=np.float32)
     sy_float = np.full((n_frames, n_cells), np.nan, dtype=np.float32)
-    sx_int = np.zeros((n_frames, n_cells), dtype=np.int16)
-    sy_int = np.zeros((n_frames, n_cells), dtype=np.int16)
+    sx_int = np.zeros((n_frames, n_cells), dtype=np.int32)
+    sy_int = np.zeros((n_frames, n_cells), dtype=np.int32)
 
     for c in range(n_cells):
         row = skycell_df.iloc[c]
@@ -404,14 +627,38 @@ def build_skycell_shift_schedule(
             )
         sx = np.asarray(sx, dtype=np.float64)
         sy = np.asarray(sy, dtype=np.float64)
-        sx_float[:, c] = sx.astype(np.float32)
-        sy_float[:, c] = sy.astype(np.float32)
+        sx_out = np.full(n_frames, np.nan, dtype=np.float64)
+        sy_out = np.full(n_frames, np.nan, dtype=np.float64)
+        sx_out[frame_measurable] = sx[frame_measurable]
+        sy_out[frame_measurable] = sy[frame_measurable]
+        sx_float[:, c] = sx_out.astype(np.float32)
+        sy_float[:, c] = sy_out.astype(np.float32)
 
-        valid_col = frame_valid & np.isfinite(sx) & np.isfinite(sy)
-        if not valid_col.any():
+        if not frame_measurable.any():
             continue
-        sx_int[:, c] = _hysteresis_round_with_fill(sx, valid_col, hysteresis_margin)
-        sy_int[:, c] = _hysteresis_round_with_fill(sy, valid_col, hysteresis_margin)
+        sx_int[:, c] = _hysteresis_round_measurable(
+            sx_out, frame_measurable, hysteresis_margin
+        )
+        sy_int[:, c] = _hysteresis_round_measurable(
+            sy_out, frame_measurable, hysteresis_margin
+        )
+
+    _synthesize_shift_gaps(sx_float, sy_float, sx_int, sy_int, frame_measurable)
+    frame_valid = np.ones(n_frames, dtype=bool)
+
+    frames_missing_wcs = [
+        {"frame": int(f), "filename": filenames[int(f)]}
+        for f in np.flatnonzero(frame_origin == FRAME_ORIGIN_SYNTH_MISSING_WCS)
+    ]
+    frames_sigma_clipped = list(sigma_audit)
+    for row in frames_sigma_clipped:
+        if "filename" not in row:
+            f = int(row["frame"])
+            row["filename"] = filenames[f] if f < len(filenames) else ""
+
+    n_measured = int((frame_origin == FRAME_ORIGIN_MEASURED).sum())
+    n_missing = int((frame_origin == FRAME_ORIGIN_SYNTH_MISSING_WCS).sum())
+    n_clipped = int((frame_origin == FRAME_ORIGIN_SYNTH_SIGMA_CLIPPED).sum())
 
     meta = {
         "schema_version": SCHEMA_VERSION,
@@ -421,8 +668,24 @@ def build_skycell_shift_schedule(
         "savgol_polyorder": int(savgol_polyorder),
         "orbit_gap_threshold_days": float(orbit_gap_threshold_days),
         "hysteresis_margin": float(hysteresis_margin),
+        "orbit_segment_source": orbit_segment_source,
+        "orbit_segment_bounds": [[int(a), int(b)] for a, b in segment_bounds],
+        "raw_drift_outlier_sigma": (
+            None if raw_drift_outlier_sigma is None else float(raw_drift_outlier_sigma)
+        ),
+        "synthesis_policy": SYNTHESIS_POLICY,
+        "frame_origin_schema_version": 1,
+        "frame_origin_counts": {
+            "measured": n_measured,
+            "synth_missing_wcs": n_missing,
+            "synth_sigma_clipped": n_clipped,
+        },
+        "frames_missing_wcs": frames_missing_wcs,
+        "frames_sigma_clipped": frames_sigma_clipped,
         "created_utc": datetime.now(timezone.utc).isoformat(),
     }
+    if sector is not None:
+        meta["sector"] = int(sector)
 
     return ShiftSchedule(
         skycell_names=skycell_names,
@@ -432,6 +695,7 @@ def build_skycell_shift_schedule(
         sy_int=sy_int,
         frame_valid=frame_valid,
         meta=meta,
+        frame_origin=frame_origin,
     )
 
 
@@ -562,8 +826,8 @@ def _build_shifts_dataframe(rows: list[dict]) -> pd.DataFrame:
     dtypes = {
         "group_id": "int32",
         "skycell": "object",
-        "sx_int": "int16",
-        "sy_int": "int16",
+        "sx_int": "int32",
+        "sy_int": "int32",
         "qx": "float32",
         "qy": "float32",
         "cache_key": "object",

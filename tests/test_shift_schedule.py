@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,9 +14,16 @@ from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts im
     build_ps1_wcs,
 )
 from syndiff_pipeline.template_creation.processing.shift_schedule import (
+    FRAME_ORIGIN_MEASURED,
+    FRAME_ORIGIN_SYNTH_MISSING_WCS,
+    FRAME_ORIGIN_SYNTH_SIGMA_CLIPPED,
     ShiftSchedule,
+    _hysteresis_round_measurable,
+    _reject_raw_drift_outliers,
     _sg_smooth_series,
     _split_orbit_segments,
+    _split_orbit_segments_from_csv,
+    _synthesize_shift_gaps,
     assign_groups_from_schedule,
     build_rle_dataframe,
     build_skycell_shift_schedule,
@@ -27,6 +35,27 @@ from syndiff_pipeline.template_creation.processing.shift_schedule import (
 )
 
 PS1_SCALE_DEG = 0.25 / 3600.0
+_FIXTURE_ORBIT_CSV = Path(__file__).resolve().parent / "fixtures" / "tess_orbit_times_sample.csv"
+
+
+def _frame_times_in_orbit47(n_frames: int) -> list[str]:
+    """ISO times all inside sector-20 orbit 47 (fixture CSV)."""
+    base = pd.Timestamp("2019-12-26T00:00:00")
+    return [
+        (base + pd.Timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M:%S") for i in range(n_frames)
+    ]
+
+
+def _schedule_orbit_kwargs(n_frames: int, **overrides) -> dict:
+    """Required orbit-CSV kwargs for ``build_skycell_shift_schedule`` tests."""
+    kwargs = {
+        "sector": 20,
+        "frame_times": _frame_times_in_orbit47(n_frames),
+        "orbit_csv_path": _FIXTURE_ORBIT_CSV,
+        "btjd": np.arange(n_frames, dtype=float),
+    }
+    kwargs.update(overrides)
+    return kwargs
 
 
 def _make_wcs(
@@ -104,11 +133,15 @@ def test_shift_schedule_matches_independent_wcs_roundtrip():
     ref_wcs = _make_wcs()
     shifts = [(0.05 * t, -0.03 * t) for t in range(4)]
     frames = [(f"f{t}.fits", _shifted_wcs(ref_wcs, s)) for t, s in enumerate(shifts)]
-    btjd = np.arange(4, dtype=float)
 
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
-        frames, skycell_df, ref_wcs, btjd=btjd, savgol_window=3, savgol_polyorder=1,
+        frames,
+        skycell_df,
+        ref_wcs,
+        savgol_window=3,
+        savgol_polyorder=1,
+        **_schedule_orbit_kwargs(4),
     )
 
     ra = skycell_df["RA"].to_numpy(dtype=np.float64)
@@ -136,7 +169,8 @@ def test_shift_schedule_matches_independent_wcs_roundtrip():
     assert list(schedule.skycell_names) == list(skycell_df["NAME"])
 
 
-def test_shift_schedule_invalid_frame_stays_nan_in_float_and_holds_in_int():
+def test_shift_schedule_missing_wcs_is_synthesized_not_dropped():
+    """Interior missing-WCS frame stays valid; holds previous quantized ints."""
     ref_wcs = _make_wcs()
     shifts = [(0.1 * t, 0.0) for t in range(5)]
     wcses: list[WCS | None] = [_shifted_wcs(ref_wcs, s) for s in shifts]
@@ -145,22 +179,44 @@ def test_shift_schedule_invalid_frame_stays_nan_in_float_and_holds_in_int():
 
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
-        frames, skycell_df, ref_wcs, btjd=np.arange(5, dtype=float), savgol_window=3,
+        frames,
+        skycell_df,
+        ref_wcs,
+        savgol_window=3,
+        raw_drift_outlier_sigma=None,
+        **_schedule_orbit_kwargs(5),
     )
 
-    assert not schedule.frame_valid[2]
-    assert np.all(np.isnan(schedule.sx_float[2]))
-    assert np.all(np.isnan(schedule.sy_float[2]))
-    # int schedule still carries a sensible (interpolated) value through the gap
-    assert np.all(np.isfinite(schedule.sx_int[2]))
+    assert schedule.frame_valid.all()
+    assert schedule.frame_origin is not None
+    assert int(schedule.frame_origin[2]) == FRAME_ORIGIN_SYNTH_MISSING_WCS
+    assert int(schedule.frame_origin[1]) == FRAME_ORIGIN_MEASURED
+    # Interior synthesis holds last measurable quantized ints.
+    assert np.all(schedule.sx_int[2] == schedule.sx_int[1])
+    assert np.all(schedule.sy_int[2] == schedule.sy_int[1])
+    assert np.all(np.isfinite(schedule.sx_float[2]))
+    assert schedule.meta["frame_origin_counts"]["synth_missing_wcs"] == 1
+
+
+def test_shift_schedule_requires_sector_and_frame_times():
+    ref_wcs = _make_wcs()
+    frames = [("f0.fits", ref_wcs), ("f1.fits", ref_wcs)]
+    skycell_df = _make_skycell_df()
+    with pytest.raises(ValueError, match="sector and frame_times"):
+        build_skycell_shift_schedule(frames, skycell_df, ref_wcs, btjd=np.arange(2))
 
 
 def test_shift_schedule_btjd_length_mismatch_raises():
     ref_wcs = _make_wcs()
     frames = [("f0.fits", ref_wcs), ("f1.fits", ref_wcs)]
     skycell_df = _make_skycell_df()
-    with pytest.raises(ValueError):
-        build_skycell_shift_schedule(frames, skycell_df, ref_wcs, btjd=np.array([0.0]))
+    with pytest.raises(ValueError, match="btjd length"):
+        build_skycell_shift_schedule(
+            frames,
+            skycell_df,
+            ref_wcs,
+            **_schedule_orbit_kwargs(2, btjd=np.array([0.0])),
+        )
 
 
 # ── orbit-segment splitting + SG smoothing (relocated from the deleted
@@ -404,8 +460,8 @@ def test_write_group_artifacts_schema_round_trip(tmp_path):
     df = pd.read_parquet(parquet_path)
     assert list(df.columns) == ["group_id", "skycell", "sx_int", "sy_int", "qx", "qy", "cache_key"]
     assert df["group_id"].dtype == np.int32
-    assert df["sx_int"].dtype == np.int16
-    assert df["sy_int"].dtype == np.int16
+    assert df["sx_int"].dtype == np.int32
+    assert df["sy_int"].dtype == np.int32
     assert df["qx"].dtype == np.float32
     assert df["qy"].dtype == np.float32
     assert len(df) == len(assignment.shifts_df)
@@ -433,7 +489,10 @@ def test_shift_schedule_save_load_round_trip(tmp_path):
     ]
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
-        frames, skycell_df, ref_wcs, btjd=np.array([0.0, 0.1, 0.2]),
+        frames,
+        skycell_df,
+        ref_wcs,
+        **_schedule_orbit_kwargs(3),
     )
 
     npz_path = tmp_path / "shift_schedule.npz"
@@ -448,5 +507,212 @@ def test_shift_schedule_save_load_round_trip(tmp_path):
     np.testing.assert_array_equal(loaded.sx_int, schedule.sx_int)
     np.testing.assert_array_equal(loaded.sy_int, schedule.sy_int)
     np.testing.assert_array_equal(loaded.frame_valid, schedule.frame_valid)
+    np.testing.assert_array_equal(loaded.frame_origin, schedule.frame_origin)
     assert loaded.meta == schedule.meta
     assert loaded.meta["schema_version"] == 1
+
+
+# ── (h) Orbit CSV split + synthesis + sigma clip ────────────────────────────
+
+
+def test_split_orbit_segments_from_csv_s20():
+    # Orbit 47 ends 2020-01-06; orbit 48 starts 2020-01-07 21:30.
+    times = [
+        "2019-12-25T01:00:00",
+        "2020-01-06T08:00:00",
+        "2020-01-07T22:00:00",
+        "2020-01-20T07:00:00",
+    ]
+    bounds = _split_orbit_segments_from_csv(20, times, _FIXTURE_ORBIT_CSV)
+    assert bounds.tolist() == [[0, 2], [2, 4]]
+
+
+def test_orbit_csv_sector_string_match():
+    times = ["2019-12-26T00:00:00", "2020-01-08T00:00:00"]
+    bounds = _split_orbit_segments_from_csv(20, times, _FIXTURE_ORBIT_CSV)
+    assert bounds.tolist() == [[0, 1], [1, 2]]
+
+
+def test_synthesize_leading_flat_extrapolate():
+    sx_f = np.array([[np.nan], [1.2], [1.3]], dtype=np.float32)
+    sy_f = np.array([[np.nan], [0.4], [0.5]], dtype=np.float32)
+    sx_i = np.array([[0], [1], [1]], dtype=np.int32)
+    sy_i = np.array([[0], [0], [1]], dtype=np.int32)
+    measurable = np.array([False, True, True])
+    _synthesize_shift_gaps(sx_f, sy_f, sx_i, sy_i, measurable)
+    assert sx_f[0, 0] == pytest.approx(1.2)
+    assert sy_f[0, 0] == pytest.approx(0.4)
+    assert sx_i[0, 0] == 1
+    assert sy_i[0, 0] == 0
+
+
+def test_synthesize_trailing_flat_extrapolate():
+    sx_f = np.array([[1.0], [1.1], [np.nan]], dtype=np.float32)
+    sy_f = np.array([[0.2], [0.3], [np.nan]], dtype=np.float32)
+    sx_i = np.array([[1], [1], [0]], dtype=np.int32)
+    sy_i = np.array([[0], [0], [0]], dtype=np.int32)
+    measurable = np.array([True, True, False])
+    _synthesize_shift_gaps(sx_f, sy_f, sx_i, sy_i, measurable)
+    assert sx_f[2, 0] == pytest.approx(1.1)
+    assert sy_f[2, 0] == pytest.approx(0.3)
+    assert sx_i[2, 0] == 1
+    assert sy_i[2, 0] == 0
+
+
+def test_synthesize_interior_holds_quantized():
+    sx_f = np.array([[1.1], [np.nan], [1.4]], dtype=np.float32)
+    sy_f = np.array([[0.2], [np.nan], [0.5]], dtype=np.float32)
+    sx_i = np.array([[1], [0], [1]], dtype=np.int32)
+    sy_i = np.array([[0], [0], [1]], dtype=np.int32)
+    measurable = np.array([True, False, True])
+    _synthesize_shift_gaps(sx_f, sy_f, sx_i, sy_i, measurable)
+    assert sx_i[1, 0] == 1
+    assert sy_i[1, 0] == 0
+    assert sx_f[1, 0] == pytest.approx(1.0)
+    assert sy_f[1, 0] == pytest.approx(0.0)
+
+
+def test_raw_drift_outlier_rejects_single_spike():
+    n_frames, n_cells = 11, 3
+    drift = np.zeros((n_frames, n_cells, 2), dtype=np.float64)
+    drift[:] = 0.02
+    drift[5, :, :] = 2000.0
+    measurable = np.ones(n_frames, dtype=bool)
+    bounds = np.array([[0, n_frames]], dtype=np.int64)
+    newly, audit = _reject_raw_drift_outliers(drift, measurable, bounds, 5.0)
+    assert 5 in newly.tolist()
+    assert not measurable[5]
+    assert measurable.sum() == n_frames - 1
+    assert audit[0]["frame"] == 5
+    assert audit[0]["median_tess_drift_px"] > 1000
+
+
+def test_raw_drift_outlier_disabled_when_sigma_null():
+    drift = np.zeros((5, 2, 2), dtype=np.float64)
+    drift[2] = 9999.0
+    measurable = np.ones(5, dtype=bool)
+    newly, audit = _reject_raw_drift_outliers(
+        drift, measurable, np.array([[0, 5]]), None  # type: ignore[arg-type]
+    )
+    assert newly.size == 0
+    assert measurable.all()
+    assert audit == []
+
+
+def test_frame_origin_missing_wcs_vs_sigma():
+    ref_wcs = _make_wcs()
+    # 9 healthy frames + one huge CRPIX jump that looks like a WCS glitch.
+    frames: list[tuple[str, WCS | None]] = []
+    for t in range(10):
+        if t == 0:
+            frames.append((f"f{t}.fits", None))  # missing WCS (leading)
+        elif t == 5:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (2000.0, 2000.0))))
+        else:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.05 * t, -0.02 * t))))
+
+    skycell_df = _make_skycell_df()
+    schedule = build_skycell_shift_schedule(
+        frames,
+        skycell_df,
+        ref_wcs,
+        savgol_window=5,
+        raw_drift_outlier_sigma=5.0,
+        **_schedule_orbit_kwargs(10),
+    )
+    assert schedule.frame_valid.all()
+    assert schedule.frame_origin is not None
+    assert int(schedule.frame_origin[0]) == FRAME_ORIGIN_SYNTH_MISSING_WCS
+    assert int(schedule.frame_origin[5]) == FRAME_ORIGIN_SYNTH_SIGMA_CLIPPED
+    assert int(schedule.frame_origin[1]) == FRAME_ORIGIN_MEASURED
+    # Neighbor of clipped spike should not explode from SG bleed.
+    assert float(np.nanmax(np.abs(schedule.sx_float[4]))) < 50.0
+    assert schedule.meta["frame_origin_counts"]["synth_missing_wcs"] >= 1
+    assert schedule.meta["frame_origin_counts"]["synth_sigma_clipped"] >= 1
+    assert schedule.meta["orbit_segment_source"] == "tess_orbit_times_csv"
+
+
+def test_orbit_csv_e2e_two_segments_and_missing_sector_raises():
+    ref_wcs = _make_wcs()
+    times = [
+        "2019-12-25T01:00:00",
+        "2020-01-06T08:00:00",
+        "2020-01-07T22:00:00",
+        "2020-01-20T07:00:00",
+    ]
+    frames = [
+        (f"f{t}.fits", _shifted_wcs(ref_wcs, (0.05 * t, -0.02 * t))) for t in range(4)
+    ]
+    skycell_df = _make_skycell_df()
+    schedule = build_skycell_shift_schedule(
+        frames,
+        skycell_df,
+        ref_wcs,
+        savgol_window=3,
+        savgol_polyorder=1,
+        raw_drift_outlier_sigma=None,
+        **_schedule_orbit_kwargs(4, frame_times=times, btjd=np.arange(4, dtype=float)),
+    )
+    assert schedule.meta["orbit_segment_source"] == "tess_orbit_times_csv"
+    assert schedule.meta["orbit_segment_bounds"] == [[0, 2], [2, 4]]
+
+    with pytest.raises(ValueError, match="No orbit rows for sector"):
+        build_skycell_shift_schedule(
+            frames,
+            skycell_df,
+            ref_wcs,
+            **_schedule_orbit_kwargs(4, sector=999),
+        )
+
+
+def test_hysteresis_round_preserves_int32_large_shifts():
+    vals = np.array([0.0, 40000.2, 40000.7], dtype=np.float64)
+    out = hysteresis_round_series(vals, 0.1)
+    assert out.dtype == np.int32
+    assert int(out[1]) == 40000
+    assert int(out[2]) == 40001
+
+
+def test_hysteresis_measurable_only_avoids_gap_bridge_contamination():
+    """Linear-fill-then-hysteresis can stick a neighbor at the wrong int; measurable-only does not."""
+    values = np.array([0.48, np.nan, 1.55], dtype=np.float64)
+    measurable = np.array([True, False, True])
+
+    filled = values.copy()
+    filled[1] = float(np.interp(1.0, [0.0, 2.0], [0.48, 1.55]))
+    old_ints = hysteresis_round_series(filled, 0.1)
+    new_ints = _hysteresis_round_measurable(values, measurable, 0.1)
+
+    assert int(new_ints[0]) == 0
+    assert int(new_ints[2]) == 2
+    assert int(old_ints[2]) == 1  # old path advanced through the fake bridge
+
+    sx_f = values.astype(np.float32).reshape(-1, 1)
+    sy_f = np.zeros_like(sx_f)
+    sx_i = new_ints.reshape(-1, 1).astype(np.int32)
+    sy_i = np.zeros_like(sx_i)
+    _synthesize_shift_gaps(sx_f, sy_f, sx_i, sy_i, measurable)
+    assert int(sx_i[1, 0]) == 0  # interior hold last measurable quantized
+    assert int(sx_i[2, 0]) == 2
+
+
+def test_raw_drift_outlier_sigma_none_disables_in_schedule_build():
+    ref_wcs = _make_wcs()
+    frames: list[tuple[str, WCS | None]] = []
+    for t in range(10):
+        if t == 5:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (2000.0, 2000.0))))
+        else:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.05 * t, -0.02 * t))))
+    skycell_df = _make_skycell_df()
+    schedule = build_skycell_shift_schedule(
+        frames,
+        skycell_df,
+        ref_wcs,
+        savgol_window=5,
+        raw_drift_outlier_sigma=None,
+        **_schedule_orbit_kwargs(10),
+    )
+    assert schedule.meta["raw_drift_outlier_sigma"] is None
+    assert schedule.meta["frame_origin_counts"]["synth_sigma_clipped"] == 0
+    assert int(schedule.frame_origin[5]) == FRAME_ORIGIN_MEASURED
