@@ -5,8 +5,8 @@
 #   syndiff template submit \
 #     --config config/pipeline_s20_field_l4_split_smoke.yaml \
 #     --scc config/scc_s20_c1_k1.csv \
-#     --stages remap,downsample \
-#     --run-id s20_c1_k1_l4_split_smoke
+#     --stages remap \
+#     --run-id s20_c1_k1_l4_split_smoke_5   # border-batched L4b
 # Then optionally: --scc config/scc_s20_c3_k3.csv --run-id s20_c3_k3_l4_split_smoke
 deployment_file: deployment.yaml
 diff_config: diff_config_single_kernel.yaml
@@ -26,12 +26,12 @@ stages:
     skip_download_catalog: false
   remap:
     intra_skycell_R: 1
-    rebuild_remap_cache: true
-    rebuild_inter_skycell_cache: true
+    rebuild_remap_cache: false
+    rebuild_inter_skycell_cache: false
     # Pre-SG MAD gate on raw TESS drift (per orbit); missing-WCS frames are
     # synthesized (not dropped) so every FFI still gets remap/template.
     raw_drift_outlier_sigma: 5.0
-    n_jobs: 16
+    n_jobs: 32
     executor: condor
     condor_request_cpus: 32
     condor_request_memory: 128000
@@ -43,7 +43,7 @@ stages:
     materialize_fits: false
     oversampling_factor: 1
     ignore_mask_bits: [12]
-    n_jobs: 16
+    n_jobs: 32
     executor: condor
     condor_request_cpus: 16
     condor_request_memory: 128000

@@ -171,35 +171,40 @@ Exact only the **~9% R=1 boundary band** — never the whole skycell.
 
 | Item | Spec |
 |------|------|
-| Trigger | New nonzero `(skycell, sx, sy)` from L3 |
+| Trigger | Contiguous nonzero `(skycell, sx, sy)` **shift epoch** (RLE; revisits get a new epoch) |
 | Skip | `(0, 0)` |
 | Mask | `dilate(ownership_boundary ∪ footprint_edge, R=1)` on the rolled assignment |
-| Cache | `exact_cache_l4a/{skycell}_sx{±}_sy{±}_exact.npz` |
-| WCS | Realizing frame for that own shift |
+| Cache | `exact_cache_l4a/{skycell}/e{epoch}_sx{±}_sy{±}_exact.npz` (schema v3) |
+| WCS | **Middle measured** frame in the epoch (`rep_frame_index`) |
 
 Interior pixels stay as cheap integer roll of the frozen L0 map.
 
 **Legacy monolithic `exact_cache/`** (old L4b-lite pollution) is **never** reused
 as L4a. Verify rejects it when `exact_cache_l4a/` is missing; rebuild with
-`rebuild_remap_cache: true`.
+`rebuild_remap_cache: true`. Flat root `exact_cache_l4a/*.npz` is rejected under
+schema v3 — wipe Exact dirs and rebuild.
 
 ---
 
 ## L4b: Type II F2 Exact (inter-skycell rim)
 
 Always on in field mode (no YAML toggle). Remap builds `exact_cache_l4b/` for every
-abutting master pair and unique neighbour shift 4-tuple.
+abutting master pair and contiguous **pair epoch** (constant 4-tuple run).
 
 | Item | Spec |
 |------|------|
 | Pairs | Master 4-neighbour abutting undirected pairs |
-| Keys | Unique `(sx_A,sy_A,sx_B,sy_B)` per pair over `frame_valid` |
+| Keys | Contiguous pair epochs `(sx_A,sy_A,sx_B,sy_B)` covering sets of `group_id`s |
 | Scope | Shared abutting border TESS ids only (~1.9%) |
-| WCS | First valid frame realizing that 4-tuple (`rep_frame_index`) |
-| Cache | `exact_cache_l4b/pair_{id_lo}__{id_hi}_…_rim.npz` |
+| WCS | Middle measured frame in the pair epoch (`rep_frame_index`) |
+| Cache | `exact_cache_l4b/pair_{id_lo}__{id_hi}/e{epoch}_sx…_rim.npz` |
+
+L5 compose resolves Exact via `gid_epoch_index.npz` (`group_id` → epoch → path).
+Missing-WCS / rejected frames still get synthesized shifts and real `group_id`s
+(contiguous signature islands; no `group_id=-1`).
 
 Legacy manifests with `include_abutting_border_exact`, `l4b_policy`, or
-`apply_hybrid_exact` are rejected on verify — rebuild remap with schema v2.
+`apply_hybrid_exact` are rejected on verify — rebuild remap with schema **v3**.
 
 ---
 
@@ -215,12 +220,30 @@ key `(skycell,sx,sy)` (~48% of keys on s0020/c3/k3). L5 therefore always writes
 contribs/{skycell}_sx{±}_sy{±}_gid{N}.npz
 ```
 
+### Skycell-major dispatch + composite-key fan-out
+
+L5 parallelizes over **skycells**, not flat `(group_id, skycell, sx, sy)` rows.
+Within each skycell worker:
+
+1. Load the regmap FITS and PS1 zarr **once**.
+2. Build a **composite geometry key** per group:
+   `(l4a_epoch_or_roll0, sorted (neighbour_id, pair_epoch_id)…)` from
+   `gid_epoch_index.npz` (schema v3) or legacy neighbour shifts.
+3. **Compose + bin once** per distinct key; **fan out** identical sparse arrays to
+   every sharing `group_id` (on-disk contract unchanged: one NPZ per group).
+4. Own-shift `(0,0)` uses L4a sentinel `"roll0"` (remap skips zero epochs) but
+   still composes L4b rims when neighbours differ.
+
+Progress sidecar (`downsample.progress.json`) reports `ckeys done/total` and
+skycell batches. Contrib writes use temp-file + atomic `replace` (no store-wide
+lock). Crop/event builds prefilter pixels outside the ROI before `argsort`.
+
 ### Compose order (per group context)
 
 1. Load L0 `TESS_PIXEL_MAP`.
 2. Build intra-skycell hybrid (roll + Exact patch from `exact_cache_l4a/`).
 3. For each master abutting neighbour B, load the matching inter-skycell rim NPZ using
-   **this group’s** `(sx_B, sy_B)`; patch A’s rim (`abutting_rim_ps1_mask`).
+   **this group’s** pair-epoch lookup; patch A’s rim (`abutting_rim_ps1_mask`).
    **Inter-skycell wins on overlap.**
 4. Bin PS1 with `assignment=hybrid_map`, `sx_int=0`, `sy_int=0` (do not data-roll
    PS1 when hybrid is used).
@@ -278,21 +301,28 @@ downsample dataclass default is `field`, but an explicit mismatch with
 ## Storage layout
 
 ```text
-{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/     # remap (L2–L4)
-  remap_manifest.json
+{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/     # remap (L2–L4), schema v3
+  remap_manifest.json                   # schema_version: 3
   shift_schedule.npz / .json
-  skycell_shift_grid_debug.png              # 3×3 SG+quantized vs BTJD
-  skycell_shift_relative_center_debug.png   # FoV differential (SG only)
+  shift_epochs.parquet                  # L4a shift epochs (skycell, sx, sy, rep_frame)
+  pair_epochs.parquet                   # L4b pair epochs (4-tuple runs)
+  epoch_group_members.parquet           # epoch_id → group_id membership
+  gid_epoch_index.npz                   # group_id → L4a/L4b epoch lookup
+  group_id_per_frame.npy
+  skycell_shift_grid_debug.png
+  skycell_shift_relative_center_debug.png
   template_group_shifts.parquet
   template_groups.json
-  exact_cache_l4a/{skycell}_sx{±N}_sy{±N}_exact.npz
-  exact_cache_l4b/pair_{id}__{id}_…_rim.npz
-  exact_cache_legacy_polluted/                            # migrated lite; do not use
+  exact_cache_l4a/{skycell}/e{epoch}_sx{±}_sy{±}_exact.npz
+  exact_cache_l4b/pair_{id_lo}__{id_hi}/e{epoch}_sx…_rim.npz
+  exact_cache_legacy_polluted/          # migrated lite; do not use
+  remap.progress.json                   # L4a/L4b counters + perf metadata
   .lock
 
 {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/ # downsample (L5)
   template_manifest.json
-  field_mode_assembly.json          # schema v1|v2
+  field_mode_assembly.json              # perf counters (n_compose, reuse ratio, …)
+  downsample.progress.json              # field L5 ckeys / skycell batches
   contribs/…_gid{N}.npz
   fits/syndiff_field_s{SSSS}_{C}_{K}[_os{N}]_gid{N}.fits.fz  # optional
   materialized_fits.json
@@ -373,7 +403,15 @@ stages:
 
 - Field mode has **~10²–10³ groups**, so `convolved_templates` runs one template
   per `group_id` (can be slow on a full frame set).
-- Hybrid Exact workers cap at `min(n_jobs, SYNDIFF_HYBRID_MAX_JOBS=24, CPUs)`.
+- Hybrid Exact workers cap at `min(n_jobs, SYNDIFF_HYBRID_MAX_JOBS, CPUs)`;
+  Condor sets `SYNDIFF_HYBRID_MAX_JOBS` from `condor_request_cpus`.
+- **Remap L4a** batches shift epochs by skycell (one regmap/zarr load per skycell,
+  not per epoch). **Remap L4b** batches pair epochs by abutting border (~2.4k
+  joblib tasks vs one per pair-epoch row). Worker processes hoist TESS coords and
+  load the master map from `master_path` (safe L4a→L4b joblib handoff).
+- **L5 downsample** batches by skycell and deduplicates compose+bin via composite
+  keys (~17–59× reuse on full-chip SCC builds). Optional
+  `SYNDIFF_REMAP_BENCHMARK_TAG` attaches perf metadata to `remap.progress.json`.
 - Intra-skycell + inter-skycell remap is order **~7 h CPU** per SCC-class gate; use
   Condor memory ≥128 GB for remap on full chips.
 - Pre-SG MAD outlier gate + missing-WCS synthesis (not a post-hoc median
@@ -390,9 +428,11 @@ stages:
 | `template_creation/processing/shift_schedule_plots.py` | Remap debug PNGs (3×3 grid + relative-to-center) |
 | `template_creation/processing/hybrid_regmaps.py` | L4a mask / roll / patch primitives |
 | `template_creation/processing/field_hybrid_exact.py` | Exact subsets; L4a/L4b compose |
-| `template_creation/processing/field_abutting.py` | Undirected pairs + pair-state enum |
-| `template_creation/processing/field_remap.py` | SCC remap store (`run_field_remap_scc`) |
-| `template_creation/processing/field_downsample.py` | SCC L5 (`run_field_downsample_scc`) |
+| `template_creation/processing/field_abutting.py` | Undirected pairs; epoch cache path helpers |
+| `template_creation/processing/field_remap.py` | SCC remap store (`run_field_remap_scc`); epoch artifacts |
+| `template_creation/processing/field_downsample.py` | SCC L5 (`run_field_downsample_scc`); composite-key batches |
+| `template_creation/processing/field_downsample_progress.py` | L5 progress sidecar (`ckeys`, skycell batches) |
+| `template_creation/processing/remap_progress.py` | Remap L4a/L4b progress + perf metadata |
 | `template_creation/processing/field_templates.py` | Contrib I/O, assemble, materialize FITS |
 | `difference_imaging/support/template_resolution.py` | Diff-time field loader |
 | `template_creation/orchestration/verify.py` | Dual-cache + lite rejection |
