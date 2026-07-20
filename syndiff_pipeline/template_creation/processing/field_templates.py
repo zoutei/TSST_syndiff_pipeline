@@ -25,10 +25,13 @@ from filelock import FileLock
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "template_manifest.json"
 CONTRIBS_DIRNAME = "contribs"
+FITS_DIRNAME = "fits"
+MATERIALIZED_FITS_SIDECAR = "materialized_fits.json"
 LOCK_NAME = ".lock"
 
 _CONTRIB_RE = re.compile(
-    r"^(?P<skycell>skycell\.\d+\.\d+)_sx(?P<sx>[+-]?\d+)_sy(?P<sy>[+-]?\d+)\.npz$",
+    r"^(?P<skycell>skycell\.\d+\.\d+)_sx(?P<sx>[+-]?\d+)_sy(?P<sy>[+-]?\d+)"
+    r"(?:_gid(?P<gid>\d+))?\.npz$",
     re.IGNORECASE,
 )
 
@@ -71,23 +74,175 @@ def field_store_lock(store_root: str | Path) -> FileLock:
     return FileLock(str(root / LOCK_NAME), timeout=-1)
 
 
-def contrib_basename(skycell: str, sx_int: int, sy_int: int) -> str:
-    """Filename for one sparse contribution key."""
+def contrib_basename(
+    skycell: str,
+    sx_int: int,
+    sy_int: int,
+    *,
+    group_id: int | None = None,
+) -> str:
+    """Filename for one sparse contribution key.
+
+    When ``group_id`` is set (Architecture A / ``l4b_policy=pair_state``), the
+    basename is group-qualified: ``{skycell}_sx…_sy…_gid{N}.npz``. Legacy
+    L4a-only stores omit ``_gid``.
+    """
     name = str(skycell).strip()
     if not name.startswith("skycell."):
         name = f"skycell.{name}" if not name.startswith("skycell") else name
-    return f"{name}_sx{int(sx_int):+d}_sy{int(sy_int):+d}.npz"
+    stem = f"{name}_sx{int(sx_int):+d}_sy{int(sy_int):+d}"
+    if group_id is not None:
+        stem += f"_gid{int(group_id)}"
+    return f"{stem}.npz"
 
 
-def contrib_path(store_root: str | Path, skycell: str, sx_int: int, sy_int: int) -> Path:
-    return Path(store_root) / CONTRIBS_DIRNAME / contrib_basename(skycell, sx_int, sy_int)
+def contrib_path(
+    store_root: str | Path,
+    skycell: str,
+    sx_int: int,
+    sy_int: int,
+    *,
+    group_id: int | None = None,
+) -> Path:
+    return Path(store_root) / CONTRIBS_DIRNAME / contrib_basename(
+        skycell, sx_int, sy_int, group_id=group_id
+    )
 
 
-def parse_contrib_basename(name: str) -> Optional[tuple[str, int, int]]:
+def field_fits_basename(
+    sector: int,
+    camera: int,
+    ccd: int,
+    group_id: int,
+    *,
+    oversampling_factor: int = 1,
+) -> str:
+    """Basename for one materialized field template FITS (logical ``.fits``)."""
+    os_part = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
+    return (
+        f"syndiff_field_s{int(sector):04d}_{int(camera)}_{int(ccd)}"
+        f"{os_part}_gid{int(group_id)}.fits"
+    )
+
+
+def field_fits_path(
+    store_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    group_id: int,
+    *,
+    oversampling_factor: int = 1,
+) -> Path:
+    """Path under ``fits/`` for one group's materialized template."""
+    return (
+        Path(store_root)
+        / FITS_DIRNAME
+        / field_fits_basename(
+            sector, camera, ccd, group_id, oversampling_factor=oversampling_factor
+        )
+    )
+
+
+def _roi_bounds_to_assemble_crop(
+    roi_bounds: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    if roi_bounds is None:
+        return None
+    x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)
+    return (x_min, x_max, y_min, y_max)
+
+
+def build_field_fits_header(
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    group_id: int,
+    oversampling_factor: int = 1,
+    roi_bounds: tuple[int, int, int, int] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+) -> Any:
+    """Minimal FITS header for a materialized field template."""
+    from astropy.io import fits
+
+    hdr = fits.Header()
+    hdr["SYNDIFF"] = (True, "SynDiff template")
+    hdr["SYNDMODE"] = ("field", "SynDiff geometry mode")
+    hdr["SECTOR"] = (int(sector), "TESS sector")
+    hdr["CAMERA"] = (int(camera), "TESS camera")
+    hdr["CCD"] = (int(ccd), "TESS CCD")
+    hdr["GROUP_ID"] = (int(group_id), "WCS signature group id")
+    os_factor = max(1, int(oversampling_factor))
+    if os_factor > 1:
+        hdr["OVERSAMP"] = (os_factor, "Oversampling factor")
+    if roi_bounds is not None:
+        x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)
+        hdr["XMIN"] = (x_min, "ROI xmin in base TESS pixels")
+        hdr["XMAX"] = (x_max, "ROI xmax (exclusive) in base TESS pixels")
+        hdr["YMIN"] = (y_min, "ROI ymin in base TESS pixels")
+        hdr["YMAX"] = (y_max, "ROI ymax (exclusive) in base TESS pixels")
+        hdr["ROIW"] = (x_max - x_min, "ROI width in base TESS pixels")
+        hdr["ROIH"] = (y_max - y_min, "ROI height in base TESS pixels")
+    if provenance:
+        if "apply_hybrid_exact" in provenance:
+            hdr["HYBEXACT"] = (
+                bool(provenance["apply_hybrid_exact"]),
+                "Hybrid L4a/L4b compose at bin time",
+            )
+        if "hybrid_R" in provenance:
+            hdr["HYBRID_R"] = (int(provenance["hybrid_R"]), "L4a boundary dilation R")
+        if "l4b_policy" in provenance:
+            hdr.set("HIERARCH SYNDIFF L4B POLICY", str(provenance["l4b_policy"]))
+        if "require_l4b_cache" in provenance:
+            hdr["REQL4B"] = (bool(provenance["require_l4b_cache"]), "Require L4b cache hits")
+        if "n_exact_keys" in provenance and provenance["n_exact_keys"] is not None:
+            hdr["NL4AKEY"] = (int(provenance["n_exact_keys"]), "L4a exact cache keys")
+        if "n_l4b_pair_states" in provenance and provenance["n_l4b_pair_states"] is not None:
+            hdr["NL4BPAIR"] = (
+                int(provenance["n_l4b_pair_states"]),
+                "L4b pair-state cache keys",
+            )
+    return hdr
+
+
+def write_field_group_fits(
+    out_path: str | Path,
+    flux: np.ndarray,
+    count: np.ndarray,
+    *,
+    header: Any | None = None,
+) -> str:
+    """Write one group's mean-flux template FITS (+ COUNT extension) as ``.fits.fz``."""
+    from astropy.io import fits
+
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
+
+    hdr = fits.Header(header) if header is not None else fits.Header()
+    flux_arr = np.asarray(flux, dtype=np.float32)
+    count_arr = np.asarray(count, dtype=np.float32)
+    count_hdr = hdr.copy()
+    count_hdr["EXTNAME"] = "COUNT"
+    hdul = fits.HDUList(
+        [
+            fits.PrimaryHDU(flux_arr, header=hdr),
+            fits.ImageHDU(count_arr, header=count_hdr, name="COUNT"),
+        ]
+    )
+    return write_hdul_fits(out_path, hdul)
+
+
+def parse_contrib_basename(
+    name: str,
+) -> Optional[tuple[str, int, int] | tuple[str, int, int, int]]:
     m = _CONTRIB_RE.match(Path(name).name)
     if not m:
         return None
-    return m.group("skycell"), int(m.group("sx")), int(m.group("sy"))
+    base = (m.group("skycell"), int(m.group("sx")), int(m.group("sy")))
+    gid = m.group("gid")
+    if gid is None:
+        return base
+    return base[0], base[1], base[2], int(gid)
 
 
 def write_contrib(
@@ -100,18 +255,19 @@ def write_contrib(
     flux_sum: np.ndarray,
     count: np.ndarray,
     mask_count: np.ndarray | None = None,
+    group_id: int | None = None,
 ) -> Path:
     """Write one sparse contrib NPZ under lock. ``indices`` are flat TESS pixel ids."""
     root = Path(store_root)
-    out = contrib_path(root, skycell, sx_int, sy_int)
+    out = contrib_path(root, skycell, sx_int, sy_int, group_id=group_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "indices": np.asarray(indices, dtype=np.int64),
         "flux_sum": np.asarray(flux_sum, dtype=np.float64),
         "count": np.asarray(count, dtype=np.float64),
         "skycell": np.asarray(str(skycell)),
-        "sx_int": np.asarray(int(sx_int), dtype=np.int16),
-        "sy_int": np.asarray(int(sy_int), dtype=np.int16),
+        "sx_int": np.asarray(int(sx_int), dtype=np.int32),
+        "sy_int": np.asarray(int(sy_int), dtype=np.int32),
     }
     if mask_count is not None:
         payload["mask_count"] = np.asarray(mask_count, dtype=np.float64)
@@ -177,6 +333,7 @@ def assemble_group_from_contribs(
     *,
     shape: tuple[int, int],
     crop: tuple[int, int, int, int] | None = None,
+    group_id: int | None = None,
 ) -> dict[str, np.ndarray]:
     """
     Sum sparse contribs for one signature group.
@@ -197,7 +354,7 @@ def assemble_group_from_contribs(
     root = Path(store_root)
     n_loaded = 0
     for skycell, sx_i, sy_i in shifts:
-        path = contrib_path(root, skycell, sx_i, sy_i)
+        path = contrib_path(root, skycell, sx_i, sy_i, group_id=group_id)
         if not path.is_file():
             raise FileNotFoundError(f"missing field contrib: {path}")
         data = load_contrib(path)
@@ -226,8 +383,9 @@ def assemble_group_from_contribs(
 def verify_field_store(
     store_root: str | Path,
     *,
-    required_keys: Iterable[tuple[str, int, int]] | None = None,
+    required_keys: Iterable[tuple] | None = None,
     require_nonempty: bool = False,
+    group_id: int | None = None,
 ) -> dict[str, Any]:
     """Thin completeness check for SCC field store reuse."""
     root = Path(store_root)
@@ -243,8 +401,15 @@ def verify_field_store(
     missing = []
     empty = []
     if required_keys is not None and contrib_dir.is_dir():
-        for skycell, sx_i, sy_i in required_keys:
-            p = contrib_path(root, skycell, sx_i, sy_i)
+        for key in required_keys:
+            if len(key) == 4:
+                gid_i, skycell, sx_i, sy_i = key
+                p = contrib_path(root, skycell, sx_i, sy_i, group_id=int(gid_i))
+            else:
+                skycell, sx_i, sy_i = key
+                p = contrib_path(
+                    root, skycell, sx_i, sy_i, group_id=group_id
+                )
             if not p.is_file():
                 missing.append(p.name)
                 continue

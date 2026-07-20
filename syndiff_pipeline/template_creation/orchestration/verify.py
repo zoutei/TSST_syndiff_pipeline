@@ -30,6 +30,11 @@ log = logging.getLogger(__name__)
 # Bump when the manifest JSON schema changes; a mismatch invalidates a manifest.
 MANIFEST_SCHEMA_VERSION = 2
 
+# Removed L4b-lite policies; manifests/sidecars claiming these must be rebuilt.
+_DEPRECATED_L4B_POLICIES = frozenset(
+    {"lite", "abutting_under_type1_wcs", "abutting_border"}
+)
+
 
 class AbsenceProbeResult(Enum):
     """Fast pre-check before scheduling a full background artifact verify."""
@@ -153,7 +158,6 @@ def config_fingerprint(
                 str(rm.keying),
                 str(rm.apply_hybrid_exact),
                 str(rm.hybrid_R),
-                str(rm.include_abutting_border_exact),
             ]
         )
     elif stage == "downsample":
@@ -746,30 +750,139 @@ def clear_downsample_event_artifacts(resolved: ResolvedTargetConfig) -> list[str
 
 def mapping_master_pixels2skycells_path(resolved: ResolvedTargetConfig) -> Path:
     """Path to mapping's master TESS→skycell FITS for this SCC."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        _master_pixels2skycells_path,
+    )
+
     t = resolved.target
-    suffix = ""
-    os_factor = resolved.stages.mapping.oversampling_factor
-    mapping_root = Path(resolved.mapping_root)
-    if os_factor > 1:
-        suffix = f"_os{os_factor}"
-    flat = (
-        mapping_root
-        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
+    os_factor = int(resolved.stages.mapping.oversampling_factor or 1)
+    return _master_pixels2skycells_path(
+        Path(resolved.mapping_root),
+        t.sector,
+        t.camera,
+        t.ccd,
+        oversampling_factor=os_factor,
     )
-    found = try_resolve_fits_variant(flat)
-    if found is not None:
-        return found
-    nested = (
-        mapping_root
-        / f"sector_{t.sector:04d}"
-        / f"camera_{t.camera}"
-        / f"ccd_{t.ccd}"
-        / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
+
+
+def _count_npz_files(cache_dir: Path) -> int:
+    """Count materialized ``*.npz`` files directly under *cache_dir*."""
+    if not cache_dir.is_dir():
+        return 0
+    return sum(1 for p in cache_dir.glob("*.npz") if p.is_file())
+
+
+def _l4b_lite_rejection_reason(payload: dict, *, source: str) -> str | None:
+    """Return an operator-facing rebuild message when *payload* claims L4b-lite."""
+    if payload.get("include_abutting_border_exact"):
+        return (
+            f"{source} uses removed L4b-lite (include_abutting_border_exact); "
+            "rebuild remap with pure L4a (exact_cache_l4a/) and optional F2 L4b "
+            "(exact_cache_l4b/); do not reuse polluted exact_cache/"
+        )
+    policy = str(payload.get("l4b_policy", "none"))
+    if policy in _DEPRECATED_L4B_POLICIES:
+        return (
+            f"{source} has deprecated l4b_policy={policy!r}; use none|pair_state "
+            "and rebuild (rebuild_remap_cache / rebuild_l4b_cache); do not reuse "
+            "polluted exact_cache/ as L4a"
+        )
+    return None
+
+
+def _polluted_legacy_exact_cache_reason(read_root: Path) -> str | None:
+    """Reject monolithic ``exact_cache/`` when pure ``exact_cache_l4a/`` is absent."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        EXACT_CACHE_L4A_DIRNAME,
+        EXACT_CACHE_LEGACY_DIRNAME,
     )
-    found = try_resolve_fits_variant(nested)
-    if found is not None:
-        return found
-    return flat
+
+    legacy = read_root / EXACT_CACHE_LEGACY_DIRNAME
+    l4a = read_root / EXACT_CACHE_L4A_DIRNAME
+    if legacy.is_dir() and any(legacy.glob("*.npz")):
+        if not l4a.is_dir() or _count_npz_files(l4a) == 0:
+            return (
+                f"legacy polluted {EXACT_CACHE_LEGACY_DIRNAME}/ present without pure "
+                f"{EXACT_CACHE_L4A_DIRNAME}/; archive or delete legacy cache and rebuild "
+                "L4a (stages.remap.rebuild_remap_cache: true); do not reuse exact_cache/ "
+                "as L4a"
+            )
+    return None
+
+
+def _verify_remap_exact_caches(
+    read_root: Path,
+    payload: dict,
+    *,
+    config_l4b_policy: str,
+) -> str | None:
+    """Validate dual-cache layout and NPZ counts for the remap manifest."""
+    from syndiff_pipeline.template_creation.processing.field_remap import (
+        EXACT_CACHE_L4A_DIRNAME,
+        EXACT_CACHE_L4B_DIRNAME,
+    )
+
+    manifest_policy = str(payload.get("l4b_policy", "none"))
+    if manifest_policy not in ("none", "pair_state"):
+        return (
+            f"remap_manifest l4b_policy={manifest_policy!r} is invalid; "
+            "use none|pair_state and rebuild"
+        )
+    if config_l4b_policy != manifest_policy:
+        return (
+            f"remap_manifest l4b_policy={manifest_policy!r} does not match config "
+            f"({config_l4b_policy!r}); rebuild remap or align config"
+        )
+
+    apply_hybrid = bool(payload.get("apply_hybrid_exact", True))
+    if not apply_hybrid:
+        return None
+
+    polluted = _polluted_legacy_exact_cache_reason(read_root)
+    if polluted:
+        return polluted
+
+    l4a_dir = read_root / EXACT_CACHE_L4A_DIRNAME
+    if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
+        n_expected = payload.get("n_exact_keys")
+        if isinstance(n_expected, int) and n_expected > 0:
+            return (
+                f"missing pure {EXACT_CACHE_L4A_DIRNAME}/ "
+                f"(manifest n_exact_keys={n_expected}); rebuild L4a "
+                "(stages.remap.rebuild_remap_cache: true)"
+            )
+
+    n_l4a_manifest = payload.get("n_exact_keys")
+    if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
+        on_disk = _count_npz_files(l4a_dir)
+        if on_disk < n_l4a_manifest:
+            return (
+                f"L4a cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
+                f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
+            )
+
+    if manifest_policy != "pair_state":
+        return None
+
+    l4b_dir = read_root / EXACT_CACHE_L4B_DIRNAME
+    if not l4b_dir.is_dir():
+        return (
+            f"pair_state requires {EXACT_CACHE_L4B_DIRNAME}/; rebuild L4b "
+            "(stages.remap.rebuild_l4b_cache: true)"
+        )
+    n_l4b_manifest = payload.get("n_l4b_pair_states")
+    if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
+        on_disk = _count_npz_files(l4b_dir)
+        if on_disk < n_l4b_manifest:
+            return (
+                f"L4b cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
+                f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild L4b"
+            )
+    elif _count_npz_files(l4b_dir) == 0:
+        return (
+            f"pair_state requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild L4b"
+        )
+    return None
 
 
 def _geometry_mode_for_resolved(resolved: ResolvedTargetConfig) -> str:
@@ -787,7 +900,7 @@ def _geometry_mode_for_resolved(resolved: ResolvedTargetConfig) -> str:
     return str(
         getattr(resolved.stages.wcs_grouping, "geometry_mode", None)
         or getattr(resolved.stages.downsample, "geometry_mode", None)
-        or "linear"
+        or "field"
     ).lower()
 
 
@@ -806,6 +919,8 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
     t = resolved.target
     ds = resolved.stages.downsample
     mp = resolved.stages.mapping
+    rm = resolved.stages.remap
+    rm = resolved.stages.remap
     store = field_templates_root(
         resolved.data_root,
         t.sector,
@@ -832,6 +947,47 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
             f"Field downsample requires {REMAP_MANIFEST_NAME} from remap stage",
             str(read_root),
         )
+    import json
+
+    try:
+        remap_payload = json.loads(manifest_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return VerifyResult(
+            "downsample",
+            False,
+            f"Unreadable {REMAP_MANIFEST_NAME}: {exc}",
+            str(manifest_path),
+        )
+    lite_reason = _l4b_lite_rejection_reason(
+        remap_payload, source=REMAP_MANIFEST_NAME
+    )
+    if lite_reason:
+        return VerifyResult("downsample", False, lite_reason, str(manifest_path))
+    cache_reason = _verify_remap_exact_caches(
+        read_root,
+        remap_payload,
+        config_l4b_policy=str(ds.l4b_policy or rm.l4b_policy or "none"),
+    )
+    if cache_reason:
+        return VerifyResult("downsample", False, cache_reason, str(read_root))
+
+    assembly_path = store / "field_mode_assembly.json"
+    if assembly_path.is_file():
+        try:
+            assembly_payload = json.loads(assembly_path.read_text())
+            lite_reason = _l4b_lite_rejection_reason(
+                assembly_payload, source="field_mode_assembly.json"
+            )
+            if lite_reason:
+                return VerifyResult("downsample", False, lite_reason, str(assembly_path))
+        except (OSError, json.JSONDecodeError) as exc:
+            return VerifyResult(
+                "downsample",
+                False,
+                f"Unreadable field_mode_assembly.json: {exc}",
+                str(assembly_path),
+            )
+
     # The SCC store is shared across events; each event records exactly the
     # crop-filtered keys it required in field_contrib_keys.json (written only
     # after a successful build). Verify against THAT — not the full-chip
@@ -844,13 +1000,42 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
             "Field downsample incomplete: missing field_contrib_keys.json marker",
             str(store),
         )
-    import json
-
     try:
         keys_payload = json.loads(marker.read_text())
-        required = [
-            (str(k[0]), int(k[1]), int(k[2])) for k in keys_payload.get("keys", [])
-        ]
+        lite_reason = _l4b_lite_rejection_reason(
+            keys_payload, source="field_contrib_keys.json"
+        )
+        if lite_reason:
+            return VerifyResult("downsample", False, lite_reason, str(marker))
+        raw_keys = keys_payload.get("keys", [])
+        l4b_policy = str(keys_payload.get("l4b_policy", "none"))
+        if l4b_policy == "pair_state":
+            if raw_keys and any(len(k) != 4 for k in raw_keys):
+                return VerifyResult(
+                    "downsample",
+                    False,
+                    "pair_state requires group-qualified contrib keys "
+                    "[group_id, skycell, sx, sy]; rebuild downsample",
+                    str(marker),
+                )
+            config_policy = str(ds.l4b_policy or "none")
+            if config_policy != "pair_state":
+                return VerifyResult(
+                    "downsample",
+                    False,
+                    f"field_contrib_keys.json l4b_policy=pair_state but config has "
+                    f"{config_policy!r}; align stages.downsample.l4b_policy",
+                    str(marker),
+                )
+        group_scoped = l4b_policy == "pair_state" or int(
+            keys_payload.get("schema_version", 1)
+        ) >= 2 and len(raw_keys[0]) == 4 if raw_keys else False
+        if group_scoped:
+            required = [
+                (int(k[0]), str(k[1]), int(k[2]), int(k[3])) for k in raw_keys
+            ]
+        else:
+            required = [(str(k[0]), int(k[1]), int(k[2])) for k in raw_keys]
     except Exception as exc:
         return VerifyResult(
             "downsample", False, f"Unreadable field_contrib_keys.json: {exc}", str(store)
@@ -872,8 +1057,13 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
         )
 
         nonempty = 0
-        for skycell, sx_i, sy_i in required:
-            p = contrib_path(store, skycell, sx_i, sy_i)
+        for key in required:
+            if len(key) == 4:
+                gid_i, skycell, sx_i, sy_i = key
+                p = contrib_path(store, skycell, sx_i, sy_i, group_id=int(gid_i))
+            else:
+                skycell, sx_i, sy_i = key
+                p = contrib_path(store, skycell, sx_i, sy_i)
             if p.is_file() and len(load_contrib(p)["indices"]) > 0:
                 nonempty += 1
         if nonempty == 0:
@@ -1227,6 +1417,16 @@ def verify_remap(resolved: ResolvedTargetConfig) -> VerifyResult:
             f"Unreadable {REMAP_MANIFEST_NAME}: {exc}",
             str(manifest_path),
         )
+    lite_reason = _l4b_lite_rejection_reason(payload, source=REMAP_MANIFEST_NAME)
+    if lite_reason:
+        return VerifyResult("remap", False, lite_reason, str(manifest_path))
+    cache_reason = _verify_remap_exact_caches(
+        store,
+        payload,
+        config_l4b_policy=str(rm.l4b_policy or "none"),
+    )
+    if cache_reason:
+        return VerifyResult("remap", False, cache_reason, str(store))
     if float(payload.get("cache_quantum_ps1_px", -1)) != float(rm.cache_quantum_ps1_px):
         return VerifyResult(
             "remap",

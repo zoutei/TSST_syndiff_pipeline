@@ -38,6 +38,7 @@ _RE_PS1_PR_PROJ_FINISHED = re.compile(
 _RE_DOWN_SKYCELLS = re.compile(r"Processing (\d+) skycells in (\d+) batches")
 _RE_DOWN_BATCHES = re.compile(r"Processing \d+ skycells in (\d+) batches")
 _RE_DOWN_COMPLETED = re.compile(r"Completed batch (\d+)")
+_RE_REMAP_EXACT_DONE = re.compile(r"Exact cache: (\d+) keys, (\d+) written")
 
 _RE_TESS_TOTAL = re.compile(r"Downloading (\d+) FITS(?: file\(s\)| files)")
 _RE_TESS_PROGRESS = re.compile(r"FFI download progress: (\d+)/(\d+)")
@@ -287,6 +288,68 @@ def _parse_downsample_sidecar(log_path: Path) -> StageProgress | None:
     return None
 
 
+def _remap_progress_label(done: int, total: int, data: dict, *, prefix: str = "exact") -> str:
+    """Format exact-cache fraction, tagging oversampling when os > 1."""
+    os_factor = int(data.get("oversampling_factor") or 1)
+    base = f"{prefix} {done}/{total}"
+    if os_factor > 1:
+        return f"{base} os{os_factor}"
+    return base
+
+
+def _parse_remap_sidecar(log_path: Path) -> StageProgress | None:
+    """Parse remap sidecar."""
+    from syndiff_pipeline.template_creation.processing.remap_progress import (
+        progress_path_for_log,
+        read_progress,
+    )
+
+    data = read_progress(progress_path_for_log(log_path))
+    if not data:
+        return None
+
+    phase = data.get("phase")
+    if phase in ("shift_schedule", "grouping"):
+        return StageProgress(str(phase), "phase")
+
+    l4a_total = int(data.get("exact_l4a_total", data.get("exact_total", 0)) or 0)
+    l4a_done = int(data.get("exact_l4a_done", data.get("exact_done", 0)) or 0)
+    l4b_total = int(data.get("exact_l4b_total", 0) or 0)
+    l4b_done = int(data.get("exact_l4b_done", 0) or 0)
+
+    if phase == "exact_l4a" and l4a_total > 0:
+        return StageProgress(_remap_progress_label(l4a_done, l4a_total, data, prefix="l4a"), "fraction")
+    if phase == "exact_l4b" and l4b_total > 0:
+        return StageProgress(_remap_progress_label(l4b_done, l4b_total, data, prefix="l4b"), "fraction")
+    if phase == "exact_cache" and l4a_total > 0:
+        return StageProgress(_remap_progress_label(l4a_done, l4a_total, data), "fraction")
+
+    if phase == "complete":
+        if l4b_total > 0:
+            return StageProgress(
+                _remap_progress_label(l4b_total, l4b_total, data, prefix="l4b"),
+                "fraction",
+            )
+        if l4a_total > 0:
+            return StageProgress(_remap_progress_label(l4a_total, l4a_total, data, prefix="l4a"), "fraction")
+        return StageProgress("complete", "phase")
+
+    if l4b_total > 0:
+        return StageProgress(_remap_progress_label(l4b_done, l4b_total, data, prefix="l4b"), "fraction")
+    if l4a_total > 0:
+        return StageProgress(_remap_progress_label(l4a_done, l4a_total, data, prefix="l4a"), "fraction")
+    return None
+
+
+def _parse_remap(text: str) -> StageProgress | None:
+    """Parse remap log tail (fallback when sidecar is unavailable)."""
+    match = _last_match(_RE_REMAP_EXACT_DONE, text)
+    if match:
+        total = int(match.group(1))
+        return StageProgress(f"exact {total}/{total}", "fraction")
+    return _phase_from_text(text)
+
+
 def _parse_downsample(text: str) -> StageProgress | None:
     """Parse downsample.
     
@@ -485,7 +548,7 @@ def _elapsed_progress(started_at: str | None) -> StageProgress | None:
 _PARSERS = {
     "ps1_download": _parse_ps1_download,
     "ps1_process": _parse_ps1_process,
-    "remap": _parse_downsample,
+    "remap": _parse_remap,
     "downsample": _parse_downsample,
     "tess_ffi_download": _parse_tess_ffi_download,
     "mapping": _parse_mapping,
@@ -506,6 +569,10 @@ def read_log_progress(
     path = Path(log_path)
     if stage == "downsample":
         sidecar_prog = _parse_downsample_sidecar(path)
+        if sidecar_prog is not None:
+            return sidecar_prog
+    if stage == "remap":
+        sidecar_prog = _parse_remap_sidecar(path)
         if sidecar_prog is not None:
             return sidecar_prog
     if stage == "diff":

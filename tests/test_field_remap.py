@@ -8,7 +8,10 @@ from pathlib import Path
 import numpy as np
 
 from syndiff_pipeline.template_creation.processing.field_remap import (
+    EXACT_CACHE_L4A_DIRNAME,
     REMAP_MANIFEST_NAME,
+    exact_cache_dir_for_read_root,
+    exact_cache_l4a_dir_for_read_root,
     remap_root,
     resolve_remap_read_root,
     run_field_remap_scc,
@@ -29,6 +32,14 @@ def _minimal_schedule(n_frames: int = 2, n_skycells: int = 1) -> ShiftSchedule:
         frame_valid=np.ones(n_frames, dtype=bool),
         meta={"reference_ffi": "/data/ref.fits"},
     )
+
+
+def test_exact_cache_l4a_dir_for_read_root(tmp_path: Path):
+    read_root = tmp_path / "remap" / "oversampling_1"
+    read_root.mkdir(parents=True)
+    l4a_dir = exact_cache_l4a_dir_for_read_root(read_root)
+    assert l4a_dir == read_root / EXACT_CACHE_L4A_DIRNAME
+    assert exact_cache_dir_for_read_root(read_root) == l4a_dir
 
 
 def test_resolve_remap_read_root_prefers_remap_manifest(tmp_path: Path):
@@ -116,6 +127,8 @@ def test_run_field_remap_scc_writes_layout(tmp_path: Path, monkeypatch):
     assert manifest["keying"] == "absolute"
     assert manifest["n_groups"] == len(assignment.groups)
     assert manifest["reference_ffi"] == "/data/ref.fits"
+    assert manifest["exact_cache_l4a"] == EXACT_CACHE_L4A_DIRNAME
+    assert (store / EXACT_CACHE_L4A_DIRNAME).exists() is False
 
 
 def test_remap_root_matches_scc_paths(tmp_path: Path):

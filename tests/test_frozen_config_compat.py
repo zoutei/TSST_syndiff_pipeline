@@ -65,6 +65,11 @@ def _write_distortion_era_frozen_config(
 
 
 class TestFrozenConfigCompat(unittest.TestCase):
+    def test_empty_stages_default_to_field_geometry(self):
+        stages = parse_stage_params({})
+        self.assertEqual(stages.wcs_grouping.geometry_mode, "field")
+        self.assertEqual(stages.downsample.geometry_mode, "field")
+
     def test_strict_parse_accepts_geometry_mode(self):
         stages = parse_stage_params(
             {
@@ -77,7 +82,6 @@ class TestFrozenConfigCompat(unittest.TestCase):
                     "materialize_fits": False,
                     "hybrid_R": 1,
                     "apply_hybrid_exact": True,
-                    "include_abutting_border_exact": True,
                     "rebuild_field_store": False,
                 },
             }
@@ -86,7 +90,6 @@ class TestFrozenConfigCompat(unittest.TestCase):
         self.assertEqual(stages.downsample.geometry_mode, "field")
         self.assertFalse(stages.downsample.materialize_fits)
         self.assertTrue(stages.downsample.apply_hybrid_exact)
-        self.assertTrue(stages.downsample.include_abutting_border_exact)
         self.assertFalse(stages.downsample.rebuild_field_store)
 
     def test_strict_parse_rejects_unknown_drift_field_block(self):

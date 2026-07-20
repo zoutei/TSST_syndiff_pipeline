@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import numpy as np
 import pandas as pd
 from astropy.wcs import WCS
 
 from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
+    abutting_rim_ps1_mask,
+    apply_hybrid_patch,
     build_l4a_hybrid_assignment,
 )
 
@@ -202,9 +204,7 @@ def shared_abutting_border_tess_ids(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Exclusive A|B abutting TESS flat ids (A-owned and B-owned sides).
 
-    Used for full F2 pair-state L4b; production binning currently Exact-expands
-    each skycell's full abutting border under its Type-I realizing WCS
-    (``l4b_policy: abutting_under_type1_wcs``).
+    Used for full F2 pair-state L4b (not yet wired in production remap/downsample).
     """
     t_x = master.shape[1]
     a = master == int(skycell_id_a)
@@ -236,3 +236,140 @@ def shared_abutting_border_tess_ids(
     ids_a = (ya.astype(np.int64) * t_x + xa.astype(np.int64)).astype(np.int32)
     ids_b = (yb.astype(np.int64) * t_x + xb.astype(np.int64)).astype(np.int32)
     return ids_a, ids_b
+
+
+def patch_l4b_rim_from_cache(
+    hybrid_tid: np.ndarray,
+    *,
+    linear_tid: np.ndarray,
+    skycell_id: int,
+    neighbour_id: int,
+    master: np.ndarray,
+    exact_cache_path: str | Path,
+) -> np.ndarray:
+    """Patch one neighbour's L4b rim onto ``hybrid_tid``; L4b wins on overlap."""
+    cache_path = Path(exact_cache_path)
+    with np.load(cache_path) as z:
+        id_lo = int(z["id_lo"])
+        id_hi = int(z["id_hi"])
+        exact_lo = np.asarray(z["exact_tid_lo"], dtype=np.int32)
+        exact_hi = np.asarray(z["exact_tid_hi"], dtype=np.int32)
+
+    ids_self, _ids_nb = shared_abutting_border_tess_ids(
+        master, int(skycell_id), int(neighbour_id)
+    )
+    if ids_self.size == 0:
+        return hybrid_tid
+
+    if int(skycell_id) == id_lo:
+        exact_tid = exact_lo
+    elif int(skycell_id) == id_hi:
+        exact_tid = exact_hi
+    else:
+        raise ValueError(
+            f"skycell_id {skycell_id} not in L4b cache pair ({id_lo}, {id_hi})"
+        )
+
+    if exact_tid.size == 0:
+        return hybrid_tid
+
+    # Rim location is defined on the rolled linear map (border tess ids), not
+    # post-L4a exact tess ids which may differ inside the seam band.
+    rim_mask = abutting_rim_ps1_mask(linear_tid, ids_self)
+    return apply_hybrid_patch(hybrid_tid, exact_tid, rim_mask)
+
+
+def compose_group_hybrid_assignment(
+    frozen_tid: np.ndarray,
+    *,
+    skycell: str,
+    skycell_id: int,
+    sx_int: int,
+    sy_int: int,
+    master: np.ndarray,
+    group_shifts: Mapping[str, tuple[int, int]],
+    name_to_id: Mapping[str, int],
+    l4a_cache_path: str | Path,
+    l4b_cache_dir: str | Path,
+    hybrid_R: int = 1,
+    apply_l4b: bool = True,
+    require_l4a_cache: bool = True,
+    require_l4b_cache: bool = True,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Compose L4a hybrid then L4b rim patches for one group context."""
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+        l4b_rim_cache_basename,
+    )
+
+    cache_path = Path(l4a_cache_path)
+    if require_l4a_cache and not cache_path.is_file():
+        raise FileNotFoundError(f"L4a exact cache missing: {cache_path}")
+    if cache_path.is_file():
+        hybrid, meta = hybrid_assignment_from_exact_cache(
+            frozen_tid,
+            sx_int,
+            sy_int,
+            cache_path,
+            hybrid_R=int(hybrid_R),
+        )
+    else:
+        hybrid, _ = build_l4a_hybrid_assignment(
+            frozen_tid, sx_int, sy_int, exact_tid=None, hybrid_R=int(hybrid_R)
+        )
+        meta = {"cache_hit": False, "cache_path": str(cache_path), "l4a_only_roll": True}
+
+    linear_tid, _ = build_l4a_hybrid_assignment(
+        frozen_tid, sx_int, sy_int, exact_tid=None, hybrid_R=int(hybrid_R)
+    )
+
+    meta = dict(meta)
+    meta["n_l4b_patches"] = 0
+
+    if not apply_l4b:
+        return hybrid, meta
+
+    l4b_dir = Path(l4b_cache_dir)
+    pair_ids = abutting_undirected_pairs(master)
+
+    for id_lo, id_hi in pair_ids:
+        if int(skycell_id) not in (int(id_lo), int(id_hi)):
+            continue
+        neighbour_id = int(id_hi) if int(skycell_id) == int(id_lo) else int(id_lo)
+        nb_name = None
+        for name, nid in name_to_id.items():
+            if int(nid) == neighbour_id:
+                nb_name = str(name)
+                break
+        if nb_name is None or nb_name not in group_shifts:
+            continue
+        sx_nb, sy_nb = group_shifts[nb_name]
+        rim_name = l4b_rim_cache_basename(
+            int(skycell_id),
+            neighbour_id,
+            int(sx_int),
+            int(sy_int),
+            int(sx_nb),
+            int(sy_nb),
+        )
+        rim_path = l4b_dir / rim_name
+        ids_self, _ = shared_abutting_border_tess_ids(
+            master, int(skycell_id), neighbour_id
+        )
+        if ids_self.size == 0:
+            continue
+        if not rim_path.is_file():
+            if require_l4b_cache:
+                raise FileNotFoundError(f"L4b rim cache missing: {rim_path}")
+            continue
+        hybrid = patch_l4b_rim_from_cache(
+            hybrid,
+            linear_tid=linear_tid,
+            skycell_id=int(skycell_id),
+            neighbour_id=neighbour_id,
+            master=master,
+            exact_cache_path=rim_path,
+        )
+        meta["n_l4b_patches"] = int(meta["n_l4b_patches"]) + 1
+
+    return hybrid, meta

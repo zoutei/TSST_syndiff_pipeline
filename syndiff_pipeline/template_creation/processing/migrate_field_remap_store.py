@@ -3,6 +3,10 @@
 Non-destructive migration: copies artifacts from the legacy templates store
 into the dedicated remap store, verifies each destination file, and leaves the
 source files in place. Safe to re-run (idempotent).
+
+Legacy monolithic ``exact_cache/`` (L4b-lite pollution) is copied to
+``exact_cache_legacy_polluted/`` and must not be used as clean L4a; rebuild
+``exact_cache_l4a/`` via field_remap.
 """
 
 from __future__ import annotations
@@ -17,7 +21,8 @@ from typing import Any
 
 from syndiff_pipeline.common.scc_paths import scc_remap_dir, scc_templates_dir
 from syndiff_pipeline.template_creation.processing.field_remap import (
-    EXACT_CACHE_DIRNAME,
+    EXACT_CACHE_LEGACY_DIRNAME,
+    EXACT_CACHE_LEGACY_POLLUTED_DIRNAME,
     REMAP_MANIFEST_NAME,
     REMAP_SCHEMA_VERSION,
 )
@@ -26,7 +31,9 @@ log = logging.getLogger(__name__)
 
 MIGRATION_NOTE = (
     "Legacy remap artifacts were copied from templates/ to remap/; "
-    "source files were left in place for safety."
+    "source files were left in place for safety. "
+    "Legacy exact_cache/ was archived under exact_cache_legacy_polluted/ "
+    "and is not valid L4a; rebuild exact_cache_l4a/ via field_remap."
 )
 
 _REMAP_FILES = (
@@ -111,7 +118,7 @@ def migrate_scc_remap_artifacts(
 
     - ``shift_schedule.npz``, ``shift_schedule.json``
     - ``template_group_shifts.parquet``, ``template_groups.json``
-    - ``exact_cache/`` (entire directory tree)
+    - ``exact_cache/`` → ``exact_cache_legacy_polluted/`` (polluted; not L4a)
 
     Does **not** touch ``contribs/``, ``template_manifest.json``, or
     ``field_mode_assembly.json``. Uses copy-then-verify and leaves sources in
@@ -140,15 +147,15 @@ def migrate_scc_remap_artifacts(
             missing_at_source.append(name)
 
     cache_status = _copy_tree_if_missing(
-        source / EXACT_CACHE_DIRNAME,
-        dest / EXACT_CACHE_DIRNAME,
+        source / EXACT_CACHE_LEGACY_DIRNAME,
+        dest / EXACT_CACHE_LEGACY_POLLUTED_DIRNAME,
     )
     if cache_status == "copied":
-        copied.append(f"{EXACT_CACHE_DIRNAME}/")
+        copied.append(f"{EXACT_CACHE_LEGACY_POLLUTED_DIRNAME}/")
     elif cache_status == "skipped":
-        skipped.append(f"{EXACT_CACHE_DIRNAME}/")
+        skipped.append(f"{EXACT_CACHE_LEGACY_POLLUTED_DIRNAME}/")
     else:
-        missing_at_source.append(f"{EXACT_CACHE_DIRNAME}/")
+        missing_at_source.append(f"{EXACT_CACHE_LEGACY_DIRNAME}/")
 
     manifest_written = _write_migration_manifest(
         dest, oversampling_factor=oversampling_factor

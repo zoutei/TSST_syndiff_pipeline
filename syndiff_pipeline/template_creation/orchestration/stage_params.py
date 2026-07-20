@@ -79,8 +79,10 @@ REMAP_ALLOWED = frozenset(
         "keying",
         "apply_hybrid_exact",
         "hybrid_R",
-        "include_abutting_border_exact",
+        "l4b_policy",
         "rebuild_remap_cache",
+        "rebuild_l4b_cache",
+        "raw_drift_outlier_sigma",
         "n_jobs",
         "executor",
         "condor_request_cpus",
@@ -113,8 +115,9 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "materialize_fits",
         "hybrid_R",
         "apply_hybrid_exact",
-        "include_abutting_border_exact",
         "rebuild_field_store",
+        "l4b_policy",
+        "require_l4b_cache",
         "prematerialize_top_n",
     }
 )
@@ -166,8 +169,8 @@ class WcsGroupingStageParams:
     x_left_dead: int = 44
     x_right_dead: int = 44
     y_edge_strip: int = 30
-    # linear (default) = target-anchored dx/dy groups; field = SCC signature groups
-    geometry_mode: str = "linear"
+    # field (default) = SCC signature groups; linear = target-anchored dx/dy groups
+    geometry_mode: str = "field"
     grouping_quantum_ps1_px: float = 1.0
 
 
@@ -246,8 +249,12 @@ class RemapStageParams:
     keying: str = "absolute"
     apply_hybrid_exact: bool = True
     hybrid_R: int = 1
-    include_abutting_border_exact: bool = True
+    # ``none`` = L4b off (L4a-only hybrid); ``pair_state`` = F2 rim under shared WCS.
+    l4b_policy: str = "none"
+    # Pre-SG MAD gate on raw TESS drift (per orbit). ``None`` disables.
+    raw_drift_outlier_sigma: float | None = 5.0
     rebuild_remap_cache: bool = False
+    rebuild_l4b_cache: bool = False
     n_jobs: int = 16
     executor: str = "condor"
     condor_request_cpus: int = 32
@@ -276,12 +283,15 @@ class DownsampleStageParams:
     condor_request_memory: int = 128_000
     condor_request_disk: int | None = None  # MB; None → omit request_disk
     condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
-    geometry_mode: str = "linear"
+    geometry_mode: str = "field"
     materialize_fits: bool = False
     hybrid_R: int = 1
     apply_hybrid_exact: bool = True
-    include_abutting_border_exact: bool = True
     rebuild_field_store: bool = False
+    # Must match ``stages.remap.l4b_policy`` for hybrid downsample.
+    l4b_policy: str = "none"
+    # When ``None``, defaults to ``True`` iff ``l4b_policy=pair_state`` (fail-loud on miss).
+    require_l4b_cache: bool | None = None
     prematerialize_top_n: int | None = None
     condor_rank: str | None = "-LoadAvg"
 
@@ -383,6 +393,12 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     remap_keying = str(rm.get("keying", "absolute"))
     if remap_keying not in ("absolute", "phase"):
         raise ValueError("stages.remap.keying must be 'absolute' or 'phase'")
+    remap_l4b_policy = str(rm.get("l4b_policy", "none"))
+    if remap_l4b_policy not in ("none", "pair_state"):
+        raise ValueError("stages.remap.l4b_policy must be 'none' or 'pair_state'")
+    downsample_l4b_policy = str(ds.get("l4b_policy", "none"))
+    if downsample_l4b_policy not in ("none", "pair_state"):
+        raise ValueError("stages.downsample.l4b_policy must be 'none' or 'pair_state'")
     return TemplateStageParams(
         wcs_grouping=_merge_dataclass(WcsGroupingStageParams, wg),
         mapping=_merge_dataclass(MappingStageParams, mp),
