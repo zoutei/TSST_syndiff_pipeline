@@ -114,6 +114,8 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "materialize_fits",
         "rebuild_field_store",
         "prematerialize_top_n",
+        "apply_intra_skycell",
+        "apply_inter_skycell",
         "remap_store_name",
         "output_store_name",
     }
@@ -290,6 +292,8 @@ class DownsampleStageParams:
     rebuild_field_store: bool = False
     prematerialize_top_n: int | None = None
     condor_rank: str | None = "-LoadAvg"
+    apply_intra_skycell: bool = True
+    apply_inter_skycell: bool = True
     # INPUT: which remap lane to read; None → inherit stages.remap.store_name
     remap_store_name: str | None = None
     # OUTPUT: which templates lane to write; None → templates/
@@ -305,6 +309,11 @@ class DownsampleStageParams:
         if level not in ("INFO", "DEBUG"):
             raise ValueError(f"log_level must be INFO or DEBUG, got {self.log_level!r}")
         object.__setattr__(self, "log_level", level)
+        if not bool(self.apply_intra_skycell) and not bool(self.apply_inter_skycell):
+            raise ValueError(
+                "downsample requires at least one of apply_intra_skycell / "
+                "apply_inter_skycell to be true"
+            )
         object.__setattr__(
             self, "remap_store_name", normalize_store_name(self.remap_store_name)
         )

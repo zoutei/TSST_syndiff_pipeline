@@ -6,7 +6,13 @@
 #     --config config/pipeline_s20_field_l4_split_smoke.yaml \
 #     --scc config/scc_s20_c1_k1.csv \
 #     --stages remap \
-#     --run-id s20_c1_k1_l4_split_smoke_5   # border-batched L4b
+#     --run-id s20_c1_k1_l4_split_smoke_5   # border-batched inter-skycell
+# Intra-skycell-only downsample (after successful remap with empty inter cache):
+#   syndiff template submit \
+#     --config config/pipeline_s20_field_l4_split_smoke.yaml \
+#     --scc config/scc_s20_c1_k1.csv \
+#     --stages downsample \
+#     --run-id s20_c1_k1_l4_split_smoke_5_intra_ds
 # Then optionally: --scc config/scc_s20_c3_k3.csv --run-id s20_c3_k3_l4_split_smoke
 deployment_file: deployment.yaml
 diff_config: diff_config_single_kernel.yaml
@@ -39,6 +45,8 @@ stages:
     condor_rank: "-LoadAvg"
   downsample:
     geometry_mode: field
+    apply_intra_skycell: true
+    apply_inter_skycell: false   # smoke: intra-skycell only; inter remap failed
     # Named lanes (optional A/B):
     #   remap_store_name: null       # INPUT  (omit → inherit stages.remap.store_name)
     #   output_store_name: no_l4b    # OUTPUT → templates_no_l4b/oversampling_N/

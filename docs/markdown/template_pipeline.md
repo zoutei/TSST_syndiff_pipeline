@@ -643,7 +643,7 @@ Reads PS1 Zarr + mapping CSV; runs the **modern sliding-window convolution pipel
 
 L5 flux binning into the SCC template product store. Deps: `mapping`, `ps1_process`, and `remap` in field mode (`effective_deps` omits `remap` in linear mode). Produces template FITS/store for SynDiff Hotpants. Stage names `templates` / `tmpl` are **rejected** by `resolve_stage_name`.
 
-- **`geometry_mode: field`** (default): reads L2–L4 remap artifacts from `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`, then writes flux `contribs/` under `templates/oversampling_{N}/` — see [field_geometry.md](field_geometry.md). No `event_job.json` is required.
+- **`geometry_mode: field`** (default): reads L2–L4 remap artifacts from `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/` (or `remap_{NAME}/` when `stages.remap.store_name` / `stages.downsample.remap_store_name` is set), then writes flux `contribs/` under `templates/oversampling_{N}/` (or `templates_{NAME}/` via `stages.downsample.output_store_name`) — see [field_geometry.md](field_geometry.md). Compose applies Exact layers selected by `apply_intra_skycell` / `apply_inter_skycell` (default both `true`). No `event_job.json` is required.
 - **`geometry_mode: linear`**: requires an event's `event_job.json` (from a completed `bind` run) on disk for crop bounds and per-transient offsets — the in-process dispatcher raises `FileNotFoundError` if it's missing (`template_creation/orchestration/dispatch.py::_execute_template_stage`).
 
 **Algorithm summary**:
@@ -936,7 +936,9 @@ Either YAML key is accepted (`parse_stage_params` reads `stages.templates` first
 | `condor_requirements` | `Memory >= 128000 && LoadAvg < 10` | Machine requirements expression |
 | `condor_rank` | `-LoadAvg` | Prefer lower load average |
 
-Field-mode-only keys (`apply_hybrid_exact`, `hybrid_R`, `rebuild_field_store`, `n_jobs`, `stage_regmaps_to_scratch`, `materialize_fits`, …): see [field_geometry.md](field_geometry.md).
+Field-mode-only keys (`apply_intra_skycell`, `apply_inter_skycell`, `rebuild_field_store`, `n_jobs`, `stage_regmaps_to_scratch`, `materialize_fits`, `output_store_name`, `remap_store_name`, …): see [field_geometry.md](field_geometry.md). Removed keys (`apply_hybrid_exact`, `l4b_policy`, `hybrid_R` on downsample) are rejected at parse.
+
+Named store lanes (optional A/B): `stages.remap.store_name` writes `remap_{NAME}/`; `stages.downsample.remap_store_name` selects which remap lane to read (omit → inherit remap); `stages.downsample.output_store_name` writes `templates_{NAME}/`. Diff/star consume a lane via `paths.template_store_name` (diff) or `defaults.template_store_name` (star). Remap shift debug PNGs land under `{scc}/debug_plots/` (with `_{NAME}` in the basename when named).
 
 #### `stages.diff`
 

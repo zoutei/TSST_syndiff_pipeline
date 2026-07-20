@@ -44,7 +44,8 @@ Defaults (no YAML required beyond a normal site):
 | `stages.wcs_grouping.geometry_mode` | `field` | Event bind records field geometry |
 | `stages.downsample.geometry_mode` | `field` | L5 uses `field_downsample` |
 | `stages.remap.intra_skycell_R` | `1` | Intra-skycell Exact dilation radius |
-| Intra-skycell + inter-skycell exact | always on | No YAML toggles in field mode |
+| `stages.downsample.apply_intra_skycell` | `true` | Apply intra-skycell Exact patch at L5 |
+| `stages.downsample.apply_inter_skycell` | `true` | Apply inter-skycell rim patches at L5 |
 
 Opt out to linear:
 
@@ -140,6 +141,7 @@ appearance of each distinct signature gets a dense `group_id`. Artifacts:
 
 - `shift_schedule.npz` / `.json`
 - `skycell_shift_grid_debug.png` / `skycell_shift_relative_center_debug.png`
+  (under `{scc}/debug_plots/`; named remap lanes add `_{store_name}` to the basename)
 - `template_group_shifts.parquet`
 - `template_groups.json` (`group_id`, `signature_hash`, frame membership)
 
@@ -188,8 +190,12 @@ schema v3 — wipe Exact dirs and rebuild.
 
 ## L4b: Type II F2 Exact (inter-skycell rim)
 
-Always on in field mode (no YAML toggle). Remap builds `exact_cache_l4b/` for every
-abutting master pair and contiguous **pair epoch** (constant 4-tuple run).
+Remap builds `exact_cache_l4b/` for every abutting master pair and contiguous
+**pair epoch** (constant 4-tuple run). Downsample applies those rim patches when
+`stages.downsample.apply_inter_skycell` is `true` (default). Set
+`apply_inter_skycell: false` to compose L5 without inter-skycell rims (skips the
+nonempty `exact_cache_l4b/` verify check) — useful when inter-skycell remap is
+incomplete.
 
 | Item | Spec |
 |------|------|
@@ -232,7 +238,9 @@ Within each skycell worker:
 3. **Compose + bin once** per distinct key; **fan out** identical sparse arrays to
    every sharing `group_id` (on-disk contract unchanged: one NPZ per group).
 4. Own-shift `(0,0)` uses L4a sentinel `"roll0"` (remap skips zero epochs) but
-   still composes L4b rims when neighbours differ.
+   still composes L4b rims when `apply_inter_skycell` is true and neighbours
+   differ. When `apply_inter_skycell` is false, composite keys omit neighbour
+   pair-epoch slots (intra epoch / `"roll0"` only).
 
 Progress sidecar (`downsample.progress.json`) reports `ckeys done/total` and
 skycell batches. Contrib writes use temp-file + atomic `replace` (no store-wide
@@ -241,13 +249,15 @@ lock). Crop/event builds prefilter pixels outside the ROI before `argsort`.
 ### Compose order (per group context)
 
 1. Load L0 `TESS_PIXEL_MAP`.
-2. Build intra-skycell hybrid (roll + Exact patch from `exact_cache_l4a/`).
-3. For each master abutting neighbour B, load the matching inter-skycell rim NPZ using
-   **this group’s** pair-epoch lookup; patch A’s rim (`abutting_rim_ps1_mask`).
-   **Inter-skycell wins on overlap.**
+2. If `apply_intra_skycell` (default): build intra-skycell hybrid (roll + Exact
+   patch from `exact_cache_l4a/`). Otherwise use the rolled linear assignment.
+3. If `apply_inter_skycell` (default): for each master abutting neighbour B, load
+   the matching inter-skycell rim NPZ using **this group’s** pair-epoch lookup;
+   patch A’s rim (`abutting_rim_ps1_mask`). **Inter-skycell wins on overlap.**
 4. Bin PS1 with `assignment=hybrid_map`, `sx_int=0`, `sy_int=0` (do not data-roll
    PS1 when hybrid is used).
-5. Missing required Exact caches → **fail**. No silent roll fallback.
+5. Missing required Exact caches (for layers that are enabled) → **fail**. No
+   silent roll fallback when a required layer’s cache is absent.
 
 ### Consumers
 
@@ -284,10 +294,17 @@ stages:
 
   downsample:                     # L5
     geometry_mode: field          # DEFAULT; set linear to opt out
+    apply_intra_skycell: true     # use exact_cache_l4a/ at compose
+    apply_inter_skycell: true     # use exact_cache_l4b/ rim patches
     rebuild_field_store: false
     materialize_fits: false
     n_jobs: 16
 ```
+
+At least one of `apply_intra_skycell` / `apply_inter_skycell` must be `true`
+(reject both `false` at parse). Remap still builds both Exact caches; the
+downsample toggles only control which layers L5 compose applies and which
+caches verify requires.
 
 Removed keys (`apply_hybrid_exact`, `l4b_policy`, `require_l4b_cache`, `hybrid_R`
 on downsample) are **rejected at parse** — use the shape above.
@@ -309,8 +326,6 @@ downsample dataclass default is `field`, but an explicit mismatch with
   epoch_group_members.parquet           # epoch_id → group_id membership
   gid_epoch_index.npz                   # group_id → L4a/L4b epoch lookup
   group_id_per_frame.npy
-  skycell_shift_grid_debug.png
-  skycell_shift_relative_center_debug.png
   template_group_shifts.parquet
   template_groups.json
   exact_cache_l4a/{skycell}/e{epoch}_sx{±}_sy{±}_exact.npz
@@ -321,13 +336,32 @@ downsample dataclass default is `field`, but an explicit mismatch with
 
 {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/ # downsample (L5)
   template_manifest.json
-  field_mode_assembly.json              # perf counters (n_compose, reuse ratio, …)
+  field_mode_assembly.json              # includes store_root, remap_root, lane names
   downsample.progress.json              # field L5 ckeys / skycell batches
   contribs/…_gid{N}.npz
   fits/syndiff_field_s{SSSS}_{C}_{K}[_os{N}]_gid{N}.fits.fz  # optional
   materialized_fits.json
   .lock
+
+{data_root}/s{SSSS}/c{C}/k{K}/debug_plots/  # template-pipeline diagnostics
+  skycell_shift_grid_debug.png
+  skycell_shift_relative_center_debug.png
+  skycell_shift_grid_debug_{NAME}.png              # when remap.store_name set
+  skycell_shift_relative_center_debug_{NAME}.png
+
+# Optional named lanes (do not clobber the default trees):
+#   remap_{NAME}/oversampling_{N}/
+#   templates_{NAME}/oversampling_{N}/
 ```
+
+Named store knobs (campaign YAML):
+
+| Knob | Role |
+|------|------|
+| `stages.remap.store_name` | Remap **write** lane → `remap/` or `remap_{NAME}/` |
+| `stages.downsample.remap_store_name` | Downsample **input** (read remap); omit → inherit `remap.store_name` |
+| `stages.downsample.output_store_name` | Downsample **output** → `templates/` or `templates_{NAME}/` |
+| `paths.template_store_name` (diff) | Which templates lane diff/star reads |
 
 | Stage | Saves | Does not save |
 |-------|-------|---------------|
@@ -383,7 +417,9 @@ Verify rejects:
 - Legacy manifests with `apply_hybrid_exact`, `l4b_policy`, or `hybrid_R` (schema v1)
 - `include_abutting_border_exact` / lite `l4b_policy` values
 - Polluted `exact_cache/` without `exact_cache_l4a/`
-- Missing `exact_cache_l4a/` or `exact_cache_l4b/` (both required in field mode)
+- Missing `exact_cache_l4a/` when `apply_intra_skycell: true` (default)
+- Missing / empty `exact_cache_l4b/` when `apply_inter_skycell: true` (default);
+  skipped when `apply_inter_skycell: false`
 - Contrib keys that are not group-qualified 4-tuples `(group_id, skycell, sx, sy)`
 
 Intentional rebuild:
@@ -425,7 +461,7 @@ stages:
 | Module | Role |
 |--------|------|
 | `template_creation/processing/shift_schedule.py` | L2–L3 schedule + groups + synthesis / frame_origin |
-| `template_creation/processing/shift_schedule_plots.py` | Remap debug PNGs (3×3 grid + relative-to-center) |
+| `template_creation/processing/shift_schedule_plots.py` | Remap debug PNGs under SCC `debug_plots/` |
 | `template_creation/processing/hybrid_regmaps.py` | L4a mask / roll / patch primitives |
 | `template_creation/processing/field_hybrid_exact.py` | Exact subsets; L4a/L4b compose |
 | `template_creation/processing/field_abutting.py` | Undirected pairs; epoch cache path helpers |
