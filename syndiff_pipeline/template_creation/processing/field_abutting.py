@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -21,14 +22,23 @@ __all__ = [
     "build_col_of_name",
     "build_name_to_id",
     "count_unique_pair_states_sum",
+    "l4a_exact_path",
     "l4b_rim_cache_basename",
+    "l4b_rim_path",
     "pair_column_indices",
+    "pair_subdir_name",
     "parse_l4b_rim_cache_basename",
     "unique_pair_states",
 ]
 
 _L4B_RIM_CACHE_RE = re.compile(
     r"^pair_(?P<id_lo>\d+)__(?P<id_hi>\d+)_"
+    r"sx(?P<sx_lo>[+-]?\d+)_sy(?P<sy_lo>[+-]?\d+)_"
+    r"sx(?P<sx_hi>[+-]?\d+)_sy(?P<sy_hi>[+-]?\d+)_rim\.npz$"
+)
+
+_L4B_EPOCH_RIM_RE = re.compile(
+    r"^e(?P<epoch_id>\d+)_"
     r"sx(?P<sx_lo>[+-]?\d+)_sy(?P<sy_lo>[+-]?\d+)_"
     r"sx(?P<sx_hi>[+-]?\d+)_sy(?P<sy_hi>[+-]?\d+)_rim\.npz$"
 )
@@ -221,7 +231,10 @@ def l4b_rim_cache_basename(
     sx_b: int,
     sy_b: int,
 ) -> str:
-    """Basename for one L4b F2 rim Exact cache entry (undirected pair-state key)."""
+    """Legacy flat basename for one L4b F2 rim Exact cache entry (undirected pair-state key).
+
+    Prefer :func:`l4b_rim_path` for schema-v3 epoch caches under ``pair_*/`` subfolders.
+    """
     id_lo, id_hi = (int(id_a), int(id_b)) if int(id_a) <= int(id_b) else (int(id_b), int(id_a))
     if id_a == id_lo:
         sx_lo, sy_lo, sx_hi, sy_hi = int(sx_a), int(sy_a), int(sx_b), int(sy_b)
@@ -232,6 +245,47 @@ def l4b_rim_cache_basename(
         f"sx{sx_lo:+d}_sy{sy_lo:+d}_"
         f"sx{sx_hi:+d}_sy{sy_hi:+d}_rim.npz"
     )
+
+
+def pair_subdir_name(id_lo: int, id_hi: int) -> str:
+    """Directory name under ``exact_cache_l4b/`` for an undirected abutting pair."""
+    lo, hi = (int(id_lo), int(id_hi)) if int(id_lo) <= int(id_hi) else (int(id_hi), int(id_lo))
+    return f"pair_{lo}__{hi}"
+
+
+def l4a_exact_path(
+    l4a_root: Path | str,
+    skycell: str,
+    epoch_id: int,
+    sx_int: int,
+    sy_int: int,
+) -> Path:
+    """Schema-v3 L4a Exact path: ``{l4a_root}/{skycell}/e{epoch}_sx±_sy±_exact.npz``."""
+    name = str(skycell)
+    fname = f"e{int(epoch_id)}_sx{int(sx_int):+d}_sy{int(sy_int):+d}_exact.npz"
+    return Path(l4a_root) / name / fname
+
+
+def l4b_rim_path(
+    l4b_root: Path | str,
+    id_lo: int,
+    id_hi: int,
+    pair_epoch_id: int,
+    sx_lo: int,
+    sy_lo: int,
+    sx_hi: int,
+    sy_hi: int,
+) -> Path:
+    """Schema-v3 L4b rim path under ``pair_{lo}__{hi}/``."""
+    lo, hi = (int(id_lo), int(id_hi)) if int(id_lo) <= int(id_hi) else (int(id_hi), int(id_lo))
+    if (int(id_lo), int(id_hi)) != (lo, hi):
+        sx_lo, sy_lo, sx_hi, sy_hi = int(sx_hi), int(sy_hi), int(sx_lo), int(sy_lo)
+    fname = (
+        f"e{int(pair_epoch_id)}_"
+        f"sx{int(sx_lo):+d}_sy{int(sy_lo):+d}_"
+        f"sx{int(sx_hi):+d}_sy{int(sy_hi):+d}_rim.npz"
+    )
+    return Path(l4b_root) / pair_subdir_name(lo, hi) / fname
 
 
 def parse_l4b_rim_cache_basename(

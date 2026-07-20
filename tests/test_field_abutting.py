@@ -9,8 +9,11 @@ from syndiff_pipeline.template_creation.processing.field_abutting import (
     build_col_of_name,
     build_name_to_id,
     count_unique_pair_states_sum,
+    l4a_exact_path,
     l4b_rim_cache_basename,
+    l4b_rim_path,
     pair_column_indices,
+    pair_subdir_name,
     parse_l4b_rim_cache_basename,
     unique_pair_states,
 )
@@ -158,3 +161,14 @@ def test_pair_column_indices_and_name_helpers():
     assert cols.shape == (1, 2)
     # schedule column for skycell.0.0 is 1, for skycell.1.0 is 0
     assert tuple(cols[0]) == (1, 0)
+
+
+def test_l4a_l4b_epoch_paths():
+    from pathlib import Path
+
+    root = Path("/tmp/exact")
+    p = l4a_exact_path(root, "skycell.1.2", 3, 5, -1)
+    assert p.as_posix().endswith("skycell.1.2/e3_sx+5_sy-1_exact.npz")
+    q = l4b_rim_path(root, 20, 10, 2, 1, 0, 0, 0)
+    assert q.as_posix().endswith("pair_10__20/e2_sx+0_sy+0_sx+1_sy+0_rim.npz")
+    assert pair_subdir_name(20, 10) == "pair_10__20"

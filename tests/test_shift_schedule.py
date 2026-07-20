@@ -26,8 +26,10 @@ from syndiff_pipeline.template_creation.processing.shift_schedule import (
     _synthesize_shift_gaps,
     assign_groups_from_schedule,
     build_rle_dataframe,
+    build_shift_epochs,
     build_skycell_shift_schedule,
     cache_key_for,
+    middle_rep_frame_index,
     encode_quantized_shift,
     hysteresis_round_series,
     quantize_shift,
@@ -322,9 +324,9 @@ def test_rle_round_trip_reconstructs_int_arrays():
 
 def _make_grouping_schedule() -> ShiftSchedule:
     """
-    6 frames x 3 skycells. Frame signatures: 0 and 3 share signature A,
-    1 and 4 share signature B, frame 2 is invalid, frame 5 is a new
-    signature C.
+    6 frames x 3 skycells. Frame signatures: A, B, A, A, B, C.
+    Frame 2 is marked frame_valid=False but still has synthesized-style
+    shifts (sig A) — it must still receive a real group_id.
     """
     skycell_names = np.array(["c0", "c1", "c2"])
     sig_a = np.array([0, 1, 2], dtype=np.int16)
@@ -355,23 +357,32 @@ def _make_grouping_schedule() -> ShiftSchedule:
 
 # ── (d) grouping ─────────────────────────────────────────────────────────
 
-def test_assign_groups_dense_first_appearance_and_invalid_frames():
+def test_assign_groups_contiguous_islands_include_invalid_frames():
+    """Contiguous islands; no group_id=-1; reappearance gets a new id."""
     schedule = _make_grouping_schedule()
     assignment = assign_groups_from_schedule(
         schedule, grouping_quantum_ps1_px=1.0, cache_quantum_ps1_px=0.25, keying="phase",
     )
 
-    assert assignment.group_id_per_frame.tolist() == [0, 1, -1, 0, 1, 2]
+    # A,B,A,A,B,C → islands 0,1,2,2,3,4 (frame 2 invalid still grouped)
+    assert assignment.group_id_per_frame.tolist() == [0, 1, 2, 2, 3, 4]
     assert assignment.group_id_per_frame.dtype == np.int32
+    assert (assignment.group_id_per_frame >= 0).all()
     group_ids = [g["group_id"] for g in assignment.groups]
-    assert group_ids == [0, 1, 2]
+    assert group_ids == [0, 1, 2, 3, 4]
     n_frames_by_group = {g["group_id"]: g["n_frames"] for g in assignment.groups}
-    assert n_frames_by_group == {0: 2, 1: 2, 2: 1}
-    # every group has a distinct signature hash
-    assert len({g["signature_hash"] for g in assignment.groups}) == 3
-    # shifts_df has one row per (group, skycell)
-    assert len(assignment.shifts_df) == 3 * 3
-    assert set(assignment.shifts_df["group_id"].unique()) == {0, 1, 2}
+    assert n_frames_by_group == {0: 1, 1: 1, 2: 2, 3: 1, 4: 1}
+    # Islands of same signature may share signature_hash (0 and 2 are both A)
+    hashes = {g["group_id"]: g["signature_hash"] for g in assignment.groups}
+    assert hashes[0] == hashes[2]
+    assert hashes[1] == hashes[3]
+    assert hashes[0] != hashes[1]
+    assert len(assignment.shifts_df) == 5 * 3
+    assert set(assignment.shifts_df["group_id"].unique()) == {0, 1, 2, 3, 4}
+    for g in assignment.groups:
+        assert "frame_lo" in g and "frame_hi" in g
+    assert assignment.groups[2]["frame_lo"] == 2
+    assert assignment.groups[2]["frame_hi"] == 3
 
 
 def test_assign_groups_coarser_quantum_can_merge_groups():
@@ -383,8 +394,8 @@ def test_assign_groups_coarser_quantum_can_merge_groups():
         schedule, grouping_quantum_ps1_px=10.0, cache_quantum_ps1_px=0.25, keying="absolute",
     )
     valid_ids = assignment.group_id_per_frame[assignment.group_id_per_frame >= 0]
-    assert len(set(valid_ids.tolist())) < 3
-
+    assert len(set(valid_ids.tolist())) < 5
+    assert (assignment.group_id_per_frame >= 0).all()
 
 # ── (e) phase vs absolute keying relationship ───────────────────────────────
 
@@ -475,8 +486,13 @@ def test_write_group_artifacts_schema_round_trip(tmp_path):
     assert payload["n_groups"] == len(assignment.groups)
     assert len(payload["groups"]) == len(assignment.groups)
     for g in payload["groups"]:
-        assert set(g.keys()) == {"group_id", "n_frames", "signature_hash"}
-
+        assert set(g.keys()) == {
+            "group_id",
+            "n_frames",
+            "signature_hash",
+            "frame_lo",
+            "frame_hi",
+        }
 
 # ── (g) ShiftSchedule save/load round trip ──────────────────────────────────
 
@@ -716,3 +732,80 @@ def test_raw_drift_outlier_sigma_none_disables_in_schedule_build():
     assert schedule.meta["raw_drift_outlier_sigma"] is None
     assert schedule.meta["frame_origin_counts"]["synth_sigma_clipped"] == 0
     assert int(schedule.frame_origin[5]) == FRAME_ORIGIN_MEASURED
+
+
+# ── shift / pair epochs ───────────────────────────────────────────────────
+
+def test_middle_rep_prefers_measured_frames():
+    frames = np.array([0, 1, 2, 3, 4], dtype=np.int64)
+    origin = np.array(
+        [
+            FRAME_ORIGIN_SYNTH_MISSING_WCS,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_SYNTH_MISSING_WCS,
+        ],
+        dtype=np.int8,
+    )
+    # measured at 1,2,3 → middle is 2
+    assert middle_rep_frame_index(frames, origin) == 2
+    # all synth → middle of all
+    assert middle_rep_frame_index(frames, np.full(5, FRAME_ORIGIN_SYNTH_MISSING_WCS)) == 2
+
+
+def test_build_shift_epochs_splits_nonmonotonic_revisit():
+    """Same (sx,sy) early and late → two epochs with different reps."""
+    skycell_names = np.array(["c0", "c1"])
+    # c0: (+1,0) for frames 0-2, then (0,0), then (+1,0) again for 4-6
+    sx = np.array(
+        [
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [0, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+        ],
+        dtype=np.int16,
+    )
+    sy = np.zeros_like(sx)
+    origin = np.array(
+        [
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_SYNTH_MISSING_WCS,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_MEASURED,
+            FRAME_ORIGIN_MEASURED,
+        ],
+        dtype=np.int8,
+    )
+    schedule = ShiftSchedule(
+        skycell_names=skycell_names,
+        sx_float=sx.astype(np.float32),
+        sy_float=sy.astype(np.float32),
+        sx_int=sx,
+        sy_int=sy,
+        frame_valid=np.ones(7, dtype=bool),
+        frame_origin=origin,
+        meta={"schema_version": 1},
+    )
+    assignment = assign_groups_from_schedule(
+        schedule, grouping_quantum_ps1_px=1.0, cache_quantum_ps1_px=0.25, keying="phase",
+    )
+    epochs, members = build_shift_epochs(schedule, assignment.group_id_per_frame)
+    c0 = epochs[epochs["skycell"] == "c0"].sort_values("epoch_id")
+    assert len(c0) == 2
+    assert list(c0["sx_int"]) == [1, 1]
+    assert list(c0["frame_lo"]) == [0, 4]
+    assert list(c0["frame_hi"]) == [2, 6]
+    # early epoch: measured frames 0,1 → middle 1
+    assert int(c0.iloc[0]["rep_frame_index"]) == 1
+    # late epoch: measured 4,5,6 → middle 5
+    assert int(c0.iloc[1]["rep_frame_index"]) == 5
+    # members cover groups in each epoch
+    assert set(members["kind"]) == {"l4a"}
+    assert (members["scope_key"] == "c0").any()
