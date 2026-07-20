@@ -309,22 +309,27 @@ def compose_group_hybrid_assignment(
     group_id: int | None = None,
     epoch_index: Mapping[str, Any] | None = None,
     hybrid_R: int = 1,
-    apply_l4b: bool = True,
-    require_l4a_cache: bool = True,
-    require_l4b_cache: bool = True,
+    apply_intra_skycell: bool = True,
+    apply_inter_skycell: bool = True,
+    require_intra_skycell_cache: bool = True,
+    require_inter_skycell_cache: bool = True,
     pair_ids: Sequence[tuple[int, int]] | np.ndarray | None = None,
     id_to_name: Mapping[int, str] | None = None,
     neighbour_ids: Sequence[int] | None = None,
     border_ids_by_neighbour: Mapping[int, np.ndarray] | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
-    """Compose L4a hybrid then L4b rim patches for one group context.
+    """Compose intra-skycell hybrid then inter-skycell rim patches for one group.
 
-    When ``epoch_index`` and ``group_id`` are provided (schema v3), L4b rim
-    paths are resolved via pair-epoch lookup. Otherwise falls back to the
+    When ``epoch_index`` and ``group_id`` are provided (schema v3), inter-skycell
+    rim paths are resolved via pair-epoch lookup. Otherwise falls back to the
     legacy flat ``l4b_rim_cache_basename`` under ``l4b_cache_dir``.
 
     Optional hoisted metadata (``pair_ids``, ``id_to_name``, ``neighbour_ids``,
     ``border_ids_by_neighbour``) avoids recomputing abutting geometry per call.
+
+    When ``apply_intra_skycell`` is False, returns the rolled linear assignment
+    without applying the intra-skycell exact patch. When ``apply_inter_skycell``
+    is False, skips inter-skycell rim patches.
     """
     from syndiff_pipeline.template_creation.processing.field_abutting import (
         abutting_undirected_pairs,
@@ -339,37 +344,45 @@ def compose_group_hybrid_assignment(
         roll_assignment,
     )
 
-    cache_path = Path(l4a_cache_path)
-    if require_l4a_cache and not cache_path.is_file():
-        raise FileNotFoundError(f"L4a exact cache missing: {cache_path}")
+    intra_cache_path = Path(l4a_cache_path)
+    if require_intra_skycell_cache and not intra_cache_path.is_file():
+        raise FileNotFoundError(f"intra-skycell exact cache missing: {intra_cache_path}")
 
-    # One assignment roll for both L4a hybrid and L4b rim masking.
+    # One assignment roll for both intra hybrid and inter rim masking.
     linear_tid = roll_assignment(
         frozen_tid, sx_int, sy_int, convention="assignment"
     )
-    if cache_path.is_file():
+    if apply_intra_skycell and intra_cache_path.is_file():
         try:
-            with np.load(cache_path) as z:
+            with np.load(intra_cache_path) as z:
                 exact = np.asarray(z["exact_tid"], dtype=np.int32)
-            meta = {"cache_hit": True, "cache_path": str(cache_path)}
+            meta = {"cache_hit": True, "cache_path": str(intra_cache_path)}
         except Exception as exc:
-            raise RuntimeError(f"corrupt exact cache {cache_path.name}: {exc}") from exc
+            raise RuntimeError(
+                f"corrupt exact cache {intra_cache_path.name}: {exc}"
+            ) from exc
         mask = needs_recompute_mask(linear_tid, R=int(hybrid_R))
         hybrid = apply_hybrid_patch(linear_tid, exact, mask)
     else:
         hybrid = linear_tid
-        meta = {"cache_hit": False, "cache_path": str(cache_path), "l4a_only_roll": True}
+        meta = {
+            "cache_hit": False,
+            "cache_path": str(intra_cache_path),
+            "intra_skycell_roll_only": True,
+        }
 
     meta = dict(meta)
-    meta["n_l4b_patches"] = 0
+    meta["apply_intra_skycell"] = bool(apply_intra_skycell)
+    meta["apply_inter_skycell"] = bool(apply_inter_skycell)
+    meta["n_inter_skycell_patches"] = 0
     meta["pair_epoch_ids"] = []
     if group_id is not None:
         meta["group_id"] = int(group_id)
 
-    if not apply_l4b:
+    if not apply_inter_skycell:
         return hybrid, meta
 
-    l4b_dir = Path(l4b_cache_dir)
+    inter_cache_dir = Path(l4b_cache_dir)
     if pair_ids is None:
         pair_ids = abutting_undirected_pairs(master)
     if id_to_name is None:
@@ -421,11 +434,11 @@ def compose_group_hybrid_assignment(
                     sy_hi=sy_hi,
                 )
             except KeyError:
-                if require_l4b_cache:
+                if require_inter_skycell_cache:
                     raise
                 continue
             rim_path = l4b_rim_path(
-                l4b_dir, lo, hi, pair_epoch_id, sx_lo, sy_lo, sx_hi, sy_hi
+                inter_cache_dir, lo, hi, pair_epoch_id, sx_lo, sy_lo, sx_hi, sy_hi
             )
             meta["pair_epoch_ids"].append(int(pair_epoch_id))
         else:
@@ -437,7 +450,7 @@ def compose_group_hybrid_assignment(
                 int(sx_nb),
                 int(sy_nb),
             )
-            rim_path = l4b_dir / rim_name
+            rim_path = inter_cache_dir / rim_name
         if border_ids_by_neighbour is not None and int(neighbour_id) in border_ids_by_neighbour:
             ids_self = border_ids_by_neighbour[int(neighbour_id)]
         else:
@@ -447,8 +460,8 @@ def compose_group_hybrid_assignment(
         if ids_self.size == 0:
             continue
         if not rim_path.is_file():
-            if require_l4b_cache:
-                raise FileNotFoundError(f"L4b rim cache missing: {rim_path}")
+            if require_inter_skycell_cache:
+                raise FileNotFoundError(f"inter-skycell rim cache missing: {rim_path}")
             continue
         hybrid = patch_l4b_rim_from_cache(
             hybrid,
@@ -459,6 +472,6 @@ def compose_group_hybrid_assignment(
             exact_cache_path=rim_path,
             ids_self=ids_self,
         )
-        meta["n_l4b_patches"] = int(meta["n_l4b_patches"]) + 1
+        meta["n_inter_skycell_patches"] = int(meta["n_inter_skycell_patches"]) + 1
 
     return hybrid, meta

@@ -229,15 +229,21 @@ def _composite_key_for_group(
     neighbour_ids: list[int],
     id_to_name: dict[int, str],
     epoch_index: dict[str, Any] | None,
+    apply_intra_skycell: bool = True,
+    apply_inter_skycell: bool = True,
 ) -> tuple[Any, ...]:
-    """Geometry identity for one (skycell, group): L4a epoch + neighbour L4b epochs.
+    """Geometry identity for one (skycell, group): intra epoch + neighbour inter epochs.
 
     Groups that share this key produce identical hybrid assignment maps (and
     therefore identical binned contribs) for this skycell.
 
-    Own-shift ``(0, 0)`` has no L4a Exact epoch (remap skips zeros); the L4a
-    slot is the sentinel ``"roll0"``. Neighbour L4b pair-epochs / shifts are
-    still part of the key so groups that differ only on the rim do not merge.
+    Own-shift ``(0, 0)`` has no intra Exact epoch (remap skips zeros); the intra
+    slot is the sentinel ``"roll0"``. Neighbour inter pair-epochs / shifts are
+    still part of the key so groups that differ only on the rim do not merge
+    when ``apply_inter_skycell`` is True.
+
+    When ``apply_inter_skycell`` is False, neighbour terms are omitted. When
+    ``apply_intra_skycell`` is False, the intra slot is ``"roll0"`` (roll-only).
     """
     from syndiff_pipeline.template_creation.processing.field_remap import (
         resolve_l4a_epoch_id,
@@ -248,10 +254,10 @@ def _composite_key_for_group(
     is_zero = sx_i == 0 and sy_i == 0
 
     if epoch_index is not None:
-        if is_zero:
-            l4a_part: Any = "roll0"
+        if not apply_intra_skycell or is_zero:
+            intra_part: Any = "roll0"
         else:
-            l4a_part = int(
+            intra_part = int(
                 resolve_l4a_epoch_id(
                     epoch_index,
                     skycell=str(skycell),
@@ -260,6 +266,8 @@ def _composite_key_for_group(
                     sy_int=sy_i,
                 )
             )
+        if not apply_inter_skycell:
+            return (intra_part,)
         nb_parts: list[tuple[int, int]] = []
         for neighbour_id in neighbour_ids:
             nb_name = id_to_name.get(int(neighbour_id))
@@ -283,9 +291,11 @@ def _composite_key_for_group(
                 sy_hi=sy_hi,
             )
             nb_parts.append((int(neighbour_id), int(pair_epoch)))
-        return (l4a_part, tuple(sorted(nb_parts)))
+        return (intra_part, tuple(sorted(nb_parts)))
 
     # Legacy (no epoch index): own shift + neighbour shifts identify geometry.
+    if not apply_inter_skycell:
+        return (sx_i, sy_i)
     nb_parts_legacy: list[tuple[int, int, int]] = []
     for neighbour_id in neighbour_ids:
         nb_name = id_to_name.get(int(neighbour_id))
@@ -339,6 +349,8 @@ def _build_skycell_composite_index(
     id_to_name: dict[int, str],
     neighbours_by_id: dict[int, list[int]],
     epoch_index: dict[str, Any] | None,
+    apply_intra_skycell: bool = True,
+    apply_inter_skycell: bool = True,
 ) -> dict[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]:
     """Per skycell: composite_key → list of (group_id, sx, sy)."""
     from collections import defaultdict
@@ -360,6 +372,8 @@ def _build_skycell_composite_index(
             neighbour_ids=neighbours_by_id.get(int(skycell_id), []),
             id_to_name=id_to_name,
             epoch_index=epoch_index,
+            apply_intra_skycell=bool(apply_intra_skycell),
+            apply_inter_skycell=bool(apply_inter_skycell),
         )
         by_skycell[str(skycell)][ckey].append((int(gid), int(sx_i), int(sy_i)))
     return {sc: dict(buckets) for sc, buckets in by_skycell.items()}
@@ -432,6 +446,8 @@ def _l5_skycell_batch(
     roi_bounds = tuple(_L5_WORKER["roi_bounds"])
     ignore_mask = int(_L5_WORKER["ignore_mask"])
     intra_skycell_R = int(_L5_WORKER["intra_skycell_R"])
+    apply_intra_skycell = bool(_L5_WORKER.get("apply_intra_skycell", True))
+    apply_inter_skycell = bool(_L5_WORKER.get("apply_inter_skycell", True))
 
     skycell_id = int(name_to_id[str(skycell)])
     neighbour_ids = list(neighbours_by_id.get(skycell_id, []))
@@ -502,10 +518,10 @@ def _l5_skycell_batch(
         group_shifts = group_shifts_by_gid[int(rep_gid)]
         is_zero = int(sx_i) == 0 and int(sy_i) == 0
 
-        # (0,0): no L4a Exact cache (remap skips zero epochs). Still compose so
-        # L4b rim patches apply when neighbours differ.
-        require_l4a = not is_zero
-        if is_zero:
+        # (0,0): no intra Exact cache (remap skips zero epochs). Still compose so
+        # inter-skycell rim patches apply when neighbours differ.
+        require_intra = bool(apply_intra_skycell) and not is_zero
+        if is_zero or not apply_intra_skycell:
             l4a_cache_path = exact_cache_l4a_dir / "_unused_roll0_exact.npz"
         else:
             cache_name = contrib_basename(skycell, sx_i, sy_i).replace(
@@ -537,9 +553,10 @@ def _l5_skycell_batch(
             group_id=int(rep_gid),
             epoch_index=epoch_index,
             hybrid_R=intra_skycell_R,
-            apply_l4b=True,
-            require_l4a_cache=require_l4a,
-            require_l4b_cache=True,
+            apply_intra_skycell=bool(apply_intra_skycell),
+            apply_inter_skycell=bool(apply_inter_skycell),
+            require_intra_skycell_cache=require_intra,
+            require_inter_skycell_cache=bool(apply_inter_skycell),
             pair_ids=pair_ids,
             id_to_name=id_to_name,
             neighbour_ids=neighbour_ids,
@@ -643,12 +660,15 @@ def run_field_downsample_scc(
     ffi_dir: str | Path | None = None,
     ref_ffi_path: str | Path | None = None,
     progress_path: str | Path | None = None,
+    apply_intra_skycell: bool = True,
+    apply_inter_skycell: bool = True,
 ) -> dict[str, Any]:
     """
     Bin sparse contribs into the SCC templates store (L5 only).
 
     Requires remap artifacts under ``remap/oversampling_{N}/``. Reads
-    intra-skycell and inter-skycell exact caches and always writes
+    intra-skycell and/or inter-skycell exact caches (controlled by
+    ``apply_intra_skycell`` / ``apply_inter_skycell``) and always writes
     group-qualified contribs (``_gid{N}``).
 
     Skycell-major dispatch with composite-key fan-out: regmap/zarr load once
@@ -706,13 +726,28 @@ def run_field_downsample_scc(
     schedule_path = remap_read / "shift_schedule.npz"
     if not schedule_path.is_file():
         raise FileNotFoundError(f"shift schedule missing under remap read root {remap_read}")
+    t_m = _time.perf_counter()
     schedule = ShiftSchedule.load(schedule_path)
+    log.info("Loaded shift schedule from %s in %.1fs", schedule_path, _time.perf_counter() - t_m)
+    t_m = _time.perf_counter()
     shifts_df = load_remap_shifts_df(remap_read)
+    log.info(
+        "Loaded template_group_shifts (%d rows, %d groups) in %.1fs",
+        len(shifts_df),
+        int(shifts_df["group_id"].nunique()) if not shifts_df.empty else 0,
+        _time.perf_counter() - t_m,
+    )
+    t_m = _time.perf_counter()
     assignment = assign_groups_from_schedule(
         schedule,
         grouping_quantum_ps1_px=grouping_quantum_ps1_px,
         cache_quantum_ps1_px=cache_quantum_ps1_px,
         keying=keying,
+    )
+    log.info(
+        "Assigned groups from schedule (%d frames) in %.1fs",
+        len(assignment.group_id_per_frame),
+        _time.perf_counter() - t_m,
     )
     gid_npy = remap_read / GROUP_ID_PER_FRAME_NPY
     if gid_npy.is_file():
@@ -730,7 +765,14 @@ def run_field_downsample_scc(
     epoch_index = None
     epoch_index_path = remap_read / GID_EPOCH_INDEX_NPZ
     if epoch_index_path.is_file():
+        t_m = _time.perf_counter()
         epoch_index = load_gid_epoch_index(epoch_index_path)
+        log.info(
+            "Loaded gid_epoch_index (%d intra, %d inter keys) in %.1fs",
+            len(epoch_index.get("l4a", {})),
+            len(epoch_index.get("l4b", {})),
+            _time.perf_counter() - t_m,
+        )
     if not scc_only:
         write_group_artifacts(
             assignment,
@@ -771,7 +813,15 @@ def run_field_downsample_scc(
         ccd,
         oversampling_factor=oversampling_factor,
     )
+    t_m = _time.perf_counter()
     master_map, name_to_id = _master_skycell_id_map(master_path)
+    log.info(
+        "Opened zarr %s and master map %s (%d skycells) in %.1fs",
+        zarr_path,
+        master_path,
+        len(name_to_id),
+        _time.perf_counter() - t_m,
+    )
 
     keys = {
         (str(r.skycell), int(r.sx_int), int(r.sy_int))
@@ -796,12 +846,16 @@ def run_field_downsample_scc(
         )
 
     from syndiff_pipeline.template_creation.processing.downsample import (
+        resolve_downsample_scratch_dir,
         resolve_stage_regmaps_to_scratch,
         stage_regmap_files_to_scratch,
     )
 
     scratch_regmaps: dict[str, str] = {}
-    if resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch):
+    do_stage = resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch)
+    if not do_stage:
+        log.info("Regmap scratch staging disabled; reading regmaps from NFS")
+    elif do_stage:
         sky_reg: list[tuple[str, str]] = []
         for sc in sorted({k[0] for k in keys}):
             try:
@@ -823,21 +877,25 @@ def run_field_downsample_scc(
             except FileNotFoundError:
                 continue
         if sky_reg:
-            local_paths, scratch_dir, n_staged, elapsed = stage_regmap_files_to_scratch(
-                [p for _, p in sky_reg],
-                sector=sector,
-                camera=camera,
-                ccd=ccd,
-                oversampling_factor=oversampling_factor,
-            )
-            scratch_regmaps = {sc: lp for (sc, _), lp in zip(sky_reg, local_paths)}
             log.info(
-                "Staged %d/%d ROI regmaps to scratch %s in %.1fs",
-                n_staged,
+                "Staging %d skycell regmaps to Condor scratch (may take minutes)...",
                 len(sky_reg),
-                scratch_dir,
-                elapsed,
             )
+            local_paths, scratch_dir, n_staged, elapsed = stage_regmap_files_to_scratch(
+                    [p for _, p in sky_reg],
+                    sector=sector,
+                    camera=camera,
+                    ccd=ccd,
+                    oversampling_factor=oversampling_factor,
+                )
+                scratch_regmaps = {sc: lp for (sc, _), lp in zip(sky_reg, local_paths)}
+                log.info(
+                    "Staged %d/%d ROI regmaps to scratch %s in %.1fs",
+                    n_staged,
+                    len(sky_reg),
+                    scratch_dir,
+                    elapsed,
+                )
 
     key_list = sorted(
         (
@@ -853,6 +911,7 @@ def run_field_downsample_scc(
     pair_ids = abutting_undirected_pairs(master_map)
     id_to_name = {int(nid): str(name) for name, nid in name_to_id.items()}
     neighbours_by_id = _neighbours_by_skycell_id(pair_ids)
+    t_m = _time.perf_counter()
     composite_index = _build_skycell_composite_index(
         key_list=key_list,
         group_shifts_by_gid=group_shifts_by_gid,
@@ -860,9 +919,21 @@ def run_field_downsample_scc(
         id_to_name=id_to_name,
         neighbours_by_id=neighbours_by_id,
         epoch_index=epoch_index,
+        apply_intra_skycell=bool(apply_intra_skycell),
+        apply_inter_skycell=bool(apply_inter_skycell),
     )
     skycell_batches = sorted(composite_index.items())
     n_composite_keys = sum(len(buckets) for _, buckets in skycell_batches)
+    log.info(
+        "Built composite-key index: %d skycells, %d composite keys, %d contrib keys "
+        "(apply_intra=%s apply_inter=%s) in %.1fs",
+        len(skycell_batches),
+        n_composite_keys,
+        len(key_list),
+        bool(apply_intra_skycell),
+        bool(apply_inter_skycell),
+        _time.perf_counter() - t_m,
+    )
 
     worker_payload = {
         "store": str(store),
@@ -887,6 +958,8 @@ def run_field_downsample_scc(
         "roi_bounds": tuple(roi_bounds),
         "ignore_mask": int(ignore_mask),
         "intra_skycell_R": int(intra_skycell_R),
+        "apply_intra_skycell": bool(apply_intra_skycell),
+        "apply_inter_skycell": bool(apply_inter_skycell),
     }
 
     if progress_file is not None:
@@ -904,7 +977,12 @@ def run_field_downsample_scc(
         _os.cpu_count() or hybrid_cap
     )
     n_jobs_eff = min(n_jobs_eff, max(1, hybrid_cap), max(1, avail))
-
+    log.info(
+        "Starting field L5 workers: n_jobs_eff=%d skycell_batches=%d setup_elapsed=%.1fs",
+        n_jobs_eff,
+        len(skycell_batches),
+        _time.perf_counter() - t_run0,
+    )
     def _on_batch_result(result: dict[str, Any]) -> None:
         if progress_file is None:
             return
@@ -999,17 +1077,22 @@ def run_field_downsample_scc(
         "schema_version": 2,
         "store_root": str(store),
         "remap_root": str(remap_store),
+        "output_store_name": None,
+        "remap_store_name": None,
         "zarr_path": str(zarr_path),
         "base_tess_shape": list(base_tess_shape),
         "roi_bounds": list(roi_bounds),
         "oversampling_factor": int(oversampling_factor),
         "ignore_mask": int(ignore_mask),
         "intra_skycell_R": int(intra_skycell_R),
+        "apply_intra_skycell": bool(apply_intra_skycell),
+        "apply_inter_skycell": bool(apply_inter_skycell),
         "group_scoped_contribs": True,
         "materialize_fits": bool(materialize_fits),
         "architecture_note": (
             "Group-qualified contribs (_gid{N}); skycell-major composite-key fan-out; "
-            "intra + inter exact always on"
+            f"apply_intra_skycell={bool(apply_intra_skycell)}, "
+            f"apply_inter_skycell={bool(apply_inter_skycell)}"
         ),
         "flux_note": (
             "Field contribs are in convolved/PS1 flux units; Hotpants may need "
@@ -1017,8 +1100,26 @@ def run_field_downsample_scc(
         ),
         "perf": perf_meta,
     }
+    # Infer lane names from path leaves for provenance / A/B bookkeeping.
+    from syndiff_pipeline.common.scc_paths import REMAP_SUBDIR, TEMPLATES_SUBDIR
+
+    def _lane_from_path(path: Path, base: str) -> str | None:
+        leaf = path.name
+        if leaf.startswith("oversampling_"):
+            leaf = path.parent.name
+        prefix = f"{base}_"
+        if leaf == base:
+            return None
+        if leaf.startswith(prefix):
+            return leaf[len(prefix) :]
+        return None
+
+    sidecar["output_store_name"] = _lane_from_path(store, TEMPLATES_SUBDIR)
+    sidecar["remap_store_name"] = _lane_from_path(Path(remap_store), REMAP_SUBDIR)
     fits_provenance = {
         "intra_skycell_R": int(intra_skycell_R),
+        "apply_intra_skycell": bool(apply_intra_skycell),
+        "apply_inter_skycell": bool(apply_inter_skycell),
         "group_scoped_contribs": True,
         "n_intra_skycell_keys": remap_manifest.get("n_intra_skycell_keys")
         or remap_manifest.get("n_exact_keys"),

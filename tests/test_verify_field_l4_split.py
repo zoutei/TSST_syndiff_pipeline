@@ -341,6 +341,98 @@ class TestStageParamsFieldGeometry(unittest.TestCase):
         stages = parse_stage_params({"remap": {"intra_skycell_R": 2}})
         self.assertEqual(stages.remap.intra_skycell_R, 2)
 
+    def test_accepts_apply_intra_inter_skycell(self):
+        stages = parse_stage_params(
+            {
+                "downsample": {
+                    "apply_intra_skycell": True,
+                    "apply_inter_skycell": False,
+                }
+            }
+        )
+        self.assertTrue(stages.downsample.apply_intra_skycell)
+        self.assertFalse(stages.downsample.apply_inter_skycell)
+
+    def test_rejects_both_apply_skycell_false(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_stage_params(
+                {
+                    "downsample": {
+                        "apply_intra_skycell": False,
+                        "apply_inter_skycell": False,
+                    }
+                }
+            )
+        self.assertIn("apply_intra_skycell", str(ctx.exception))
+
+
+class TestVerifyDownsampleSkycellToggles(unittest.TestCase):
+    def test_intra_only_skips_empty_inter_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolved = _resolved(Path(tmpdir))
+            object.__setattr__(
+                resolved.stages.downsample, "apply_inter_skycell", False
+            )
+            object.__setattr__(
+                resolved.stages.downsample, "apply_intra_skycell", True
+            )
+            _write_remap_store(
+                resolved,
+                manifest=_v3_manifest(
+                    n_intra_skycell_keys=2,
+                    n_inter_skycell_pair_states=5,
+                ),
+                l4a_npz=2,
+                l4b_npz=0,
+            )
+            # Ensure empty inter dir exists (remap always creates it).
+            (remap_root(resolved.data_root, 20, 1, 1, oversampling_factor=1)
+             / EXACT_CACHE_L4B_DIRNAME).mkdir(parents=True, exist_ok=True)
+            _write_field_store(resolved)
+            result = verify_downsample_field_mode(resolved)
+            self.assertTrue(result.ok, result.message)
+
+    def test_inter_only_skips_empty_intra_cache(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolved = _resolved(Path(tmpdir))
+            object.__setattr__(
+                resolved.stages.downsample, "apply_intra_skycell", False
+            )
+            object.__setattr__(
+                resolved.stages.downsample, "apply_inter_skycell", True
+            )
+            _write_remap_store(
+                resolved,
+                manifest=_v3_manifest(
+                    n_intra_skycell_keys=3,
+                    n_inter_skycell_pair_states=1,
+                ),
+                l4a_npz=0,
+                l4b_npz=1,
+            )
+            _write_field_store(resolved)
+            result = verify_downsample_field_mode(resolved)
+            self.assertTrue(result.ok, result.message)
+
+    def test_both_required_rejects_empty_inter(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolved = _resolved(Path(tmpdir))
+            _write_remap_store(
+                resolved,
+                manifest=_v3_manifest(
+                    n_intra_skycell_keys=2,
+                    n_inter_skycell_pair_states=1,
+                ),
+                l4a_npz=2,
+                l4b_npz=0,
+            )
+            (remap_root(resolved.data_root, 20, 1, 1, oversampling_factor=1)
+             / EXACT_CACHE_L4B_DIRNAME).mkdir(parents=True, exist_ok=True)
+            _write_field_store(resolved)
+            result = verify_downsample_field_mode(resolved)
+            self.assertFalse(result.ok)
+            self.assertIn(EXACT_CACHE_L4B_DIRNAME, result.message)
+
 
 if __name__ == "__main__":
     unittest.main()

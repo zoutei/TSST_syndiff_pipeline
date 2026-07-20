@@ -137,9 +137,9 @@ def test_l4b_rim_overwrites_l4a_overlap():
         name_to_id=name_to_id,
         l4a_cache_path=l4a_dir / l4a_name,
         l4b_cache_dir=l4b_dir,
-        require_l4b_cache=True,
+        require_inter_skycell_cache=True,
     )
-    assert meta["n_l4b_patches"] == 1
+    assert meta["n_inter_skycell_patches"] == 1
     l4a_only, _ = hybrid_assignment_from_exact_cache(
         frozen, sx_a, sy_a, l4a_dir / l4a_name, hybrid_R=1
     )
@@ -236,7 +236,7 @@ def test_missing_l4b_cache_raises_when_required():
     l4a_name = contrib_basename("skycell.1.1", 0, 0).replace(".npz", "_exact.npz")
     _write_l4a_cache(l4a_dir / l4a_name, frozen, 0, 0, marker=1)
 
-    with pytest.raises(FileNotFoundError, match="L4b rim cache missing"):
+    with pytest.raises(FileNotFoundError, match="inter-skycell rim cache missing"):
         compose_group_hybrid_assignment(
             frozen,
             skycell="skycell.1.1",
@@ -248,7 +248,7 @@ def test_missing_l4b_cache_raises_when_required():
             name_to_id=name_to_id,
             l4a_cache_path=l4a_dir / l4a_name,
             l4b_cache_dir=l4b_dir,
-            require_l4b_cache=True,
+            require_inter_skycell_cache=True,
         )
 
 
@@ -658,3 +658,137 @@ def test_roi_prefilter_bins_match_full_then_filter():
     assert set(cropped[0]).issubset(set(full[0]))
     assert 2 not in set(cropped[0])
     assert 8 not in set(cropped[0])
+
+
+def test_compose_skips_intra_when_apply_intra_false():
+    master, name_to_id = _tiny_master()
+    frozen = _frozen_a(master)
+    l4a_dir = Path(tempfile.mkdtemp()) / "exact_cache_l4a"
+    l4b_dir = Path(tempfile.mkdtemp()) / "exact_cache_l4b"
+    l4a_name = contrib_basename("skycell.1.1", 1, 0).replace(".npz", "_exact.npz")
+    _write_l4a_cache(l4a_dir / l4a_name, frozen, 1, 0, marker=9001)
+
+    hybrid, meta = compose_group_hybrid_assignment(
+        frozen,
+        skycell="skycell.1.1",
+        skycell_id=10,
+        sx_int=1,
+        sy_int=0,
+        master=master,
+        group_shifts={"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)},
+        name_to_id=name_to_id,
+        l4a_cache_path=l4a_dir / l4a_name,
+        l4b_cache_dir=l4b_dir,
+        apply_intra_skycell=False,
+        apply_inter_skycell=False,
+        require_intra_skycell_cache=False,
+        require_inter_skycell_cache=False,
+    )
+    assert meta["apply_intra_skycell"] is False
+    assert meta.get("intra_skycell_roll_only") is True
+    assert meta["n_inter_skycell_patches"] == 0
+    from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
+        roll_assignment,
+    )
+
+    linear = roll_assignment(frozen, 1, 0, convention="assignment")
+    assert np.array_equal(hybrid, linear)
+
+
+def test_compose_skips_inter_when_apply_inter_false():
+    master, name_to_id = _tiny_master()
+    frozen = _frozen_a(master)
+    sx_a, sy_a = 0, 0
+    l4a_dir = Path(tempfile.mkdtemp()) / "exact_cache_l4a"
+    l4b_dir = Path(tempfile.mkdtemp()) / "exact_cache_l4b"
+    l4a_name = contrib_basename("skycell.1.1", sx_a, sy_a).replace(".npz", "_exact.npz")
+    _write_l4a_cache(l4a_dir / l4a_name, frozen, sx_a, sy_a, marker=9001)
+
+    rim_name = l4b_rim_cache_basename(10, 20, sx_a, sy_a, 0, 1)
+    _write_l4b_cache(
+        l4b_dir / rim_name,
+        id_lo=10,
+        id_hi=20,
+        sx_lo=sx_a,
+        sy_lo=sy_a,
+        sx_hi=0,
+        sy_hi=1,
+        marker_lo=7777,
+        marker_hi=8888,
+        frozen_shape=frozen.shape,
+        master=master,
+    )
+
+    hybrid, meta = compose_group_hybrid_assignment(
+        frozen,
+        skycell="skycell.1.1",
+        skycell_id=10,
+        sx_int=sx_a,
+        sy_int=sy_a,
+        master=master,
+        group_shifts={"skycell.1.1": (sx_a, sy_a), "skycell.1.2": (0, 1)},
+        name_to_id=name_to_id,
+        l4a_cache_path=l4a_dir / l4a_name,
+        l4b_cache_dir=l4b_dir,
+        apply_inter_skycell=False,
+        require_inter_skycell_cache=False,
+    )
+    assert meta["n_inter_skycell_patches"] == 0
+    l4a_only, _ = hybrid_assignment_from_exact_cache(
+        frozen, sx_a, sy_a, l4a_dir / l4a_name, hybrid_R=1
+    )
+    assert np.array_equal(hybrid, l4a_only)
+
+
+def test_composite_key_omits_inter_when_apply_inter_false():
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _composite_key_for_group,
+    )
+
+    epoch_index = {
+        "l4a": {("skycell.1.1", 0, 1, 0): 42},
+        "l4b": {(10, 20, 0, 1, 0, 0, 1): 7},
+    }
+    with_inter = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=1,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)},
+        neighbour_ids=[20],
+        id_to_name={10: "skycell.1.1", 20: "skycell.1.2"},
+        epoch_index=epoch_index,
+        apply_intra_skycell=True,
+        apply_inter_skycell=True,
+    )
+    without_inter = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=1,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)},
+        neighbour_ids=[20],
+        id_to_name={10: "skycell.1.1", 20: "skycell.1.2"},
+        epoch_index=epoch_index,
+        apply_intra_skycell=True,
+        apply_inter_skycell=False,
+    )
+    assert with_inter == (42, ((20, 7),))
+    assert without_inter == (42,)
+
+    roll_only = _composite_key_for_group(
+        skycell="skycell.1.1",
+        skycell_id=10,
+        group_id=0,
+        sx_int=1,
+        sy_int=0,
+        group_shifts={"skycell.1.1": (1, 0), "skycell.1.2": (0, 1)},
+        neighbour_ids=[20],
+        id_to_name={10: "skycell.1.1", 20: "skycell.1.2"},
+        epoch_index=epoch_index,
+        apply_intra_skycell=False,
+        apply_inter_skycell=False,
+    )
+    assert roll_only == ("roll0",)
