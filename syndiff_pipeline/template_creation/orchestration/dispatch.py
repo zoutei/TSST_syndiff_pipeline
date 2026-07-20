@@ -407,6 +407,7 @@ def _execute_template_stage(
                 scc_only=True,
                 ffi_dir=resolved.ffi_dir,
                 ref_ffi_path=ref_ffi,
+                progress_path=progress_path,
             )
             field_result = dict(field_result)
             field_result["template_dir_physical"] = str(field_result["output_dir"])
@@ -466,6 +467,7 @@ def _execute_template_stage(
                 rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
                 stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
                 store_root=ds.output_base or resolved.template_output_base,
+                progress_path=progress_path,
             )
             field_result = dict(field_result)
             field_result["template_dir_physical"] = str(field_result["output_dir"])
