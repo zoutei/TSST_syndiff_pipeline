@@ -32,7 +32,6 @@ def _fake_resolved(**overrides):
         keying="absolute",
         apply_hybrid_exact=True,
         hybrid_R=1,
-        include_abutting_border_exact=True,
     )
     downsample = SimpleNamespace(
         oversampling_factor=2,
@@ -170,7 +169,6 @@ class TestTemplateRecipeParamsBuilders(unittest.TestCase):
                 "keying": "absolute",
                 "apply_hybrid_exact": True,
                 "hybrid_R": 1,
-                "include_abutting_border_exact": True,
             },
         )
 

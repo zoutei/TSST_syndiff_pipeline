@@ -1152,7 +1152,7 @@ class PipelineState:
             mode = str(
                 getattr(ds, "geometry_mode", None)
                 or getattr(wg, "geometry_mode", None)
-                or "linear"
+                or "field"
             ).lower()
             if mode == "field":
                 continue

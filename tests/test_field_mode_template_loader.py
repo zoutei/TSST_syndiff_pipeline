@@ -64,54 +64,71 @@ class TestFieldModeLoader(unittest.TestCase):
             # mean flux at (1,2) within crop = 6/2 = 3
             self.assertAlmostEqual(float(arr[1, 2]), 3.0)
 
+    def _write_maybe_load_fixture(self, tmp: str, *, schema_version: int) -> tuple[Path, Path]:
+        event = Path(tmp) / "event"
+        store = Path(tmp) / "store"
+        event.mkdir()
+        store.mkdir()
+        (store / "contribs").mkdir()
+        write_template_manifest(
+            store,
+            FieldManifest(
+                geometry_mode="field",
+                scope="scc",
+                assembly="sparse_sum",
+                materialize_fits=False,
+                sector=20,
+                camera=3,
+                ccd=3,
+                contribs_dir="contribs",
+                groups=[{"group_id": 0, "n_frames": 1}],
+            ),
+        )
+        payload = {
+            "schema_version": schema_version,
+            "store_root": str(store),
+            "base_tess_shape": [10, 12],
+            "roi_bounds": [0, 0, 12, 10],
+            "oversampling_factor": 1,
+            "ignore_mask": 0,
+        }
+        if schema_version >= 2:
+            payload.update(
+                {
+                    "l4b_policy": "pair_state",
+                    "require_l4b_cache": True,
+                    "group_scoped_contribs": True,
+                }
+            )
+        (store / "field_mode_assembly.json").write_text(json.dumps(payload))
+        pd.DataFrame(
+            {
+                "group_id": [0],
+                "skycell": ["skycell.1.1"],
+                "sx_int": [0],
+                "sy_int": [0],
+                "qx": [0.0],
+                "qy": [0.0],
+                "cache_key": ["x"],
+            }
+        ).to_parquet(event / "template_group_shifts.parquet", index=False)
+        return store, event
+
     def test_maybe_load_context(self):
         with tempfile.TemporaryDirectory() as tmp:
-            event = Path(tmp) / "event"
-            store = Path(tmp) / "store"
-            event.mkdir()
-            store.mkdir()
-            (store / "contribs").mkdir()
-            write_template_manifest(
-                store,
-                FieldManifest(
-                    geometry_mode="field",
-                    scope="scc",
-                    assembly="sparse_sum",
-                    materialize_fits=False,
-                    sector=20,
-                    camera=3,
-                    ccd=3,
-                    contribs_dir="contribs",
-                    groups=[{"group_id": 0, "n_frames": 1}],
-                ),
-            )
-            (store / "field_mode_assembly.json").write_text(
-                json.dumps(
-                    {
-                        "schema_version": 1,
-                        "store_root": str(store),
-                        "base_tess_shape": [10, 12],
-                        "roi_bounds": [0, 0, 12, 10],
-                        "oversampling_factor": 1,
-                        "ignore_mask": 0,
-                    }
-                )
-            )
-            pd.DataFrame(
-                {
-                    "group_id": [0],
-                    "skycell": ["skycell.1.1"],
-                    "sx_int": [0],
-                    "sy_int": [0],
-                    "qx": [0.0],
-                    "qy": [0.0],
-                    "cache_key": ["x"],
-                }
-            ).to_parquet(event / "template_group_shifts.parquet", index=False)
+            store, event = self._write_maybe_load_fixture(tmp, schema_version=1)
             ctx = maybe_load_field_mode_template_context(store, event)
             self.assertIsNotNone(ctx)
             self.assertEqual(ctx.base_tess_shape, (10, 12))
             self.assertEqual(ctx.oversampling_factor, 1)
+
+    def test_maybe_load_context_schema_v2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, event = self._write_maybe_load_fixture(tmp, schema_version=2)
+            ctx = maybe_load_field_mode_template_context(store, event)
+            self.assertIsNotNone(ctx)
+            self.assertEqual(ctx.store_root, str(store))
+            self.assertEqual(ctx.base_tess_shape, (10, 12))
 
     def test_loader_scales_native_crop_when_oversampled(self):
         with tempfile.TemporaryDirectory() as tmp:

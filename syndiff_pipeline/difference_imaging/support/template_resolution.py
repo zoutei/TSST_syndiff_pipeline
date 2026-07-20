@@ -218,8 +218,15 @@ def resolve_template_for_ffi(
     Field without FITS: raises ``FileNotFoundError`` (assemble from contribs).
     """
     tmpl_root = template_dir or resolve_template_dir(output_dir)
-    mode = (geometry_mode or "linear").lower()
-    if mode == "field" or is_field_template_store(tmpl_root):
+    mode = (geometry_mode or "").lower()
+    if mode == "linear":
+        use_field = False
+    elif mode == "field":
+        use_field = True
+    else:
+        # Unset: detect from store (legacy linear events omit geometry_mode).
+        use_field = is_field_template_store(tmpl_root)
+    if use_field:
         gid = group_id_for_ffi(manifest, ffi_path)
         path = find_field_fits_by_group_id(tmpl_root, gid)
         if path is None:
@@ -449,7 +456,15 @@ def maybe_load_field_mode_template_context(
     except Exception as exc:
         log.warning("field mode context load failed: %s", exc)
         return None
-    if int(side.get("schema_version", 0)) != 1:
+    # v1: legacy L4a-only / (skycell,sx,sy) contribs
+    # v2: Architecture A sidecars (l4b_policy, group-scoped contribs, materialize_fits)
+    schema_version = int(side.get("schema_version", 0))
+    if schema_version not in (1, 2):
+        log.warning(
+            "field mode context unsupported schema_version=%s under %s",
+            schema_version,
+            root,
+        )
         return None
     remap_root = side.get("remap_root")
     shifts_path = None

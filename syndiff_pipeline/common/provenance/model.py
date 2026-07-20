@@ -321,7 +321,6 @@ def remap_store_recipe_params(resolved) -> dict:
         "keying": rm.keying,
         "apply_hybrid_exact": rm.apply_hybrid_exact,
         "hybrid_R": rm.hybrid_R,
-        "include_abutting_border_exact": rm.include_abutting_border_exact,
     }
 
 

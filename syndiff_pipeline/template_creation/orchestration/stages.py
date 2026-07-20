@@ -67,7 +67,7 @@ def _downsample_effective_deps(stages) -> tuple[str, ...]:
     mode = str(
         getattr(ds, "geometry_mode", None)
         or getattr(wg, "geometry_mode", None)
-        or "linear"
+        or "field"
     ).lower()
     if mode == "field":
         return base + ("remap",)

@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 
 from syndiff_pipeline.common.scc_paths import scc_remap_dir, scc_templates_dir
-from syndiff_pipeline.template_creation.processing.field_remap import REMAP_MANIFEST_NAME
+from syndiff_pipeline.template_creation.processing.field_remap import (
+    EXACT_CACHE_LEGACY_DIRNAME,
+    EXACT_CACHE_LEGACY_POLLUTED_DIRNAME,
+    REMAP_MANIFEST_NAME,
+)
 from syndiff_pipeline.template_creation.processing.migrate_field_remap_store import (
     migrate_scc_remap_artifacts,
 )
@@ -58,7 +62,7 @@ def _legacy_templates_store(
     ).to_parquet(store / "template_group_shifts.parquet", index=False)
     (store / "template_groups.json").write_text('{"groups": []}')
 
-    cache = store / "exact_cache"
+    cache = store / EXACT_CACHE_LEGACY_DIRNAME
     cache.mkdir()
     (cache / "exact.npz").write_bytes(b"cache-data")
     return store
@@ -77,7 +81,8 @@ def test_migrate_creates_dest_layout(tmp_path: Path):
     assert (dest / "shift_schedule.json").is_file()
     assert (dest / "template_group_shifts.parquet").is_file()
     assert (dest / "template_groups.json").is_file()
-    assert (dest / "exact_cache" / "exact.npz").is_file()
+    assert (dest / EXACT_CACHE_LEGACY_POLLUTED_DIRNAME / "exact.npz").is_file()
+    assert not (dest / EXACT_CACHE_LEGACY_DIRNAME).exists()
     assert result["manifest_written"] is True
     manifest = json.loads((dest / REMAP_MANIFEST_NAME).read_text())
     assert manifest["geometry_mode"] == "field"
@@ -120,5 +125,5 @@ def test_migrate_idempotent_second_run(tmp_path: Path):
         "shift_schedule.json",
         "template_group_shifts.parquet",
         "template_groups.json",
-        "exact_cache/",
+        f"{EXACT_CACHE_LEGACY_POLLUTED_DIRNAME}/",
     }

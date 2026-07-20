@@ -335,12 +335,15 @@ def _execute_template_stage(
             keying=str(rm.keying),
             apply_hybrid_exact=bool(rm.apply_hybrid_exact),
             hybrid_R=int(rm.hybrid_R or 1),
-            include_abutting_border_exact=bool(rm.include_abutting_border_exact),
             rebuild_remap_cache=bool(rm.rebuild_remap_cache),
+            l4b_policy=str(rm.l4b_policy),
+            rebuild_l4b_cache=bool(rm.rebuild_l4b_cache),
             scc_only=True,
             ffi_dir=resolved.ffi_dir,
             ref_ffi_path=ref_ffi,
             n_jobs=rm.n_jobs,
+            progress_path=progress_path,
+            raw_drift_outlier_sigma=rm.raw_drift_outlier_sigma,
         )
         return _manifest_from_result(field_result)
 
@@ -400,10 +403,9 @@ def _execute_template_stage(
                 n_jobs=ds.n_jobs,
                 apply_hybrid_exact=bool(getattr(ds, "apply_hybrid_exact", True)),
                 hybrid_R=int(getattr(ds, "hybrid_R", 1) or 1),
-                include_abutting_border_exact=bool(
-                    getattr(ds, "include_abutting_border_exact", True)
-                ),
                 rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
+                l4b_policy=str(getattr(ds, "l4b_policy", "none") or "none"),
+                require_l4b_cache=getattr(ds, "require_l4b_cache", None),
                 stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
                 crop_filter_skycells=False,
                 update_frames_csv=False,
@@ -428,7 +430,7 @@ def _execute_template_stage(
 
         payload = load_cluster_template_job_payload(job_path)
         geometry_mode = (
-            payload.get("geometry_mode") or wg.geometry_mode or ds.geometry_mode or "linear"
+            payload.get("geometry_mode") or wg.geometry_mode or ds.geometry_mode or "field"
         )
         if ds.single_offset:
             offsets = np.array([[0.0, 0.0]])
@@ -469,10 +471,9 @@ def _execute_template_stage(
                 n_jobs=ds.n_jobs,
                 apply_hybrid_exact=bool(getattr(ds, "apply_hybrid_exact", True)),
                 hybrid_R=int(getattr(ds, "hybrid_R", 1) or 1),
-                include_abutting_border_exact=bool(
-                    getattr(ds, "include_abutting_border_exact", True)
-                ),
                 rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
+                l4b_policy=str(getattr(ds, "l4b_policy", "none") or "none"),
+                require_l4b_cache=getattr(ds, "require_l4b_cache", None),
                 stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
                 store_root=ds.output_base or resolved.template_output_base,
             )
