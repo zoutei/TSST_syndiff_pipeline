@@ -1256,30 +1256,66 @@ def _stage_remap_regmaps_to_scratch(
     return scratch_regmaps, n_staged, elapsed
 
 
-def load_gid_epoch_index(path: str | Path) -> dict[str, Any]:
-    """Load ``gid_epoch_index.npz`` into dicts for O(1) compose lookup."""
+def load_gid_epoch_index(
+    path: str | Path,
+    *,
+    include_inter: bool = True,
+) -> dict[str, Any]:
+    """Load ``gid_epoch_index.npz`` into dicts for O(1) compose lookup.
+
+    Arrays are materialized once before the Python dict loops. Walking an
+    open ``NpzFile`` element-by-element (especially object ``skycell``
+    strings) is pathologically slow on large indexes.
+
+    When ``include_inter`` is False, skip the L4b half entirely (intra-only
+    downsample).
+    """
     data = np.load(Path(path), allow_pickle=True)
-    l4a: dict[tuple[str, int, int, int], int] = {}
-    for i in range(len(data["l4a_gid"])):
-        key = (
-            str(data["l4a_skycell"][i]),
-            int(data["l4a_gid"][i]),
-            int(data["l4a_sx"][i]),
-            int(data["l4a_sy"][i]),
+    # Materialize once — do not index into NpzFile inside the loops.
+    l4a_skycell = np.asarray(data["l4a_skycell"])
+    l4a_gid = np.asarray(data["l4a_gid"], dtype=np.int32)
+    l4a_sx = np.asarray(data["l4a_sx"], dtype=np.int32)
+    l4a_sy = np.asarray(data["l4a_sy"], dtype=np.int32)
+    l4a_epoch_id = np.asarray(data["l4a_epoch_id"], dtype=np.int32)
+    l4a: dict[tuple[str, int, int, int], int] = {
+        (str(sk), int(gid), int(sx), int(sy)): int(eid)
+        for sk, gid, sx, sy, eid in zip(
+            l4a_skycell, l4a_gid, l4a_sx, l4a_sy, l4a_epoch_id, strict=True
         )
-        l4a[key] = int(data["l4a_epoch_id"][i])
+    }
     l4b: dict[tuple[int, int, int, int, int, int, int], int] = {}
-    for i in range(len(data["l4b_gid"])):
-        key = (
-            int(data["l4b_pair_lo"][i]),
-            int(data["l4b_pair_hi"][i]),
-            int(data["l4b_gid"][i]),
-            int(data["l4b_sx_lo"][i]),
-            int(data["l4b_sy_lo"][i]),
-            int(data["l4b_sx_hi"][i]),
-            int(data["l4b_sy_hi"][i]),
-        )
-        l4b[key] = int(data["l4b_pair_epoch_id"][i])
+    if include_inter and "l4b_gid" in data.files:
+        l4b_gid = np.asarray(data["l4b_gid"], dtype=np.int32)
+        if len(l4b_gid):
+            l4b_pair_lo = np.asarray(data["l4b_pair_lo"], dtype=np.int32)
+            l4b_pair_hi = np.asarray(data["l4b_pair_hi"], dtype=np.int32)
+            l4b_sx_lo = np.asarray(data["l4b_sx_lo"], dtype=np.int32)
+            l4b_sy_lo = np.asarray(data["l4b_sy_lo"], dtype=np.int32)
+            l4b_sx_hi = np.asarray(data["l4b_sx_hi"], dtype=np.int32)
+            l4b_sy_hi = np.asarray(data["l4b_sy_hi"], dtype=np.int32)
+            l4b_pair_epoch_id = np.asarray(data["l4b_pair_epoch_id"], dtype=np.int32)
+            l4b = {
+                (
+                    int(plo),
+                    int(phi),
+                    int(gid),
+                    int(sx_lo),
+                    int(sy_lo),
+                    int(sx_hi),
+                    int(sy_hi),
+                ): int(peid)
+                for plo, phi, gid, sx_lo, sy_lo, sx_hi, sy_hi, peid in zip(
+                    l4b_pair_lo,
+                    l4b_pair_hi,
+                    l4b_gid,
+                    l4b_sx_lo,
+                    l4b_sy_lo,
+                    l4b_sx_hi,
+                    l4b_sy_hi,
+                    l4b_pair_epoch_id,
+                    strict=True,
+                )
+            }
     return {"l4a": l4a, "l4b": l4b}
 
 
