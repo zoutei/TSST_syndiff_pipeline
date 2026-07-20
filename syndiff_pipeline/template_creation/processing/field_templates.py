@@ -46,10 +46,16 @@ def templates_root(
     ccd: int,
     *,
     oversampling_factor: int = 1,
+    store_name: str | None = None,
 ) -> Path:
     """Return the SCC templates store directory (does not create it)."""
     return scc_templates_dir(
-        data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=oversampling_factor,
+        store_name=store_name,
     )
 
 
@@ -60,10 +66,16 @@ def field_templates_root(
     ccd: int,
     *,
     oversampling_factor: int = 1,
+    store_name: str | None = None,
 ) -> Path:
     """Legacy alias for :func:`templates_root`."""
     return templates_root(
-        data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=oversampling_factor,
+        store_name=store_name,
     )
 
 

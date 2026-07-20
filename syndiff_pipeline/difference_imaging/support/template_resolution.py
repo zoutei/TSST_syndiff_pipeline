@@ -74,6 +74,7 @@ def resolve_template_dir(
     camera: int | None = None,
     ccd: int | None = None,
     oversampling_factor: int = 1,
+    store_name: str | None = None,
 ) -> str:
     """Resolve SCC templates directory for an event leaf."""
     from syndiff_pipeline.common.scc_paths import scc_templates_dir
@@ -81,7 +82,12 @@ def resolve_template_dir(
 
     if data_root is not None and sector is not None and camera is not None and ccd is not None:
         store = scc_templates_dir(
-            data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+            data_root,
+            sector,
+            camera,
+            ccd,
+            oversampling_factor=oversampling_factor,
+            store_name=store_name,
         )
         if store.is_dir():
             return str(store.resolve())
@@ -93,7 +99,12 @@ def resolve_template_dir(
             s, c, k = int(payload["sector"]), int(payload["camera"]), int(payload["ccd"])
             if data_root:
                 store = scc_templates_dir(
-                    data_root, s, c, k, oversampling_factor=oversampling_factor
+                    data_root,
+                    s,
+                    c,
+                    k,
+                    oversampling_factor=oversampling_factor,
+                    store_name=store_name,
                 )
                 if store.is_dir():
                     return str(store.resolve())

@@ -178,8 +178,13 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       oversampling_{N}/            # PanCAKES skycell maps
     remap/
       oversampling_{N}/            # field L2–L4 (schedule, groups, exact_cache)
+    remap_{NAME}/                  # optional named remap lane (stages.remap.store_name)
+      oversampling_{N}/
     templates/
       oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode)
+    templates_{NAME}/              # optional named templates lane (downsample.output_store_name)
+      oversampling_{N}/
+    debug_plots/                   # template-pipeline PNGs (shift schedule debug)
     legacy/                        # archived pre-cutover artifacts
     bookkeeping/                   # per-stage run_meta (mapping reference FFI, etc.)
   ps1_skycells_zarr/               # shared PS1 raw-band cache (ps1_download + syndiff star)
@@ -195,7 +200,9 @@ Older top-level science trees (`tess_ffi/`, `skycell_pixel_mapping/`, `field_tem
 `ps1_zarr_path` in `star_config.yaml` overrides that location for unusual
 deployments.
 
-Diff imaging resolves templates from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (or an explicit `paths.template_dir` override). The `ws/templates` symlink is no longer created.
+Diff imaging resolves templates from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`
+(or `templates_{NAME}/…` when `paths.template_store_name` is set; or an explicit
+`paths.template_dir` override). The `ws/templates` symlink is no longer created.
 
 With `geometry_mode: field`, L2–L4 artifacts live under
 `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`:

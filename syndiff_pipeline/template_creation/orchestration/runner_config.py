@@ -33,6 +33,7 @@ from syndiff_pipeline.common.scc_paths import (
     scc_convolved_zarr,
     scc_ffi_dir,
     scc_mapping_dir,
+    scc_remap_dir,
     scc_templates_dir,
 )
 from syndiff_pipeline.common.orchestration.workspace import (
@@ -511,6 +512,9 @@ class ResolvedTargetConfig:
     mapping_root: str
     zarr_dir: str
     template_output_base: str
+    remap_output_base: str = ""
+    # Effective remap lane downsample reads (inherits remap.store_name when unset).
+    downsample_remap_store_name: str | None = None
     config_path: str = ""
 
 
@@ -574,6 +578,15 @@ def resolve_config(
     templates_os = int(
         merged_stages_raw.get("downsample", {}).get("oversampling_factor", 1) or 1
     )
+    stages = parse_stage_params(merged_stages_raw)
+    # remap oversampling follows mapping (same as dispatch remap stage).
+    remap_os = mapping_os
+    remap_store_name = stages.remap.store_name
+    # Downsample INPUT: explicit remap_store_name, else inherit remap.store_name.
+    ds_remap_store = stages.downsample.remap_store_name
+    if ds_remap_store is None:
+        ds_remap_store = remap_store_name
+    tmpl_store = stages.downsample.output_store_name
 
     event_dir = str(
         event_scc_leaf(cfg.workspace_root, target.event_name(), t.sector, t.camera, t.ccd)
@@ -584,7 +597,24 @@ def resolve_config(
     )
     zarr_dir = str(ps1_skycells_zarr_dir(data_root))
     template_output_base = str(
-        scc_templates_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=templates_os)
+        scc_templates_dir(
+            data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=templates_os,
+            store_name=tmpl_store,
+        )
+    )
+    remap_output_base = str(
+        scc_remap_dir(
+            data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=remap_os,
+            store_name=remap_store_name,
+        )
     )
 
     return ResolvedTargetConfig(
@@ -593,10 +623,12 @@ def resolve_config(
         ffi_dir=ffi_dir,
         event_dir=event_dir,
         skycell_wcs_csv=cfg.skycell_wcs_csv,
-        stages=parse_stage_params(merged_stages_raw),
+        stages=stages,
         mapping_root=mapping_root,
         zarr_dir=zarr_dir,
         template_output_base=template_output_base,
+        remap_output_base=remap_output_base,
+        downsample_remap_store_name=ds_remap_store,
         config_path=str(config_path) if config_path else "",
     )
 

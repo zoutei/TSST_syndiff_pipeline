@@ -159,6 +159,42 @@ class TestSiteConfigLoader(unittest.TestCase):
         )
         self.assertTrue(resolved.endswith("s0020/c3/k3/templates/oversampling_1"))
 
+    def test_resolve_diff_config_honors_template_store_name(self):
+        target = _target()
+        named = scc_templates_dir(
+            self.data,
+            target.sector,
+            target.camera,
+            target.ccd,
+            oversampling_factor=1,
+            store_name="no_l4b",
+        )
+        named.mkdir(parents=True)
+        (named / "template_manifest.json").write_text("{}", encoding="utf-8")
+        policy_path = self.site / "diff_config_named.yaml"
+        policy_path.write_text(
+            "\n".join(
+                [
+                    "deployment_file: deployment.yaml",
+                    "defaults:",
+                    "  n_jobs: 4",
+                    "  oversampling_factor: 1",
+                    "paths:",
+                    "  template_store_name: no_l4b",
+                    "pipeline:",
+                    "  - kind: shared_mask",
+                    "condor:",
+                    "  request_cpus: 4",
+                    "  request_memory: 32000",
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        cfg = freeze_target_diff_config(policy_path, target)
+        self.assertTrue(cfg.template_dir.endswith("templates_no_l4b/oversampling_1"))
+        self.assertEqual(Path(cfg.template_dir).resolve(), named.resolve())
+
     def test_resolve_event_template_dir_missing_raises(self):
         target = _target()
         with self.assertRaises(FileNotFoundError):

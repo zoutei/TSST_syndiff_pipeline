@@ -152,6 +152,32 @@ class TestReindexSccTree(_TempCase):
         # Re-running does not create duplicate rows (same synthetic fp both times).
         self.assertEqual(store.stats()["total_artifacts"], 4)
 
+    def test_named_remap_and_templates_lanes_are_indexed(self):
+        scc_dir = self.data_root / "s0020" / "c1" / "k1"
+        self._build_synthetic_scc(scc_dir)
+        named_remap = scc_dir / "remap_hybrid_r2" / "oversampling_2"
+        named_remap.mkdir(parents=True)
+        (named_remap / "remap_manifest.json").write_text("{}")
+        named_tmpl = scc_dir / "templates_no_l4b" / "oversampling_2"
+        named_tmpl.mkdir(parents=True)
+        (named_tmpl / "contrib.npz").write_text("x")
+        store = ProvenanceStore(self.data_root / "bookkeeping" / "provenance.db")
+        n = reindex_scc_tree(store, scc_dir, 20, 1, 1)
+        # default 4 + named remap + named templates
+        self.assertEqual(n, 6)
+        named_remap_rows = store.artifacts_by_kind_spatial(
+            "remap_store_legacy_unverified",
+            {"s": 20, "c": 1, "k": 1, "os": 2, "store_name": "hybrid_r2"},
+        )
+        self.assertEqual(len(named_remap_rows), 1)
+        self.assertIn("remap_hybrid_r2", named_remap_rows[0].location)
+        named_tmpl_rows = store.artifacts_by_kind_spatial(
+            "downsample_legacy_unverified",
+            {"s": 20, "c": 1, "k": 1, "os": 2, "store_name": "no_l4b"},
+        )
+        self.assertEqual(len(named_tmpl_rows), 1)
+        self.assertIn("templates_no_l4b", named_tmpl_rows[0].location)
+
 
 class TestDiscoverSccDirs(_TempCase):
     def test_discovers_nested_scc_dirs_only(self):

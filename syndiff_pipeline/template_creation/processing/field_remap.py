@@ -62,10 +62,16 @@ def remap_root(
     ccd: int,
     *,
     oversampling_factor: int = 1,
+    store_name: str | None = None,
 ) -> Path:
     """Return the SCC remap store directory (does not create it)."""
     return scc_remap_dir(
-        data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=oversampling_factor,
+        store_name=store_name,
     )
 
 
@@ -313,6 +319,7 @@ def _build_shift_schedule_for_scc(
             camera=camera,
             ccd=ccd,
             oversampling_factor=oversampling_factor,
+            data_root=data_root,
         )
     log.info(
         "Built SCC shift_schedule.npz (%d frames × %d skycells)",
@@ -448,6 +455,7 @@ def _build_shift_schedule_for_event(
             camera=camera,
             ccd=ccd,
             oversampling_factor=oversampling_factor,
+            data_root=data_root,
         )
     log.info(
         "Built shift_schedule.npz (%d frames × %d skycells) for field remap",
@@ -515,12 +523,37 @@ def _try_write_skycell_shift_debug_plots(
     camera: int,
     ccd: int,
     oversampling_factor: int = 1,
+    data_root: str | Path | None = None,
+    store_name: str | None = None,
 ) -> None:
-    """Best-effort remap debug PNGs next to ``shift_schedule.npz`` (never fail remap)."""
+    """Best-effort remap debug PNGs under SCC ``debug_plots/`` (never fail remap)."""
     try:
+        from syndiff_pipeline.common.scc_paths import (
+            REMAP_SUBDIR,
+            normalize_store_name,
+            scc_debug_plots_dir,
+        )
         from syndiff_pipeline.template_creation.processing.shift_schedule_plots import (
             write_skycell_shift_debug_plots,
         )
+
+        name = normalize_store_name(store_name)
+        if name is None and store_root is not None:
+            # Infer from …/remap[_NAME]/oversampling_N
+            parent = Path(store_root).name
+            if parent.startswith("oversampling_"):
+                parent = Path(store_root).parent.name
+            prefix = f"{REMAP_SUBDIR}_"
+            if parent.startswith(prefix):
+                name = parent[len(prefix) :]
+            elif parent != REMAP_SUBDIR:
+                name = None
+
+        if data_root is not None:
+            out_dir = scc_debug_plots_dir(data_root, sector, camera, ccd)
+        else:
+            # Fallback: sibling debug_plots next to remap/ under the SCC root.
+            out_dir = Path(store_root).parent.parent / "debug_plots"
 
         master_path = _master_pixels2skycells_path(
             mapping_root,
@@ -531,7 +564,7 @@ def _try_write_skycell_shift_debug_plots(
         )
         write_skycell_shift_debug_plots(
             schedule,
-            out_dir=store_root,
+            out_dir=out_dir,
             btjd=btjd,
             ref_wcs=ref_wcs,
             skycell_df=skycell_df,
@@ -539,6 +572,7 @@ def _try_write_skycell_shift_debug_plots(
             sector=int(sector),
             camera=int(camera),
             ccd=int(ccd),
+            store_name=name,
         )
     except Exception as exc:
         log.warning("Skycell shift debug plots skipped: %s", exc)

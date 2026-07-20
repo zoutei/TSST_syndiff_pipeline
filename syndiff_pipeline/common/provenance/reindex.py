@@ -16,13 +16,15 @@ Two kinds of tree are walked:
    recipe and all.
 2. **Legacy per-SCC trees** that predate this package and carry no sidecar:
    ``convolved.zarr`` (checkpoint-only, presence == complete),
-   ``remap/oversampling_{N}/remap_manifest.json``,
-   ``templates/oversampling_{N}/``, ``mapping/oversampling_{N}/``. These have
+   ``remap[/_{NAME}]/oversampling_{N}/remap_manifest.json``,
+   ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``. These have
    no recoverable recipe, so per decision #8 they are ingested under
    ``{kind}_legacy_unverified`` with a synthetic, deterministic (idempotent)
    fingerprint tied to their on-disk path -- visible in queries, but never
    satisfying a ``scc_stage_complete`` check against a freshly-computed
-   fingerprint (which always names a *_legacy_unverified-free kind).
+   fingerprint (which always names a *_legacy_unverified-free kind). Named
+   lanes include ``store_name`` in the spatial key so they do not collide
+   with the default lane.
 
 This module does filesystem walks by design (that is its whole job) -- it is
 explicitly **offline only** and must never be imported on the scheduler hot
@@ -224,11 +226,29 @@ def _oversampling_children(parent: Path) -> list[tuple[int, Path]]:
     return out
 
 
+def _store_lane_roots(scc_dir: Path, base: str) -> list[tuple[str | None, Path]]:
+    """Return ``[(store_name, root)]`` for ``base/`` and ``base_{NAME}/`` siblings."""
+    out: list[tuple[str | None, Path]] = []
+    default = scc_dir / base
+    if default.is_dir():
+        out.append((None, default))
+    prefix = f"{base}_"
+    if not scc_dir.is_dir():
+        return out
+    for child in sorted(scc_dir.iterdir()):
+        if not child.is_dir() or not child.name.startswith(prefix):
+            continue
+        name = child.name[len(prefix) :]
+        if name:
+            out.append((name, child))
+    return out
+
+
 def reindex_scc_tree(store: ProvenanceStore, scc_dir: str | Path, s: int, c: int, k: int) -> int:
     """
     Legacy-marker sweep of one SCC directory: ``convolved.zarr`` presence,
-    ``remap/oversampling_{N}/remap_manifest.json``,
-    ``templates/oversampling_{N}/``, ``mapping/oversampling_{N}/``.
+    ``remap[/_{NAME}]/oversampling_{N}/remap_manifest.json``,
+    ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``.
 
     Returns the count of legacy_unverified artifacts ingested.
     """
@@ -254,20 +274,26 @@ def reindex_scc_tree(store: ProvenanceStore, scc_dir: str | Path, s: int, c: int
             )
             n += 1
 
-    for os_val, remap_dir in _oversampling_children(scc_dir / REMAP_SUBDIR):
-        manifest = remap_dir / "remap_manifest.json"
-        if manifest.is_file():
-            _legacy_artifact(
-                store, "remap_store", {"s": s, "c": c, "k": k, "os": os_val}, str(remap_dir)
-            )
+    for store_name, remap_root in _store_lane_roots(scc_dir, REMAP_SUBDIR):
+        for os_val, remap_dir in _oversampling_children(remap_root):
+            manifest = remap_dir / "remap_manifest.json"
+            if not manifest.is_file():
+                continue
+            spatial = {"s": s, "c": c, "k": k, "os": os_val}
+            if store_name is not None:
+                spatial["store_name"] = store_name
+            _legacy_artifact(store, "remap_store", spatial, str(remap_dir))
             n += 1
 
-    for os_val, templates_dir in _oversampling_children(scc_dir / TEMPLATES_SUBDIR):
-        has_content = templates_dir.is_dir() and any(templates_dir.iterdir())
-        if has_content:
-            _legacy_artifact(
-                store, "downsample", {"s": s, "c": c, "k": k, "os": os_val}, str(templates_dir)
-            )
+    for store_name, templates_root in _store_lane_roots(scc_dir, TEMPLATES_SUBDIR):
+        for os_val, templates_dir in _oversampling_children(templates_root):
+            has_content = templates_dir.is_dir() and any(templates_dir.iterdir())
+            if not has_content:
+                continue
+            spatial = {"s": s, "c": c, "k": k, "os": os_val}
+            if store_name is not None:
+                spatial["store_name"] = store_name
+            _legacy_artifact(store, "downsample", spatial, str(templates_dir))
             n += 1
 
     return n

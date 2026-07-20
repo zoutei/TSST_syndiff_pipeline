@@ -7,6 +7,7 @@ from pathlib import Path
 
 from syndiff_pipeline.common.scc_paths import (
     event_scc_leaf,
+    normalize_store_name,
     ps1_combined_zarr_path,
     ps1_convolved_zarr_path,
     ps1_skycells_zarr_dir,
@@ -14,12 +15,14 @@ from syndiff_pipeline.common.scc_paths import (
     ps1_skycells_zarr_path,
     provenance_db_path,
     provenance_spool_dir,
+    scc_debug_plots_dir,
     scc_diff_stage_dir,
     scc_diff_workspace_index_path,
     scc_label,
     scc_remap_dir,
     scc_root,
     scc_templates_dir,
+    store_subdir,
 )
 
 
@@ -92,6 +95,34 @@ class TestSccPaths(unittest.TestCase):
         self.assertEqual(
             scc_diff_workspace_index_path("/event/ws"),
             Path("/event/ws/scc_diff_index.json"),
+        )
+
+    def test_named_store_subdir_and_paths(self):
+        self.assertEqual(store_subdir("templates", None), "templates")
+        self.assertEqual(store_subdir("templates", "no_l4b"), "templates_no_l4b")
+        self.assertEqual(store_subdir("remap", "hybrid_r2"), "remap_hybrid_r2")
+        self.assertEqual(normalize_store_name("  "), None)
+        self.assertEqual(normalize_store_name("no_l4b"), "no_l4b")
+        with self.assertRaises(ValueError):
+            normalize_store_name("../evil")
+        with self.assertRaises(ValueError):
+            normalize_store_name("a/b")
+
+        self.assertEqual(
+            scc_templates_dir(
+                "/data", 20, 1, 1, oversampling_factor=2, store_name="no_l4b"
+            ),
+            Path("/data/s0020/c1/k1/templates_no_l4b/oversampling_2"),
+        )
+        self.assertEqual(
+            scc_remap_dir(
+                "/data", 20, 1, 1, oversampling_factor=1, store_name="hybrid_r2"
+            ),
+            Path("/data/s0020/c1/k1/remap_hybrid_r2/oversampling_1"),
+        )
+        self.assertEqual(
+            scc_debug_plots_dir("/data", 20, 1, 1),
+            Path("/data/s0020/c1/k1/debug_plots"),
         )
 
 

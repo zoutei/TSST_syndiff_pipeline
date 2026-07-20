@@ -119,6 +119,8 @@ class StarRunConfig:
     max_ffis: int | None = None
     overwrite: bool = False
     oversampling_factor: int = 1
+    # Named templates lane → templates_{NAME}/; None → templates/
+    template_store_name: str | None = None
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry_methods: list[dict] = field(default_factory=list)
     epsf: StarEpsfConfig | None = None
@@ -412,6 +414,11 @@ def resolve_star_run_config(
     max_ffis_raw = merged_defaults.get("max_ffis")
     max_ffis = int(max_ffis_raw) if max_ffis_raw not in (None, "") else None
     oversampling_factor = max(1, int(merged_defaults.get("oversampling_factor", 1) or 1))
+    from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+    template_store_name = normalize_store_name(
+        merged_defaults.get("template_store_name")
+    )
 
     return StarRunConfig(
         cutout_size=int(merged_defaults.get("cutout_size", 96)),
@@ -424,6 +431,7 @@ def resolve_star_run_config(
         max_ffis=max_ffis,
         overwrite=bool(merged_defaults.get("overwrite", False)),
         oversampling_factor=oversampling_factor,
+        template_store_name=template_store_name,
         baseline=baseline,
         photometry_methods=methods,
         epsf=epsf_cfg,

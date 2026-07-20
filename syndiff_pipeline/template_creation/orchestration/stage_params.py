@@ -87,6 +87,7 @@ REMAP_ALLOWED = frozenset(
         "condor_request_memory",
         "condor_requirements",
         "condor_rank",
+        "store_name",
     }
 )
 DOWNSAMPLE_ALLOWED = frozenset(
@@ -113,6 +114,8 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "materialize_fits",
         "rebuild_field_store",
         "prematerialize_top_n",
+        "remap_store_name",
+        "output_store_name",
     }
 )
 
@@ -253,6 +256,13 @@ class RemapStageParams:
     condor_request_memory: int = 128_000
     condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
     condor_rank: str | None = "-LoadAvg"
+    # Named remap lane → remap_{store_name}/; None → remap/
+    store_name: str | None = None
+
+    def __post_init__(self):
+        from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+        object.__setattr__(self, "store_name", normalize_store_name(self.store_name))
 
 
 @dataclass
@@ -280,15 +290,27 @@ class DownsampleStageParams:
     rebuild_field_store: bool = False
     prematerialize_top_n: int | None = None
     condor_rank: str | None = "-LoadAvg"
+    # INPUT: which remap lane to read; None → inherit stages.remap.store_name
+    remap_store_name: str | None = None
+    # OUTPUT: which templates lane to write; None → templates/
+    output_store_name: str | None = None
 
     def __post_init__(self):
         """Post init."""
+        from syndiff_pipeline.common.scc_paths import normalize_store_name
+
         if self.ignore_mask_bits is None:
             object.__setattr__(self, "ignore_mask_bits", [12])
         level = (self.log_level or "INFO").upper()
         if level not in ("INFO", "DEBUG"):
             raise ValueError(f"log_level must be INFO or DEBUG, got {self.log_level!r}")
         object.__setattr__(self, "log_level", level)
+        object.__setattr__(
+            self, "remap_store_name", normalize_store_name(self.remap_store_name)
+        )
+        object.__setattr__(
+            self, "output_store_name", normalize_store_name(self.output_store_name)
+        )
 
 
 @dataclass
