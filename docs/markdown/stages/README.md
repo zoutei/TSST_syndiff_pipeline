@@ -6,7 +6,7 @@ These documents describe the **science algorithms** behind each template pipelin
 
 | Document | Stage | Legacy script | Package module |
 |----------|-------|---------------|----------------|
-| [Field (distortion-aware) geometry](../field_geometry.md) | `templates` (`geometry_mode: field`) | — | `field_downsample.py`, `shift_schedule.py`, `hybrid_regmaps.py` |
+| [Field (distortion-aware) templates](../field_geometry.md) | `remap` + `downsample` (**default** `geometry_mode: field`) | — | `field_remap.py`, `field_downsample.py`, … |
 | [Oversampled templates + Hotpants stamp modes](../oversampled_templates.md) | `mapping` / `templates` / `diff` / `star` | — | `template_coverage.py`, `hotpants.py`, `kernel.py`, `star/*` |
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
 | [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |

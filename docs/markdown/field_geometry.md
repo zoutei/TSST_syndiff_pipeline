@@ -1,316 +1,400 @@
-# Field (distortion-aware) templates — `geometry_mode: field`
+# Field (distortion-aware) templates
 
-> **Linear mode** (default): single-point drift, per-event template FITS — see
-> [WCS grouping](stages/wcs_grouping.md) and
-> [Multi-offset downsample](stages/downsample_technical.md).
->
-> **Field mode** (this document): per-skycell drift, SCC-scoped sparse contrib store,
-> hybrid Exact patches.
+**Field mode is the default** (`geometry_mode: field` on `stages.wcs_grouping`
+and `stages.downsample`). Templates are built once per SCC from per-skycell WCS
+drift, hybrid Exact patches, and a sparse contrib store; difference imaging
+assembles a full-chip template per `group_id` on demand.
 
-## Table of contents
+Linear mode (`geometry_mode: linear`) remains available as an explicit opt-out
+for target-anchored single-offset templates — see
+[WCS grouping](stages/wcs_grouping.md) and
+[Multi-offset downsample](stages/downsample_technical.md).
 
-1. [What it is](#what-it-is)
-2. [Linear vs field](#linear-vs-field)
-3. [Why field mode exists](#why-field-mode-exists)
-4. [Architecture (L0–L5)](#architecture-l0l5)
-5. [Drift measurement and smoothing](#drift-measurement-and-smoothing)
-6. [Hybrid recomputation (L4)](#hybrid-recomputation-l4)
-7. [Cache keys and reuse](#cache-keys-and-reuse)
-8. [WCS in Exact remapping](#wcs-in-exact-remapping)
-9. [Package modules](#package-modules)
-10. [Config knobs](#config-knobs)
-11. [Storage](#storage)
-12. [Engine support](#engine-support)
-13. [Performance caveats](#performance-caveats)
-14. [Not yet done](#not-yet-done)
-15. [Glossary](#glossary)
+```{contents}
+:local:
+:depth: 2
+```
 
 Also see [oversampled templates](oversampled_templates.md) when combining field
-mode with `oversampling_factor F>1` (HR store ROI units vs native diff crops).
+mode with `oversampling_factor F>1`.
 
 ---
 
-## What it is
+## Quick start
 
-**Linear templates** measure velocity-aberration drift at **one** point (the science
-target) and apply it as a single global PS1-pixel roll, so templates degrade away
-from the target. **Field mode** instead:
+```bash
+mamba activate syndiff
 
-1. Measures drift at **every skycell center** (not only the target).
-2. Savitzky–Golay-smooths each skycell's drift time series per orbit segment.
-3. Integer-quantizes each skycell's PS1 shift with hysteresis.
-4. Groups frames by their full-chip shift **signature** (`group_id`).
-5. Rolls each skycell's frozen L0 regmap independently.
-6. **Exact-patches** the R=1 seam/rim band (hybrid **L4a**) and abutting neighbor
-   borders (**L4b-lite**).
+# SCC-only template DAG (remap + downsample are included when geometry_mode=field)
+syndiff template submit \
+  --site config \
+  --scc config/scc_example.csv
 
-Instead of per-target `dx/dy` template FITS, field mode keeps an **SCC-scoped sparse
-contrib store** and **assembles a template per `group_id` on demand**.
+# First-time event differencing still needs bind
+syndiff diff submit \
+  --site config \
+  --targets config/targets_example.csv \
+  --stages bind,diff
+```
 
-`geometry_mode: linear` remains the default and is unaffected.
+Defaults (no YAML required beyond a normal site):
+
+| Knob | Default | Meaning |
+|------|---------|---------|
+| `stages.wcs_grouping.geometry_mode` | `field` | Event bind records field geometry |
+| `stages.downsample.geometry_mode` | `field` | L5 uses `field_downsample` |
+| `stages.remap.apply_hybrid_exact` | `true` | L4a Exact on R=1 seam/rim |
+| `stages.remap.l4b_policy` | `none` | L4b F2 off until you set `pair_state` |
+| `stages.downsample.l4b_policy` | `none` | Must match remap when enabling F2 |
+
+Enable true Type-II (F2) L4b:
+
+```yaml
+stages:
+  remap:
+    l4b_policy: pair_state
+    raw_drift_outlier_sigma: 5.0   # pre-SG MAD gate; null disables
+  downsample:
+    l4b_policy: pair_state
+    require_l4b_cache: true       # fail-loud on missing L4b NPZs
+```
+
+Opt out to linear:
+
+```yaml
+stages:
+  wcs_grouping:
+    geometry_mode: linear
+  downsample:
+    geometry_mode: linear
+```
+
+---
+
+## Why field mode
+
+### Spatial error (large)
+
+Linear mode applies one `(group_dx, group_dy)` everywhere. True drift is a smooth
+field `d(x, y, t)` from velocity aberration. Measuring only at the science target
+leaves up to **~6 PS1 px** differential across the FOV — templates are good near
+the target and wrong far away.
+
+### Sub-pixel floor (small)
+
+Even with a correct local integer roll, a pure roll of the frozen footprint
+disagrees with Exact geometry on **TESS-ownership seams** and the **footprint
+rim** (~0.3–0.8% of pixels). Field mode Exact-patches those bands.
+
+### What field mode does
+
+1. Measure drift at **every skycell center** (~10³ points).
+2. Savitzky–Golay-smooth each skycell’s drift time series per orbit segment.
+3. Integer-quantize each skycell’s PS1 shift with hysteresis.
+4. Group frames by full-chip shift **signature** → `group_id`.
+5. Roll each skycell’s frozen L0 regmap independently.
+6. Exact-patch the R=1 seam/rim (**L4a**) and, when enabled, the inter-skycell
+   rim under a shared WCS (**L4b F2**, `l4b_policy: pair_state`).
+7. Bin PS1 flux into sparse `contribs/` and assemble per `group_id` at diff time.
 
 ---
 
 ## Linear vs field
 
-| Aspect | Linear (`geometry_mode: linear`) | Field (`geometry_mode: field`) |
-|--------|----------------------------------|--------------------------------|
-| Drift measured at | Science target only | Every skycell center (~1000) |
-| Drift smoothing | SG on target `(dx, dy)` per frame | SG on each skycell's `(dx, dy)` time series |
-| Template groups | ~19 per sector (target-anchored) | ~10²–10³ (full-chip signature) |
-| Regmap geometry | Integer roll of frozen L0 map | Roll + hybrid Exact patch (L4a/L4b-lite) |
-| Output | Per-event `syndiff_template_*_dx*_dy*.fits.fz` | SCC `contribs/` + on-demand assembly |
-| Event dependency | Requires `event_job.json` (crop, offsets) | SCC-wide; no event ROI at build time |
-| Deep dive | [wcs_grouping.md](stages/wcs_grouping.md), [downsample_technical.md](stages/downsample_technical.md) | This document |
-
----
-
-## Why field mode exists
-
-### Spatial error (large)
-
-Linear mode applies one `(group_dx, group_dy)` everywhere. True drift is a smooth
-field `d(x, y, t)` from velocity aberration. Measuring only at the target leaves up
-to **~6 PS1 px** differential across the FOV — templates are good near the target
-and wrong far away.
-
-### Sub-pixel floor (small)
-
-Even with a correct local integer roll, a pure roll of the frozen footprint disagrees
-with Exact geometry on **TESS-ownership seams** and the **footprint rim** (~0.3–0.8%
-of PS1 pixels; ~0.37 PS1 px mean centroid residual). Hybrid R=1 Exact patches fix
-this without a full remap.
-
-### Compute trap
-
-Full PanCAKES remapping every FFI ≈ **12 CPU-days** per SCC. Field mode maps once
-(L0), then rolls and patches only the ~9% of pixels where rolls are wrong.
+| Aspect | Field (default) | Linear (opt-out) |
+|--------|-----------------|------------------|
+| Drift measured at | Every skycell center | Science target only |
+| Template groups | ~10²–10³ full-chip signatures | ~19 target-anchored |
+| Regmap geometry | Roll + L4a (+ optional L4b F2) | Integer roll of frozen L0 |
+| Output | SCC `contribs/` + on-demand assemble | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
+| Event dependency at build | None (SCC-wide) | Requires `event_job.json` |
+| Template DAG | Includes `remap` before `downsample` | `remap` pre-skipped |
+| Deep dive | This document | [wcs_grouping.md](stages/wcs_grouping.md), [downsample_technical.md](stages/downsample_technical.md) |
 
 ---
 
 ## Architecture (L0–L5)
 
-```mermaid
-flowchart TB
-  subgraph once [Once per SCC]
-    L0["L0 mapping / PanCAKES\nfrozen regmaps + master map"]
-  end
-  subgraph cheap [Per FFI — cheap]
-    L1["L1 WCS headers\nSCC keyword cache"]
-    L2["L2 drift at every skycell center"]
-  end
-  subgraph book [Bookkeeping]
-    L3["L3 hysteresis + signature groups"]
-  end
-  subgraph exact [Cached Exact — moderate]
-    L4a["L4a Type I\nroll + R=1 seam patch"]
-    L4b["L4b-lite\nabutting-border Exact"]
-  end
-  subgraph out [Per event / group]
-    L5["L5 bin PS1 flux → assemble template"]
-  end
-  L0 --> L4a
-  L0 --> L4b
-  L1 --> L2 --> L3 --> L4a --> L5
-  L3 --> L4b --> L5
-```
-
-| Layer | What | When | Module |
-|-------|------|------|--------|
-| **L0** | Frozen `TESS_PIXEL_MAP` per skycell + master `pixels2skycells` | Once per SCC (`mapping` stage) | `pancakes.py` |
-| **L1** | Per-FFI celestial WCS (SIP) via shared keyword cache | Every frame; ~9 ms/frame on cache hit | `wcs_header_cache.py` |
-| **L2** | TESS-pixel drift at each skycell center; convert to PS1 shift | `remap` stage → `shift_schedule.npz` | `shift_schedule.py`, `field_remap.py` |
-| **L3** | Hysteresis round → integer `(sx, sy)`; frame signature → `group_id` | Same `remap` schedule build | `shift_schedule.py`, `field_remap.py` |
-| **L4a** | Roll frozen map + Exact-patch R=1 seam/rim mask | `remap` → `exact_cache/` per `(skycell, sx, sy)` | `hybrid_regmaps.py`, `field_hybrid_exact.py` |
-| **L4b-lite** | Exact-refresh abutting TESS border when neighbors differ | Expanded into L4a TESS-id set (still `remap`) | `field_hybrid_exact.py` |
-| **L5** | Bin PS1 flux through hybrid assignment; sum contribs per `group_id` | `downsample` stage + diff assembly | `field_downsample.py`, `field_templates.py` |
-
-**Measured scale (s0020/c3/k3):** ~1036 skycells, ~1183 valid frames, ~16.6k Type I
-keys `(skycell, sx, sy)`, ~951 distinct `group_id`s.
-
-### Why `remap` and `downsample` are separate stages
-
-| Layer | Needs `convolved.zarr`? | Stage |
-|-------|-------------------------|-------|
-| L2–L3 schedule + groups | No | `remap` |
-| L4 hybrid Exact cache | No | `remap` |
-| L5 flux binning → `contribs/` | **Yes** | `downsample` |
-
-`remap` depends only on `mapping`, so it can run in parallel with `ps1_download` /
-`ps1_process`. `downsample` waits for both `remap` (field) and `ps1_process`.
-
-**Linear mode:** the scheduler pre-skips `remap` (`apply_linear_remap_skips`) and
-`downsample`'s `effective_deps` omit it — linear still rolls frozen L0 maps inside
-`downsample` and writes offset FITS.
-
-**What “recompute” means:** hybrid Exact (L4a/L4b-lite) is **not** a full PanCAKES
-remap per frame, and it is **not** folded into `mapping` (L0 stays reference-epoch
-only).
-
----
-
-## Drift measurement and smoothing
-
-### L2 — per-skycell-center drift
-
-For every frame `f` and skycell `c` with catalog center `(RA, DEC)`:
-
-1. Map the sky position through the **reference WCS** → `(x_ref, y_ref)`.
-2. Map the same sky point through **frame f's WCS** → `(fx, fy)`.
-3. TESS drift: `dx = fx - x_ref`, `dy = fy - y_ref`.
-
-Implemented in `build_skycell_shift_schedule()` (`shift_schedule.py`): vectorized over
-all skycells per frame via `wcs_f.world_to_pixel_values(ra, dec)`.
-
-### TESS drift → PS1 integer shift
-
-Smoothed `(dx, dy)` at each skycell center is converted to a PS1-pixel shift by the
-same WCS round-trip used in linear downsample (`compute_ps1_shift_for_skycell`):
-
-- sky → TESS pixel at skycell center
-- perturb by `(dx, dy)` in TESS pixel space
-- both positions → sky → PS1 pixels
-- PS1 shift = difference
-
-Then **hysteresis rounding** (default margin 0.1) prevents flapping at bin edges.
-Frames with identical per-skycell `(sx_int, sy_int)` vectors share a `group_id`.
-
-### Savitzky–Golay smoothing — what is and is not smoothed
-
-**Smoothed:** the per-skycell **drift time series** `(dx, dy)` before integer
-quantization. Within each orbit segment (split where `btjd` gaps exceed 0.5 days),
-each component is SG-filtered (default window=11, polyorder=2). This reduces
-frame-to-frame noise so single-frame WCS jitter does not spawn spurious shift bins.
-
-**Not smoothed:**
-
-- WCS FITS headers or SIP coefficients.
-- The WCS used during Exact remapping (see below).
-
-Smoothing affects **which integer bin** each skycell lands in and **which realizing
-frame** is picked for a cache key — not the geometry math inside `process_skycell_pixel_mapping`.
-At test epochs, SG schedule vs raw WCS differ by ≲0.003 px.
-
-Linear mode applies the same SG filter, but only to the **target** drift — see
-[§4 of wcs_grouping.md](stages/wcs_grouping.md#4-savitzkygolay-smoothing).
-
----
-
-## Hybrid recomputation (L4)
-
-Recomputing is **not** a full PanCAKES remap. It is **roll + small Exact patch**.
-
-### Baseline: integer roll
-
-The L0 frozen assignment map (PS1 pixel → TESS flat id) is rolled by
-`(sx_int, sy_int)` (`hybrid_regmaps.roll_assignment`). A roll is correct almost
-everywhere — wrong only on ownership seams and footprint edges.
-
-### Type I (L4a) — intra-skycell
-
-**Trigger:** new cache key `(skycell, sx_int, sy_int)`. Neighbor motion does
-**not** create a Type I key for an unchanged skycell.
-
-**Algorithm:**
-
-1. `linear = roll(frozen_map, sx, sy)`
-2. `mask = dilate(ownership_seams ∪ footprint_edge, R=1)` → ~9% of footprint
-3. Collect TESS ids covering `mask`; run Exact mapping for those ids only
-4. Replace `linear` values on `mask` with Exact values (`apply_hybrid_patch`)
-
-`(sx, sy) = (0, 0)` skips hybrid Exact (mapping-epoch geometry is used as-is).
-
-### Type II (L4b-lite) — inter-skycell neighbor rim
-
-**Trigger:** a neighbor's integer shift changes while this skycell's shift does not
-(~88% of pair-state changes on s0020/c3/k3).
-
-**What happens:**
-
-- **Do not** redo this skycell's internal Type I seams.
-- **Do** Exact-refresh PS1 pixels on the **shared abutting TESS border** with the
-  neighbor.
-
-**As-built policy (`include_abutting_border_exact: true`):** expand the Exact TESS-id
-set with `abutting_border_tess_ids()` under the same realizing WCS used for L4a.
-Full F2 pair-state shared-WCS rim cache is designed but not yet shipped.
-
-Type I and Type II use the **same** Exact primitive — they differ only in **when**
-and **which pixels** are scheduled.
-
-### Decision table
-
-| Question | Answer |
-|----------|--------|
-| Re-run PanCAKES for a drifted FFI? | **No** (L0 only). |
-| Exact-remap every FFI × skycell? | **No**. |
-| Exact-remap every `(skycell, sx, sy)` fully? | **No** — hybrid R=1 (~9%). |
-| Recompute A's Type I when neighbor B moves? | **No** for internal seams. |
-| Refresh PS1 on the A\|B rim when B moves? | **Yes** (L4b-lite). |
-| Margin R? | **R=1** for Type I; abutting border for Type II. |
-
----
-
-## Cache keys and reuse
-
-Two independent quanta appear in the shift-schedule / group handoff
-(`shift_schedule.assign_groups_from_schedule`, written into
-`template_groups.json`):
-
-| Knob | Controls | Typical value |
-|------|----------|---------------|
-| `grouping_quantum_ps1_px` | Full-chip signature → how many `group_id`s | `1.0` (config under `stages.wcs_grouping`) |
-| `cache_quantum_ps1_px` | Per-skycell quantized `(qx, qy)` recorded on group rows | Production field build currently passes `1.0` with `keying="absolute"` |
-
-**Grouping** decides template count. **Cache quantum** is the geometric-accuracy
-knob for per-skycell reuse of Exact patches: finer bins share less work but
-keep ownership closer when two frames land in the same integer roll bin from
-opposite fractional corners.
-
-### Why integer-only reuse is approximate
-
-Within one integer `(sx, sy)` bin, frames can sit at opposite rounding corners
-(`frac_dist` up to ~√2). Nearest-pixel TESS ownership then differs by roughly
-**~0.4% typical / ~1–2% worst** of PS1 pixels on measured s0020/c3/k2 GT sites
-(corr ≈ 0.97 with fractional separation). Integer-align rolling one Exact map
-toward another cuts raw disagree a lot, but a frac-dependent residual remains
-(~0.75% median after roll).
-
-A finer reuse key of the form
+| Layer | Role | Stage / artifacts | Modules |
+|-------|------|-------------------|---------|
+| **L0** | Frozen PS1→TESS ownership at mapping-epoch WCS | `mapping` → `mapping/oversampling_{N}/` | `pancakes.py` |
+| **L2** | Per-skycell PS1 drift time series | `remap` → `shift_schedule.npz` | `shift_schedule.py`, `field_remap.py` |
+| **L3** | Hysteresis integer `(sx,sy)`; signature → `group_id` | Same remap store | `shift_schedule.py` |
+| **L4a** | Exact-patch R=1 seam/rim (~9% footprint) | `exact_cache_l4a/` | `hybrid_regmaps.py`, `field_hybrid_exact.py` |
+| **L4b (F2)** | Shared-WCS abutting rim (~1.9%) | `exact_cache_l4b/` when `pair_state` | `field_abutting.py`, `field_hybrid_exact.py` |
+| **L5** | Compose L4a→L4b; bin PS1; sum contribs per `group_id` | `downsample` → `templates/…/contribs/` | `field_downsample.py`, `field_templates.py` |
 
 ```text
-(skycell, quantize(sx_f, q), quantize(sy_f, q))   with q ≈ 0.25 PS1 px
+L0 frozen regmaps ──► L4a exact_cache_l4a ──┐
+                     └► L4b exact_cache_l4b ─┼─► L5 hybrid bin ─► assemble(group_id)
+L2 shift_schedule ─► L3 groups ─────────────┘
 ```
 
-dropped worst-pair disagree to **median ~0.3%, max ~0.6%** on the same probe.
-`shift_schedule` still supports `keying="phase"` (quantize only the fractional
-part) vs `"absolute"`, and a non-1.0 `cache_quantum_ps1_px`, but the live
-`field_downsample` path currently keys Exact work at integer absolute shifts
-(`cache_quantum_ps1_px=1.0`, `keying="absolute"`) — i.e. the cheaper tier with
-the known ~1% worst-case ownership noise inside a bin. Treat that as an
-accuracy budget, not “exact” geometry reuse.
+### Template DAG
 
-As-built L4 Type I triggers still use the cache key
-`(skycell, sx_int, sy_int)` described above.
+```text
+tess_ffi_download → mapping → ps1_download → ps1_process → downsample
+                         └→ remap ──────────────────────────┘
+```
+
+`downsample` waits for both `remap` and `ps1_process`. Linear mode pre-skips
+`remap` and omits it from `downsample` effective deps.
 
 ---
 
-## WCS in Exact remapping
+## L2–L3: shift schedule and groups
 
-Exact patches call `process_skycell_pixel_mapping()` (`pancakes.py`):
+For each valid FFI frame and each skycell center, remap measures the PS1-pixel
+shift of the skycell relative to the mapping-epoch reference WCS, smooths per
+orbit with Savitzky–Golay, and hysteresis-rounds to integer `(sx_int, sy_int)`.
 
-1. TESS pixel corners (sub-pixel footprint)
-2. `tess_wcs.all_pix2world(...)` — full SIP distortion
-3. `world_ra_dec_to_pixel(ps1_wcs, ...)` — project to PS1
-4. Find PS1 pixels inside each TESS pixel rectangle
+A **signature** is the full-chip vector of per-skycell integer shifts. The first
+appearance of each distinct signature gets a dense `group_id`. Artifacts:
 
-**Which frame's WCS?** The first valid frame whose schedule matches
-`(skycell, sx_int, sy_int)` — the **realizing frame**
-(`field_downsample._frame_index_for_shift`). That frame's unsmoothed per-FFI WCS
-(with SIP) drives the Exact geometry.
+- `shift_schedule.npz` / `.json`
+- `skycell_shift_grid_debug.png` / `skycell_shift_relative_center_debug.png`
+- `template_group_shifts.parquet`
+- `template_groups.json` (`group_id`, `signature_hash`, frame membership)
 
-**Summary:** SG smoothing shapes the **schedule**; Exact remapping uses **real frame
-WCS headers**.
+### Non-measurable frames (missing WCS / sigma-clipped)
+
+Frames with `wcs_ok=False` (or empty WCS headers) and frames whose raw TESS
+drift fails a pre-SG MAD gate (`stages.remap.raw_drift_outlier_sigma`, default
+`5.0`) are **not dropped** from remap or template. They are marked
+non-measurable for Savitzky–Golay, then **synthesized**:
+
+| Gap position | Policy (v1) |
+|--------------|-------------|
+| Interior | Hold last measurable quantized `(sx_int, sy_int)`; floats = `float(int)` |
+| Leading / trailing | Flat-line extrapolation (constant = first / last measurable values) |
+
+Orbit segments for SG come from MIT `TESS_orbit_times.csv` (auto-downloaded via
+`ensure_tess_orbit_times_csv`), not a single sector-wide window.
+
+Provenance is stored in `shift_schedule.npz` as `frame_origin` (`0`=measured,
+`1`=synth missing WCS, `2`=synth sigma-clipped) and in the JSON sidecar as
+`frames_missing_wcs` / `frames_sigma_clipped` / `frame_origin_counts`. The remap
+manifest echoes `shift_schedule_frame_origin_counts`.
+
+---
+
+## L4a: Type I Exact (intra-skycell)
+
+Exact only the **~9% R=1 boundary band** — never the whole skycell.
+
+| Item | Spec |
+|------|------|
+| Trigger | New nonzero `(skycell, sx, sy)` from L3 |
+| Skip | `(0, 0)` |
+| Mask | `dilate(ownership_boundary ∪ footprint_edge, R=1)` on the rolled assignment |
+| Cache | `exact_cache_l4a/{skycell}_sx{±}_sy{±}_exact.npz` |
+| WCS | Realizing frame for that own shift |
+
+Interior pixels stay as cheap integer roll of the frozen L0 map.
+
+**Legacy monolithic `exact_cache/`** (old L4b-lite pollution) is **never** reused
+as L4a. Verify rejects it when `exact_cache_l4a/` is missing; rebuild with
+`rebuild_remap_cache: true`.
+
+---
+
+## L4b: Type II F2 Exact (inter-skycell rim)
+
+Off by default (`l4b_policy: none`). When `l4b_policy: pair_state`:
+
+| Item | Spec |
+|------|------|
+| Pairs | Master 4-neighbour abutting undirected pairs |
+| Keys | Unique `(sx_A,sy_A,sx_B,sy_B)` per pair over `frame_valid` |
+| Scope | Shared abutting border TESS ids only (~1.9%) |
+| WCS | First valid frame realizing that 4-tuple (`rep_frame_index`) |
+| Cache | `exact_cache_l4b/pair_{id_lo}__{id_hi}_…_rim.npz` |
+
+There is **no** `lite` policy. Manifests with `include_abutting_border_exact` or
+`l4b_policy` in `{lite, abutting_under_type1_wcs}` are rejected on verify.
+
+---
+
+## L5: compose, bin, assemble
+
+### Architecture A (group-scoped contribs)
+
+When `l4b_policy=pair_state`, neighbour shifts can differ across `group_id`s that
+share the same Type I key `(skycell,sx,sy)` (~48% of keys on s0020/c3/k3). L5
+therefore writes **group-qualified** contribs:
+
+```text
+contribs/{skycell}_sx{±}_sy{±}_gid{N}.npz     # pair_state
+contribs/{skycell}_sx{±}_sy{±}.npz             # l4b_policy=none (legacy key)
+```
+
+### Compose order (per group context)
+
+1. Load L0 `TESS_PIXEL_MAP`.
+2. Build L4a hybrid (roll + Exact patch from `exact_cache_l4a/`).
+3. For each master abutting neighbour B, load the matching L4b rim NPZ using
+   **this group’s** `(sx_B, sy_B)`; patch A’s rim (`abutting_rim_ps1_mask`).
+   **L4b wins on overlap.**
+4. Bin PS1 with `assignment=hybrid_map`, `sx_int=0`, `sy_int=0` (do not data-roll
+   PS1 when hybrid is used).
+5. Missing required Exact → **fail** (`require_l4b_cache` / require L4a). No
+   silent roll fallback when hybrid is required.
+
+### Consumers
+
+| Consumer | Path |
+|----------|------|
+| Diff Hotpants / shared mask / kernels | `build_field_mode_template_loader` → `assemble_field_group_flux` / `_count` |
+| Optional FITS | `materialize_fits: true` → `fits/syndiff_field_*_gid{N}.fits.fz` from the **same** assemble helpers |
+| Star | Reads field-assembled templates when the event’s `geometry_mode` is field |
+
+---
+
+## Config reference
+
+```yaml
+stages:
+  wcs_grouping:                   # consumed by bind (diff DAG); key name unchanged
+    geometry_mode: field          # DEFAULT
+    grouping_quantum_ps1_px: 1.0
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+    crop_mode: target_box         # diff crop only; field store is full-chip
+    crop_box_size: 1024
+
+  remap:                          # L2–L4
+    apply_hybrid_exact: true
+    hybrid_R: 1
+    l4b_policy: none              # or pair_state
+    raw_drift_outlier_sigma: 5.0  # or null to disable
+    rebuild_remap_cache: false
+    rebuild_l4b_cache: false
+    cache_quantum_ps1_px: 1.0
+    keying: absolute
+    n_jobs: 16
+    executor: condor
+    condor_request_memory: 128000
+
+  downsample:                     # L5
+    geometry_mode: field          # DEFAULT
+    apply_hybrid_exact: true
+    hybrid_R: 1
+    l4b_policy: none              # must match remap for F2
+    require_l4b_cache: null       # auto-true when pair_state
+    rebuild_field_store: false
+    materialize_fits: false
+    n_jobs: 16
+```
+
+Set `geometry_mode` under **both** `wcs_grouping` and `downsample`. The
+downsample dataclass default is `field`, but an explicit mismatch with
+`wcs_grouping` is confusing — keep them aligned.
+
+---
+
+## Storage layout
+
+```text
+{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/     # remap (L2–L4)
+  remap_manifest.json
+  shift_schedule.npz / .json
+  skycell_shift_grid_debug.png              # 3×3 SG+quantized vs BTJD
+  skycell_shift_relative_center_debug.png   # FoV differential (SG only)
+  template_group_shifts.parquet
+  template_groups.json
+  exact_cache_l4a/{skycell}_sx{±N}_sy{±N}_exact.npz
+  exact_cache_l4b/pair_{id}__{id}_…_rim.npz               # pair_state only
+  exact_cache_legacy_polluted/                            # migrated lite; do not use
+  .lock
+
+{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/ # downsample (L5)
+  template_manifest.json
+  field_mode_assembly.json          # schema v1|v2
+  contribs/…[_gid{N}].npz
+  fits/syndiff_field_s{SSSS}_{C}_{K}[_os{N}]_gid{N}.fits.fz  # optional
+  materialized_fits.json
+  .lock
+```
+
+| Stage | Saves | Does not save |
+|-------|-------|---------------|
+| `mapping` | Frozen L0 regmaps | Schedules, Exact, flux |
+| `remap` | Schedule, groups, Exact caches | Full hybrid grids, contribs, FITS |
+| `downsample` | Hybrid-binned contribs (+ optional FITS) | PanCAKES Exact (reads caches only) |
+
+Both remap and templates stores are **shared across events** on an SCC. Ordinary
+`--force-rerun` does not delete them. Use `rebuild_remap_cache` /
+`rebuild_field_store` for intentional rebuilds.
+
+See also [storage layout](storage_layout.md).
+
+### Migration
+
+Older field builds colocated L2–L4 under `templates/`. Use
+`migrate_scc_remap_artifacts()` to copy schedule/groups into `remap/`; legacy
+`exact_cache/` is archived as `exact_cache_legacy_polluted/` and must be rebuilt
+as pure `exact_cache_l4a/` (+ `exact_cache_l4b/` for F2).
+
+---
+
+## Diff and star
+
+1. `bind` writes `event_job.json` / `frames.csv` with `geometry_mode: field` and
+   per-frame `group_id` (from SCC group artifacts).
+2. Diff resolves the SCC templates store via `data_root` + SCC identity.
+3. Hotpants / shared mask / kernel engines call the field template loader, which
+   assembles flux (and optionally count) for the frame’s `group_id`, then crops
+   to the event ROI.
+4. Star consumes the same field-assembled templates when the event is field mode.
+
+Do not parse field products with the linear `dx/dy` filename regex.
+
+---
+
+## Engine support
+
+| Stage | Field-aware |
+|-------|-------------|
+| `hotpants` | yes (on-demand loader, cached per group); OS-aware — see [oversampled templates](oversampled_templates.md) |
+| `shared_mask` | yes (`ps1_min_hit_count>0` uses assembled COUNT) |
+| `kernel_fit` / `convolved_templates` / `kernel_subtract` | yes (keyed by `group_id`) |
+| `epsf` / `centroids` / `sat_template` / `subtract` / `background` / `forced_photometry` | agnostic (consume diff/ePSF products) |
+| `star` | yes when event `geometry_mode` is field |
+
+---
+
+## Verify and rebuild
+
+Verify rejects:
+
+- `include_abutting_border_exact` / lite `l4b_policy` values
+- Polluted `exact_cache/` without `exact_cache_l4a/`
+- `pair_state` without both cache dirs (and NPZ count fingerprints)
+- `pair_state` contrib keys that are not group-qualified 4-tuples
+
+Intentional rebuild:
+
+```yaml
+stages:
+  remap:
+    rebuild_remap_cache: true
+    rebuild_l4b_cache: true
+  downsample:
+    rebuild_field_store: true
+```
+
+---
+
+## Performance notes
+
+- Field mode has **~10²–10³ groups**, so `convolved_templates` runs one template
+  per `group_id` (can be slow on a full frame set).
+- Hybrid Exact workers cap at `min(n_jobs, SYNDIFF_HYBRID_MAX_JOBS=24, CPUs)`.
+- L4a+L4b F2 remap is order **~7 h CPU** per SCC-class gate; use Condor memory
+  ≥128 GB for remap when enabling `pair_state`.
+- Pre-SG MAD outlier gate + missing-WCS synthesis (not a post-hoc median
+  PS1-shift drop) keeps L4a keys from exploding while every FFI still gets a
+  shift assignment.
 
 ---
 
@@ -318,154 +402,16 @@ WCS headers**.
 
 | Module | Role |
 |--------|------|
-| `template_creation/processing/shift_schedule.py` | `build_skycell_shift_schedule`, hysteresis, group assignment |
-| `template_creation/processing/compute_ps1_skycell_shifts.py` | TESS drift → PS1 shift WCS round-trip |
-| `template_creation/processing/hybrid_regmaps.py` | Roll, recompute mask, hybrid patch merge |
-| `template_creation/processing/field_hybrid_exact.py` | Exact regmap for TESS-id subsets; L4a/L4b-lite orchestration |
-| `template_creation/processing/field_remap.py` | SCC remap store build (`run_field_remap_scc`; L2–L4) |
-| `template_creation/processing/field_downsample.py` | SCC field downsample (`run_field_downsample_scc`; L5 contribs) |
-| `template_creation/processing/field_templates.py` | Contrib cache, per-group assembly |
-| `template_creation/processing/pancakes.py` | `process_skycell_pixel_mapping` (shared with L0 mapping) |
-| `common/wcs_header_cache.py` | Per-FFI WCS keyword cache (zero file I/O on hit) |
-| `difference_imaging/support/template_resolution.py` | Resolve field store, assemble per `group_id` at diff time |
-
----
-
-## Config knobs
-
-```yaml
-stages:
-  wcs_grouping:                   # consumed by the `bind` stage (diff DAG); config key name unchanged
-    geometry_mode: field          # opt in (default: linear)
-    grouping_quantum_ps1_px: 1.0  # signature quantum for group_id assignment
-    wcs_drift_savgol_window: 11   # also used by field shift schedule (via defaults)
-    wcs_drift_savgol_polyorder: 2
-    crop_mode: target_box         # diff crop; field store is full-chip, crop filters at assembly
-    crop_box_size: 1024
-  remap:                          # L2–L4 (schedule, groups, exact_cache)
-    apply_hybrid_exact: true
-    hybrid_R: 1
-    include_abutting_border_exact: true   # L4b-lite
-    rebuild_remap_cache: false
-    n_jobs: 32
-  downsample:                     # L5 contribs under templates/oversampling_{N}/
-    geometry_mode: field
-    rebuild_field_store: false    # true overwrites existing contribs
-    n_jobs: 32
-```
-
-`grouping_quantum_ps1_px` is the supported config knob for template count. Finer
-Exact-reuse quanta (`cache_quantum_ps1_px`, phase vs absolute keying) are set on
-`stages.remap` and recorded in `remap_manifest.json` / `template_groups.json`
-(defaults `1.0` / `absolute`).
-
-`mapping_dir` / `convolved_dir` can point remap/downsample at a shared read-only
-mapping + convolved tree while writing SCC stores to an isolated `data_root`.
-
----
-
-## Storage
-
-```
-{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/       # remap stage (L2–L4)
-  remap_manifest.json              # verify gate + recipe (schema_version, hybrid knobs, …)
-  shift_schedule.npz / .json
-  template_group_shifts.parquet
-  template_groups.json
-  exact_cache/{skycell}_sx{±N}_sy{±N}_exact.npz   # Exact TESS-id patch only
-  .lock
-
-{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/  # downsample stage (L5)
-  template_manifest.json          # completeness marker for the SCC store
-  field_mode_assembly.json        # remap_root, roi_bounds, base_tess_shape, zarr, …
-  contribs/skycell.{proj}.{cell}_sx{±N}_sy{±N}.npz
-  .lock
-
-{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/field_contrib_keys.json
-```
-
-### What each stage saves (and does not)
-
-| Stage | Saves | Does **not** save |
-|-------|-------|-------------------|
-| `mapping` | Frozen L0 regmaps under `mapping/oversampling_{N}/` | Shift schedules, Exact patches, flux |
-| `remap` | Schedule, groups, `exact_cache/` Exact **patches** (~9% of footprint ids), `remap_manifest.json` | Full hybrid assignment grids (too large), full per-frame PanCAKES regmaps, `contribs/`, template FITS, zarr |
-| `downsample` | `contribs/`, `template_manifest.json`, `field_mode_assembly.json` (with `remap_root`) | Exact PanCAKES calls when cache hits — only `roll(L0) + apply_patch(exact_cache)` then bin |
-
-`exact_cache` stores Exact TESS-id subsets only. At bin time `downsample` rebuilds the
-in-memory hybrid assignment cheaply from frozen L0 + patch; it must not call
-`exact_regmap_for_tess_ids` / `process_skycell_pixel_mapping` on a warm cache.
-
-### Migration from pre-split stores
-
-Older field builds colocated L2–L4 under `templates/oversampling_{N}/`. Use
-`migrate_scc_remap_artifacts()` in
-[`migrate_field_remap_store.py`](../../syndiff_pipeline/template_creation/processing/migrate_field_remap_store.py)
-to **copy** schedule / groups / `exact_cache/` into `remap/` (sources left in place;
-idempotent). Until migrated, code dual-reads those legacy files when
-`remap_manifest.json` is absent.
-
-Resolved at diff time by `template_resolution.resolve_template_dir()` — first via
-`data_root`+SCC (`scc_templates_dir()`), falling back to sector/camera/ccd from
-`event_job.json`. `is_field_template_store()` recognizes the store by
-`template_manifest.json`. Group shifts prefer `remap_root` from
-`field_mode_assembly.json` when present.
-
-Both stores are **shared across events** on an SCC; ordinary force-rerun never
-deletes them. Use `rebuild_remap_cache: true` (`stages.remap`) and/or
-`rebuild_field_store: true` (`stages.downsample`) for intentional rebuilds.
-Each event records exactly the keys it required (crop-aware verify). Legacy
-pre-cutover stores at `{data_root}/field_templates/sector_*` are obsolete and
-are **not** read by current code. See [storage_layout.md](storage_layout.md).
-
-Diff resolves `group_id` from `syndiff_ffi_frames.csv` → assembles from SCC
-`contribs/`. Do not parse field products with the linear `dx/dy` filename regex.
-
----
-
-## Engine support
-
-Every template-consuming stage is field-aware; templates are assembled per
-`group_id` from the store.
-
-| Stage | Field-aware |
-|-------|-------------|
-| `hotpants` | yes (on-demand loader, cached per group); also OS-aware — see [oversampled templates](oversampled_templates.md) |
-| `shared_mask` | yes (`ps1_min_hit_count>0` uses the assembled COUNT plane; HR COUNT is block-summed to native) |
-| `kernel_fit` / `convolved_templates` / `kernel_subtract` | yes (convolved products keyed by `group_id`; OS crop + reconvolve when `F>1`) |
-| `epsf` / `centroids` / `sat_template` / `subtract` / `background` / `forced_photometry` | agnostic (consume diff/ePSF products) |
-| star (host-star LCs) | yes (per-skycell field shifts per `group_id`, deduped to local signatures; same `oversampling_factor` as templates) |
-
-**Field store units when `oversampling_factor F>1`:** sidecar `base_tess_shape` and
-`roi_bounds` are in **oversampled** pixels; diff crop bounds stay native and
-are converted as `native * F - roi_hr_origin` at assemble time. Event-crop
-template builds scale the native cluster ROI by `F` before writing the store.
-
-Assemble a full-FFI ("big") template for any FFI:
-`template_resolution.assemble_field_template_for_ffi(ctx, manifest, ffi_name)`.
-
----
-
-## Performance caveats
-
-- Field mode has **~10²–10³ groups** (vs ~19 linear), so `convolved_templates`
-  convolves one template per distinct `group_id` **serially** — slow on a full
-  frame set. Use a coarser `grouping_quantum_ps1_px` for the kernel engine, or
-  parallelize `run_convolved_templates`. (The star path deduplicates to the few
-  **local** signatures over its ROI.)
-- Hybrid Exact does one `process_skycell_pixel_mapping` per `(skycell, sx, sy)` key;
-  workers cap at `min(n_jobs, SYNDIFF_HYBRID_MAX_JOBS=24, available CPUs)` at
-  ~2 GB each.
-- Shift schedule build: ~255 s per SCC (measured); L4a-only CPU sketch ~0.6 h
-  serial per SCC.
-
----
-
-## Not yet done
-
-- `materialize_fits: true` (optional pre-materialized FITS) is a no-op flag.
-- Parallel `convolved_templates`.
-- F2 pair-state strip cache for L4b (full shared-WCS rim under pair key).
+| `template_creation/processing/shift_schedule.py` | L2–L3 schedule + groups + synthesis / frame_origin |
+| `template_creation/processing/shift_schedule_plots.py` | Remap debug PNGs (3×3 grid + relative-to-center) |
+| `template_creation/processing/hybrid_regmaps.py` | L4a mask / roll / patch primitives |
+| `template_creation/processing/field_hybrid_exact.py` | Exact subsets; L4a/L4b compose |
+| `template_creation/processing/field_abutting.py` | Undirected pairs + pair-state enum |
+| `template_creation/processing/field_remap.py` | SCC remap store (`run_field_remap_scc`) |
+| `template_creation/processing/field_downsample.py` | SCC L5 (`run_field_downsample_scc`) |
+| `template_creation/processing/field_templates.py` | Contrib I/O, assemble, materialize FITS |
+| `difference_imaging/support/template_resolution.py` | Diff-time field loader |
+| `template_creation/orchestration/verify.py` | Dual-cache + lite rejection |
 
 ---
 
@@ -476,11 +422,8 @@ Assemble a full-FFI ("big") template for any FFI:
 | Frozen regmap | L0 PS1→TESS assignment at mapping-epoch WCS |
 | Linear / roll | Integer PS1 roll of frozen regmap |
 | Exact | `process_skycell_pixel_mapping` under a chosen frame WCS |
-| Hybrid | Linear everywhere + Exact on the R=1 mask |
-| Type I | Intra-skycell seam/rim Exact (L4a) |
-| Type II | Inter-skycell abutting-rim consistency (L4b / L4b-lite) |
-| Abutting border | Master 4-neighbour TESS pixels where skycell A meets B |
-| Signature / group | Full-chip vector of per-skycell integer shifts → `group_id` |
-| Grouping quantum | PS1-px quantum for signature / `group_id` count (`grouping_quantum_ps1_px`) |
-| Cache quantum | PS1-px quantum for per-skycell Exact-reuse `(qx, qy)` (`cache_quantum_ps1_px`) |
-| Realizing frame | First valid frame whose schedule matches `(skycell, sx, sy)` |
+| Hybrid | Linear everywhere + Exact on the R=1 (and optional L4b) mask |
+| Type I / L4a | Intra-skycell seam/rim Exact |
+| Type II / L4b F2 | Inter-skycell abutting-rim Exact under shared WCS |
+| Signature / `group_id` | Full-chip vector of per-skycell integer shifts |
+| Architecture A | Group-qualified contribs when neighbour context collides |
