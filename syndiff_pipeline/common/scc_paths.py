@@ -93,6 +93,8 @@ __all__ = [
     "scc_diff_workspace_dir",
     "scc_diff_event_dir",
     "scc_diff_bookkeeping_dir",
+    "legacy_scc_diff_bookkeeping_dir",
+    "resolve_scc_diff_bookkeeping_dir",
     "scc_ffi_dir",
     "scc_label",
     "scc_legacy_dir",
@@ -417,9 +419,65 @@ def scc_diff_bookkeeping_dir(
     sector: int,
     camera: int,
     ccd: int,
+    *,
+    oversampling_factor: int = 1,
+    template_store_name: str | None = None,
 ) -> Path:
-    """``bookkeeping/diff/`` — frames.csv and diff_job.json."""
-    return scc_bookkeeping_dir(data_root, sector, camera, ccd) / "diff"
+    """Bookkeeping dir for one template lane: ``bookkeeping/diff[_NAME]/oversampling_{N}/``.
+
+    Mirrors the ``templates``/``remap`` lane layout (:func:`scc_templates_dir`)
+    so diff handoff bookkeeping partitions by ``(template_store_name,
+    oversampling_factor)`` instead of a single flat directory. Always the
+    *write* path — see :func:`resolve_scc_diff_bookkeeping_dir` for read-side
+    legacy fallback.
+    """
+    return (
+        scc_bookkeeping_dir(data_root, sector, camera, ccd)
+        / store_subdir(DIFF_SUBDIR, template_store_name)
+        / oversampling_dirname(oversampling_factor)
+    )
+
+
+def legacy_scc_diff_bookkeeping_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """Pre-lane flat bookkeeping dir: ``bookkeeping/diff/`` (no oversampling leaf)."""
+    return scc_bookkeeping_dir(data_root, sector, camera, ccd) / DIFF_SUBDIR
+
+
+def resolve_scc_diff_bookkeeping_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int = 1,
+    template_store_name: str | None = None,
+) -> Path:
+    """Read-resolve one lane's bookkeeping dir, with legacy flat fallback.
+
+    For the default lane (``template_store_name=None``, ``oversampling_factor
+    == 1``), if the new lane path has no ``diff_job.json`` yet but the legacy
+    flat ``bookkeeping/diff/`` does, return the legacy path (read-only —
+    writers must always target :func:`scc_diff_bookkeeping_dir`).
+    """
+    new_dir = scc_diff_bookkeeping_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=oversampling_factor,
+        template_store_name=template_store_name,
+    )
+    os_n = max(1, int(oversampling_factor))
+    if normalize_store_name(template_store_name) is None and os_n == 1:
+        legacy_dir = legacy_scc_diff_bookkeeping_dir(data_root, sector, camera, ccd)
+        if not (new_dir / "diff_job.json").is_file() and (legacy_dir / "diff_job.json").is_file():
+            return legacy_dir
+    return new_dir
 
 
 def scc_diff_stage_dir(
