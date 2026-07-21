@@ -40,6 +40,14 @@ log = logging.getLogger(__name__)
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
+_CHECKPOINT_EMITTERS = {
+    "tess_ffi_download": "emit_ffi_set_checkpoint",
+    "mapping": "emit_mapping_checkpoint",
+    "remap": "emit_remap_store_checkpoint",
+    "downsample": "emit_downsample_checkpoint",
+    "ps1_process": "emit_scc_assembly_checkpoint",
+}
+
 
 def _progress_path_for_stage(stage: str, log_path: Path) -> str | None:
     """Return sidecar path for stages that write JSON progress beside the log."""
@@ -249,7 +257,11 @@ def main(argv: list[str] | None = None) -> int:
                     force_rerun=args.force_rerun,
                     progress_path=_progress_path_for_stage(args.stage, log_path),
                 )
-            if manifest is None:
+            checkpoint_emit_name = _CHECKPOINT_EMITTERS.get(args.stage)
+            skip_manifest = (
+                cfg.bookkeeping_trust_index and checkpoint_emit_name is not None
+            )
+            if manifest is None and not skip_manifest:
                 if args.stage == "diff":
                     assert stage_ctx is not None
                     manifest = DIFF_STAGE.collect_artifacts(stage_ctx)
@@ -258,69 +270,65 @@ def main(argv: list[str] | None = None) -> int:
                     manifest = STAR_STAGE.collect_artifacts(stage_ctx)
                 else:
                     assert resolved is not None
-                    manifest = collect_stage_artifacts(resolved, args.stage)
-            if len(manifest) == 4:
-                expected_count, produced_count, artifacts, manifest_meta = manifest
-            else:
-                expected_count, produced_count, artifacts = manifest
-                manifest_meta = None
-            manifest_paths = (
-                logs.stage_manifest_path(
-                    runs_root, args.run_id, args.target_label, args.stage
-                ),
-                logs.stable_stage_manifest_path(
-                    runs_root, args.target_label, args.stage
-                ),
-            )
-            if args.stage == "diff":
-                assert stage_ctx is not None
-                for manifest_dest in manifest_paths:
-                    write_diff_manifest(
-                        manifest_dest,
-                        stage_ctx,
-                        artifacts,
-                        expected_count,
-                        produced_count,
+                    manifest = collect_stage_artifacts(
+                        resolved, args.stage, runner_cfg=cfg
                     )
-            elif args.stage == "star":
-                assert stage_ctx is not None
-                for manifest_dest in manifest_paths:
-                    write_star_manifest(
-                        manifest_dest,
-                        stage_ctx,
-                        artifacts,
-                        expected_count,
-                        produced_count,
-                    )
-            else:
+            if not skip_manifest:
+                if len(manifest) == 4:
+                    expected_count, produced_count, artifacts, manifest_meta = manifest
+                else:
+                    expected_count, produced_count, artifacts = manifest
+                    manifest_meta = None
+                manifest_paths = (
+                    logs.stage_manifest_path(
+                        runs_root, args.run_id, args.target_label, args.stage
+                    ),
+                    logs.stable_stage_manifest_path(
+                        runs_root, args.target_label, args.stage
+                    ),
+                )
+                if args.stage == "diff":
+                    assert stage_ctx is not None
+                    for manifest_dest in manifest_paths:
+                        write_diff_manifest(
+                            manifest_dest,
+                            stage_ctx,
+                            artifacts,
+                            expected_count,
+                            produced_count,
+                        )
+                elif args.stage == "star":
+                    assert stage_ctx is not None
+                    for manifest_dest in manifest_paths:
+                        write_star_manifest(
+                            manifest_dest,
+                            stage_ctx,
+                            artifacts,
+                            expected_count,
+                            produced_count,
+                        )
+                else:
+                    assert resolved is not None
+                    for manifest_dest in manifest_paths:
+                        write_manifest(
+                            manifest_dest,
+                            resolved,
+                            args.stage,
+                            artifacts,
+                            expected_count,
+                            produced_count,
+                            meta=manifest_meta,
+                        )
+            if checkpoint_emit_name is not None:
                 assert resolved is not None
-                for manifest_dest in manifest_paths:
-                    write_manifest(
-                        manifest_dest,
-                        resolved,
-                        args.stage,
-                        artifacts,
-                        expected_count,
-                        produced_count,
-                        meta=manifest_meta,
+                try:
+                    from syndiff_pipeline.template_creation.orchestration import (
+                        provenance_checkpoint,
                     )
-                if args.stage == "ps1_process":
-                    # Provenance dual-write window (template_bookkeeping_plan.md
-                    # PR2, §11): emit the scc_assembly checkpoint sidecar
-                    # alongside the manifest above. Best-effort and guarded here
-                    # too (belt-and-braces on top of the function's own
-                    # try/except) so a broken/absent provenance package during
-                    # its own rollout can never affect stage success.
-                    try:
-                        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
-                            emit_scc_assembly_checkpoint,
-                        )
 
-                        emit_scc_assembly_checkpoint(resolved)
-                    except Exception:
-                        log.exception(
-                            "scc_assembly checkpoint emit failed (non-fatal)"
-                        )
+                    getattr(provenance_checkpoint, checkpoint_emit_name)(resolved)
+                except Exception:
+                    log.exception("%s checkpoint emit failed (non-fatal)", args.stage)
     except SystemExit as exc:
         if isinstance(exc.code, int):
             exit_code = exc.code

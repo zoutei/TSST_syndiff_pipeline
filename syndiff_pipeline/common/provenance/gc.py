@@ -12,8 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
+from syndiff_pipeline.common.provenance.reindex import _store_lane_roots
 from syndiff_pipeline.common.scc_paths import (
     DIFF_SUBDIR,
+    EVENTS_SUBDIR,
     ps1_combined_zarr_path,
     ps1_convolved_zarr_path,
     provenance_db_path,
@@ -40,6 +42,22 @@ class GcReport:
             "diff_recipe_dirs": self.diff_recipe_dirs,
             "errors": self.errors,
         }
+
+
+def _iter_diff_recipe_dirs(scc_dir: Path) -> Iterable[Path]:
+    for _store_name, diff_root in _store_lane_roots(scc_dir, DIFF_SUBDIR):
+        if not diff_root.is_dir():
+            continue
+        for stage_dir in diff_root.iterdir():
+            if (
+                not stage_dir.is_dir()
+                or stage_dir.name == EVENTS_SUBDIR
+                or stage_dir.name.startswith("_tmp_")
+            ):
+                continue
+            for recipe_dir in stage_dir.iterdir():
+                if recipe_dir.is_dir() and not recipe_dir.name.startswith("_tmp_"):
+                    yield recipe_dir
 
 
 def _fingerprint_dirs(root: Path) -> Iterable[Path]:
@@ -98,14 +116,7 @@ def gc_report(data_root: str | Path) -> GcReport:
                 report.orphan_fingerprint_dirs.append(str(fp_dir))
 
     for scc in data_root.glob("s*/c*/k*"):
-        diff_root = scc / DIFF_SUBDIR
-        if not diff_root.is_dir():
-            continue
-        for stage_dir in diff_root.iterdir():
-            if not stage_dir.is_dir():
-                continue
-            for recipe_dir in stage_dir.iterdir():
-                if recipe_dir.is_dir():
-                    report.diff_recipe_dirs.append(str(recipe_dir))
+        for recipe_dir in _iter_diff_recipe_dirs(scc):
+            report.diff_recipe_dirs.append(str(recipe_dir))
 
     return report

@@ -57,9 +57,17 @@ def _resolve_data_root(args: argparse.Namespace) -> str:
 
 
 def cmd_bookkeeping_reindex(args: argparse.Namespace) -> int:
-    from syndiff_pipeline.common.provenance.reindex import reindex_data_root
+    import sys
+
+    from syndiff_pipeline.common.provenance.reindex import (
+        collect_reindex_clear_warnings,
+        reindex_data_root,
+    )
 
     data_root = _resolve_data_root(args)
+    if not args.incremental:
+        for msg in collect_reindex_clear_warnings(data_root):
+            print(f"WARNING: {msg}", file=sys.stderr)
     store = _store_for_data_root(data_root)
     result = reindex_data_root(data_root, store, clear_first=not args.incremental)
     print(
