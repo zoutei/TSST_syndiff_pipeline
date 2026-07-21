@@ -53,14 +53,6 @@ def _resolved(tmp: Path) -> ResolvedTargetConfig:
 
 
 class TestStageAbsenceProbe(unittest.TestCase):
-    def test_wcs_absent_on_fresh_target(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            resolved = _resolved(Path(tmpdir))
-            self.assertEqual(
-                stage_absence_probe(resolved, "bind"),
-                AbsenceProbeResult.ABSENT,
-            )
-
     def test_mapping_absent_on_fresh_target(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             resolved = _resolved(Path(tmpdir))

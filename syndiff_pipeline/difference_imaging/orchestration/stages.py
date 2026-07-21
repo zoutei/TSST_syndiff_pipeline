@@ -8,10 +8,6 @@ from pathlib import Path
 
 from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.common.orchestration.spec import StageRunContext, StageSpec
-from syndiff_pipeline.difference_imaging.orchestration.bind import (
-    execute_bind_stage,
-    verify_bind_complete,
-)
 from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
     collect_diff_workspace_artifacts,
     diff_workspace_complete,
@@ -227,37 +223,10 @@ def write_diff_manifest(
     return payload
 
 
-def _bind_stage_snapshot(ctx: StageRunContext) -> dict:
-    event_dir = _event_dir_for_target(ctx)
-    return {
-        "sector": ctx.target.sector,
-        "camera": ctx.target.camera,
-        "ccd": ctx.target.ccd,
-        "target_name": ctx.target.target_name,
-        "event_dir": str(event_dir),
-        "stage": "bind",
-        "pool": None,
-    }
-
-
-BIND_STAGE = StageSpec(
-    name="bind",
-    short_name="bind",
-    deps=(),
-    pool=None,
-    default_executor="local",
-    execute=execute_bind_stage,
-    verify_complete=verify_bind_complete,
-    collect_artifacts=lambda ctx: (1, 1 if verify_bind_complete(ctx) else 0, []),
-    config_fingerprint=lambda ctx: "bind",
-    stage_snapshot=_bind_stage_snapshot,
-)
-
-
 DIFF_STAGE = StageSpec(
     name="diff",
     short_name="diff",
-    deps=("bind",),
+    deps=("downsample",),
     pool="diff",
     default_executor="condor",
     execute=execute_diff_stage,
@@ -268,4 +237,4 @@ DIFF_STAGE = StageSpec(
     stage_snapshot=_diff_stage_snapshot,
 )
 
-DIFF_STAGES: tuple[StageSpec, ...] = (BIND_STAGE, DIFF_STAGE)
+DIFF_STAGES: tuple[StageSpec, ...] = (DIFF_STAGE,)

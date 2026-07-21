@@ -216,15 +216,25 @@ class TestManifestFirstVerify(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             resolved = _resolved(tmp_path)
-            csv_path = (
+            scc = (
                 Path(resolved.mapping_root)
                 / "sector_0022"
                 / "camera_3"
                 / "ccd_3"
-                / "tess_s0022_3_3_master_skycells_list.csv"
             )
+            csv_path = scc / "tess_s0022_3_3_master_skycells_list.csv"
             csv_path.parent.mkdir(parents=True, exist_ok=True)
             csv_path.write_text("NAME,projection\nskycell.0001.0001,0001\n", encoding="utf-8")
+            from astropy.io import fits
+            import numpy as np
+            from syndiff_pipeline.common.mapping_grid import MappingGrid
+
+            grid = MappingGrid.from_ffi_shape(2048, 2048)
+            master = scc / "tess_s0022_3_3_master_pixels2skycells.fits"
+            hdu = fits.PrimaryHDU(data=np.zeros(grid.array_shape_native(), dtype=np.int16))
+            for key, val in grid.to_fits_header_updates().items():
+                hdu.header[key] = val
+            hdu.writeto(master, overwrite=True)
 
             result = verify_mapping(resolved)
             self.assertTrue(result.ok)
@@ -1282,12 +1292,6 @@ class TestDiffOnlyVerifyClosure(unittest.TestCase):
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_EXTERNAL,
                 )
-            bind_row = state.get_stage_run(run_id, label, "bind")
-            self.assertEqual(bind_row.status, STATUS_SKIPPED)
-            self.assertEqual(
-                state.get_skip_reason(run_id, label, "bind"),
-                SKIP_REASON_NOT_SELECTED,
-            )
 
     def test_diff_only_artifact_verify_needed(self):
         from syndiff_pipeline.common.orchestration.state import artifact_verify_needed
@@ -1308,9 +1312,6 @@ class TestDiffOnlyVerifyClosure(unittest.TestCase):
             )
             self.assertTrue(
                 artifact_verify_needed(state, run_id, label, "downsample", active)
-            )
-            self.assertFalse(
-                artifact_verify_needed(state, run_id, label, "bind", active)
             )
             self.assertTrue(
                 artifact_verify_needed(
@@ -1355,7 +1356,6 @@ class TestSupersededSkips(unittest.TestCase):
                 tmp_path, [target], active_stages=["mapping", "downsample"]
             )
             label = target.label()
-            state.update_stage_status(run_id, label, "bind", STATUS_SKIPPED, exit_code=0)
             state.update_stage_status(run_id, label, "ps1_process", STATUS_SKIPPED, exit_code=0)
             state.cache_external_check(run_id, label, "ps1_download", complete=False)
 
@@ -1374,7 +1374,7 @@ class TestSupersededSkips(unittest.TestCase):
                 artifact_verify_needed(state, run_id, label, "ps1_download", ["mapping", "downsample"])
             )
 
-    def test_tess_not_superseded_when_bind_skipped(self):
+    def test_tess_not_superseded_when_unrelated_upstream_skipped(self):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1382,7 +1382,7 @@ class TestSupersededSkips(unittest.TestCase):
                 tmp_path, [target], active_stages=["mapping"]
             )
             label = target.label()
-            state.update_stage_status(run_id, label, "bind", STATUS_SKIPPED, exit_code=0)
+            state.update_stage_status(run_id, label, "remap", STATUS_SKIPPED, exit_code=0)
             state.apply_superseded_skips(run_id, ctx.targets)
             tess = state.get_stage_run(run_id, label, "tess_ffi_download")
             self.assertEqual(tess.status, STATUS_EXTERNAL)
@@ -1396,33 +1396,12 @@ class TestSupersededSkips(unittest.TestCase):
             )
             label = target.label()
             state.update_stage_status(run_id, label, "mapping", STATUS_SKIPPED, exit_code=0)
-            state.update_stage_status(run_id, label, "bind", STATUS_SKIPPED, exit_code=0)
 
             from syndiff_pipeline.common.orchestration.state import artifact_verify_needed
 
             self.assertTrue(
                 artifact_verify_needed(state, run_id, label, "ps1_download", ["ps1_process"])
             )
-
-    def test_bind_stays_external_for_mapping_downsample_run(self):
-        target = Target(40, 1, 1, 292.6, 35.7, "2021udg")
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            state, ctx, run_id, _runs_root = _minimal_run_setup(
-                tmp_path, [target], active_stages=["mapping", "downsample"]
-            )
-            label = target.label()
-            state.update_stage_status(run_id, label, "ps1_process", STATUS_SKIPPED, exit_code=0)
-
-            from syndiff_pipeline.common.orchestration.state import artifact_verify_needed
-
-            self.assertFalse(
-                artifact_verify_needed(
-                    state, run_id, label, "bind", ["mapping", "downsample"]
-                )
-            )
-            bind_row = state.get_stage_run(run_id, label, "bind")
-            self.assertEqual(bind_row.status, STATUS_EXTERNAL)
 
 
 class TestPartialRunRetry(unittest.TestCase):

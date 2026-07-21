@@ -20,8 +20,8 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(len(TEMPLATE_STAGES), 6)
 
     def test_composed_stage_count_includes_diff(self):
-        self.assertEqual(len(STAGE_NAMES), 9)
-        self.assertIn("bind", STAGE_NAMES)
+        self.assertEqual(len(STAGE_NAMES), 8)
+        self.assertNotIn("bind", STAGE_NAMES)
         self.assertEqual(STAGE_NAMES[-1], "star")
 
     def test_template_stage_order(self):
@@ -46,11 +46,8 @@ class TestPipelineSpec(unittest.TestCase):
     def test_remap_deps(self):
         self.assertEqual(STAGE_DEPS["remap"], ["mapping"])
 
-    def test_diff_depends_on_bind(self):
-        self.assertEqual(STAGE_DEPS["diff"], ["bind"])
-
-    def test_bind_unpooled(self):
-        self.assertNotIn("bind", STAGE_POOL)
+    def test_diff_depends_on_downsample(self):
+        self.assertEqual(STAGE_DEPS["diff"], ["downsample"])
 
     def test_downsample_pool(self):
         self.assertEqual(STAGE_POOL.get("downsample"), "downsample")
@@ -101,7 +98,7 @@ class TestPipelineSpec(unittest.TestCase):
         linear_stages = parse_stage_params({})
         self.assertEqual(
             SYNDIFF_PIPELINE.effective_stage_deps("downsample", linear_stages),
-            ["mapping", "ps1_process"],
+            ["mapping", "ps1_process", "remap"],
         )
 
     def test_upstream_closure_for_partial_run(self):
@@ -139,7 +136,7 @@ class TestPipelineSpec(unittest.TestCase):
         downstream = SYNDIFF_PIPELINE.downstream_stages("mapping")
         self.assertEqual(
             downstream,
-            ["ps1_download", "ps1_process", "remap", "downsample"],
+            ["ps1_download", "ps1_process", "remap", "downsample", "diff"],
         )
 
     def test_stages_in_pool(self):

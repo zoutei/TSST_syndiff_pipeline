@@ -18,8 +18,6 @@ DIFF_VERIFY_UPSTREAM = frozenset(
 # Legacy stage names accepted by resolve_stage_name.
 _STAGE_LEGACY_ALIASES: dict[str, str] = {
     "skycell_remap": "remap",
-    "wcs": "bind",
-    "wcs_grouping": "bind",
 }
 
 _RENAMED_STAGE_ALIASES = frozenset({"templates", "tmpl"})
@@ -303,7 +301,7 @@ class PipelineSpec:
     def artifact_verify_closure(self, active_stages: Sequence[str]) -> frozenset[str]:
         """Stages eligible for artifact verify in a partial run.
 
-        Diff-only runs verify tess_dl, downsample on disk, and bind handoff — not the
+        Diff-only runs verify tess_dl and downsample on disk — not the
         full template chain (mapping, ps1_download, ps1_process).
         """
         active = set(active_stages)

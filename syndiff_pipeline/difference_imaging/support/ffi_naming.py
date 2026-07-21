@@ -139,6 +139,11 @@ def workspace_frame_stem(product_id: str, label: str) -> str:
     return f"{product_id}_{sanitize_workspace_label(label)}"
 
 
+def scc_diff_artifact_stem(product_id: str, label: str) -> str:
+    """Stem for SCC diff lane artifacts (without FITS suffix)."""
+    return workspace_frame_stem(product_id, label)
+
+
 def parse_workspace_frame_stem(frame_stem: str) -> Optional[Tuple[str, str]]:
     """
     Split ``tess<digits>_<label>`` back into ``(product_id, label)``.
