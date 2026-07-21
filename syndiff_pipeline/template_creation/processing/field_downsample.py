@@ -118,10 +118,6 @@ def _bin_skycell_contrib(
     ``MappingGrid.contains_flat``) are dropped before ``argsort``.
     ``roi_bounds`` is retained for call-site compatibility / materialize only.
     """
-    from syndiff_pipeline.template_creation.processing.downsample import (
-        _aggregate_sorted_groups,
-    )
-
     if assignment.shape != ps1_data.shape:
         raise ValueError(
             f"regmap assignment shape {assignment.shape} != PS1 data shape {ps1_data.shape}"
@@ -163,27 +159,47 @@ def _bin_skycell_contrib(
         return None
 
     flat_keep = np.flatnonzero(keep)
-    pind = pind_full[flat_keep]
+    pind = pind_full[flat_keep].astype(np.int64, copy=False)
     ps1_rav = ps1_full[flat_keep]
     mask_rav = mask_full[flat_keep]
-
-    sort_ind = np.argsort(pind)
-    pind_sorted = pind[sort_ind]
-    change_pts = np.where(np.diff(pind_sorted) > 0)[0] + 1
-    group_starts = np.concatenate([[0], change_pts]).astype(np.intp)
-    tess_pixels = pind_sorted[group_starts].astype(np.int64)
-    if len(tess_pixels) == 0:
+    if pind.size == 0:
         return None
 
-    sums, counts, mask_counts = _aggregate_sorted_groups(
-        ps1_rav[sort_ind], mask_rav[sort_ind], group_starts, ignore_mask
+    # Bin directly with np.bincount instead of argsort-then-aggregate: the sort
+    # only ever existed to make equal ids contiguous, and the aggregation was
+    # already three bincounts. O(N) instead of O(N log N) over ~39M pixels.
+    #
+    # Bins are offset by this skycell's minimum id so the counters span only the
+    # id *range* it touches. Sizing them by the full grid would allocate ~75M
+    # bins x 3 arrays at os4 -- >1.5 GB per worker.
+    base = int(pind.min())
+    local = pind - base
+    n_local = int(local.max()) + 1
+
+    # Upcast before the bitwise AND: the on-disk mask may be narrower (uint8)
+    # than the tested bit (bit 12 = 4096), which numpy rejects outright.
+    ignored = (mask_rav.astype(np.int64, copy=False) & int(ignore_mask)) > 0
+    sum_weights = np.where(ignored, 0.0, ps1_rav).astype(np.float64, copy=False)
+    sum_weights = np.where(np.isnan(sum_weights), 0.0, sum_weights)
+
+    counts_local = np.bincount(local, minlength=n_local)
+    sums_local = np.bincount(local, weights=sum_weights, minlength=n_local)
+    mask_counts_local = np.bincount(
+        local, weights=(mask_rav != 0).astype(np.float64), minlength=n_local
     )
 
+    nz = np.flatnonzero(counts_local)
+    if nz.size == 0:
+        return None
+    tess_pixels = (nz + base).astype(np.int64)
+
+    # Match the legacy narrowing exactly (_aggregate_sorted_groups cast sums to
+    # float32 and the counters to int32 before the caller widened to float64).
     return (
-        tess_pixels.astype(np.int64),
-        sums.astype(np.float64),
-        counts.astype(np.float64),
-        mask_counts.astype(np.float64),
+        tess_pixels,
+        sums_local[nz].astype(np.float32).astype(np.float64),
+        counts_local[nz].astype(np.int32).astype(np.float64),
+        mask_counts_local[nz].astype(np.int32).astype(np.float64),
     )
 
 
@@ -469,10 +485,16 @@ def _build_skycell_composite_index(
     by_skycell: dict[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]] = (
         defaultdict(lambda: defaultdict(list))
     )
+    n_skipped_missing = 0
     for gid, skycell, sx_i, sy_i in key_list:
         skycell_id = name_to_id.get(str(skycell))
         if skycell_id is None:
-            raise KeyError(f"skycell {skycell!r} missing from master id map")
+            # Remap's shift schedule can carry skycells outside the current
+            # master id map (e.g. a buffer-region skycell, or a convolved
+            # store built under a since-rebuilt mapping); skip rather than
+            # fail the whole downsample for a handful of edge contributions.
+            n_skipped_missing += 1
+            continue
         ckey = _composite_key_for_group(
             skycell=str(skycell),
             skycell_id=int(skycell_id),
@@ -487,6 +509,11 @@ def _build_skycell_composite_index(
             apply_inter_skycell=bool(apply_inter_skycell),
         )
         by_skycell[str(skycell)][ckey].append((int(gid), int(sx_i), int(sy_i)))
+    if n_skipped_missing:
+        log.warning(
+            "Skipped %d contrib key(s) for skycell(s) missing from master id map",
+            n_skipped_missing,
+        )
     return {sc: dict(buckets) for sc, buckets in by_skycell.items()}
 
 
@@ -526,8 +553,36 @@ def _read_regmap_assignment_l5(skycell: str) -> np.ndarray:
         )
     with fits.open(regmap_path) as hdul:
         if "TESS_PIXEL_MAP" in hdul:
-            return np.asarray(hdul["TESS_PIXEL_MAP"].data)
-        return np.asarray(hdul[1].data)
+            data = np.asarray(hdul["TESS_PIXEL_MAP"].data)
+        else:
+            data = np.asarray(hdul[1].data)
+    return _as_tess_pixel_ids(data)
+
+
+def _as_tess_pixel_ids(data: np.ndarray) -> np.ndarray:
+    """Narrow a regmap TESS-pixel-id array to int32 when exactly representable.
+
+    Regmaps are int32 on disk, but astropy applies BSCALE/BZERO to the
+    compressed HDU and hands back float64 -- 315 MB for a 39.4M-pixel skycell.
+    Every downstream roll/compare then moves twice the memory it needs to. The
+    ids are whole numbers well inside int32, so the cast is lossless; it is
+    verified rather than assumed, and a non-representable array is left alone.
+    """
+    arr = np.asarray(data)
+    if arr.dtype == np.int32:
+        return arr
+    if arr.dtype.kind == "f":
+        if not np.all(np.isfinite(arr)):
+            return arr
+        narrowed = arr.astype(np.int32)
+        if not np.array_equal(narrowed.astype(arr.dtype), arr):
+            return arr
+        return narrowed
+    if arr.dtype.kind in "iu":
+        info = np.iinfo(np.int32)
+        if arr.min() >= info.min and arr.max() <= info.max:
+            return arr.astype(np.int32)
+    return arr
 
 
 def _l5_skycell_batch(
@@ -617,6 +672,69 @@ def _l5_skycell_batch(
     ps1_data, ps1_mask = _load_ps1_skycell_for_l5(skycell)
     n_zarr_loads = 1
 
+    # ---- per-skycell hoists -------------------------------------------------
+    # The seam mask and the per-neighbour rim masks depend only on the frozen
+    # map, yet the naive path rebuilds them for every composite key (~1.2s and
+    # ~0.8s x n_neighbours each, over a 39M-pixel array). Build them once here
+    # and roll them per key instead; see compose_group_hybrid_assignment.
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        load_l4b_rim_side,
+    )
+    from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
+        abutting_rim_ps1_mask,
+        needs_recompute_mask,
+        stencil_roll_is_exact,
+    )
+
+    max_abs_shift = 0
+    for _ck, _gids in pending.items():
+        for _g, _sx, _sy in _gids:
+            max_abs_shift = max(max_abs_shift, abs(int(_sx)), abs(int(_sy)))
+
+    seam_mask_base = None
+    seam_roll_exact = stencil_roll_is_exact(
+        assignment_map, max_abs_shift, R=intra_skycell_R
+    )
+    if apply_intra_skycell and seam_roll_exact:
+        seam_mask_base = needs_recompute_mask(assignment_map, R=intra_skycell_R)
+    elif apply_intra_skycell:
+        # Assigned pixels reach close enough to the array border that np.roll's
+        # wraparound could disagree with the non-wrapping boundary stencils.
+        # Fall back to per-key recomputation for this skycell (slow but exact).
+        log.warning(
+            "skycell %s: assignment reaches within %d px of the array border; "
+            "using per-key seam-mask recomputation (slower, bit-identical)",
+            skycell,
+            max_abs_shift + int(intra_skycell_R) + 1,
+        )
+
+    # Rim masks are built lazily: a skycell only pays for neighbours it actually
+    # patches. Rolling commutes with abutting_rim_ps1_mask unconditionally
+    # (it is a pure elementwise LUT), so no guard is needed here.
+    _rim_mask_cache: dict[int, np.ndarray] = {}
+
+    class _LazyRimMasks(dict):
+        def __missing__(self, nb: int) -> np.ndarray:
+            mask = abutting_rim_ps1_mask(
+                assignment_map, border_ids_by_neighbour[int(nb)]
+            )
+            self[int(nb)] = mask
+            return mask
+
+    rim_mask_base = _LazyRimMasks(_rim_mask_cache) if apply_inter_skycell else None
+
+    # Memoize sparse rim payloads across keys within this skycell (measured
+    # 1.2-3.0x reuse; the sparse payloads total only a few MB per skycell).
+    _rim_payloads: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    def _cached_rim_loader(path, *, skycell_id: int):
+        key = str(path)
+        hit = _rim_payloads.get(key)
+        if hit is None:
+            hit = load_l4b_rim_side(path, skycell_id=int(skycell_id))
+            _rim_payloads[key] = hit
+        return hit
+
     for ckey, gid_list in pending.items():
         # Representative group for compose (any member shares the composite key).
         rep_gid, sx_i, sy_i = gid_list[0]
@@ -661,11 +779,18 @@ def _l5_skycell_batch(
             apply_intra_skycell=bool(apply_intra_skycell),
             apply_inter_skycell=bool(apply_inter_skycell),
             require_intra_skycell_cache=require_intra,
-            require_inter_skycell_cache=bool(apply_inter_skycell),
+            # Remap already tolerates individual L4b rim-cache write failures
+            # (e.g. extreme early-sector drift overflowing the on-disk dtype)
+            # by logging and skipping; downsample must tolerate the resulting
+            # missing file the same way rather than aborting the whole stage.
+            require_inter_skycell_cache=False,
             pair_ids=pair_ids,
             id_to_name=id_to_name,
             neighbour_ids=neighbour_ids,
             border_ids_by_neighbour=border_ids_by_neighbour,
+            seam_mask_base=seam_mask_base,
+            rim_mask_base_by_neighbour=rim_mask_base,
+            rim_cache_loader=_cached_rim_loader,
         )
         n_compose += 1
         binned = _bin_skycell_contrib(

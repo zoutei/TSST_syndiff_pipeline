@@ -56,6 +56,15 @@ class TestHybridRegmaps(unittest.TestCase):
         self.assertEqual(int(rim.sum()), 7)  # three 10s + four 20s
         self.assertFalse(rim[2, 2])  # 30 not in border set
 
+    def test_abutting_rim_ps1_mask_accepts_float_tid(self):
+        """Regmap FITS files store TESS_PIXEL_MAP as whole-number floats."""
+        tid = np.array(
+            [[10, 10, 20], [10, 20, 20], [-1, 20, 30]], dtype=np.float32
+        )
+        rim = abutting_rim_ps1_mask(tid, [10, 20])
+        self.assertEqual(int(rim.sum()), 7)
+        self.assertFalse(rim[2, 2])
+
     def test_roll_assignment_roundtrip_shape(self):
         frozen = np.arange(12, dtype=np.int64).reshape(3, 4)
         rolled = roll_assignment(frozen, 1, -2, convention="assignment")

@@ -276,12 +276,14 @@ def patch_l4b_rim_from_cache(
     When ``ids_self`` is provided (hoisted border ids), skips recomputing
     :func:`shared_abutting_border_tess_ids`.
     """
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        load_l4b_rim_side,
+    )
+    from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
+        apply_sparse_patch_inplace,
+    )
+
     cache_path = Path(exact_cache_path)
-    with np.load(cache_path) as z:
-        id_lo = int(z["id_lo"])
-        id_hi = int(z["id_hi"])
-        exact_lo = np.asarray(z["exact_tid_lo"], dtype=np.int32)
-        exact_hi = np.asarray(z["exact_tid_hi"], dtype=np.int32)
 
     if ids_self is None:
         ids_self, _ids_nb = shared_abutting_border_tess_ids(
@@ -292,22 +294,45 @@ def patch_l4b_rim_from_cache(
     if ids_self.size == 0:
         return hybrid_tid
 
-    if int(skycell_id) == id_lo:
-        exact_tid = exact_lo
-    elif int(skycell_id) == id_hi:
-        exact_tid = exact_hi
-    else:
-        raise ValueError(
-            f"skycell_id {skycell_id} not in L4b cache pair ({id_lo}, {id_hi})"
-        )
-
-    if exact_tid.size == 0:
+    # Reads only this skycell's side, and accepts both cache layouts.
+    idx, val = load_l4b_rim_side(cache_path, skycell_id=int(skycell_id))
+    if idx.size == 0:
         return hybrid_tid
 
     # Rim location is defined on the rolled linear map (border tess ids), not
     # post-L4a exact tess ids which may differ inside the seam band.
     rim_mask = abutting_rim_ps1_mask(linear_tid, ids_self)
-    return apply_hybrid_patch(hybrid_tid, exact_tid, rim_mask)
+    out = np.asarray(hybrid_tid).copy()
+    apply_sparse_patch_inplace(out.ravel(), rim_mask.ravel(), idx, val)
+    return out
+
+
+def _patch_l4b_rim_sparse(
+    hybrid_tid: np.ndarray,
+    *,
+    rim_mask: np.ndarray,
+    skycell_id: int,
+    exact_cache_path: str | Path,
+    loader: Any | None = None,
+) -> np.ndarray:
+    """In-place sparse rim patch using a precomputed (already rolled) rim mask.
+
+    Equivalent to :func:`patch_l4b_rim_from_cache` but skips both the per-key
+    ``abutting_rim_ps1_mask`` rebuild and the full-array copy.
+    """
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        load_l4b_rim_side,
+    )
+    from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
+        apply_sparse_patch_inplace,
+    )
+
+    load = loader if loader is not None else load_l4b_rim_side
+    idx, val = load(Path(exact_cache_path), skycell_id=int(skycell_id))
+    if len(idx) == 0:
+        return hybrid_tid
+    apply_sparse_patch_inplace(hybrid_tid.ravel(), rim_mask.ravel(), idx, val)
+    return hybrid_tid
 
 
 def compose_group_hybrid_assignment(
@@ -333,6 +358,9 @@ def compose_group_hybrid_assignment(
     id_to_name: Mapping[int, str] | None = None,
     neighbour_ids: Sequence[int] | None = None,
     border_ids_by_neighbour: Mapping[int, np.ndarray] | None = None,
+    seam_mask_base: np.ndarray | None = None,
+    rim_mask_base_by_neighbour: Mapping[int, np.ndarray] | None = None,
+    rim_cache_loader: Any | None = None,
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Compose intra-skycell hybrid then inter-skycell rim patches for one group.
 
@@ -342,6 +370,22 @@ def compose_group_hybrid_assignment(
 
     Optional hoisted metadata (``pair_ids``, ``id_to_name``, ``neighbour_ids``,
     ``border_ids_by_neighbour``) avoids recomputing abutting geometry per call.
+
+    Three further hoists, all per-skycell rather than per-key, and all producing
+    bit-identical output (see
+    :func:`~...hybrid_regmaps.stencil_roll_is_exact` for the one precondition):
+
+    ``seam_mask_base``
+        Dilated recompute mask built on the *unrolled* frozen map; rolled here
+        instead of recomputing ``needs_recompute_mask`` per key. Callers must
+        only pass this when ``stencil_roll_is_exact`` holds.
+    ``rim_mask_base_by_neighbour``
+        Per-neighbour rim masks built on the unrolled frozen map.
+        ``abutting_rim_ps1_mask`` is elementwise, so rolling commutes exactly.
+    ``rim_cache_loader``
+        ``loader(path, want_lo) -> (idx, val, id_lo, id_hi)``; lets a worker
+        memoize sparse rim payloads across keys. Defaults to
+        :func:`~...field_abutting.load_l4b_rim_side`.
 
     When ``apply_intra_skycell`` is False, returns the rolled linear assignment
     without applying the intra-skycell exact patch. When ``apply_inter_skycell``
@@ -358,6 +402,7 @@ def compose_group_hybrid_assignment(
     from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
         needs_recompute_mask,
         roll_assignment,
+        roll_mask,
     )
 
     intra_cache_path = Path(l4a_cache_path)
@@ -368,6 +413,12 @@ def compose_group_hybrid_assignment(
     linear_tid = roll_assignment(
         frozen_tid, sx_int, sy_int, convention="assignment"
     )
+    # The rolled array is freshly allocated, so it can be patched in place --
+    # but only when no later step still needs the *unpatched* map. The fallback
+    # rim path derives its mask from ``linear_tid``, so in that case keep a copy.
+    needs_unpatched_linear = bool(apply_inter_skycell) and (
+        rim_mask_base_by_neighbour is None
+    )
     if apply_intra_skycell and intra_cache_path.is_file():
         try:
             with np.load(intra_cache_path) as z:
@@ -377,8 +428,17 @@ def compose_group_hybrid_assignment(
             raise RuntimeError(
                 f"corrupt exact cache {intra_cache_path.name}: {exc}"
             ) from exc
-        mask = needs_recompute_mask(linear_tid, R=int(hybrid_R))
-        hybrid = apply_hybrid_patch(linear_tid, exact, mask)
+        if seam_mask_base is not None:
+            mask = roll_mask(seam_mask_base, sx_int, sy_int)
+        else:
+            mask = needs_recompute_mask(linear_tid, R=int(hybrid_R))
+        if needs_unpatched_linear:
+            hybrid = apply_hybrid_patch(linear_tid, exact, mask)
+        else:
+            # Equivalent to apply_hybrid_patch, without the full-array copy.
+            hybrid = linear_tid
+            replace = mask & (exact >= 0)
+            hybrid[replace] = exact[replace]
     else:
         hybrid = linear_tid
         meta = {
@@ -391,6 +451,7 @@ def compose_group_hybrid_assignment(
     meta["apply_intra_skycell"] = bool(apply_intra_skycell)
     meta["apply_inter_skycell"] = bool(apply_inter_skycell)
     meta["n_inter_skycell_patches"] = 0
+    meta["n_inter_skycell_missing"] = 0
     meta["pair_epoch_ids"] = []
     if group_id is not None:
         meta["group_id"] = int(group_id)
@@ -452,6 +513,7 @@ def compose_group_hybrid_assignment(
             except KeyError:
                 if require_inter_skycell_cache:
                     raise
+                meta["n_inter_skycell_missing"] = int(meta["n_inter_skycell_missing"]) + 1
                 continue
             rim_path = l4b_rim_path(
                 inter_cache_dir, lo, hi, pair_epoch_id, sx_lo, sy_lo, sx_hi, sy_hi
@@ -478,16 +540,28 @@ def compose_group_hybrid_assignment(
         if not rim_path.is_file():
             if require_inter_skycell_cache:
                 raise FileNotFoundError(f"inter-skycell rim cache missing: {rim_path}")
+            meta["n_inter_skycell_missing"] = int(meta["n_inter_skycell_missing"]) + 1
             continue
-        hybrid = patch_l4b_rim_from_cache(
-            hybrid,
-            linear_tid=linear_tid,
-            skycell_id=int(skycell_id),
-            neighbour_id=neighbour_id,
-            master=master,
-            exact_cache_path=rim_path,
-            ids_self=ids_self,
-        )
+        if rim_mask_base_by_neighbour is not None:
+            hybrid = _patch_l4b_rim_sparse(
+                hybrid,
+                rim_mask=roll_mask(
+                    rim_mask_base_by_neighbour[int(neighbour_id)], sx_int, sy_int
+                ),
+                skycell_id=int(skycell_id),
+                exact_cache_path=rim_path,
+                loader=rim_cache_loader,
+            )
+        else:
+            hybrid = patch_l4b_rim_from_cache(
+                hybrid,
+                linear_tid=linear_tid,
+                skycell_id=int(skycell_id),
+                neighbour_id=neighbour_id,
+                master=master,
+                exact_cache_path=rim_path,
+                ids_self=ids_self,
+            )
         meta["n_inter_skycell_patches"] = int(meta["n_inter_skycell_patches"]) + 1
 
     return hybrid, meta
