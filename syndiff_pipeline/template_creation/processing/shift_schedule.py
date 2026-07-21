@@ -74,6 +74,34 @@ FRAME_ORIGIN_SYNTH_SIGMA_CLIPPED = 2
 
 SYNTHESIS_POLICY = "interior_hold_quantized_edges_flat"
 
+# A skycell's stored PS1 array has no valid data beyond its own nominal
+# footprint except the boundary/edge-continuity margin ps1_process fills in
+# via cross-projection padding (cross_projection_padding.PAD_SIZE /
+# CELL_OVERLAP = 480 PS1 px). But that whole 480px band is itself the input
+# to a Gaussian PSF convolution truncated at a 470px radius
+# (convolved_store.DEFAULT_RADIUS, DEFAULT_PSF_SIGMA=60 -> truncate=470/60)
+# with a constant/NaN boundary condition (convolution_utils.
+# apply_gaussian_convolution, mode="constant") — so only the innermost
+# ``480 - 470 = 10`` px of that padding band is far enough from the true
+# array edge to be uncontaminated by the convolution's edge effect; the
+# outer ~470px of the "padding" is not valid data to shift into. (Duplicated
+# here rather than imported: cross_projection_padding.py pulls in reproject/
+# band_utils, ~5s import cost we don't want on remap's fast-fail path.)
+#
+# A per-skycell PS1-pixel shift beyond this margin cannot be a real
+# translation: np.roll would wrap contaminated/out-of-footprint data around
+# instead of drawing from valid padded neighbour data. Seen in production as
+# shifts of tens of thousands of PS1 px (~degrees) from a broken WCS
+# round-trip at specific skycells/frames — not real drift. Enforced hard in
+# :func:`build_skycell_shift_schedule`, and checked immediately per skycell
+# (raises on the first violation, before scanning the rest) so a bad WCS
+# solution fails at the very start of remap, before L4a/L4b even begin —
+# once the WCS bug itself is fixed, every downstream artifact keyed off it
+# needs regenerating anyway, so there is no value in continuing past it.
+_PS1_CROSS_PROJECTION_PAD_PX = 480  # cross_projection_padding.PAD_SIZE/CELL_OVERLAP
+_PS1_CONVOLUTION_RADIUS_PX = 470  # convolved_store.DEFAULT_RADIUS
+MAX_SHIFT_PS1_PX = _PS1_CROSS_PROJECTION_PAD_PX - _PS1_CONVOLUTION_RADIUS_PX
+
 
 # ── Savitzky-Golay smoothing (relocated from common/wcs_drift_field.py) ────
 
@@ -631,6 +659,30 @@ def build_skycell_shift_schedule(
         sy_out = np.full(n_frames, np.nan, dtype=np.float64)
         sx_out[frame_measurable] = sx[frame_measurable]
         sy_out[frame_measurable] = sy[frame_measurable]
+
+        # Hard bound: a computed shift beyond the skycell's real padding
+        # margin cannot be a valid translation (see MAX_SHIFT_PS1_PX above).
+        # Check the raw per-frame values before hysteresis rounding so the
+        # error reports the actual offending frame, not a held/smoothed one.
+        # Raise immediately (don't scan the remaining skycells first): this
+        # is meant to fail before L4a/L4b real computation even starts, and
+        # fixing the underlying WCS bug invalidates every other skycell's
+        # cached artifacts anyway, so there is no value in a "full report".
+        exceeded = frame_measurable & (
+            (np.abs(sx_out) > MAX_SHIFT_PS1_PX) | (np.abs(sy_out) > MAX_SHIFT_PS1_PX)
+        )
+        if exceeded.any():
+            f0 = int(np.flatnonzero(exceeded)[0])
+            raise ValueError(
+                f"Computed PS1-pixel shift for {skycell_names[c]!r} at frame "
+                f"{f0} ({filenames[f0] if f0 < len(filenames) else '?'}) is "
+                f"sx={sx_out[f0]:+.1f} sy={sy_out[f0]:+.1f} px, exceeding the "
+                f"{MAX_SHIFT_PS1_PX}px valid-padding margin ({int(exceeded.sum())} "
+                f"frame(s) affected on this skycell alone). This is not real "
+                f"spacecraft drift — it indicates a broken WCS round-trip "
+                f"(compute_ps1_shift_vectorized) for this skycell/frame."
+            )
+
         sx_float[:, c] = sx_out.astype(np.float32)
         sy_float[:, c] = sy_out.astype(np.float32)
 

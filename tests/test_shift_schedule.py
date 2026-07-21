@@ -133,7 +133,7 @@ def test_shift_schedule_matches_independent_wcs_roundtrip():
     SG-smoothing (polyorder=1) reproduces them with no residual.
     """
     ref_wcs = _make_wcs()
-    shifts = [(0.05 * t, -0.03 * t) for t in range(4)]
+    shifts = [(0.0025 * t, -0.0015 * t) for t in range(4)]
     frames = [(f"f{t}.fits", _shifted_wcs(ref_wcs, s)) for t, s in enumerate(shifts)]
 
     skycell_df = _make_skycell_df()
@@ -174,7 +174,7 @@ def test_shift_schedule_matches_independent_wcs_roundtrip():
 def test_shift_schedule_missing_wcs_is_synthesized_not_dropped():
     """Interior missing-WCS frame stays valid; holds previous quantized ints."""
     ref_wcs = _make_wcs()
-    shifts = [(0.1 * t, 0.0) for t in range(5)]
+    shifts = [(0.005 * t, 0.0) for t in range(5)]
     wcses: list[WCS | None] = [_shifted_wcs(ref_wcs, s) for s in shifts]
     wcses[2] = None
     frames = [(f"f{t}.fits", w) for t, w in enumerate(wcses)]
@@ -500,8 +500,8 @@ def test_shift_schedule_save_load_round_trip(tmp_path):
     ref_wcs = _make_wcs()
     frames = [
         ("frame0.fits", ref_wcs),
-        ("frame1.fits", _shifted_wcs(ref_wcs, (0.2, -0.1))),
-        ("frame2.fits", _shifted_wcs(ref_wcs, (0.4, -0.2))),
+        ("frame1.fits", _shifted_wcs(ref_wcs, (0.01, -0.005))),
+        ("frame2.fits", _shifted_wcs(ref_wcs, (0.02, -0.01))),
     ]
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
@@ -625,7 +625,7 @@ def test_frame_origin_missing_wcs_vs_sigma():
         elif t == 5:
             frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (2000.0, 2000.0))))
         else:
-            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.05 * t, -0.02 * t))))
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.0025 * t, -0.001 * t))))
 
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
@@ -657,7 +657,7 @@ def test_orbit_csv_e2e_two_segments_and_missing_sector_raises():
         "2020-01-20T07:00:00",
     ]
     frames = [
-        (f"f{t}.fits", _shifted_wcs(ref_wcs, (0.05 * t, -0.02 * t))) for t in range(4)
+        (f"f{t}.fits", _shifted_wcs(ref_wcs, (0.0025 * t, -0.001 * t))) for t in range(4)
     ]
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
@@ -717,9 +717,12 @@ def test_raw_drift_outlier_sigma_none_disables_in_schedule_build():
     frames: list[tuple[str, WCS | None]] = []
     for t in range(10):
         if t == 5:
-            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (2000.0, 2000.0))))
+            # A large outlier relative to the other frames' ~0.02px drift,
+            # but still within MAX_SHIFT_PS1_PX (the hard physical padding
+            # bound is a separate, independent check from sigma rejection).
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.02, 0.02))))
         else:
-            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.05 * t, -0.02 * t))))
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.0025 * t, -0.001 * t))))
     skycell_df = _make_skycell_df()
     schedule = build_skycell_shift_schedule(
         frames,
@@ -732,6 +735,35 @@ def test_raw_drift_outlier_sigma_none_disables_in_schedule_build():
     assert schedule.meta["raw_drift_outlier_sigma"] is None
     assert schedule.meta["frame_origin_counts"]["synth_sigma_clipped"] == 0
     assert int(schedule.frame_origin[5]) == FRAME_ORIGIN_MEASURED
+
+
+def test_shift_exceeding_padding_margin_raises():
+    """A shift beyond MAX_SHIFT_PS1_PX (the real per-skycell padding margin)
+    cannot be a valid translation — it must fail loudly at the source rather
+    than silently propagate a nonsensical multi-thousand-pixel shift into
+    remap/downsample, where it previously surfaced as unrelated dtype-cast
+    crashes far downstream."""
+    ref_wcs = _make_wcs()
+    frames: list[tuple[str, WCS | None]] = []
+    for t in range(10):
+        if t == 5:
+            # ~2000 TESS px of "drift" translates to tens of thousands of
+            # PS1 px — physically impossible (would be several degrees),
+            # exactly the broken-WCS-round-trip shape seen in production.
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (2000.0, 2000.0))))
+        else:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.0025 * t, -0.001 * t))))
+    skycell_df = _make_skycell_df()
+
+    with pytest.raises(ValueError, match="padding margin"):
+        build_skycell_shift_schedule(
+            frames,
+            skycell_df,
+            ref_wcs,
+            savgol_window=5,
+            raw_drift_outlier_sigma=None,
+            **_schedule_orbit_kwargs(10),
+        )
 
 
 # ── shift / pair epochs ───────────────────────────────────────────────────
