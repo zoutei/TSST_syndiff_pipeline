@@ -41,7 +41,7 @@ except ImportError:  # pragma: no cover
 # recipe_id via the caller-supplied ``code_version`` argument -- it is NOT
 # read implicitly by canonical()/recipe_id()/fingerprint(); producers pass it
 # explicitly so schema bumps are auditable per-kind.
-RECIPE_SCHEMA_VERSION = 1
+RECIPE_SCHEMA_VERSION = 2
 
 _FLOAT_ROUND_NDIGITS = 9
 

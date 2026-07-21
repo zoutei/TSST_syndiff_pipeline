@@ -29,7 +29,13 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Any, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence, Union
+
+from syndiff_pipeline.common.mapping_grid import (
+    MappingGrid,
+    compute_conv_pad_native,
+    compute_rkernel,
+)
 
 __all__ = [
     "SPATIAL_KEY_KINDS",
@@ -44,6 +50,7 @@ __all__ = [
     "KIND_REGISTRY",
     "LEGACY_UNVERIFIED_SUFFIX",
     "legacy_unverified_kind",
+    "mapping_grid_recipe_fragment",
     "mapping_recipe_params",
     "remap_store_recipe_params",
     "downsample_recipe_params",
@@ -87,12 +94,13 @@ class SkycellKey:
 
 @dataclass(frozen=True)
 class SccKey:
-    """SCC-addressed key, optionally at one oversampling factor."""
+    """SCC-addressed key, optionally at one oversampling factor and store lane."""
 
     s: int
     c: int
     k: int
     os: Optional[int] = None
+    store_name: Optional[str] = None
 
     def __post_init__(self) -> None:
         for name in ("s", "c", "k"):
@@ -101,11 +109,17 @@ class SccKey:
                 raise ValueError(f"SccKey.{name} must be a non-negative int, got {val!r}")
         if self.os is not None and (int(self.os) != self.os or int(self.os) < 1):
             raise ValueError(f"SccKey.os must be a positive int or None, got {self.os!r}")
+        if self.store_name is not None:
+            from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+            object.__setattr__(self, "store_name", normalize_store_name(self.store_name))
 
     def to_dict(self) -> dict:
         d = {"s": int(self.s), "c": int(self.c), "k": int(self.k)}
         if self.os is not None:
             d["os"] = int(self.os)
+        if self.store_name is not None:
+            d["store_name"] = str(self.store_name)
         return d
 
 
@@ -272,34 +286,137 @@ def _asdict(obj: Any) -> dict:
     raise TypeError(f"expected a dataclass instance or Mapping, got {type(obj)!r}")
 
 
+def _mapping_grid_stage_fragment(
+    *,
+    x_left_dead: int,
+    x_right_dead: int,
+    y_edge_strip: int,
+    conv_pad_native: int,
+    oversampling_factor: int,
+) -> dict:
+    """Canonical mapping-grid recipe fields (matches template stage builders)."""
+    return {
+        "x_left_dead": int(x_left_dead),
+        "x_right_dead": int(x_right_dead),
+        "y_edge_strip": int(y_edge_strip),
+        "conv_pad_native": int(conv_pad_native),
+        "oversampling_factor": int(oversampling_factor),
+    }
+
+
+def _mapping_grid_stage_fragment_from_ffi_block(block: Mapping[str, Any]) -> dict | None:
+    """Convert an ffi-bounds block to stage keys when full FFI size is known."""
+    nx = block.get("nx")
+    ny = block.get("ny")
+    if nx is None or ny is None:
+        return None
+    conv_pad = block.get("conv_pad_native")
+    if conv_pad is None and "ffi_ymin" in block:
+        conv_pad = -int(block["ffi_ymin"])
+    return _mapping_grid_stage_fragment(
+        x_left_dead=int(block["ffi_xmin"]),
+        x_right_dead=int(nx) - int(block["ffi_xmax"]),
+        y_edge_strip=int(ny) - int(block["ffi_ymax"]),
+        conv_pad_native=int(conv_pad or 0),
+        oversampling_factor=int(
+            block.get("oversampling_factor", block.get("oversampling", 1))
+        ),
+    )
+
+
+def mapping_grid_recipe_fragment(grid: Union[MappingGrid, Mapping[str, Any]]) -> dict:
+    """Canonical mapping-grid fields for template-side recipes.
+
+    Accepts a :class:`~syndiff_pipeline.common.mapping_grid.MappingGrid` or a
+    ``mapping_grid`` block / ``to_mapping_dict()`` payload. Stage-style keys
+    (``x_left_dead``, ``x_right_dead``, …) are preferred; ffi-bounds blocks
+    are converted when ``nx``/``ny`` are present.
+    """
+    if isinstance(grid, MappingGrid):
+        return grid.to_mapping_dict()
+    block = dict(grid.get("mapping_grid", grid))
+    stage = _mapping_grid_stage_fragment_from_ffi_block(block)
+    if stage is not None:
+        return stage
+    if "x_left_dead" in block:
+        return _mapping_grid_stage_fragment(
+            x_left_dead=int(block["x_left_dead"]),
+            x_right_dead=int(block["x_right_dead"]),
+            y_edge_strip=int(block["y_edge_strip"]),
+            conv_pad_native=int(block.get("conv_pad_native", 0)),
+            oversampling_factor=int(
+                block.get("oversampling_factor", block.get("oversampling", 1))
+            ),
+        )
+    if "ffi_xmin" in block:
+        return {
+            "ffi_xmin": int(block["ffi_xmin"]),
+            "ffi_ymin": int(block["ffi_ymin"]),
+            "ffi_xmax": int(block["ffi_xmax"]),
+            "ffi_ymax": int(block["ffi_ymax"]),
+            "oversampling_factor": int(
+                block.get("oversampling_factor", block.get("oversampling", 1))
+            ),
+            "conv_pad_native": int(block.get("conv_pad_native", 0)),
+        }
+    keys = (
+        "x_left_dead",
+        "x_right_dead",
+        "y_edge_strip",
+        "conv_pad_native",
+        "oversampling_factor",
+    )
+    return {k: block[k] for k in keys if k in block}
+
+
+def _mapping_grid_fragment_from_mapping_stage(
+    mapping_stage: Any,
+    *,
+    oversampling_factor: Optional[int] = None,
+) -> dict:
+    """Geometry-defining mapping-grid fields from ``MappingStageParams``."""
+    mp = mapping_stage
+    os_factor = int(
+        oversampling_factor if oversampling_factor is not None else mp.oversampling_factor
+    )
+    rkernel = compute_rkernel(float(mp.sci_fwhm))
+    conv_pad = compute_conv_pad_native(
+        rkernel, template_conv_pad_spare_px=int(mp.template_conv_pad_spare_px)
+    )
+    return {
+        "x_left_dead": int(mp.x_left_dead),
+        "x_right_dead": int(mp.x_right_dead),
+        "y_edge_strip": int(mp.y_edge_strip),
+        "conv_pad_native": int(conv_pad),
+        "oversampling_factor": os_factor,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Template-side recipe_params builders.
 #
 # Field lists copied verbatim from
-# template_creation/orchestration/verify.py:117-172 (`config_fingerprint`);
+# template_creation/orchestration/verify.py:117-176 (`config_fingerprint`);
 # that function is not imported or modified here.
 # ---------------------------------------------------------------------------
 
 
 def mapping_recipe_params(resolved) -> dict:
-    """``mapping`` recipe params (verify.py:132)."""
+    """``mapping`` recipe params (verify.py:137-139 + mapping grid)."""
     mp = resolved.stages.mapping
     return {
         "oversampling_factor": mp.oversampling_factor,
         "pad_distance": mp.pad_distance,
         "overwrite": mp.overwrite,
+        "mapping_grid": _mapping_grid_fragment_from_mapping_stage(mp),
     }
 
 
 def ps1_process_recipe_params(resolved) -> dict:
     """``ps1_process`` recipe params (verify.py's ``ps1_process`` branch).
 
-    Used directly for ``combined_skycell``/``convolved_skycell``/
-    ``scc_assembly`` in PR1: Phase 1/2 (§12/§13) have not landed on this
-    branch, so those kinds do not yet have their own finer-grained param
-    breakdown (band-combine constants, psf radius/mode, gaia_version). Until
-    then this single builder stands in for all three per §11's checkpoint
-    recipe (``psf_sigma``/saturation/removal params + ``projections_limit``).
+    Used directly for ``scc_assembly`` checkpoint recipes and as the base for
+    ``combined_skycell`` saturation/star-removal fields.
     """
     pp = resolved.stages.ps1_process
     return {
@@ -312,7 +429,7 @@ def ps1_process_recipe_params(resolved) -> dict:
 
 
 def remap_store_recipe_params(resolved) -> dict:
-    """``remap_store`` recipe params (verify.py:146)."""
+    """``remap_store`` recipe params (verify.py:151-161)."""
     rm = resolved.stages.remap
     mp = resolved.stages.mapping
     return {
@@ -320,17 +437,27 @@ def remap_store_recipe_params(resolved) -> dict:
         "cache_quantum_ps1_px": rm.cache_quantum_ps1_px,
         "keying": rm.keying,
         "intra_skycell_R": rm.intra_skycell_R,
+        "store_name": rm.store_name or "",
+        "mapping_grid": _mapping_grid_fragment_from_mapping_stage(mp),
     }
 
 
 def downsample_recipe_params(resolved) -> dict:
-    """``downsample`` recipe params (verify.py:159)."""
+    """``downsample`` recipe params (verify.py:163-175)."""
     ds = resolved.stages.downsample
+    mp = resolved.stages.mapping
     return {
         "oversampling_factor": ds.oversampling_factor,
         "single_offset": ds.single_offset,
         "ignore_mask_bits": list(ds.ignore_mask_bits),
         "output_base": ds.output_base or resolved.template_output_base,
+        "output_store_name": ds.output_store_name or "",
+        "remap_store_name": getattr(resolved, "downsample_remap_store_name", None) or "",
+        "apply_intra_skycell": bool(ds.apply_intra_skycell),
+        "apply_inter_skycell": bool(ds.apply_inter_skycell),
+        "mapping_grid": _mapping_grid_fragment_from_mapping_stage(
+            mp, oversampling_factor=ds.oversampling_factor
+        ),
     }
 
 
@@ -381,12 +508,7 @@ def source_catalog_recipe_params(
 
 
 def combined_skycell_recipe_params(resolved, *, gaia_version: str = _DEFAULT_GAIA_VERSION) -> dict:
-    """``combined_skycell`` recipe params.
-
-    Phase 1 (§12) stub: saturation/star-removal params come from the current
-    ``ps1_process`` stage config (there is no separate combine-stage config on
-    this branch yet); ``gaia_version`` is threaded through explicitly.
-    """
+    """``combined_skycell`` recipe params: star-removal + Gaia catalog version."""
     params = ps1_process_recipe_params(resolved)
     params["gaia_version"] = str(gaia_version)
     return params
@@ -395,10 +517,9 @@ def combined_skycell_recipe_params(resolved, *, gaia_version: str = _DEFAULT_GAI
 def convolved_skycell_recipe_params(resolved) -> dict:
     """``convolved_skycell`` recipe params.
 
-    Phase 2 (§13) stub: ``radius``/``mode``/``padding`` are not yet
-    independent config knobs (convolution today is one call inside
-    ``ps1_process`` keyed only by ``psf_sigma``); recorded as fixed literals
-    until the padding decouple lands.
+    Convolution is still keyed by ``psf_sigma`` inside ``ps1_process``; radius/
+    mode/padding literals record the same-projection padding policy until the
+    shared convolved store fully decouples seam padding (§13).
     """
     pp = resolved.stages.ps1_process
     return {
@@ -410,11 +531,11 @@ def convolved_skycell_recipe_params(resolved) -> dict:
 
 
 def scc_assembly_recipe_params(resolved) -> dict:
-    """``scc_assembly`` checkpoint recipe params (§11: same fields as
-    ``ps1_process_recipe_params`` -- "psf_sigma/saturation/removal params +
-    projections_limit").
-    """
-    return ps1_process_recipe_params(resolved)
+    """``scc_assembly`` checkpoint recipe params (§11 + mapping grid)."""
+    params = ps1_process_recipe_params(resolved)
+    mp = resolved.stages.mapping
+    params["mapping_grid"] = _mapping_grid_fragment_from_mapping_stage(mp)
+    return params
 
 
 # ---------------------------------------------------------------------------
@@ -423,9 +544,53 @@ def scc_assembly_recipe_params(resolved) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def shared_mask_recipe_params(params: Any) -> dict:
-    """``shared_mask`` recipe params from ``SharedMaskParams``."""
-    return _asdict(params)
+def shared_mask_recipe_params(params: Any, *, mask_settings: Any = None) -> dict:
+    """``shared_mask`` recipe params from ``SharedMaskParams`` + mask policy.
+
+    Hotpants ref-star selection lives on ``SharedMaskParams``; mask geometry/
+    policy (maglims, straps, TNS, asteroids) is serialized from *mask_settings*
+    (a :class:`~syndiff_pipeline.difference_imaging.masking.settings.MaskSettings`,
+    its ``asdict`` form, or a YAML-shaped dict). When the kwarg is omitted,
+    ``params.mask_settings`` is loaded when it points at an existing YAML file;
+    otherwise packaged defaults are used as a last resort. The recipe never
+    carries a filesystem path for mask policy.
+    """
+    from pathlib import Path
+
+    from syndiff_pipeline.difference_imaging.masking.settings import (
+        MaskSettings,
+        load_mask_settings,
+        mask_settings_from_dict,
+        mask_settings_to_dict,
+    )
+
+    stage = _asdict(params)
+    mask_settings_path = stage.pop("mask_settings", None)
+
+    if mask_settings is not None:
+        if isinstance(mask_settings, MaskSettings):
+            resolved_settings = mask_settings
+        elif isinstance(mask_settings, Mapping):
+            resolved_settings = mask_settings_from_dict(mask_settings)
+        elif dataclasses.is_dataclass(mask_settings):
+            resolved_settings = mask_settings
+        else:
+            raise TypeError(
+                f"mask_settings must be MaskSettings, mapping, or dataclass, got {type(mask_settings)!r}"
+            )
+    elif mask_settings_path and str(mask_settings_path).strip():
+        path = Path(mask_settings_path).expanduser()
+        if path.is_file():
+            resolved_settings = load_mask_settings(path)
+        else:
+            resolved_settings = MaskSettings()
+    else:
+        resolved_settings = MaskSettings()
+
+    return {
+        **stage,
+        "mask_settings": mask_settings_to_dict(resolved_settings),
+    }
 
 
 def diff_background_recipe_params(params: Any) -> dict:

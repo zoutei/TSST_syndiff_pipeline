@@ -11,6 +11,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.provenance.fingerprint import (
+    RECIPE_SCHEMA_VERSION,
     canonical,
     fingerprint,
     recipe_id,
@@ -67,19 +68,48 @@ class TestCanonicalGolden(unittest.TestCase):
 
 
 class TestRecipeIdAndFingerprintGolden(unittest.TestCase):
+    def test_recipe_schema_version_is_two(self):
+        self.assertEqual(RECIPE_SCHEMA_VERSION, 2)
+
     def test_recipe_id_pinned(self):
         rid = recipe_id(
-            "mapping", {"oversampling_factor": 2, "pad_distance": 480, "overwrite": True}, 1
+            "mapping",
+            {
+                "oversampling_factor": 2,
+                "pad_distance": 480,
+                "overwrite": True,
+                "mapping_grid": {
+                    "x_left_dead": 44,
+                    "x_right_dead": 44,
+                    "y_edge_strip": 30,
+                    "conv_pad_native": 8,
+                    "oversampling_factor": 2,
+                },
+            },
+            RECIPE_SCHEMA_VERSION,
         )
-        self.assertEqual(rid, "b44498b7f7a5fa46")
+        self.assertEqual(rid, "3a001d8636a2e0e5")
         self.assertEqual(len(rid), 16)
 
     def test_fingerprint_pinned(self):
         rid = recipe_id(
-            "mapping", {"oversampling_factor": 2, "pad_distance": 480, "overwrite": True}, 1
+            "mapping",
+            {
+                "oversampling_factor": 2,
+                "pad_distance": 480,
+                "overwrite": True,
+                "mapping_grid": {
+                    "x_left_dead": 44,
+                    "x_right_dead": 44,
+                    "y_edge_strip": 30,
+                    "conv_pad_native": 8,
+                    "oversampling_factor": 2,
+                },
+            },
+            RECIPE_SCHEMA_VERSION,
         )
         fp = fingerprint("mapping", {"s": 20, "c": 1, "k": 1, "os": 2}, rid, ["aaa111", "bbb222"])
-        self.assertEqual(fp, "46e809a718e1fcf01a213c70")
+        self.assertEqual(fp, "fbd30ecff49511442462bd5b")
         self.assertEqual(len(fp), 24)
 
 
