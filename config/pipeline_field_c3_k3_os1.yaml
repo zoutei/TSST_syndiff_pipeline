@@ -1,0 +1,87 @@
+# SCC field-mode campaign (os1): mapping -> remap -> downsample -> diff for
+# s0020/c3/k3 + s0022/c3/k3, default template/remap/output lane, oversampling 1.
+# Both SCCs need a mapping rebuild (MAPGRID v2) before remap/downsample/diff.
+# Usage:
+#   mamba activate syndiff
+#   syndiff diff submit \
+#     --config config/pipeline_field_c3_k3_os1.yaml \
+#     --scc config/scc_s20_s22_c3_k3.csv \
+#     --stages mapping,remap,downsample,diff \
+#     --run-id s20_s22_c3_k3_os1 \
+#     --force-rerun --skip-artifact-verify
+deployment_file: deployment.yaml
+diff_config: diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 1
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  remap:
+    intra_skycell_R: 1
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    raw_drift_outlier_sigma: 5.0
+    n_jobs: 32
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  downsample:
+    geometry_mode: field
+    apply_intra_skycell: true
+    apply_inter_skycell: true
+    rebuild_field_store: true
+    materialize_fits: false
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    n_jobs: 32
+    stage_regmaps_to_scratch: false
+    executor: condor
+    # Condor derives SYNDIFF_HYBRID_MAX_JOBS from request_cpus, which is what
+    # caps n_jobs_eff -- at 16 the `n_jobs: 32` above never took effect. Nodes
+    # are 64-core/128 GB; the int32 + in-place L5 path peaks near 1.9 GB per
+    # worker, so 32 workers sit around 61 GB.
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_request_disk: 4096
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 2
+  mapping:
+    max_concurrent: 2
+  remap:
+    max_concurrent: 2
+  ps1_process:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

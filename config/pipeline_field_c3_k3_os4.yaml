@@ -1,0 +1,89 @@
+# SCC field-mode campaign (os4): mapping -> remap -> downsample -> diff for
+# s0020/c3/k3 + s0022/c3/k3, default template/remap/output lane, oversampling 1.
+# Both SCCs need a mapping rebuild (MAPGRID v2) before remap/downsample/diff.
+# Usage:
+#   mamba activate syndiff
+#   syndiff diff submit \
+#     --config config/pipeline_field_c3_k3_os4.yaml \
+#     --scc config/scc_s20_s22_c3_k3.csv \
+#     --stages mapping,remap,downsample,diff \
+#     --run-id s20_s22_c3_k3_os4 \
+#     --force-rerun --skip-artifact-verify
+deployment_file: deployment.yaml
+diff_config: diff_config_scc_c3_k3_multi_hp_epsf_os4.yaml
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 4
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  remap:
+    intra_skycell_R: 1
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    raw_drift_outlier_sigma: 5.0
+    n_jobs: 32
+    # os4 regmaps are ~16x the os1 pixel count; scratch-staging them blows
+    # past the Condor slot's local disk (see downsample's identical setting
+    # and pipeline_s20_field_l4_split_smoke.yaml comments for the os1 case).
+    stage_regmaps_to_scratch: false
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  downsample:
+    geometry_mode: field
+    apply_intra_skycell: true
+    apply_inter_skycell: true
+    rebuild_field_store: true
+    materialize_fits: false
+    oversampling_factor: 4
+    ignore_mask_bits: [12]
+    n_jobs: 32
+    stage_regmaps_to_scratch: false
+    executor: condor
+    # See the os1 config: request_cpus is what caps n_jobs_eff (Condor derives
+    # SYNDIFF_HYBRID_MAX_JOBS from it), so 16 silently overrode `n_jobs: 32`.
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_request_disk: 4096
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 2
+  mapping:
+    max_concurrent: 2
+  remap:
+    max_concurrent: 2
+  ps1_process:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true
