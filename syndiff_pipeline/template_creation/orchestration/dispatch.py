@@ -354,6 +354,7 @@ def _execute_template_stage(
             n_jobs=rm.n_jobs,
             progress_path=progress_path,
             raw_drift_outlier_sigma=rm.raw_drift_outlier_sigma,
+            stage_regmaps_to_scratch=rm.stage_regmaps_to_scratch,
         )
         return _manifest_from_result(field_result)
 

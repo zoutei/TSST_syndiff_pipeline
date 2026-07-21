@@ -11,8 +11,10 @@ import pandas as pd
 import pytest
 
 from syndiff_pipeline.template_creation.processing.field_abutting import (
+    L4B_RIM_FORMAT_VERSION,
     l4b_rim_cache_basename,
     l4b_rim_path,
+    load_l4b_rim_side,
 )
 from syndiff_pipeline.template_creation.processing.field_remap import (
     EXACT_CACHE_L4B_DIRNAME,
@@ -62,7 +64,7 @@ def _expected_pair_epoch_count(schedule: ShiftSchedule, master: np.ndarray) -> i
     _, name_to_id = _synthetic_master()
     idx_to_name = {int(v): str(k) for k, v in name_to_id.items()}
     pair_ids = abutting_undirected_pairs(master)
-    pair_idx = pair_column_indices(
+    pair_ids, pair_idx = pair_column_indices(
         pair_ids,
         name_to_id=name_to_id,
         col_of_name=build_col_of_name(schedule.skycell_names),
@@ -214,11 +216,26 @@ def test_inter_skycell_writes_expected_npzs(remap_l4b_env):
     assert "l4b_policy" not in manifest
 
     with np.load(npz_files[0]) as z:
-        assert "exact_tid_lo" in z
-        assert "exact_tid_hi" in z
+        # v2 sparse layout: only valid (tid >= 0) rim pixels are stored.
+        assert int(z["format_version"]) == L4B_RIM_FORMAT_VERSION
+        assert "didx_lo" in z
+        assert "val_lo" in z
+        assert "didx_hi" in z
+        assert "val_hi" in z
+        assert "exact_tid_lo" not in z
         assert "rep_frame_index" in z
         assert "pair_epoch_id" in z
         assert int(z["id_lo"]) <= int(z["id_hi"])
+        id_lo, id_hi = int(z["id_lo"]), int(z["id_hi"])
+        idx_lo = np.cumsum(np.asarray(z["didx_lo"], dtype=np.int64))
+        val_lo = np.asarray(z["val_lo"])
+
+    # The reader selects a side by skycell id and returns the same sparse pairs.
+    got_idx, got_val = load_l4b_rim_side(npz_files[0], skycell_id=id_lo)
+    assert np.array_equal(got_idx, idx_lo)
+    assert np.array_equal(got_val, val_lo)
+    with pytest.raises(ValueError):
+        load_l4b_rim_side(npz_files[0], skycell_id=max(id_lo, id_hi) + 12345)
 
 
 def test_inter_skycell_basename_undirected(remap_l4b_env):
