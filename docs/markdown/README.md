@@ -10,6 +10,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, template DAG + diff DAG, star branch, Condor, config |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
+| [Bookkeeping (provenance graph)](bookkeeping.md) | All users / ops | Content-addressed provenance: fingerprints, spool/ingest, skip/resume, CLI |
 | [Field (distortion-aware) templates](field_geometry.md) | Users / maintainers | **Default** `geometry_mode: field` — L0–L5, L4a/L4b, storage, verify, ops |
 | [Oversampled templates + Hotpants stamp modes](oversampled_templates.md) | Users / maintainers | `oversampling_factor` (`F`), native vs HR coords, Hotpants `stamp_mode` / `region_*`, star OS |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |

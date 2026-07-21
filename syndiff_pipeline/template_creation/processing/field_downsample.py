@@ -187,13 +187,132 @@ def _bin_skycell_contrib(
     )
 
 
+def _is_shared_convolved_store_path(path: str | Path) -> bool:
+    """True when ``path`` is the sky-keyed ``ps1_convolved.zarr`` store root.
+
+    Detection is by basename (``ps1_convolved.zarr``), matching
+    ``scc_paths.PS1_CONVOLVED_ZARR_BASENAME`` / ``resolve_downsample_convolved_dir``
+    when ``use_shared_convolved_store`` is on. Legacy per-SCC stores use
+    ``sector_*_camera_*_ccd_*.zarr`` or ``convolved.zarr``.
+    """
+    from syndiff_pipeline.common.scc_paths import PS1_CONVOLVED_ZARR_BASENAME
+
+    return Path(path).name == PS1_CONVOLVED_ZARR_BASENAME
+
+
+def _projection_and_cell(skycell: str) -> tuple[str, str] | None:
+    """Split ``skycell.PROJ.CELL`` → (``skycell.PROJ``, ``CELL``)."""
+    parts = str(skycell).split(".")
+    if len(parts) < 3:
+        return None
+    return ".".join(parts[:2]), parts[2]
+
+
+def _discover_shared_convolved_fp(
+    data_root: str | Path, projection: str, cell: str
+) -> str | None:
+    """Return a published fingerprint dirname under the shared store, or None.
+
+    When multiple recipe epochs exist, prefer the newest complete payload by
+    mtime (same presence check as verify's ``_shared_convolved_cell_published``).
+    """
+    from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
+
+    cell_root = ps1_convolved_zarr_path(data_root) / str(projection) / str(cell)
+    if not cell_root.is_dir():
+        return None
+    candidates: list[Path] = []
+    try:
+        for fp_dir in cell_root.iterdir():
+            if fp_dir.is_dir() and (fp_dir / "arrays.npz").is_file():
+                candidates.append(fp_dir)
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    return candidates[0].name
+
+
+def _try_load_shared_convolved_arrays(
+    data_root: str | Path, skycell: str
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Load ``(image, mask)`` from the shared convolved store, or ``None``.
+
+    Uses ``convolved_store.try_load_convolved_cell`` after discovering a
+    published fingerprint. Same-projection canonical cells load successfully.
+
+    TODO(BK-7/seam): Cross-projection seam correction is *not* applied here.
+    Canonical shared cells are ``same_projection_only``; the validated
+    patch-convolve-and-add seam math lives in ``ps1_process`` /
+    ``cross_projection_padding`` at assembly time, and there is no clear
+    standalone consumer helper to call at L5 load without inventing untested
+    math. Wire seam correction when a dedicated downsample/scc_assembly helper
+    lands; until then, cells that needed cross-projection padding may disagree
+    with legacy per-SCC ``convolved.zarr`` at seam edges.
+    """
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        try_load_convolved_cell,
+    )
+
+    parsed = _projection_and_cell(skycell)
+    if parsed is None:
+        return None
+    projection, cell = parsed
+    fp = _discover_shared_convolved_fp(data_root, projection, cell)
+    if fp is None:
+        return None
+    loaded = try_load_convolved_cell(data_root, projection, cell, fp)
+    if loaded is None:
+        return None
+    data = np.asarray(loaded["convolved_image"], dtype=np.float32)
+    mask = np.asarray(loaded["convolved_mask"])
+    return data, mask
+
+
 def _load_zarr_skycell(zstore, skycell: str) -> tuple[np.ndarray, np.ndarray]:
+    """Legacy flat per-SCC convolved zarr: ``{skycell}_data`` / ``{skycell}_mask``."""
     data = np.asarray(zstore[f"{skycell}_data"][:], dtype=np.float32)
     try:
         mask = np.asarray(zstore[f"{skycell}_mask"][:])
     except Exception:
         mask = np.zeros(data.shape, dtype=np.int32)
     return data, mask
+
+
+def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray]:
+    """Shared-store first (when enabled), else legacy flat ``*_data`` zarr keys.
+
+    Shared path: ``ps1_convolved.zarr/{projection}/{cell}/{fp}/arrays.npz`` via
+    ``try_load_convolved_cell``. On miss (or shared flag off), fall back to the
+    legacy zarr handle / ``legacy_zarr_path``.
+    """
+    if not _L5_WORKER:
+        raise RuntimeError("L5 worker not initialized; call _init_l5_worker first")
+
+    data_root = _L5_WORKER.get("data_root")
+    if bool(_L5_WORKER.get("shared_convolved_store")) and data_root:
+        shared = _try_load_shared_convolved_arrays(data_root, skycell)
+        if shared is not None:
+            return shared
+
+    zstore = _L5_WORKER.get("zstore")
+    if zstore is None:
+        legacy_path = _L5_WORKER.get("legacy_zarr_path") or (
+            None
+            if bool(_L5_WORKER.get("shared_convolved_store"))
+            else _L5_WORKER.get("zarr_path")
+        )
+        if not legacy_path:
+            raise FileNotFoundError(
+                f"No shared convolved cell for {skycell!r} and no legacy "
+                f"convolved zarr fallback configured"
+            )
+        import zarr
+
+        zstore = zarr.open(str(legacy_path), mode="r")
+        _L5_WORKER["zstore"] = zstore
+    return _load_zarr_skycell(zstore, skycell)
 
 
 def _neighbours_by_skycell_id(
@@ -495,13 +614,7 @@ def _l5_skycell_batch(
 
     assignment_map = _read_regmap_assignment_l5(skycell)
     n_regmap_opens = 1
-    zstore = _L5_WORKER.get("zstore")
-    if zstore is None:
-        import zarr
-
-        zstore = zarr.open(str(_L5_WORKER["zarr_path"]), mode="r")
-        _L5_WORKER["zstore"] = zstore
-    ps1_data, ps1_mask = _load_zarr_skycell(zstore, skycell)
+    ps1_data, ps1_mask = _load_ps1_skycell_for_l5(skycell)
     n_zarr_loads = 1
 
     for ckey, gid_list in pending.items():
@@ -775,20 +888,41 @@ def run_field_downsample_scc(
     for bit in ignore_mask_bits or [12]:
         ignore_mask |= 1 << int(bit)
 
-    zarr_path = Path(convolved_dir)
-    if zarr_path.suffix != ".zarr" or not zarr_path.name.endswith(".zarr"):
-        zarr_path = zarr_path / f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}.zarr"
-    if not zarr_path.exists():
-        alt = list(Path(convolved_dir).glob(f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}*.zarr"))
-        if not alt:
-            from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
+    from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
 
-            zarr_path = scc_convolved_zarr(data_root, sector, camera, ccd)
-            if not zarr_path.exists():
-                raise FileNotFoundError(f"convolved zarr not found: {zarr_path}")
-        else:
-            zarr_path = alt[0]
-    zarr.open(str(zarr_path), mode="r")
+    zarr_path = Path(convolved_dir)
+    shared_convolved_store = _is_shared_convolved_store_path(zarr_path)
+    legacy_zarr_path: Path | None = None
+    if shared_convolved_store:
+        # Shared store is a directory tree of npz cells, not a zarr Group.
+        if not zarr_path.is_dir():
+            raise FileNotFoundError(f"shared convolved store not found: {zarr_path}")
+        legacy_candidate = scc_convolved_zarr(data_root, sector, camera, ccd)
+        if legacy_candidate.is_dir() or legacy_candidate.exists():
+            legacy_zarr_path = legacy_candidate
+            try:
+                zarr.open(str(legacy_zarr_path), mode="r")
+            except Exception:
+                log.warning(
+                    "Legacy convolved zarr at %s exists but could not be opened; "
+                    "shared-store misses will not fall back",
+                    legacy_zarr_path,
+                )
+                legacy_zarr_path = None
+    else:
+        if zarr_path.suffix != ".zarr" or not zarr_path.name.endswith(".zarr"):
+            zarr_path = zarr_path / f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}.zarr"
+        if not zarr_path.exists():
+            alt = list(
+                Path(convolved_dir).glob(f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}*.zarr")
+            )
+            if not alt:
+                zarr_path = scc_convolved_zarr(data_root, sector, camera, ccd)
+                if not zarr_path.exists():
+                    raise FileNotFoundError(f"convolved zarr not found: {zarr_path}")
+            else:
+                zarr_path = alt[0]
+        zarr.open(str(zarr_path), mode="r")
 
     master_path = _master_pixels2skycells_path(
         mapping_root,
@@ -800,7 +934,8 @@ def run_field_downsample_scc(
     t_m = _time.perf_counter()
     master_map, name_to_id = _master_skycell_id_map(master_path)
     log.info(
-        "Opened zarr %s and master map %s (%d skycells) in %.1fs",
+        "Opened %s %s and master map %s (%d skycells) in %.1fs",
+        "shared convolved store" if shared_convolved_store else "zarr",
         zarr_path,
         master_path,
         len(name_to_id),
@@ -934,7 +1069,10 @@ def run_field_downsample_scc(
         "ccd": int(ccd),
         "oversampling_factor": int(oversampling_factor),
         "scratch_regmaps": dict(scratch_regmaps),
+        "data_root": str(data_root),
         "zarr_path": str(zarr_path),
+        "shared_convolved_store": bool(shared_convolved_store),
+        "legacy_zarr_path": str(legacy_zarr_path) if legacy_zarr_path else None,
         "name_to_id": dict(name_to_id),
         "id_to_name": dict(id_to_name),
         "master_map": master_map,

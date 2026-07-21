@@ -287,6 +287,10 @@ def _execute_template_stage(
             clear_ps1_process_artifacts(resolved)
         pp = resolved.stages.ps1_process
         pd = resolved.stages.ps1_download
+        use_shared_convolved_store = bool(pp.use_shared_convolved_store)
+        write_per_scc_convolved_zarr = (
+            False if use_shared_convolved_store else bool(pp.write_per_scc_convolved_zarr)
+        )
         result = ps1_process.run_modern_sliding_window_pipeline(
             sector=t.sector,
             camera=t.camera,
@@ -302,6 +306,8 @@ def _execute_template_stage(
             remove_saturated_stars=pp.remove_saturated_stars,
             catalog_path=pp.catalog_path,
             bright_star_mag_threshold=pp.bright_star_mag_threshold,
+            use_shared_convolved_store=use_shared_convolved_store,
+            write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
         )
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(result["error"])
@@ -353,9 +359,10 @@ def _execute_template_stage(
 
     if stage == "downsample":
         from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
-        from syndiff_pipeline.common.scc_paths import scc_convolved_zarr, scc_remap_dir
+        from syndiff_pipeline.common.scc_paths import scc_remap_dir
         from syndiff_pipeline.template_creation.orchestration.verify import (
             mapping_master_pixels2skycells_path,
+            resolve_downsample_convolved_dir,
         )
         from syndiff_pipeline.template_creation.processing.field_downsample import (
             run_field_downsample_scc,
@@ -374,9 +381,7 @@ def _execute_template_stage(
                 "linear/event ROI templates were removed."
             )
 
-        convolved = ds.convolved_dir or str(
-            scc_convolved_zarr(resolved.data_root, t.sector, t.camera, t.ccd)
-        )
+        convolved = resolve_downsample_convolved_dir(resolved)
         remap_store_root = str(
             scc_remap_dir(
                 resolved.data_root,

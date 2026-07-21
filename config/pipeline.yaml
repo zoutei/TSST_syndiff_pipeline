@@ -27,6 +27,8 @@ stages:
     enable_saturation_correction: false
     psf_sigma: 40.0
     projections_limit: null
+    # use_shared_convolved_store: false   # PR5 shared store; operator gate required before enabling
+    # write_per_scc_convolved_zarr: true  # must be false when use_shared_convolved_store is true
   downsample:
     geometry_mode: field
     ignore_mask_bits: [12]
