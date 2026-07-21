@@ -475,6 +475,11 @@ def verify_wcs_grouping(resolved: ResolvedTargetConfig) -> VerifyResult:
 
 def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
     """Verify mapping artifacts under the SCC oversampling leaf."""
+    from syndiff_pipeline.common.mapping_grid import (
+        MappingGridError,
+        load_mapping_grid_from_master,
+    )
+
     t = resolved.target
     suffix = ""
     os_factor = resolved.stages.mapping.oversampling_factor
@@ -494,9 +499,40 @@ def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
         / f"tess_s{t.sector:04d}_{t.camera}_{t.ccd}_master_skycells_list{suffix}.csv"
     )
     csv_path = csv_flat if csv_flat.is_file() else csv_nested
-    if csv_path.is_file():
-        return VerifyResult("mapping", True, "Master skycells CSV exists", str(csv_path))
-    return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_flat))
+    if not csv_path.is_file():
+        return VerifyResult("mapping", False, "Master skycells CSV missing", str(csv_flat))
+
+    try:
+        master_path = mapping_master_pixels2skycells_path(resolved)
+    except FileNotFoundError as exc:
+        return VerifyResult(
+            "mapping",
+            False,
+            f"Master pixels2skycells FITS missing: {exc}",
+            str(csv_path),
+        )
+    if not master_path.is_file():
+        return VerifyResult(
+            "mapping",
+            False,
+            f"Master pixels2skycells FITS missing: {master_path}",
+            str(csv_path),
+        )
+    try:
+        grid = load_mapping_grid_from_master(master_path)
+    except MappingGridError as exc:
+        return VerifyResult(
+            "mapping",
+            False,
+            f"Master FITS is not MAPGRID v2 (rebuild mapping): {exc}",
+            str(master_path),
+        )
+    return VerifyResult(
+        "mapping",
+        True,
+        f"MAPGRID v2 master OK (shape={grid.array_shape_os()})",
+        str(master_path),
+    )
 
 
 _PS1_DOWNLOAD_BANDS = ("r", "i", "z", "y")
@@ -1586,14 +1622,6 @@ def stage_absence_probe(
     from syndiff_pipeline.common.orchestration.event_ws_symlinks import event_templates_symlink_path
     from syndiff_pipeline.common.wcs_grouping import CLUSTER_TEMPLATE_JOB_FILENAME
 
-    if stage == "bind":
-        job_path = Path(resolved.event_dir) / CLUSTER_TEMPLATE_JOB_FILENAME
-        return (
-            AbsenceProbeResult.MAYBE_PRESENT
-            if job_path.is_file()
-            else AbsenceProbeResult.ABSENT
-        )
-
     if stage == "mapping":
         csv_path = _mapping_csv_path(resolved)
         return (
@@ -1792,6 +1820,36 @@ def collect_stage_artifacts(
         ok = manifest.is_file()
         return 1, int(ok), [str(manifest)] if ok else [str(store)]
     if stage == "downsample":
+        from syndiff_pipeline.common.wcs_grouping import _event_job_path
+
+        has_event_job = Path(_event_job_path(resolved.event_dir)).is_file()
+        # SCC-only field builds have no event handoff; collect store markers.
+        # Linear / event-bound runs keep the FITS path (matches dispatch).
+        if _geometry_mode_for_resolved(resolved) == "field" and not has_event_job:
+            from syndiff_pipeline.template_creation.processing.field_templates import (
+                MANIFEST_NAME,
+                field_templates_root,
+            )
+
+            t = resolved.target
+            ds = resolved.stages.downsample
+            store = field_templates_root(
+                resolved.data_root,
+                t.sector,
+                t.camera,
+                t.ccd,
+                oversampling_factor=ds.oversampling_factor,
+                store_name=ds.output_store_name,
+            )
+            if ds.output_base:
+                store = Path(ds.output_base)
+            paths = [
+                store / "field_mode_assembly.json",
+                store / MANIFEST_NAME,
+            ]
+            existing = [str(p) for p in paths if p.is_file()]
+            return len(paths), len(existing), existing
+
         paths = expected_downsample_fits_paths(resolved)
         if ps1_process_removed_stars_csv_path(resolved).is_file():
             paths.append(event_dir_ps1_removed_stars_csv_path(resolved))
