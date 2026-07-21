@@ -180,6 +180,61 @@ class TestRemoveBackgroundRegression:
         assert processed[32, 32] == 0.0
         assert np.count_nonzero(processed) < np.count_nonzero(data)
 
+    def test_quality_flag_removal_flags_sat_and_starcore_bits(self):
+        """mask_sat requires both 0x0020 (starcore) and 0x1000 (sat) bits;
+        pixels with both set inside a segment should get zeroed and recorded."""
+        data, uncert = _gaussian_image(
+            64,
+            [(32.0, 32.0, 120.0, 1.8)],
+            background=2.0,
+            uncert=0.1,
+        )
+        mask = np.zeros((64, 64), dtype=np.uint16)
+        mask[30:35, 30:35] = 0x0020 | 0x1000
+
+        processed, removed = remove_background(
+            data.copy(),
+            uncert,
+            sigma=2.5,
+            sigma_mask=50,
+            mask=mask,
+            remove_saturated_stars=True,
+        )
+
+        assert processed[32, 32] == 0.0
+        assert any(r["removal_reason"] == "quality_flag_no_star" for r in removed)
+
+    def test_quality_flag_removal_tolerates_narrow_mask_dtype(self, caplog):
+        """PS1 quality masks should be uint16, but stale on-disk data (or a
+        cached intermediate) can be narrower (uint8); bit 12 (0x1000) can't
+        be represented there, so nothing should be flagged via that bit — and
+        it must not hit the broad except-and-warn fallback that an unguarded
+        bitwise AND would trigger under numpy's strict same-dtype casting."""
+        data, uncert = _gaussian_image(
+            64,
+            [(32.0, 32.0, 120.0, 1.8)],
+            background=2.0,
+            uncert=0.1,
+        )
+        mask = np.zeros((64, 64), dtype=np.uint8)
+        mask[30:35, 30:35] = 0x0020  # starcore-like flag only; fits uint8
+
+        with caplog.at_level("WARNING"):
+            processed, removed = remove_background(
+                data.copy(),
+                uncert,
+                sigma=2.5,
+                sigma_mask=50,
+                mask=mask,
+                remove_saturated_stars=True,
+            )
+
+        assert processed.shape == data.shape
+        assert isinstance(removed, list)
+        assert not any(
+            "Quality-flag removal failed" in rec.message for rec in caplog.records
+        )
+
     def test_no_catalog_removal_when_star_is_faint(self):
         data, uncert = _gaussian_image(
             64,

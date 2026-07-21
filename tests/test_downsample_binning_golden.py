@@ -139,6 +139,24 @@ class TestDownsampleBinningGolden(unittest.TestCase):
         np.testing.assert_array_equal(vec_counts, ref_counts)
         np.testing.assert_array_equal(vec_mask_counts, ref_mask_counts)
 
+    def test_aggregate_sorted_groups_handles_narrow_mask_dtype(self):
+        """PS1 mask arrays on disk can be uint8; ignore_mask bits beyond uint8
+        range (e.g. bit 12 = 4096) must not raise on the bitwise AND — a
+        narrower-than-the-bit mask simply never matches that bit."""
+        n = 50
+        ps1_rav = np.ones(n, dtype=np.float32)
+        ps1_mask_rav = np.zeros(n, dtype=np.uint8)
+        ps1_mask_rav[::3] = 1  # some bit-0 flags, well within uint8
+        ignore_mask = 1 << 12
+
+        group_starts = np.array([0, 10, 25], dtype=np.intp)
+        sums, counts, mask_counts = _aggregate_sorted_groups(
+            ps1_rav, ps1_mask_rav, group_starts, ignore_mask
+        )
+        # No uint8 value can have bit 12 set, so nothing is ignored: sums ==
+        # counts (all ones, none dropped).
+        np.testing.assert_array_equal(sums, counts.astype(np.float32))
+
     def test_process_skycell_binning_nans_and_ignore_bits(self):
         shape = (6, 6)
         assignment = _make_assignment_map(

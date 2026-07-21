@@ -511,7 +511,12 @@ def remove_background(
             logger.warning("[Band] Saturated-star removal requested but no mask was provided.")
         else:
             try:
-                mask_sat = ((mask & 0x0020) != 0) & ((mask & 0x1000) != 0)
+                # Contract is uint16 (0x1000 = bit 12 needs >= 9 bits), but
+                # upcast defensively: a narrower on-disk/cached mask dtype
+                # (e.g. stale uint8) would otherwise raise under numpy's
+                # strict same-dtype bitwise-AND casting.
+                mask_wide = np.asarray(mask).astype(np.int64, copy=False)
+                mask_sat = ((mask_wide & 0x0020) != 0) & ((mask_wide & 0x1000) != 0)
 
                 # Extend segment assignment into sat pixels as well.
                 flag_total_mask = has_id | mask_bright_stars | mask_sat

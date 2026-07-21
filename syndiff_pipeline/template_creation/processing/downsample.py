@@ -569,7 +569,10 @@ def _aggregate_sorted_groups(
     ps1_grouped = ps1_rav[slice_start:]
     mask_grouped = ps1_mask_rav[slice_start:]
 
-    ignored = (mask_grouped & ignore_mask) > 0
+    # mask dtype on disk may be narrower (e.g. uint8) than the ignore_mask bit
+    # position being tested (e.g. bit 12 = 4096); upcast before the bitwise AND
+    # so numpy's strict same-dtype casting doesn't reject the Python int.
+    ignored = (mask_grouped.astype(np.int64, copy=False) & int(ignore_mask)) > 0
     sum_weights = np.where(ignored, 0.0, ps1_grouped).astype(np.float64, copy=False)
     sum_weights = np.where(np.isnan(sum_weights), 0.0, sum_weights)
 
