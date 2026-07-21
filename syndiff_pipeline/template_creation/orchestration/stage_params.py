@@ -49,6 +49,11 @@ MAPPING_ALLOWED = frozenset(
         "condor_request_memory",
         "condor_requirements",
         "condor_rank",
+        "x_left_dead",
+        "x_right_dead",
+        "y_edge_strip",
+        "template_conv_pad_spare_px",
+        "sci_fwhm",
     }
 )
 PS1_DOWNLOAD_ALLOWED = frozenset(
@@ -199,6 +204,11 @@ class MappingStageParams:
     condor_request_memory: int = 100_000
     condor_requirements: str | None = "Memory <= 500000 && LoadAvg < 10"
     condor_rank: str | None = "-LoadAvg"
+    x_left_dead: int = 44
+    x_right_dead: int = 44
+    y_edge_strip: int = 30
+    template_conv_pad_spare_px: int = 4
+    sci_fwhm: float = 1.88
 
 
 @dataclass

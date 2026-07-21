@@ -40,7 +40,12 @@ class TestEffectiveStageDeps(unittest.TestCase):
         self.assertEqual(effective_stage_deps("ps1_process", stages), ["ps1_download"])
 
     def test_linear_downsample_omits_remap_dep(self):
-        stages = parse_stage_params({})
+        stages = parse_stage_params(
+            {
+                "downsample": {"geometry_mode": "linear"},
+                "wcs_grouping": {"geometry_mode": "linear"},
+            }
+        )
         self.assertEqual(
             effective_stage_deps("downsample", stages),
             ["mapping", "ps1_process"],
@@ -178,7 +183,12 @@ class TestLinearRemapSkipAtCreate(unittest.TestCase):
                 workspace_root=str(tmp_path / "handoffs"),
                 runs_root=str(tmp_path / "runs"),
                 skycell_wcs_csv="/wcs.csv",
-                stages=parse_stage_params({}),
+                stages=parse_stage_params(
+                    {
+                        "downsample": {"geometry_mode": "linear"},
+                        "wcs_grouping": {"geometry_mode": "linear"},
+                    }
+                ),
             )
             state = PipelineState(db)
             target = Target(80, 4, 2, 274.9, 66.0, "2024pvw", True)
@@ -215,7 +225,12 @@ class TestLinearRemapSkipAtCreate(unittest.TestCase):
                 workspace_root=str(Path(tmp) / "handoffs"),
                 runs_root=str(Path(tmp) / "runs"),
                 skycell_wcs_csv="/wcs.csv",
-                stages=parse_stage_params({}),
+                stages=parse_stage_params(
+                    {
+                        "downsample": {"geometry_mode": "linear"},
+                        "wcs_grouping": {"geometry_mode": "linear"},
+                    }
+                ),
             )
             target = Target(80, 4, 2, 274.9, 66.0, "2024pvw", True)
             state.create_run(

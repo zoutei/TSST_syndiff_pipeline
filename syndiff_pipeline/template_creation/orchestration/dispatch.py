@@ -252,6 +252,11 @@ def _execute_template_stage(
             overwrite=mp.overwrite,
             max_workers=mp.max_workers,
             oversampling_factor=mp.oversampling_factor,
+            x_left_dead=mp.x_left_dead,
+            x_right_dead=mp.x_right_dead,
+            y_edge_strip=mp.y_edge_strip,
+            template_conv_pad_spare_px=mp.template_conv_pad_spare_px,
+            sci_fwhm=mp.sci_fwhm,
         )
         return None
 
@@ -347,25 +352,15 @@ def _execute_template_stage(
         return _manifest_from_result(field_result)
 
     if stage == "downsample":
-        import numpy as np
-
+        from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
         from syndiff_pipeline.common.scc_paths import scc_convolved_zarr, scc_remap_dir
-        from syndiff_pipeline.common.wcs_grouping import _event_job_path
         from syndiff_pipeline.template_creation.orchestration.verify import (
-            clear_downsample_event_artifacts,
             mapping_master_pixels2skycells_path,
-        )
-        from syndiff_pipeline.template_creation.processing.downsample import (
-            load_cluster_template_job_payload,
-            main as run_downsample,
-            offsets_from_cluster_job_payload,
-            roi_tuple_from_cluster_job_payload,
         )
         from syndiff_pipeline.template_creation.processing.field_downsample import (
             run_field_downsample_scc,
         )
         from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
-            load_mapping_reference_ffi,
             resolve_scc_reference_ffi,
         )
 
@@ -373,8 +368,12 @@ def _execute_template_stage(
         wg = resolved.stages.wcs_grouping
         mp = resolved.stages.mapping
         geometry_mode = str(ds.geometry_mode or wg.geometry_mode or "field").lower()
-        job_path = _event_job_path(resolved.event_dir)
-        has_event_job = Path(job_path).is_file()
+        if geometry_mode != "field":
+            raise NotImplementedError(
+                "v2 template downsample supports geometry_mode='field' only; "
+                "linear/event ROI templates were removed."
+            )
+
         convolved = ds.convolved_dir or str(
             scc_convolved_zarr(resolved.data_root, t.sector, t.camera, t.ccd)
         )
@@ -390,143 +389,54 @@ def _execute_template_stage(
         )
 
         master_path = mapping_master_pixels2skycells_path(resolved)
-        with __import__("astropy.io.fits", fromlist=["open"]).open(master_path) as hdul:
-            master = hdul[1].data
-            full_shape = (int(master.shape[0]), int(master.shape[1]))
-
-        if geometry_mode == "field" and not has_event_job:
-            ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
-            field_result = run_field_downsample_scc(
-                sector=t.sector,
-                camera=t.camera,
-                ccd=t.ccd,
-                data_root=resolved.data_root,
-                event_dir=resolved.event_dir,
-                mapping_root=ds.mapping_dir or resolved.mapping_root,
-                convolved_dir=convolved,
-                roi_bounds=(0, 0, full_shape[1], full_shape[0]),
-                base_tess_shape=full_shape,
-                oversampling_factor=ds.oversampling_factor,
-                ignore_mask_bits=list(ds.ignore_mask_bits),
-                grouping_quantum_ps1_px=float(wg.grouping_quantum_ps1_px or 1.0),
-                materialize_fits=bool(ds.materialize_fits),
-                n_jobs=ds.n_jobs,
-                rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
-                apply_intra_skycell=bool(getattr(ds, "apply_intra_skycell", True)),
-                apply_inter_skycell=bool(getattr(ds, "apply_inter_skycell", True)),
-                stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
-                crop_filter_skycells=False,
-                update_frames_csv=False,
-                store_root=ds.output_base or resolved.template_output_base,
-                remap_store_root=remap_store_root,
-                scc_only=True,
-                ffi_dir=resolved.ffi_dir,
-                ref_ffi_path=ref_ffi,
-                progress_path=progress_path,
-            )
-            field_result = dict(field_result)
-            field_result["template_dir_physical"] = str(field_result["output_dir"])
-            return _manifest_from_result(field_result)
-
-        if not has_event_job:
-            raise FileNotFoundError(
-                f"Linear templates require event handoff at {job_path}; "
-                "run bind stage first or use geometry_mode: field for SCC-only builds."
-            )
-
-        os.makedirs(resolved.event_dir, exist_ok=True)
-        if force_rerun:
-            clear_downsample_event_artifacts(resolved)
-
-        payload = load_cluster_template_job_payload(job_path)
-        geometry_mode = (
-            payload.get("geometry_mode") or wg.geometry_mode or ds.geometry_mode or "field"
+        mapping_grid = load_mapping_grid_from_master(master_path)
+        os_factor = max(1, int(ds.oversampling_factor or 1))
+        base_shape = (
+            mapping_grid.array_shape_os()
+            if os_factor > 1
+            else mapping_grid.array_shape_native()
         )
-        if ds.single_offset:
-            offsets = np.array([[0.0, 0.0]])
-            roi = roi_tuple_from_cluster_job_payload(payload)
-        else:
-            offsets = offsets_from_cluster_job_payload(payload)
-            roi = roi_tuple_from_cluster_job_payload(payload)
-        x_min, y_min, x_max, y_max = roi
 
-        if str(geometry_mode).lower() == "field":
-            os_factor = max(1, int(ds.oversampling_factor or 1))
-            if os_factor > 1:
-                # Sidecar / field store ROI is always in oversampled pixels.
-                x_min, y_min, x_max, y_max = (
-                    int(x_min) * os_factor,
-                    int(y_min) * os_factor,
-                    int(x_max) * os_factor,
-                    int(y_max) * os_factor,
-                )
-            field_result = run_field_downsample_scc(
-                sector=t.sector,
-                camera=t.camera,
-                ccd=t.ccd,
-                data_root=resolved.data_root,
-                event_dir=resolved.event_dir,
-                mapping_root=ds.mapping_dir or resolved.mapping_root,
-                convolved_dir=convolved,
-                roi_bounds=(x_min, y_min, x_max, y_max),
-                base_tess_shape=full_shape,
-                oversampling_factor=ds.oversampling_factor,
-                ignore_mask_bits=list(ds.ignore_mask_bits),
-                grouping_quantum_ps1_px=float(
-                    payload.get("grouping_quantum_ps1_px")
-                    or wg.grouping_quantum_ps1_px
-                    or 1.0
-                ),
-                materialize_fits=bool(ds.materialize_fits),
-                n_jobs=ds.n_jobs,
-                rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
-                apply_intra_skycell=bool(getattr(ds, "apply_intra_skycell", True)),
-                apply_inter_skycell=bool(getattr(ds, "apply_inter_skycell", True)),
-                stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
-                store_root=ds.output_base or resolved.template_output_base,
-                remap_store_root=remap_store_root,
-                progress_path=progress_path,
-            )
-            field_result = dict(field_result)
-            field_result["template_dir_physical"] = str(field_result["output_dir"])
-            return _manifest_from_result(field_result)
-
-        ref_basename = payload.get("reference_ffi_basename")
-        if not ref_basename:
-            mapped_ref = load_mapping_reference_ffi(resolved)
-            if mapped_ref:
-                ref_basename = os.path.basename(mapped_ref)
-        result = run_downsample(
+        ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
+        field_result = run_field_downsample_scc(
             sector=t.sector,
             camera=t.camera,
             ccd=t.ccd,
-            offsets=offsets,
-            ignore_mask_bits=list(ds.ignore_mask_bits),
             data_root=resolved.data_root,
-            mapping_dir=ds.mapping_dir or resolved.mapping_root,
-            convolved_dir=convolved,
-            output_base=ds.output_base or resolved.template_output_base,
-            x_min=x_min,
-            y_min=y_min,
-            x_max=x_max,
-            y_max=y_max,
-            oversampling_factor=ds.oversampling_factor,
-            reference_ffi_basename_expected=ref_basename,
-            cluster_job_json_path=job_path,
-            allow_reference_ffi_mismatch=ds.allow_reference_ffi_mismatch,
-            progress_path=progress_path,
-            n_jobs=ds.n_jobs,
-            skycells_per_batch=ds.skycells_per_batch,
             event_dir=resolved.event_dir,
-            write_ps1_removed_stars_csv=True,
-            log_level=ds.log_level,
+            mapping_root=ds.mapping_dir or resolved.mapping_root,
+            convolved_dir=convolved,
+            roi_bounds=tuple(
+                int(v)
+                for v in (
+                    mapping_grid.ffi_xmin,
+                    mapping_grid.ffi_ymin,
+                    mapping_grid.ffi_xmax,
+                    mapping_grid.ffi_ymax,
+                )
+            ),
+            base_tess_shape=base_shape,
+            oversampling_factor=ds.oversampling_factor,
+            ignore_mask_bits=list(ds.ignore_mask_bits),
+            grouping_quantum_ps1_px=float(wg.grouping_quantum_ps1_px or 1.0),
+            materialize_fits=bool(ds.materialize_fits),
+            n_jobs=ds.n_jobs,
+            rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
+            apply_intra_skycell=bool(getattr(ds, "apply_intra_skycell", True)),
+            apply_inter_skycell=bool(getattr(ds, "apply_inter_skycell", True)),
             stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
-            checkpoint_skycells=ds.checkpoint_skycells,
+            update_frames_csv=False,
+            store_root=ds.output_base or resolved.template_output_base,
+            remap_store_root=remap_store_root,
+            scc_only=True,
+            ffi_dir=resolved.ffi_dir,
+            ref_ffi_path=ref_ffi,
+            progress_path=progress_path,
+            mapping_grid=mapping_grid,
         )
-        result = dict(result)
-        if result.get("output_dir"):
-            result["template_dir_physical"] = str(result["output_dir"])
-        return _manifest_from_result(result)
+        field_result = dict(field_result)
+        field_result["template_dir_physical"] = str(field_result["output_dir"])
+        return _manifest_from_result(field_result)
 
     raise ValueError(f"Unknown template stage: {stage!r}")
 

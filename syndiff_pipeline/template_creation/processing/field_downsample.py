@@ -41,6 +41,7 @@ from syndiff_pipeline.template_creation.processing.field_abutting import (
 from syndiff_pipeline.template_creation.processing.field_templates import (
     FieldManifest,
     FITS_DIRNAME,
+    MANIFEST_NAME,
     MATERIALIZED_FITS_SIDECAR,
     assemble_group_from_contribs,
     build_field_fits_header,
@@ -48,7 +49,6 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
     contrib_path,
     field_fits_path,
     templates_root,
-    verify_field_store,
     write_contrib,
     write_field_group_fits,
     write_template_manifest,
@@ -110,12 +110,13 @@ def _bin_skycell_contrib(
     base_tess_shape: tuple[int, int],
     roi_bounds: tuple[int, int, int, int],
     ignore_mask: int,
+    mapping_grid=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None:
     """Sparse bin one skycell contribution.
 
-    When ``roi_bounds`` is smaller than the full chip, pixels whose TESS id
-    falls outside the ROI are dropped *before* ``argsort`` to cut event/crop
-    binning cost.
+    Field mode must pass ``mapping_grid``; pixels outside the grid (via
+    ``MappingGrid.contains_flat``) are dropped before ``argsort``.
+    ``roi_bounds`` is retained for call-site compatibility / materialize only.
     """
     from syndiff_pipeline.template_creation.processing.downsample import (
         _aggregate_sorted_groups,
@@ -125,9 +126,13 @@ def _bin_skycell_contrib(
         raise ValueError(
             f"regmap assignment shape {assignment.shape} != PS1 data shape {ps1_data.shape}"
         )
+    if mapping_grid is None:
+        raise ValueError(
+            "_bin_skycell_contrib requires mapping_grid (MappingGrid.contains_flat); "
+            "legacy ROI crop filtering was removed"
+        )
     t_y, t_x = base_tess_shape
-    x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)
-    full_chip = (x_min, y_min, x_max, y_max) == (0, 0, t_x, t_y)
+    del roi_bounds  # grid APIs own membership; bounds kept on signature for callers
 
     if int(sx_int) == 0 and int(sy_int) == 0:
         ps1_shifted = ps1_data
@@ -140,20 +145,20 @@ def _bin_skycell_contrib(
     ps1_full = np.asarray(ps1_shifted).ravel()
     mask_full = np.asarray(mask_shifted).ravel()
 
+    shape_os = mapping_grid.array_shape_os()
+    shape_native = mapping_grid.array_shape_native()
+    if (int(t_y), int(t_x)) == shape_os:
+        oversampled = True
+    elif (int(t_y), int(t_x)) == shape_native:
+        oversampled = False
+    else:
+        oversampled = int(getattr(mapping_grid, "oversampling", 1)) > 1
+
     keep = np.isfinite(pind_full) & (pind_full >= 0)
-    if not full_chip:
-        y_all = pind_full // t_x
-        x_all = pind_full % t_x
-        keep &= (
-            (0 <= y_all)
-            & (y_all < t_y)
-            & (0 <= x_all)
-            & (x_all < t_x)
-            & (x_all >= x_min)
-            & (x_all < x_max)
-            & (y_all >= y_min)
-            & (y_all < y_max)
-        )
+    # Vectorized MappingGrid.contains_flat: local flat ids are [0, H*W).
+    width = mapping_grid.width_os if oversampled else mapping_grid.width_native
+    height = mapping_grid.height_os if oversampled else mapping_grid.height_native
+    keep &= pind_full < (int(height) * int(width))
     if not np.any(keep):
         return None
 
@@ -174,26 +179,11 @@ def _bin_skycell_contrib(
         ps1_rav[sort_ind], mask_rav[sort_ind], group_starts, ignore_mask
     )
 
-    # Safety ROI filter (no-op when already prefiltered).
-    y_base = tess_pixels // t_x
-    x_base = tess_pixels % t_x
-    valid = (
-        (0 <= y_base)
-        & (y_base < t_y)
-        & (0 <= x_base)
-        & (x_base < t_x)
-        & (x_base >= x_min)
-        & (x_base < x_max)
-        & (y_base >= y_min)
-        & (y_base < y_max)
-    )
-    if not np.any(valid):
-        return None
     return (
-        tess_pixels[valid].astype(np.int64),
-        sums[valid].astype(np.float64),
-        counts[valid].astype(np.float64),
-        mask_counts[valid].astype(np.float64),
+        tess_pixels.astype(np.int64),
+        sums.astype(np.float64),
+        counts.astype(np.float64),
+        mask_counts.astype(np.float64),
     )
 
 
@@ -574,6 +564,7 @@ def _l5_skycell_batch(
             base_tess_shape=base_tess_shape,
             roi_bounds=roi_bounds,
             ignore_mask=ignore_mask,
+            mapping_grid=_L5_WORKER.get("mapping_grid"),
         )
 
         if binned is None:
@@ -612,28 +603,6 @@ def _l5_skycell_batch(
     }
 
 
-def _skycells_in_crop(
-    master_path: Path,
-    roi_bounds: tuple[int, int, int, int],
-    name_by_idx: dict[int, str] | None = None,
-) -> set[str]:
-    """Skycell names whose exclusive TESS pixels intersect the crop ROI."""
-    x0, y0, x1, y1 = (int(v) for v in roi_bounds)
-    with fits.open(master_path) as hdul:
-        master = np.asarray(hdul[1].data)
-        if name_by_idx is None and len(hdul) > 2:
-            tab = hdul[2].data
-            name_by_idx = {
-                int(i): str(n).strip() for n, i in zip(tab["SKYCELL"], tab["SKYCIND"])
-            }
-    crop = master[y0:y1, x0:x1]
-    ids = np.unique(crop)
-    ids = ids[ids >= 0]
-    if not name_by_idx:
-        return {str(i) for i in ids}
-    return {name_by_idx[int(i)] for i in ids if int(i) in name_by_idx}
-
-
 def run_field_downsample_scc(
     *,
     sector: int,
@@ -653,7 +622,6 @@ def run_field_downsample_scc(
     materialize_fits: bool = False,
     n_jobs: int = 1,
     update_frames_csv: bool = True,
-    crop_filter_skycells: bool = True,
     store_root: str | Path | None = None,
     remap_store_root: str | Path | None = None,
     rebuild_field_store: bool = False,
@@ -664,6 +632,7 @@ def run_field_downsample_scc(
     progress_path: str | Path | None = None,
     apply_intra_skycell: bool = True,
     apply_inter_skycell: bool = True,
+    mapping_grid=None,
 ) -> dict[str, Any]:
     """
     Bin sparse contribs into the SCC templates store (L5 only).
@@ -692,6 +661,13 @@ def run_field_downsample_scc(
     )
 
     del ffi_dir, ref_ffi_path  # remap stage owns schedule build inputs
+    if mapping_grid is None:
+        from syndiff_pipeline.common.mapping_grid import MappingGridError
+
+        raise MappingGridError(
+            "field downsample requires MappingGrid (MAPGRID>=2 / field_mode_assembly "
+            "schema_version>=3); rebuild mapping then re-run downsample"
+        )
     progress_file = Path(progress_path) if progress_path is not None else None
     t_run0 = _time.perf_counter()
     if progress_file is not None:
@@ -842,16 +818,6 @@ def run_field_downsample_scc(
             str(r.skycell): (int(r.sx_int), int(r.sy_int))
             for r in rows.itertuples(index=False)
         }
-    if crop_filter_skycells:
-        allowed = _skycells_in_crop(master_path, roi_bounds)
-        before = len(keys)
-        keys = {k for k in keys if k[0] in allowed}
-        log.info(
-            "Crop-filter skycells: %d -> %d contrib keys (%d skycells in ROI)",
-            before,
-            len(keys),
-            len(allowed),
-        )
 
     from syndiff_pipeline.template_creation.processing.downsample import (
         resolve_downsample_scratch_dir,
@@ -984,6 +950,7 @@ def run_field_downsample_scc(
         "intra_skycell_R": int(intra_skycell_R),
         "apply_intra_skycell": bool(apply_intra_skycell),
         "apply_inter_skycell": bool(apply_inter_skycell),
+        "mapping_grid": mapping_grid,
     }
 
     if progress_file is not None:
@@ -1098,14 +1065,13 @@ def run_field_downsample_scc(
         ),
     )
     sidecar = {
-        "schema_version": 2,
+        "schema_version": 3,
         "store_root": str(store),
         "remap_root": str(remap_store),
         "output_store_name": None,
         "remap_store_name": None,
         "zarr_path": str(zarr_path),
         "base_tess_shape": list(base_tess_shape),
-        "roi_bounds": list(roi_bounds),
         "oversampling_factor": int(oversampling_factor),
         "ignore_mask": int(ignore_mask),
         "intra_skycell_R": int(intra_skycell_R),
@@ -1123,6 +1089,8 @@ def run_field_downsample_scc(
             "a per-event flux scale vs linear ADU templates (~1e3–1e4)."
         ),
         "perf": perf_meta,
+        "mapping_grid": mapping_grid.to_mapping_dict(),
+        "geometry_mode": "field",
     }
     # Infer lane names from path leaves for provenance / A/B bookkeeping.
     from syndiff_pipeline.common.scc_paths import REMAP_SUBDIR, TEMPLATES_SUBDIR
@@ -1166,17 +1134,10 @@ def run_field_downsample_scc(
             oversampling_factor=int(oversampling_factor),
             group_scoped_contribs=True,
             provenance=fits_provenance,
+            mapping_grid=mapping_grid,
         )
         sidecar["materialized_fits"] = materialized_fits
     (store / "field_mode_assembly.json").write_text(json.dumps(sidecar, indent=2) + "\n")
-
-    v = verify_field_store(
-        store,
-        required_keys=list(key_list),
-        require_nonempty=False,
-    )
-    if not v["ok"]:
-        raise RuntimeError(f"field store incomplete: {v['reasons']}")
 
     if progress_file is not None:
         field_downsample_progress.set_progress_phase(progress_file, "complete")
@@ -1200,6 +1161,9 @@ def run_field_downsample_scc(
             + "\n"
         )
 
+    assembly_path = store / "field_mode_assembly.json"
+    manifest_path = store / MANIFEST_NAME
+    artifacts = [str(assembly_path), str(manifest_path)]
     return {
         "output_dir": str(store),
         "remap_root": str(remap_store),
@@ -1216,6 +1180,9 @@ def run_field_downsample_scc(
         "materialize_fits": bool(materialize_fits),
         "materialized_fits": materialized_fits,
         "perf": perf_meta,
+        "artifacts": artifacts,
+        "expected_count": len(artifacts),
+        "produced_count": int(assembly_path.is_file()) + int(manifest_path.is_file()),
     }
 
 
@@ -1349,6 +1316,7 @@ def materialize_field_fits_for_store(
     oversampling_factor: int = 1,
     group_scoped_contribs: bool | None = None,
     provenance: dict[str, Any] | None = None,
+    mapping_grid=None,
 ) -> dict[str, Any]:
     """Write per-group field template FITS from hybrid-binned sparse contribs.
 
@@ -1403,6 +1371,7 @@ def materialize_field_fits_for_store(
             oversampling_factor=oversampling_factor,
             roi_bounds=roi_bounds,
             provenance=prov,
+            mapping_grid=mapping_grid,
         )
         written_path = write_field_group_fits(out_path, flux, count, header=header)
         written.append(

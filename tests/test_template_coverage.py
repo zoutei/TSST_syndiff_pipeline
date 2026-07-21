@@ -136,6 +136,28 @@ class TestTemplateCoverage(unittest.TestCase):
             with self.assertRaises(TemplateCoverageError):
                 _load_template_cropped(str(p), crop)
 
+    def test_mapgrid_v2_without_xmin_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "tmpl_v2.fits"
+            data = np.zeros((8, 8), dtype=np.float32)
+            hdu = fits.PrimaryHDU(data=data)
+            hdu.header["MAPGRID"] = 2
+            hdu.writeto(p, overwrite=True)
+            with self.assertRaises(ValueError) as cm:
+                template_coverage_ffi_bounds(str(p))
+            self.assertIn("MAPGRID>=2", str(cm.exception))
+            self.assertIn("XMIN", str(cm.exception))
+
+    def test_legacy_without_xmin_still_falls_back_to_origin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "tmpl_legacy.fits"
+            data = np.zeros((10, 12), dtype=np.float32)
+            fits.PrimaryHDU(data=data).writeto(p, overwrite=True)
+            cov = template_coverage_ffi_bounds(str(p))
+            self.assertEqual(cov["x_min"], 0)
+            self.assertEqual(cov["y_min"], 0)
+            self.assertEqual(cov["shape"], (10, 12))
+
 
 class TestBlockSumOversampledCount(unittest.TestCase):
     def test_block_sum_f2(self):

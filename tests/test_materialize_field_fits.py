@@ -13,6 +13,8 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.common.mapping_grid import MAPGRID_VERSION, MappingGrid
+from syndiff_pipeline.common.template_coverage import template_coverage_ffi_bounds
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     find_field_fits_by_group_id,
     parse_field_gid_from_filename,
@@ -191,6 +193,48 @@ class TestMaterializeFieldFits(unittest.TestCase):
         sidecar = json.loads((self.store / "materialized_fits.json").read_text())
         self.assertEqual(sidecar["provenance"]["intra_skycell_R"], 1)
         self.assertEqual(sidecar["provenance"]["n_intra_skycell_keys"], 12)
+
+    @mock.patch(
+        "syndiff_pipeline.template_creation.processing.field_downsample.write_field_group_fits",
+        side_effect=_plain_write_field_group_fits,
+    )
+    def test_materialize_writes_mapgrid_headers(self, _mock_write):
+        self._seed_group_contribs()
+        shifts_df = self._shifts_legacy()
+        shifts_df.to_parquet(self.store / "template_group_shifts.parquet")
+        grid = MappingGrid(
+            ffi_xmin=0,
+            ffi_ymin=0,
+            ffi_xmax=NX,
+            ffi_ymax=NY,
+            oversampling=1,
+            conv_pad_native=0,
+        )
+
+        materialize_field_fits_for_store(
+            self.store,
+            shifts_df,
+            sector=20,
+            camera=3,
+            ccd=3,
+            base_tess_shape=(NY, NX),
+            mapping_grid=grid,
+        )
+
+        fits_path = find_field_fits_by_group_id(self.store, 0)
+        self.assertIsNotNone(fits_path)
+        with fits.open(fits_path) as hdul:
+            hdr = hdul[0].header
+            self.assertEqual(int(hdr["MAPGRID"]), MAPGRID_VERSION)
+            self.assertEqual(int(hdr["CONVPAD"]), 0)
+            self.assertEqual(int(hdr["XMIN"]), 0)
+            self.assertEqual(int(hdr["YMIN"]), 0)
+            self.assertEqual(int(hdr["XMAX"]), NX)
+            self.assertEqual(int(hdr["YMAX"]), NY)
+        cov = template_coverage_ffi_bounds(str(fits_path))
+        self.assertEqual(cov["x_min"], 0)
+        self.assertEqual(cov["y_min"], 0)
+        self.assertEqual(cov["shape"], (NY, NX))
 
     @mock.patch(
         "syndiff_pipeline.template_creation.processing.field_downsample.write_field_group_fits",

@@ -120,9 +120,21 @@ def remap_l4b_env(tmp_path: Path, monkeypatch):
         "syndiff_pipeline.template_creation.processing.field_remap._master_skycell_id_map",
         lambda _path: (master, name_to_id),
     )
+    # Real MAPGRID master so _build_remap_tpix hard-fails are not tripped by a
+    # fake path; master pixel contents are still mocked via _master_skycell_id_map.
+    from astropy.io import fits
+
+    from syndiff_pipeline.common.mapping_grid import MappingGrid
+
+    grid = MappingGrid.from_ffi_shape(256, 256, conv_pad_native=2)
+    master_path = tmp_path / "master_pixels2skycells.fits"
+    hdu = fits.PrimaryHDU(data=np.zeros(grid.array_shape_native(), dtype=np.int32))
+    for key, val in grid.to_fits_header_updates().items():
+        hdu.header[key] = val
+    hdu.writeto(master_path, overwrite=True)
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_remap._master_pixels2skycells_path",
-        lambda *a, **k: Path("/fake/master.fits"),
+        lambda *a, **k: master_path,
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_remap._load_frame_wcs",

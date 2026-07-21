@@ -173,6 +173,7 @@ def build_field_fits_header(
     oversampling_factor: int = 1,
     roi_bounds: tuple[int, int, int, int] | None = None,
     provenance: Mapping[str, Any] | None = None,
+    mapping_grid: Any | None = None,
 ) -> Any:
     """Minimal FITS header for a materialized field template."""
     from astropy.io import fits
@@ -187,7 +188,10 @@ def build_field_fits_header(
     os_factor = max(1, int(oversampling_factor))
     if os_factor > 1:
         hdr["OVERSAMP"] = (os_factor, "Oversampling factor")
-    if roi_bounds is not None:
+    if mapping_grid is not None:
+        for key, value in mapping_grid.to_fits_header_updates().items():
+            hdr[key] = (int(value), f"MappingGrid {key}")
+    elif roi_bounds is not None:
         x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)
         hdr["XMIN"] = (x_min, "ROI xmin in base TESS pixels")
         hdr["XMAX"] = (x_max, "ROI xmax (exclusive) in base TESS pixels")

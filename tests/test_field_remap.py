@@ -252,6 +252,7 @@ def test_init_remap_worker_loads_master_from_path(monkeypatch, tmp_path: Path):
 
     master = np.arange(6, dtype=np.int32).reshape(2, 3)
     master_path = tmp_path / "master.fits"
+    fake_tpix = np.zeros((4, 2), dtype=np.float64)
 
     def fake_map(path: Path):
         assert Path(path) == master_path
@@ -260,17 +261,8 @@ def test_init_remap_worker_loads_master_from_path(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(fr, "_master_skycell_id_map", fake_map)
     monkeypatch.setattr(
         fr,
-        "create_tess_pixel_coordinates",
-        lambda shape, os: (np.zeros((2, 2)), None),
-        raising=False,
-    )
-    # pancakes.create_tess_pixel_coordinates is imported inside _init_remap_worker
-    import syndiff_pipeline.template_creation.processing.pancakes as pancakes
-
-    monkeypatch.setattr(
-        pancakes,
-        "create_tess_pixel_coordinates",
-        lambda shape, os: (np.zeros((2, 2)), None),
+        "_build_remap_tpix",
+        lambda **_kwargs: fake_tpix,
     )
 
     fr._reset_remap_worker()
@@ -301,15 +293,16 @@ def test_init_remap_worker_loads_master_from_path(monkeypatch, tmp_path: Path):
     np.testing.assert_array_equal(fr._REMAP_WORKER["master"], master)
     assert fr._REMAP_WORKER["idx_to_name"] == {1: "skycell.0.0"}
     assert fr._REMAP_WORKER["master_path"] == str(master_path)
+    np.testing.assert_array_equal(fr._REMAP_WORKER["_tpix"], fake_tpix)
 
 
 def test_init_remap_worker_keeps_idx_to_name_from_payload(monkeypatch, tmp_path: Path):
     import syndiff_pipeline.template_creation.processing.field_remap as fr
-    import syndiff_pipeline.template_creation.processing.pancakes as pancakes
 
     master = np.arange(4, dtype=np.int32).reshape(2, 2)
     master_path = tmp_path / "master.fits"
     idx_to_name = {10: "skycell.1.1", 20: "skycell.1.2"}
+    fake_tpix = np.zeros((4, 2), dtype=np.float64)
 
     monkeypatch.setattr(
         fr,
@@ -317,9 +310,9 @@ def test_init_remap_worker_keeps_idx_to_name_from_payload(monkeypatch, tmp_path:
         lambda _path: (master, {"skycell.9.9": 99}),
     )
     monkeypatch.setattr(
-        pancakes,
-        "create_tess_pixel_coordinates",
-        lambda shape, os: (np.zeros((2, 2)), None),
+        fr,
+        "_build_remap_tpix",
+        lambda **_kwargs: fake_tpix,
     )
 
     fr._reset_remap_worker()
@@ -348,3 +341,4 @@ def test_init_remap_worker_keeps_idx_to_name_from_payload(monkeypatch, tmp_path:
     }
     fr._init_remap_worker(payload)
     assert fr._REMAP_WORKER["idx_to_name"] == idx_to_name
+    np.testing.assert_array_equal(fr._REMAP_WORKER["_tpix"], fake_tpix)

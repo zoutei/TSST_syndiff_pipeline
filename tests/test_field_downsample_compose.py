@@ -625,39 +625,38 @@ def test_write_contrib_atomic_no_lock(tmp_path: Path):
     assert list(data["indices"]) == [3, 4]
 
 
-def test_roi_prefilter_bins_match_full_then_filter():
+def test_bin_skycell_contrib_uses_mapping_grid_contains_flat():
+    from syndiff_pipeline.common.mapping_grid import MappingGrid
     from syndiff_pipeline.template_creation.processing.field_downsample import (
         _bin_skycell_contrib,
     )
 
-    assignment = np.array([[0, 1, 2], [6, 7, 8]], dtype=np.int32)
+    # Local grid 2x3 (ffi x=[0,3), y=[0,2)); flats 0..5 in-grid, 6+ out.
+    grid = MappingGrid(
+        ffi_xmin=0, ffi_ymin=0, ffi_xmax=3, ffi_ymax=2, oversampling=1, conv_pad_native=0
+    )
+    assignment = np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int32)
+    # Inject an out-of-grid flat that must be dropped.
+    assignment = assignment.copy()
+    assignment[1, 2] = 99
     ps1 = np.ones((2, 3), dtype=np.float32)
     mask = np.zeros((2, 3), dtype=np.int32)
-    # Full chip 3x3 → indices 0..8; ROI keeps only x in [0,2) → drop col 2
-    full = _bin_skycell_contrib(
+    binned = _bin_skycell_contrib(
         assignment=assignment,
         ps1_data=ps1,
         ps1_mask=mask,
         sx_int=0,
         sy_int=0,
-        base_tess_shape=(3, 3),
-        roi_bounds=(0, 0, 3, 3),
+        base_tess_shape=grid.array_shape_native(),
+        roi_bounds=(0, 0, 3, 2),
         ignore_mask=0,
+        mapping_grid=grid,
     )
-    cropped = _bin_skycell_contrib(
-        assignment=assignment,
-        ps1_data=ps1,
-        ps1_mask=mask,
-        sx_int=0,
-        sy_int=0,
-        base_tess_shape=(3, 3),
-        roi_bounds=(0, 0, 2, 3),
-        ignore_mask=0,
-    )
-    assert full is not None and cropped is not None
-    assert set(cropped[0]).issubset(set(full[0]))
-    assert 2 not in set(cropped[0])
-    assert 8 not in set(cropped[0])
+    assert binned is not None
+    idxs = set(int(i) for i in binned[0])
+    assert idxs == {0, 1, 2, 3, 4}
+    assert 99 not in idxs
+    assert 5 not in idxs
 
 
 def test_compose_skips_intra_when_apply_intra_false():

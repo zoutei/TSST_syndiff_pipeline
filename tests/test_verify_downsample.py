@@ -57,7 +57,7 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
         ),
         skycell_wcs_csv=str(tmp / "skycell_wcs.csv"),
         stages=TemplateStageParams(
-            wcs_grouping=WcsGroupingStageParams(),
+            wcs_grouping=WcsGroupingStageParams(geometry_mode="linear"),
             mapping=MappingStageParams(oversampling_factor=1),
             ps1_download=Ps1DownloadStageParams(),
             ps1_process=Ps1ProcessStageParams(),
@@ -65,6 +65,7 @@ def _resolved(tmp: Path, *, single_offset: bool) -> ResolvedTargetConfig:
             downsample=DownsampleStageParams(
                 single_offset=single_offset,
                 output_base=str(legacy_base),
+                geometry_mode="linear",
             ),
         ),
         mapping_root=str(data_root / "s0022" / "c3" / "k3" / "mapping" / "oversampling_1"),

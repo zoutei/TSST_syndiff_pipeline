@@ -30,14 +30,19 @@ def exact_regmap_for_tess_ids(
     tess_ids: np.ndarray,
     *,
     data_shape: tuple[int, int],
+    tpix_coord_input: np.ndarray,
     oversampling_factor: int = 1,
-    tpix_coord_input: np.ndarray | None = None,
     ps1_wcs: WCS | None = None,
     ps1_shape: tuple[int, int] | None = None,
 ) -> np.ndarray:
-    """Exact PS1→TESS assignment for a subset of global TESS flat ids."""
+    """Exact PS1→TESS assignment for a subset of global TESS flat ids.
+
+    ``tpix_coord_input`` must be FFI-pixel coordinates from
+    :func:`~syndiff_pipeline.common.mapping_grid.create_coords_for_grid`
+    (MappingGrid). The legacy ``create_tess_pixel_coordinates(data_shape)``
+    fallback is banned on v2 field/remap paths.
+    """
     from syndiff_pipeline.template_creation.processing.pancakes import (
-        create_tess_pixel_coordinates,
         get_ps1_wcs_information,
         process_skycell_pixel_mapping,
     )
@@ -45,9 +50,16 @@ def exact_regmap_for_tess_ids(
     if not isinstance(skycell_row, pd.Series):
         skycell_row = pd.Series(skycell_row)
     if tpix_coord_input is None:
-        tpix, _ = create_tess_pixel_coordinates(data_shape, oversampling_factor)
-    else:
-        tpix = tpix_coord_input
+        raise ValueError(
+            "tpix_coord_input is required (pass MappingGrid coords via "
+            "create_coords_for_grid); create_tess_pixel_coordinates(data_shape) "
+            "fallback is banned on v2 field/remap paths"
+        )
+    tpix = np.asarray(tpix_coord_input)
+    if tpix.ndim != 2 or tpix.shape[1] != 2:
+        raise ValueError(
+            f"tpix_coord_input must be (N, 2) [ty, tx] FFI coords; got shape {tpix.shape}"
+        )
     if ps1_wcs is None or ps1_shape is None:
         _, ps1_wcs, ps1_shape = get_ps1_wcs_information(skycell_row)
     tids = np.asarray(tess_ids, dtype=np.int32)
@@ -93,6 +105,7 @@ def build_hybrid_assignment_with_exact(
     skycell_row: pd.Series | dict[str, Any],
     *,
     data_shape: tuple[int, int],
+    tpix_coord_input: np.ndarray,
     hybrid_R: int = 1,
     oversampling_factor: int = 1,
     extra_tess_ids: np.ndarray | None = None,
@@ -100,7 +113,9 @@ def build_hybrid_assignment_with_exact(
 ) -> tuple[np.ndarray, dict[str, Any]]:
     """Roll + Exact-patch L4a hybrid assignment for one ``(sx, sy)``.
 
-    Returns ``(hybrid_tid, meta)``. Caches Exact under ``exact_cache_path`` when set.
+    ``tpix_coord_input`` must be MappingGrid FFI coords (see
+    :func:`exact_regmap_for_tess_ids`). Returns ``(hybrid_tid, meta)``.
+    Caches Exact under ``exact_cache_path`` when set.
     """
     tids, mask = candidate_tess_ids_for_l4a(
         frozen_tid,
@@ -147,6 +162,7 @@ def build_hybrid_assignment_with_exact(
             skycell_row,
             tids,
             data_shape=data_shape,
+            tpix_coord_input=tpix_coord_input,
             oversampling_factor=oversampling_factor,
         )
         if cache_path is not None:
