@@ -1,16 +1,11 @@
-> **Package integration**: `syndiff` stage `wcs_grouping` · modules `common/wcs_grouping.py` + `template_creation/orchestration/handoff.py` · runner-only (no legacy script)  
-> **Orchestration docs**: [template pipeline guide](../template_pipeline.md)
+> **Package integration**: algorithms in `common/wcs_grouping.py` · **linear `geometry_mode` only** (field mode uses per-skycell `remap` + `scc_bootstrap`)  
+> **Orchestration docs**: [field_geometry.md](../field_geometry.md) · [template pipeline guide](../template_pipeline.md)
 
-# WCS grouping — Detailed Technical Reference
+# WCS grouping — Detailed Technical Reference (linear mode)
 
-The `wcs_grouping` stage measures how the science target's **pixel position drifts across the sector** (because each FFI carries its own WCS solution, including SIP distortion), smooths that drift in time, assigns each FFI to a **template offset group**, selects a **reference FFI**, and resolves the **image crop (ROI)**. Its single JSON handoff, `cluster_template_job.json`, drives `mapping`, `downsample`, and `diff`.
+These algorithms measure how a science target's **pixel position drifts across the sector** (each FFI carries its own WCS solution, including SIP distortion), smooth that drift in time, assign each FFI to a **template offset group**, select a **reference FFI**, and resolve an **image crop (ROI)** for linear-mode templates.
 
-With **`geometry_mode: field`**, target-anchored groups from this stage are supplemented
-by a separate per-skycell shift schedule built during the `templates` stage — see
-[field geometry](../field_geometry.md). The linear-mode flow below still applies for
-reference-FFI selection, crop bounds, and `syndiff_ffi_frames.csv`.
-
-This stage is fast (header-only FITS reads) and runs unpooled on the submit host.
+With **`geometry_mode: field`** (default), drift is measured at every skycell center during **`remap`**, templates are stored SCC-wide, and **`scc_bootstrap`** supplies diff geometry from `MappingGrid` — see [field geometry](../field_geometry.md). This document describes the **linear opt-out** path only.
 
 ---
 

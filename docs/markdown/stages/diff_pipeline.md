@@ -21,7 +21,17 @@ The orchestrator sees a single stage `diff` (`orchestration/stages.py`, `deps=("
 
 Preamble entries (no `kind`, must precede the first stage): `external_workspaces`, `workspace_inherit`.
 
-Required handoff from the template pipeline (all under `events/{label}/`): `cluster_template_job.json`, `syndiff_ffi_frames.csv`, and the `ws/templates` symlink to the downsampled `syndiff_template_*.fits.fz` files. **Exception:** an astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff, DS9 regions at startup, and the master FITS mirror.
+### Field-mode v2 handoff (`scc_bootstrap`)
+
+When `data_root` is set and templates exist with `field_mode_assembly.json` **schema v3** + `mapping_grid`, `execute.py` loads handoff via `scc_bootstrap.load_scc_diff_handoff_for_config()`:
+
+- `bookkeeping/diff/frames.csv` — per-FFI manifest with `group_id`
+- `bookkeeping/diff/diff_job.json` v2 — `mapping_grid`, `crop_bounds`, store names
+- Diff products written SCC-primary to `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`
+
+No separate scheduler stage. No `crop_mode` / `target_box` for geometry.
+
+**Exception:** astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff.
 
 ---
 

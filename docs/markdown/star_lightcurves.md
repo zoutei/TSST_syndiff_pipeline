@@ -32,11 +32,11 @@ Use `--local` on submit for local executor instead of Condor. Monitor with `synd
 
 Transient template + diff must have completed for the baseline workspace referenced in `star_targets` / `star_config`. Star validates these on disk before processing hosts:
 
-| Artifact | Typical label | Stage |
-|----------|---------------|-------|
-| `event_job.json` (legacy: `cluster_template_job.json`) | `events/{event_name}/s{SSSS}_c{C}_k{K}/` | `bind` (diff DAG) |
-| `frames.csv` (legacy: `syndiff_ffi_frames.csv`) | `events/{event_name}/s{SSSS}_c{C}_k{K}/` | `bind` (diff DAG) |
-| `syndiff_template_*` | SCC's `templates/oversampling_{N}/` (`scc_templates_dir()`) | `templates` (legacy config key/alias: `downsample`) |
+| Artifact | Typical location | Stage |
+|----------|------------------|-------|
+| `bookkeeping/diff/frames.csv` | `{data_root}/s{SSSS}/c{C}/k{K}/` | `diff` (`scc_bootstrap`) |
+| `bookkeeping/diff/diff_job.json` | `{data_root}/s{SSSS}/c{C}/k{K}/` | `diff` (`scc_bootstrap`) |
+| Field template store | `templates/oversampling_{N}/` or `templates_{lane}/` | `downsample` |
 | Convolved template | `hp_c` | `hotpants` (`write_convolved: true`) |
 | Kernel solutions | `hp_d_kernels/*_kernel.npz` | `hotpants` (`write_kernel_solutions: true`) |
 | Photutils background | `ks_b_s` or `ks_b` | `kernel_subtract` + `background` |

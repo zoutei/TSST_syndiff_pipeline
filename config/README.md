@@ -44,10 +44,13 @@ cp config/deployment.yaml.example config/deployment.yaml   # first time
 # Template DAG: SCC-only input, no event coordinates
 syndiff template submit --site config --scc config/scc_example.csv --run-id my_template_run
 
-# Diff DAG: event input, once templates exist. --stages bind,diff is required —
-# the bare `diff` preset does NOT run bind by default (see template_pipeline.md#overview).
-syndiff diff submit --site config --targets config/targets_example.csv \
-  --stages bind,diff --run-id my_diff_run
+# Field-mode diff (SCC-only), once templates exist
+syndiff diff submit --site config \
+  --config config/diff_config_single_kernel.yaml \
+  --scc config/scc_example.csv --run-id my_diff_run
+
+# Event photometry (optional)
+syndiff diff submit --site config --targets config/targets_example.csv --run-id my_event_diff
 ```
 
 **Host-star light curves** (after transient diff artifacts exist on disk):

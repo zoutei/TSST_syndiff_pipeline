@@ -7,7 +7,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | Document | Audience | Contents |
 |----------|----------|----------|
 | [Main README](../../README.md) | All users | Project overview, pyhotpants + custom MOCPy, install, quick start |
-| [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, five-stage template DAG + two-stage diff DAG (`bind`→`diff`), independent star branch, Condor, config, workspace layout |
+| [Unified pipeline guide](template_pipeline.md) | All users | `syndiff` CLI, template DAG + diff DAG, star branch, Condor, config |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit|run`, config, prerequisites, outputs |
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
 | [Field (distortion-aware) templates](field_geometry.md) | Users / maintainers | **Default** `geometry_mode: field` — L0–L5, L4a/L4b, storage, verify, ops |
@@ -37,7 +37,7 @@ docs/markdown/
     ├── README.md                 ← index + script/module mapping
     ├── standalone_pipeline_overview.md   ← legacy single-FFI pipeline.py workflow
     ├── tess_ffi_download.md      ← FFI download stage
-    ├── wcs_grouping.md           ← drift measurement, template groups, reference FFI, crop (now the `bind` stage)
+    ├── wcs_grouping.md           ← linear-mode drift measurement (field mode: see field_geometry.md)
     ├── mapping_pancakes.md       ← PanCAKES (TESS↔PS1 pixel mapping) + Gaia download
     ├── ps1_process_technical.md  ← sliding-window convolution architecture + star removal
     ├── downsample_technical.md   ← multi-offset downsampling onto TESS grid (now the `templates` stage)
@@ -64,16 +64,13 @@ are vendored here so this repository is self-contained.
 | `download_and_store_zarr.py` | `template_creation/processing/ps1_download.py` | `ps1_download` |
 | `process_ps1.py` | `template_creation/processing/ps1_process.py` | `ps1_process` |
 | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` (+ `field_downsample.py`) | `templates` (legacy config key/alias: `downsample`) |
-| — | `difference_imaging/orchestration/bind.py` + `common/wcs_grouping.py` | `bind` (diff DAG; legacy alias: `wcs_grouping`) |
-| — | `common/download.py` | `tess_ffi_download` |
-| — | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` | `diff` |
+| — | `difference_imaging/orchestration/scc_bootstrap.py` + `execute.py` | `diff` (`scc_bootstrap` handoff at execute time) |
 
-The **`syndiff` orchestrator** adds event-scoped WCS grouping (`bind`) for
-transients, an SCC-scoped five-stage template DAG plus a two-stage diff DAG
-(`bind`→`diff`) and an independent `star` branch, SQLite bookkeeping, resource
-pools, detached scheduling, artifact verification, and HTCondor for
-`mapping`, `ps1_process`, `diff`, and `star`. The core template science
-algorithms match the standalone scripts.
+The **`syndiff` orchestrator** adds an SCC-scoped five-stage template DAG, a
+field-mode diff path (`scc_bootstrap` → SCC `diff_{lane}/`), optional
+event-target photometry under `events/`, an independent `star` branch,
+SQLite bookkeeping, and HTCondor for `mapping`, `ps1_process`, `diff`, and
+`star`.
 
 ## Example diff configs
 
