@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 from syndiff_pipeline.common.mapping_grid import MappingGrid
-from syndiff_pipeline.common.scc_paths import scc_templates_dir
+from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir, scc_templates_dir
 from syndiff_pipeline.difference_imaging.orchestration.diff_verify import verify_scc_diff
 from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
     DIFF_JOB_BASENAME,
@@ -18,7 +18,23 @@ from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
 SECTOR, CAMERA, CCD = 20, 1, 1
 
 
-def _bookkeeping_dir(data_root: Path) -> Path:
+def _bookkeeping_dir(
+    data_root: Path,
+    *,
+    oversampling_factor: int = 1,
+    template_store_name: str | None = None,
+) -> Path:
+    return scc_diff_bookkeeping_dir(
+        data_root,
+        SECTOR,
+        CAMERA,
+        CCD,
+        oversampling_factor=oversampling_factor,
+        template_store_name=template_store_name,
+    )
+
+
+def _legacy_bookkeeping_dir(data_root: Path) -> Path:
     return data_root / f"s{SECTOR:04d}" / f"c{CAMERA}" / f"k{CCD}" / "bookkeeping" / "diff"
 
 
@@ -29,9 +45,19 @@ def _write_ok_tree(
     sidecar_schema: int = 3,
     include_mapping_grid: bool = True,
     template_store_name: str | None = None,
+    oversampling_factor: int = 1,
+    legacy_path: bool = False,
 ) -> MappingGrid:
     grid = MappingGrid.from_ffi_shape(2048, 2048)
-    bk = _bookkeeping_dir(data_root)
+    bk = (
+        _legacy_bookkeeping_dir(data_root)
+        if legacy_path
+        else _bookkeeping_dir(
+            data_root,
+            oversampling_factor=oversampling_factor,
+            template_store_name=template_store_name,
+        )
+    )
     bk.mkdir(parents=True)
     job = {
         "schema_version": job_schema,
@@ -52,7 +78,7 @@ def _write_ok_tree(
         SECTOR,
         CAMERA,
         CCD,
-        oversampling_factor=1,
+        oversampling_factor=oversampling_factor,
         store_name=template_store_name,
     )
     tmpl.mkdir(parents=True)
@@ -133,6 +159,29 @@ def test_verify_scc_diff_job_missing_mapping_grid(tmp_path: Path) -> None:
     _write_ok_tree(data_root, include_mapping_grid=False)
     errors = verify_scc_diff(data_root, SECTOR, CAMERA, CCD)
     assert any("missing mapping_grid" in e for e in errors)
+
+
+def test_verify_scc_diff_success_os4_lane(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    _write_ok_tree(data_root, oversampling_factor=4)
+    errors = verify_scc_diff(data_root, SECTOR, CAMERA, CCD, oversampling_factor=4)
+    assert errors == []
+
+
+def test_verify_scc_diff_os4_does_not_see_os1_tree(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    _write_ok_tree(data_root, oversampling_factor=1)
+    errors = verify_scc_diff(data_root, SECTOR, CAMERA, CCD, oversampling_factor=4)
+    assert any("diff_job.json" in e for e in errors)
+    assert any("frames.csv" in e for e in errors)
+
+
+def test_verify_scc_diff_success_legacy_flat_path(tmp_path: Path) -> None:
+    """Pre-lane runs wrote a flat bookkeeping/diff/ with no oversampling leaf."""
+    data_root = tmp_path / "data"
+    _write_ok_tree(data_root, legacy_path=True)
+    errors = verify_scc_diff(data_root, SECTOR, CAMERA, CCD)
+    assert errors == []
 
 
 def test_verify_scc_diff_sidecar_schema_too_old(tmp_path: Path) -> None:

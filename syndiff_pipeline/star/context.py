@@ -10,7 +10,11 @@ import yaml
 
 from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
 from syndiff_pipeline.common.mapping_grid import MappingGrid
-from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir, scc_diff_dir
+from syndiff_pipeline.common.scc_paths import (
+    normalize_store_name,
+    resolve_scc_diff_bookkeeping_dir,
+    scc_diff_dir,
+)
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     require_deployment_path,
@@ -344,8 +348,21 @@ def _load_scc_diff_job(
     sector: int,
     camera: int,
     ccd: int,
+    *,
+    oversampling_factor: int = 1,
+    template_store_name: str | None = None,
 ) -> dict | None:
-    job_path = scc_diff_bookkeeping_dir(data_root, sector, camera, ccd) / "diff_job.json"
+    job_path = (
+        resolve_scc_diff_bookkeeping_dir(
+            data_root,
+            sector,
+            camera,
+            ccd,
+            oversampling_factor=max(1, int(oversampling_factor)),
+            template_store_name=normalize_store_name(template_store_name),
+        )
+        / "diff_job.json"
+    )
     if not job_path.is_file():
         return None
     try:
@@ -435,7 +452,21 @@ def load_event_context(
 
     event_dir = str(Path(cfg.output_dir).expanduser().resolve())
     cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
-    diff_job = _load_scc_diff_job(data_root, target.sector, target.camera, target.ccd)
+
+    os_factor = 1
+    template_store_name = None
+    if star_run_config is not None:
+        os_factor = max(1, int(star_run_config.oversampling_factor or 1))
+        template_store_name = star_run_config.template_store_name
+
+    diff_job = _load_scc_diff_job(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        oversampling_factor=os_factor,
+        template_store_name=template_store_name,
+    )
     mapping_grid = None
     output_store_name = None
     if diff_job is not None:
@@ -455,11 +486,7 @@ def load_event_context(
         )
 
     templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
-    os_factor = 1
-    template_store_name = None
     if star_run_config is not None:
-        os_factor = max(1, int(star_run_config.oversampling_factor or 1))
-        template_store_name = star_run_config.template_store_name
         output_store_name = output_store_name or getattr(
             star_run_config, "output_store_name", None
         )

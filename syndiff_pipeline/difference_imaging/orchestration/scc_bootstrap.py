@@ -13,6 +13,8 @@ import pandas as pd
 
 from syndiff_pipeline.common.mapping_grid import MappingGrid
 from syndiff_pipeline.common.scc_paths import (
+    normalize_store_name,
+    resolve_scc_diff_bookkeeping_dir,
     scc_diff_bookkeeping_dir,
     scc_diff_dir,
     scc_ffi_list_parquet,
@@ -122,7 +124,14 @@ def bootstrap_scc_diff(
     from syndiff_pipeline.common.coordinate_preflight import validate_coordinate_contract
 
     validate_coordinate_contract(mapping_grid, crop_bounds)
-    bookkeeping_dir = scc_diff_bookkeeping_dir(data_root, sector, camera, ccd)
+    bookkeeping_dir = scc_diff_bookkeeping_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=os_factor,
+        template_store_name=template_store_name,
+    )
     bookkeeping_dir.mkdir(parents=True, exist_ok=True)
     frames_csv_path = bookkeeping_dir / FRAMES_CSV_BASENAME
     frames_df.to_csv(frames_csv_path, index=False)
@@ -200,6 +209,34 @@ def _resolve_reference_ffi_path(
     )
 
 
+def _inherit_remap_store_name(
+    data_root: Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    template_store_name: str | None,
+    oversampling_factor: int,
+) -> str | None:
+    """Read ``remap_store_name`` off the template sidecar when caller left it unset."""
+    template_store = scc_templates_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=oversampling_factor,
+        store_name=template_store_name,
+    )
+    sidecar = template_store / FIELD_MODE_ASSEMBLY_BASENAME
+    if not sidecar.is_file():
+        return None
+    try:
+        doc = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return normalize_store_name(doc.get("remap_store_name"))
+
+
 def ensure_scc_diff_handoff(
     *,
     data_root: str | Path,
@@ -212,27 +249,61 @@ def ensure_scc_diff_handoff(
     oversampling_factor: int = 1,
     event_name: str | None = None,
 ) -> SccDiffBootstrapResult:
-    """Load or create SCC-primary diff bookkeeping for field-mode differencing."""
+    """Load or create SCC-primary diff bookkeeping for field-mode differencing.
+
+    Reuses an existing ``diff_job.json`` only when it matches the requested
+    lane identity (``oversampling_factor``, ``template_store_name``,
+    ``remap_store_name``, ``schema_version >= 2``); otherwise rebuilds it in
+    place. When ``remap_store_name`` is not given explicitly, it is inherited
+    from the template store's ``field_mode_assembly.json`` sidecar.
+    """
     data_root = Path(data_root).expanduser()
-    bookkeeping_dir = scc_diff_bookkeeping_dir(data_root, sector, camera, ccd)
+    os_factor = max(1, int(oversampling_factor))
+    template_store_name = normalize_store_name(template_store_name)
+    remap_store_name = normalize_store_name(remap_store_name)
+    if remap_store_name is None:
+        remap_store_name = _inherit_remap_store_name(
+            data_root,
+            sector,
+            camera,
+            ccd,
+            template_store_name=template_store_name,
+            oversampling_factor=os_factor,
+        )
+
+    bookkeeping_dir = resolve_scc_diff_bookkeeping_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=os_factor,
+        template_store_name=template_store_name,
+    )
     job_path = bookkeeping_dir / DIFF_JOB_BASENAME
     frames_path = bookkeeping_dir / FRAMES_CSV_BASENAME
     if job_path.is_file() and frames_path.is_file():
         doc = json.loads(job_path.read_text(encoding="utf-8"))
-        grid = MappingGrid.from_mapping_dict(doc["mapping_grid"])
-        frames_df = pd.read_csv(frames_path)
-        crop_bounds = doc.get("crop_bounds") or grid.science_ffi_bounds()
-        return SccDiffBootstrapResult(
-            mapping_grid=grid,
-            crop_bounds=crop_bounds,
-            frames_df=frames_df,
-            diff_store_root=scc_diff_dir(
-                data_root, sector, camera, ccd, store_name=output_store_name
-            ),
-            bookkeeping_dir=bookkeeping_dir,
-            diff_job_path=job_path,
-            frames_csv_path=frames_path,
+        identity_ok = (
+            int(doc.get("schema_version", 0)) >= 2
+            and int(doc.get("oversampling_factor", 1)) == os_factor
+            and normalize_store_name(doc.get("template_store_name")) == template_store_name
+            and normalize_store_name(doc.get("remap_store_name")) == remap_store_name
         )
+        if identity_ok:
+            grid = MappingGrid.from_mapping_dict(doc["mapping_grid"])
+            frames_df = pd.read_csv(frames_path)
+            crop_bounds = doc.get("crop_bounds") or grid.science_ffi_bounds()
+            return SccDiffBootstrapResult(
+                mapping_grid=grid,
+                crop_bounds=crop_bounds,
+                frames_df=frames_df,
+                diff_store_root=scc_diff_dir(
+                    data_root, sector, camera, ccd, store_name=output_store_name
+                ),
+                bookkeeping_dir=bookkeeping_dir,
+                diff_job_path=job_path,
+                frames_csv_path=frames_path,
+            )
     return bootstrap_scc_diff(
         data_root=data_root,
         sector=sector,
@@ -241,7 +312,7 @@ def ensure_scc_diff_handoff(
         template_store_name=template_store_name,
         output_store_name=output_store_name,
         remap_store_name=remap_store_name,
-        oversampling_factor=oversampling_factor,
+        oversampling_factor=os_factor,
         event_name=event_name,
     )
 

@@ -11,11 +11,6 @@ from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConf
 from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import split_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.site_config import freeze_target_diff_config
 from syndiff_pipeline.difference_imaging.orchestration.validate import _outputs_for_stage
-from syndiff_pipeline.difference_imaging.stages.photometry import lightcurve_csv_basename
-from syndiff_pipeline.difference_imaging.stages.kernel import (
-    KERNEL_FIT_META_BASENAME,
-    KERNEL_R2_NPZ_BASENAME,
-)
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     is_pipeline_fits_filename,
     resolve_pipeline_artifact_path,
@@ -126,14 +121,24 @@ def load_diff_frames_for_verify(
     data_root = getattr(cfg, "data_root", "") or ""
     if data_root:
         try:
-            from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir
+            from syndiff_pipeline.common.scc_paths import (
+                normalize_store_name,
+                resolve_scc_diff_bookkeeping_dir,
+            )
             from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
                 DIFF_JOB_BASENAME,
                 FRAMES_CSV_BASENAME,
             )
 
-            bk_dir = scc_diff_bookkeeping_dir(
-                data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+            bk_dir = resolve_scc_diff_bookkeeping_dir(
+                data_root,
+                int(cfg.sector),
+                int(cfg.camera),
+                int(cfg.ccd),
+                oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
+                template_store_name=normalize_store_name(
+                    getattr(cfg, "template_store_name", None)
+                ),
             )
             frames_path = bk_dir / FRAMES_CSV_BASENAME
             job_path = bk_dir / DIFF_JOB_BASENAME
@@ -152,14 +157,24 @@ def _diff_frame_manifest_available(cfg: SynDiffConfig, event_dir: str | Path) ->
     data_root = getattr(cfg, "data_root", "") or ""
     if data_root:
         try:
-            from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir
+            from syndiff_pipeline.common.scc_paths import (
+                normalize_store_name,
+                resolve_scc_diff_bookkeeping_dir,
+            )
             from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
                 DIFF_JOB_BASENAME,
                 FRAMES_CSV_BASENAME,
             )
 
-            bk_dir = scc_diff_bookkeeping_dir(
-                data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+            bk_dir = resolve_scc_diff_bookkeeping_dir(
+                data_root,
+                int(cfg.sector),
+                int(cfg.camera),
+                int(cfg.ccd),
+                oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
+                template_store_name=normalize_store_name(
+                    getattr(cfg, "template_store_name", None)
+                ),
             )
             if (bk_dir / FRAMES_CSV_BASENAME).is_file() and (bk_dir / DIFF_JOB_BASENAME).is_file():
                 return True
@@ -261,6 +276,10 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
         )
 
     if kind == "forced_photometry":
+        from syndiff_pipeline.difference_imaging.stages.photometry import (
+            lightcurve_csv_basename,
+        )
+
         label = str(stage["output"]).strip()
         phot_dir = ws_dir / label
         if not phot_dir.is_dir():
@@ -341,6 +360,11 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
         return any(centroids_dir.glob(f"*{PHOTRESULTS_ECSV_SUFFIX}"))
 
     if kind == "kernel_fit":
+        from syndiff_pipeline.difference_imaging.stages.kernel import (
+            KERNEL_FIT_META_BASENAME,
+            KERNEL_R2_NPZ_BASENAME,
+        )
+
         label = str(stage.get("output", "")).strip()
         if not label:
             return False
@@ -742,7 +766,10 @@ def verify_scc_diff(
     """
     import json
 
-    from syndiff_pipeline.common.scc_paths import scc_templates_dir
+    from syndiff_pipeline.common.scc_paths import (
+        resolve_scc_diff_bookkeeping_dir,
+        scc_templates_dir,
+    )
     from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
         DIFF_JOB_BASENAME,
         FIELD_MODE_ASSEMBLY_BASENAME,
@@ -751,13 +778,13 @@ def verify_scc_diff(
 
     errors: list[str] = []
     data_root = Path(data_root).expanduser()
-    bk = (
-        data_root
-        / f"s{int(sector):04d}"
-        / f"c{int(camera)}"
-        / f"k{int(ccd)}"
-        / "bookkeeping"
-        / "diff"
+    bk = resolve_scc_diff_bookkeeping_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=max(1, int(oversampling_factor)),
+        template_store_name=template_store_name,
     )
     job_path = bk / DIFF_JOB_BASENAME
     frames_path = bk / FRAMES_CSV_BASENAME
