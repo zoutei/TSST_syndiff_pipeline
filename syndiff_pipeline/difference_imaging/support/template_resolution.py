@@ -254,7 +254,7 @@ def resolve_template_for_ffi(
 # ── on-demand field assemble loader ───────────────────────────────────────
 
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -266,6 +266,7 @@ class FieldModeTemplateContext:
     base_tess_shape: tuple[int, int]
     template_roi_bounds: tuple[int, int, int, int]
     oversampling_factor: int = 1
+    mapping_grid: Any = None  # MappingGrid | None for schema v3
 
 
 def build_field_mode_template_loader(
@@ -273,6 +274,7 @@ def build_field_mode_template_loader(
     diff_crop_bounds: dict,
     *,
     planes: str = "flux",
+    crop_to_science: bool = True,
 ) -> Callable[[int], Any]:
     """Return ``group_id -> cropped flux array`` (float64).
 
@@ -290,13 +292,26 @@ def build_field_mode_template_loader(
         raise ValueError(f"planes must be flux|all, got {planes!r}")
 
     os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
-    x_min, y_min, x_max, y_max = ctx.template_roi_bounds
-    # diff_crop_bounds are native FFI; template_roi_bounds / assembled arrays are
-    # in oversampled pixels when os_factor > 1 (same grid as base_tess_shape).
-    dx0 = int(diff_crop_bounds["x_min"]) * os_factor - int(x_min)
-    dx1 = int(diff_crop_bounds["x_max"]) * os_factor - int(x_min)
-    dy0 = int(diff_crop_bounds["y_min"]) * os_factor - int(y_min)
-    dy1 = int(diff_crop_bounds["y_max"]) * os_factor - int(y_min)
+    grid = getattr(ctx, "mapping_grid", None)
+    if grid is not None and not crop_to_science:
+        if os_factor > 1:
+            w, h = grid.array_shape_os()
+        else:
+            w, h = grid.array_shape_native()
+        lx0, ly0, lx1, ly1 = 0, 0, int(w), int(h)
+        x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+    elif grid is not None:
+        lx0 = int(round((int(diff_crop_bounds["x_min"]) - grid.ffi_xmin) * os_factor))
+        lx1 = int(round((int(diff_crop_bounds["x_max"]) - grid.ffi_xmin) * os_factor))
+        ly0 = int(round((int(diff_crop_bounds["y_min"]) - grid.ffi_ymin) * os_factor))
+        ly1 = int(round((int(diff_crop_bounds["y_max"]) - grid.ffi_ymin) * os_factor))
+        x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+    else:
+        x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+        lx0 = int(diff_crop_bounds["x_min"]) * os_factor - int(x_min)
+        lx1 = int(diff_crop_bounds["x_max"]) * os_factor - int(x_min)
+        ly0 = int(diff_crop_bounds["y_min"]) * os_factor - int(y_min)
+        ly1 = int(diff_crop_bounds["y_max"]) * os_factor - int(y_min)
 
     def _load(group_id: int):
         crop = (int(x_min), int(x_max), int(y_min), int(y_max))
@@ -307,7 +322,7 @@ def build_field_mode_template_loader(
             shape=ctx.base_tess_shape,
             crop=crop,
         )
-        out = flux[dy0:dy1, dx0:dx1].astype(np.float32).astype(np.float64)
+        out = flux[ly0:ly1, lx0:lx1].astype(np.float32).astype(np.float64)
         if planes == "all":
             # COUNT/MASK not reconstructed here; stack flux thrice for API parity callers
             return np.stack([out, np.ones_like(out), np.zeros_like(out)], axis=0)
@@ -333,11 +348,19 @@ def build_field_mode_count_loader(
     )
 
     os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
-    x_min, y_min, x_max, y_max = ctx.template_roi_bounds
-    dx0 = int(diff_crop_bounds["x_min"]) * os_factor - int(x_min)
-    dx1 = int(diff_crop_bounds["x_max"]) * os_factor - int(x_min)
-    dy0 = int(diff_crop_bounds["y_min"]) * os_factor - int(y_min)
-    dy1 = int(diff_crop_bounds["y_max"]) * os_factor - int(y_min)
+    grid = getattr(ctx, "mapping_grid", None)
+    if grid is not None:
+        lx0 = int(round((int(diff_crop_bounds["x_min"]) - grid.ffi_xmin) * os_factor))
+        lx1 = int(round((int(diff_crop_bounds["x_max"]) - grid.ffi_xmin) * os_factor))
+        ly0 = int(round((int(diff_crop_bounds["y_min"]) - grid.ffi_ymin) * os_factor))
+        ly1 = int(round((int(diff_crop_bounds["y_max"]) - grid.ffi_ymin) * os_factor))
+        x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+    else:
+        x_min, y_min, x_max, y_max = ctx.template_roi_bounds
+        lx0 = int(diff_crop_bounds["x_min"]) * os_factor - int(x_min)
+        lx1 = int(diff_crop_bounds["x_max"]) * os_factor - int(x_min)
+        ly0 = int(diff_crop_bounds["y_min"]) * os_factor - int(y_min)
+        ly1 = int(diff_crop_bounds["y_max"]) * os_factor - int(y_min)
 
     def _load(group_id: int):
         crop = (int(x_min), int(x_max), int(y_min), int(y_max))
@@ -348,7 +371,7 @@ def build_field_mode_count_loader(
             shape=ctx.base_tess_shape,
             crop=crop,
         )
-        count_hr = count[dy0:dy1, dx0:dx1]
+        count_hr = count[ly0:ly1, lx0:lx1]
         if os_factor > 1:
             from syndiff_pipeline.common.template_coverage import (
                 block_sum_oversampled_to_native,
@@ -440,6 +463,125 @@ def assemble_field_template_for_ffi(
     )
 
 
+def _resolve_template_group_shifts_path(
+    store_root: Path,
+    side: Mapping[str, Any],
+) -> Path:
+    """Locate ``template_group_shifts.parquet`` for an SCC field store."""
+    candidates: list[Path] = [store_root / "template_group_shifts.parquet"]
+    remap_root = side.get("remap_root")
+    if remap_root:
+        candidates.append(Path(str(remap_root)) / "template_group_shifts.parquet")
+    for path in candidates:
+        if path.is_file():
+            return path
+    tried = ", ".join(str(p) for p in candidates)
+    raise FileNotFoundError(
+        f"No template_group_shifts.parquet found for field store {store_root} "
+        f"(tried: {tried})"
+    )
+
+
+def _field_mode_context_from_sidecar(
+    store_root: Path,
+    side: Mapping[str, Any],
+    *,
+    shifts_df: pd.DataFrame,
+) -> FieldModeTemplateContext:
+    from syndiff_pipeline.common.mapping_grid import MappingGrid, MappingGridError
+
+    schema_version = int(side.get("schema_version", 0))
+    if schema_version < 3 or "mapping_grid" not in side:
+        raise MappingGridError(
+            f"field template store {store_root} is v1/v2 field mode "
+            f"(field_mode_assembly schema_version={schema_version}; need >=3 with mapping_grid). "
+            "Rebuild mapping (MAPGRID>=2) and field downsample before using field-mode templates."
+        )
+    os_factor = max(1, int(side.get("oversampling_factor", 1) or 1))
+    mapping_grid = MappingGrid.from_sidecar(side)
+    if os_factor > 1:
+        h, w = mapping_grid.array_shape_os()
+    else:
+        h, w = mapping_grid.array_shape_native()
+    template_roi_bounds = (0, 0, int(w), int(h))
+    return FieldModeTemplateContext(
+        store_root=str(side.get("store_root") or store_root),
+        shifts_df=shifts_df,
+        base_tess_shape=tuple(side["base_tess_shape"]),
+        template_roi_bounds=template_roi_bounds,
+        oversampling_factor=os_factor,
+        mapping_grid=mapping_grid,
+    )
+
+
+def load_field_mode_template_context_from_store(
+    store_root: str | Path,
+) -> FieldModeTemplateContext:
+    """Load field assemble context from an SCC template store sidecar."""
+    root = Path(str(store_root)).expanduser().resolve()
+    sidecar = root / "field_mode_assembly.json"
+    if not sidecar.is_file():
+        raise FileNotFoundError(f"Missing field mode sidecar: {sidecar}")
+    side = json.loads(sidecar.read_text(encoding="utf-8"))
+    shifts_path = _resolve_template_group_shifts_path(root, side)
+    shifts_df = pd.read_parquet(shifts_path)
+    return _field_mode_context_from_sidecar(root, side, shifts_df=shifts_df)
+
+
+def write_field_template_fits_for_ffi(
+    ctx: FieldModeTemplateContext,
+    manifest: pd.DataFrame,
+    ffi_path: str,
+    out_path: str | Path,
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    crop: tuple[int, int, int, int] | None = None,
+    provenance: Mapping[str, Any] | None = None,
+    extra_header: Mapping[str, Any] | None = None,
+) -> str:
+    """Assemble and write one FFI's field template FITS (flux + COUNT)."""
+    from syndiff_pipeline.template_creation.processing.field_templates import (
+        build_field_fits_header,
+        write_field_group_fits,
+    )
+
+    gid = _group_id_for_ffi_name(manifest, ffi_path)
+    flux = assemble_field_template_for_ffi(
+        ctx, manifest, ffi_path, crop=crop, plane="flux"
+    )
+    count = assemble_field_template_for_ffi(
+        ctx, manifest, ffi_path, crop=crop, plane="count"
+    )
+    roi_bounds = None
+    if crop is not None:
+        x_min, x_max, y_min, y_max = (int(v) for v in crop)
+        roi_bounds = (x_min, y_min, x_max, y_max)
+    elif ctx.template_roi_bounds:
+        roi_bounds = tuple(int(v) for v in ctx.template_roi_bounds)
+
+    header = build_field_fits_header(
+        sector=int(sector),
+        camera=int(camera),
+        ccd=int(ccd),
+        group_id=int(gid),
+        oversampling_factor=int(ctx.oversampling_factor),
+        roi_bounds=roi_bounds,
+        provenance=provenance,
+        mapping_grid=ctx.mapping_grid,
+    )
+    ffi_file = Path(fits_logical_path(ffi_path)).name
+    header["FFI_FILE"] = (ffi_file, "Source FFI logical filename")
+    if extra_header:
+        for key, value in extra_header.items():
+            header[str(key)] = value
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    return write_field_group_fits(out, flux, count, header=header)
+
+
 def maybe_load_field_mode_template_context(
     template_dir: str | Path | None,
     event_dir: str | Path,
@@ -467,16 +609,6 @@ def maybe_load_field_mode_template_context(
     except Exception as exc:
         log.warning("field mode context load failed: %s", exc)
         return None
-    # v1: legacy L4a-only / (skycell,sx,sy) contribs
-    # v2: Architecture A sidecars (l4b_policy, group-scoped contribs, materialize_fits)
-    schema_version = int(side.get("schema_version", 0))
-    if schema_version not in (1, 2):
-        log.warning(
-            "field mode context unsupported schema_version=%s under %s",
-            schema_version,
-            root,
-        )
-        return None
     remap_root = side.get("remap_root")
     shifts_path = None
     if remap_root:
@@ -494,11 +626,5 @@ def maybe_load_field_mode_template_context(
     except Exception as exc:
         log.warning("field mode context load failed: %s", exc)
         return None
-    return FieldModeTemplateContext(
-        store_root=str(side.get("store_root") or root),
-        shifts_df=shifts_df,
-        base_tess_shape=tuple(side["base_tess_shape"]),
-        template_roi_bounds=tuple(side["roi_bounds"]),
-        oversampling_factor=max(1, int(side.get("oversampling_factor", 1) or 1)),
-    )
+    return _field_mode_context_from_sidecar(root, side, shifts_df=shifts_df)
 

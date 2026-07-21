@@ -12,13 +12,11 @@ Updated to use Zarr data from the convolved_results directory structure:
 The script loads PS1 convolved image data from Zarr stores instead of individual
 FITS files, providing better performance and organization.
 
-When ``event_dir`` and ``cluster_job_json_path`` are set (orchestrator path or
-``--job-json`` CLI), by default the script also writes
-``{event_dir}/ps1_removed_stars.csv`` — crop-local Gaia rows for PS1
-``removed_stars``, using paths and WCS from the cluster job JSON. Use
-``write_ps1_removed_stars_csv=False`` (or ``--skip-ps1-removed-star-gaia-csv`` on
-the CLI) to disable. This extra step does not run for ``--single-offset`` or when
-no cluster job / event dir is provided.
+When ``event_dir`` and ``cluster_job_json_path`` are set, helpers such as
+``write_ps1_removed_star_gaia_csv`` can still write
+``{event_dir}/ps1_removed_stars.csv``. The linear/event ``main()`` entry point
+has been removed; use orchestrated field downsample
+(``run_field_downsample_scc`` / ``geometry_mode=field``).
 """
 
 import errno
@@ -586,51 +584,6 @@ def _aggregate_sorted_groups(
     return sums, counts, mask_counts
 
 
-def _decode_sparse_indices_to_roi(
-    combined_indices: np.ndarray,
-    base_tess_shape: tuple[int, int],
-    roi_bounds: tuple[int, int, int, int],
-    oversampling_factor: int,
-    out_h: int,
-    out_w: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (valid_mask, out_y, out_x) for sparse linearized TESS indices."""
-    x_min, y_min, x_max, y_max = roi_bounds
-    _, t_x = base_tess_shape
-
-    if oversampling_factor > 1:
-        os_width = t_x * oversampling_factor
-        y_os = combined_indices // os_width
-        x_os = combined_indices % os_width
-        y_base = y_os // oversampling_factor
-        x_base = x_os // oversampling_factor
-        sub_y = y_os % oversampling_factor
-        sub_x = x_os % oversampling_factor
-        out_y = (y_base - y_min) * oversampling_factor + sub_y
-        out_x = (x_base - x_min) * oversampling_factor + sub_x
-    else:
-        y_base = combined_indices // t_x
-        x_base = combined_indices % t_x
-        out_y = y_base - y_min
-        out_x = x_base - x_min
-
-    valid = (
-        (x_min <= x_base)
-        & (x_base < x_max)
-        & (y_min <= y_base)
-        & (y_base < y_max)
-        & (out_y >= 0)
-        & (out_y < out_h)
-        & (out_x >= 0)
-        & (out_x < out_w)
-    )
-    return (
-        valid,
-        out_y[valid].astype(np.int32, copy=False),
-        out_x[valid].astype(np.int32, copy=False),
-    )
-
-
 def _process_skycell_registration_binning(
     *,
     ps1_assignment: np.ndarray,
@@ -924,17 +877,40 @@ def combine_sparse_downsample_results(
     out_w = roi_w * oversampling_factor
     combined_results = np.zeros((len(offsets), 3, out_h, out_w), dtype=np.float32)
 
-    valid, out_y, out_x = _decode_sparse_indices_to_roi(
-        combined_indices,
-        base_tess_shape,
-        roi_bounds,
-        oversampling_factor,
-        out_h,
-        out_w,
+    # Decode sparse linearized TESS indices into ROI-local (out_y, out_x).
+    # Legacy event-ROI linear path only; field mode uses MappingGrid contribs.
+    _, t_x = base_tess_shape
+    if oversampling_factor > 1:
+        os_width = t_x * oversampling_factor
+        y_os = combined_indices // os_width
+        x_os = combined_indices % os_width
+        y_base = y_os // oversampling_factor
+        x_base = x_os // oversampling_factor
+        sub_y = y_os % oversampling_factor
+        sub_x = x_os % oversampling_factor
+        out_y = (y_base - y_min) * oversampling_factor + sub_y
+        out_x = (x_base - x_min) * oversampling_factor + sub_x
+    else:
+        y_base = combined_indices // t_x
+        x_base = combined_indices % t_x
+        out_y = y_base - y_min
+        out_x = x_base - x_min
+
+    valid = (
+        (x_min <= x_base)
+        & (x_base < x_max)
+        & (y_min <= y_base)
+        & (y_base < y_max)
+        & (out_y >= 0)
+        & (out_y < out_h)
+        & (out_x >= 0)
+        & (out_x < out_w)
     )
     if not np.any(valid):
         return combined_results
 
+    out_y = out_y[valid].astype(np.int32, copy=False)
+    out_x = out_x[valid].astype(np.int32, copy=False)
     sums_valid = combined_sums[valid]
     counts_valid = combined_counts[valid]
     mask_counts_valid = combined_mask_counts[valid]
@@ -1227,577 +1203,20 @@ def main(
     stage_regmaps_to_scratch: bool | None = None,
     checkpoint_skycells: bool = False,
 ) -> dict:
-    # Resolve base paths (allow overrides)
-    """Main.
-    
-    Parameters
-    ----------
-    sector : int, optional, default ``20``
-    camera : int, optional, default ``3``
-    ccd : int, optional, default ``3``
-    offsets : np.ndarray, optional, default ``np.array([[0.0, 0.0]])``
-    ignore_mask_bits : list[int], optional, default ``[12]``
-    data_root : str | Path, optional, default ``'data'``
-    mapping_dir : str | Path | None, optional, default ``None``
-    convolved_dir : str | Path | None, optional, default ``None``
-    output_base : str | Path | None, optional, default ``None``
-    x_min : int | None, optional, default ``None``
-    y_min : int | None, optional, default ``None``
-    x_max : int | None, optional, default ``None``
-    y_max : int | None, optional, default ``None``
-    oversampling_factor : int, optional, default ``1``
-    reference_ffi_basename_expected : str | None, optional, default ``None``
-    cluster_job_json_path : str | None, optional, default ``None``
-    allow_reference_ffi_mismatch : bool, optional, default ``False``
-    progress_path : str | Path | None, optional, default ``None``
-    n_jobs : int, optional, default ``16``
-    skycells_per_batch : int, optional, default ``20``
-    event_dir : str | Path | None, optional, default ``None``
-    write_ps1_removed_stars_csv : bool, optional, default ``True``
-    removed_stars_csv : str | Path | None, optional, default ``None``
-    log_level : str, optional, default ``'INFO'``
-    stage_regmaps_to_scratch : bool | None, optional, default ``None``
-        When None, auto-enable on Condor (``_CONDOR_SCRATCH_DIR`` in env).
-    checkpoint_skycells : bool, optional, default ``False``
-        Write per-skycell sparse NPZ checkpoints under ``{output_dir}/_partial/``.
-    
-    Returns
-    -------
-    dict"""
-    data_root = Path(data_root)
-    log_level = (log_level or "INFO").upper()
-    if log_level not in ("INFO", "DEBUG"):
-        raise ValueError(f"log_level must be INFO or DEBUG, got {log_level!r}")
-    run_t0 = time.perf_counter()
-    if mapping_dir is None:
-        mapping_root = data_root / "skycell_pixel_mapping"
-    else:
-        mapping_root = Path(mapping_dir)
-    if convolved_dir is None:
-        convolved_dir = data_root / "convolved_results"
-    else:
-        convolved_dir = Path(convolved_dir)
-    if output_base is None:
-        output_base = data_root / "shifted_downsampled"
-    else:
-        output_base = Path(output_base)
+    """Linear/event ROI downsample entry point — removed.
 
-    # Generate paths based on parameters
-    # mapping_root from resolve_config is already the SCC oversampling leaf.
-    suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
-    csv_flat = mapping_root / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
-    csv_nested = mapping_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
-    if oversampling_factor > 1 and not csv_flat.is_file() and not csv_nested.is_file():
-        # Legacy: oversampling nest outside sector tree
-        alt_root = mapping_root / f"oversampling_{oversampling_factor}"
-        csv_flat = alt_root / f"tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
-        csv_nested = alt_root / f"sector_{sector:04d}/camera_{camera}/ccd_{ccd}/tess_s{sector:04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
-        if csv_flat.is_file() or csv_nested.is_file():
-            mapping_root = alt_root
-    SKYCELL_CSV_PATH = csv_flat if csv_flat.is_file() or not csv_nested.is_file() else csv_nested
-    CONVOLVED_DATA_PATH = Path(convolved_dir)
-    leaf = SKYCELL_CSV_PATH.parent
-    REG_MASTER_FILES_PATH = str(
-        resolve_existing_fits_path(
-            leaf
-            / f"tess_s{sector:04d}_{camera}_{ccd}_master_pixels2skycells{suffix}{PIPELINE_FITS_EXT}"
-        )
+    Orchestrated field downsample is the only supported path
+    (``run_field_downsample_scc`` via ``syndiff template`` /
+    ``geometry_mode=field``).
+    """
+    raise NotImplementedError(
+        "downsample.main() linear/event ROI path was removed; use orchestrated "
+        "field downsample (geometry_mode='field' / run_field_downsample_scc)"
     )
-    OUTPUT_DIR = output_base / f"sector{sector:04d}_camera{camera}_ccd{ccd}"
-
-    # Processing parameters - lower n_jobs / skycells_per_batch for full-FFI runs
-    N_JOBS = max(1, int(n_jobs))
-    SKYCELLS_PER_BATCH = max(1, int(skycells_per_batch))
-    print(f"Parallel workers: n_jobs={N_JOBS}, skycells_per_batch={SKYCELLS_PER_BATCH}")
-
-    # Load TESS data and WCS
-    print("Loading TESS data and WCS...")
-    start_time = time.time()
-    tess_wcs, tess_dims = load_tess_wcs(REG_MASTER_FILES_PATH)
-    with fits.open(REG_MASTER_FILES_PATH) as hdul:
-        # Find HDU with data
-        hdu_idx = 1 if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None else 0
-        tess_data = hdul[hdu_idx].data.astype(np.float32)
-        tess_header = hdul[hdu_idx].header
-
-    if reference_ffi_basename_expected:
-        expected_raw = os.path.basename(str(reference_ffi_basename_expected).strip())
-        tess_ffi_raw = tess_header.get("TESS_FFI")
-        actual_raw = (
-            os.path.basename(str(tess_ffi_raw).strip())
-            if tess_ffi_raw not in (None, "")
-            else ""
-        )
-        expected_bn = strip_fits_suffix(expected_raw)
-        actual_bn = strip_fits_suffix(actual_raw) if actual_raw else ""
-        json_note = f" ({cluster_job_json_path})" if cluster_job_json_path else ""
-        if not actual_bn or expected_bn != actual_bn:
-            actual_display = repr(actual_raw) if actual_raw else "(missing)"
-            msg = (
-                "Reference FFI basename from cluster job JSON does not match master mapping TESS_FFI. "
-                f"expected_basename={expected_raw!r} (from job JSON{json_note}), "
-                f"mapping TESS_FFI basename={actual_display} "
-                f"(mapping file: {REG_MASTER_FILES_PATH})"
-            )
-            if allow_reference_ffi_mismatch:
-                warnings.warn(f"{msg} Continuing because allow_reference_ffi_mismatch=True.", UserWarning, stacklevel=1)
-            else:
-                raise ValueError(msg)
-
-    if oversampling_factor < 1:
-        raise ValueError("oversampling_factor must be >= 1")
-
-    if oversampling_factor > 1:
-        if tess_data.shape[0] % oversampling_factor != 0 or tess_data.shape[1] % oversampling_factor != 0:
-            raise ValueError("Oversampled mapping dimensions are not divisible by oversampling_factor")
-        base_shape = (tess_data.shape[0] // oversampling_factor, tess_data.shape[1] // oversampling_factor)
-    else:
-        base_shape = tess_data.shape
-
-    # ROI is always in base TESS pixel coordinates [min, max)
-    roi_values = [x_min, y_min, x_max, y_max]
-    if any(value is not None for value in roi_values) and not all(value is not None for value in roi_values):
-        raise ValueError("Provide all ROI bounds together: x_min, y_min, x_max, y_max")
-
-    if all(value is None for value in roi_values):
-        x_min, y_min, x_max, y_max = 0, 0, base_shape[1], base_shape[0]
-    else:
-        x_min = int(x_min)
-        y_min = int(y_min)
-        x_max = int(x_max)
-        y_max = int(y_max)
-
-    if not (0 <= x_min < x_max <= base_shape[1] and 0 <= y_min < y_max <= base_shape[0]):
-        raise ValueError(f"Invalid ROI bounds for base shape {base_shape}: " f"x_min={x_min}, x_max={x_max}, y_min={y_min}, y_max={y_max}")
-
-    roi_bounds = (x_min, y_min, x_max, y_max)
-    print(f"Using ROI (base TESS scale): x=[{x_min},{x_max}), y=[{y_min},{y_max})")
-
-    # Build an output directory name that includes ROI bounds and oversampling
-    roi_suffix = ""
-    if not (x_min == 0 and y_min == 0 and x_max == base_shape[1] and y_max == base_shape[0]):
-        roi_suffix = f"_x{x_min}-{x_max}_y{y_min}-{y_max}"
-    os_suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
-
-    OUTPUT_DIR = output_base / f"sector{sector:04d}_camera{camera}_ccd{ccd}{roi_suffix}{os_suffix}"
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Load skycell info
-    print("Loading skycell info...")
-    usecols = ["NAME", "RA", "DEC"] + RELEVANT_WCS_KEYS
-    skycell_df = pd.read_csv(SKYCELL_CSV_PATH, usecols=usecols)
-
-    # Prefilter skycells to only those present in ROI, using master mapping IDs.
-    if oversampling_factor > 1:
-        roi_mapping = tess_data[y_min * oversampling_factor : y_max * oversampling_factor, x_min * oversampling_factor : x_max * oversampling_factor]
-    else:
-        roi_mapping = tess_data[y_min:y_max, x_min:x_max]
-
-    roi_ids = np.unique(roi_mapping.astype(np.int64))
-    roi_ids = roi_ids[roi_ids >= 0]
-
-    if len(roi_ids) > 0:
-        roi_ids = roi_ids[roi_ids < len(skycell_df)]
-        roi_names = set(skycell_df.iloc[roi_ids]["NAME"].tolist())
-        skycell_df = skycell_df[skycell_df["NAME"].isin(roi_names)].reset_index(drop=True)
-        print(f"Prefiltered to {len(skycell_df)} ROI-intersecting skycells")
-    else:
-        print("No mapped skycells found in ROI; output will be empty.")
-        skycell_df = skycell_df.iloc[0:0].copy()
-
-    # Load Zarr metadata once for efficient access
-    print("Loading Zarr metadata...")
-    zarr_path = load_zarr_metadata(sector, camera, ccd, CONVOLVED_DATA_PATH)
-    require_convolved_zarr_data(zarr_path)
-    # print(f"Found {len(zarr_metadata['cells'])} cells in Zarr store")
-
-    # Precompute shifts for all offsets
-    print("Precomputing shifts for all offsets...")
-    t_shifts = time.perf_counter()
-    if progress_path is not None:
-        set_downsample_progress_phase(
-            progress_path,
-            "precomputing_shifts",
-            oversampling_factor=oversampling_factor,
-        )
-    shifts_dict = precompute_shifts_for_offsets(
-        tess_wcs, skycell_df, offsets, progress_path=progress_path
-    )
-    shifts_elapsed = time.perf_counter() - t_shifts
-
-    # Get registration files (any storage variant; prefer fz > gz > plain per stem)
-    print("Getting registration files...")
-    t_batches = time.perf_counter()
-    by_stem: dict[str, str] = {}
-    for pattern in iter_fits_variant_globs():
-        for path in glob(str(leaf / pattern)):
-            name = Path(path).name
-            if not is_fits_storage_filename(name):
-                continue
-            stem = strip_fits_storage_suffix(name)
-            existing = by_stem.get(stem)
-            if existing is None or storage_suffix_rank(name) < storage_suffix_rank(
-                Path(existing).name
-            ):
-                by_stem[stem] = path
-    reg_files_all = sorted(by_stem.values())
-    reg_files = [f for f in reg_files_all if "master_pixels2skycells" not in Path(f).name]
-    skycell_names = [extract_skycell_name_from_reg_file(f) for f in reg_files]
-
-    # Keep only registration files for ROI-intersecting skycells.
-    allowed_names = set(skycell_df["NAME"].tolist())
-    filtered_pairs = [(rf, sn) for rf, sn in zip(reg_files, skycell_names) if sn is not None and sn in allowed_names]
-    reg_files = [rf for rf, _ in filtered_pairs]
-    skycell_names = [sn for _, sn in filtered_pairs]
-
-    # Split into batches
-    num_batches = (len(reg_files) + SKYCELLS_PER_BATCH - 1) // SKYCELLS_PER_BATCH if len(reg_files) > 0 else 0
-    print(f"Processing {len(reg_files)} skycells in {num_batches} batches...")
-
-    if num_batches > 0:
-        reg_batches = np.array_split(reg_files, num_batches)
-        name_batches = np.array_split(skycell_names, num_batches)
-    else:
-        reg_batches = []
-        name_batches = []
-
-    total_skycells = len(reg_files)
-    if progress_path is not None and num_batches > 0:
-        batch_sizes = [len(batch) for batch in reg_batches]
-        init_downsample_progress(
-            progress_path,
-            total_skycells,
-            batch_sizes,
-            oversampling_factor=oversampling_factor,
-        )
-
-    do_stage_regmaps = resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch)
-    if do_stage_regmaps and reg_files:
-        try:
-            staged_paths, scratch_dir, n_staged, stage_elapsed = stage_regmap_files_to_scratch(
-                reg_files,
-                sector=sector,
-                camera=camera,
-                ccd=ccd,
-                oversampling_factor=oversampling_factor,
-            )
-            reg_files = staged_paths
-            if num_batches > 0:
-                reg_batches = np.array_split(reg_files, num_batches)
-            print(
-                f"[downsample] staged {n_staged}/{len(staged_paths)} regmaps to scratch "
-                f"{scratch_dir} in {stage_elapsed:.1f}s (zarr stays on NFS)"
-            )
-        except OSError as exc:
-            if getattr(exc, "errno", None) != errno.ENOSPC:
-                raise
-            # Undersized Condor scratch: drop partial copies and continue on NFS.
-            os_suffix = f"_os{oversampling_factor}" if oversampling_factor > 1 else ""
-            scratch_dir = (
-                resolve_downsample_scratch_dir()
-                / f"syndiff_downsample_regmaps_{sector:04d}_{camera}_{ccd}{os_suffix}"
-            )
-            if scratch_dir.is_dir():
-                shutil.rmtree(scratch_dir, ignore_errors=True)
-            warnings.warn(
-                f"[downsample] scratch staging hit ENOSPC ({exc}); "
-                "continuing with NFS regmap paths",
-                UserWarning,
-                stacklevel=1,
-            )
-            print(
-                "[downsample] scratch staging disabled after ENOSPC; "
-                "using NFS regmap paths"
-            )
-
-    partial_dir = checkpoint_dir_for_output(OUTPUT_DIR) if checkpoint_skycells else None
-    if partial_dir is not None:
-        completed = scan_completed_skycell_checkpoints(partial_dir)
-        if completed:
-            print(
-                f"[downsample] resume: {len(completed)} skycell checkpoints in {partial_dir}"
-            )
-
-    # Process batches in parallel. Progress is updated in the parent as each
-    # batch completes (NFS-safe; workers must not flock the sidecar).
-    from syndiff_pipeline.common.joblib_progress import parallel_map_with_optional_tqdm
-
-    def _run_one_batch(args):
-        i, reg_batch, name_batch = args
-        batch_result = process_skycell_batch(
-            i,
-            reg_batch,
-            name_batch,
-            offsets,
-            shifts_dict,
-            base_shape,
-            zarr_path,
-            roi_bounds,
-            oversampling_factor=oversampling_factor,
-            ignore_mask_bits=ignore_mask_bits,
-            progress_path=None,
-            log_level=log_level,
-            total_batches=num_batches,
-            checkpoint_dir=partial_dir,
-            checkpoint_skycells=checkpoint_skycells,
-        )
-        return i, len(reg_batch), batch_result
-
-    batch_args = [
-        (i, reg_batch, name_batch)
-        for i, (reg_batch, name_batch) in enumerate(zip(reg_batches, name_batches))
-    ]
-
-    def _on_batch_done(item) -> None:
-        batch_idx, n_done, _batch_result = item
-        if progress_path is not None and n_done:
-            mark_downsample_skycells_done(progress_path, batch_idx, n_done)
-
-    if N_JOBS == 1 or len(batch_args) <= 1:
-        batch_items = []
-        for args in batch_args:
-            item = _run_one_batch(args)
-            _on_batch_done(item)
-            batch_items.append(item)
-    else:
-        batch_items = parallel_map_with_optional_tqdm(
-            (delayed(_run_one_batch)(args) for args in batch_args),
-            n_tasks=len(batch_args),
-            desc="downsample batches",
-            n_jobs_eff=N_JOBS,
-            on_result=_on_batch_done,
-        )
-    results = [batch_result for _i, _n, batch_result in batch_items]
-    batches_elapsed = time.perf_counter() - t_batches
-
-    # Combine results using the sparse array approach
-    t_combine = time.perf_counter()
-    if progress_path is not None and total_skycells > 0:
-        set_downsample_progress_phase(
-            progress_path, "combining", total_skycells=total_skycells
-        )
-    print("Combining results...")
-    combined_results = combine_sparse_downsample_results(
-        results,
-        offsets,
-        base_shape,
-        roi_bounds,
-        oversampling_factor=oversampling_factor,
-    )
-    if not np.any(combined_results):
-        raise RuntimeError("No PS1 convolved data loaded for any skycell")
-    combine_elapsed = time.perf_counter() - t_combine
-
-    # Save outputs as FITS files
-    t_save = time.perf_counter()
-    if progress_path is not None and total_skycells > 0:
-        set_downsample_progress_phase(
-            progress_path, "saving", total_skycells=total_skycells
-        )
-    print("Saving outputs...")
-    written_paths = save_fits_outputs(output_dir=OUTPUT_DIR, sector=sector, camera=camera, ccd=ccd, results=combined_results, offsets=offsets, tess_header=tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor)
-    save_elapsed = time.perf_counter() - t_save
-    total_elapsed = time.perf_counter() - run_t0
-    print(
-        f"[downsample] timing: shifts={shifts_elapsed:.1f}s "
-        f"batches={batches_elapsed:.1f}s combine={combine_elapsed:.1f}s "
-        f"save={save_elapsed:.1f}s total={total_elapsed:.1f}s"
-    )
-
-    # Record processing time
-    total_time = time.time() - start_time
-    print(f"Done! Total processing time: {total_time / 60:.2f} minutes")
-
-    # Print summary information
-    print(f"Processing completed at: {time.ctime()}")
-    print(f"Total time: {total_time / 60:.2f} minutes")
-    print(f"Processed {len(reg_files)} skycells in {num_batches} batches")
-    print(f"Generated {len(offsets)} shifted images")
-    print(f"Ignored mask bits: {ignore_mask_bits}")
-    print("Shifts processed:")
-    for dx, dy in offsets:
-        print(f"  dx={dx:.3f}, dy={dy:.3f}")
-    print(f"Results saved to: {OUTPUT_DIR}")
-    if progress_path is not None and total_skycells > 0:
-        set_downsample_progress_phase(
-            progress_path, "complete", total_skycells=total_skycells
-        )
-
-    artifacts = [str(p) for p in written_paths]
-    expected_count = len(offsets)
-    produced_count = len(written_paths)
-
-    if event_dir and cluster_job_json_path and write_ps1_removed_stars_csv:
-        event_dir_p = Path(event_dir)
-        event_dir_p.mkdir(parents=True, exist_ok=True)
-        removed_path = (
-            Path(removed_stars_csv).expanduser().resolve()
-            if removed_stars_csv
-            else default_ps1_process_removed_stars_csv_path(
-                convolved_dir, sector, camera, ccd
-            ).resolve()
-        )
-        csv_out = event_dir_p / PS1_REMOVED_STARS_CSV_FILENAME
-        if not removed_path.is_file():
-            warnings.warn(
-                f"PS1 removed-star Gaia CSV skipped: file not found: {removed_path}",
-                UserWarning,
-                stacklevel=1,
-            )
-        else:
-            write_ps1_removed_star_gaia_csv(
-                job_json_path=cluster_job_json_path,
-                removed_stars_csv=removed_path,
-                event_dir=event_dir_p,
-                sector=sector,
-                camera=camera,
-                ccd=ccd,
-                roi_bounds=roi_bounds,
-            )
-            artifacts.append(str(csv_out))
-            expected_count += 1
-            produced_count += 1
-
-    return {
-        "output_dir": str(OUTPUT_DIR),
-        "artifacts": artifacts,
-        "expected_count": expected_count,
-        "produced_count": produced_count,
-    }
 
 
 if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Multi-offset downsampling runner")
-    parser.add_argument(
-        "sector",
-        nargs="?",
-        type=int,
-        default=20,
-        help="TESS sector (default: 20; with --job-json, JSON wins—see warning if this differs)",
-    )
-    parser.add_argument(
-        "camera",
-        nargs="?",
-        type=int,
-        default=3,
-        help="Camera (default: 3; with --job-json, JSON wins—see warning if this differs)",
-    )
-    parser.add_argument(
-        "ccd",
-        nargs="?",
-        type=int,
-        default=3,
-        help="CCD (default: 3; with --job-json, JSON wins—see warning if this differs)",
-    )
-    parser.add_argument("--data-root", type=str, default=str(Path(__file__).resolve().parent / "data"), help="Root data directory")
-    parser.add_argument("--mapping-dir", type=str, default=None, help="Skycell pixel mapping directory (default: data-root/skycell_pixel_mapping)")
-    parser.add_argument("--convolved-dir", type=str, default=None, help="Convolved results directory (overrides data-root/convolved_results)")
-    parser.add_argument("--output-base", type=str, default=None, help="Base output directory (overrides data-root/shifted_downsamples)")
-    parser.add_argument("--x-min", type=int, default=None, help="ROI xmin in base TESS pixels (inclusive)")
-    parser.add_argument("--y-min", type=int, default=None, help="ROI ymin in base TESS pixels (inclusive)")
-    parser.add_argument("--x-max", type=int, default=None, help="ROI xmax in base TESS pixels (exclusive)")
-    parser.add_argument("--y-max", type=int, default=None, help="ROI ymax in base TESS pixels (exclusive)")
-    parser.add_argument("--oversampling-factor", type=int, default=1, help="Oversampling factor for reading mapping files and index decoding")
-    parser.add_argument(
-        "--job-json",
-        type=str,
-        default=None,
-        help="Path to cluster_template_job.json (offsets, sector/camera/ccd, and ROI when bounds omitted)",
-    )
-    parser.add_argument(
-        "--removed-stars-csv",
-        type=str,
-        default=None,
-        help=(
-            "PS1 pipeline removed_stars CSV (default: "
-            "{data-root}/convolved_results/sector_{s:04d}_camera_{c}_ccd_{k}_removed_stars.csv). "
-            "Only used when --job-json is set and --skip-ps1-removed-star-gaia-csv is not set."
-        ),
-    )
-    parser.add_argument(
-        "--skip-ps1-removed-star-gaia-csv",
-        action="store_true",
-        help=(
-            "Skip writing event_dir/ps1_removed_stars.csv (crop-local Gaia for PS1 removed stars). "
-            "By default this step runs only when --job-json is provided (not with --single-offset)."
-        ),
-    )
-    parser.add_argument(
-        "--single-offset",
-        action="store_true",
-        help="Use only [0.0, 0.0] for fast testing; ignores --job-json offsets",
-    )
-    parser.add_argument(
-        "--progress-path",
-        type=str,
-        default=None,
-        help="Write downsample.progress.json sidecar for syndiff progress monitoring",
-    )
-    args = parser.parse_args()
-
-    roi_cli = [args.x_min, args.y_min, args.x_max, args.y_max]
-    if any(v is not None for v in roi_cli) and not all(v is not None for v in roi_cli):
-        parser.error("Provide all four ROI bounds together: --x-min, --y-min, --x-max, --y-max")
-
-    x_min, y_min, x_max, y_max = args.x_min, args.y_min, args.x_max, args.y_max
-    sector, camera, ccd = args.sector, args.camera, args.ccd
-
-    reference_ffi_basename_expected: str | None = None
-    cluster_job_json_path: str | None = None
-
-    if args.single_offset:
-        offsets = np.array([[0.0, 0.0]], dtype=np.float64)
-    elif args.job_json:
-        cluster_job_json_path = str(Path(args.job_json).resolve())
-        payload = load_cluster_template_job_payload(args.job_json)
-        js_sec, js_cam, js_ccd = instrument_tuple_from_cluster_job_payload(payload)
-        if (args.sector, args.camera, args.ccd) != (js_sec, js_cam, js_ccd):
-            warnings.warn(
-                f"Using sector/camera/ccd from --job-json ({js_sec}, {js_cam}, {js_ccd}); "
-                f"CLI positionals ({args.sector}, {args.camera}, {args.ccd}) are ignored.",
-                UserWarning,
-                stacklevel=1,
-            )
-        sector, camera, ccd = js_sec, js_cam, js_ccd
-        offsets = offsets_from_cluster_job_payload(payload)
-        if all(v is None for v in roi_cli):
-            x_min, y_min, x_max, y_max = roi_tuple_from_cluster_job_payload(payload)
-        _ref = payload.get("reference_ffi_basename")
-        if isinstance(_ref, str) and _ref.strip():
-            reference_ffi_basename_expected = _ref.strip()
-    else:
-        parser.error("Provide --job-json or --single-offset")
-
-    # Set mask bits to ignore (0-indexed)
-    ignore_mask_bits = [12]
-
-    event_dir = (
-        str(Path(cluster_job_json_path).resolve().parent)
-        if cluster_job_json_path
-        else None
-    )
-
-    main(
-        sector=sector,
-        camera=camera,
-        ccd=ccd,
-        offsets=offsets,
-        ignore_mask_bits=ignore_mask_bits,
-        data_root=args.data_root,
-        mapping_dir=args.mapping_dir,
-        convolved_dir=args.convolved_dir,
-        output_base=args.output_base,
-        x_min=x_min,
-        y_min=y_min,
-        x_max=x_max,
-        y_max=y_max,
-        oversampling_factor=args.oversampling_factor,
-        reference_ffi_basename_expected=reference_ffi_basename_expected,
-        cluster_job_json_path=cluster_job_json_path,
-        event_dir=event_dir,
-        write_ps1_removed_stars_csv=not args.skip_ps1_removed_star_gaia_csv,
-        removed_stars_csv=args.removed_stars_csv,
-        progress_path=args.progress_path,
+    raise SystemExit(
+        "downsample.py CLI linear/event ROI path was removed; use "
+        "`syndiff template` with geometry_mode=field / run_field_downsample_scc"
     )

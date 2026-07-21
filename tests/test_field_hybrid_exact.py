@@ -8,6 +8,7 @@ import pytest
 from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
     abutting_border_tess_ids,
     candidate_tess_ids_for_l4a,
+    exact_regmap_for_tess_ids,
     shared_abutting_border_tess_ids,
 )
 from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
@@ -58,6 +59,28 @@ def test_shared_abutting_border_both_sides():
     for tid in b_ids:
         y, x = divmod(int(tid), t_x)
         assert master[y, x] == 20
+
+
+def test_exact_regmap_requires_tpix_coord_input():
+    """Legacy create_tess_pixel_coordinates(data_shape) fallback is banned."""
+    with pytest.raises(TypeError, match="tpix_coord_input"):
+        exact_regmap_for_tess_ids(
+            None,  # type: ignore[arg-type]
+            {"NAME": "skycell.0.0"},
+            np.array([0], dtype=np.int32),
+            data_shape=(4, 4),
+        )
+
+
+def test_exact_regmap_rejects_explicit_none_tpix():
+    with pytest.raises(ValueError, match="tpix_coord_input is required"):
+        exact_regmap_for_tess_ids(
+            None,  # type: ignore[arg-type]
+            {"NAME": "skycell.0.0"},
+            np.array([0], dtype=np.int32),
+            data_shape=(4, 4),
+            tpix_coord_input=None,  # type: ignore[arg-type]
+        )
 
 
 def test_verify_field_store_require_nonempty(tmp_path):

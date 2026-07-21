@@ -27,9 +27,10 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
     """
     Return FFI-coordinate bounds covered by a syndiff template FITS.
 
-    Uses ``XMIN``/``XMAX``/``YMIN``/``YMAX`` header keywords when present;
-    otherwise assumes full-chip origin ``(0, 0)`` with array shape divided by
-    ``OVERSAMP`` when that keyword is set.
+    Uses ``XMIN``/``XMAX``/``YMIN``/``YMAX`` header keywords when present.
+    Templates with ``MAPGRID>=2`` **require** those keywords (no silent origin
+    fallback). Legacy (non-v2) templates without them assume full-chip origin
+    ``(0, 0)`` with array shape divided by ``OVERSAMP`` when that keyword is set.
 
     Coverage bounds and ``shape`` are always in **base (native) FFI pixels**.
     ``oversampling_factor`` is the template array oversampling relative to that
@@ -64,6 +65,11 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
             "shape": (y_max - y_min, x_max - x_min),
             "oversampling_factor": os_factor,
         }
+
+    if int(hdr.get("MAPGRID", 0) or 0) >= 2:
+        raise ValueError(
+            f"Template {tmpl_path} has MAPGRID>=2 but missing XMIN/XMAX/YMIN/YMAX headers"
+        )
 
     if os_factor > 1:
         if ny % os_factor != 0 or nx % os_factor != 0:

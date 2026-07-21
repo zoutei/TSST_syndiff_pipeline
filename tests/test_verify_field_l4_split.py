@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.common.scc_paths import event_scc_leaf, scc_templates_dir
+from syndiff_pipeline.template_creation.orchestration.dispatch import _manifest_from_result
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (
     DownsampleStageParams,
@@ -26,6 +27,7 @@ from syndiff_pipeline.template_creation.orchestration.stage_params import (
     parse_stage_params,
 )
 from syndiff_pipeline.template_creation.orchestration.verify import (
+    collect_stage_artifacts,
     verify_downsample_field_mode,
     verify_remap,
 )
@@ -432,6 +434,51 @@ class TestVerifyDownsampleSkycellToggles(unittest.TestCase):
             result = verify_downsample_field_mode(resolved)
             self.assertFalse(result.ok)
             self.assertIn(EXACT_CACHE_L4B_DIRNAME, result.message)
+
+
+class TestCollectFieldDownsampleArtifacts(unittest.TestCase):
+    """SCC field downsample must not require cluster_template_job.json."""
+
+    def test_collect_without_cluster_job(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            resolved = _resolved(Path(tmpdir))
+            store = _write_field_store(resolved)
+            job = Path(resolved.event_dir) / "cluster_template_job.json"
+            self.assertFalse(job.is_file())
+
+            expected, produced, artifacts = collect_stage_artifacts(
+                resolved, "downsample"
+            )
+            self.assertEqual(expected, 2)
+            self.assertEqual(produced, 2)
+            self.assertIn(str(store / "field_mode_assembly.json"), artifacts)
+            self.assertIn(str(store / MANIFEST_NAME), artifacts)
+
+    def test_manifest_from_field_result(self):
+        result = {
+            "output_dir": "/data/templates/oversampling_1",
+            "n_contrib_keys": 10,
+            "artifacts": [
+                "/data/templates/oversampling_1/field_mode_assembly.json",
+                "/data/templates/oversampling_1/template_manifest.json",
+            ],
+            "expected_count": 2,
+            "produced_count": 2,
+        }
+        manifest = _manifest_from_result(result)
+        self.assertIsNotNone(manifest)
+        expected, produced, artifacts, _meta = manifest
+        self.assertEqual(expected, 2)
+        self.assertEqual(produced, 2)
+        self.assertEqual(len(artifacts), 2)
+
+    def test_manifest_from_result_none_without_counts(self):
+        """Pre-fix field returns lacked expected_count/produced_count."""
+        result = {
+            "output_dir": "/data/templates/oversampling_1",
+            "n_contrib_keys": 10,
+        }
+        self.assertIsNone(_manifest_from_result(result))
 
 
 if __name__ == "__main__":

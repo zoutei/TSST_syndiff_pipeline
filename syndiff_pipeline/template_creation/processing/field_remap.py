@@ -755,12 +755,34 @@ def _effective_parallel_jobs(n_jobs: int, n_tasks: int) -> int:
 _REMAP_WORKER: dict[str, Any] = {}
 
 
+def _build_remap_tpix(
+    *,
+    master_path: str | Path | None,
+    base_tess_shape: tuple[int, int],
+    oversampling_factor: int,
+) -> np.ndarray:
+    """Build FFI-pixel ``tpix`` for remap workers (v2 grid-aware)."""
+    from syndiff_pipeline.common.coordinate_preflight import assert_wcs_uses_ffi_coords
+    from syndiff_pipeline.common.mapping_grid import (
+        MappingGridError,
+        create_coords_for_grid,
+        load_mapping_grid_from_master,
+    )
+
+    os_factor = max(1, int(oversampling_factor))
+    if not master_path:
+        raise MappingGridError(
+            "remap requires master_path with MAPGRID>=2; legacy shrunk-chip coords are banned"
+        )
+    grid = load_mapping_grid_from_master(master_path)
+    tpix, _ = create_coords_for_grid(grid, os_factor)
+    assert_wcs_uses_ffi_coords(tpix, grid, oversampling_factor=os_factor)
+    return tpix
+
+
 def _init_remap_worker(payload: dict[str, Any]) -> None:
     """Initialize one loky worker: hoist TESS coords once per process."""
     global _REMAP_WORKER
-    from syndiff_pipeline.template_creation.processing.pancakes import (
-        create_tess_pixel_coordinates,
-    )
 
     _REMAP_WORKER = dict(payload)
     master_path = _REMAP_WORKER.get("master_path")
@@ -771,9 +793,10 @@ def _init_remap_worker(payload: dict[str, Any]) -> None:
             _REMAP_WORKER["idx_to_name"] = {
                 int(v): str(k) for k, v in name_to_id.items()
             }
-    tpix, _ = create_tess_pixel_coordinates(
-        tuple(_REMAP_WORKER["base_tess_shape"]),
-        int(_REMAP_WORKER["oversampling_factor"]),
+    tpix = _build_remap_tpix(
+        master_path=master_path,
+        base_tess_shape=tuple(_REMAP_WORKER["base_tess_shape"]),
+        oversampling_factor=int(_REMAP_WORKER["oversampling_factor"]),
     )
     _REMAP_WORKER["_tpix"] = tpix
 

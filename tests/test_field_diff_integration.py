@@ -1,9 +1,13 @@
 """Field-mode diff integration: assemble -> loaders -> FFI assembler -> verify ->
 kernel group lookup, exercised across module seams on a synthetic SCC store."""
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
+
+from syndiff_pipeline.common.fits_io import open_fits
 
 from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
     lookup_convolved_path_by_group_id,
@@ -13,6 +17,7 @@ from syndiff_pipeline.difference_imaging.support.template_resolution import (
     assemble_field_template_for_ffi,
     build_field_mode_count_loader,
     build_field_mode_template_loader,
+    write_field_template_fits_for_ffi,
 )
 from syndiff_pipeline.template_creation.processing.field_downsample import (
     assemble_field_group_count,
@@ -114,6 +119,41 @@ def test_assemble_template_for_ffi_by_name(field_store):
     assert big[2, 3] == pytest.approx(50.0)
     big2 = assemble_field_template_for_ffi(ctx, manifest, manifest.loc[0, "path"])
     assert np.array_equal(big, big2)
+
+
+def test_write_field_template_fits_for_ffi(field_store, tmp_path):
+    store, shifts_df = field_store
+    ctx = _ctx(store, shifts_df)
+    manifest = pd.DataFrame(
+        {
+            "filename": ["tess2020007-0001-1-1_ffic.fits.gz"],
+            "path": ["/data/tess2020007-0001-1-1_ffic.fits.gz"],
+            "group_id": [0],
+        }
+    )
+    expected = assemble_field_template_for_ffi(
+        ctx, manifest, "tess2020007-0001-1-1_ffic.fits.gz"
+    )
+    out_path = tmp_path / "template_gid0.fits"
+    written = write_field_template_fits_for_ffi(
+        ctx,
+        manifest,
+        "tess2020007-0001-1-1_ffic.fits.gz",
+        out_path,
+        sector=1,
+        camera=1,
+        ccd=1,
+    )
+    assert Path(written).is_file()
+    with open_fits(written) as hdul:
+        flux = np.asarray(hdul[0].data, dtype=np.float64)
+        count = np.asarray(hdul["COUNT"].data, dtype=np.float64)
+        assert hdul[0].header["GROUP_ID"] == 0
+        assert hdul[0].header["FFI_FILE"] == "tess2020007-0001-1-1_ffic.fits"
+    assert flux.shape == expected.shape
+    assert flux[2, 3] == pytest.approx(expected[2, 3])
+    assert count[2, 3] == 2
+    assert count[5, 6] == 1
 
 
 def test_verify_field_store_marker(field_store):

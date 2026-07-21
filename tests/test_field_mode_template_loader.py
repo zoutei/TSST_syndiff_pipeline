@@ -10,9 +10,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from syndiff_pipeline.common.mapping_grid import MappingGrid, MappingGridError
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     FieldModeTemplateContext,
     build_field_mode_template_loader,
+    load_field_mode_template_context_from_store,
     maybe_load_field_mode_template_context,
 )
 from syndiff_pipeline.template_creation.processing.field_templates import (
@@ -65,7 +67,13 @@ class TestFieldModeLoader(unittest.TestCase):
             # mean flux at (1,2) within crop = 6/2 = 3
             self.assertAlmostEqual(float(arr[1, 2]), 3.0)
 
-    def _write_maybe_load_fixture(self, tmp: str, *, schema_version: int) -> tuple[Path, Path]:
+    def _write_maybe_load_fixture(
+        self,
+        tmp: str,
+        *,
+        schema_version: int,
+        include_mapping_grid: bool | None = None,
+    ) -> tuple[Path, Path]:
         event = Path(tmp) / "event"
         store = Path(tmp) / "store"
         event.mkdir()
@@ -85,6 +93,14 @@ class TestFieldModeLoader(unittest.TestCase):
                 groups=[{"group_id": 0, "n_frames": 1}],
             ),
         )
+        grid = MappingGrid(
+            ffi_xmin=0,
+            ffi_ymin=0,
+            ffi_xmax=12,
+            ffi_ymax=10,
+            oversampling=1,
+            conv_pad_native=0,
+        )
         payload = {
             "schema_version": schema_version,
             "store_root": str(store),
@@ -99,6 +115,10 @@ class TestFieldModeLoader(unittest.TestCase):
                     "group_scoped_contribs": True,
                 }
             )
+        if include_mapping_grid is None:
+            include_mapping_grid = schema_version >= 3
+        if include_mapping_grid:
+            payload["mapping_grid"] = grid.to_mapping_dict()
         (store / "field_mode_assembly.json").write_text(json.dumps(payload))
         pd.DataFrame(
             {
@@ -113,21 +133,68 @@ class TestFieldModeLoader(unittest.TestCase):
         ).to_parquet(event / "template_group_shifts.parquet", index=False)
         return store, event
 
-    def test_maybe_load_context(self):
+    def test_maybe_load_context_rejects_schema_v1(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, event = self._write_maybe_load_fixture(tmp, schema_version=1)
+            with self.assertRaises(MappingGridError) as cm:
+                maybe_load_field_mode_template_context(store, event)
+            self.assertIn("schema_version=1", str(cm.exception))
+            self.assertIn("Rebuild mapping", str(cm.exception))
+
+    def test_maybe_load_context_rejects_schema_v2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, event = self._write_maybe_load_fixture(tmp, schema_version=2)
+            with self.assertRaises(MappingGridError) as cm:
+                maybe_load_field_mode_template_context(store, event)
+            self.assertIn("schema_version=2", str(cm.exception))
+
+    def test_maybe_load_context_schema_v3(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, event = self._write_maybe_load_fixture(tmp, schema_version=3)
             ctx = maybe_load_field_mode_template_context(store, event)
             self.assertIsNotNone(ctx)
             self.assertEqual(ctx.base_tess_shape, (10, 12))
             self.assertEqual(ctx.oversampling_factor, 1)
+            self.assertIsNotNone(ctx.mapping_grid)
+            self.assertEqual(ctx.mapping_grid.ffi_xmax, 12)
 
-    def test_maybe_load_context_schema_v2(self):
+    def test_load_context_from_store_rejects_v2(self):
         with tempfile.TemporaryDirectory() as tmp:
-            store, event = self._write_maybe_load_fixture(tmp, schema_version=2)
-            ctx = maybe_load_field_mode_template_context(store, event)
-            self.assertIsNotNone(ctx)
-            self.assertEqual(ctx.store_root, str(store))
-            self.assertEqual(ctx.base_tess_shape, (10, 12))
+            store, _event = self._write_maybe_load_fixture(tmp, schema_version=2)
+            shifts = pd.DataFrame(
+                {
+                    "group_id": [0],
+                    "skycell": ["skycell.1.1"],
+                    "sx_int": [0],
+                    "sy_int": [0],
+                    "qx": [0.0],
+                    "qy": [0.0],
+                    "cache_key": ["x"],
+                }
+            )
+            shifts.to_parquet(store / "template_group_shifts.parquet", index=False)
+            with self.assertRaisesRegex(MappingGridError, "schema_version=2"):
+                load_field_mode_template_context_from_store(store)
+
+    def test_load_context_from_store_rejects_v3_missing_mapping_grid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _event = self._write_maybe_load_fixture(
+                tmp, schema_version=3, include_mapping_grid=False
+            )
+            shifts = pd.DataFrame(
+                {
+                    "group_id": [0],
+                    "skycell": ["skycell.1.1"],
+                    "sx_int": [0],
+                    "sy_int": [0],
+                    "qx": [0.0],
+                    "qy": [0.0],
+                    "cache_key": ["x"],
+                }
+            )
+            shifts.to_parquet(store / "template_group_shifts.parquet", index=False)
+            with self.assertRaisesRegex(MappingGridError, "mapping_grid"):
+                load_field_mode_template_context_from_store(store)
 
     def test_loader_scales_native_crop_when_oversampled(self):
         with tempfile.TemporaryDirectory() as tmp:
