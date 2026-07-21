@@ -514,6 +514,38 @@ def test_composite_key_merges_identical_neighbour_geometry():
     assert len(next(iter(index["skycell.1.1"].values()))) == 3
 
 
+def test_composite_key_index_skips_skycells_missing_from_master_map():
+    """Remap's shift schedule can reference skycells outside the current
+    master id map (buffer-region skycells, or a convolved store built under a
+    since-rebuilt mapping); these must be skipped, not raise."""
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+    from syndiff_pipeline.template_creation.processing.field_downsample import (
+        _build_skycell_composite_index,
+        _neighbours_by_skycell_id,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = _neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    shifts = {"skycell.1.1": (1, 0)}
+
+    key_list = [
+        (0, "skycell.1.1", 1, 0),
+        (0, "skycell.stale.99", 0, 0),  # not in name_to_id
+    ]
+    index = _build_skycell_composite_index(
+        key_list=key_list,
+        group_shifts_by_gid={0: shifts},
+        name_to_id=name_to_id,
+        id_to_name=id_to_name,
+        neighbours_by_id=neighbours,
+        epoch_index=None,
+    )
+    assert list(index.keys()) == ["skycell.1.1"]
+
+
 def test_l5_skycell_batch_loads_regmap_and_zarr_once(monkeypatch, tmp_path: Path):
     import syndiff_pipeline.template_creation.processing.field_downsample as fd
     from syndiff_pipeline.template_creation.processing.field_abutting import (
@@ -733,6 +765,41 @@ def test_compose_skips_inter_when_apply_inter_false():
         require_inter_skycell_cache=False,
     )
     assert meta["n_inter_skycell_patches"] == 0
+    l4a_only, _ = hybrid_assignment_from_exact_cache(
+        frozen, sx_a, sy_a, l4a_dir / l4a_name, hybrid_R=1
+    )
+    assert np.array_equal(hybrid, l4a_only)
+
+
+def test_compose_tolerates_missing_rim_cache_when_not_required():
+    """A rim cache that failed to write upstream (e.g. remap's known int16
+    overflow on extreme drift) must not abort downsample when
+    apply_inter_skycell=True but require_inter_skycell_cache=False — it
+    should skip that one patch and fall back to the L4a-only assignment."""
+    master, name_to_id = _tiny_master()
+    frozen = _frozen_a(master)
+    sx_a, sy_a = 0, 0
+    l4a_dir = Path(tempfile.mkdtemp()) / "exact_cache_l4a"
+    l4b_dir = Path(tempfile.mkdtemp()) / "exact_cache_l4b"  # no rim cache written
+    l4a_name = contrib_basename("skycell.1.1", sx_a, sy_a).replace(".npz", "_exact.npz")
+    _write_l4a_cache(l4a_dir / l4a_name, frozen, sx_a, sy_a, marker=9001)
+
+    hybrid, meta = compose_group_hybrid_assignment(
+        frozen,
+        skycell="skycell.1.1",
+        skycell_id=10,
+        sx_int=sx_a,
+        sy_int=sy_a,
+        master=master,
+        group_shifts={"skycell.1.1": (sx_a, sy_a), "skycell.1.2": (0, 1)},
+        name_to_id=name_to_id,
+        l4a_cache_path=l4a_dir / l4a_name,
+        l4b_cache_dir=l4b_dir,
+        apply_inter_skycell=True,
+        require_inter_skycell_cache=False,
+    )
+    assert meta["n_inter_skycell_patches"] == 0
+    assert meta["n_inter_skycell_missing"] == 1
     l4a_only, _ = hybrid_assignment_from_exact_cache(
         frozen, sx_a, sy_a, l4a_dir / l4a_name, hybrid_R=1
     )
