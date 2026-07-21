@@ -11,13 +11,6 @@ from pathlib import Path
 from syndiff_pipeline.common.orchestration import logs
 from syndiff_pipeline.common.orchestration.spec import StageRunContext, StageSpec
 from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
-from syndiff_pipeline.star.context import StarPrerequisiteError, load_event_context
-from syndiff_pipeline.star.runner import (
-    resolve_star_host_root,
-    run_star_pipeline,
-    star_output_root,
-    verify_star_batch_manifest,
-)
 from syndiff_pipeline.star.site_config import (
     find_star_target_row,
     load_star_site_policy,
@@ -79,6 +72,9 @@ def _resolve_star_run(ctx: StageRunContext):
 
 def execute_star_stage(ctx: StageRunContext):
     """Execute star stage for one SCC target."""
+    from syndiff_pipeline.star.context import load_event_context
+    from syndiff_pipeline.star.runner import run_star_pipeline, star_output_root
+
     policy, star_row, run_config, site_dir = _resolve_star_run(ctx)
     frozen_path = _frozen_star_config_path(ctx)
     write_frozen_star_config(policy, frozen_path)
@@ -100,6 +96,9 @@ def execute_star_stage(ctx: StageRunContext):
 
 
 def _verify_star(ctx: StageRunContext) -> bool:
+    from syndiff_pipeline.star.context import StarPrerequisiteError, load_event_context
+    from syndiff_pipeline.star.runner import resolve_star_host_root, verify_star_batch_manifest
+
     try:
         _policy, _star_row, run_config, site_dir = _resolve_star_run(ctx)
         event_ctx = load_event_context(
@@ -115,6 +114,9 @@ def _verify_star(ctx: StageRunContext) -> bool:
 
 
 def _collect_star_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
+    from syndiff_pipeline.star.context import load_event_context
+    from syndiff_pipeline.star.runner import resolve_star_host_root
+
     _policy, star_row, run_config, site_dir = _resolve_star_run(ctx)
     event_ctx = load_event_context(
         site=str(site_dir),
