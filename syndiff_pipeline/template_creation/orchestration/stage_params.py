@@ -69,6 +69,8 @@ PS1_PROCESS_ALLOWED = frozenset(
         "remove_saturated_stars",
         "catalog_path",
         "bright_star_mag_threshold",
+        "use_shared_convolved_store",
+        "write_per_scc_convolved_zarr",
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
@@ -232,11 +234,20 @@ class Ps1ProcessStageParams:
     remove_saturated_stars: bool = False
     catalog_path: str | None = None
     bright_star_mag_threshold: float = 13.0
+    use_shared_convolved_store: bool = False
+    write_per_scc_convolved_zarr: bool = True
     executor: str = "condor"
     condor_request_cpus: int = 64
     condor_request_memory: int = 500_000
     condor_requirements: str | None = "Memory >= 500000 && LoadAvg < 10"
     condor_rank: str | None = "-LoadAvg"
+
+    def __post_init__(self) -> None:
+        if self.use_shared_convolved_store and self.write_per_scc_convolved_zarr:
+            raise ValueError(
+                "stages.ps1_process: use_shared_convolved_store=True requires "
+                "write_per_scc_convolved_zarr=False (hard cut on per-SCC convolved.zarr)"
+            )
 
 
 @dataclass

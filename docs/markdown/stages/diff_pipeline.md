@@ -31,6 +31,8 @@ When `data_root` is set and templates exist with `field_mode_assembly.json` **sc
 
 No separate scheduler stage. No `crop_mode` / `target_box` for geometry.
 
+Per-FFI diff completeness and resume use `data_root/bookkeeping/provenance.db` when indexed (BK-5); SCC handoff `bookkeeping/diff/frames.csv` is preferred over event `syndiff_ffi_frames.csv`. See [storage layout](../storage_layout.md#provenance-bookkeeping-data_rootbookkeeping) and [`doc/template_bookkeeping_plan.md`](../../doc/template_bookkeeping_plan.md).
+
 **Exception:** astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff.
 
 ---

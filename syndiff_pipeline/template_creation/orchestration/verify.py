@@ -20,9 +20,17 @@ from syndiff_pipeline.common.fits_variants import (
     strip_fits_storage_suffix,
     try_resolve_fits_variant,
 )
-from syndiff_pipeline.common.scc_paths import ps1_skycells_zarr_path, scc_convolved_zarr
+from syndiff_pipeline.common.scc_paths import (
+    ps1_convolved_zarr_path,
+    ps1_skycells_zarr_path,
+    scc_convolved_zarr,
+)
 from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig, resolve_config, RunnerConfig
+from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+    CHECKPOINT_STAGES,
+    checkpoint_stage_indexed,
+)
 from syndiff_pipeline.common.orchestration.targets import Target
 
 log = logging.getLogger(__name__)
@@ -728,9 +736,28 @@ def _mapping_csv_path(resolved: ResolvedTargetConfig) -> Path:
 
 
 def _convolved_zarr_path(resolved: ResolvedTargetConfig) -> Path:
-    """Convolved zarr path for one SCC."""
+    """Per-SCC legacy convolved.zarr path (removed-stars CSV sibling)."""
     t = resolved.target
     return scc_convolved_zarr(resolved.data_root, t.sector, t.camera, t.ccd)
+
+
+def ps1_process_uses_shared_convolved_store(resolved: ResolvedTargetConfig) -> bool:
+    return bool(getattr(resolved.stages.ps1_process, "use_shared_convolved_store", False))
+
+
+def resolve_ps1_process_checkpoint_location(resolved: ResolvedTargetConfig) -> Path:
+    """Canonical ps1_process artifact root for checkpoints and verify."""
+    if ps1_process_uses_shared_convolved_store(resolved):
+        return ps1_convolved_zarr_path(resolved.data_root)
+    return _convolved_zarr_path(resolved)
+
+
+def resolve_downsample_convolved_dir(resolved: ResolvedTargetConfig) -> str:
+    """Resolve convolved inputs for downsample (explicit override, else checkpoint location)."""
+    ds = resolved.stages.downsample
+    if ds.convolved_dir:
+        return str(ds.convolved_dir)
+    return str(resolve_ps1_process_checkpoint_location(resolved))
 
 
 def ps1_process_removed_stars_csv_path(resolved: ResolvedTargetConfig) -> Path:
@@ -1161,26 +1188,74 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
     )
 
 
-def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
-    """Clear ps1 process artifacts.
-    
-    Parameters
-    ----------
-    resolved : ResolvedTargetConfig
-    
-    Returns
-    -------
-    list[str]"""
+def _shared_convolved_cell_root(shared_root: Path, full_skycell_name: str) -> Path | None:
+    from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
+
+    parsed = _projection_and_cell(full_skycell_name)
+    if parsed is None:
+        return None
+    projection, cell = parsed
+    return shared_root / projection / cell
+
+
+def _clear_shared_convolved_cells(
+    resolved: ResolvedTargetConfig,
+    shared_root: Path,
+) -> list[str]:
+    """Remove published shared-store cells for this SCC's expected skycells only."""
     removed: list[str] = []
-    for path in (_convolved_zarr_path(resolved), ps1_process_removed_stars_csv_path(resolved)):
-        if path.is_dir():
-            shutil.rmtree(path)
-            removed.append(str(path))
-            log.info("Force rerun: removed directory %s", path)
-        elif path.is_file():
-            path.unlink()
-            removed.append(str(path))
-            log.info("Force rerun: removed file %s", path)
+    try:
+        expected = expected_ps1_process_skycells(resolved)
+    except Exception as exc:
+        log.warning(
+            "Force rerun: could not resolve expected skycells for shared convolved clear: %s",
+            exc,
+        )
+        return removed
+    for name in expected:
+        cell_root = _shared_convolved_cell_root(shared_root, name)
+        if cell_root is None:
+            log.warning(
+                "Force rerun: skipping unparseable skycell %r for shared convolved clear",
+                name,
+            )
+            continue
+        if cell_root.is_dir():
+            shutil.rmtree(cell_root)
+            removed.append(str(cell_root))
+            log.info("Force rerun: removed shared convolved cell %s", cell_root)
+    return removed
+
+
+def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
+    """Clear ps1_process outputs so a force-rerun rebuilds from scratch.
+
+    Legacy mode (``use_shared_convolved_store=False``): removes the per-SCC
+    ``convolved.zarr`` tree. Shared mode: scope-clears only the skycell cells
+    listed in this SCC's mapping CSV under the shared ``ps1_convolved.zarr``
+    store (never the whole store). The per-SCC removed-stars CSV is always
+    removed when present.
+    """
+    removed: list[str] = []
+    if ps1_process_uses_shared_convolved_store(resolved):
+        shared_root = resolve_ps1_process_checkpoint_location(resolved)
+        removed.extend(_clear_shared_convolved_cells(resolved, shared_root))
+    else:
+        legacy_zarr = _convolved_zarr_path(resolved)
+        if legacy_zarr.is_dir():
+            shutil.rmtree(legacy_zarr)
+            removed.append(str(legacy_zarr))
+            log.info("Force rerun: removed directory %s", legacy_zarr)
+        elif legacy_zarr.is_file():
+            legacy_zarr.unlink()
+            removed.append(str(legacy_zarr))
+            log.info("Force rerun: removed file %s", legacy_zarr)
+
+    csv_path = ps1_process_removed_stars_csv_path(resolved)
+    if csv_path.is_file():
+        csv_path.unlink()
+        removed.append(str(csv_path))
+        log.info("Force rerun: removed file %s", csv_path)
     return removed
 
 
@@ -1251,6 +1326,38 @@ def _count_convolved_data_arrays(zarr_path: Path, expected_names: list[str]) -> 
     return saved, missing
 
 
+def _shared_convolved_cell_published(shared_root: Path, full_skycell_name: str) -> bool:
+    from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
+
+    parsed = _projection_and_cell(full_skycell_name)
+    if parsed is None:
+        return False
+    projection, cell = parsed
+    cell_root = shared_root / projection / cell
+    if not cell_root.is_dir():
+        return False
+    try:
+        for fp_dir in cell_root.iterdir():
+            if fp_dir.is_dir() and (fp_dir / "arrays.npz").is_file():
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _count_shared_convolved_cells(
+    shared_root: Path, expected_names: list[str]
+) -> tuple[int, list[str]]:
+    missing: list[str] = []
+    saved = 0
+    for name in expected_names:
+        if _shared_convolved_cell_published(shared_root, name):
+            saved += 1
+        else:
+            missing.append(name)
+    return saved, missing
+
+
 def _store_has_any_data_array(zarr_path: Path) -> bool:
     """True if the convolved store contains any ``*_data`` array directory."""
     try:
@@ -1260,19 +1367,32 @@ def _store_has_any_data_array(zarr_path: Path) -> bool:
         return False
 
 
-def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
+def verify_ps1_process(
+    resolved: ResolvedTargetConfig,
+    runner_cfg: RunnerConfig | None = None,
+) -> VerifyResult:
     """Verify ps1 process.
     
     Parameters
     ----------
     resolved : ResolvedTargetConfig
+    runner_cfg : RunnerConfig | None, optional, default ``None``
     
     Returns
     -------
     VerifyResult"""
-    zarr_path = _convolved_zarr_path(resolved)
+    zarr_path = resolve_ps1_process_checkpoint_location(resolved)
+    if runner_cfg is not None and runner_cfg.bookkeeping_trust_index:
+        indexed = checkpoint_stage_indexed(resolved, "ps1_process")
+        if indexed:
+            return VerifyResult("ps1_process", True, "indexed", str(zarr_path))
+        return VerifyResult(
+            "ps1_process", False, "scc_assembly not indexed", str(zarr_path)
+        )
+    shared_store = ps1_process_uses_shared_convolved_store(resolved)
     if not zarr_path.exists():
-        return VerifyResult("ps1_process", False, "Convolved zarr missing", str(zarr_path))
+        label = "Shared convolved store missing" if shared_store else "Convolved zarr missing"
+        return VerifyResult("ps1_process", False, label, str(zarr_path))
     try:
         expected = expected_ps1_process_skycells(resolved)
     except Exception as exc:
@@ -1281,7 +1401,10 @@ def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
         return VerifyResult("ps1_process", False, "No expected skycells from mapping CSV", str(zarr_path))
 
     started = time.monotonic()
-    saved, missing = _count_convolved_data_arrays(zarr_path, expected)
+    if shared_store:
+        saved, missing = _count_shared_convolved_cells(zarr_path, expected)
+    else:
+        saved, missing = _count_convolved_data_arrays(zarr_path, expected)
     elapsed = time.monotonic() - started
     log.info(
         "verify_ps1_process: %d/%d skycells saved in %.2fs (%s)",
@@ -1292,7 +1415,9 @@ def verify_ps1_process(resolved: ResolvedTargetConfig) -> VerifyResult:
     )
 
     if saved == 0:
-        if _store_has_any_data_array(zarr_path):
+        if shared_store:
+            msg = f"Shared convolved store has no published cells: 0/{len(expected)} skycells saved"
+        elif _store_has_any_data_array(zarr_path):
             msg = (
                 f"Convolved zarr has *_data arrays but none cover expected skycells "
                 f"(or all empty): 0/{len(expected)} skycells saved"
@@ -1745,6 +1870,18 @@ def verify_stage(
     Returns
     -------
     VerifyResult"""
+    if (
+        runner_cfg is not None
+        and runner_cfg.bookkeeping_trust_index
+        and stage in CHECKPOINT_STAGES
+    ):
+        indexed = checkpoint_stage_indexed(resolved, stage)
+        return VerifyResult(
+            stage,
+            indexed,
+            "indexed" if indexed else "not indexed",
+            "",
+        )
     fn = VERIFY_FUNCS.get(stage)
     if fn is None:
         raise ValueError(f"Unknown stage: {stage!r}")
@@ -1771,6 +1908,12 @@ def stage_complete(
     ``verify_stage(resolved, stage).ok``. An ``unknown`` on-disk result is treated
     conservatively (not complete).
     """
+    if (
+        runner_cfg is not None
+        and runner_cfg.bookkeeping_trust_index
+        and stage in CHECKPOINT_STAGES
+    ):
+        return checkpoint_stage_indexed(resolved, stage)
     for candidate in (manifest_path, stable_manifest_path):
         if candidate is None:
             continue
@@ -1863,11 +2006,17 @@ def collect_stage_artifacts(
         existing = [str(p) for p in paths if p.is_file() or p.is_symlink()]
         return len(paths), len(existing), existing
     if stage == "ps1_process":
+        zarr_path = resolve_ps1_process_checkpoint_location(resolved)
+        if runner_cfg is not None and runner_cfg.bookkeeping_trust_index:
+            indexed = checkpoint_stage_indexed(resolved, stage)
+            return (1, int(indexed), [str(zarr_path)])
         expected = expected_ps1_process_skycells(resolved)
-        zarr_path = _convolved_zarr_path(resolved)
         if not zarr_path.exists():
             return len(expected), 0, [str(zarr_path)]
-        saved, _missing = _count_convolved_data_arrays(zarr_path, expected)
+        if ps1_process_uses_shared_convolved_store(resolved):
+            saved, _missing = _count_shared_convolved_cells(zarr_path, expected)
+        else:
+            saved, _missing = _count_convolved_data_arrays(zarr_path, expected)
         return len(expected), saved, [str(zarr_path)]
     if stage == "mapping":
         csv_path = _mapping_csv_path(resolved)

@@ -177,5 +177,48 @@ class ConvolvedGateNumericComparisonTests(unittest.TestCase):
             self.assertIn("error", report)
 
 
+class ConvolvedGateSmokeSccTests(unittest.TestCase):
+    """v2 smoke SCC defaults (s20/c1/k1) used in cluster_smoke_checklist."""
+
+    SECTOR, CAMERA, CCD = 20, 1, 1
+
+    def test_smoke_scc_gate_fixture_matches_legacy(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp)
+            rows = [
+                {
+                    "projection": "skycell.2246",
+                    "y": 0,
+                    "NAME": "skycell.2246.000",
+                    "x": 0,
+                    "NAXIS1": 32,
+                    "NAXIS2": 32,
+                },
+            ]
+            _write_master_csv(data_root, self.SECTOR, self.CAMERA, self.CCD, rows)
+
+            rng = np.random.default_rng(42)
+            array = rng.random((32, 32)).astype(np.float32)
+
+            legacy_path = scc_convolved_zarr(data_root, self.SECTOR, self.CAMERA, self.CCD)
+            _write_legacy_convolved_cell(legacy_path, "skycell.2246.000", array)
+            _publish_shared_cell(data_root, "skycell.2246", "000", array)
+
+            report = convolved_gate_report(
+                data_root,
+                sector=self.SECTOR,
+                camera=self.CAMERA,
+                ccd=self.CCD,
+                sample_cells=5,
+            )
+
+            self.assertTrue(report["pass"], report)
+            self.assertEqual(report["sector"], 20)
+            self.assertEqual(report["camera"], 1)
+            self.assertEqual(report["ccd"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

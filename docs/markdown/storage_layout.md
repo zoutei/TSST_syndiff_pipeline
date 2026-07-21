@@ -251,7 +251,7 @@ Full daemon/liveness details: [template_runner_architecture.md — SQLite and NF
 
 ## Provenance bookkeeping (`data_root/bookkeeping/`)
 
-Content-addressed provenance (see `doc/template_bookkeeping_plan.md`) lives under `data_root`:
+Content-addressed provenance lives under `data_root`. For a full guide (concepts, DAG, scheduler integration, operator runbook), see **[bookkeeping.md](bookkeeping.md)**.
 
 ```text
 {data_root}/bookkeeping/
@@ -291,9 +291,35 @@ Operator commands:
 |---------|---------|
 | `syndiff bookkeeping stats` | Row counts by kind/state |
 | `syndiff bookkeeping reindex` | Offline DB rebuild from disk |
+
+**Reindex warning:** A full reindex (default, without `--incremental`) clears `provenance.db`. Per-FFI diff rows are spool-ingested only and are **not** rebuilt from FITS on disk — drain `bookkeeping/spool/` first (supervisor ingest) and re-emit diff runs if needed.
 | `syndiff bookkeeping gc` | Report-only orphan/missing scan |
 | `syndiff bookkeeping pilot` | Phase-5 go/no-go checklist |
 | `syndiff bookkeeping convolved-gate` | PR5 gate before write cutover |
+
+**PR5 convolved-store cutover gate (s20/c1/k1 smoke SCC)**
+
+Run after a dual-write or legacy `ps1_process` completion on a representative SCC, before setting `stages.ps1_process.use_shared_convolved_store: true` in any site config:
+
+```bash
+mamba activate syndiff
+# data_root from config/deployment.yaml
+syndiff bookkeeping convolved-gate \
+  --data-root /path/to/data \
+  --sector 20 --camera 1 --ccd 1 \
+  --sample-cells 10
+```
+
+Exit code 0 and `"pass": true` in the JSON report means shared-store cells match legacy per-SCC `convolved.zarr` on padding-free skycells. Only then enable `use_shared_convolved_store` (with `write_per_scc_convolved_zarr: false`) for that campaign.
+
+**Index-trust cutover** (`bookkeeping.trust_index` in `config/pipeline.yaml`, default `false`):
+
+| Flag | Template stages with checkpoints | Scheduler verify | `run_stage` after success |
+|------|----------------------------------|------------------|---------------------------|
+| `false` (default) | Manifest + provenance dual-write | Checkpoint-first, fail-open to manifest/scan | Unchanged |
+| `true` | Provenance emit only (no manifest JSON) | Index-only for checkpoint stages; no NFS scandir | Skip `collect_stage_artifacts` / manifest write |
+
+Enable only after a green campaign with warm `provenance.db` (or run `syndiff bookkeeping reindex` first). Details: [bookkeeping.md §11](bookkeeping.md#11-bookkeepingtrust_index).
 
 ---
 

@@ -592,6 +592,27 @@ directory-level operation. Never touches raw inputs.
 PR-D1 depends only on PR1 and can proceed in parallel with PR2–PR4. PR-D2
 needs PR-D1. PR5 is last among numeric-risk changes and needs real data.
 
+### Integration status (BK waves)
+
+| BK | Scope | Status |
+|---|---|---|
+| **BK-1** | Test fix + mask recipe fingerprint | Done |
+| **BK-2** | v2-aware fingerprints / schema bump | Done |
+| **BK-3** | All template checkpoints + scheduler generalization | Done |
+| **BK-4** | Merkle edges + emit/verify parity + photometry | Done |
+| **BK-5** | Diff indexed verify + SCC frames handoff | Done |
+| **BK-6** | reindex + gc v2 `diff_{lane}/` trees | Done — full reindex does not rebuild per-FFI diff rows from FITS; drain spool first |
+| **BK-7** | Shared convolved cutover (`use_shared_convolved_store`) | Done (default off; operator gate) |
+| **BK-8** | Legacy manifest/scan retirement | **Flag-gated** — `bookkeeping.trust_index: true` in `pipeline.yaml` (default `false`) skips manifest dual-write and demotes template-stage verify scans to index-only; default-on after green campaign |
+
+When `bookkeeping.trust_index` is **false** (default), behavior is unchanged:
+manifest dual-write, checkpoint-first verify with fail-open to legacy scans.
+When **true**, checkpoint-covered template stages emit provenance sidecars only
+(no JSON manifests), scheduler verify never walks NFS for those stages (miss →
+incomplete until `syndiff bookkeeping reindex`), and `verify_ps1_process` /
+`collect_stage_artifacts` skip `_count_convolved_data_arrays`. See
+[`docs/markdown/storage_layout.md`](../docs/markdown/storage_layout.md#provenance-bookkeeping-data_rootbookkeeping).
+
 ---
 
 ## 20. File inventory
