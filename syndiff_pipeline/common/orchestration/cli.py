@@ -451,7 +451,7 @@ def _resolve_template_scope(args: argparse.Namespace):
     from syndiff_pipeline.common.orchestration.targets import load_sccs, scc_from_cli
 
     has_inline = any(
-        getattr(args, name) is not None for name in ("sector", "camera", "ccd")
+        getattr(args, name, None) is not None for name in ("sector", "camera", "ccd")
     )
     if getattr(args, "scc", None) and has_inline:
         raise SystemExit("Use either --scc or --sector/--camera/--ccd, not both")
@@ -468,16 +468,47 @@ def _resolve_template_scope(args: argparse.Namespace):
     raise SystemExit("Template runs require --scc PATH or --sector, --camera, and --ccd")
 
 
+def _resolve_diff_scope(args: argparse.Namespace):
+    """Resolve diff run targets from --targets, --scc, or inline SCC CLI."""
+    from syndiff_pipeline.common.orchestration.targets import load_sccs, load_targets, scc_from_cli
+
+    has_targets = bool(getattr(args, "targets", None))
+    has_scc = bool(getattr(args, "scc", None))
+    has_inline = any(
+        getattr(args, name, None) is not None for name in ("sector", "camera", "ccd")
+    )
+    if has_targets and (has_scc or has_inline):
+        raise SystemExit("Use --targets OR --scc/--sector/--camera/--ccd, not both")
+    if has_targets:
+        path = str(Path(args.targets).expanduser().resolve())
+        return path, load_targets(path)
+    if has_scc:
+        path = Path(args.scc).expanduser().resolve()
+        return str(path), load_sccs(path)
+    sector = getattr(args, "sector", None)
+    camera = getattr(args, "camera", None)
+    ccd = getattr(args, "ccd", None)
+    if sector is not None and camera is not None and ccd is not None:
+        return None, [scc_from_cli(sector, camera, ccd)]
+    if has_inline:
+        raise SystemExit("--sector, --camera, and --ccd must all be set together")
+    raise SystemExit(
+        "Diff runs require --targets PATH or --scc PATH or --sector, --camera, and --ccd"
+    )
+
+
 def _resolve_execution_targets(args: argparse.Namespace):
     """Resolve targets for submit/run from preset-specific CLI args."""
-    from syndiff_pipeline.common.orchestration.targets import load_targets
-
     preset = getattr(args, "preset", None)
     if preset == "template":
         return _resolve_template_scope(args)
+    if preset == "diff":
+        return _resolve_diff_scope(args)
     if not getattr(args, "targets", None):
         raise SystemExit("Diff runs require --targets")
     path = str(Path(args.targets).expanduser().resolve())
+    from syndiff_pipeline.common.orchestration.targets import load_targets
+
     return path, load_targets(path)
 
 
@@ -686,18 +717,33 @@ def cmd_submit(args: argparse.Namespace) -> int:
             skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
     else:
-        run_directory = _prepare_run_directory(
-            args.config,
-            run_id,
-            runs_root,
-            stages=active,
-            detach=True,
-            force_rerun=bool(args.force_rerun),
-            source_targets=source_input_path,
-            source_diff_config_path=cfg.diff_config_path or None,
-            workspace_run_id=getattr(args, "workspace_run_id", None),
-            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
-        )
+        if getattr(args, "targets", None):
+            run_directory = _prepare_run_directory(
+                args.config,
+                run_id,
+                runs_root,
+                stages=active,
+                detach=True,
+                force_rerun=bool(args.force_rerun),
+                source_targets=source_input_path,
+                source_diff_config_path=cfg.diff_config_path or None,
+                workspace_run_id=getattr(args, "workspace_run_id", None),
+                skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+            )
+        else:
+            run_directory = _prepare_run_directory(
+                args.config,
+                run_id,
+                runs_root,
+                stages=active,
+                detach=True,
+                force_rerun=bool(args.force_rerun),
+                source_scc=source_input_path,
+                inline_scc_targets=targets if source_input_path is None else None,
+                source_diff_config_path=cfg.diff_config_path or None,
+                workspace_run_id=getattr(args, "workspace_run_id", None),
+                skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+            )
 
     if getattr(args, "local", False) and preset == "diff":
         _patch_local_diff_executor(run_directory)
@@ -809,18 +855,33 @@ def cmd_run(args: argparse.Namespace) -> int:
             skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
     else:
-        run_directory = _prepare_run_directory(
-            args.config,
-            run_id,
-            runs_root,
-            stages=active,
-            detach=False,
-            force_rerun=bool(args.force_rerun),
-            source_targets=source_input_path,
-            source_diff_config_path=cfg.diff_config_path or None,
-            workspace_run_id=getattr(args, "workspace_run_id", None),
-            skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
-        )
+        if getattr(args, "targets", None):
+            run_directory = _prepare_run_directory(
+                args.config,
+                run_id,
+                runs_root,
+                stages=active,
+                detach=False,
+                force_rerun=bool(args.force_rerun),
+                source_targets=source_input_path,
+                source_diff_config_path=cfg.diff_config_path or None,
+                workspace_run_id=getattr(args, "workspace_run_id", None),
+                skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+            )
+        else:
+            run_directory = _prepare_run_directory(
+                args.config,
+                run_id,
+                runs_root,
+                stages=active,
+                detach=False,
+                force_rerun=bool(args.force_rerun),
+                source_scc=source_input_path,
+                inline_scc_targets=targets if source_input_path is None else None,
+                source_diff_config_path=cfg.diff_config_path or None,
+                workspace_run_id=getattr(args, "workspace_run_id", None),
+                skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
+            )
 
     return run_scheduler(
         run_id,

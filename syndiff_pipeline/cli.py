@@ -91,7 +91,19 @@ def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
             help=argparse.SUPPRESS,
         )
     elif preset == "diff":
-        p.add_argument("--targets", required=True, help="Targets CSV path")
+        p.add_argument(
+            "--targets",
+            default=None,
+            help="Targets CSV path (event photometry); optional for SCC-only diff",
+        )
+        p.add_argument(
+            "--scc",
+            default=None,
+            help="SCC CSV path (sector,camera,ccd[,enabled]) for field-mode diff",
+        )
+        p.add_argument("--sector", type=int, default=None, help="Single SCC sector")
+        p.add_argument("--camera", type=int, default=None, help="Single SCC camera")
+        p.add_argument("--ccd", type=int, default=None, help="Single SCC CCD")
         p.add_argument(
             "--target-name",
             default=None,
@@ -169,6 +181,8 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
 
     if not args.target_name:
         raise SystemExit("--target-name is required for diff foreground run")
+    if not args.targets:
+        raise SystemExit("--targets is required for diff foreground run with --target-name")
     if args.site:
         paths = SitePaths.from_site_dir(args.site)
         diff_config = str(paths.diff_config)
@@ -221,12 +235,19 @@ def _dispatch_execution(preset: str, argv: list[str]) -> int:
     args = _finalize_execution_args(preset, parser.parse_args(argv[1:]))
 
     if preset == "diff" and verb == "run":
-        if not args.target_name:
-            raise SystemExit(
-                "syndiff diff run requires --target-name for foreground debugging. "
-                "For supervised multi-target diff, use: syndiff diff submit ..."
-            )
-        return _cmd_diff_foreground_run(args)
+        if args.target_name:
+            return _cmd_diff_foreground_run(args)
+        has_scc_scope = bool(getattr(args, "scc", None)) or any(
+            getattr(args, name, None) is not None for name in ("sector", "camera", "ccd")
+        )
+        if has_scc_scope:
+            # Supervised field-mode / SCC-only run (same path as template run).
+            return orch_cli.cmd_run(args)
+        raise SystemExit(
+            "syndiff diff run requires --target-name for foreground debugging, "
+            "or --scc/--sector/--camera/--ccd for supervised SCC-only diff. "
+            "For supervised multi-target event diff, use: syndiff diff submit ..."
+        )
 
     if verb == "submit":
         return orch_cli.cmd_submit(args)
@@ -251,7 +272,8 @@ def main(argv: list[str] | None = None) -> int:
             "usage: syndiff <noun> <verb> ...\n\n"
             "Execution presets:\n"
             "  syndiff template submit|run --site SITE --scc SCCS.csv\n"
-            "  syndiff diff submit|run --site SITE --targets TARGETS.csv\n\n"
+            "  syndiff diff submit|run --site SITE --targets TARGETS.csv\n"
+            "  syndiff diff submit|run --site SITE --scc SCCS.csv\n\n"
             "Host-star light curves:\n"
             "  syndiff star submit --site SITE --star-targets STAR_TARGETS.csv\n"
             "  syndiff star run --site SITE --star-targets STAR_TARGETS.csv "

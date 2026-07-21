@@ -97,7 +97,8 @@ class TestExecutionParser(unittest.TestCase):
             main(["all", "submit", "--config", "/tmp/config.yaml", "--targets", "/tmp/t.csv"])
         self.assertIn("removed", str(ctx.exception).lower())
 
-    def test_stages_override_clears_preset(self):
+    def test_stages_override_keeps_preset_for_scope(self):
+        """``--stages`` replaces the stage list; preset still drives input scope."""
         _, _, args = parse_execution_argv(
             [
                 "template",
@@ -110,8 +111,11 @@ class TestExecutionParser(unittest.TestCase):
                 "mapping,downsample",
             ]
         )
-        self.assertIsNone(args.preset)
+        self.assertEqual(args.preset, "template")
         self.assertEqual(args.stages, "mapping,downsample")
+        active, stages_arg = orch_cli._resolve_stages_arg(args)
+        self.assertEqual(active, ["mapping", "downsample"])
+        self.assertEqual(stages_arg, "mapping,downsample")
 
     def test_site_resolves_template_config(self):
         site = _ROOT / "config"
@@ -138,10 +142,51 @@ class TestExecutionParser(unittest.TestCase):
         action_dests = {a.dest for a in parser._actions}
         self.assertNotIn("targets", action_dests)
 
-    def test_diff_parser_requires_targets(self):
+    def test_diff_parser_accepts_scc_scope(self):
         parser = build_execution_parser("diff", "submit")
         action_dests = {a.dest for a in parser._actions}
         self.assertIn("targets", action_dests)
+        self.assertIn("scc", action_dests)
+        self.assertIn("sector", action_dests)
+        targets_action = next(a for a in parser._actions if a.dest == "targets")
+        self.assertFalse(targets_action.required)
+
+    def test_parse_execution_argv_sets_preset_for_diff_scc(self):
+        _, verb, args = parse_execution_argv(
+            [
+                "diff",
+                "submit",
+                "--config",
+                "/tmp/config.yaml",
+                "--scc",
+                "/tmp/sccs.csv",
+            ]
+        )
+        self.assertEqual(verb, "submit")
+        self.assertEqual(args.preset, "diff")
+        self.assertEqual(args.scc, "/tmp/sccs.csv")
+        self.assertIsNone(args.targets)
+
+    def test_parse_execution_argv_sets_preset_for_diff_inline_scc(self):
+        _, verb, args = parse_execution_argv(
+            [
+                "diff",
+                "submit",
+                "--config",
+                "/tmp/config.yaml",
+                "--sector",
+                "20",
+                "--camera",
+                "1",
+                "--ccd",
+                "1",
+            ]
+        )
+        self.assertEqual(verb, "submit")
+        self.assertEqual(args.preset, "diff")
+        self.assertEqual(args.sector, 20)
+        self.assertEqual(args.camera, 1)
+        self.assertEqual(args.ccd, 1)
 
 
 class TestDiffRunGuard(unittest.TestCase):
@@ -170,6 +215,35 @@ class TestDiffRunGuard(unittest.TestCase):
                     ]
                 )
             self.assertIn("--target-name", str(ctx.exception))
+
+    def test_diff_run_scc_routes_to_supervised_cmd_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "config.yaml"
+            cfg_path.write_text(
+                f"workspace_root: {tmp}\ndata_root: {tmp}\n",
+                encoding="utf-8",
+            )
+            scc_path = Path(tmp) / "sccs.csv"
+            scc_path.write_text(
+                "sector,camera,ccd,enabled\n20,1,1,true\n",
+                encoding="utf-8",
+            )
+            with mock.patch.object(orch_cli, "cmd_run", return_value=0) as cmd_run:
+                rc = main(
+                    [
+                        "diff",
+                        "run",
+                        "--config",
+                        str(cfg_path),
+                        "--scc",
+                        str(scc_path),
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            cmd_run.assert_called_once()
+            passed = cmd_run.call_args.args[0]
+            self.assertEqual(passed.scc, str(scc_path))
+            self.assertIsNone(passed.targets)
 
 
 class TestLocalSubmitPatch(unittest.TestCase):
@@ -278,6 +352,70 @@ class TestTemplateSubmitFreezesScc(unittest.TestCase):
             frozen_scc = runs[0] / "scc.csv"
             self.assertTrue(frozen_scc.is_file())
             self.assertIn("22,3,3", frozen_scc.read_text(encoding="utf-8"))
+
+
+class TestDiffSubmitFreezesScc(unittest.TestCase):
+    def test_diff_submit_materializes_scc_csv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            handoff = Path(tmp) / "handoff"
+            handoff.mkdir()
+            cfg_path = Path(tmp) / "config.yaml"
+            cfg_path.write_text(
+                "\n".join(
+                    [
+                        f"workspace_root: {handoff}",
+                        f"data_root: {handoff / 'data'}",
+                        "deployment_file: deployment.yaml",
+                        "stages:",
+                        "  diff:",
+                        "    executor: local",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            (Path(tmp) / "deployment.yaml").write_text(
+                f"workspace_root: {handoff}\ndata_root: {handoff / 'data'}\n",
+                encoding="utf-8",
+            )
+            scc_path = Path(tmp) / "sccs.csv"
+            scc_path.write_text(
+                "sector,camera,ccd,enabled\n20,1,1,true\n",
+                encoding="utf-8",
+            )
+
+            _, _, args = parse_execution_argv(
+                [
+                    "diff",
+                    "submit",
+                    "--config",
+                    str(cfg_path),
+                    "--scc",
+                    str(scc_path),
+                ]
+            )
+            with mock.patch.object(orch_cli, "ensure_daemon_running"), mock.patch.object(
+                orch_cli, "record_deployment_path"
+            ), mock.patch(
+                "syndiff_pipeline.common.orchestration.run_setup.apply_post_create_run_setup",
+                return_value=mock.Mock(),
+            ):
+                orch_cli.cmd_submit(args)
+
+            runs = sorted((handoff / "runs").glob("*"))
+            self.assertTrue(runs)
+            frozen_scc = runs[0] / "scc.csv"
+            self.assertTrue(frozen_scc.is_file())
+            self.assertIn("20,1,1", frozen_scc.read_text(encoding="utf-8"))
+            # Normalized targets.csv is also written for run-context loaders.
+            frozen_targets = runs[0] / "targets.csv"
+            self.assertTrue(frozen_targets.is_file())
+            self.assertIn("s0020_c1_k1", frozen_targets.read_text(encoding="utf-8"))
+
+    def test_resolve_diff_scope_rejects_targets_and_scc(self):
+        args = mock.Mock(targets="/tmp/t.csv", scc="/tmp/s.csv", sector=None, camera=None, ccd=None)
+        with self.assertRaises(SystemExit) as ctx:
+            orch_cli._resolve_diff_scope(args)
+        self.assertIn("not both", str(ctx.exception))
 
 
 class TestVerifySiteScope(unittest.TestCase):
