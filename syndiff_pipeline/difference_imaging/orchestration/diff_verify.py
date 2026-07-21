@@ -477,3 +477,72 @@ def collect_diff_workspace_artifacts(cfg: SynDiffConfig, event_dir: str | Path) 
             if path.is_file():
                 artifacts.append(str(path.resolve()))
     return artifacts
+
+
+def verify_scc_diff(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    template_store_name: str | None = None,
+    oversampling_factor: int = 1,
+) -> list[str]:
+    """
+    Verify SCC-primary diff bookkeeping and template sidecar for field-mode diff.
+
+    Returns a list of human-readable error strings (empty when OK).
+    """
+    import json
+
+    from syndiff_pipeline.common.scc_paths import scc_templates_dir
+    from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+        DIFF_JOB_BASENAME,
+        FIELD_MODE_ASSEMBLY_BASENAME,
+        FRAMES_CSV_BASENAME,
+    )
+
+    errors: list[str] = []
+    data_root = Path(data_root).expanduser()
+    bk = (
+        data_root
+        / f"s{int(sector):04d}"
+        / f"c{int(camera)}"
+        / f"k{int(ccd)}"
+        / "bookkeeping"
+        / "diff"
+    )
+    job_path = bk / DIFF_JOB_BASENAME
+    frames_path = bk / FRAMES_CSV_BASENAME
+    if not job_path.is_file():
+        errors.append(f"missing {job_path}")
+    if not frames_path.is_file():
+        errors.append(f"missing {frames_path}")
+    if job_path.is_file():
+        try:
+            doc = json.loads(job_path.read_text(encoding="utf-8"))
+            if int(doc.get("schema_version", 0)) < 2:
+                errors.append(f"{job_path}: schema_version < 2")
+            if not doc.get("mapping_grid"):
+                errors.append(f"{job_path}: missing mapping_grid")
+        except Exception as exc:
+            errors.append(f"{job_path}: invalid JSON ({exc})")
+    tmpl = scc_templates_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        oversampling_factor=max(1, int(oversampling_factor)),
+        store_name=template_store_name,
+    )
+    sidecar = tmpl / FIELD_MODE_ASSEMBLY_BASENAME
+    if not sidecar.is_file():
+        errors.append(f"missing template sidecar {sidecar}")
+    elif sidecar.is_file():
+        try:
+            doc = json.loads(sidecar.read_text(encoding="utf-8"))
+            if int(doc.get("schema_version", 0)) < 3:
+                errors.append(f"{sidecar}: requires schema v3")
+        except Exception as exc:
+            errors.append(f"{sidecar}: invalid JSON ({exc})")
+    return errors

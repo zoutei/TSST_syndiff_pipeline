@@ -28,7 +28,6 @@ from syndiff_pipeline.template_creation.processing.remap_progress import (
 from syndiff_pipeline.template_creation.orchestration.verify import collect_stage_artifacts, write_manifest
 from syndiff_pipeline.pipeline_spec import build_stage_context
 from syndiff_pipeline.difference_imaging.orchestration.stages import (
-    BIND_STAGE,
     DIFF_STAGE,
     write_diff_manifest,
 )
@@ -161,18 +160,6 @@ def main(argv: list[str] | None = None) -> int:
                 progress_path=str(diff_log_path),
             )
             snap = DIFF_STAGE.stage_snapshot(stage_ctx) if DIFF_STAGE.stage_snapshot else {}
-        elif args.stage == "bind":
-            stage_ctx = build_stage_context(
-                run_id=args.run_id,
-                runs_root=runs_root,
-                target_label=args.target_label,
-                target=target,
-                runner_cfg=cfg,
-                stage=args.stage,
-                meta=dict(ctx.meta or {}),
-                force_rerun=args.force_rerun,
-            )
-            snap = BIND_STAGE.stage_snapshot(stage_ctx) if BIND_STAGE.stage_snapshot else {}
         elif args.stage == "star":
             star_log_path = logs.target_log_path(
                 runs_root, args.run_id, args.target_label, args.stage
@@ -248,10 +235,6 @@ def main(argv: list[str] | None = None) -> int:
             if args.stage == "diff":
                 assert stage_ctx is not None
                 manifest = DIFF_STAGE.execute(stage_ctx)
-            elif args.stage == "bind":
-                assert stage_ctx is not None
-                BIND_STAGE.execute(stage_ctx)
-                manifest = BIND_STAGE.collect_artifacts(stage_ctx)
             elif args.stage == "star":
                 assert stage_ctx is not None
                 manifest = STAR_STAGE.execute(stage_ctx)
@@ -270,9 +253,6 @@ def main(argv: list[str] | None = None) -> int:
                 if args.stage == "diff":
                     assert stage_ctx is not None
                     manifest = DIFF_STAGE.collect_artifacts(stage_ctx)
-                elif args.stage == "bind":
-                    assert stage_ctx is not None
-                    manifest = BIND_STAGE.collect_artifacts(stage_ctx)
                 elif args.stage == "star":
                     assert stage_ctx is not None
                     manifest = STAR_STAGE.collect_artifacts(stage_ctx)

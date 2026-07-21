@@ -89,6 +89,10 @@ __all__ = [
     "scc_debug_plots_dir",
     "scc_diff_stage_dir",
     "scc_diff_workspace_index_path",
+    "scc_diff_dir",
+    "scc_diff_workspace_dir",
+    "scc_diff_event_dir",
+    "scc_diff_bookkeeping_dir",
     "scc_ffi_dir",
     "scc_label",
     "scc_legacy_dir",
@@ -359,6 +363,63 @@ def scc_bookkeeping_stage_dir(
 ) -> Path:
     """Directory for one template stage's bookkeeping under an SCC."""
     return scc_bookkeeping_dir(data_root, sector, camera, ccd) / str(stage).strip()
+
+
+def scc_diff_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    store_name: str | None = None,
+) -> Path:
+    """SCC diff lane root: ``diff/`` or ``diff_{store_name}/``."""
+    return scc_root(data_root, sector, camera, ccd) / store_subdir(DIFF_SUBDIR, store_name)
+
+
+def scc_diff_workspace_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    store_name: str | None,
+    workspace_label: str,
+    recipe_fp: str,
+) -> Path:
+    """Per-recipe workspace under a diff lane, e.g. ``diff_{lane}/hp_d/{recipe_fp}/``."""
+    return (
+        scc_diff_dir(data_root, sector, camera, ccd, store_name=store_name)
+        / str(workspace_label).strip()
+        / str(recipe_fp).strip()
+    )
+
+
+def scc_diff_event_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    store_name: str | None,
+    event_name: str,
+) -> Path:
+    """Event-scoped photometry subtree under a diff lane."""
+    return (
+        scc_diff_dir(data_root, sector, camera, ccd, store_name=store_name)
+        / EVENTS_SUBDIR
+        / str(event_name).strip()
+    )
+
+
+def scc_diff_bookkeeping_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """``bookkeeping/diff/`` — frames.csv and diff_job.json."""
+    return scc_bookkeeping_dir(data_root, sector, camera, ccd) / "diff"
 
 
 def scc_diff_stage_dir(

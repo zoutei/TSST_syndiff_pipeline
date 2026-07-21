@@ -73,10 +73,10 @@ def _write_diff_policy(path: Path) -> None:
 
 
 class TestDiffPipelineSpec(unittest.TestCase):
-    def test_diff_is_eighth_stage(self):
+    def test_diff_is_seventh_composed_stage(self):
         self.assertEqual(len(STAGE_NAMES), 8)
         self.assertEqual(STAGE_NAMES[-2], "diff")
-        self.assertEqual(STAGE_DEPS["diff"], ["bind"])
+        self.assertEqual(STAGE_DEPS["diff"], ["downsample"])
         self.assertEqual(STAGE_POOL["diff"], "diff")
 
     def test_diff_resource_pool_default(self):
