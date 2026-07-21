@@ -106,7 +106,6 @@ def _eight_stage_run_setup(tmp_path: Path, target: Target):
         "ps1_process",
         "remap",
         "downsample",
-        "bind",
         "diff",
     ]
     from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
@@ -142,7 +141,6 @@ class TestEightStageTick(unittest.TestCase):
         target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
         all_stages = [
             "tess_ffi_download",
-            "bind",
             "mapping",
             "ps1_download",
             "ps1_process",
@@ -217,7 +215,7 @@ class TestEightStageTick(unittest.TestCase):
             )
             self.assertGreater(len(launch_calls), 0)
             _assert_topo_order(launch_calls)
-            # Independent roots (tess_ffi_download, bind) may launch in either order.
+            # Independent roots (e.g. tess_ffi_download) may launch before deps complete.
             template_calls = [s for s in launch_calls if s != "diff"]
             expected = [s for s in all_stages if s != "diff"]
             self.assertEqual(set(template_calls), set(expected[: len(template_calls)]))

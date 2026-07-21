@@ -250,7 +250,6 @@ def _run_background_stage(
             sck=(int(cfg.sector), int(cfg.camera), int(cfg.ccd)),
             data_root=getattr(cfg, "data_root", "") or None,
             background_params=params,
-            publish_scc=bool(getattr(cfg, "publish_scc", False)),
             workspace_root=ws_index_root,
         )
 
@@ -357,8 +356,32 @@ def _load_template_handoff(
 ) -> tuple[pd.DataFrame, dict, str, float]:
     """
     Load template-pipeline handoff: frame manifest, crop bounds, reference FFI,
-    and offset threshold from ``output_dir``.
+    and offset threshold from ``output_dir`` or SCC bookkeeping.
     """
+    if getattr(cfg, "data_root", None):
+        try:
+            from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+                load_scc_diff_handoff_for_config,
+            )
+
+            wcs_table, crop_bounds, ref_ffi_path, offset_threshold, _grid = (
+                load_scc_diff_handoff_for_config(cfg)
+            )
+            log.info(
+                "Loaded SCC-primary diff handoff (bookkeeping/diff/) for "
+                "s%04d/c%d/k%d",
+                int(cfg.sector),
+                int(cfg.camera),
+                int(cfg.ccd),
+            )
+            return wcs_table, crop_bounds, ref_ffi_path, offset_threshold
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            log.debug(
+                "SCC diff handoff unavailable for %s; trying legacy event handoff: %s",
+                out,
+                exc,
+            )
+
     if not manifest_csv_exists(out, manifest_path):
         man = manifest_path_from_output_dir(out, manifest_path)
         raise RuntimeError(
@@ -905,6 +928,32 @@ def run_config_pipeline(
         )
         if field_ctx is not None:
             log.info("Field-mode template assembly active (geometry_mode: field)")
+            grid = getattr(field_ctx, "mapping_grid", None)
+            if grid is not None and crop_bounds is not None:
+                from syndiff_pipeline.common.coordinate_preflight import (
+                    validate_coordinate_contract,
+                    validate_conv_pad_for_diff,
+                )
+
+                validate_coordinate_contract(grid, crop_bounds)
+                from syndiff_pipeline.difference_imaging.stages.hotpants import (
+                    _kernel_scale_pixels,
+                )
+
+                for stage in cfg.pipeline:
+                    if not isinstance(stage, dict):
+                        continue
+                    kind = stage.get("kind")
+                    if kind in ("kernel_fit", "hotpants"):
+                        hp_probe = (
+                            kernel_fit_params_to_hotpants(parse_kernel_fit(stage, 0))
+                            if kind == "kernel_fit"
+                            else parse_hotpants(stage, 0)
+                        )
+                        validate_conv_pad_for_diff(
+                            grid, scale_px=float(_kernel_scale_pixels(hp_probe))
+                        )
+                        break
 
     coords = load_astrometry_coords(ws_root)
     if coords is not None:

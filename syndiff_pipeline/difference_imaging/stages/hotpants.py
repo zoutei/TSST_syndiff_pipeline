@@ -158,10 +158,10 @@ def _hotpants_loky_initializer(
     field_mode_context: Optional[Any] = None,
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
-    publish_scc: bool = False,
     workspace_root: Optional[str] = None,
     mask_catalog=None,
     btjd_by_product_id: Optional[dict] = None,
+    output_store_name: Optional[str] = None,
 ) -> None:
     """Hotpants loky initializer (MaskCatalog + cadence lookup + field-mode loader)."""
     global _HOTPANTS_LOKY_PAYLOAD
@@ -172,7 +172,9 @@ def _hotpants_loky_initializer(
         )
 
         template_loader = build_field_mode_template_loader(
-            field_mode_context, crop_bounds
+            field_mode_context,
+            crop_bounds,
+            crop_to_science=_field_mode_mapping_grid(field_mode_context) is None,
         )
     _HOTPANTS_LOKY_PAYLOAD = {
         "mask": mask,
@@ -190,10 +192,11 @@ def _hotpants_loky_initializer(
         "template_loader": template_loader,
         "sck": sck,
         "data_root": data_root,
-        "publish_scc": bool(publish_scc),
         "workspace_root": workspace_root,
+        "output_store_name": output_store_name,
         "mask_catalog": mask_catalog,
         "btjd_by_product_id": btjd_by_product_id or {},
+        "mapping_grid": _field_mode_mapping_grid(field_mode_context),
     }
 
 
@@ -231,10 +234,11 @@ def _hotpants_loky_run_task(
         force_rerun=bool(p.get("force_rerun")),
         sck=p.get("sck"),
         data_root=p.get("data_root"),
-        publish_scc=bool(p.get("publish_scc")),
         workspace_root=p.get("workspace_root"),
+        output_store_name=p.get("output_store_name"),
         mask_catalog=p.get("mask_catalog"),
         btjd=p.get("btjd_by_product_id", {}).get(product_id),
+        mapping_grid=p.get("mapping_grid"),
     )
 
 
@@ -904,6 +908,31 @@ def _resolve_hotpants_mask_array(mask, mask_catalog, btjd) -> np.ndarray:
     return hotpants_mask_bool(arr)
 
 
+def _field_mode_mapping_grid(field_mode_context) -> Any | None:
+    return getattr(field_mode_context, "mapping_grid", None) if field_mode_context else None
+
+
+def _pair_hotpants_arrays(
+    sci_crop: np.ndarray,
+    tmpl_crop: np.ndarray,
+    err_crop: np.ndarray,
+    mapping_grid,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    if mapping_grid is None:
+        return sci_crop, tmpl_crop, err_crop, 0
+    from syndiff_pipeline.common.grid_pairing import (
+        prepare_science_template_pairing,
+        zero_pad_science_bottom,
+    )
+
+    sci_crop, tmpl_crop = prepare_science_template_pairing(
+        sci_crop, tmpl_crop, mapping_grid
+    )
+    pad_rows = int(mapping_grid.conv_pad_native)
+    err_crop = zero_pad_science_bottom(err_crop, pad_rows)
+    return sci_crop, tmpl_crop, err_crop, pad_rows
+
+
 def _process_one_frame(
     ffi_path,
     product_id,
@@ -923,10 +952,11 @@ def _process_one_frame(
     force_rerun: bool = False,
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
-    publish_scc: bool = False,
     workspace_root: Optional[str] = None,
     mask_catalog=None,
     btjd=None,
+    mapping_grid=None,
+    output_store_name: Optional[str] = None,
 ):
     """Process one frame.
 
@@ -936,28 +966,41 @@ def _process_one_frame(
     """
     diffs_label = workspace_label_from_dir(dirs.diffs)
     diff_stem = workspace_frame_stem(product_id, diffs_label)
+    ws_diff_out = workspace_frame_fits_path(dirs.diffs, diff_stem)
 
     if not force_rerun:
-        diff_out_path = workspace_frame_fits_path(dirs.diffs, diff_stem)
-        if publish_scc and sck is not None and data_root and workspace_root:
+        from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+            resolve_diff_write_path,
+        )
+
+        write_path, scc_primary = resolve_diff_write_path(
+            data_root=data_root,
+            sck=sck,
+            kind="diff_image",
+            stage_label=diffs_label,
+            product_id=product_id,
+            label=diffs_label,
+            params=hp,
+            workspace_path=ws_diff_out,
+            output_store_name=output_store_name,
+        )
+        if sck is not None and data_root and workspace_root:
             try:
                 from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
                     try_materialize_workspace_artifact,
                 )
 
                 if try_materialize_workspace_artifact(
-                    publish_scc=True,
                     data_root=data_root,
-                    sector=sck[0],
-                    camera=sck[1],
-                    ccd=sck[2],
+                    sck=sck,
                     kind="diff_image",
                     stage_label=diffs_label,
                     product_id=product_id,
                     label=diffs_label,
                     params=hp,
-                    workspace_dest=diff_out_path,
+                    workspace_dest=ws_diff_out,
                     workspace_root=workspace_root,
+                    output_store_name=output_store_name,
                 ):
                     return {
                         "stem": diff_stem,
@@ -965,13 +1008,23 @@ def _process_one_frame(
                         "group_id": group_id,
                         "success": True,
                         "skipped": True,
-                        "path": diff_out_path,
+                        "path": ws_diff_out,
                         "scc_store_hit": True,
                     }
             except Exception:
                 log.debug(
                     "SCC diff-store materialize failed for %s", product_id, exc_info=True
                 )
+        if scc_primary and write_path.is_file():
+            return {
+                "stem": diff_stem,
+                "ffi_product_id": product_id,
+                "group_id": group_id,
+                "success": True,
+                "skipped": True,
+                "path": str(write_path),
+                "scc_store_hit": True,
+            }
         existing_diff = resolve_pipeline_fits_path(dirs.diffs, diff_stem)
         if existing_diff is not None:
             return {
@@ -1048,6 +1101,10 @@ def _process_one_frame(
         if template_cache is not None:
             template_cache[group_id] = tmpl_crop
 
+    sci_crop, tmpl_crop, err_crop, pad_rows = _pair_hotpants_arrays(
+        sci_crop, tmpl_crop, err_crop, mapping_grid
+    )
+
     try:
         crop_header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
     except Exception as exc:
@@ -1060,7 +1117,22 @@ def _process_one_frame(
             "error_msg": f"header crop failed: {exc}",
         }
 
-    diff_out_path = workspace_frame_fits_path(dirs.diffs, diff_stem)
+    diff_out_path = ws_diff_out
+    from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+        resolve_diff_write_path,
+    )
+
+    write_path, scc_primary = resolve_diff_write_path(
+        data_root=data_root,
+        sck=sck,
+        kind="diff_image",
+        stage_label=diffs_label,
+        product_id=product_id,
+        label=diffs_label,
+        params=hp,
+        workspace_path=diff_out_path,
+        output_store_name=output_store_name,
+    )
     conv_label = workspace_label_from_dir(dirs.convolved)
     conv_stem = workspace_frame_stem(product_id, conv_label)
     conv_out_path = workspace_frame_fits_path(dirs.convolved, conv_stem)
@@ -1089,6 +1161,14 @@ def _process_one_frame(
     )
 
     if result["success"]:
+        if pad_rows > 0:
+            from syndiff_pipeline.common.grid_pairing import trim_padded_products
+
+            result["diff"] = trim_padded_products(result["diff"], pad_rows)
+            if result.get("convolved") is not None:
+                result["convolved"] = trim_padded_products(
+                    result["convolved"], pad_rows
+                )
         kernel_sum = None
         tess_zp = None
         try:
@@ -1108,14 +1188,14 @@ def _process_one_frame(
             )
         try:
             write_diff_noise_mask_fits(
-                diff_out_path,
+                str(write_path),
                 result["diff"],
                 result.get("noise"),
                 result.get("mask"),
                 header=crop_header,
             )
         except Exception as exc:
-            log.error("Failed writing %s: %s", diff_out_path, exc)
+            log.error("Failed writing %s: %s", write_path, exc)
             result["success"] = False
             result["error_msg"] = str(exc)
         if result["success"] and sck is not None:
@@ -1134,12 +1214,13 @@ def _process_one_frame(
                     product_id=product_id,
                     label=diffs_label,
                     params=hp,
-                    location=diff_out_path,
+                    location=str(write_path),
                     input_fingerprints=inputs,
                     data_root=data_root,
                     meta={"round_id": round_id, "group_id": group_id},
-                    publish_scc=publish_scc,
+                    scc_primary=scc_primary,
                     workspace_root=workspace_root,
+                    output_store_name=output_store_name,
                 )
             except Exception:
                 log.debug(
@@ -1167,8 +1248,26 @@ def _process_one_frame(
         elif hp.write_bkg and dirs.bkg and result.get("bkg") is not None:
             bkg_label = workspace_label_from_dir(dirs.bkg)
             bkg_basename = workspace_frame_stem(product_id, bkg_label)
-            _save_bkg_fits(
-                result["bkg"], bkg_basename, dirs.bkg, header=crop_header
+            bkg_ws_out = workspace_frame_fits_path(dirs.bkg, bkg_basename)
+            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                resolve_diff_write_path,
+            )
+
+            bkg_write_path, bkg_scc_primary = resolve_diff_write_path(
+                data_root=data_root,
+                sck=sck,
+                kind="diff_background",
+                stage_label=bkg_label,
+                product_id=product_id,
+                label=bkg_label,
+                params=hp,
+                workspace_path=bkg_ws_out,
+                output_store_name=output_store_name,
+            )
+            _write_image_fits(
+                str(bkg_write_path),
+                result["bkg"],
+                header=crop_header,
             )
             if sck is not None:
                 try:
@@ -1181,12 +1280,13 @@ def _process_one_frame(
                         product_id=product_id,
                         label=bkg_label,
                         params=hp,
-                        location=workspace_frame_fits_path(dirs.bkg, bkg_basename),
+                        location=str(bkg_write_path),
                         input_fingerprints=[ffi_fp] if ffi_fp else [],
                         data_root=data_root,
                         meta={"round_id": round_id, "group_id": group_id, "producer": "hotpants"},
-                        publish_scc=publish_scc,
+                        scc_primary=bkg_scc_primary,
                         workspace_root=workspace_root,
+                        output_store_name=output_store_name,
                     )
                 except Exception:
                     log.debug(
@@ -1217,7 +1317,7 @@ def _process_one_frame(
     result["stem"] = diff_stem
     result["ffi_product_id"] = product_id
     result["group_id"] = group_id
-    result["path"] = diff_out_path
+    result["path"] = str(write_path) if scc_primary else diff_out_path
     for key in ("diff", "bkg", "convolved", "noise", "mask", "kernel_params_arrays"):
         result.pop(key, None)
     return result
@@ -1297,7 +1397,7 @@ def hotpants_loop(
     except Exception:
         prov_sck = None
     prov_data_root = getattr(cfg, "data_root", "") or None
-    prov_publish_scc = bool(getattr(cfg, "publish_scc", False))
+    prov_output_store_name = getattr(cfg, "output_store_name", None) or None
     from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
 
     prov_workspace_root = _workspace_root(
@@ -1382,8 +1482,11 @@ def hotpants_loop(
             )
 
             template_loader = build_field_mode_template_loader(
-                field_mode_context, crop_bounds
+                field_mode_context,
+                crop_bounds,
+                crop_to_science=_field_mode_mapping_grid(field_mode_context) is None,
             )
+        mapping_grid = _field_mode_mapping_grid(field_mode_context)
 
         def _serial_worker(args):
             """Serial worker.
@@ -1413,10 +1516,11 @@ def hotpants_loop(
                 force_rerun=force_rerun,
                 sck=prov_sck,
                 data_root=prov_data_root,
-                publish_scc=prov_publish_scc,
                 workspace_root=prov_workspace_root,
+                output_store_name=prov_output_store_name,
                 mask_catalog=mask_catalog,
                 btjd=btjd_by_product_id.get(product_id),
+                mapping_grid=mapping_grid,
             )
 
         results = []
@@ -1451,10 +1555,10 @@ def hotpants_loop(
                 field_mode_context,
                 prov_sck,
                 prov_data_root,
-                prov_publish_scc,
                 prov_workspace_root,
                 mask_catalog,
                 btjd_by_product_id,
+                prov_output_store_name,
             ),
             on_result=_record_progress,
         )

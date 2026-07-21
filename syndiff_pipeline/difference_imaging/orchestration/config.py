@@ -84,10 +84,17 @@ class SynDiffConfig:
     configs built outside the site-config flow (e.g. ad hoc scripts), in which
     case provenance emission is a no-op."""
 
-    publish_scc: bool = False
-    """When true, finalized diff products are mirrored into the SCC-scoped diff
-    store (``s/c/k/diff/{stage_label}/{recipe_fp}/``) with workspace index
-    pointers (plan §14.2, decision #13). Default off until piloted."""
+    template_store_name: str | None = None
+    """Named templates store lane (``templates_{name}/``). ``None`` → default lane."""
+
+    output_store_name: str | None = None
+    """Named diff output lane (``diff_{name}/``). ``None`` → default ``diff/``."""
+
+    remap_store_name: str | None = None
+    """Named remap store lane (``remap_{name}/``). ``None`` → default lane."""
+
+    oversampling_factor: int = 1
+    """Template/remap oversampling factor for field-mode assembly."""
 
     site_config_dir: str = ""
     """Site config directory (for resolving ``mask_settings.yaml``)."""

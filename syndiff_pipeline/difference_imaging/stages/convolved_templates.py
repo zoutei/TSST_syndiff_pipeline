@@ -138,12 +138,21 @@ def run_convolved_templates(
     hp_fit = replace(hp, hp_bgo=0)
     work = os.path.join(convolved_ws_dir, "_kernel_conv_tmp")
     os.makedirs(work, exist_ok=True)
-    sci_shape = tuple(crop_bounds.get("shape") or ())
+    mapping_grid = (
+        getattr(field_ctx, "mapping_grid", None) if field_ctx is not None else None
+    )
+    if mapping_grid is not None:
+        sci_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
+        science_shape = tuple(mapping_grid.science_ffi_bounds()["shape"])
+    else:
+        sci_shape = tuple(crop_bounds.get("shape") or ())
+        science_shape = sci_shape
     if len(sci_shape) != 2:
         sci_shape = (
             int(crop_bounds["y_max"]) - int(crop_bounds["y_min"]),
             int(crop_bounds["x_max"]) - int(crop_bounds["x_min"]),
         )
+        science_shape = sci_shape
     hp_config = build_hotpants_config(
         hp_fit,
         work,
@@ -157,19 +166,33 @@ def run_convolved_templates(
         from syndiff_pipeline.difference_imaging.stages.hotpants import (
             resolve_hotpants_oversample,
         )
+        from syndiff_pipeline.common.grid_pairing import trim_padded_products
+
+        tmpl = np.asarray(template_crop)
+        pad_rows = 0
+        if mapping_grid is not None:
+            pad_rows = int(mapping_grid.conv_pad_native)
+            science_shape_local = tuple(mapping_grid.science_ffi_bounds()["shape"])
+        else:
+            science_shape_local = science_shape
 
         factor = resolve_hotpants_oversample(
             sci_shape,
-            template_crop.shape,
+            tmpl.shape,
             getattr(hp, "oversample", None),
         )
-        return convolve_template_with_kernel_solution(
-            template_crop,
+        convolved = convolve_template_with_kernel_solution(
+            tmpl,
             kernel_solution,
             hp_config,
             oversample=factor,
             science_shape=sci_shape if factor > 1 else None,
         )
+        if pad_rows > 0:
+            convolved = trim_padded_products(convolved, pad_rows)
+        elif factor > 1 and science_shape_local:
+            convolved = convolved[: science_shape_local[0], : science_shape_local[1]]
+        return convolved
 
     os.makedirs(convolved_ws_dir, exist_ok=True)
 
@@ -192,7 +215,11 @@ def run_convolved_templates(
             raise RuntimeError(
                 "convolved_templates field mode requires a manifest with group_id"
             )
-        loader = build_field_mode_template_loader(field_ctx, crop_bounds)
+        loader = build_field_mode_template_loader(
+            field_ctx,
+            crop_bounds,
+            crop_to_science=mapping_grid is None,
+        )
         gids = sorted(
             {
                 int(g)

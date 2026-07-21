@@ -115,7 +115,7 @@ DIFF_VERIFY_STAGES = (
     "tess_ffi_download",
     "downsample",
 )
-DIFF_EXTERNAL_STAGES = DIFF_VERIFY_STAGES + ("bind",)
+DIFF_EXTERNAL_STAGES = DIFF_VERIFY_STAGES
 DIFF_NOT_SELECTED_STAGES = (
     "mapping",
     "ps1_download",
@@ -139,12 +139,6 @@ class TestDiffOnlyE2E(unittest.TestCase):
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_EXTERNAL,
                 )
-            bind_row = state.get_stage_run(run_id, label, "bind")
-            self.assertEqual(bind_row.status, STATUS_SKIPPED)
-            self.assertEqual(
-                state.get_skip_reason(run_id, label, "bind"),
-                SKIP_REASON_NOT_SELECTED,
-            )
             for stage in DIFF_NOT_SELECTED_STAGES:
                 row = state.get_stage_run(run_id, label, stage)
                 self.assertEqual(row.status, STATUS_SKIPPED)
@@ -205,8 +199,6 @@ class TestDiffOnlyE2E(unittest.TestCase):
                     state.get_stage_run(run_id, label, stage).status,
                     STATUS_SKIPPED,
                 )
-            bind_row = state.get_stage_run(run_id, label, "bind")
-            self.assertEqual(bind_row.status, STATUS_SKIPPED)
             for stage in DIFF_NOT_SELECTED_STAGES:
                 self.assertEqual(
                     state.get_skip_reason(run_id, label, stage),

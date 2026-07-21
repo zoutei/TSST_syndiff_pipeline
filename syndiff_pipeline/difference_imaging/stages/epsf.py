@@ -364,7 +364,6 @@ def fit_epsf_all_frames(diff_paths: list,
         diff_log_path=diff_log_path,
         epsf_label=epsf_label,
         diffs_input=diffs_input,
-        publish_scc=bool(getattr(cfg, "publish_scc", False)),
     )
     epsf_stack, tile_centers, ffi_stems, epsf_ok = result
     save_epsf_stack_bundle(epsf_stack, ffi_stems, output_dir, round_id)

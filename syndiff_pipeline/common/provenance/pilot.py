@@ -50,7 +50,7 @@ def pilot_checklist_report(data_root: str | Path) -> dict:
         "manual_ops": [
             "Confirm ps1_process verify hits checkpoint path on a completed SCC",
             "Confirm diff per-FFI rows appear after a small finalized diff run",
-            "Enable publish_scc on one SCC only after D2 confidence",
+            "Run a small finalized diff run and confirm per-FFI bookkeeping rows",
             "Run syndiff bookkeeping convolved-gate before PR5 write cutover",
         ],
     }

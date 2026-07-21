@@ -227,18 +227,33 @@ def run_kernel_fit(
 
         group_dx, group_dy = 0.0, 0.0
         template_path = f"field:group_id={group_id_for_ffi(manifest, min_bg_path)}"
-        os_factor = max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
-        field_template = assemble_field_template_for_ffi(
-            field_ctx,
-            manifest,
-            min_bg_path,
-            crop=(
-                int(crop_bounds["x_min"]) * os_factor,
-                int(crop_bounds["x_max"]) * os_factor,
-                int(crop_bounds["y_min"]) * os_factor,
-                int(crop_bounds["y_max"]) * os_factor,
-            ),
-        )
+        mapping_grid = getattr(field_ctx, "mapping_grid", None)
+        if mapping_grid is not None:
+            tmpl_bounds = mapping_grid.template_ffi_bounds()
+            field_template = assemble_field_template_for_ffi(
+                field_ctx,
+                manifest,
+                min_bg_path,
+                crop=(
+                    int(tmpl_bounds["x_min"]),
+                    int(tmpl_bounds["x_max"]),
+                    int(tmpl_bounds["y_min"]),
+                    int(tmpl_bounds["y_max"]),
+                ),
+            )
+        else:
+            os_factor = max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
+            field_template = assemble_field_template_for_ffi(
+                field_ctx,
+                manifest,
+                min_bg_path,
+                crop=(
+                    int(crop_bounds["x_min"]) * os_factor,
+                    int(crop_bounds["x_max"]) * os_factor,
+                    int(crop_bounds["y_min"]) * os_factor,
+                    int(crop_bounds["y_max"]) * os_factor,
+                ),
+            )
     else:
         group_dx, group_dy, template_path = resolve_template_for_ffi(
             output_dir, manifest, min_bg_path
@@ -258,6 +273,18 @@ def run_kernel_fit(
         if field_template is not None
         else _load_template_cropped(template_path, crop_bounds)
     )
+    pad_rows = 0
+    mapping_grid = getattr(field_ctx, "mapping_grid", None) if field_ctx is not None else None
+    if mapping_grid is not None:
+        from syndiff_pipeline.common.grid_pairing import (
+            prepare_science_template_pairing,
+            zero_pad_science_bottom,
+        )
+
+        ffi, template = prepare_science_template_pairing(ffi, template, mapping_grid)
+        pad_rows = int(mapping_grid.conv_pad_native)
+        if err is not None:
+            err = zero_pad_science_bottom(err, pad_rows)
     header = wcs_grouping.crop_ffi_header(min_bg_path, crop_bounds)
 
     btjd = None
@@ -283,6 +310,11 @@ def run_kernel_fit(
         frame_mask = full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
     else:
         frame_mask = shared_mask
+
+    if mapping_grid is not None and pad_rows > 0:
+        from syndiff_pipeline.common.grid_pairing import zero_pad_science_bottom
+
+        frame_mask = zero_pad_science_bottom(np.asarray(frame_mask), pad_rows)
 
     if ffi.shape != np.asarray(frame_mask).shape:
         raise ValueError(

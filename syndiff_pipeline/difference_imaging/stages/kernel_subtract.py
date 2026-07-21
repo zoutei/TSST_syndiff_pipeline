@@ -108,15 +108,15 @@ def _process_one_frame(task: tuple) -> dict:
     manifest = p["manifest"]
     sck = p.get("sck")
     data_root = p.get("data_root")
-    publish_scc = bool(p.get("publish_scc"))
     workspace_root = p.get("workspace_root")
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
     diff_stem = workspace_frame_stem(product_id, diffs_label)
-    diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
+    ws_diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
+    output_store_name = p.get("output_store_name")
 
     if resolve_pipeline_fits_path(diffs_dir, diff_stem) is None:
-        if publish_scc and sck is not None and data_root and workspace_root:
+        if sck is not None and data_root and workspace_root:
             try:
                 from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
                     try_materialize_workspace_artifact,
@@ -124,18 +124,16 @@ def _process_one_frame(task: tuple) -> dict:
 
                 ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
                 try_materialize_workspace_artifact(
-                    publish_scc=True,
                     data_root=data_root,
-                    sector=sck[0],
-                    camera=sck[1],
-                    ccd=sck[2],
+                    sck=sck,
                     kind="diff_image",
                     stage_label=diffs_label,
                     product_id=product_id,
                     label=diffs_label,
                     params=ks_params,
-                    workspace_dest=diff_out,
+                    workspace_dest=ws_diff_out,
                     workspace_root=workspace_root,
+                    output_store_name=output_store_name,
                 )
             except Exception:
                 log.debug(
@@ -172,9 +170,14 @@ def _process_one_frame(task: tuple) -> dict:
             conv_path = lookup_convolved_path(convolved_table, group_dx, group_dy)
         ffi, _ = _load_ffi_cropped(ffi_path, crop_bounds)
         convolved = _load_convolved_crop(conv_path, crop_bounds)
+        expected = tuple(crop_bounds.get("shape", ffi.shape))
         if ffi.shape != convolved.shape:
             raise ValueError(
                 f"FFI shape {ffi.shape} != convolved template {convolved.shape}"
+            )
+        if ffi.shape != expected:
+            raise ValueError(
+                f"FFI shape {ffi.shape} != science grid {expected} from crop_bounds"
             )
 
         if mask_catalog is not None:
@@ -190,7 +193,23 @@ def _process_one_frame(task: tuple) -> dict:
         )
 
         header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
-        _write_image_fits(diff_out, diff_raw, header=header)
+        from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+            resolve_diff_write_path,
+        )
+
+        ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
+        write_path, scc_primary = resolve_diff_write_path(
+            data_root=data_root,
+            sck=sck,
+            kind="diff_image",
+            stage_label=diffs_label,
+            product_id=product_id,
+            label=diffs_label,
+            params=ks_params,
+            workspace_path=ws_diff_out,
+            output_store_name=output_store_name,
+        )
+        _write_image_fits(str(write_path), diff_raw, header=header)
         if sck is not None:
             try:
                 inputs = []
@@ -212,13 +231,14 @@ def _process_one_frame(task: tuple) -> dict:
                     # stage and not threaded through this loop; the recorded
                     # recipe covers this stage's own params only (deviation,
                     # see PR-D1 report).
-                    params=KernelSubtractParams(phot_box_size=int(phot_box_size)),
-                    location=diff_out,
+                    params=ks_params,
+                    location=str(write_path),
                     input_fingerprints=inputs,
                     data_root=data_root,
                     meta={"producer": "kernel_subtract"},
-                    publish_scc=publish_scc,
+                    scc_primary=scc_primary,
                     workspace_root=workspace_root,
+                    output_store_name=output_store_name,
                 )
             except Exception:
                 log.debug(
@@ -228,9 +248,20 @@ def _process_one_frame(task: tuple) -> dict:
                 )
         if bkg_dir and bkg_label:
             bkg_stem = workspace_frame_stem(product_id, bkg_label)
-            bkg_out = workspace_frame_fits_path(bkg_dir, bkg_stem)
+            bkg_ws_out = workspace_frame_fits_path(bkg_dir, bkg_stem)
+            bkg_write_path, bkg_scc_primary = resolve_diff_write_path(
+                data_root=data_root,
+                sck=sck,
+                kind="diff_background",
+                stage_label=bkg_label,
+                product_id=product_id,
+                label=bkg_label,
+                params=ks_params,
+                workspace_path=bkg_ws_out,
+                output_store_name=output_store_name,
+            )
             _write_image_fits(
-                bkg_out,
+                str(bkg_write_path),
                 phot_bkg,
                 header=header,
             )
@@ -244,13 +275,14 @@ def _process_one_frame(task: tuple) -> dict:
                         ccd=sck[2],
                         product_id=product_id,
                         label=bkg_label,
-                        params=KernelSubtractParams(phot_box_size=int(phot_box_size)),
-                        location=bkg_out,
+                        params=ks_params,
+                        location=str(bkg_write_path),
                         input_fingerprints=[ffi_fp] if ffi_fp else [],
                         data_root=data_root,
                         meta={"producer": "kernel_subtract"},
-                        publish_scc=publish_scc,
+                        scc_primary=bkg_scc_primary,
                         workspace_root=workspace_root,
+                        output_store_name=output_store_name,
                     )
                 except Exception:
                     log.debug(
@@ -307,15 +339,15 @@ def kernel_subtract_loop(
 
     sck = None
     data_root = None
-    publish_scc = False
     workspace_root = None
+    output_store_name = None
     if cfg is not None:
         try:
             sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
         except Exception:
             sck = None
         data_root = getattr(cfg, "data_root", "") or None
-        publish_scc = bool(getattr(cfg, "publish_scc", False))
+        output_store_name = getattr(cfg, "output_store_name", None) or None
         from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
 
         workspace_root = _workspace_root(
@@ -355,8 +387,8 @@ def kernel_subtract_loop(
         "field_mode": bool(field_mode),
         "sck": sck,
         "data_root": data_root,
-        "publish_scc": publish_scc,
         "workspace_root": workspace_root,
+        "output_store_name": output_store_name,
         "mask_catalog": mask_catalog,
         "btjd_by_product_id": btjd_by_product_id,
     }

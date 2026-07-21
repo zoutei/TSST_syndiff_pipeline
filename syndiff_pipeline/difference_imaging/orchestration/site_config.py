@@ -427,6 +427,14 @@ def resolve_diff_config(
         if val:
             optional_paths[key] = resolve_config_path(str(val), data_root_path)
 
+    from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+    store_names: dict[str, str | None] = {}
+    for key in ("template_store_name", "output_store_name", "remap_store_name"):
+        raw = merged_paths.get(key)
+        if raw is not None:
+            store_names[key] = normalize_store_name(str(raw) if str(raw).strip() else None)
+
     deprecated_median = merged_paths.get("median_mask_path") or deployment.get(
         "median_mask_path"
     )
@@ -458,7 +466,9 @@ def resolve_diff_config(
         ccd=target.ccd,
         data_root=str(data_root),
         site_config_dir=str(Path(site_dir).expanduser().resolve()),
+        oversampling_factor=os_factor,
         **optional_paths,
+        **store_names,
     )
     for key, val in merged_defaults.items():
         if hasattr(cfg, key):
