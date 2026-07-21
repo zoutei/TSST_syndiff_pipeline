@@ -42,8 +42,7 @@ Only three top-level subtrees belong here long-term:
   events/                          # per-event nested SCC leaves
     {event_name}/                  # e.g. 2020ftl
       s{SSSS}_c{C}_k{K}/           # e.g. s0023_c1_k3
-      event_job.json               # bind handoff (was cluster_template_job.json)
-      frames.csv                   # frame manifest (was syndiff_ffi_frames.csv)
+      frames.csv                   # optional event copy of SCC frame manifest
       ps1_removed_stars.csv        # crop-local Gaia (templates stage; linear geometry_mode)
       ws/                          # canonical diff workspace tree (no workspace_run_id)
       ws_{workspace_run_id}/       # namespaced tree when diff_config sets workspace_run_id
@@ -184,9 +183,15 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode)
     templates_{NAME}/              # optional named templates lane (downsample.output_store_name)
       oversampling_{N}/
+    diff/                          # default SCC diff lane
+    diff_{NAME}/                   # named diff lane (paths.output_store_name)
+      {workspace_label}/{recipe_fp}/
     debug_plots/                   # template-pipeline PNGs (shift schedule debug)
     legacy/                        # archived pre-cutover artifacts
-    bookkeeping/                   # per-stage run_meta (mapping reference FFI, etc.)
+    bookkeeping/                   # per-stage run_meta (mapping reference FFI, diff handoff, …)
+      diff/
+        frames.csv
+        diff_job.json
   ps1_skycells_zarr/               # shared PS1 raw-band cache (ps1_download + syndiff star)
     ps1_skycells.zarr
 ```
@@ -263,14 +268,22 @@ Shared PS1 stores (decision #14):
   ps1_convolved.zarr/    # canonical convolved cells (PR5, gated)
 ```
 
-SCC-scoped diff store (PR-D2, `publish_scc: true` on finalized runs only):
+SCC-scoped diff store (field mode v2 — SCC-primary write-through):
 
 ```text
-{data_root}/s{SSSS}/c{C}/k{K}/diff/{stage_label}/{recipe_fp}/
-  tess<digits>_{label}.fits.fz   # mirrored diff products
+{data_root}/s{SSSS}/c{C}/k{K}/
+  diff/                              # default lane (store_name null)
+  diff_{lane}/                       # named lane (e.g. diff_l4_split_smoke/)
+    {workspace_label}/               # e.g. hp_d, ks_d
+      {recipe_fp}/                   # content-addressed recipe id
+        tess<digits>_{label}.fits.fz
+  bookkeeping/
+    diff/
+      frames.csv                     # SCC frame manifest (bootstrap)
+      diff_job.json                  # v2: mapping_grid, store names, crop_bounds
 ```
 
-Event workspaces record pointers in `ws/scc_diff_index.json` (no symlinks into `data_root`).
+Event workspaces may record pointers in `ws/scc_diff_index.json` and optionally materialize copies under `events/{name}/ws/{label}/` via `try_materialize_workspace_artifact`.
 
 Operator commands:
 
@@ -288,6 +301,7 @@ Operator commands:
 
 | Document | Contents |
 |----------|----------|
+| [field_geometry.md](field_geometry.md) | MappingGrid, field templates, rebuild runbook |
 | [template_pipeline.md](template_pipeline.md) | CLI, config, deployment setup |
 | [template_runner_architecture.md](template_runner_architecture.md) | Scheduler internals, daemon lifecycle |
 | [cluster_smoke_checklist.md](cluster_smoke_checklist.md) | Manual validation on a cluster |

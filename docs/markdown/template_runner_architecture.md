@@ -36,7 +36,7 @@ The **SynDiff orchestrator** is a **batch orchestrator**, not a workflow engine 
 
 | Principle | What it means in code |
 |-----------|----------------------|
-| **One registry, two DAGs (+ one branch)** | `PipelineSpec` composes five template stages, two diff stages (`bind`, `diff`), and the independent `star` stage (`pipeline_spec.py`). CLI nouns `template` and `diff` submit their own DAG separately — there is no combined `all` preset; `--stages` selects a subset within whichever noun's DAG. |
+| **One registry, two DAGs (+ one branch)** | `PipelineSpec` composes six template stages, one diff stage (`diff`), and the independent `star` stage (`pipeline_spec.py`). CLI nouns `template` and `diff` submit their own DAG separately — there is no combined `all` preset; `--stages` selects a subset within whichever noun's DAG. |
 | **One supervisor per workspace** | A flock-guarded daemon (`scheduler.py --daemon`) owns `{workspace_root}`. Only it mutates execution state. |
 | **CLI writes intents, not state** | `retry`, `kill`, `pause` insert rows into `commands`; the daemon applies them. |
 | **SQLite is the schedule of record** | `stage_runs.status` drives what runs next. Workers do not update SQLite on success — the supervisor does after reading durable sidecars. |
@@ -202,7 +202,7 @@ sequenceDiagram
     Daemon->>NFS: summary.json
 ```
 
-**`create_run`** (`state.py`) always inserts **all eight composed stages** (`pipeline_spec.py`'s full registry: 5 template + `bind` + `diff` + `star`) for every enabled target, regardless of which noun was submitted:
+**`create_run`** (`state.py`) always inserts **all eight composed stages** (six template + `diff` + `star` from `pipeline_spec.py`) for every enabled target, regardless of which noun was submitted:
 
 - Stages in `--stages` → `pending`
 - All other stages → `external` (may become `skipped` after verify)
@@ -252,7 +252,7 @@ Each tick for one run executes **in this order** (see `scheduler.py::_tick_run`)
 | 4 | `apply_superseded_skips` | Skip redundant upstream verify when downstream done |
 | 5 | `_schedule_external_and_pending_skips` | Non-blocking artifact verify (budget per tick) |
 | 6 | `promote_stages` | `blocked→pending`, `pending→ready` when deps + verify cache satisfied |
-| 7 | Launch unpooled ready rows | `bind` has no pool |
+| 7 | Launch unpooled ready rows | `remap` has no pool |
 | 8 | Launch pooled ready rows | Respect global `pool_running` vs `max_concurrent` |
 | 9 | Stall / resume detection | `running==0`, `launchable==0`, verify backlog empty → `stalled` |
 | 10 | `_write_summary` | Update `summary.json` / `summary.csv` |
@@ -325,19 +325,19 @@ Runs stay **`running`** while artifact scans are queued or in flight. `stall_rea
 
 ## Dependency graph and partial runs
 
-Composed registry (`pipeline_spec.py` / `PipelineSpec` = `TEMPLATE_STAGES + DIFF_STAGES + STAR_STAGES`), shown as two DAGs (there is no dependency edge between them — `templates` and `bind`/`diff` are linked only by both reading/writing the same on-disk SCC/event paths, not by SQLite `deps`):
+Composed registry (`pipeline_spec.py` / `PipelineSpec` = `TEMPLATE_STAGES + DIFF_STAGES + STAR_STAGES`), shown as two DAGs (there is no dependency edge between them — `downsample` and `diff` are linked only by both reading/writing the same on-disk SCC paths, not by SQLite `deps`):
 
 ```text
 Template DAG:
 tess_ffi_download → mapping → ps1_download → ps1_process ─┐
                         │                                   │
-                        └───────────────────────────────────┴──▶ templates
+                        └→ remap ───────────────────────────┴──▶ downsample
 
 Diff DAG:
-bind → diff   (diff also resolves templates from data_root/s{SSSS}/c{C}/k{K}/templates/ on disk)
+diff   (deps: downsample; scc_bootstrap inside execute)
 ```
 
-Stage metadata (deps, pools, executors, verify hooks) lives in `StageSpec` registries: `template_creation/orchestration/stages.py` (`TEMPLATE_STAGES`, five stages) and `difference_imaging/orchestration/stages.py` (`DIFF_STAGES = (BIND_STAGE, DIFF_STAGE)`; `diff` depends on `bind`). `state.py` reads the composed spec instead of module-level `STAGE_DEPS`.
+Stage metadata (deps, pools, executors, verify hooks) lives in `StageSpec` registries: `template_creation/orchestration/stages.py` (`TEMPLATE_STAGES`, six stages) and `difference_imaging/orchestration/stages.py` (`DIFF_STAGES = (DIFF_STAGE,)`; `diff` depends on `downsample`). `state.py` reads the composed spec instead of module-level `STAGE_DEPS`.
 
 **Effective deps** (`effective_stage_deps`) can shorten the graph:
 
@@ -355,20 +355,19 @@ Stage metadata (deps, pools, executors, verify hooks) lives in `StageSpec` regis
 
 `artifact_verify_needed()` encodes the supersede rule using **direct dependents** from `STAGE_DEPS` only (not transitive downstream). `apply_superseded_skips()` runs at tick start and again at the end of each verify pass so same-tick verify results can supersede upstream stages immediately.
 
-Because `create_run` always materializes **all eight** composed stages per target (see [End-to-end: submit to finished run](#end-to-end-submit-to-finished-run)), a `diff` run's SQLite rows include the five template stages too, even though **the DAG itself does not connect them**: `stage_deps()` gives `diff → [bind]` and `bind → []` — `tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, and `templates` are a completely separate, disconnected sub-graph with no edge to `bind`/`diff`. Concretely, `run_stage_closure(["diff"]) == {"bind", "diff"}` only. The template stages are pulled into a diff run's verify path **only** through the `artifact_verify_closure` special-case below, not through any dependency edge.
+Because `create_run` always materializes **all eight** composed stages per target (see [End-to-end: submit to finished run](#end-to-end-submit-to-finished-run)), a `diff` run's SQLite rows include the six template stages too, even though **the DAG itself does not connect them**: `stage_deps()` gives `diff → [downsample]` only — `tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, and `remap` are a completely separate sub-graph with no edge to `diff`. Concretely, `run_stage_closure(["diff"]) == {"diff"}` only. The template stages are pulled into a diff run's verify path **only** through the `artifact_verify_closure` special-case below, not through any dependency edge.
 
 ### Diff-only artifact verify closure
 
-`artifact_verify_closure(active_stages)` (`spec.py`) special-cases `active_stages == {"diff"}` to union in `DIFF_VERIFY_UPSTREAM`, which is **wider than** `run_stage_closure({"diff"})` for `tess_ffi_download`/`templates` (not DAG upstream of `diff` at all) and simultaneously **excludes** `bind` (which *is* DAG upstream of `diff`, but is not verified). For the **default** `syndiff diff submit` (`--stages diff`, i.e. `active_stages == {"diff"}` — note `bind` is *not* included by `preset_stages("diff")`):
+`artifact_verify_closure(active_stages)` (`spec.py`) special-cases `active_stages == {"diff"}` to union in `DIFF_VERIFY_UPSTREAM`. For the **default** `syndiff diff submit` (`--stages diff`, i.e. `active_stages == {"diff"}`):
 
 | Stage | In `run_stage_closure({"diff"})`? | In `artifact_verify_closure({"diff"})`? | Resulting status |
 |-------|-----------------|------------------|-------------------|
-| `bind` | **yes** (`diff` depends on it) | **no** | `skipped` (`not_selected`) immediately — treated as satisfied without ever running or being checked on disk |
-| `tess_ffi_download`, `templates` | no (no DAG edge to `diff`) | **yes** (`DIFF_VERIFY_UPSTREAM` special-case) | `external` → verified on disk → `skipped` (`artifacts_verified`) |
-| `mapping`, `ps1_download`, `ps1_process` | no | no | `skipped` (`not_selected`) immediately — no scan |
+| `tess_ffi_download`, `downsample` | no (no DAG edge to `diff`) | **yes** (`DIFF_VERIFY_UPSTREAM` special-case) | `external` → verified on disk → `skipped` (`artifacts_verified`) |
+| `mapping`, `ps1_download`, `ps1_process`, `remap` | no | no | `skipped` (`not_selected`) immediately — no scan |
 | `diff` | yes (selected) | yes | `pending` → runs |
 
-`DIFF_VERIFY_UPSTREAM = {tess_ffi_download, templates}` — enough to confirm FFIs and the template store exist without scanning mapping CSV or Zarr stores, but it **does not cover `bind`**. Operationally: pass `--stages bind,diff` explicitly whenever `bind`'s `event_job.json`/`frames.csv` handoff might not already exist for the target event — otherwise `bind` is marked `skipped` (not_selected) without running, and `diff` will fail at execution time if the handoff is missing.
+`DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}` — enough to confirm FFIs and the template store exist without scanning mapping CSV or Zarr stores. Field-mode diff uses `scc_bootstrap` inside `execute.py` to build `bookkeeping/diff/` from the SCC template sidecar; no separate scheduler stage is required.
 
 ---
 
@@ -520,9 +519,9 @@ CLI inserts into `commands`; `_apply_commands` processes FIFO each tick (and aga
 | `mapping` | `mapping` | 6 |
 | `ps1_process` | `ps1_process` | 4 |
 | `diff` | `diff` | 2 |
-| *(none)* | `bind` | unlimited |
+| *(none)* | `remap` | unlimited |
 
-`bind` is intentionally **unpooled** — it is fast and should not compete with `templates` for pool slots.
+`remap` is intentionally **unpooled** — it should not compete with `templates` for pool slots.
 
 Capacity check (`_global_pool_running`):
 
@@ -637,10 +636,11 @@ Log-derived progress (`stage_progress.py`) avoids importing science modules in t
 | `condor.py` | Submit file generation, `condor_submit`, poll, `condor_rm` sweep |
 | `run_stage.py` | Worker entry: fd log redirection, spec-driven `execute_stage`, manifests, status sidecar |
 | `spec.py` | `StageSpec` / `PipelineSpec` abstraction; `DIFF_VERIFY_UPSTREAM`, legacy stage-name aliases |
-| `pipeline_spec.py` | Composed 8-stage SynDiff registry: 5 template stages + `bind` + `diff` + `star` |
-| `template_creation/.../stages.py` | Template stage registry (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `templates`) + execute/verify hooks |
-| `difference_imaging/.../stages.py` | Diff DAG registry (`bind`, `diff`; `diff` depends on `bind`) |
-| `difference_imaging/.../bind.py` | `bind` stage: event WCS grouping into the nested event leaf |
+| `pipeline_spec.py` | Composed 8-stage SynDiff registry: 6 template stages + `diff` + `star` |
+| `template_creation/.../stages.py` | Template stage registry (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample`) + execute/verify hooks |
+| `difference_imaging/.../stages.py` | Diff DAG registry (`diff`; `diff` depends on `downsample`) |
+| `difference_imaging/.../scc_bootstrap.py` | Field-mode diff handoff: `bookkeeping/diff/`, `diff_job.json` v2 |
+| `common/mapping_grid.py` | Canonical SCC grid (`MappingGrid`, MAPGRID=2) |
 | `common/scc_paths.py` | SCC-scoped + event-scoped path helpers |
 | `template_creation/processing/scc_reference_ffi.py` | SCC-scoped mapping reference-FFI chooser + bookkeeping |
 | `verify.py` | On-disk verifiers, manifest read/write, `stage_complete` |
@@ -653,7 +653,6 @@ Log-derived progress (`stage_progress.py`) avoids importing science modules in t
 | `workspace.py` | `workspace_root` paths, supervisor discovery via `/proc` |
 | `deployment.py` | Gitignored deployment overlay |
 | `targets.py` | CSV loaders: `load_sccs()` (SCC-only, template) and `load_targets()` (normalized + SN catalog format, diff/star) |
-| `handoff.py` | `run_wcs_grouping()` — shared by `bind` |
 | `run_report.py` | Format progress lines and status grid |
 | `stage_progress.py` | Parse running-stage fraction from log tails |
 | `notifications.py` | Discord webhook dedup + message formatting |

@@ -1,13 +1,14 @@
 # Field (distortion-aware) templates
 
-**Field mode is the default** (`geometry_mode: field` on `stages.wcs_grouping`
-and `stages.downsample`). Templates are built once per SCC from per-skycell WCS
-drift, hybrid Exact patches, and a sparse contrib store; difference imaging
-assembles a full-chip template per `group_id` on demand.
+**Field mode is the default** (`geometry_mode: field` on `stages.downsample`).
+Templates are built once per SCC from per-skycell WCS drift, hybrid Exact
+patches, and a sparse contrib store; difference imaging assembles a full-chip
+template per `group_id` on demand via `scc_bootstrap` and subtracts on the
+canonical **MappingGrid** science rectangle (~1960×2018 native for 2048 FFI
+defaults).
 
 Linear mode (`geometry_mode: linear`) remains available as an explicit opt-out
 for target-anchored single-offset templates — see
-[WCS grouping](stages/wcs_grouping.md) and
 [Multi-offset downsample](stages/downsample_technical.md).
 
 ```{contents}
@@ -30,32 +31,52 @@ syndiff template submit \
   --site config \
   --scc config/scc_example.csv
 
-# First-time event differencing still needs bind
+# Field-mode diff (after template rebuild with MAPGRID=2 + sidecar v3):
 syndiff diff submit \
   --site config \
-  --targets config/targets_example.csv \
-  --stages bind,diff
+  --config config/diff_config_single_kernel.yaml \
+  --scc config/scc_example.csv
 ```
 
 Defaults (no YAML required beyond a normal site):
 
 | Knob | Default | Meaning |
 |------|---------|---------|
-| `stages.wcs_grouping.geometry_mode` | `field` | Event bind records field geometry |
-| `stages.downsample.geometry_mode` | `field` | L5 uses `field_downsample` |
+| `stages.downsample.geometry_mode` | `field` | L5 uses `field_downsample`; diff uses `scc_bootstrap` |
 | `stages.remap.intra_skycell_R` | `1` | Intra-skycell Exact dilation radius |
 | `stages.downsample.apply_intra_skycell` | `true` | Apply intra-skycell Exact patch at L5 |
 | `stages.downsample.apply_inter_skycell` | `true` | Apply inter-skycell rim patches at L5 |
+| `stages.mapping.template_conv_pad_spare_px` | `4` | Extra bottom pad rows for Hotpants kernel margin |
 
 Opt out to linear:
 
 ```yaml
 stages:
-  wcs_grouping:
-    geometry_mode: linear
   downsample:
     geometry_mode: linear
 ```
+
+## MappingGrid (canonical SCC grid)
+
+All field-mode coordinates flow through **`MappingGrid`**
+(`syndiff_pipeline/common/mapping_grid.py`). Mapping writes `MAPGRID=2` on the
+master FITS; remap and downsample sidecars embed the same grid; `scc_bootstrap`
+copies `crop_bounds` into `bookkeeping/diff/diff_job.json` for diff.
+
+| Quantity (2048² FFI defaults) | Value |
+|-------------------------------|-------|
+| Science shape (native) | 2018 × 1960 |
+| Template shape (with bottom conv pad) | 2026 × 1960 |
+| `ffi_xmin`, `ffi_xmax` | 44, 2004 |
+| Science `y` range | 0 … 2018 |
+| Template `ffi_ymin` (pad rows) | −8 |
+
+WCS and `tesswcs` projections must use **FFI chip pixels** `(ffi_x, ffi_y)`;
+local grid indices `(lx, ly)` are for array indexing only. Pad rows use negative
+`ffi_y`. See `coordinate_preflight.py` checks in mapping, bootstrap, and execute.
+
+Diff does **not** use `crop_mode` / `target_box` for geometry — the science
+grid is fully determined by the SCC `MappingGrid`.
 
 ---
 
@@ -95,9 +116,9 @@ rim** (~0.3–0.8% of pixels). Field mode Exact-patches those bands.
 | Template groups | ~10²–10³ full-chip signatures | ~19 target-anchored |
 | Regmap geometry | Roll + intra-skycell (L4a) + inter-skycell (L4b F2) | Integer roll of frozen L0 |
 | Output | SCC `contribs/` + on-demand assemble | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
-| Event dependency at build | None (SCC-wide) | Requires `event_job.json` |
+| Event dependency at build | None (SCC-wide) | Requires per-event offset list (linear only) |
 | Template DAG | Includes `remap` before `downsample` | `remap` pre-skipped |
-| Deep dive | This document | [wcs_grouping.md](stages/wcs_grouping.md), [downsample_technical.md](stages/downsample_technical.md) |
+| Deep dive | This document | [downsample_technical.md](stages/downsample_technical.md) |
 
 ---
 
@@ -273,14 +294,6 @@ lock). Crop/event builds prefilter pixels outside the ROI before `argsort`.
 
 ```yaml
 stages:
-  wcs_grouping:                   # consumed by bind (diff DAG); key name unchanged
-    geometry_mode: field          # DEFAULT
-    grouping_quantum_ps1_px: 1.0
-    wcs_drift_savgol_window: 11
-    wcs_drift_savgol_polyorder: 2
-    crop_mode: target_box         # diff crop only; field store is full-chip
-    crop_box_size: 1024
-
   remap:                          # L2–L4 (field mode only)
     intra_skycell_R: 1            # sole geometry tuning knob
     raw_drift_outlier_sigma: 5.0  # or null to disable
@@ -309,9 +322,8 @@ caches verify requires.
 Removed keys (`apply_hybrid_exact`, `l4b_policy`, `require_l4b_cache`, `hybrid_R`
 on downsample) are **rejected at parse** — use the shape above.
 
-Set `geometry_mode` under **both** `wcs_grouping` and `downsample`. The
-downsample dataclass default is `field`, but an explicit mismatch with
-`wcs_grouping` is confusing — keep them aligned.
+Set `geometry_mode: field` on `stages.downsample` (default). Linear opt-out
+requires `geometry_mode: linear` on the same key.
 
 ---
 
@@ -386,13 +398,16 @@ as pure `exact_cache_l4a/` (+ `exact_cache_l4b/` for F2).
 
 ## Diff and star
 
-1. `bind` writes `event_job.json` / `frames.csv` with `geometry_mode: field` and
-   per-frame `group_id` (from SCC group artifacts).
+1. `scc_bootstrap` (inside `diff` execute) reads `field_mode_assembly.json`
+   schema v3 + `mapping_grid`, writes `bookkeeping/diff/{frames.csv,diff_job.json}`,
+   and sets per-frame `group_id` from SCC group artifacts.
 2. Diff resolves the SCC templates store via `data_root` + SCC identity.
 3. Hotpants / shared mask / kernel engines call the field template loader, which
-   assembles flux (and optionally count) for the frame’s `group_id`, then crops
-   to the event ROI.
-4. Star consumes the same field-assembled templates when the event is field mode.
+   assembles flux (and optionally count) for the frame’s `group_id` on the full
+   science grid (pad/trim at bottom edge for Hotpants).
+4. Diff products are written SCC-primary under `diff_{lane}/`; event photometry
+   (when using `--targets`) may additionally materialize under `events/.../ws/`.
+5. Star consumes field-assembled templates from the SCC diff lane when available.
 
 Do not parse field products with the linear `dx/dy` filename regex.
 

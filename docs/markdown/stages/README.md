@@ -10,7 +10,7 @@ These documents describe the **science algorithms** behind each template pipelin
 | [Oversampled templates + Hotpants stamp modes](../oversampled_templates.md) | `mapping` / `templates` / `diff` / `star` | — | `template_coverage.py`, `hotpants.py`, `kernel.py`, `star/*` |
 | [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
 | [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
-| [WCS grouping](wcs_grouping.md) | `wcs_grouping` | — | `template_creation/orchestration/handoff.py` + `common/wcs_grouping.py` |
+| [WCS grouping](wcs_grouping.md) | Linear-mode drift algorithms (reference) | — | `common/wcs_grouping.py` |
 | [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
 | [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
 | [Multi-offset downsample](downsample_technical.md) | `templates` (linear `geometry_mode`) | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
@@ -34,11 +34,11 @@ Key points:
 
 ## TESS FFI download (runner-only)
 
-There is no legacy `syndiff/` script — **`tess_ffi_download`** fetches sector FFI FITS via `common/download.py` before WCS grouping.
+There is no legacy `syndiff/` script — **`tess_ffi_download`** fetches sector FFI FITS via `common/download.py` before mapping.
 
-## WCS grouping (runner-only)
+## WCS drift (field vs linear)
 
-There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the SynDiff template runner. See the [WCS grouping deep-dive](wcs_grouping.md) for drift measurement, smoothing, reference-FFI selection, template groups, crop bounds, and output schemas. Downsample reads crop bounds and offset list from `cluster_template_job.json`.
+Field mode measures drift at every skycell center during **`remap`** (see [field_geometry.md](../field_geometry.md)). Linear mode uses target-anchored grouping algorithms documented in [WCS grouping](wcs_grouping.md). Diff field mode uses **`scc_bootstrap`** inside `diff` execute — not a separate scheduler stage.
 
 ## Diff imaging
 
@@ -63,14 +63,14 @@ There is no legacy `syndiff/` script — **`wcs_grouping`** was added for the Sy
 ## Typical data flow
 
 ```text
-tess_ffi_download          →  FFI FITS on disk ({data_root}/tess_ffi/)
-wcs_grouping               →  {workspace_root}/events/{target_label}/cluster_template_job.json
-mapping (PanCAKES)         →  data_root/skycell_pixel_mapping/sector_*/camera_*/ccd_*/tess_s*_master_skycells_list.csv
-ps1_download               →  data_root/ps1_skycells_zarr/ps1_skycells.zarr
-ps1_process                →  data_root/convolved_results/sector_*_camera_*_ccd_*.zarr
-downsample                 →  data_root/shifted_downsampled/.../syndiff_template_*.fits.fz
-diff                       →  {workspace_root}/events/{target_label}/ws/{workspace_label}/
-star (after diff verify)   →  {workspace_root}/events/{target_label}/star[_run_id]/{gaia_source_id}/
+tess_ffi_download          →  FFI FITS ({data_root}/s{SSSS}/c{C}/k{K}/ffi/)
+mapping (PanCAKES)         →  {data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/
+remap (field mode)         →  {data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/
+ps1_download               →  {data_root}/ps1_skycells_zarr/ps1_skycells.zarr
+ps1_process                →  {data_root}/s{SSSS}/c{C}/k{K}/convolved.zarr
+downsample                 →  {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/
+diff (scc_bootstrap)       →  {data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/ + bookkeeping/diff/
+star (after diff verify)   →  {workspace_root}/events/{target_label}/ws/host_star/
 ```
 
 ## Provenance

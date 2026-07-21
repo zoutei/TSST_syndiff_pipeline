@@ -26,9 +26,11 @@ Hotpants.
 4. **PS1 process** (`ps1_process`) — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
 5. **Templates** (`templates`; legacy config key/alias: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
 
-### Event binding (`syndiff diff submit --targets targets.csv --stages bind,diff`)
+### Field-mode difference imaging (`syndiff diff submit --scc sccs.csv`)
 
-The first diff-DAG stage, **`bind`**, measures the transient's per-frame WCS and pixel drift and writes the event handoff (`event_job.json` + `frames.csv`) under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`. **Important**: the bare `syndiff diff submit --targets ...` (no `--stages`) selects only `diff`, not `bind` — pass `--stages bind,diff` explicitly the first time you diff a new event. See [`docs/markdown/template_pipeline.md`](docs/markdown/template_pipeline.md#overview).
+After templates exist (with `MAPGRID=2` and `field_mode_assembly.json` schema v3), **`diff`** runs `scc_bootstrap` inside execute: it reads the SCC template sidecar + `mapping_grid`, writes `bookkeeping/diff/{frames.csv,diff_job.json}`, and subtracts on the full science grid. Products land SCC-primary under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`. See [`docs/markdown/field_geometry.md`](docs/markdown/field_geometry.md).
+
+For per-event forced photometry under `events/{name}/ws/`, use `syndiff diff submit --targets targets.csv` instead (`--scc` and `--targets` are mutually exclusive).
 
 ### Difference imaging (templates + FFIs → light curves)
 
@@ -46,7 +48,7 @@ Optional steps you can add to the `pipeline:` list:
 - **Background removal** — the unified `background` stage composes spatial, temporal, and strap corrections before optional `subtract`.
 - **Second round of differencing** — run Hotpants again on background-subtracted science images for cleaner residuals (see commented blocks in [`config/diff_config.yaml`](config/diff_config.yaml) and [`config/example/diff_config_c_second_hotpants.yaml`](config/example/diff_config_c_second_hotpants.yaml)).
 
-Run template building with `syndiff template submit --scc sccs.csv`, then diff imaging (once templates exist) with `syndiff diff submit --targets targets.csv --stages bind,diff`.
+Run template building with `syndiff template submit --scc sccs.csv`, then field-mode diff with `syndiff diff submit --scc sccs.csv` (or event photometry with `--targets`).
 
 ---
 
@@ -98,11 +100,12 @@ The **`syndiff`** CLI orchestrates the full workflow behind one supervisor daemo
 
 ```text
 syndiff template submit --scc sccs.csv                   # template stages only
-syndiff diff submit --targets t.csv --stages bind,diff   # bind (event WCS) + diff
+syndiff diff submit --scc sccs.csv                       # field-mode subtract (default --stages diff)
+syndiff diff submit --targets t.csv                      # event photometry under events/{name}/ws/
 syndiff progress                                          # monitoring works the same for any run
 ```
 
-Foreground debugging: `syndiff diff run --site config --targets t.csv --target-name 2020ut` (optional `--validate-only`) — this path never runs `bind`; the event's handoff must already exist.
+Foreground debugging: `syndiff diff run --site config --scc sccs.csv` for SCC-only, or `--targets t.csv --target-name 2020ut` for one event.
 
 | | Foreground (`syndiff diff run`) | Supervised (`syndiff * submit`) |
 |---|--------------------------------|----------------------------------|
@@ -143,11 +146,11 @@ syndiff template submit \
 syndiff progress
 syndiff status --watch
 
-# once templates exist, bind + diff the event
+# once templates exist, run field-mode diff on the SCC
 syndiff diff submit \
   --site config \
-  --targets config/targets_example.csv \
-  --stages bind,diff \
+  --config config/diff_config_single_kernel.yaml \
+  --scc config/scc_example.csv \
   --run-id diff_batch_no5
 
 syndiff retry --deployment config/deployment.yaml --run-id diff_batch_no5 \
@@ -158,7 +161,7 @@ syndiff retry --deployment config/deployment.yaml --run-id diff_batch_no5 \
 
 | Pattern | Examples |
 |---------|----------|
-| **Execute** | `syndiff template submit`, `syndiff diff submit --stages bind,diff`, `syndiff diff run --target-name …`, `syndiff star submit` |
+| **Execute** | `syndiff template submit`, `syndiff diff submit --scc` or `--targets`, `syndiff diff run`, `syndiff star submit` |
 | **Monitor** | `syndiff progress`, `syndiff status --watch`, `syndiff logs`, `syndiff tail` |
 | **Control** | `syndiff retry`, `syndiff pause`, `syndiff resume`, `syndiff kill` |
 | **Workspace** | `syndiff runs`, `syndiff active`, `syndiff daemon status`, `syndiff verify` |
@@ -171,8 +174,8 @@ After PS1 templates exist, the orchestrator **`diff`** stage runs a YAML-ordered
 diff policy (`shared_mask`, `hotpants`, `epsf`, `background`,
 `forced_photometry`, …). Foreground `--site config` uses
 [`config/diff_config.yaml`](config/diff_config.yaml); supervised submit uses
-the `diff_config:` path selected by `pipeline.yaml`. The event handoff
-(`event_job.json`, `frames.csv`) comes from the **`bind`** stage; templates
+the `diff_config:` path selected by `pipeline.yaml`. Field-mode diff uses
+`scc_bootstrap` for geometry (`bookkeeping/diff/diff_job.json`); templates
 are resolved directly from the SCC's shared store
 (`{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`) — there is
 no `ws/templates` symlink.

@@ -94,7 +94,7 @@ flowchart LR
 flowchart TD
   map["mapping F<br/>oversampling_F/ master + regmaps"]
   tmpl["templates F<br/>linear FITS or field store"]
-  bind["bind<br/>native crop + frames"]
+  bootstrap["scc_bootstrap<br/>SCC frames + mapping_grid"]
   diff["diff<br/>OS crop + Hotpants"]
   star["star<br/>same F"]
 
@@ -102,7 +102,7 @@ flowchart TD
   map --> star
   tmpl --> diff
   tmpl --> star
-  bind --> diff
+  bootstrap --> diff
   diff --> star
 ```
 

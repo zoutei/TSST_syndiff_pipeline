@@ -10,4 +10,5 @@ deployment.yaml
 config/example/
 scripts/
 dev/
+doc/
 docs/_build/
