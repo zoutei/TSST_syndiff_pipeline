@@ -910,6 +910,58 @@ def find_relevant_skycells(skycell_wcs_df, tess_wcs, data_shape, tess_buffer=150
     return skycell_wcs_df[sc_mask].reset_index(drop=True)
 
 
+def find_relevant_skycells_for_grid(
+    skycell_wcs_df,
+    tess_wcs,
+    grid,
+    tess_buffer=150,
+):
+    """
+    Find skycells overlapping a MappingGrid footprint (FFI coordinates + buffer).
+
+    Parameters
+    ----------
+    grid : MappingGrid
+        Canonical SCC mapping grid (science + bottom pad rows).
+    """
+    from syndiff_pipeline.common.mapping_grid import MappingGrid
+
+    if not isinstance(grid, MappingGrid):
+        raise TypeError(f"grid must be MappingGrid, got {type(grid)!r}")
+    x_lo, x_hi = int(grid.ffi_xmin), int(grid.ffi_xmax)
+    y_lo, y_hi = int(grid.ffi_ymin), int(grid.ffi_ymax)
+    tess_ffi_corner = tess_wcs.all_pix2world(
+        np.array(
+            [
+                [x_lo - tess_buffer, y_lo],
+                [x_lo - tess_buffer, y_hi],
+                [x_lo, y_hi + tess_buffer],
+                [x_hi, y_hi + tess_buffer],
+                [x_hi + tess_buffer, y_hi],
+                [x_hi + tess_buffer, y_lo],
+                [x_hi, y_lo - tess_buffer],
+                [x_lo, y_lo - tess_buffer],
+            ]
+        ),
+        0,
+    )
+
+    footprint_ra = normalize_ra_degrees(tess_ffi_corner[:, 0])
+    ra_shift = moc_ra_shift_degrees(float(np.median(footprint_ra)))
+    footprint_ra = shift_ras_for_moc(footprint_ra, ra_shift)
+    tess_ffi_skycoord = SkyCoord(
+        ra=footprint_ra * u.deg, dec=tess_ffi_corner[:, 1] * u.deg, frame="icrs"
+    )
+
+    tess_ffi_moc = MOC.from_polygon_skycoord(tess_ffi_skycoord, complement=False, max_depth=21)
+    skycell_ra = shift_ras_for_moc(skycell_wcs_df["RA"].values, ra_shift)
+    sc_mask = tess_ffi_moc.contains_lonlat(
+        skycell_ra * u.degree, skycell_wcs_df["DEC"].values * u.degree
+    )
+
+    return skycell_wcs_df[sc_mask].reset_index(drop=True)
+
+
 def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, complete_wcs_skycells, edge_buffer_large=410, edge_buffer_small=70, buffer=200, n_threads=8):
     """
     Create optimized mapping from TESS pixels to skycells.
@@ -1241,7 +1293,20 @@ def finalize_master_skycells_csv(output_path, sector, camera_id, ccd_id, oversam
     return final_csv
 
 
-def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_name, tess_header, data_shape, output_path, sector, camera_id, ccd_id, overwrite=True, oversampling_factor=1):
+def save_master_mapping(
+    tess_pix_skycell_mapping,
+    selected_skycells,
+    ffi_file_name,
+    tess_header,
+    data_shape,
+    output_path,
+    sector,
+    camera_id,
+    ccd_id,
+    overwrite=True,
+    oversampling_factor=1,
+    mapping_grid=None,
+):
     """
     Save master TESS-to-skycell mapping file.
 
@@ -1277,13 +1342,27 @@ def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_na
     # Create header
     master_header = create_master_fits_header(tess_header, ffi_file_name)
     master_header["DATE-MOD"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S.%f")
-    
+
+    if mapping_grid is not None:
+        for key, val in mapping_grid.to_fits_header_updates().items():
+            master_header[key] = (val, f"MappingGrid v2 ({key})")
+        map_shape = (
+            mapping_grid.array_shape_os()
+            if oversampling_factor > 1
+            else mapping_grid.array_shape_native()
+        )
+    else:
+        map_shape = tuple(data_shape)
+
     # Add oversampling info to header
     if oversampling_factor > 1:
         master_header["OVERSAMP"] = (oversampling_factor, "Oversampling factor (NxN sub-pixels per TESS pixel)")
-        master_header["OSAMPRES"] = (f"{data_shape[0] * oversampling_factor}x{data_shape[1] * oversampling_factor}", "Effective oversampled resolution")
-        master_header["NAXIS1"] = data_shape[1] * oversampling_factor
-        master_header["NAXIS2"] = data_shape[0] * oversampling_factor
+        master_header["OSAMPRES"] = (
+            f"{map_shape[0]}x{map_shape[1]}",
+            "Effective oversampled mapping grid resolution",
+        )
+        master_header["NAXIS1"] = map_shape[1]
+        master_header["NAXIS2"] = map_shape[0]
 
     # Create FITS file
     file_path = os.path.join(base_path, file_name)
@@ -1291,10 +1370,9 @@ def save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_na
 
     # Reshape mapping to 2D with oversampling dimensions
     if oversampling_factor > 1:
-        oversampled_shape = (data_shape[0] * oversampling_factor, data_shape[1] * oversampling_factor)
-        mapping_2d = tess_pix_skycell_mapping.reshape(oversampled_shape)
+        mapping_2d = tess_pix_skycell_mapping.reshape(map_shape)
     else:
-        mapping_2d = tess_pix_skycell_mapping.reshape(data_shape)
+        mapping_2d = tess_pix_skycell_mapping.reshape(map_shape)
     image_hdu = fits.ImageHDU(data=np.int16(mapping_2d), header=master_header)
 
     # Create skycell table
@@ -1831,7 +1909,28 @@ def download_gaia_catalog_for_tess_file(
 # ============================================================================
 
 
-def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_distance=480, edge_exclusion=10, edge_buffer_large=410, edge_buffer_small=70, buffer=200, tess_buffer=150, n_threads=8, overwrite=True, max_workers=None, oversampling_factor=1):
+def process_tess_image_optimized(
+    tess_file,
+    skycell_wcs_csv,
+    output_path,
+    pad_distance=480,
+    edge_exclusion=10,
+    edge_buffer_large=410,
+    edge_buffer_small=70,
+    buffer=200,
+    tess_buffer=150,
+    n_threads=8,
+    overwrite=True,
+    max_workers=None,
+    oversampling_factor=1,
+    *,
+    x_left_dead=44,
+    x_right_dead=44,
+    y_edge_strip=30,
+    template_conv_pad_spare_px=4,
+    sci_fwhm=1.88,
+    mapping_grid=None,
+):
     """
     Main optimized pipeline for processing TESS images with PanSTARRS1 skycells.
 
@@ -1878,6 +1977,34 @@ def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_di
         output_path, sector, camera_id, ccd_id, overwrite, oversampling_factor
     )
 
+    from syndiff_pipeline.common.mapping_grid import (
+        MappingGrid,
+        compute_conv_pad_native,
+        compute_rkernel,
+        create_coords_for_grid,
+    )
+
+    ffi_ny, ffi_nx = int(data_shape[0]), int(data_shape[1])
+    if mapping_grid is None:
+        rkernel = compute_rkernel(sci_fwhm)
+        conv_pad = compute_conv_pad_native(
+            rkernel, template_conv_pad_spare_px=template_conv_pad_spare_px
+        )
+        mapping_grid = MappingGrid.from_ffi_shape(
+            ffi_nx,
+            ffi_ny,
+            x_left_dead=x_left_dead,
+            x_right_dead=x_right_dead,
+            y_edge_strip=y_edge_strip,
+            conv_pad_native=conv_pad,
+            oversampling=oversampling_factor,
+        )
+
+    if oversampling_factor > 1:
+        map_shape = mapping_grid.array_shape_os()
+    else:
+        map_shape = mapping_grid.array_shape_native()
+
     skycell_wcs_df = pd.read_csv(skycell_wcs_csv)
 
     # Calculate skycell centers if not present
@@ -1892,11 +2019,20 @@ def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_di
         print(f"Creating oversampled TESS pixel coordinate arrays ({oversampling_factor}x{oversampling_factor})...")
     else:
         print("Creating TESS pixel coordinate arrays...")
-    tpix_coord_input, ravelled_index = create_tess_pixel_coordinates(data_shape, oversampling_factor)
+    tpix_coord_input, ravelled_index = create_coords_for_grid(
+        mapping_grid, oversampling_factor
+    )
+    from syndiff_pipeline.common.coordinate_preflight import assert_wcs_uses_ffi_coords
+
+    assert_wcs_uses_ffi_coords(
+        tpix_coord_input, mapping_grid, oversampling_factor=oversampling_factor
+    )
 
     # Find relevant skycells
     print("Finding relevant skycells using MOC filtering...")
-    complete_wcs_skycells = find_relevant_skycells(skycell_wcs_df, tess_wcs, data_shape, tess_buffer)
+    complete_wcs_skycells = find_relevant_skycells_for_grid(
+        skycell_wcs_df, tess_wcs, mapping_grid, tess_buffer
+    )
 
     if len(complete_wcs_skycells) == 0:
         print("No relevant skycells found!")
@@ -1906,7 +2042,16 @@ def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_di
 
     # Create TESS-to-skycell mapping
     print("Creating optimized TESS-to-skycell mapping...")
-    selected_skycells, tess_pix_skycell_mapping = process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, complete_wcs_skycells, edge_buffer_large=edge_buffer_large, edge_buffer_small=edge_buffer_small, buffer=buffer, n_threads=n_threads)
+    selected_skycells, tess_pix_skycell_mapping = process_tess_to_skycell_mapping(
+        tess_wcs,
+        map_shape,
+        tpix_coord_input,
+        complete_wcs_skycells,
+        edge_buffer_large=edge_buffer_large,
+        edge_buffer_small=edge_buffer_small,
+        buffer=buffer,
+        n_threads=n_threads,
+    )
 
     if np.any(tess_pix_skycell_mapping == -1):
         print("Warning: Some TESS pixels are not mapped to any skycell. This may affect the results.")
@@ -1914,7 +2059,20 @@ def process_tess_image_optimized(tess_file, skycell_wcs_csv, output_path, pad_di
     # Save master mapping
     print("Saving master TESS-to-skycell mapping...")
     ffi_file_name = os.path.basename(tess_file)
-    save_master_mapping(tess_pix_skycell_mapping, selected_skycells, ffi_file_name, tess_header, data_shape, output_path, sector, camera_id, ccd_id, overwrite, oversampling_factor)
+    save_master_mapping(
+        tess_pix_skycell_mapping,
+        selected_skycells,
+        ffi_file_name,
+        tess_header,
+        map_shape,
+        output_path,
+        sector,
+        camera_id,
+        ccd_id,
+        overwrite,
+        oversampling_factor,
+        mapping_grid=mapping_grid,
+    )
     print(f"Processing time: {(time.time() - start_time):.2f} seconds")
 
     # Process each skycell
