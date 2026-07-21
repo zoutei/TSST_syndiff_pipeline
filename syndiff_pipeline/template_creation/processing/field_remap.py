@@ -1047,6 +1047,7 @@ def _l4b_rim_one_epoch(
     """Write or skip one L4b rim NPZ; border tess ids are provided by the batch."""
     from syndiff_pipeline.template_creation.processing.field_abutting import (
         l4b_rim_path,
+        write_l4b_rim_cache,
     )
 
     exact_l4b_dir = Path(_REMAP_WORKER["exact_l4b_dir"])
@@ -1083,19 +1084,22 @@ def _l4b_rim_one_epoch(
             else np.array([], dtype=np.int32)
         )
 
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(
+        # Sparse (v2) layout + atomic replace. Rim caches are ~1% valid, so the
+        # dense form spent ~315 MB of decompression per read at L5; it also
+        # wrote straight to the final path, which could leave a truncated NPZ
+        # that a later is_file() skip check would treat as complete.
+        write_l4b_rim_cache(
             cache_path,
-            exact_tid_lo=exact_tid_lo.astype(np.int32),
-            exact_tid_hi=exact_tid_hi.astype(np.int32),
-            id_lo=np.int32(id_lo),
-            id_hi=np.int32(id_hi),
-            sx_lo=np.int16(sx_lo),
-            sy_lo=np.int16(sy_lo),
-            sx_hi=np.int16(sx_hi),
-            sy_hi=np.int16(sy_hi),
-            pair_epoch_id=np.int32(pair_epoch_id),
-            rep_frame_index=np.int32(frame_i),
+            exact_tid_lo=exact_tid_lo,
+            exact_tid_hi=exact_tid_hi,
+            id_lo=int(id_lo),
+            id_hi=int(id_hi),
+            sx_lo=int(sx_lo),
+            sy_lo=int(sy_lo),
+            sx_hi=int(sx_hi),
+            sy_hi=int(sy_hi),
+            pair_epoch_id=int(pair_epoch_id),
+            rep_frame_index=frame_i,
         )
         return "write"
     except Exception as exc:
@@ -1228,6 +1232,7 @@ def _stage_remap_regmaps_to_scratch(
     ccd: int,
     oversampling_factor: int,
     skycells: set[str],
+    stage_regmaps_to_scratch: bool | None = None,
 ) -> tuple[dict[str, str], int, float]:
     """Copy unique skycell regmaps to local scratch; return skycell→path map."""
     from syndiff_pipeline.template_creation.processing.downsample import (
@@ -1235,7 +1240,7 @@ def _stage_remap_regmaps_to_scratch(
         stage_regmap_files_to_scratch,
     )
 
-    if not skycells or not resolve_stage_regmaps_to_scratch(None):
+    if not skycells or not resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch):
         return {}, 0, 0.0
 
     sky_reg: list[tuple[str, str]] = []
@@ -1570,6 +1575,7 @@ def run_field_remap_scc(
     n_jobs: int = 1,
     progress_path: str | Path | None = None,
     raw_drift_outlier_sigma: float | None = 5.0,
+    stage_regmaps_to_scratch: bool | None = None,
 ) -> dict[str, Any]:
     """Build or reuse SCC remap artifacts (L2–L4).
 
@@ -1657,7 +1663,7 @@ def run_field_remap_scc(
     idx_to_name = {int(v): str(k) for k, v in name_to_id.items()}
     pair_ids = abutting_undirected_pairs(master)
     col_of_name = build_col_of_name(schedule.skycell_names)
-    pair_idx = pair_column_indices(
+    pair_ids, pair_idx = pair_column_indices(
         pair_ids,
         name_to_id=name_to_id,
         col_of_name=col_of_name,
@@ -1748,6 +1754,7 @@ def run_field_remap_scc(
             ccd=ccd,
             oversampling_factor=oversampling_factor,
             skycells=skycells_for_stage,
+            stage_regmaps_to_scratch=stage_regmaps_to_scratch,
         )
 
     if run_intra:

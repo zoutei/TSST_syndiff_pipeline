@@ -152,14 +152,39 @@ def test_pair_column_indices_and_name_helpers():
     idx_to_name = {v: k for k, v in name_to_id.items()}
 
     pair_ids = np.array([[0, 1]], dtype=np.int32)
-    cols = pair_column_indices(
+    kept_ids, cols = pair_column_indices(
         pair_ids,
         name_to_id=name_to_id,
         col_of_name=col_of_name,
         idx_to_name=idx_to_name,
     )
     assert cols.shape == (1, 2)
+    assert kept_ids.shape == (1, 2)
+    assert tuple(kept_ids[0]) == (0, 1)
     # schedule column for skycell.0.0 is 1, for skycell.1.0 is 0
+    assert tuple(cols[0]) == (1, 0)
+
+
+def test_pair_column_indices_drops_pairs_missing_from_schedule():
+    """Endpoints absent from the schedule are dropped from both outputs, row-aligned."""
+    master_names = ["skycell.0.0", "skycell.1.0", "skycell.2.0"]
+    name_to_id = build_name_to_id(master_names)
+    idx_to_name = {v: k for k, v in name_to_id.items()}
+    # Only skycell.0.0 and skycell.1.0 made it into the shift schedule;
+    # skycell.2.0 (id 2) did not (e.g. filtered out upstream).
+    col_of_name = build_col_of_name(["skycell.1.0", "skycell.0.0"])
+
+    pair_ids = np.array([[0, 1], [1, 2]], dtype=np.int32)
+    kept_ids, cols = pair_column_indices(
+        pair_ids,
+        name_to_id=name_to_id,
+        col_of_name=col_of_name,
+        idx_to_name=idx_to_name,
+    )
+    # Only the (0, 1) pair survives; (1, 2) is dropped from both arrays.
+    assert kept_ids.shape == (1, 2)
+    assert cols.shape == (1, 2)
+    assert tuple(kept_ids[0]) == (0, 1)
     assert tuple(cols[0]) == (1, 0)
 
 

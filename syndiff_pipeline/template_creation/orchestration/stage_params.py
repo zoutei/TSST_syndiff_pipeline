@@ -89,9 +89,11 @@ REMAP_ALLOWED = frozenset(
         "rebuild_inter_skycell_cache",
         "raw_drift_outlier_sigma",
         "n_jobs",
+        "stage_regmaps_to_scratch",
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
+        "condor_request_disk",
         "condor_requirements",
         "condor_rank",
         "store_name",
@@ -274,9 +276,13 @@ class RemapStageParams:
     rebuild_remap_cache: bool = False
     rebuild_inter_skycell_cache: bool = False
     n_jobs: int = 16
+    # None → auto-enable under Condor (see resolve_stage_regmaps_to_scratch);
+    # set false when os4+ regmaps exceed the execute host's local scratch disk.
+    stage_regmaps_to_scratch: bool | None = None
     executor: str = "condor"
     condor_request_cpus: int = 32
     condor_request_memory: int = 128_000
+    condor_request_disk: int | None = None  # MB; None → omit request_disk
     condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
     condor_rank: str | None = "-LoadAvg"
     # Named remap lane → remap_{store_name}/; None → remap/
