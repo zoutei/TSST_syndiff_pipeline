@@ -114,3 +114,43 @@ def test_ensure_orbit_times_redownloads_when_sector_missing(tmp_path):
 
 def test_orbit_times_url_default_constant():
     assert DEFAULT_TESS_ORBIT_TIMES_URL.endswith("TESS_orbit_times.csv")
+
+
+def test_ffi_fov_uses_science_bounds_from_crop(monkeypatch):
+    """FOV corners must follow science_bounds_1based(crop_bounds), not hardcoded SCI_*."""
+    from types import SimpleNamespace
+    import sys
+    import types
+
+    import numpy as np
+
+    from syndiff_pipeline.difference_imaging.masking import asteroid_discover as ad
+
+    calls: list[tuple[np.ndarray, np.ndarray]] = []
+
+    class _FakeSky:
+        def separation(self, other):
+            return SimpleNamespace(deg=np.array([1.0, 1.0, 1.0, 1.0]))
+
+    class _FakeWCS:
+        @staticmethod
+        def from_sector(sector, camera, ccd):
+            return _FakeWCS()
+
+        def pixel_to_world(self, cols, rows):
+            calls.append(
+                (np.asarray(cols, dtype=float), np.asarray(rows, dtype=float))
+            )
+            return _FakeSky()
+
+    fake_tesswcs = types.ModuleType("tesswcs")
+    fake_tesswcs.WCS = _FakeWCS
+    monkeypatch.setitem(sys.modules, "tesswcs", fake_tesswcs)
+
+    crop = {"x_min": 44, "x_max": 2004, "y_min": 0, "y_max": 2018}
+    ad.ffi_fov_center_hwidth(20, 1, 1, crop_bounds=crop)
+    assert len(calls) >= 1
+    cols, rows = calls[0]
+    # 1-based inclusive → 0-based: col 45..2004 → 44..2003; row 1..2018 → 0..2017
+    np.testing.assert_allclose(cols, [44.0, 2003.0, 2003.0, 44.0])
+    np.testing.assert_allclose(rows, [0.0, 0.0, 2017.0, 2017.0])

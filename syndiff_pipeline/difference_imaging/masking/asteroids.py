@@ -9,6 +9,7 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from syndiff_pipeline.difference_imaging.masking.bounds import science_bounds_1based
 from syndiff_pipeline.difference_imaging.masking.geometry import load_geometry, radius_from_mag
 from syndiff_pipeline.difference_imaging.masking.settings import default_asteroid_intervals_dir
 
@@ -20,8 +21,6 @@ ASTEROID_FFI_TIMES_BASENAME = "asteroid_ffi_times.parquet"
 # Woods et al. 2021 / tess-asteroids; also in packaged mask_geometry.yaml
 V_TO_T = 0.671
 
-SCI_ROW_LO, SCI_ROW_HI = 1, 2048
-SCI_COL_LO, SCI_COL_HI = 45, 2092
 FFI_NROWS, FFI_NCOLS = 2048, 2136
 
 
@@ -43,7 +42,12 @@ def sector_ffi_cadence_hours(sector: int) -> float:
     return 0.5 if int(sector) < 27 else 10.0 / 60.0
 
 
-def _circle_pixels(col: float, row: float, radius: int) -> tuple[np.ndarray, np.ndarray]:
+def _circle_pixels(
+    col: float,
+    row: float,
+    radius: int,
+    bounds: dict[str, int],
+) -> tuple[np.ndarray, np.ndarray]:
     """1-based integer pixel centers inside circle."""
     r = int(max(radius, 0))
     c0 = int(np.floor(col))
@@ -56,21 +60,28 @@ def _circle_pixels(col: float, row: float, radius: int) -> tuple[np.ndarray, np.
     rows = yy[m]
     cols = xx[m]
     ok = (
-        (rows >= SCI_ROW_LO)
-        & (rows <= SCI_ROW_HI)
-        & (cols >= SCI_COL_LO)
-        & (cols <= SCI_COL_HI)
+        (rows >= bounds["row_lo"])
+        & (rows <= bounds["row_hi"])
+        & (cols >= bounds["col_lo"])
+        & (cols <= bounds["col_hi"])
     )
     return rows[ok], cols[ok]
 
 
-def rasterize_track_to_visits(track: pd.DataFrame) -> pd.DataFrame:
+def rasterize_track_to_visits(
+    track: pd.DataFrame,
+    *,
+    crop_bounds: dict | None = None,
+) -> pd.DataFrame:
+    bounds = science_bounds_1based(crop_bounds)
     records_r: list = []
     records_c: list = []
     records_cad: list = []
     for _, row in track.iterrows():
         rad = int(row.get("radius_px", 2))
-        pr, pc = _circle_pixels(float(row["column"]), float(row["row"]), rad)
+        pr, pc = _circle_pixels(
+            float(row["column"]), float(row["row"]), rad, bounds
+        )
         if len(pr) == 0:
             continue
         cad = int(row["cadence"])
@@ -125,14 +136,18 @@ def visits_to_intervals(visits: pd.DataFrame, target_id: str) -> pd.DataFrame:
     return pd.DataFrame(intervals)
 
 
-def build_pixel_intervals(tracks: pd.DataFrame) -> pd.DataFrame:
+def build_pixel_intervals(
+    tracks: pd.DataFrame,
+    *,
+    crop_bounds: dict | None = None,
+) -> pd.DataFrame:
     if tracks.empty:
         return pd.DataFrame(
             columns=["target_id", "row", "col", "cadence_lo", "cadence_hi"]
         )
     parts: list[pd.DataFrame] = []
     for tid, g in tracks.groupby("target_id"):
-        visits = rasterize_track_to_visits(g)
+        visits = rasterize_track_to_visits(g, crop_bounds=crop_bounds)
         parts.append(visits_to_intervals(visits, str(tid)))
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
@@ -304,6 +319,7 @@ def _load_or_discover_candidates(
     orbit_times_path: str | Path | None,
     orbit_times_url: str | None,
     run_discover: bool,
+    crop_bounds: dict | None = None,
 ) -> pd.DataFrame | None:
     """Load candidates.parquet/csv, or run sbident discover when enabled."""
     cand_parquet = intervals_dir / "candidates.parquet"
@@ -350,6 +366,7 @@ def _load_or_discover_candidates(
             orbit_times_url=orbit_times_url,
             out_dir=intervals_dir,
             cache_dir=intervals_dir / "sb_ident_cache",
+            crop_bounds=crop_bounds,
         )
     except Exception as exc:
         log.warning("Asteroid discover failed (%s); omit bit 128", exc)
@@ -368,6 +385,7 @@ def try_generate_asteroid_products(
     orbit_times_path: str | Path | None = None,
     orbit_times_url: str | None = None,
     run_discover: bool = True,
+    crop_bounds: dict | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """
     Attempt generate when tess-ephem / sbident deps present.
@@ -428,6 +446,7 @@ def try_generate_asteroid_products(
         orbit_times_path=orbit_times_path,
         orbit_times_url=orbit_times_url,
         run_discover=run_discover,
+        crop_bounds=crop_bounds,
     )
     if candidates is None:
         return None, None
@@ -503,7 +522,7 @@ def try_generate_asteroid_products(
         )
     else:
         tracks = pd.concat(pieces, ignore_index=True)
-        intervals = build_pixel_intervals(tracks)
+        intervals = build_pixel_intervals(tracks, crop_bounds=crop_bounds)
 
     intervals_dir.mkdir(parents=True, exist_ok=True)
     intervals.to_parquet(intervals_dir / PIXEL_INTERVALS_BASENAME, index=False)
@@ -530,6 +549,7 @@ def ensure_asteroid_products(
     orbit_times_path: str | Path | None = None,
     orbit_times_url: str | None = None,
     run_discover: bool = True,
+    crop_bounds: dict | None = None,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
     """
     Load SCC parquet; else try generate (sbident discover + tess-ephem tracks);
@@ -565,6 +585,7 @@ def ensure_asteroid_products(
             orbit_times_path=orbit_times_path,
             orbit_times_url=orbit_times_url,
             run_discover=run_discover,
+            crop_bounds=crop_bounds,
         )
     except Exception as exc:
         log.warning("Asteroid generate failed (%s); omit bit 128", exc)

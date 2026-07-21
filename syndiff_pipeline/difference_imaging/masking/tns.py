@@ -28,9 +28,6 @@ __all__ = [
     "load_or_build_transient_fixed",
 ]
 
-SCI_COL_LO, SCI_COL_HI = 45, 2092
-SCI_ROW_LO, SCI_ROW_HI = 1, 2048
-
 TRANSIENT_FIXED_BASENAME = "transient_fixed.parquet"
 
 # WIS TNS rejects bare urllib User-Agent; send a normal browser-like header.
@@ -102,8 +99,13 @@ def select_from_public_with_tesswcs(
     camera: int,
     ccd: int,
     public_csv: Path | str,
+    *,
+    crop_bounds: dict | None = None,
 ) -> pd.DataFrame:
     """Project TNS public catalog with tesswcs onto one chip."""
+    from syndiff_pipeline.difference_imaging.masking.bounds import science_bounds_1based
+
+    bounds = science_bounds_1based(crop_bounds)
     if not hasattr(np, "in1d"):
         np.in1d = np.isin  # type: ignore[attr-defined]
 
@@ -164,7 +166,8 @@ def select_from_public_with_tesswcs(
             row_1 = float(h[rcol])
             col_1 = float(h[ccol])
             if not (
-                SCI_COL_LO <= col_1 <= SCI_COL_HI and SCI_ROW_LO <= row_1 <= SCI_ROW_HI
+                bounds["col_lo"] <= col_1 <= bounds["col_hi"]
+                and bounds["row_lo"] <= row_1 <= bounds["row_hi"]
             ):
                 continue
             rows.append(
@@ -213,10 +216,15 @@ def build_transient_fixed(
     *,
     n_frames: int | None = None,
     scale: float = 1.0,
+    crop_bounds: dict | None = None,
 ) -> pd.DataFrame:
     """Build transient_fixed table (0-based full-FFI x,y) from TNS seeds."""
+    from syndiff_pipeline.difference_imaging.masking.bounds import science_bounds_1based
+
     if seeds.empty:
         return pd.DataFrame()
+
+    bounds = science_bounds_1based(crop_bounds)
 
     # Prefer refined coords if present; else tesspoint → 0-based; else project
     if "x" in seeds.columns and "y" in seeds.columns:
@@ -237,10 +245,10 @@ def build_transient_fixed(
     x1 = x + 1.0
     y1 = y + 1.0
     on = (
-        (x1 >= SCI_COL_LO)
-        & (x1 <= SCI_COL_HI)
-        & (y1 >= SCI_ROW_LO)
-        & (y1 <= SCI_ROW_HI)
+        (x1 >= bounds["col_lo"])
+        & (x1 <= bounds["col_hi"])
+        & (y1 >= bounds["row_lo"])
+        & (y1 <= bounds["row_hi"])
     )
 
     rows = []
@@ -312,6 +320,7 @@ def load_or_build_transient_fixed(
     public_csv: Path,
     scale: float = 1.0,
     force: bool = False,
+    crop_bounds: dict | None = None,
 ) -> pd.DataFrame:
     """Load ``ws/transient_fixed.parquet`` or build from public CSV + tesswcs."""
     ws_root = Path(ws_root)
@@ -319,11 +328,15 @@ def load_or_build_transient_fixed(
     if path.is_file() and not force:
         return pd.read_parquet(path)
     try:
-        seeds = select_from_public_with_tesswcs(sector, camera, ccd, public_csv)
+        seeds = select_from_public_with_tesswcs(
+            sector, camera, ccd, public_csv, crop_bounds=crop_bounds
+        )
     except Exception as exc:
         log.warning("TNS select failed (%s); continuing without bit 64", exc)
         return pd.DataFrame()
-    table = build_transient_fixed(seeds, sector, camera, ccd, scale=scale)
+    table = build_transient_fixed(
+        seeds, sector, camera, ccd, scale=scale, crop_bounds=crop_bounds
+    )
     if not table.empty:
         ws_root.mkdir(parents=True, exist_ok=True)
         table.to_parquet(path, index=False)

@@ -28,9 +28,6 @@ ORBIT_TIMES_BASENAME = "TESS_orbit_times.csv"
 
 FOV_PAD_DEG = 2.0
 VMAG_LIM = 20.0
-# Science array (1-based FFI convention) → 0-based for WCS
-SCI_COL0, SCI_COL1 = 44.0, 2091.0  # cols 45–2092
-SCI_ROW0, SCI_ROW1 = 0.0, 2047.0  # rows 1–2048
 EPOCH_FRACTIONS = (0.0, 0.25, 0.5, 0.75, 1.0)
 
 _NAME_NUM = re.compile(r"^(\d+)\s")
@@ -198,22 +195,37 @@ def ffi_fov_center_hwidth(
     camera: int,
     ccd: int,
     pad_deg: float = FOV_PAD_DEG,
+    *,
+    crop_bounds: dict | None = None,
 ):
-    """CCD sky center and isotropic half-width (deg) = FFI half-diagonal + pad."""
+    """CCD sky center and isotropic half-width (deg) = FFI half-diagonal + pad.
+
+    Science corners come from :func:`science_bounds_1based` (*crop_bounds* when
+    provided; otherwise legacy full-chip defaults), converted to 0-based pixels
+    for ``tesswcs`` ``pixel_to_world``.
+    """
+    from syndiff_pipeline.difference_imaging.masking.bounds import science_bounds_1based
+
     # NumPy ≥2.4 removed np.in1d; tesswcs still calls it.
     if not hasattr(np, "in1d"):
         np.in1d = np.isin  # type: ignore[attr-defined]
 
     from tesswcs import WCS
 
+    bounds = science_bounds_1based(crop_bounds)
+    col0 = float(bounds["col_lo"] - 1)
+    col1 = float(bounds["col_hi"] - 1)
+    row0 = float(bounds["row_lo"] - 1)
+    row1 = float(bounds["row_hi"] - 1)
+
     wcs = WCS.from_sector(sector, camera, ccd)
     corners = wcs.pixel_to_world(
-        np.array([SCI_COL0, SCI_COL1, SCI_COL1, SCI_COL0]),
-        np.array([SCI_ROW0, SCI_ROW0, SCI_ROW1, SCI_ROW1]),
+        np.array([col0, col1, col1, col0]),
+        np.array([row0, row0, row1, row1]),
     )
     center = wcs.pixel_to_world(
-        0.5 * (SCI_COL0 + SCI_COL1),
-        0.5 * (SCI_ROW0 + SCI_ROW1),
+        0.5 * (col0 + col1),
+        0.5 * (row0 + row1),
     )
     seps = center.separation(corners).deg
     r_ffi = float(np.max(seps))
@@ -375,6 +387,7 @@ def discover_candidates(
     orbit_times_url: str | None = None,
     cache_dir: str | Path | None = None,
     out_dir: str | Path | None = None,
+    crop_bounds: dict | None = None,
 ) -> pd.DataFrame:
     """
     Full discovery: multi-epoch SB Ident (TESS observer, padded FOV) → union →
@@ -388,7 +401,9 @@ def discover_candidates(
     if sector not in set(pointings["Sector"]):
         raise ValueError(f"Sector {sector} not in tesswcs.pointings")
 
-    center, hwidth = ffi_fov_center_hwidth(sector, camera, ccd, pad_deg=pad_deg)
+    center, hwidth = ffi_fov_center_hwidth(
+        sector, camera, ccd, pad_deg=pad_deg, crop_bounds=crop_bounds
+    )
     epochs = sample_epochs_for_sector(
         sector,
         data_root=data_root,

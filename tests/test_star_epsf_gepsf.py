@@ -86,6 +86,7 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
         ccd=2,
         baseline_workspace_dir=str(ws),
         baseline_diffs_label="hp_d",
+        baseline_diffs_dir=str(ws / "hp_d"),
         baseline_convolved_dir=str(ws / "hp_c"),
         baseline_phot_bkg_dir=str(ws / "ks_b_s"),
         baseline_phot_bkg_label="ks_b_s",
@@ -197,6 +198,9 @@ class TestStarEpsfRunner(unittest.TestCase):
                     with mock.patch(
                         "syndiff_pipeline.star.epsf_runner.workspace_has_gridded_epsf",
                         return_value=False,
+                    ), mock.patch(
+                        "syndiff_pipeline.star.epsf_runner.load_catalog_for_event",
+                        return_value=None,
                     ):
                         ensure_star_epsf_catalog(
                             ctx,
