@@ -20,6 +20,10 @@ from syndiff_pipeline.template_creation.orchestration.runner_config import (
     ResolvedTargetConfig,
     RunnerConfig,
 )
+from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+    CHECKPOINT_STAGES,
+    checkpoint_stage_indexed,
+)
 from syndiff_pipeline.template_creation.orchestration.verify import (
     copy_manifest_to_stable,
     stage_complete,
@@ -96,6 +100,18 @@ def _run_verify_task(task: VerifyTask) -> VerifyOutcome:
     -------
     VerifyOutcome"""
     try:
+        if (
+            task.runner_cfg is not None
+            and task.runner_cfg.bookkeeping_trust_index
+            and task.key.stage in CHECKPOINT_STAGES
+        ):
+            complete = checkpoint_stage_indexed(task.resolved, task.key.stage)
+            return VerifyOutcome(
+                key=task.key,
+                complete=complete,
+                stable_path=task.stable_path,
+                resolved=task.resolved,
+            )
         complete = stage_complete(
             task.resolved,
             task.key.stage,

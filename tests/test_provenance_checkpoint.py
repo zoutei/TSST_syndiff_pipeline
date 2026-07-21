@@ -27,8 +27,26 @@ from syndiff_pipeline.common.scc_paths import provenance_spool_dir, scc_convolve
 
 
 class _FakeMappingParams:
-    def __init__(self, oversampling_factor: int = 2) -> None:
+    def __init__(
+        self,
+        oversampling_factor: int = 2,
+        *,
+        x_left_dead: int = 44,
+        x_right_dead: int = 44,
+        y_edge_strip: int = 30,
+        template_conv_pad_spare_px: int = 4,
+        sci_fwhm: float = 1.88,
+        pad_distance: float = 0.0,
+        overwrite: bool = False,
+    ) -> None:
         self.oversampling_factor = oversampling_factor
+        self.x_left_dead = x_left_dead
+        self.x_right_dead = x_right_dead
+        self.y_edge_strip = y_edge_strip
+        self.template_conv_pad_spare_px = template_conv_pad_spare_px
+        self.sci_fwhm = sci_fwhm
+        self.pad_distance = pad_distance
+        self.overwrite = overwrite
 
 
 class _FakePs1ProcessParams:
@@ -40,12 +58,16 @@ class _FakePs1ProcessParams:
         enable_saturation_correction: bool = True,
         remove_saturated_stars: bool = True,
         bright_star_mag_threshold: float = 12.0,
+        use_shared_convolved_store: bool = False,
+        write_per_scc_convolved_zarr: bool = True,
     ) -> None:
         self.projections_limit = projections_limit
         self.psf_sigma = psf_sigma
         self.enable_saturation_correction = enable_saturation_correction
         self.remove_saturated_stars = remove_saturated_stars
         self.bright_star_mag_threshold = bright_star_mag_threshold
+        self.use_shared_convolved_store = use_shared_convolved_store
+        self.write_per_scc_convolved_zarr = write_per_scc_convolved_zarr
 
 
 class _FakeStages:
@@ -205,9 +227,20 @@ class TestEmitSccAssemblyCheckpoint(unittest.TestCase):
                 "enable_saturation_correction": True,
                 "remove_saturated_stars": True,
                 "bright_star_mag_threshold": 12.0,
+                "mapping_grid": {
+                    "x_left_dead": 44,
+                    "x_right_dead": 44,
+                    "y_edge_strip": 30,
+                    "conv_pad_native": 8,
+                    "oversampling_factor": 2,
+                },
             },
         )
-        self.assertEqual(record["inputs"], [])
+        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+            expected_mapping_fingerprint,
+        )
+
+        self.assertEqual(record["inputs"], [expected_mapping_fingerprint(resolved)])
         self.assertEqual(record["state"], "complete")
         self.assertEqual(
             record["location"],

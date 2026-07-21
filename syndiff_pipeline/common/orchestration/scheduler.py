@@ -926,20 +926,61 @@ def _apply_verify_outcome(state: pstate.PipelineState, outcome: VerifyOutcome) -
     return 0
 
 
-# Stage this PR's checkpoint-first verify short-circuit applies to (plan
-# §11/§19 PR3: perf win is scoped to ps1_process only -- mapping/remap/
-# downsample verifies are already cheap and untouched).
-_CHECKPOINT_FIRST_STAGE = "ps1_process"
+# Template stages with checkpoint-first verify short-circuit (plan §11).
+# Stage name -> expected-fingerprint helper in provenance_checkpoint.
+from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+    CHECKPOINT_STAGE_FINGERPRINTS,
+    CHECKPOINT_STAGES,
+)
+
+# Backward-compatible alias for tests and external references.
+_CHECKPOINT_STAGE_FINGERPRINTS = CHECKPOINT_STAGE_FINGERPRINTS
+
+_TRUST_INDEX_MISS_REMEDIATION = (
+    "run 'syndiff bookkeeping reindex', re-run the stage, or set "
+    "bookkeeping.trust_index to false"
+)
 
 
-def _ps1_process_checkpoint_hit(
+def _log_trust_index_checkpoint_miss(
+    stage: str,
+    run_id: str,
+    target_label: str,
+    *,
+    miss_reason: str | None,
+) -> None:
+    """Emit BK-8 audit WARNING when trust_index fail-closes on a checkpoint miss."""
+    if miss_reason == "store_unavailable":
+        log.warning(
+            "Provenance store unavailable for checkpoint verify on stage %s "
+            "(%s/%s) with bookkeeping.trust_index; fail-closed (no legacy scan). "
+            "Remediation: fix provenance.db access, or %s",
+            stage,
+            run_id,
+            target_label,
+            _TRUST_INDEX_MISS_REMEDIATION,
+        )
+    else:
+        log.warning(
+            "Checkpoint index miss for stage %s (%s/%s) with "
+            "bookkeeping.trust_index; fail-closed (no legacy scan). "
+            "Remediation: %s",
+            stage,
+            run_id,
+            target_label,
+            _TRUST_INDEX_MISS_REMEDIATION,
+        )
+
+
+def _checkpoint_hit(
+    stage: str,
     key: "VerifyTaskKey",
     resolved,
     stable_path: str,
-) -> "VerifyOutcome | None":
-    """Checkpoint-first fast path for ``ps1_process`` (plan §11, PR3).
+) -> tuple["VerifyOutcome | None", str | None]:
+    """Checkpoint-first fast path for template stages (plan §11).
 
-    Recomputes the ``scc_assembly`` fingerprint fresh from *resolved* (a pure
+    Recomputes the stage checkpoint fingerprint fresh from *resolved* (a pure
     function, no filesystem access -- config drift naturally yields a
     different fingerprint and therefore a miss) and checks it against the
     provenance store with one indexed query. On a HIT, returns a
@@ -953,34 +994,65 @@ def _ps1_process_checkpoint_hit(
     """
     from syndiff_pipeline.common.orchestration.verify_worker import VerifyOutcome
 
+    fingerprint_fn_name = CHECKPOINT_STAGE_FINGERPRINTS.get(stage)
+    if fingerprint_fn_name is None:
+        return None, None
+
     try:
         from syndiff_pipeline.common.provenance.store import ProvenanceStore
         from syndiff_pipeline.common.scc_paths import provenance_db_path
-        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
-            expected_scc_assembly_fingerprint,
+        from syndiff_pipeline.template_creation.orchestration import (
+            provenance_checkpoint,
         )
 
-        expected_fp = expected_scc_assembly_fingerprint(resolved)
-        store = ProvenanceStore(
-            str(provenance_db_path(resolved.data_root)), read_only=True
-        )
-        if not store.scc_stage_complete([expected_fp]):
-            return None
+        expected_fp_fn = getattr(provenance_checkpoint, fingerprint_fn_name)
+        expected_fp = expected_fp_fn(resolved)
     except Exception:
         log.debug(
-            "ps1_process checkpoint check unavailable for %s/%s (falling open"
-            " to legacy verify)",
+            "%s checkpoint check unavailable for %s/%s (falling open to legacy"
+            " verify)",
+            stage,
             key.run_id,
             key.target_label,
             exc_info=True,
         )
-        return None
+        return None, None
 
-    return VerifyOutcome(
-        key=key,
-        complete=True,
-        stable_path=stable_path,
-        resolved=resolved,
+    try:
+        store = ProvenanceStore(
+            str(provenance_db_path(resolved.data_root)), read_only=True
+        )
+    except Exception:
+        log.debug(
+            "%s provenance store open failed for %s/%s",
+            stage,
+            key.run_id,
+            key.target_label,
+            exc_info=True,
+        )
+        return None, "store_unavailable"
+
+    try:
+        if not store.scc_stage_complete([expected_fp]):
+            return None, "not_indexed"
+    except Exception:
+        log.debug(
+            "%s checkpoint index query failed for %s/%s",
+            stage,
+            key.run_id,
+            key.target_label,
+            exc_info=True,
+        )
+        return None, "store_unavailable"
+
+    return (
+        VerifyOutcome(
+            key=key,
+            complete=True,
+            stable_path=stable_path,
+            resolved=resolved,
+        ),
+        None,
     )
 
 
@@ -1203,14 +1275,33 @@ def _run_verify_pass(
         ):
             if budget_left <= 0:
                 break
-            if key.stage == _CHECKPOINT_FIRST_STAGE:
-                checkpoint_outcome = _ps1_process_checkpoint_hit(
-                    key, resolved, stable_path
+            checkpoint_result = _checkpoint_hit(
+                key.stage, key, resolved, stable_path
+            )
+            if checkpoint_result is None:
+                checkpoint_outcome, miss_reason = None, None
+            else:
+                checkpoint_outcome, miss_reason = checkpoint_result
+            if checkpoint_outcome is not None:
+                budget_left -= 1
+                total += apply(checkpoint_outcome)
+                continue
+            if ctx.cfg.bookkeeping_trust_index and key.stage in CHECKPOINT_STAGES:
+                _log_trust_index_checkpoint_miss(
+                    key.stage,
+                    key.run_id,
+                    key.target_label,
+                    miss_reason=miss_reason,
                 )
-                if checkpoint_outcome is not None:
-                    budget_left -= 1
-                    total += apply(checkpoint_outcome)
-                    continue
+                budget_left -= 1
+                outcome = VerifyOutcome(
+                    key=key,
+                    complete=False,
+                    stable_path=stable_path,
+                    resolved=resolved,
+                )
+                total += apply(outcome)
+                continue
             manifest_hit = check_manifests_only(
                 resolved,
                 key.stage,

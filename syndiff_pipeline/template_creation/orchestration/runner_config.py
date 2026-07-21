@@ -107,6 +107,7 @@ class RunnerConfig:
     verify_max_workers: int = 1
     verify_budget_per_tick: int = 16
     skip_artifact_verify: bool = False
+    bookkeeping_trust_index: bool = False
     max_stage_attempts: int = 3
     requeue_backoff_s: float = 30.0
     condor_hold_timeout_s: float = 600.0
@@ -190,6 +191,13 @@ def _paths_from_deployment(
     return handoff, data, ffi_dir, db, runs, wcs
 
 
+def _parse_bookkeeping_trust_index(raw: dict) -> bool:
+    bookkeeping = raw.get("bookkeeping") or {}
+    if isinstance(bookkeeping, dict) and "trust_index" in bookkeeping:
+        return bool(bookkeeping.get("trust_index"))
+    return bool(raw.get("bookkeeping_trust_index", False))
+
+
 def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> RunnerConfig:
     """Build runner config.
     
@@ -252,6 +260,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         skip_artifact_verify=bool(
             raw.get("scheduler", {}).get("skip_artifact_verify", False)
         ),
+        bookkeeping_trust_index=_parse_bookkeeping_trust_index(raw),
         max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
         requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
         condor_hold_timeout_s=float(
@@ -345,6 +354,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
     if cfg.star_config_path:
         data["star_config_path"] = cfg.star_config_path
     data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
+    data["bookkeeping"] = {"trust_index": cfg.bookkeeping_trust_index}
     data["scheduler"] = {
         "heartbeat_interval_s": cfg.scheduler_heartbeat_interval_s,
         "verify_max_workers": cfg.verify_max_workers,
@@ -446,6 +456,7 @@ def load_and_materialize_runner_config(
             skip_artifact_verify=bool(
                 raw.get("scheduler", {}).get("skip_artifact_verify", False)
             ),
+            bookkeeping_trust_index=_parse_bookkeeping_trust_index(raw),
             max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
             requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
             condor_hold_timeout_s=float(

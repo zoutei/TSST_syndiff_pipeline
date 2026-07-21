@@ -335,46 +335,50 @@ class TestCheckpointHitPromotesLikeLegacyScan(_BaseVerifyCutoverTest):
 
 
 class TestOtherStagesUntouched(_BaseVerifyCutoverTest):
-    """(f) The checkpoint-first branch is stage-gated to ps1_process only;
-    every other stage's verify path takes zero new code."""
+    """Checkpoint-first applies to template stages with emitters; ps1_download
+    has no checkpoint and must not invoke the helper."""
 
-    def test_checkpoint_helper_is_only_invoked_for_ps1_process(self):
+    def test_checkpoint_helper_is_invoked_for_template_checkpoint_stages(self):
         target = Target(20, 3, 3, 210.0, 81.0, "2020ut")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            # active_stages=["downsample"] puts tess_ffi_download, mapping,
-            # ps1_download, ps1_process, remap all in the verify closure as
-            # candidates (none pre-skipped here) -- a broad sweep across
-            # every non-ps1_process stage.
             state, ctx, run_id, _runs_root = _minimal_run_setup(
                 tmp_path, [target], active_stages=["downsample"]
             )
             calls: list[str] = []
 
-            def spy(key, resolved, stable_path):
-                calls.append(key.stage)
+            def spy(stage, key, resolved, stable_path):
+                calls.append(stage)
                 return None  # always miss -- let the legacy path continue
 
             with mock.patch(
-                "syndiff_pipeline.common.orchestration.scheduler._ps1_process_checkpoint_hit",
+                "syndiff_pipeline.common.orchestration.scheduler._checkpoint_hit",
                 side_effect=spy,
             ):
                 _run_verify_pass(
                     state, run_id, ctx, force_rerun=False, budget=16, block=True
                 )
 
-            self.assertIn("ps1_process", calls)
-            for stage in ("mapping", "ps1_download", "remap", "tess_ffi_download", "downsample"):
-                self.assertNotIn(
-                    stage,
-                    calls,
-                    msg=f"checkpoint-first branch must not run for stage={stage!r}",
-                )
+            for stage in ("ps1_process", "mapping", "remap", "tess_ffi_download"):
+                self.assertIn(stage, calls)
+            self.assertNotIn("downsample", calls)
+            from syndiff_pipeline.common.orchestration import scheduler
 
-    def test_stage_constant_matches_ps1_process_only(self):
+            self.assertNotIn("ps1_download", scheduler._CHECKPOINT_STAGE_FINGERPRINTS)
+
+    def test_checkpoint_stage_map_covers_template_emitters(self):
         from syndiff_pipeline.common.orchestration import scheduler
 
-        self.assertEqual(scheduler._CHECKPOINT_FIRST_STAGE, "ps1_process")
+        self.assertEqual(
+            set(scheduler._CHECKPOINT_STAGE_FINGERPRINTS),
+            {
+                "tess_ffi_download",
+                "mapping",
+                "remap",
+                "downsample",
+                "ps1_process",
+            },
+        )
 
 
 if __name__ == "__main__":

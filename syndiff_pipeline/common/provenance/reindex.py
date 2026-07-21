@@ -17,7 +17,8 @@ Two kinds of tree are walked:
 2. **Legacy per-SCC trees** that predate this package and carry no sidecar:
    ``convolved.zarr`` (checkpoint-only, presence == complete),
    ``remap[/_{NAME}]/oversampling_{N}/remap_manifest.json``,
-   ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``. These have
+   ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``,
+   ``diff[/_{NAME}]/{workspace_label}/{recipe_fp}/``. These have
    no recoverable recipe, so per decision #8 they are ingested under
    ``{kind}_legacy_unverified`` with a synthetic, deterministic (idempotent)
    fingerprint tied to their on-disk path -- visible in queries, but never
@@ -51,11 +52,20 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "ReindexResult",
+    "REINDEX_CLEAR_PER_FFI_WARNING",
+    "collect_reindex_clear_warnings",
     "reindex_shared_store",
     "reindex_scc_tree",
     "discover_scc_dirs",
     "reindex_data_root",
 ]
+
+REINDEX_CLEAR_PER_FFI_WARNING = (
+    "FULL REINDEX CLEARS provenance.db: per-FFI diff provenance (background, "
+    "diff images, ePSF, masks) is spool-ingested only and will NOT be rebuilt "
+    "from on-disk FITS. Drain bookkeeping/spool/ (supervisor ingest) before "
+    "clearing, then re-emit diff runs for any lost rows."
+)
 
 _OVERSAMPLING_RE = re.compile(r"^oversampling_(\d+)$")
 _SCC_DIR_RE = re.compile(r"^s(\d{4})/c(\d+)/k(\d+)$")
@@ -226,6 +236,49 @@ def _oversampling_children(parent: Path) -> list[tuple[int, Path]]:
     return out
 
 
+def _diff_kind_from_workspace_label(workspace_label: str) -> str:
+    """Best-effort kind guess for a legacy SCC diff recipe directory."""
+    label = str(workspace_label).strip().lower()
+    if "shared_mask" in label or label in {"mask", "sharedmask"}:
+        return "shared_mask"
+    if (
+        "bkg" in label
+        or label.endswith("_bg")
+        or label.endswith("_b")
+        or label.endswith("_b_s")
+        or label in {"hp_b", "ks_b", "ks_b_s"}
+    ):
+        return "diff_background"
+    if "epsf" in label or label.startswith("gepsf"):
+        return "epsf"
+    return "diff_image"
+
+
+def collect_reindex_clear_warnings(data_root: str | Path) -> list[str]:
+    """Return operator warnings to emit before a full (non-incremental) reindex."""
+    from syndiff_pipeline.common.scc_paths import provenance_spool_dir
+
+    warnings = [REINDEX_CLEAR_PER_FFI_WARNING]
+    spool_dir = provenance_spool_dir(data_root)
+    if spool_dir.is_dir():
+        live = sorted(spool_dir.glob("*.jsonl"))
+        if live:
+            warnings.append(
+                f"Undrained spool files under {spool_dir} ({len(live)} file(s)); "
+                "drain into provenance.db before clearing or spool-only per-FFI "
+                "rows will be lost."
+            )
+    return warnings
+
+
+def _recipe_dir_has_content(recipe_dir: Path) -> bool:
+    if not recipe_dir.is_dir():
+        return False
+    return any(
+        child.is_file() and not child.name.startswith("_tmp_") for child in recipe_dir.iterdir()
+    )
+
+
 def _store_lane_roots(scc_dir: Path, base: str) -> list[tuple[str | None, Path]]:
     """Return ``[(store_name, root)]`` for ``base/`` and ``base_{NAME}/`` siblings."""
     out: list[tuple[str | None, Path]] = []
@@ -248,12 +301,15 @@ def reindex_scc_tree(store: ProvenanceStore, scc_dir: str | Path, s: int, c: int
     """
     Legacy-marker sweep of one SCC directory: ``convolved.zarr`` presence,
     ``remap[/_{NAME}]/oversampling_{N}/remap_manifest.json``,
-    ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``.
+    ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``,
+    ``diff[/_{NAME}]/{workspace_label}/{recipe_fp}/``.
 
     Returns the count of legacy_unverified artifacts ingested.
     """
     from syndiff_pipeline.common.scc_paths import (
         CONVOLVED_ZARR_BASENAME,
+        DIFF_SUBDIR,
+        EVENTS_SUBDIR,
         MAPPING_SUBDIR,
         REMAP_SUBDIR,
         TEMPLATES_SUBDIR,
@@ -296,6 +352,40 @@ def reindex_scc_tree(store: ProvenanceStore, scc_dir: str | Path, s: int, c: int
             _legacy_artifact(store, "downsample", spatial, str(templates_dir))
             n += 1
 
+    for store_name, diff_root in _store_lane_roots(scc_dir, DIFF_SUBDIR):
+        if not diff_root.is_dir():
+            continue
+        for ws_dir in sorted(p for p in diff_root.iterdir() if p.is_dir()):
+            if ws_dir.name == EVENTS_SUBDIR or ws_dir.name.startswith("_tmp_"):
+                continue
+            workspace_label = ws_dir.name
+            kind = _diff_kind_from_workspace_label(workspace_label)
+            for recipe_dir in sorted(p for p in ws_dir.iterdir() if p.is_dir()):
+                if recipe_dir.name.startswith("_tmp_"):
+                    continue
+                if not _recipe_dir_has_content(recipe_dir):
+                    continue
+                if kind == "shared_mask":
+                    spatial = {"s": s, "c": c, "k": k}
+                else:
+                    spatial = {
+                        "s": s,
+                        "c": c,
+                        "k": k,
+                        "workspace_label": workspace_label,
+                        "recipe_fp": recipe_dir.name,
+                    }
+                if store_name is not None:
+                    spatial["store_name"] = store_name
+                _legacy_artifact(
+                    store,
+                    kind,
+                    spatial,
+                    str(recipe_dir),
+                    disk_key=f"{workspace_label}/{recipe_dir.name}",
+                )
+                n += 1
+
     return n
 
 
@@ -328,6 +418,8 @@ def reindex_data_root(
     )
 
     if clear_first:
+        for msg in collect_reindex_clear_warnings(data_root):
+            log.warning("reindex: %s", msg)
         store.clear()
 
     result = ReindexResult()
