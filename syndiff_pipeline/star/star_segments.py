@@ -144,8 +144,14 @@ def find_owning_skycell_for_host(
     x_pix = int(round(host_xy[0]))
     y_pix = int(round(host_xy[1]))
     os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
-    x_lookup = x_pix * os_factor + os_factor // 2
-    y_lookup = y_pix * os_factor + os_factor // 2
+    mapping_grid = getattr(ctx, "mapping_grid", None)
+    if mapping_grid is not None:
+        lx, ly = mapping_grid.ffi_to_local(x_pix, y_pix)
+        x_lookup = lx * os_factor + os_factor // 2
+        y_lookup = ly * os_factor + os_factor // 2
+    else:
+        x_lookup = x_pix * os_factor + os_factor // 2
+        y_lookup = y_pix * os_factor + os_factor // 2
 
     with fits.open(ctx.master_mapping_fits) as hdul:
         hdu_idx = 1 if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None else 0

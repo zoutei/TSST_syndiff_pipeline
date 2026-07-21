@@ -48,6 +48,7 @@ def _minimal_ctx(tmp: str, **overrides) -> StarEventContext:
         ccd=2,
         baseline_workspace_dir=str(Path(tmp) / "event" / "ws"),
         baseline_diffs_label="hp_d",
+        baseline_diffs_dir=str(Path(tmp) / "event" / "ws" / "hp_d"),
         baseline_convolved_dir=str(Path(tmp) / "event" / "ws" / "hp_c"),
         baseline_phot_bkg_dir=str(Path(tmp) / "event" / "ws" / "ks_b_s"),
         baseline_phot_bkg_label="ks_b_s",
@@ -122,6 +123,85 @@ class TestStarContext(unittest.TestCase):
 
             ctx = _minimal_ctx(tmp)
             validate_star_prerequisites(ctx)
+
+    def test_validate_accepts_scc_lane_baseline_diffs(self):
+        from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / "event"
+            ws = event / "ws"
+            templates = Path(tmp) / "templates"
+            mapping = (
+                Path(tmp)
+                / "data"
+                / "skycell_pixel_mapping"
+                / "sector_0020"
+                / "camera_3"
+                / "ccd_2"
+            )
+            gaia = Path(tmp) / "data" / "catalogs"
+            lane_hp = (
+                Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_d" / "recipe_abc"
+            )
+            lane_hc = (
+                Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_c" / "recipe_abc"
+            )
+            lane_bkg = (
+                Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "ks_b_s" / "recipe_abc"
+            )
+            kernels_dir = Path(frame_kernels_dir(str(lane_hp)))
+            for directory in (ws, lane_hp, lane_hc, lane_bkg, kernels_dir, templates, mapping, gaia):
+                directory.mkdir(parents=True, exist_ok=True)
+
+            (event / "event_job.json").write_text("{}", encoding="utf-8")
+            (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
+            (templates / "syndiff_template_0.fits").write_bytes(b"")
+            (lane_hp / "tess123_hp_d.fits.fz").write_bytes(b"")
+            (lane_hc / "tess123_hp_c.fits.fz").write_bytes(b"")
+            (lane_bkg / "tess123_ks_b_s.fits.fz").write_bytes(b"")
+            (kernels_dir / "tess123_kernel.npz").write_bytes(b"")
+            (ws / "shared_mask.fits.fz").write_bytes(b"")
+            (mapping / "tess_s0020_3_2_master_skycells_list.csv").write_bytes(b"")
+            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.fz").write_bytes(b"")
+            (gaia / "gaia.csv").write_bytes(b"")
+
+            ctx = _minimal_ctx(
+                tmp,
+                baseline_diffs_dir=str(lane_hp),
+                baseline_convolved_dir=str(lane_hc),
+                baseline_phot_bkg_dir=str(lane_bkg),
+                baseline_kernels_dir=str(kernels_dir),
+            )
+            validate_star_prerequisites(ctx)
+
+    def test_resolve_baseline_label_dir_prefers_scc_lane(self):
+        from syndiff_pipeline.star.context import _resolve_baseline_label_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Target(
+                sector=20,
+                camera=3,
+                ccd=2,
+                target_ra=0.0,
+                target_dec=0.0,
+                target_name="t",
+            )
+            event = Path(tmp) / "event"
+            ws_hp = event / "ws" / "hp_d"
+            ws_hp.mkdir(parents=True)
+            (ws_hp / "legacy.fits.fz").write_bytes(b"")
+            lane = Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_d" / "fp1"
+            lane.mkdir(parents=True)
+            (lane / "lane.fits.fz").write_bytes(b"")
+            resolved = _resolve_baseline_label_dir(
+                data_root=str(Path(tmp) / "data"),
+                target=target,
+                event_dir=str(event),
+                label="hp_d",
+                baseline_run_id="none",
+                output_store_name=None,
+            )
+            self.assertEqual(Path(resolved).resolve(), lane.resolve())
 
 
 if __name__ == "__main__":

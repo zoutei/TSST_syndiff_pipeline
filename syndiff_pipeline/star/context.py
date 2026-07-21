@@ -9,6 +9,8 @@ from pathlib import Path
 import yaml
 
 from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
+from syndiff_pipeline.common.mapping_grid import MappingGrid
+from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir, scc_diff_dir
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     require_deployment_path,
@@ -64,11 +66,14 @@ class StarEventContext:
     ccd: int
     baseline_workspace_dir: str
     baseline_diffs_label: str
+    baseline_diffs_dir: str
     baseline_convolved_dir: str
     baseline_phot_bkg_dir: str
     baseline_phot_bkg_label: str
     baseline_kernels_dir: str
     oversampling_factor: int = 1
+    mapping_grid: MappingGrid | None = None
+    output_store_name: str | None = None
 
 
 def _resolve_hotpants_output_labels(
@@ -145,16 +150,44 @@ def _photutils_bkg_from_pipeline(
     return kernel_subtract_label
 
 
+def _label_dir_has_fits(
+    *,
+    label: str,
+    baseline_workspace_dir: str,
+    data_root: str | None = None,
+    target: Target | None = None,
+    output_store_name: str | None = None,
+) -> bool:
+    """True when *label* exists under the SCC diff lane or event workspace."""
+    if data_root is not None and target is not None:
+        lane_root = scc_diff_dir(
+            data_root,
+            target.sector,
+            target.camera,
+            target.ccd,
+            store_name=output_store_name,
+        )
+        if lane_root.is_dir():
+            for recipe_dir in sorted(lane_root.glob(f"{label}/*/")):
+                if any(recipe_dir.glob("*.fits*")):
+                    return True
+    return (Path(baseline_workspace_dir) / label).is_dir()
+
+
 def _resolve_photutils_bkg_label(
     *,
     site_dir: Path,
     baseline_workspace_dir: str,
     diffs_label: str,
+    data_root: str | None = None,
+    target: Target | None = None,
+    output_store_name: str | None = None,
 ) -> str:
     """
     Workspace label for per-frame photutils background (e.g. ``ks_b`` / ``ks_b_s``).
 
     Star stamps subtract this map from raw science. Hotpants ``hp_b`` is not used.
+    Prefers SCC ``diff_{lane}/`` when present, else the event workspace.
     """
     ws_dir = Path(baseline_workspace_dir)
     config_paths = [
@@ -175,12 +208,18 @@ def _resolve_photutils_bkg_label(
             candidates.append(fallback)
 
     for label in candidates:
-        if (ws_dir / label).is_dir():
+        if _label_dir_has_fits(
+            label=label,
+            baseline_workspace_dir=baseline_workspace_dir,
+            data_root=data_root,
+            target=target,
+            output_store_name=output_store_name,
+        ):
             return label
 
     tried = ", ".join(repr(label) for label in candidates)
     raise ValueError(
-        f"No photutils background workspace found under {ws_dir} "
+        f"No photutils background workspace found under SCC lane or {ws_dir} "
         f"(tried {tried}). Run kernel_subtract (ks_b) and/or inherit ks_b_s "
         "before star run."
     )
@@ -300,6 +339,50 @@ def _enrich_star_target_coords(
     return target
 
 
+def _load_scc_diff_job(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> dict | None:
+    job_path = scc_diff_bookkeeping_dir(data_root, sector, camera, ccd) / "diff_job.json"
+    if not job_path.is_file():
+        return None
+    try:
+        doc = json.loads(job_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if int(doc.get("schema_version", 0)) < 2:
+        return None
+    return doc
+
+
+def _resolve_baseline_label_dir(
+    *,
+    data_root: str,
+    target: Target,
+    event_dir: str,
+    label: str,
+    baseline_run_id: str,
+    output_store_name: str | None,
+) -> str:
+    """Prefer ``diff_{lane}/{label}/{recipe_fp}/``; fall back to event ``ws/{label}/``."""
+    if not label:
+        return ""
+    lane_root = scc_diff_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        store_name=output_store_name,
+    )
+    if lane_root.is_dir():
+        for recipe_dir in sorted(lane_root.glob(f"{label}/*/")):
+            if any(recipe_dir.glob("*.fits*")):
+                return str(recipe_dir.resolve())
+    return workspace_dir(event_dir, label, run_id=baseline_run_id)
+
+
 def load_event_context(
     *,
     site: str,
@@ -352,9 +435,18 @@ def load_event_context(
 
     event_dir = str(Path(cfg.output_dir).expanduser().resolve())
     cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
-    with Path(wcs_grouping._event_job_path(event_dir)).open(encoding="utf-8") as fh:
-        cluster_job = json.load(fh)
-    crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)
+    diff_job = _load_scc_diff_job(data_root, target.sector, target.camera, target.ccd)
+    mapping_grid = None
+    output_store_name = None
+    if diff_job is not None:
+        mapping_grid = MappingGrid.from_mapping_dict(diff_job["mapping_grid"])
+        crop_bounds = diff_job.get("crop_bounds") or mapping_grid.science_ffi_bounds()
+        output_store_name = diff_job.get("output_store_name")
+        cluster_job = diff_job
+    else:
+        with Path(wcs_grouping._event_job_path(event_dir)).open(encoding="utf-8") as fh:
+            cluster_job = json.load(fh)
+        crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)
 
     reference_ffi_path = wcs_grouping.load_reference_ffi_path(event_dir)
     if not reference_ffi_path:
@@ -368,6 +460,9 @@ def load_event_context(
     if star_run_config is not None:
         os_factor = max(1, int(star_run_config.oversampling_factor or 1))
         template_store_name = star_run_config.template_store_name
+        output_store_name = output_store_name or getattr(
+            star_run_config, "output_store_name", None
+        )
     expected_templates = resolve_scc_template_dir(
         data_root,
         target,
@@ -424,17 +519,25 @@ def load_event_context(
             site_dir=paths.site_dir,
             baseline_workspace_dir=baseline_workspace_dir,
             diffs_label=diffs_label,
+            data_root=data_root,
+            target=target,
+            output_store_name=output_store_name,
         )
-    baseline_diffs_dir = workspace_dir(
-        event_dir, diffs_label, run_id=baseline_run_id
+    resolve_kw = dict(
+        data_root=data_root,
+        target=target,
+        event_dir=event_dir,
+        baseline_run_id=baseline_run_id,
+        output_store_name=output_store_name,
     )
+    baseline_diffs_dir = _resolve_baseline_label_dir(label=diffs_label, **resolve_kw)
     baseline_convolved_dir = (
-        workspace_dir(event_dir, convolved_label, run_id=baseline_run_id)
+        _resolve_baseline_label_dir(label=convolved_label, **resolve_kw)
         if convolved_label
         else ""
     )
-    baseline_phot_bkg_dir = workspace_dir(
-        event_dir, phot_bkg_label, run_id=baseline_run_id
+    baseline_phot_bkg_dir = _resolve_baseline_label_dir(
+        label=phot_bkg_label, **resolve_kw
     )
     baseline_kernels_dir = frame_kernels_dir(baseline_diffs_dir)
 
@@ -457,11 +560,14 @@ def load_event_context(
         ccd=target.ccd,
         baseline_workspace_dir=baseline_workspace_dir,
         baseline_diffs_label=diffs_label,
+        baseline_diffs_dir=baseline_diffs_dir,
         baseline_convolved_dir=baseline_convolved_dir,
         baseline_phot_bkg_dir=baseline_phot_bkg_dir,
         baseline_phot_bkg_label=phot_bkg_label,
         baseline_kernels_dir=baseline_kernels_dir,
         oversampling_factor=os_factor,
+        mapping_grid=mapping_grid,
+        output_store_name=output_store_name,
     )
 
 
@@ -534,12 +640,12 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "run template downsample for this event"
         )
 
-    diffs_dir = Path(ctx.baseline_workspace_dir) / ctx.baseline_diffs_label
-    if not _dir_has_glob(str(diffs_dir), "*.fits*"):
+    diffs_dir = Path(ctx.baseline_diffs_dir)
+    if not ctx.baseline_diffs_dir or not _dir_has_glob(str(diffs_dir), "*.fits*"):
         missing.append(
-            f"no baseline diff FITS under {diffs_dir}; "
+            f"no baseline diff FITS under {diffs_dir or '(unset)'}; "
             f"complete the baseline hotpants stage ({ctx.baseline_diffs_label}) "
-            "for this event"
+            "in the SCC diff lane or event workspace"
         )
 
     conv_dir = Path(ctx.baseline_convolved_dir)
@@ -554,7 +660,8 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
         missing.append(
             f"no photutils background FITS under {phot_bkg_dir or '(unset)'}; "
             f"ensure baseline.phot_bkg={ctx.baseline_phot_bkg_label!r} exists "
-            "(run kernel_subtract ks_b and/or inherit ks_b_s in the baseline workspace)"
+            "(run kernel_subtract ks_b and/or inherit ks_b_s in the SCC lane "
+            "or baseline workspace)"
         )
 
     kernels_dir = Path(ctx.baseline_kernels_dir)

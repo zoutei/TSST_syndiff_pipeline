@@ -122,6 +122,7 @@ def _minimal_ctx(tmp: Path, **overrides) -> StarEventContext:
         ccd=2,
         baseline_workspace_dir=str(tmp / "event" / "ws"),
         baseline_diffs_label="hp_d",
+        baseline_diffs_dir=str(tmp / "event" / "ws" / "hp_d"),
         baseline_convolved_dir=str(tmp / "event" / "ws" / "hp_c"),
         baseline_phot_bkg_dir=str(tmp / "event" / "ws" / "ks_b_s"),
         baseline_phot_bkg_label="ks_b_s",

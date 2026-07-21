@@ -96,6 +96,7 @@ def generate_shared_mask_catalog(
                 ccd=ccd,
                 public_csv=public,
                 scale=settings.shared.scale,
+                crop_bounds=crop_bounds,
             )
         except Exception as exc:
             log.warning("TNS enabled but failed (%s); continuing without bit 64", exc)
@@ -141,6 +142,7 @@ def generate_shared_mask_catalog(
             orbit_times_path=settings.asteroids.orbit_times_path,
             orbit_times_url=settings.asteroids.orbit_times_url or None,
             run_discover=bool(settings.asteroids.run_discover),
+            crop_bounds=crop_bounds,
         )
         if asteroid_iv is None:
             log.warning("Asteroids enabled but no intervals available; omit bit 128")
