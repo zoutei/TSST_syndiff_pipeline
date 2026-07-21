@@ -14,12 +14,14 @@ from astropy.io import fits
 from syndiff_pipeline.common.fits_io import write_image_fits
 from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    parse_workspace_frame_stem,
     resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
     workspace_frame_fits_basename,
     workspace_frame_stem,
     workspace_label_from_dir,
 )
+from syndiff_pipeline.difference_imaging.support.paths import DIFF_CONFIG_SNAPSHOT_BASENAME
 from syndiff_pipeline.difference_imaging.support.paths import BACKGROUND_STACK_NPZ_ARRAY_KEY
 
 log = logging.getLogger(__name__)
@@ -266,6 +268,119 @@ def load_flux_cubes(
     return fit_cube, strap_cube
 
 
+def _event_dirs_from_out_ws(out_dir: str) -> tuple[Optional[str], Optional[str]]:
+    """Return ``(event_dir, ws_tree)`` from a label workspace path, or ``(None, None)``."""
+    ws_label_dir = os.path.abspath(out_dir)
+    ws_tree = os.path.dirname(ws_label_dir)
+    if not os.path.basename(ws_tree).startswith("ws"):
+        return None, None
+    return os.path.dirname(ws_tree), ws_tree
+
+
+def _diff_image_fingerprint_from_store(
+    *,
+    sck: tuple[int, int, int],
+    product_id: str,
+    diff_label: str,
+    data_root: str,
+) -> Optional[str]:
+    """Indexed ``diff_image`` fingerprint for one frame, or ``None`` when ambiguous."""
+    store = provenance_glue.open_store(str(data_root))
+    if store is None:
+        return None
+    spatial = provenance_glue.ffi_spatial_key(
+        sck[0], sck[1], sck[2], product_id, diff_label
+    )
+    rows = store.artifacts_by_kind_spatial("diff_image", spatial)
+    complete = [r for r in rows if getattr(r, "state", "complete") == "complete"]
+    if len(complete) == 1:
+        return str(complete[0].fingerprint)
+    if len(complete) > 1:
+        log.debug(
+            "background provenance: %d complete diff_image rows for %s/%s; skip emit",
+            len(complete),
+            product_id,
+            diff_label,
+        )
+    return None
+
+
+def _diff_image_fingerprint_from_frozen_config(
+    *,
+    rec: FrameRecord,
+    sck: tuple[int, int, int],
+    diff_label: str,
+    out_dir: str,
+    data_root: Optional[str],
+) -> Optional[str]:
+    """Reconstruct ``diff_image`` fp from frozen ``ws/diff_config.yaml`` (no ``loc:``)."""
+    event_dir, ws_tree = _event_dirs_from_out_ws(out_dir)
+    if not event_dir or not ws_tree:
+        return None
+    cfg_path = os.path.join(ws_tree, DIFF_CONFIG_SNAPSHOT_BASENAME)
+    if not os.path.isfile(cfg_path):
+        return None
+    try:
+        from syndiff_pipeline.difference_imaging.orchestration.config import load_config
+        from syndiff_pipeline.difference_imaging.orchestration import diff_verify as dv
+
+        cfg = load_config(cfg_path)
+        if data_root and not getattr(cfg, "data_root", ""):
+            cfg.data_root = str(data_root)
+        frames_df = dv.load_diff_frames_for_verify(cfg, event_dir)
+        diff_stage = dv._upstream_diff_image_stage(cfg, {"inputs": {"diffs": diff_label}})
+        if diff_stage is None:
+            return None
+        downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(cfg)
+        return dv._diff_image_fingerprint_for_product(
+            cfg,
+            frames_df,
+            rec.product_id,
+            diff_stage,
+            downsample_fp=downsample_fp,
+        )
+    except Exception:
+        log.debug(
+            "background provenance: diff_image reconstruct failed for %s",
+            rec.product_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _resolve_diff_image_fingerprint_for_background(
+    *,
+    rec: FrameRecord,
+    sck: tuple[int, int, int],
+    data_root: Optional[str],
+    out_dir: str,
+) -> Optional[str]:
+    """Real upstream ``diff_image`` fingerprint for standalone background emit."""
+    if not rec.diff_path:
+        return None
+    parsed = parse_workspace_frame_stem(rec.stem)
+    if not parsed:
+        return None
+    _product_id, diff_label = parsed
+    fp = _diff_image_fingerprint_from_frozen_config(
+        rec=rec,
+        sck=sck,
+        diff_label=diff_label,
+        out_dir=out_dir,
+        data_root=data_root,
+    )
+    if fp is not None:
+        return fp
+    if data_root:
+        return _diff_image_fingerprint_from_store(
+            sck=sck,
+            product_id=rec.product_id,
+            diff_label=diff_label,
+            data_root=str(data_root),
+        )
+    return None
+
+
 def write_per_frame_fits(
     out_dir: str,
     stack: np.ndarray,
@@ -305,18 +420,18 @@ def write_per_frame_fits(
         )
         if sck is not None and background_params is not None:
             try:
-                # This standalone background stage reads the diffs stack (not
-                # the raw FFI) — its diff_background node depends on the
-                # upstream diff_image node, not on an `ffi` node directly
-                # (§21 open question: hotpants-internal bkg vs standalone
-                # background stage are tracked with different recipes/edges).
-                inputs = []
-                if rec.diff_path:
-                    inputs.append(
-                        provenance_glue.upstream_label_edge("diff_image", rec.diff_path)[
-                            "fingerprint"
-                        ]
-                    )
+                # Standalone background edges on the upstream diff_image node
+                # (hotpants-internal bkg uses ffi instead — see
+                # diff_background_input_fingerprints).
+                diff_image_fp = _resolve_diff_image_fingerprint_for_background(
+                    rec=rec,
+                    sck=sck,
+                    data_root=data_root,
+                    out_dir=out_dir,
+                )
+                inputs = provenance_glue.required_input_fingerprints(diff_image_fp)
+                if inputs is None:
+                    continue
                 provenance_glue.emit_diff_artifact(
                     kind="diff_background",
                     sector=sck[0],
