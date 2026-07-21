@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import multiprocessing
 import os
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -109,11 +110,14 @@ def _process_one_frame(task: tuple) -> dict:
     sck = p.get("sck")
     data_root = p.get("data_root")
     workspace_root = p.get("workspace_root")
+    downsample_fp = p.get("downsample_fp")
+    cfg = p.get("cfg")
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
     diff_stem = workspace_frame_stem(product_id, diffs_label)
     ws_diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
     output_store_name = p.get("output_store_name")
+    ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
 
     if resolve_pipeline_fits_path(diffs_dir, diff_stem) is None:
         if sck is not None and data_root and workspace_root:
@@ -122,7 +126,6 @@ def _process_one_frame(task: tuple) -> dict:
                     try_materialize_workspace_artifact,
                 )
 
-                ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
                 try_materialize_workspace_artifact(
                     data_root=data_root,
                     sck=sck,
@@ -147,6 +150,93 @@ def _process_one_frame(task: tuple) -> dict:
             "stem": diff_stem,
             "skipped": True,
         }
+
+    if sck is not None and data_root:
+        try:
+            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                resolve_diff_write_path,
+            )
+
+            write_path, scc_primary = resolve_diff_write_path(
+                data_root=data_root,
+                sck=sck,
+                kind="diff_image",
+                stage_label=diffs_label,
+                product_id=product_id,
+                label=diffs_label,
+                params=ks_params,
+                workspace_path=ws_diff_out,
+                output_store_name=output_store_name,
+            )
+            if downsample_fp is None and cfg is not None:
+                downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(
+                    cfg
+                )
+            prov_complete = provenance_glue.diff_image_complete_in_store(
+                sector=sck[0],
+                camera=sck[1],
+                ccd=sck[2],
+                product_id=product_id,
+                label=diffs_label,
+                params=ks_params,
+                ffi_path=ffi_path,
+                downsample_fp=downsample_fp,
+                data_root=data_root,
+                cfg=cfg,
+            )
+        except Exception:
+            log.debug(
+                "provenance resume check failed for %s", product_id, exc_info=True
+            )
+            prov_complete = None
+            write_path, scc_primary = Path(ws_diff_out), False
+        if prov_complete is True:
+            # Indexed-complete is not enough: require a locatable artifact.
+            hit_path: Optional[str] = None
+            if Path(write_path).is_file():
+                hit_path = str(write_path)
+            elif Path(ws_diff_out).is_file():
+                hit_path = str(ws_diff_out)
+            else:
+                existing_after_prov = resolve_pipeline_fits_path(diffs_dir, diff_stem)
+                if existing_after_prov is not None:
+                    hit_path = existing_after_prov
+                elif data_root and workspace_root:
+                    try:
+                        from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                            try_materialize_workspace_artifact,
+                        )
+
+                        if try_materialize_workspace_artifact(
+                            data_root=data_root,
+                            sck=sck,
+                            kind="diff_image",
+                            stage_label=diffs_label,
+                            product_id=product_id,
+                            label=diffs_label,
+                            params=ks_params,
+                            workspace_dest=ws_diff_out,
+                            workspace_root=workspace_root,
+                            output_store_name=output_store_name,
+                        ):
+                            hit_path = ws_diff_out
+                    except Exception:
+                        log.debug(
+                            "SCC materialize after provenance_hit failed for %s",
+                            product_id,
+                            exc_info=True,
+                        )
+            if hit_path is not None:
+                return {
+                    "success": True,
+                    "product_id": product_id,
+                    "stem": diff_stem,
+                    "skipped": True,
+                    "path": hit_path,
+                    "provenance_hit": True,
+                    "scc_store_hit": bool(scc_primary and Path(write_path).is_file()),
+                }
+            # Indexed complete but no file — fall through to process.
 
     try:
         from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
@@ -212,34 +302,39 @@ def _process_one_frame(task: tuple) -> dict:
         _write_image_fits(str(write_path), diff_raw, header=header)
         if sck is not None:
             try:
-                inputs = []
-                ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
-                if ffi_fp:
-                    inputs.append(ffi_fp)
-                if template_path:
-                    inputs.append(
-                        provenance_glue.template_input_edge(template_path)["fingerprint"]
+                if downsample_fp is None and cfg is not None:
+                    downsample_fp = (
+                        provenance_glue.resolve_downsample_fingerprint_from_cfg(cfg)
                     )
-                provenance_glue.emit_diff_artifact(
-                    kind="diff_image",
+                inputs = provenance_glue.diff_image_input_fingerprints(
                     sector=sck[0],
                     camera=sck[1],
                     ccd=sck[2],
-                    product_id=product_id,
-                    label=diffs_label,
-                    # KernelFitParams is resolved in a separate upstream pipeline
-                    # stage and not threaded through this loop; the recorded
-                    # recipe covers this stage's own params only (deviation,
-                    # see PR-D1 report).
-                    params=ks_params,
-                    location=str(write_path),
-                    input_fingerprints=inputs,
-                    data_root=data_root,
-                    meta={"producer": "kernel_subtract"},
-                    scc_primary=scc_primary,
-                    workspace_root=workspace_root,
-                    output_store_name=output_store_name,
+                    ffi_path=ffi_path,
+                    downsample_fp=downsample_fp,
+                    cfg=cfg,
                 )
+                if inputs is not None:
+                    provenance_glue.emit_diff_artifact(
+                        kind="diff_image",
+                        sector=sck[0],
+                        camera=sck[1],
+                        ccd=sck[2],
+                        product_id=product_id,
+                        label=diffs_label,
+                        # KernelFitParams is resolved in a separate upstream pipeline
+                        # stage and not threaded through this loop; the recorded
+                        # recipe covers this stage's own params only (deviation,
+                        # see PR-D1 report).
+                        params=ks_params,
+                        location=str(write_path),
+                        input_fingerprints=inputs,
+                        data_root=data_root,
+                        meta={"producer": "kernel_subtract"},
+                        scc_primary=scc_primary,
+                        workspace_root=workspace_root,
+                        output_store_name=output_store_name,
+                    )
             except Exception:
                 log.debug(
                     "provenance emit (diff_image/kernel_subtract) failed for %s",
@@ -267,23 +362,29 @@ def _process_one_frame(task: tuple) -> dict:
             )
             if sck is not None:
                 try:
-                    ffi_fp = provenance_glue.ffi_input_fingerprint(sck[0], sck[1], sck[2], ffi_path)
-                    provenance_glue.emit_diff_artifact(
-                        kind="diff_background",
-                        sector=sck[0],
-                        camera=sck[1],
-                        ccd=sck[2],
-                        product_id=product_id,
-                        label=bkg_label,
-                        params=ks_params,
-                        location=str(bkg_write_path),
-                        input_fingerprints=[ffi_fp] if ffi_fp else [],
-                        data_root=data_root,
-                        meta={"producer": "kernel_subtract"},
-                        scc_primary=bkg_scc_primary,
-                        workspace_root=workspace_root,
-                        output_store_name=output_store_name,
+                    ffi_fp = provenance_glue.ffi_input_fingerprint(
+                        sck[0], sck[1], sck[2], ffi_path
                     )
+                    bkg_inputs = provenance_glue.diff_background_input_fingerprints(
+                        ffi_fp
+                    )
+                    if bkg_inputs is not None:
+                        provenance_glue.emit_diff_artifact(
+                            kind="diff_background",
+                            sector=sck[0],
+                            camera=sck[1],
+                            ccd=sck[2],
+                            product_id=product_id,
+                            label=bkg_label,
+                            params=ks_params,
+                            location=str(bkg_write_path),
+                            input_fingerprints=bkg_inputs,
+                            data_root=data_root,
+                            meta={"producer": "kernel_subtract"},
+                            scc_primary=bkg_scc_primary,
+                            workspace_root=workspace_root,
+                            output_store_name=output_store_name,
+                        )
                 except Exception:
                     log.debug(
                         "provenance emit (diff_background/kernel_subtract) failed for %s",
@@ -341,6 +442,7 @@ def kernel_subtract_loop(
     data_root = None
     workspace_root = None
     output_store_name = None
+    downsample_fp = None
     if cfg is not None:
         try:
             sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
@@ -353,6 +455,15 @@ def kernel_subtract_loop(
         workspace_root = _workspace_root(
             output_dir, run_id=getattr(cfg, "workspace_run_id", None)
         )
+        if sck is not None:
+            try:
+                downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(
+                    cfg
+                )
+            except Exception:
+                log.debug(
+                    "downsample fingerprint resolve failed (non-fatal)", exc_info=True
+                )
 
     btjd_by_product_id: dict = {}
     btjd_col = None
@@ -389,6 +500,8 @@ def kernel_subtract_loop(
         "data_root": data_root,
         "workspace_root": workspace_root,
         "output_store_name": output_store_name,
+        "downsample_fp": downsample_fp,
+        "cfg": cfg,
         "mask_catalog": mask_catalog,
         "btjd_by_product_id": btjd_by_product_id,
     }

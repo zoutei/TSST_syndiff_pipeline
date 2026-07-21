@@ -121,7 +121,9 @@ class TestFingerprintDeterminism(unittest.TestCase):
     def test_shared_mask_fingerprint(self):
         fp = pg.diff_kind_fingerprint_shared_mask(20, 3, 3, SharedMaskParams())
         self.assertIsNotNone(fp)
-        fp2 = pg.diff_kind_fingerprint_shared_mask(20, 3, 3, SharedMaskParams(gaia_mag_bright=5.0))
+        fp2 = pg.diff_kind_fingerprint_shared_mask(
+            20, 3, 3, SharedMaskParams(ref_mag_min=10.0)
+        )
         self.assertNotEqual(fp, fp2)
 
 
@@ -315,6 +317,161 @@ class TestProvenanceUnavailableFallsOpen(unittest.TestCase):
         self.assertEqual(r["kind"], "diff_image")
         key = pg.ffi_spatial_key(20, 3, 3, "tess0001", "diffs")
         self.assertEqual(key["product_id"], "tess0001")
+
+
+class TestRequiredInputFingerprints(unittest.TestCase):
+    def test_all_present_returns_list(self):
+        self.assertEqual(pg.required_input_fingerprints("a", "b"), ["a", "b"])
+
+    def test_none_arg_returns_none(self):
+        self.assertIsNone(pg.required_input_fingerprints("a", None))
+        self.assertIsNone(pg.required_input_fingerprints(None))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(pg.required_input_fingerprints("a", ""))
+        self.assertIsNone(pg.required_input_fingerprints("  "))
+
+    def test_empty_call_returns_empty_list(self):
+        self.assertEqual(pg.required_input_fingerprints(), [])
+
+
+class TestDiffBackgroundInputFingerprints(unittest.TestCase):
+    def test_present(self):
+        self.assertEqual(pg.diff_background_input_fingerprints("ffi_fp"), ["ffi_fp"])
+
+    def test_missing_refuses_empty_mint(self):
+        self.assertIsNone(pg.diff_background_input_fingerprints(None))
+
+
+class TestEpsfInputFingerprints(unittest.TestCase):
+    def test_real_fp(self):
+        self.assertEqual(pg.epsf_input_fingerprints("diff_fp"), ["diff_fp"])
+
+    def test_real_fp_with_extras(self):
+        self.assertEqual(
+            pg.epsf_input_fingerprints("diff_fp", "mask_fp"),
+            ["diff_fp", "mask_fp"],
+        )
+
+    def test_path_only_fails_open_no_loc(self):
+        out = pg.epsf_input_fingerprints(diff_image_path="/tmp/diff.fits")
+        self.assertIsNone(out)
+
+    def test_missing_fp_fails_open(self):
+        self.assertIsNone(pg.epsf_input_fingerprints(None))
+        self.assertIsNone(pg.epsf_input_fingerprints())
+
+
+class TestUpstreamLabelEdgeNotForSkip(unittest.TestCase):
+    def test_loc_fallback_still_exists_but_prefixed(self):
+        edge = pg.upstream_label_edge("diff_image", "/tmp/x.fits")
+        self.assertTrue(str(edge["fingerprint"]).startswith("loc:"))
+
+    def test_real_fp_preferred(self):
+        edge = pg.upstream_label_edge("diff_image", "/tmp/x.fits", fingerprint="real_fp")
+        self.assertEqual(edge["fingerprint"], "real_fp")
+
+
+@unittest.skipUnless(pg.PROVENANCE_AVAILABLE and pg._STORE_AVAILABLE, "store unavailable")
+class TestResolveDownsampleMultiMatch(unittest.TestCase):
+    def test_single_complete_row_returns_fp(self):
+        from syndiff_pipeline.common.provenance.store import ProvenanceStore
+        from syndiff_pipeline.common.scc_paths import provenance_db_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp)
+            db = provenance_db_path(data_root)
+            db.parent.mkdir(parents=True, exist_ok=True)
+            store = ProvenanceStore(str(db))
+            spatial = {"s": 20, "c": 3, "k": 3}
+            store.upsert_recipe("rid_a", "downsample", {"a": 1}, 1)
+            store.upsert_artifact(
+                "fp_only",
+                "downsample",
+                spatial,
+                "rid_a",
+                "/tmp/templates",
+                created_at="2020-01-01T00:00:00Z",
+            )
+            got = pg.resolve_downsample_fingerprint(
+                sector=20, camera=3, ccd=3, data_root=str(data_root)
+            )
+            self.assertEqual(got, "fp_only")
+
+    def test_multi_complete_returns_none_not_newest(self):
+        from syndiff_pipeline.common.provenance.store import ProvenanceStore
+        from syndiff_pipeline.common.scc_paths import provenance_db_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_root = Path(tmp)
+            db = provenance_db_path(data_root)
+            db.parent.mkdir(parents=True, exist_ok=True)
+            store = ProvenanceStore(str(db))
+            spatial = {"s": 20, "c": 3, "k": 3}
+            store.upsert_recipe("rid_a", "downsample", {"a": 1}, 1)
+            store.upsert_recipe("rid_b", "downsample", {"a": 2}, 1)
+            store.upsert_artifact(
+                "fp_old",
+                "downsample",
+                spatial,
+                "rid_a",
+                "/tmp/templates_a",
+                created_at="2020-01-01T00:00:00Z",
+            )
+            store.upsert_artifact(
+                "fp_new",
+                "downsample",
+                spatial,
+                "rid_b",
+                "/tmp/templates_b",
+                created_at="2024-01-01T00:00:00Z",
+            )
+            got = pg.resolve_downsample_fingerprint(
+                sector=20, camera=3, ccd=3, data_root=str(data_root)
+            )
+            self.assertIsNone(got)
+
+
+@unittest.skipUnless(pg.PROVENANCE_AVAILABLE, "common.provenance not importable")
+class TestSharedMaskRecipeLoadsMaskSettings(unittest.TestCase):
+    def test_path_on_params_changes_recipe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            yaml_path = Path(tmp) / "mask_settings.yaml"
+            yaml_path.write_text(
+                "shared:\n  bright_maglim: 9.5\n  faint_maglim: 16.0\n",
+                encoding="utf-8",
+            )
+            r_default = pg.diff_recipe("shared_mask", SharedMaskParams())
+            r_custom = pg.diff_recipe(
+                "shared_mask", SharedMaskParams(mask_settings=str(yaml_path))
+            )
+            self.assertNotEqual(r_default["params"], r_custom["params"])
+            self.assertEqual(
+                r_custom["params"]["mask_settings"]["shared"]["bright_maglim"], 9.5
+            )
+
+
+@unittest.skipUnless(pg.PROVENANCE_AVAILABLE, "common.provenance not importable")
+class TestRequiredInputRefusalInFingerprint(unittest.TestCase):
+    def test_none_in_list_refuses_fingerprint(self):
+        fp_none = pg.diff_kind_fingerprint(
+            "diff_background",
+            sector=20,
+            camera=3,
+            ccd=3,
+            product_id="tess0001",
+            label="bkg",
+            params=HotpantsParams(),
+            input_fingerprints=[None],
+        )
+        self.assertIsNone(fp_none)
+
+    def test_helper_none_must_not_be_coerced_to_empty(self):
+        """Callers must pass helper result as-is — never ``inputs or ()`` / ``[]``."""
+        inputs = pg.diff_background_input_fingerprints(None)
+        self.assertIsNone(inputs)
+        # The anti-pattern ``inputs or ()`` would mint empty-input; document refusal.
+        self.assertIsNone(pg.required_input_fingerprints(None))
 
 
 if __name__ == "__main__":

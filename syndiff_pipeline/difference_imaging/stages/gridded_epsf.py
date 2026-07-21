@@ -72,6 +72,7 @@ def _init_gridded_epsf_worker(
     output_store_name: str | None = None,
     mask_catalog=None,
     btjd_by_stem: dict | None = None,
+    diff_image_fps: dict[str, str] | None = None,
 ) -> None:
     """Load shared ePSF inputs once per loky worker (see starpositioningscript)."""
     _suppress_photutils_epsf_noise()
@@ -90,6 +91,7 @@ def _init_gridded_epsf_worker(
             "output_store_name": output_store_name,
             "mask_catalog": mask_catalog,
             "btjd_by_stem": btjd_by_stem or {},
+            "diff_image_fps": dict(diff_image_fps or {}),
         }
     )
 
@@ -562,6 +564,155 @@ def _load_gridded_epsf_stack(path: str) -> np.ndarray | None:
         return None
 
 
+def _upstream_diff_image_stage(cfg, diffs_input: str | None) -> dict | None:
+    """Hotpants/kernel_subtract stage that produced diffs feeding ePSF."""
+    pipeline = getattr(cfg, "pipeline", None)
+    if not pipeline:
+        return None
+    from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+        split_pipeline,
+    )
+
+    _, _, stages = split_pipeline(pipeline)
+    diffs_label = (diffs_input or "").strip() or None
+    if diffs_label:
+        for _, st in stages:
+            if st.get("kind") not in ("hotpants", "kernel_subtract"):
+                continue
+            o = st.get("output") or {}
+            if str(o.get("diffs", "")).strip() == diffs_label:
+                return st
+    for _, st in stages:
+        if st.get("kind") in ("hotpants", "kernel_subtract"):
+            return st
+    return None
+
+
+def _diff_image_stage_params(stage: dict):
+    from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+        parse_hotpants,
+        parse_kernel_subtract,
+    )
+
+    kind = stage.get("kind")
+    try:
+        if kind == "hotpants":
+            return parse_hotpants(stage, 0)
+        if kind == "kernel_subtract":
+            return parse_kernel_subtract(stage, 0)
+    except Exception:
+        log.debug("diff_image stage param reparse failed", exc_info=True)
+    return None
+
+
+def _diff_image_stage_label(stage: dict) -> str | None:
+    o = stage.get("output") or {}
+    label = str(o.get("diffs", "")).strip()
+    return label or None
+
+
+def _load_frames_df_for_provenance(cfg) -> pd.DataFrame | None:
+    output_dir = getattr(cfg, "output_dir", "") or ""
+    if not output_dir:
+        return None
+    try:
+        from syndiff_pipeline.difference_imaging.support.manifest import (
+            load_frame_manifest,
+        )
+
+        manifest_path = getattr(cfg, "manifest", "") or None
+        return load_frame_manifest(output_dir, manifest_path or None)
+    except Exception:
+        log.debug("load_frame_manifest for epsf provenance failed", exc_info=True)
+        return None
+
+
+def _diff_image_fp_for_product(
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    product_id: str,
+    cfg,
+    diff_stage: dict,
+    frames_df: pd.DataFrame | None,
+    downsample_fp: str | None,
+) -> str | None:
+    """Reconstruct one ``diff_image`` fingerprint (real edges, no ``loc:``)."""
+    params = _diff_image_stage_params(diff_stage)
+    label = _diff_image_stage_label(diff_stage)
+    if params is None or not label:
+        return None
+    ffi_dir = getattr(cfg, "ffi_dir", "") or ""
+    ffi_path = provenance_glue.resolve_ffi_path_for_product_id(
+        frames_df, product_id, ffi_dir=ffi_dir or None
+    )
+    if not ffi_path:
+        return None
+    ds_fp = downsample_fp
+    if ds_fp is None:
+        ds_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(cfg)
+    if ds_fp is None:
+        return None
+    inputs = provenance_glue.diff_image_input_fingerprints(
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        ffi_path=ffi_path,
+        downsample_fp=ds_fp,
+    )
+    if inputs is None:
+        return None
+    return provenance_glue.diff_kind_fingerprint(
+        "diff_image",
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=label,
+        params=params,
+        input_fingerprints=inputs,
+    )
+
+
+def _build_diff_image_fps(
+    cfg,
+    diff_paths: list[str],
+    *,
+    diffs_input: str | None,
+    sck: tuple | None,
+) -> dict[str, str]:
+    if sck is None:
+        return {}
+    diff_stage = _upstream_diff_image_stage(cfg, diffs_input)
+    if diff_stage is None:
+        return {}
+    frames_df = _load_frames_df_for_provenance(cfg)
+    if frames_df is None:
+        return {}
+    downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(cfg)
+    sector, camera, ccd = int(sck[0]), int(sck[1]), int(sck[2])
+    out: dict[str, str] = {}
+    for diff_path in diff_paths:
+        if not diff_path:
+            continue
+        stem = _diff_path_to_stem(diff_path)
+        pid = tess_product_id_from_ffi_path(stem) or stem
+        fp = _diff_image_fp_for_product(
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            product_id=pid,
+            cfg=cfg,
+            diff_stage=diff_stage,
+            frames_df=frames_df,
+            downsample_fp=downsample_fp,
+        )
+        if fp is not None:
+            out[pid] = fp
+    return out
+
+
 def _fit_one_frame_task(
     frame_idx: int,
     diff_path: str,
@@ -662,23 +813,28 @@ def _fit_one_frame_task(
 
     if sck is not None:
         try:
-            inputs = [provenance_glue.upstream_label_edge("diff_image", diff_path)["fingerprint"]]
-            provenance_glue.emit_diff_artifact(
-                kind="epsf",
-                sector=sck[0],
-                camera=sck[1],
-                ccd=sck[2],
-                product_id=product_id,
-                label=epsf_label,
-                params=epsf_params,
-                location=write_path,
-                input_fingerprints=inputs,
-                data_root=data_root,
-                is_fits=False,
-                scc_primary=scc_primary,
-                workspace_root=ctx.get("workspace_root"),
-                output_store_name=output_store_name,
+            diff_image_fp = (ctx.get("diff_image_fps") or {}).get(product_id)
+            inputs = provenance_glue.epsf_input_fingerprints(
+                diff_image_fp,
+                diff_image_path=diff_path,
             )
+            if inputs is not None:
+                provenance_glue.emit_diff_artifact(
+                    kind="epsf",
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=product_id,
+                    label=epsf_label,
+                    params=epsf_params,
+                    location=write_path,
+                    input_fingerprints=inputs,
+                    data_root=data_root,
+                    is_fits=False,
+                    scc_primary=scc_primary,
+                    workspace_root=ctx.get("workspace_root"),
+                    output_store_name=output_store_name,
+                )
         except Exception:
             log.debug("provenance emit (epsf) failed for %s", ffi_stem, exc_info=True)
 
@@ -790,6 +946,13 @@ def fit_gridded_epsf_all_frames(
     else:
         prov_workspace_root = workspace_root
 
+    diff_image_fps = _build_diff_image_fps(
+        cfg,
+        diff_paths,
+        diffs_input=diffs_input,
+        sck=prov_sck,
+    )
+
     worker_initargs = (
         gaia_df,
         epsf_params,
@@ -803,6 +966,7 @@ def fit_gridded_epsf_all_frames(
         prov_output_store_name,
         mask_catalog,
         btjd_by_stem or {},
+        diff_image_fps,
     )
     results: list[tuple] = []
     if n_workers <= 1 or n_frames <= 1:

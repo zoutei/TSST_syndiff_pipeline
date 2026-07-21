@@ -753,6 +753,338 @@ def _ffi_stem_from_diff_path(path: str) -> str:
     return tess_product_id_from_ffi_path(stem) or stem
 
 
+def _is_real_provenance_fp(fp: Optional[str]) -> bool:
+    """True when *fp* is a non-empty fingerprint that is not a deprecated ``loc:`` token."""
+    if fp is None:
+        return False
+    s = str(fp).strip()
+    return bool(s) and not s.startswith("loc:")
+
+
+def _photometry_upstream_diff_stage(cfg, diffs_label: Optional[str]) -> Optional[dict]:
+    """Hotpants/kernel_subtract stage that produced diffs under *diffs_label*."""
+    from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+        split_pipeline,
+    )
+
+    _, _, stages = split_pipeline(getattr(cfg, "pipeline", None) or [])
+    label = str(diffs_label or "").strip()
+    if label:
+        for _, st in stages:
+            if st.get("kind") not in ("hotpants", "kernel_subtract"):
+                continue
+            o = st.get("output") or {}
+            if str(o.get("diffs", "")).strip() == label:
+                return st
+    for _, st in stages:
+        if st.get("kind") in ("hotpants", "kernel_subtract"):
+            return st
+    return None
+
+
+def _photometry_epsf_stage(cfg, epsf_workspace: Optional[str]) -> Optional[dict]:
+    from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+        split_pipeline,
+    )
+
+    ws = str(epsf_workspace or "").strip()
+    if not ws:
+        return None
+    _, _, stages = split_pipeline(getattr(cfg, "pipeline", None) or [])
+    for _, st in stages:
+        if st.get("kind") == "epsf" and str(st.get("output", "")).strip() == ws:
+            return st
+    return None
+
+
+def _photometry_stage_params(stage: dict):
+    from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+        parse_epsf,
+        parse_hotpants,
+        parse_kernel_subtract,
+    )
+
+    kind = stage.get("kind")
+    try:
+        if kind == "hotpants":
+            return parse_hotpants(stage, 0)
+        if kind == "kernel_subtract":
+            return parse_kernel_subtract(stage, 0)
+        if kind == "epsf":
+            return parse_epsf(stage, 0)
+    except Exception:
+        log.debug("photometry provenance: stage param reparse failed", exc_info=True)
+        return None
+    return None
+
+
+def _photometry_diff_image_label(stage: dict) -> Optional[str]:
+    o = stage.get("output") or {}
+    label = str(o.get("diffs", "")).strip()
+    return label or None
+
+
+def _photometry_product_id_and_diff_label(
+    diff_path: str,
+) -> tuple[Optional[str], Optional[str]]:
+    from pathlib import Path
+
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        parse_workspace_frame_stem,
+        strip_fits_suffix,
+    )
+
+    stem = strip_fits_suffix(Path(str(diff_path)).name)
+    parsed = parse_workspace_frame_stem(stem)
+    if parsed is not None:
+        return parsed[0], parsed[1]
+    return _ffi_stem_from_diff_path(diff_path), None
+
+
+def _photometry_resolve_ffi_path(cfg, product_id: str) -> Optional[str]:
+    from pathlib import Path
+
+    from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+    from syndiff_pipeline.difference_imaging.support.manifest import (
+        manifest_path_from_output_dir,
+    )
+
+    manifest = getattr(cfg, "manifest", None) or ""
+    if not str(manifest).strip() and getattr(cfg, "output_dir", None):
+        manifest = manifest_path_from_output_dir(str(cfg.output_dir), None)
+    if str(manifest).strip() and os.path.isfile(str(manifest)):
+        try:
+            frames_df = pd.read_csv(str(manifest))
+            ffi_path = provenance_glue.resolve_ffi_path_for_product_id(
+                frames_df,
+                product_id,
+                ffi_dir=getattr(cfg, "ffi_dir", None) or None,
+            )
+            if ffi_path:
+                return ffi_path
+        except Exception:
+            log.debug("photometry provenance: manifest ffi resolve failed", exc_info=True)
+
+    ffi_dir = getattr(cfg, "ffi_dir", None) or ""
+    if ffi_dir:
+        from syndiff_pipeline.common.download import nested_ffi_dir
+        from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
+
+        sector = int(getattr(cfg, "sector", 0) or 0)
+        camera = int(getattr(cfg, "camera", 0) or 0)
+        ccd = int(getattr(cfg, "ccd", 0) or 0)
+        nested = nested_ffi_dir(sector, camera, ccd, ffi_dir)
+        if os.path.isdir(nested):
+            for hit in Path(nested).glob(f"*{product_id}*"):
+                resolved = try_resolve_fits_variant(str(hit))
+                if resolved is not None:
+                    return str(resolved)
+    return None
+
+
+def _photometry_resolve_diff_image_fp(
+    cfg,
+    diff_path: str,
+    *,
+    diffs_label: Optional[str] = None,
+) -> Optional[str]:
+    """Real ``diff_image`` fingerprint for one diff FITS, or ``None`` (fail-open)."""
+    from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+
+    product_id, parsed_label = _photometry_product_id_and_diff_label(diff_path)
+    if not product_id:
+        return None
+    label = str(diffs_label or parsed_label or "").strip()
+    diff_stage = _photometry_upstream_diff_stage(cfg, label or None)
+    if diff_stage is None:
+        return None
+    if not label:
+        label = _photometry_diff_image_label(diff_stage)
+    if not label:
+        return None
+    params = _photometry_stage_params(diff_stage)
+    if params is None:
+        return None
+    ffi_path = _photometry_resolve_ffi_path(cfg, product_id)
+    if not ffi_path:
+        return None
+    sector = int(getattr(cfg, "sector", 0) or 0)
+    camera = int(getattr(cfg, "camera", 0) or 0)
+    ccd = int(getattr(cfg, "ccd", 0) or 0)
+    inputs = provenance_glue.diff_image_input_fingerprints(
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        ffi_path=ffi_path,
+        cfg=cfg,
+    )
+    if inputs is None:
+        return None
+    return provenance_glue.diff_kind_fingerprint(
+        "diff_image",
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=label,
+        params=params,
+        input_fingerprints=inputs,
+    )
+
+
+def _photometry_resolve_epsf_fp(
+    cfg,
+    diff_image_fp: str,
+    *,
+    epsf_workspace: Optional[str] = None,
+    product_id: Optional[str] = None,
+) -> Optional[str]:
+    """Real ``epsf`` node fingerprint when resolvable; else ``None``."""
+    from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+
+    if not _is_real_provenance_fp(diff_image_fp) or not product_id:
+        return None
+    epsf_stage = _photometry_epsf_stage(cfg, epsf_workspace)
+    if epsf_stage is None:
+        return None
+    epsf_label = str(epsf_stage.get("output", "")).strip()
+    if not epsf_label:
+        return None
+    params = _photometry_stage_params(epsf_stage)
+    if params is None:
+        return None
+    sector = int(getattr(cfg, "sector", 0) or 0)
+    camera = int(getattr(cfg, "camera", 0) or 0)
+    ccd = int(getattr(cfg, "ccd", 0) or 0)
+    inputs = provenance_glue.epsf_input_fingerprints(diff_image_fp)
+    if inputs is None:
+        return None
+    return provenance_glue.diff_kind_fingerprint(
+        "epsf",
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=epsf_label,
+        params=params,
+        input_fingerprints=inputs,
+    )
+
+
+def _photometry_provenance_input_fingerprints(
+    cfg,
+    diff_paths: list,
+    *,
+    diffs_label: Optional[str] = None,
+    epsf_workspace: Optional[str] = None,
+) -> Optional[list[str]]:
+    """
+    Real input fingerprints for photometry emit, or ``None`` to skip emit.
+
+    Requires at least one real ``diff_image`` fp; never returns ``loc:`` tokens.
+    """
+    from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+
+    if not diff_paths:
+        return None
+    diff_path = str(diff_paths[0])
+    diff_image_fp = _photometry_resolve_diff_image_fp(
+        cfg, diff_path, diffs_label=diffs_label
+    )
+    if not _is_real_provenance_fp(diff_image_fp):
+        return None
+    product_id, _ = _photometry_product_id_and_diff_label(diff_path)
+    epsf_fp = _photometry_resolve_epsf_fp(
+        cfg,
+        str(diff_image_fp),
+        epsf_workspace=epsf_workspace,
+        product_id=product_id,
+    )
+    if _is_real_provenance_fp(epsf_fp):
+        return provenance_glue.required_input_fingerprints(
+            str(diff_image_fp), str(epsf_fp)
+        )
+    return provenance_glue.required_input_fingerprints(str(diff_image_fp))
+
+
+def _try_emit_photometry_provenance(
+    *,
+    cfg,
+    method,
+    diff_paths: list,
+    phot_targets: list,
+    output_dir: str,
+    output_label: Optional[str],
+    diffs_input: Optional[str],
+    stage_epsf_workspace: Optional[str],
+    gridded_epsf_by_workspace: Optional[dict],
+) -> None:
+    """Best-effort event-scoped photometry provenance (BK-4b). Never raises."""
+    try:
+        from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
+
+        data_root = getattr(cfg, "data_root", "") or None
+        if not data_root:
+            return
+        event = (
+            getattr(cfg, "target_name", None)
+            or getattr(cfg, "event_name", None)
+            or "unknown"
+        )
+        sector = int(getattr(cfg, "sector", 0) or 0)
+        camera = int(getattr(cfg, "camera", 0) or 0)
+        ccd = int(getattr(cfg, "ccd", 0) or 0)
+        label = str(output_label or "phot")
+        epsf_ws = getattr(method, "epsf_workspace", None) or stage_epsf_workspace
+        epsf_ws_for_prov = None
+        if (
+            epsf_ws
+            and gridded_epsf_by_workspace
+            and epsf_ws in gridded_epsf_by_workspace
+        ):
+            epsf_ws_for_prov = epsf_ws
+        input_fps = _photometry_provenance_input_fingerprints(
+            cfg,
+            diff_paths,
+            diffs_label=diffs_input,
+            epsf_workspace=epsf_ws_for_prov,
+        )
+        if input_fps is None:
+            log.debug(
+                "photometry provenance: skip emit for method %s (no real diff_image fp)",
+                getattr(method, "name", "?"),
+            )
+            return
+        csv_name = (
+            phot_targets[0].csv_basename
+            if phot_targets
+            else lightcurve_csv_basename(method.name)
+        )
+        loc = os.path.join(str(output_dir), csv_name)
+        provenance_glue.emit_photometry_artifact(
+            event=str(event),
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            method=str(method.name),
+            label=label,
+            params=method,
+            location=loc,
+            input_fingerprints=input_fps,
+            data_root=data_root,
+            meta={
+                "n_epochs": int(len(diff_paths)),
+                "n_targets": len(phot_targets),
+            },
+        )
+    except Exception:
+        log.debug(
+            "provenance emit (photometry) failed for method %s",
+            getattr(method, "name", "?"),
+            exc_info=True,
+        )
+
+
 def forced_phot_gridded_epoch(
     image: np.ndarray,
     gridded_model,
@@ -3080,4 +3412,15 @@ def run_forced_photometry_stage(
         else:
             raise TypeError(f"unknown photometry method type: {type(method)!r}")
         results[method.name] = dfs
+        _try_emit_photometry_provenance(
+            cfg=cfg,
+            method=method,
+            diff_paths=diff_paths,
+            phot_targets=phot_targets,
+            output_dir=output_dir,
+            output_label=output_label,
+            diffs_input=diffs_input,
+            stage_epsf_workspace=stage_epsf_workspace,
+            gridded_epsf_by_workspace=gridded_epsf_by_workspace,
+        )
     return results

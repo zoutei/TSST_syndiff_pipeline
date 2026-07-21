@@ -80,6 +80,7 @@ try:
         diff_background_recipe_params as _diff_background_recipe_params,
         diff_image_recipe_params as _diff_image_recipe_params,
         epsf_recipe_params as _epsf_recipe_params,
+        photometry_recipe_params as _photometry_recipe_params,
         shared_mask_recipe_params as _shared_mask_recipe_params,
     )
 except Exception:  # pragma: no cover
@@ -88,6 +89,7 @@ except Exception:  # pragma: no cover
     _diff_background_recipe_params = None
     _diff_image_recipe_params = None
     _epsf_recipe_params = None
+    _photometry_recipe_params = None
     _shared_mask_recipe_params = None
 
 try:
@@ -141,11 +143,50 @@ SHARED_MASK_KIND = "shared_mask"
 
 # ── Recipe builders (§6 kind registry, diff-side rows) ──────────────────────
 
+def _try_load_mask_settings_from_params(params: Any) -> Any:
+    """Load mask policy YAML from ``params.mask_settings`` path when present.
+
+    Returns a :class:`MaskSettings` (or mapping) for
+    ``shared_mask_recipe_params(..., mask_settings=...)``, or ``None`` when
+    no path is set / load fails — leaving the model builder's own defaults
+    or auto-load path to decide.
+    """
+    path = getattr(params, "mask_settings", None)
+    if path is None and isinstance(params, dict):
+        path = params.get("mask_settings")
+    if path is None:
+        return None
+    if not isinstance(path, (str, Path)):
+        # Already a MaskSettings / mapping / dataclass — pass through.
+        return path
+    if not str(path).strip():
+        return None
+    try:
+        from syndiff_pipeline.difference_imaging.masking.settings import load_mask_settings
+
+        return load_mask_settings(path)
+    except Exception:
+        log.debug(
+            "shared_mask: failed to load mask_settings from %s", path, exc_info=True
+        )
+        return None
+
+
+def _shared_mask_recipe_from_parts(parts: list) -> dict:
+    """Call model ``shared_mask_recipe_params``, loading YAML when path is set."""
+    params = parts[0]
+    ms = _try_load_mask_settings_from_params(params)
+    if ms is not None:
+        return _shared_mask_recipe_params(params, mask_settings=ms)
+    return _shared_mask_recipe_params(params)
+
+
 _MODEL_RECIPE_BUILDERS = {
     "diff_background": lambda parts: _diff_background_recipe_params(parts[0]),
     "diff_image": lambda parts: _diff_image_recipe_params(*parts),
     "epsf": lambda parts: _epsf_recipe_params(parts[0]),
-    "shared_mask": lambda parts: _shared_mask_recipe_params(parts[0]),
+    "shared_mask": _shared_mask_recipe_from_parts,
+    "photometry": lambda parts: _photometry_recipe_params(parts[0]),
 }
 
 
@@ -231,6 +272,29 @@ def shared_mask_spatial_key(sector: int, camera: int, ccd: int, *, label: str = 
     return {"s": int(sector), "c": int(camera), "k": int(ccd)}
 
 
+def photometry_spatial_key(
+    event: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    method: str = "",
+    label: str = "",
+) -> dict:
+    """Spatial key for ``photometry`` — event-scoped; ``method``/``label`` disambiguate producers."""
+    d: dict = {
+        "event": str(event).strip(),
+        "s": int(sector),
+        "c": int(camera),
+        "k": int(ccd),
+    }
+    if method:
+        d["method"] = str(method)
+    if label:
+        d["label"] = str(label)
+    return d
+
+
 def product_id_for_ffi(path_or_basename: str) -> Optional[str]:
     """``tess<digits>`` product id for an FFI path/basename (thin re-export)."""
     return tess_product_id_from_ffi_path(path_or_basename)
@@ -303,44 +367,305 @@ def ffi_input_fingerprint(
 def _stable_location_token(location: str) -> str:
     """Deterministic stand-in fingerprint keyed on a logical file location.
 
-    Used for edges into nodes this module does not own the recipe for
-    (template ``downsample`` nodes) or cross-stage/cross-process upstream
-    diff artifacts reachable here only as an on-disk file path. A live
-    ``store`` lookup by ``(kind, spatial_key)`` is deliberately *not* used
-    for these edges: the upstream artifact's sidecar record is very likely
-    still sitting in a spool file (not yet drained by the supervisor) when a
-    downstream stage of the *same* pipeline run reads it moments later, so a
-    DB-backed lookup would almost always miss. A location hash is at least
-    deterministic and available immediately. PENDING: once there is a
-    reliable way to resolve the *real* upstream fingerprint at emit time
-    (e.g. threading it forward in-process instead of round-tripping through
-    the store), swap this for the real value — every diff-side recipe that
-    consumes one of these edges already depends on the returned string, so
-    the swap re-fingerprints the diff cone automatically (Merkle
-    invalidation, plan §3.3).
+    DEPRECATED for Merkle edges (BK-4): prefer real fingerprints. Kept only as
+    a last-resort for kinds with no recipe yet (``source_catalog``/Gaia).
+
+    **Skip-oracle / indexed-verify paths must not use ``loc:`` tokens** — they
+    poison the Merkle name relative to real checkpoint nodes. Do not use for
+    ``downsample`` / ``diff_image`` / ``shared_mask`` / ``epsf`` /
+    ``diff_background`` when the fingerprint will drive skip decisions.
     """
     return "loc:" + hashlib.sha256(str(location).encode("utf-8")).hexdigest()[:24]
 
 
 def location_edge(kind: str, path: str, *, is_fits: bool = True) -> dict:
-    """Best-effort edge to a node this module doesn't own the recipe for (see :func:`_stable_location_token`)."""
+    """Best-effort edge via location hash — last resort only (see :func:`_stable_location_token`).
+
+    Not safe for indexed skip decisions; prefer real fingerprints via
+    :func:`required_input_fingerprints` / kind-specific helpers.
+    """
     location = fits_logical_path(path) if is_fits else str(path)
     return {"kind": str(kind), "location": location, "fingerprint": _stable_location_token(location)}
 
 
-def template_input_edge(template_path: str) -> dict:
-    """Edge to the ``downsample`` node that produced *template_path* (best-effort, see :func:`location_edge`)."""
-    return location_edge("downsample", template_path)
+def resolve_downsample_fingerprint(
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    data_root: Optional[str] = None,
+    oversampling_factor: int = 1,
+    store_name: Optional[str] = None,
+    site_config_dir: Optional[str] = None,
+    target_ra: Optional[float] = None,
+    target_dec: Optional[float] = None,
+    target_name: Optional[str] = None,
+    explicit_fp: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Resolve the SCC-scoped ``downsample`` node fingerprint used as a template edge.
+
+    Order: explicit → ``expected_downsample_fingerprint`` via site ``pipeline.yaml``
+    → provenance-store lookup by spatial key. Returns ``None`` when unresolved
+    (callers fail-open rather than minting a ``loc:`` token).
+
+    Store lookup: a single complete row wins; multiple complete rows for the
+    same spatial key are ambiguous (different recipes) and return ``None`` —
+    never newest-by-``created_at``. Prefer the site/expected path above when
+    a recipe match is available.
+    """
+    if explicit_fp:
+        return str(explicit_fp)
+    if site_config_dir and data_root:
+        try:
+            from syndiff_pipeline.common.orchestration.targets import Target
+            from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+                expected_downsample_fingerprint,
+            )
+            from syndiff_pipeline.template_creation.orchestration.runner_config import (
+                load_runner_config,
+                resolve_config,
+            )
+
+            site = Path(str(site_config_dir))
+            pipeline_yaml = site / "pipeline.yaml"
+            if pipeline_yaml.is_file():
+                runner_cfg = load_runner_config(pipeline_yaml)
+                target = Target(
+                    int(sector),
+                    int(camera),
+                    int(ccd),
+                    float(target_ra if target_ra is not None else 0.0),
+                    float(target_dec if target_dec is not None else 0.0),
+                    str(target_name or "unknown"),
+                )
+                resolved = resolve_config(target, runner_cfg)
+                return expected_downsample_fingerprint(resolved)
+        except Exception:
+            log.debug("resolve_downsample_fingerprint: site resolve failed", exc_info=True)
+
+    if data_root and _STORE_AVAILABLE:
+        try:
+            from syndiff_pipeline.common.provenance.model import SccKey
+
+            spatial = SccKey(
+                int(sector),
+                int(camera),
+                int(ccd),
+                os=int(oversampling_factor) if int(oversampling_factor) > 1 else None,
+                store_name=store_name,
+            ).to_dict()
+            store = open_store(str(data_root))
+            if store is not None:
+                rows = store.artifacts_by_kind_spatial("downsample", spatial)
+                complete = [r for r in rows if getattr(r, "state", "complete") == "complete"]
+                if len(complete) == 1:
+                    return complete[0].fingerprint
+                if len(complete) > 1:
+                    # Ambiguous across recipes — refuse rather than newest-by-created_at.
+                    log.debug(
+                        "resolve_downsample_fingerprint: %d complete downsample rows "
+                        "for spatial=%s; returning None (prefer site expected recipe)",
+                        len(complete),
+                        spatial,
+                    )
+                    return None
+        except Exception:
+            log.debug("resolve_downsample_fingerprint: store lookup failed", exc_info=True)
+    return None
 
 
-def upstream_label_edge(kind: str, path: str) -> dict:
-    """Edge to an upstream diff-side artifact referenced by its written file (best-effort, see :func:`location_edge`)."""
+def resolve_downsample_fingerprint_from_cfg(
+    cfg: Any, *, explicit_fp: Optional[str] = None
+) -> Optional[str]:
+    """``resolve_downsample_fingerprint`` from a :class:`SynDiffConfig`-like object."""
+    return resolve_downsample_fingerprint(
+        sector=int(cfg.sector),
+        camera=int(cfg.camera),
+        ccd=int(cfg.ccd),
+        data_root=getattr(cfg, "data_root", None) or None,
+        oversampling_factor=int(getattr(cfg, "oversampling_factor", 1) or 1),
+        store_name=getattr(cfg, "template_store_name", None) or None,
+        site_config_dir=getattr(cfg, "site_config_dir", None) or None,
+        target_ra=getattr(cfg, "target_ra", None),
+        target_dec=getattr(cfg, "target_dec", None),
+        target_name=getattr(cfg, "target_name", None),
+        explicit_fp=explicit_fp,
+    )
+
+
+def template_input_edge(
+    template_path: str = "",
+    *,
+    downsample_fingerprint: Optional[str] = None,
+    cfg: Any = None,
+) -> dict:
+    """Edge to the SCC-scoped ``downsample`` node that produced the templates.
+
+    Prefers a real downsample fingerprint (threaded or resolved from *cfg*).
+    Returns ``fingerprint=None`` when unresolved — callers must fail-open
+    (do not mint ``loc:`` tokens that poison the Merkle name).
+    """
+    location = fits_logical_path(template_path) if template_path else ""
+    fp = downsample_fingerprint
+    if fp is None and cfg is not None:
+        fp = resolve_downsample_fingerprint_from_cfg(cfg)
+    return {"kind": "downsample", "location": location, "fingerprint": fp}
+
+
+def upstream_label_edge(
+    kind: str,
+    path: str,
+    *,
+    fingerprint: Optional[str] = None,
+) -> dict:
+    """Edge to an upstream diff-side artifact.
+
+    Prefer a real *fingerprint* when the caller has one (threaded emit return
+    value). Otherwise fall back to a ``loc:`` token.
+
+    **Not for indexed skip decisions.** Skip-oracle / Wave-2 verify paths must
+    use :func:`epsf_input_fingerprints` / :func:`required_input_fingerprints`
+    (or an explicit real fp) — never the ``loc:`` fallback from this helper.
+    """
+    location = fits_logical_path(path)
+    if fingerprint is not None:
+        return {"kind": str(kind), "location": location, "fingerprint": fingerprint}
     return location_edge(kind, path)
 
 
 def gaia_catalog_edge(path: str) -> dict:
-    """Edge to the Gaia catalog CSV consumed by ``epsf`` (best-effort, see :func:`location_edge`)."""
+    """Edge to the Gaia catalog CSV consumed by ``epsf``.
+
+    ``source_catalog`` has no diff-side recipe yet — keep ``loc:`` as last
+    resort (documented TODO) so emit can still record an edge. Safe only
+    because Gaia is not currently used as an indexed skip oracle.
+    """
     return location_edge("source_catalog", path, is_fits=False)
+
+
+def required_input_fingerprints(*fps: Optional[str]) -> Optional[list[str]]:
+    """
+    Build a required input-fingerprint vector, or ``None`` if any edge is missing.
+
+    Returns ``None`` when any argument is ``None``/empty so callers fail-open
+    instead of minting a node with silently omitted dependencies.
+
+    **Callers must pass this into** :func:`emit_diff_artifact` /
+    :func:`diff_kind_fingerprint` **rather than** ``[fp] if fp else []``,
+    which bypasses the ``None``-in-list guard and mints an empty-input node
+    that never matches a later real-edge verify fingerprint.
+    """
+    out: list[str] = []
+    for fp in fps:
+        if fp is None:
+            return None
+        s = str(fp).strip()
+        if not s:
+            return None
+        out.append(s)
+    return out
+
+
+def diff_background_input_fingerprints(ffi_fp: Optional[str]) -> Optional[list[str]]:
+    """
+    Input fingerprint vector for hotpants-internal ``diff_background`` emit/verify.
+
+    Returns ``[ffi_fp]`` when present, else ``None`` (refuse silent empty-input
+    mint). Standalone background stages that edge on ``diff_image`` should use
+    :func:`required_input_fingerprints` with the upstream diff fp instead.
+    """
+    return required_input_fingerprints(ffi_fp)
+
+
+def epsf_input_fingerprints(
+    diff_image_fp: Optional[str] = None,
+    *extra_fps: Optional[str],
+    diff_image_path: Optional[str] = None,
+) -> Optional[list[str]]:
+    """
+    Input fingerprint vector for ``epsf`` emit/verify (Wave 2 parity).
+
+    Prefer a real *diff_image_fp* (and any additional required edges). When
+    only *diff_image_path* is available and a real fingerprint cannot be
+    resolved without minting ``loc:``, return ``None`` (fail-open) rather
+    than poisoning skip-critical Merkle names.
+
+    Does **not** call :func:`upstream_label_edge` / :func:`_stable_location_token`.
+    """
+    if diff_image_fp is None:
+        # Path alone is insufficient for skip-oracle — refuse loc: mint.
+        # (diff_image_path is accepted so callers can be explicit about the miss.)
+        _ = diff_image_path
+        return None
+    return required_input_fingerprints(diff_image_fp, *extra_fps)
+
+
+def diff_image_input_fingerprints(
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    ffi_path: str,
+    downsample_fp: Optional[str] = None,
+    cfg: Any = None,
+) -> Optional[list[str]]:
+    """
+    Input fingerprint vector matching hotpants/kernel_subtract emit sites.
+
+    Returns ``[ffi_fp, downsample_fp]`` when both resolve, or ``None`` if either
+    edge is missing (fail-open — do not mint a partial vector).
+    """
+    ffi_fp = ffi_input_fingerprint(sector, camera, ccd, ffi_path)
+    tmpl_fp = downsample_fp
+    if tmpl_fp is None and cfg is not None:
+        tmpl_fp = resolve_downsample_fingerprint_from_cfg(cfg)
+    return required_input_fingerprints(ffi_fp, tmpl_fp)
+
+
+def resolve_ffi_path_for_product_id(
+    frames_df: "pd.DataFrame",
+    product_id: str,
+    *,
+    ffi_dir: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve an on-disk FFI path for *product_id* from the frame manifest."""
+    from syndiff_pipeline.difference_imaging.support.manifest import (
+        row_ffi_product_id_series,
+    )
+    from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
+
+    if frames_df is None or len(frames_df) == 0:
+        return None
+    pids = row_ffi_product_id_series(frames_df)
+    matches = frames_df.loc[pids.astype(str) == str(product_id)]
+    if matches.empty:
+        return None
+    row = matches.iloc[0]
+    if "path" in matches.columns:
+        raw = row.get("path")
+        if raw is not None and not (isinstance(raw, float) and pd.isna(raw)):
+            resolved = try_resolve_fits_variant(str(raw))
+            if resolved is not None:
+                return str(resolved)
+            if Path(str(raw)).is_file():
+                return str(raw)
+    filename = None
+    if "filename" in matches.columns:
+        filename = row.get("filename")
+    if filename is None or (isinstance(filename, float) and pd.isna(filename)):
+        return None
+    filename = str(filename)
+    if ffi_dir:
+        candidate = Path(ffi_dir) / filename
+        resolved = try_resolve_fits_variant(candidate)
+        if resolved is not None:
+            return str(resolved)
+    # Absolute filename / path already on the row
+    resolved = try_resolve_fits_variant(filename)
+    if resolved is not None:
+        return str(resolved)
+    return None
 
 
 # ── Fingerprint computation ──────────────────────────────────────────────────
@@ -507,6 +832,11 @@ def emit_diff_artifact(
     On success, returns the computed fingerprint so the caller may pass it
     forward as an ``input_fingerprints`` entry for a downstream kind within
     the same process (e.g. ``diff_image``'s fingerprint feeding ``epsf``).
+
+    For kinds with required edges, pass
+    :func:`required_input_fingerprints` / :func:`diff_image_input_fingerprints`
+    / :func:`diff_background_input_fingerprints` / :func:`epsf_input_fingerprints`
+    — never ``[fp] if fp else []``, which silently mints empty-input nodes.
     """
     try:
         if not PROVENANCE_AVAILABLE or not _SPOOL_AVAILABLE or not data_root:
@@ -582,7 +912,14 @@ def emit_shared_mask_artifact(
     label: str = "shared_mask",
     meta: Optional[dict] = None,
 ) -> Optional[str]:
-    """``emit_diff_artifact`` counterpart for the ``shared_mask`` kind (different spatial key shape)."""
+    """``emit_diff_artifact`` counterpart for the ``shared_mask`` kind (different spatial key shape).
+
+    Recipe materialization goes through :func:`diff_recipe` → model
+    ``shared_mask_recipe_params``. When ``params.mask_settings`` is a YAML
+    path, glue loads it (via :func:`load_mask_settings`) and passes
+    ``mask_settings=`` so the fingerprint hashes policy contents, not a path
+    string or packaged defaults alone.
+    """
     try:
         if not PROVENANCE_AVAILABLE or not _SPOOL_AVAILABLE or not data_root:
             return None
@@ -610,6 +947,98 @@ def emit_shared_mask_artifact(
         return None
 
 
+def photometry_fingerprint(
+    *,
+    event: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    method: str,
+    label: str,
+    params: Any,
+    input_fingerprints: Sequence[Optional[str]] = (),
+) -> Optional[str]:
+    """Content-addressed fingerprint for one event-scoped ``photometry`` node."""
+    if not PROVENANCE_AVAILABLE:
+        return None
+    if any(fp is None for fp in input_fingerprints):
+        return None
+    spatial_key = photometry_spatial_key(
+        event, sector, camera, ccd, method=method, label=label
+    )
+    recipe = diff_recipe("photometry", params)
+    try:
+        rid = _recipe_id_fn("photometry", recipe["params"], recipe["code_version"])
+        return _fingerprint_fn(
+            "photometry",
+            spatial_key,
+            rid,
+            sorted(fp for fp in input_fingerprints if fp),
+        )
+    except Exception:
+        log.debug("photometry_fingerprint failed", exc_info=True)
+        return None
+
+
+def emit_photometry_artifact(
+    *,
+    event: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    method: str,
+    label: str,
+    params: Any,
+    location: str,
+    input_fingerprints: Sequence[Optional[str]] = (),
+    data_root: Optional[str] = None,
+    meta: Optional[dict] = None,
+) -> Optional[str]:
+    """Best-effort sidecar record for an event-scoped photometry product. Never raises."""
+    try:
+        if not PROVENANCE_AVAILABLE or not _SPOOL_AVAILABLE or not data_root:
+            return None
+        fp = photometry_fingerprint(
+            event=event,
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            method=method,
+            label=label,
+            params=params,
+            input_fingerprints=input_fingerprints,
+        )
+        if fp is None:
+            return None
+        recipe = diff_recipe("photometry", params)
+        spatial_key = photometry_spatial_key(
+            event, sector, camera, ccd, method=method, label=label
+        )
+        full_meta = dict(meta or {})
+        full_meta.setdefault("method", method)
+        full_meta.setdefault("label", label)
+        if _emit_record(
+            fp=fp,
+            kind="photometry",
+            spatial_key=spatial_key,
+            recipe=recipe,
+            input_fingerprints=input_fingerprints,
+            location=str(location),
+            data_root=str(data_root),
+            meta=full_meta,
+        ):
+            return fp
+        return None
+    except Exception:
+        log.debug(
+            "emit_photometry_artifact(event=%s, method=%s) failed; continuing without provenance",
+            event,
+            method,
+            exc_info=True,
+        )
+        return None
+
+
 # ── Query (used by diff_verify) ──────────────────────────────────────────────
 
 
@@ -628,3 +1057,58 @@ def open_store(data_root: str) -> Optional[Any]:
 def close_store(store: Any) -> None:
     """Best-effort close for a handle returned by :func:`open_store` (no-op: ProvenanceStore has no persistent handle)."""
     return None
+
+
+def diff_image_complete_in_store(
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    product_id: str,
+    label: str,
+    params: Any,
+    ffi_path: str,
+    downsample_fp: Optional[str] = None,
+    data_root: Optional[str] = None,
+    cfg: Any = None,
+) -> Optional[bool]:
+    """
+    Whether ``provenance.db`` already indexes one ``diff_image`` node as complete.
+
+    Returns ``True`` when the fingerprint is not in ``missing_fingerprints``,
+    ``False`` when it is still missing, or ``None`` when the store or recipe
+    inputs cannot be resolved (fail-open — callers fall back to exists-check).
+    """
+    if not PROVENANCE_AVAILABLE or not _STORE_AVAILABLE or not data_root:
+        return None
+    inputs = diff_image_input_fingerprints(
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        ffi_path=ffi_path,
+        downsample_fp=downsample_fp,
+        cfg=cfg,
+    )
+    if inputs is None:
+        return None
+    fp = diff_kind_fingerprint(
+        "diff_image",
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=label,
+        params=params,
+        input_fingerprints=inputs,
+    )
+    if fp is None:
+        return None
+    store = open_store(str(data_root))
+    if store is None:
+        return None
+    try:
+        missing = store.missing_fingerprints([fp], fallback_stat=True)
+        return fp not in missing
+    except Exception:
+        log.debug("diff_image_complete_in_store query failed", exc_info=True)
+        return None

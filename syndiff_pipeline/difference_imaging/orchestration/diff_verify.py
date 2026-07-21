@@ -44,13 +44,11 @@ log = logging.getLogger(__name__)
 # YAML pipeline "kind" -> provenance kind, for the per-FFI stages this module
 # can derive an exact required-fingerprint set for (registry §6). Stages not
 # listed here (forced_photometry, centroids, subtract, sat_template,
-# kernel_subtract, kernel_fit, convolved_templates, astrometry) always fall
-# open to the legacy marker check; kernel_subtract's diff_image recipe spans
-# two stage configs (KernelFitParams + KernelSubtractParams) resolved in a
-# different pipeline stage and is not reconstructed here — deliberately out
-# of scope for this pass (see PR-D1 report).
+# kernel_fit, convolved_templates, astrometry) always fall open to the legacy
+# marker check.
 _INDEXED_STAGE_KIND = {
     "hotpants": "diff_image",
+    "kernel_subtract": "diff_image",
     "epsf": "epsf",
     "shared_mask": "shared_mask",
     "background": "diff_background",
@@ -112,6 +110,63 @@ def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
         ctx.target,
         meta=ctx.meta,
     )
+
+
+def load_diff_frames_for_verify(
+    cfg: SynDiffConfig, event_dir: str | Path
+) -> "pd.DataFrame":
+    """
+    Frame manifest for indexed diff verify.
+
+    Prefers SCC ``bookkeeping/diff/frames.csv`` when present (read-only — never
+    bootstraps); falls back to the event ``syndiff_ffi_frames.csv`` manifest.
+    """
+    import pandas as pd
+
+    data_root = getattr(cfg, "data_root", "") or ""
+    if data_root:
+        try:
+            from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir
+            from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+                DIFF_JOB_BASENAME,
+                FRAMES_CSV_BASENAME,
+            )
+
+            bk_dir = scc_diff_bookkeeping_dir(
+                data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+            )
+            frames_path = bk_dir / FRAMES_CSV_BASENAME
+            job_path = bk_dir / DIFF_JOB_BASENAME
+            if frames_path.is_file() and job_path.is_file():
+                return pd.read_csv(frames_path)
+        except Exception:
+            log.debug("load_diff_frames_for_verify: SCC handoff read failed", exc_info=True)
+
+    from syndiff_pipeline.difference_imaging.support.manifest import load_frame_manifest
+
+    return load_frame_manifest(str(event_dir))
+
+
+def _diff_frame_manifest_available(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
+    """True when SCC bookkeeping or the event frame manifest is on disk."""
+    data_root = getattr(cfg, "data_root", "") or ""
+    if data_root:
+        try:
+            from syndiff_pipeline.common.scc_paths import scc_diff_bookkeeping_dir
+            from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+                DIFF_JOB_BASENAME,
+                FRAMES_CSV_BASENAME,
+            )
+
+            bk_dir = scc_diff_bookkeeping_dir(
+                data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+            )
+            if (bk_dir / FRAMES_CSV_BASENAME).is_file() and (bk_dir / DIFF_JOB_BASENAME).is_file():
+                return True
+        except Exception:
+            log.debug("_diff_frame_manifest_available: SCC check failed", exc_info=True)
+    manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
+    return manifest_csv.is_file()
 
 
 def diff_workspace_root(cfg: SynDiffConfig, event_dir: str | Path) -> Path:
@@ -324,6 +379,7 @@ def _params_for_indexed_stage(stage: dict):
         parse_background,
         parse_epsf,
         parse_hotpants,
+        parse_kernel_subtract,
         parse_shared_mask,
     )
 
@@ -331,6 +387,8 @@ def _params_for_indexed_stage(stage: dict):
     try:
         if kind == "hotpants":
             return parse_hotpants(stage, 0)
+        if kind == "kernel_subtract":
+            return parse_kernel_subtract(stage, 0)
         if kind == "epsf":
             return parse_epsf(stage, 0)
         if kind == "shared_mask":
@@ -340,6 +398,132 @@ def _params_for_indexed_stage(stage: dict):
     except Exception:
         log.debug("diff_stage_complete_indexed: stage param reparse failed", exc_info=True)
         return None
+    return None
+
+
+def _upstream_diff_image_stage(cfg: SynDiffConfig, stage: dict | None = None) -> Optional[dict]:
+    """Hotpants/kernel_subtract stage that produced the diffs feeding *stage*."""
+    _, _, stages = split_pipeline(cfg.pipeline)
+    diffs_label = None
+    if stage is not None:
+        inp = stage.get("inputs") or {}
+        raw = inp.get("diffs")
+        if raw is not None and str(raw).strip():
+            diffs_label = str(raw).strip()
+    if diffs_label:
+        for _, st in stages:
+            k = st.get("kind")
+            if k not in ("hotpants", "kernel_subtract"):
+                continue
+            o = st.get("output") or {}
+            if str(o.get("diffs", "")).strip() == diffs_label:
+                return st
+    found = None
+    for _, st in stages:
+        if st.get("kind") in ("hotpants", "kernel_subtract"):
+            found = st
+    return found
+
+
+def _diff_image_fingerprint_for_product(
+    cfg: SynDiffConfig,
+    frames_df,
+    product_id: str,
+    diff_stage: dict,
+    *,
+    downsample_fp: Optional[str] = None,
+) -> Optional[str]:
+    """Reconstruct one ``diff_image`` fingerprint (real edges, no ``loc:``)."""
+    params = _params_for_indexed_stage(diff_stage)
+    if params is None:
+        return None
+    label = _label_for_indexed_stage(diff_stage, "diff_image")
+    if not label:
+        return None
+    ffi_dir = getattr(cfg, "ffi_dir", "") or ""
+    ffi_path = _prov.resolve_ffi_path_for_product_id(
+        frames_df, product_id, ffi_dir=ffi_dir or None
+    )
+    if not ffi_path:
+        return None
+    if downsample_fp is None:
+        downsample_fp = _prov.resolve_downsample_fingerprint_from_cfg(cfg)
+    if downsample_fp is None:
+        return None
+    sector, camera, ccd = int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+    inputs = _prov.diff_image_input_fingerprints(
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        ffi_path=ffi_path,
+        downsample_fp=downsample_fp,
+    )
+    if inputs is None:
+        return None
+    return _prov.diff_kind_fingerprint(
+        "diff_image",
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=label,
+        params=params,
+        input_fingerprints=inputs,
+    )
+
+
+def _indexed_input_fingerprints(
+    *,
+    cfg: SynDiffConfig,
+    stage: dict,
+    kind: str,
+    frames_df,
+    product_id: str,
+    downsample_fp: Optional[str] = None,
+) -> Optional[list[str]]:
+    """Input-fingerprint vector matching emit for one indexed per-FFI kind."""
+    sector, camera, ccd = int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+    ffi_dir = getattr(cfg, "ffi_dir", "") or ""
+
+    if kind == "diff_background":
+        from syndiff_pipeline.difference_imaging.stages.background.pipeline import (
+            BackgroundParams,
+        )
+
+        params = _params_for_indexed_stage(stage)
+        if isinstance(params, BackgroundParams):
+            diff_stage = _upstream_diff_image_stage(cfg, stage)
+            if diff_stage is None:
+                return None
+            diff_image_fp = _diff_image_fingerprint_for_product(
+                cfg,
+                frames_df,
+                product_id,
+                diff_stage,
+                downsample_fp=downsample_fp,
+            )
+            return _prov.required_input_fingerprints(diff_image_fp)
+        ffi_path = _prov.resolve_ffi_path_for_product_id(
+            frames_df, product_id, ffi_dir=ffi_dir or None
+        )
+        if not ffi_path:
+            return None
+        ffi_fp = _prov.ffi_input_fingerprint(sector, camera, ccd, ffi_path)
+        return _prov.diff_background_input_fingerprints(ffi_fp)
+
+    if kind == "epsf":
+        diff_stage = _upstream_diff_image_stage(cfg, stage)
+        if diff_stage is None:
+            return None
+        diff_image_fp = _diff_image_fingerprint_for_product(
+            cfg,
+            frames_df,
+            product_id,
+            diff_stage,
+            downsample_fp=downsample_fp,
+        )
+        return _prov.epsf_input_fingerprints(diff_image_fp)
+
     return None
 
 
@@ -380,9 +564,7 @@ def diff_stage_complete_indexed(
         return None
 
     try:
-        from syndiff_pipeline.difference_imaging.support.manifest import load_frame_manifest
-
-        frames_df = load_frame_manifest(str(event_dir))
+        frames_df = load_diff_frames_for_verify(cfg, event_dir)
     except Exception:
         log.debug("diff_stage_complete_indexed: frame manifest load failed", exc_info=True)
         return None
@@ -392,10 +574,76 @@ def diff_stage_complete_indexed(
         return None
 
     sector, camera, ccd = int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+    downsample_fp = None
+    if kind == "diff_image":
+        downsample_fp = _prov.resolve_downsample_fingerprint_from_cfg(cfg)
+        if downsample_fp is None:
+            return None
+    elif kind == "epsf":
+        downsample_fp = _prov.resolve_downsample_fingerprint_from_cfg(cfg)
+        if downsample_fp is None:
+            return None
+    elif kind == "diff_background":
+        from syndiff_pipeline.difference_imaging.stages.background.pipeline import (
+            BackgroundParams,
+        )
+
+        if isinstance(_params_for_indexed_stage(stage), BackgroundParams):
+            downsample_fp = _prov.resolve_downsample_fingerprint_from_cfg(cfg)
+            if downsample_fp is None:
+                return None
+
+    ffi_dir = getattr(cfg, "ffi_dir", "") or ""
     required_fps: list[str] = []
     for pid in pids:
         if kind == "shared_mask":
             fp = _prov.diff_kind_fingerprint_shared_mask(sector, camera, ccd, params, label=label)
+        elif kind == "diff_image":
+            ffi_path = _prov.resolve_ffi_path_for_product_id(
+                frames_df, pid, ffi_dir=ffi_dir or None
+            )
+            if not ffi_path:
+                return None
+            inputs = _prov.diff_image_input_fingerprints(
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                ffi_path=ffi_path,
+                downsample_fp=downsample_fp,
+            )
+            if inputs is None:
+                return None
+            fp = _prov.diff_kind_fingerprint(
+                kind,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                product_id=pid,
+                label=label,
+                params=params,
+                input_fingerprints=inputs,
+            )
+        elif kind in ("diff_background", "epsf"):
+            inputs = _indexed_input_fingerprints(
+                cfg=cfg,
+                stage=stage,
+                kind=kind,
+                frames_df=frames_df,
+                product_id=pid,
+                downsample_fp=downsample_fp,
+            )
+            if inputs is None:
+                return None
+            fp = _prov.diff_kind_fingerprint(
+                kind,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                product_id=pid,
+                label=label,
+                params=params,
+                input_fingerprints=inputs,
+            )
         else:
             fp = _prov.diff_kind_fingerprint(
                 kind,
@@ -428,8 +676,7 @@ def diff_stage_complete_indexed(
 def diff_workspace_complete(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
     """True when handoff manifest and final pipeline outputs exist in the active workspace tree."""
     event_dir = Path(event_dir)
-    manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
-    if not manifest_csv.is_file():
+    if not _diff_frame_manifest_available(cfg, event_dir):
         return False
     ws_dir = diff_workspace_root(cfg, event_dir)
     if not ws_dir.is_dir():
