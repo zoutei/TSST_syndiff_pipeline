@@ -1,8 +1,8 @@
-"""SCC-scoped diff product store (PR-D2, plan §14.2).
+"""SCC-scoped diff product store (lane-primary layout).
 
-When ``publish_scc`` is enabled on a diff run, per-FFI artifacts are mirrored
-into ``{data_root}/s{SSSS}/c{C}/k{K}/diff/{stage_label}/{recipe_fp}/`` and
-the event workspace records pointers in ``scc_diff_index.json`` (no symlinks).
+Per-FFI artifacts are written under
+``{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/{workspace_label}/{recipe_fp}/``.
+Event workspaces may record pointers in ``scc_diff_index.json``.
 """
 
 from __future__ import annotations
@@ -14,7 +14,11 @@ import shutil
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from syndiff_pipeline.common.scc_paths import scc_diff_stage_dir, scc_diff_workspace_index_path
+from syndiff_pipeline.common.scc_paths import (
+    normalize_store_name,
+    scc_diff_workspace_dir,
+    scc_diff_workspace_index_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,11 +40,87 @@ def scc_diff_artifact_path(
     product_id: str,
     label: str,
     *,
+    output_store_name: str | None = None,
     suffix: str = ".fits.fz",
 ) -> Path:
-    return scc_diff_stage_dir(
-        data_root, sector, camera, ccd, stage_label, recipe_fp
+    return scc_diff_workspace_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        store_name=normalize_store_name(output_store_name),
+        workspace_label=stage_label,
+        recipe_fp=recipe_fp,
     ) / diff_artifact_basename(product_id, label, suffix=suffix)
+
+
+def resolve_diff_write_path(
+    *,
+    data_root: str | None,
+    sck: tuple[int, int, int] | None,
+    kind: str,
+    stage_label: str,
+    product_id: str,
+    label: str,
+    params: Any,
+    workspace_path: str | Path,
+    output_store_name: str | None = None,
+    suffix: str = ".fits.fz",
+) -> tuple[Path, bool]:
+    """
+    Choose the on-disk write target for a per-FFI diff artifact.
+
+    When ``data_root`` and SCC context are available and a recipe fingerprint
+    resolves, returns the lane path under ``diff_{store}/``; otherwise returns
+    the event workspace path.
+    """
+    ws = Path(workspace_path)
+    if not data_root or sck is None:
+        return ws, False
+    recipe_fp = recipe_fp_for_artifact(kind, params)
+    if not recipe_fp:
+        return ws, False
+    sector, camera, ccd = sck
+    return (
+        scc_diff_artifact_path(
+            data_root,
+            sector,
+            camera,
+            ccd,
+            stage_label,
+            recipe_fp,
+            product_id,
+            label,
+            output_store_name=output_store_name,
+            suffix=suffix,
+        ),
+        True,
+    )
+
+
+def record_scc_artifact_pointer(
+    *,
+    workspace_root: str | Path,
+    product_id: str,
+    label: str,
+    scc_path: str | Path,
+    kind: str,
+    fingerprint: Optional[str],
+    stage_label: str,
+    recipe_fp: str,
+) -> None:
+    """Record a workspace index entry for an SCC-primary artifact."""
+    record_workspace_pointer(
+        workspace_root,
+        f"{product_id}:{label}",
+        {
+            "kind": kind,
+            "fingerprint": fingerprint,
+            "scc_path": str(scc_path),
+            "stage_label": stage_label,
+            "recipe_fp": recipe_fp,
+        },
+    )
 
 
 def mirror_to_scc_store(source: str | Path, dest: Path) -> bool:
@@ -111,11 +191,8 @@ def recipe_fp_for_artifact(kind: str, params: Any) -> Optional[str]:
 
 def try_materialize_workspace_artifact(
     *,
-    publish_scc: bool,
-    data_root: str,
-    sector: int,
-    camera: int,
-    ccd: int,
+    data_root: str | None,
+    sck: tuple[int, int, int] | None,
     kind: str,
     stage_label: str,
     product_id: str,
@@ -123,15 +200,16 @@ def try_materialize_workspace_artifact(
     params: Any,
     workspace_dest: str | Path,
     workspace_root: Optional[str] = None,
+    output_store_name: str | None = None,
     suffix: str = ".fits.fz",
     fingerprint: Optional[str] = None,
 ) -> bool:
-    """Copy a finalized artifact from the SCC diff store into an event workspace.
+    """Copy a finalized artifact from the SCC diff lane into an event workspace.
 
     Returns True when *workspace_dest* exists after the call (already present or
     freshly materialized). Never raises.
     """
-    if not publish_scc or not data_root:
+    if not data_root or sck is None:
         return False
     dest = Path(workspace_dest)
     if dest.is_file():
@@ -139,6 +217,7 @@ def try_materialize_workspace_artifact(
     recipe_fp = recipe_fp_for_artifact(kind, params)
     if not recipe_fp:
         return False
+    sector, camera, ccd = sck
     src = scc_diff_artifact_path(
         data_root,
         sector,
@@ -148,6 +227,7 @@ def try_materialize_workspace_artifact(
         recipe_fp,
         product_id,
         label,
+        output_store_name=output_store_name,
         suffix=suffix,
     )
     if not src.is_file():
@@ -169,48 +249,3 @@ def try_materialize_workspace_artifact(
         )
     return True
 
-
-def publish_mirror(
-    *,
-    publish_scc: bool,
-    data_root: str,
-    sector: int,
-    camera: int,
-    ccd: int,
-    stage_label: str,
-    recipe_fp: str,
-    product_id: str,
-    label: str,
-    source_path: str,
-    fingerprint: Optional[str],
-    workspace_root: Optional[str] = None,
-    kind: str = "",
-) -> Optional[str]:
-    """Mirror an on-disk artifact into the SCC diff store when enabled."""
-    if not publish_scc or not data_root or not recipe_fp:
-        return None
-    dest = scc_diff_artifact_path(
-        data_root,
-        sector,
-        camera,
-        ccd,
-        stage_label,
-        recipe_fp,
-        product_id,
-        label,
-    )
-    if not mirror_to_scc_store(source_path, dest):
-        return None
-    if workspace_root:
-        record_workspace_pointer(
-            workspace_root,
-            f"{product_id}:{label}",
-            {
-                "kind": kind,
-                "fingerprint": fingerprint,
-                "scc_path": str(dest),
-                "stage_label": stage_label,
-                "recipe_fp": recipe_fp,
-            },
-        )
-    return str(dest)
