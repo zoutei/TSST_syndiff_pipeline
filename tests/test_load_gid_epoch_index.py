@@ -7,8 +7,18 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
-from syndiff_pipeline.template_creation.processing.field_remap import load_gid_epoch_index
+from syndiff_pipeline.template_creation.processing.field_remap import (
+    _write_gid_epoch_index,
+    load_gid_epoch_index,
+)
+from syndiff_pipeline.template_creation.processing.shift_schedule import (
+    FRAME_ORIGIN_MEASURED,
+    ShiftSchedule,
+    assign_groups_from_schedule,
+    build_shift_epochs,
+)
 
 
 def _write_mini_index(path: Path, *, n_l4a: int = 3, n_l4b: int = 2) -> None:
@@ -49,6 +59,66 @@ class TestLoadGidEpochIndex(unittest.TestCase):
             idx = load_gid_epoch_index(path, include_inter=False)
             self.assertEqual(len(idx["l4a"]), 3)
             self.assertEqual(idx["l4b"], {})
+
+
+class TestWriteGidEpochIndex(unittest.TestCase):
+    def test_write_from_shift_epochs_and_members(self):
+        skycell_names = np.array(["c0"])
+        sx = np.array([[1], [1], [0], [1]], dtype=np.int16)
+        sy = np.zeros_like(sx)
+        schedule = ShiftSchedule(
+            skycell_names=skycell_names,
+            sx_float=sx.astype(np.float32),
+            sy_float=sy.astype(np.float32),
+            sx_int=sx,
+            sy_int=sy,
+            frame_valid=np.ones(4, dtype=bool),
+            frame_origin=np.full(4, FRAME_ORIGIN_MEASURED, dtype=np.int8),
+            meta={"schema_version": 1},
+        )
+        assignment = assign_groups_from_schedule(
+            schedule,
+            grouping_quantum_ps1_px=1.0,
+            cache_quantum_ps1_px=0.25,
+            keying="phase",
+        )
+        shift_epochs, members = build_shift_epochs(
+            schedule, assignment.group_id_per_frame
+        )
+        pair_epochs = pd.DataFrame(
+            {
+                "pair_epoch_id": pd.Series(dtype="int32"),
+                "id_lo": pd.Series(dtype="int32"),
+                "id_hi": pd.Series(dtype="int32"),
+                "sx_lo": pd.Series(dtype="int32"),
+                "sy_lo": pd.Series(dtype="int32"),
+                "sx_hi": pd.Series(dtype="int32"),
+                "sy_hi": pd.Series(dtype="int32"),
+                "frame_lo": pd.Series(dtype="int32"),
+                "frame_hi": pd.Series(dtype="int32"),
+                "n_frames": pd.Series(dtype="int32"),
+                "n_measured_frames": pd.Series(dtype="int32"),
+                "gid_begin": pd.Series(dtype="int32"),
+                "gid_end": pd.Series(dtype="int32"),
+                "n_groups": pd.Series(dtype="int32"),
+                "rep_frame_index": pd.Series(dtype="int32"),
+            }
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gid_epoch_index.npz"
+            _write_gid_epoch_index(
+                path,
+                shift_epochs=shift_epochs,
+                pair_epochs=pair_epochs,
+                members=members,
+            )
+            idx = load_gid_epoch_index(path)
+            self.assertEqual(len(idx["l4a"]), len(members))
+            self.assertEqual(idx["l4b"], {})
+            for row in members.itertuples(index=False):
+                key = (str(row.scope_key), int(row.group_id), 1, 0)
+                self.assertIn(key, idx["l4a"])
+                self.assertEqual(int(idx["l4a"][key]), int(row.epoch_id))
 
 
 if __name__ == "__main__":

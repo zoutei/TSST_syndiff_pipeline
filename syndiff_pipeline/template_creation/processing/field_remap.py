@@ -1373,73 +1373,79 @@ def _write_gid_epoch_index(
     l4a_m = members[members["kind"] == "l4a"] if len(members) else members
     l4b_m = members[members["kind"] == "l4b"] if len(members) else members
 
-    l4a_skycell: list[str] = []
-    l4a_gid: list[int] = []
-    l4a_sx: list[int] = []
-    l4a_sy: list[int] = []
-    l4a_epoch_id: list[int] = []
     if len(l4a_m) and len(shift_epochs):
-        ep = shift_epochs.set_index(["skycell", "epoch_id"], drop=False)
-        for row in l4a_m.itertuples(index=False):
-            key = (str(row.scope_key), int(row.epoch_id))
-            if key not in ep.index:
-                continue
-            er = ep.loc[key]
-            if isinstance(er, pd.DataFrame):
-                er = er.iloc[0]
-            l4a_skycell.append(str(row.scope_key))
-            l4a_gid.append(int(row.group_id))
-            l4a_sx.append(int(er.sx_int))
-            l4a_sy.append(int(er.sy_int))
-            l4a_epoch_id.append(int(row.epoch_id))
+        l4a_join = l4a_m.merge(
+            shift_epochs[["skycell", "epoch_id", "sx_int", "sy_int"]],
+            left_on=["scope_key", "epoch_id"],
+            right_on=["skycell", "epoch_id"],
+            how="inner",
+        )
+        l4a_skycell = l4a_join["scope_key"].astype(str).to_numpy(dtype=object)
+        l4a_gid = l4a_join["group_id"].to_numpy(dtype=np.int32)
+        l4a_sx = l4a_join["sx_int"].to_numpy(dtype=np.int32)
+        l4a_sy = l4a_join["sy_int"].to_numpy(dtype=np.int32)
+        l4a_epoch_id = l4a_join["epoch_id"].to_numpy(dtype=np.int32)
+    else:
+        l4a_skycell = np.asarray([], dtype=object)
+        l4a_gid = np.asarray([], dtype=np.int32)
+        l4a_sx = np.asarray([], dtype=np.int32)
+        l4a_sy = np.asarray([], dtype=np.int32)
+        l4a_epoch_id = np.asarray([], dtype=np.int32)
 
-    l4b_pair_lo: list[int] = []
-    l4b_pair_hi: list[int] = []
-    l4b_gid: list[int] = []
-    l4b_sx_lo: list[int] = []
-    l4b_sy_lo: list[int] = []
-    l4b_sx_hi: list[int] = []
-    l4b_sy_hi: list[int] = []
-    l4b_pair_epoch_id: list[int] = []
     if len(l4b_m) and len(pair_epochs):
-        ep = pair_epochs.set_index(["id_lo", "id_hi", "pair_epoch_id"], drop=False)
-        for row in l4b_m.itertuples(index=False):
-            # scope_key = pair_{lo}__{hi}
-            parts = str(row.scope_key).split("__")
-            if len(parts) != 2 or not parts[0].startswith("pair_"):
-                continue
-            id_lo = int(parts[0].removeprefix("pair_"))
-            id_hi = int(parts[1])
-            key = (id_lo, id_hi, int(row.epoch_id))
-            if key not in ep.index:
-                continue
-            er = ep.loc[key]
-            if isinstance(er, pd.DataFrame):
-                er = er.iloc[0]
-            l4b_pair_lo.append(id_lo)
-            l4b_pair_hi.append(id_hi)
-            l4b_gid.append(int(row.group_id))
-            l4b_sx_lo.append(int(er.sx_lo))
-            l4b_sy_lo.append(int(er.sy_lo))
-            l4b_sx_hi.append(int(er.sx_hi))
-            l4b_sy_hi.append(int(er.sy_hi))
-            l4b_pair_epoch_id.append(int(row.epoch_id))
+        l4b_prep = l4b_m.copy()
+        parts = l4b_prep["scope_key"].astype(str).str.split("__", expand=True)
+        l4b_prep["id_lo"] = parts[0].str.removeprefix("pair_").astype(np.int32)
+        l4b_prep["id_hi"] = parts[1].astype(np.int32)
+        l4b_join = l4b_prep.merge(
+            pair_epochs[
+                [
+                    "id_lo",
+                    "id_hi",
+                    "pair_epoch_id",
+                    "sx_lo",
+                    "sy_lo",
+                    "sx_hi",
+                    "sy_hi",
+                ]
+            ],
+            left_on=["id_lo", "id_hi", "epoch_id"],
+            right_on=["id_lo", "id_hi", "pair_epoch_id"],
+            how="inner",
+        )
+        l4b_pair_lo = l4b_join["id_lo"].to_numpy(dtype=np.int32)
+        l4b_pair_hi = l4b_join["id_hi"].to_numpy(dtype=np.int32)
+        l4b_gid = l4b_join["group_id"].to_numpy(dtype=np.int32)
+        l4b_sx_lo = l4b_join["sx_lo"].to_numpy(dtype=np.int32)
+        l4b_sy_lo = l4b_join["sy_lo"].to_numpy(dtype=np.int32)
+        l4b_sx_hi = l4b_join["sx_hi"].to_numpy(dtype=np.int32)
+        l4b_sy_hi = l4b_join["sy_hi"].to_numpy(dtype=np.int32)
+        l4b_pair_epoch_id = l4b_join["epoch_id"].to_numpy(dtype=np.int32)
+    else:
+        l4b_pair_lo = np.asarray([], dtype=np.int32)
+        l4b_pair_hi = np.asarray([], dtype=np.int32)
+        l4b_gid = np.asarray([], dtype=np.int32)
+        l4b_sx_lo = np.asarray([], dtype=np.int32)
+        l4b_sy_lo = np.asarray([], dtype=np.int32)
+        l4b_sx_hi = np.asarray([], dtype=np.int32)
+        l4b_sy_hi = np.asarray([], dtype=np.int32)
+        l4b_pair_epoch_id = np.asarray([], dtype=np.int32)
 
     np.savez_compressed(
         path,
-        l4a_skycell=np.asarray(l4a_skycell, dtype=object),
-        l4a_gid=np.asarray(l4a_gid, dtype=np.int32),
-        l4a_sx=np.asarray(l4a_sx, dtype=np.int32),
-        l4a_sy=np.asarray(l4a_sy, dtype=np.int32),
-        l4a_epoch_id=np.asarray(l4a_epoch_id, dtype=np.int32),
-        l4b_pair_lo=np.asarray(l4b_pair_lo, dtype=np.int32),
-        l4b_pair_hi=np.asarray(l4b_pair_hi, dtype=np.int32),
-        l4b_gid=np.asarray(l4b_gid, dtype=np.int32),
-        l4b_sx_lo=np.asarray(l4b_sx_lo, dtype=np.int32),
-        l4b_sy_lo=np.asarray(l4b_sy_lo, dtype=np.int32),
-        l4b_sx_hi=np.asarray(l4b_sx_hi, dtype=np.int32),
-        l4b_sy_hi=np.asarray(l4b_sy_hi, dtype=np.int32),
-        l4b_pair_epoch_id=np.asarray(l4b_pair_epoch_id, dtype=np.int32),
+        l4a_skycell=l4a_skycell,
+        l4a_gid=l4a_gid,
+        l4a_sx=l4a_sx,
+        l4a_sy=l4a_sy,
+        l4a_epoch_id=l4a_epoch_id,
+        l4b_pair_lo=l4b_pair_lo,
+        l4b_pair_hi=l4b_pair_hi,
+        l4b_gid=l4b_gid,
+        l4b_sx_lo=l4b_sx_lo,
+        l4b_sy_lo=l4b_sy_lo,
+        l4b_sx_hi=l4b_sx_hi,
+        l4b_sy_hi=l4b_sy_hi,
+        l4b_pair_epoch_id=l4b_pair_epoch_id,
     )
 
 
