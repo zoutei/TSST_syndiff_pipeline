@@ -1,16 +1,20 @@
-"""Discord bot for on-demand pipeline status replies (runs inside the supervisor)."""
+"""Discord bot for on-demand pipeline status replies (supervisor-managed subprocess)."""
 
 from __future__ import annotations
 
+import argparse
 import asyncio
+import concurrent.futures
 import getpass
 import logging
 import os
 import subprocess
-import threading
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
+from syndiff_pipeline.common.orchestration import daemon, logs
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     load_workspace_root_from_deployment,
@@ -30,6 +34,8 @@ _CONDOR_SHELL_COMMANDS = frozenset(
 )
 _CONDOR_SHELL_TIMEOUT_S = 30.0
 _CONDOR_SHELL_TIMEOUT_OVERRIDES = {"condor_status -tla": 60.0}
+_STATUS_BUILD_TIMEOUT_S = 120.0
+_STATUS_EXECUTOR_WORKERS = 2
 
 
 def _channel_matches(message: Any, channel_id: int) -> bool:
@@ -146,6 +152,10 @@ class PipelineDiscordBot:
         )
         self._client: Any | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=_STATUS_EXECUTOR_WORKERS,
+            thread_name_prefix="discord-status",
+        )
 
     def _build_status_reply(self, message_text: str) -> list[str]:
         from syndiff_pipeline.common.orchestration.notifications import (
@@ -158,6 +168,7 @@ class PipelineDiscordBot:
             run_ids,
             self._runs_dir,
             workspace_root=self._workspace_root,
+            include_orphan_scan=False,
         )
 
     def _build_client(self):
@@ -179,6 +190,7 @@ class PipelineDiscordBot:
         channel_id = int(self._channel_id)
         listen_channel_id: int | None = channel_id
         bot_user_id: int | None = None
+        executor = self._executor
 
         @client.event
         async def on_ready():
@@ -247,10 +259,31 @@ class PipelineDiscordBot:
             )
             trigger = condor_shell_trigger(message.content)
             try:
+                await message.channel.trigger_typing()
+            except Exception:
+                log.debug("Could not send typing indicator", exc_info=True)
+            loop = asyncio.get_running_loop()
+            try:
                 if trigger is not None:
-                    replies = await asyncio.to_thread(run_condor_shell_command, trigger)
+                    build_coro = loop.run_in_executor(
+                        executor, run_condor_shell_command, trigger
+                    )
                 else:
-                    replies = await asyncio.to_thread(self._build_status_reply, message.content)
+                    build_coro = loop.run_in_executor(
+                        executor, self._build_status_reply, message.content
+                    )
+                replies = await asyncio.wait_for(
+                    build_coro, timeout=_STATUS_BUILD_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                log.warning("Discord status build timed out after %.0fs", _STATUS_BUILD_TIMEOUT_S)
+                if trigger is not None:
+                    replies = [f"`{trigger}` timed out after {_STATUS_BUILD_TIMEOUT_S:.0f}s."]
+                else:
+                    replies = [
+                        "Pipeline status is taking too long (supervisor may be busy on NFS). "
+                        "Try again in a moment or use `syndiff progress`."
+                    ]
             except Exception:
                 log.exception("Failed to build Discord reply")
                 if trigger is not None:
@@ -297,6 +330,7 @@ class PipelineDiscordBot:
             self._loop.close()
             self._loop = None
             self._client = None
+            self._executor.shutdown(wait=False, cancel_futures=True)
 
     def request_stop(self) -> None:
         """Ask the Discord client to close (thread-safe)."""
@@ -310,22 +344,94 @@ class PipelineDiscordBot:
             log.warning("Failed to schedule Discord client close", exc_info=True)
 
 
+def spawn_discord_bot_subprocess(
+    deployment_path: str | Path,
+    *,
+    workspace_root: str | Path,
+) -> int:
+    """Spawn a detached Discord bot child process and return its PID."""
+    deploy = Path(deployment_path).expanduser().resolve()
+    cmd = [
+        sys.executable,
+        "-m",
+        "syndiff_pipeline.template_creation.orchestration.discord_bot",
+        "--deployment",
+        str(deploy),
+    ]
+    log_path = logs.discord_bot_log_path(workspace_root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_fh = log_path.open("a", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+        close_fds=True,
+    )
+    log_fh.close()
+    return proc.pid
+
+
+def stop_discord_bot_subprocess(
+    workspace_root: str | Path,
+    *,
+    timeout_s: float = 5.0,
+) -> None:
+    """Terminate the supervisor-managed Discord bot child, if recorded locally."""
+    pid_path = logs.discord_bot_pid_path(workspace_root)
+    host, pid = daemon.read_process_identity(pid_path)
+    if pid is None:
+        return
+    if host is not None and host != daemon.local_hostname():
+        log.warning(
+            "Discord bot pid file points to host %s (local %s); not signaling pid=%s",
+            host,
+            daemon.local_hostname(),
+            pid,
+        )
+        return
+    if daemon.is_process_alive(pid):
+        daemon.terminate_process_tree(pid)
+        deadline = time.monotonic() + timeout_s
+        while daemon.is_process_alive(pid):
+            if time.monotonic() >= deadline:
+                log.warning("Discord bot pid=%s did not exit within %.1fs", pid, timeout_s)
+                break
+            time.sleep(0.1)
+    daemon.remove_pid_file(pid_path)
+
+
 class InProcessDiscordBot:
-    """Supervisor-owned Discord bot running on a background thread."""
+    """Supervisor-owned Discord bot running in a child process."""
 
     def __init__(self, deployment_path: str | Path):
         self._deployment_path = Path(deployment_path).expanduser().resolve()
-        self._bot: PipelineDiscordBot | None = None
-        self._thread: threading.Thread | None = None
+        self._workspace_root = str(
+            load_workspace_root_from_deployment(self._deployment_path)
+        )
+        self._process: subprocess.Popen[Any] | None = None
+        self._pid: int | None = None
         self._started = False
         self.skipped_reason: str | None = None
 
     @property
     def running(self) -> bool:
-        return self._thread is not None and self._thread.is_alive()
+        if self._process is not None and self._process.poll() is None:
+            return True
+        if self._pid is not None and daemon.is_process_alive(self._pid):
+            return True
+        return False
+
+    @property
+    def pid(self) -> int | None:
+        if self._process is not None and self._process.poll() is None:
+            return self._process.pid
+        if self._pid is not None and daemon.is_process_alive(self._pid):
+            return self._pid
+        return None
 
     def start(self) -> bool:
-        """Start the bot thread. Returns False when skipped or already running."""
+        """Start the bot subprocess. Returns False when skipped or already running."""
         if self.running:
             return True
         try:
@@ -347,33 +453,66 @@ class InProcessDiscordBot:
             log.warning("Discord bot not started: discord.py not installed")
             return False
 
-        self._bot = bot
-        self._thread = threading.Thread(
-            target=self._run_guarded,
-            name="discord-bot",
-            daemon=True,
+        stop_discord_bot_subprocess(self._workspace_root, timeout_s=2.0)
+        try:
+            pid = spawn_discord_bot_subprocess(
+                self._deployment_path,
+                workspace_root=self._workspace_root,
+            )
+        except OSError as exc:
+            self.skipped_reason = f"failed to spawn bot subprocess: {exc}"
+            log.warning("Discord bot not started: %s", exc)
+            return False
+
+        self._pid = pid
+        self._process = None
+        daemon.write_process_identity(
+            logs.discord_bot_pid_path(self._workspace_root),
+            pid,
+            host=daemon.local_hostname(),
         )
-        self._thread.start()
         self._started = True
         self.skipped_reason = None
-        log.info("Discord bot thread started for %s", self._deployment_path)
+        log.info(
+            "Discord bot subprocess started pid=%s for %s",
+            pid,
+            self._deployment_path,
+        )
         return True
 
-    def _run_guarded(self) -> None:
-        assert self._bot is not None
-        try:
-            self._bot.run_forever()
-        except Exception:
-            log.exception("Discord bot thread crashed")
-
     def stop(self, *, timeout_s: float = 5.0) -> None:
-        """Stop the bot thread and wait briefly for exit."""
-        if self._bot is not None:
-            self._bot.request_stop()
-        thread = self._thread
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout_s)
-            if thread.is_alive():
-                log.warning("Discord bot thread did not exit within %.1fs", timeout_s)
-        self._thread = None
-        self._bot = None
+        """Stop the bot subprocess and wait briefly for exit."""
+        proc = self._process
+        if proc is not None and proc.poll() is None:
+            daemon.terminate_process_tree(proc.pid)
+            try:
+                proc.wait(timeout=timeout_s)
+            except subprocess.TimeoutExpired:
+                log.warning("Discord bot subprocess did not exit within %.1fs", timeout_s)
+        elif self._pid is not None:
+            stop_discord_bot_subprocess(self._workspace_root, timeout_s=timeout_s)
+        self._process = None
+        self._pid = None
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for the supervisor-managed Discord bot subprocess."""
+    parser = argparse.ArgumentParser(description="SynDiff Discord status bot")
+    parser.add_argument(
+        "--deployment",
+        required=True,
+        help="Path to deployment.yaml (workspace_root + Discord credentials)",
+    )
+    args = parser.parse_args(argv)
+    deploy = Path(args.deployment).expanduser().resolve()
+    workspace_root = load_workspace_root_from_deployment(deploy)
+    daemon.configure_process_logging("discord-bot")
+    try:
+        PipelineDiscordBot(deploy).run_forever()
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

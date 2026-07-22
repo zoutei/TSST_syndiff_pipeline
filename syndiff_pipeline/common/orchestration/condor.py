@@ -27,6 +27,7 @@ _POLL_GRACE_SECONDS = 120.0
 HOLD_TIMEOUT_S = 600.0
 _QUERY_RETRY_ATTEMPTS = 3
 _QUERY_RETRY_DELAY_S = 0.5
+_DISPLAY_QUERY_TIMEOUT_S = 15.0
 CONDOR_EVICT_FAIL_THRESHOLD = 2
 
 _EVENT_HEADER_RE = re.compile(r"^\s*\d{3}\s+\((\d+)\.\d+\.\d+\)")
@@ -219,13 +220,19 @@ def _resolve_held_since(
     return now
 
 
-def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_condor(
+    args: Sequence[str],
+    *,
+    check: bool = True,
+    timeout_s: float | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run condor.
     
     Parameters
     ----------
     args : Sequence[str]
     check : bool, optional, default ``True``
+    timeout_s : float | None, optional, default ``None``
     
     Returns
     -------
@@ -235,6 +242,7 @@ def _run_condor(args: Sequence[str], *, check: bool = True) -> subprocess.Comple
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout_s,
     )
     if check and proc.returncode != 0:
         raise RuntimeError(
@@ -719,23 +727,34 @@ def query_clusters(cluster_ids: Sequence[int]) -> dict[int, tuple[int | None, in
 
 def query_clusters_display(
     cluster_ids: Sequence[int],
+    *,
+    timeout_s: float | None = _DISPLAY_QUERY_TIMEOUT_S,
 ) -> dict[int, tuple[int | None, int | None]]:
     """Batch-query Condor queue state for progress display (no history fallback)."""
     if not cluster_ids:
         return {}
     unique_ids = list(dict.fromkeys(int(cluster_id) for cluster_id in cluster_ids))
     result: dict[int, tuple[int | None, int | None]] = {}
-    proc = _run_condor(
-        [
-            "condor_q",
-            *[str(cluster_id) for cluster_id in unique_ids],
-            "-af",
-            "ClusterId",
-            "JobStatus",
-            "ExitCode",
-        ],
-        check=False,
-    )
+    try:
+        proc = _run_condor(
+            [
+                "condor_q",
+                *[str(cluster_id) for cluster_id in unique_ids],
+                "-af",
+                "ClusterId",
+                "JobStatus",
+                "ExitCode",
+            ],
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "condor_q display query timed out after %.0fs for %d cluster(s)",
+            timeout_s or 0.0,
+            len(unique_ids),
+        )
+        return {}
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:

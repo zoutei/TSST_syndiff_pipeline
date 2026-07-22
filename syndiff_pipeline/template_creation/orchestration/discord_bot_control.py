@@ -36,7 +36,7 @@ def _bot_overrides_from_site_config(site_config_path: str | Path) -> tuple[bool,
 
 @dataclass(frozen=True)
 class DiscordBotStatus:
-    """Discord bot expected/in-process status (not a separate OS process)."""
+    """Discord bot expected status (supervisor-managed child process)."""
 
     enabled: bool
     expected_in_process: bool
@@ -95,15 +95,42 @@ def _load_recorded_site_config(workspace_root: str | Path) -> Path | None:
     return recorded if recorded.is_file() else None
 
 
+def _bot_child_status(
+    deployment: dict,
+    *,
+    daemon_alive: bool,
+) -> tuple[bool, int | None, str | None]:
+    """Return (alive, pid, host) for the supervisor-managed bot child."""
+    if not daemon_alive:
+        return False, None, None
+    workspace_root = str(deployment.get("workspace_root", "")).strip()
+    if not workspace_root:
+        return False, None, None
+    pid_path = logs.discord_bot_pid_path(workspace_root)
+    host, pid = daemon.read_process_identity(pid_path)
+    if pid is None:
+        return False, None, host
+    if host is not None and host != daemon.local_hostname():
+        return False, pid, host
+    return daemon.is_process_alive(pid), pid, host
+
+
 def discord_bot_status(
     deployment_path: str | Path,
     *,
     site_config_path: str | Path | None = None,
     daemon_alive: bool = False,
 ) -> DiscordBotStatus:
-    """Report whether the bot is expected to run inside the supervisor."""
+    """Report whether the bot is expected to run under the supervisor."""
     deploy_path = Path(deployment_path).expanduser().resolve()
     deployment = load_deployment_file(deploy_path)
+    try:
+        deployment = {
+            **deployment,
+            "workspace_root": load_workspace_root_from_deployment(deploy_path),
+        }
+    except Exception:
+        pass
     config_channel_id = ""
     enabled = True
     if site_config_path is not None:
@@ -124,12 +151,17 @@ def discord_bot_status(
             expected_in_process=False,
             skipped_reason=reason,
         )
+    child_alive, child_pid, child_host = _bot_child_status(
+        deployment,
+        daemon_alive=daemon_alive,
+    )
     return DiscordBotStatus(
         enabled=True,
         expected_in_process=daemon_alive,
         skipped_reason=None if daemon_alive else "supervisor not running",
-        alive=daemon_alive,
-        host=daemon.local_hostname() if daemon_alive else None,
+        alive=child_alive,
+        pid=child_pid,
+        host=child_host or (daemon.local_hostname() if daemon_alive else None),
     )
 
 

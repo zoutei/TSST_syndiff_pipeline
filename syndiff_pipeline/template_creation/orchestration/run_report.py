@@ -192,6 +192,7 @@ def format_progress_lines(
     *,
     workspace_root: str | None = None,
     include_running_detail: bool = True,
+    include_orphan_scan: bool = True,
 ) -> list[str]:
     """Format progress lines.
     
@@ -235,7 +236,9 @@ def format_progress_lines(
     from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
 
     running = state.running_stage_runs(run_id)
-    orphaned = _orphaned_active_stage_rows(state, run_id, runs_root)
+    orphaned = (
+        _orphaned_active_stage_rows(state, run_id, runs_root) if include_orphan_scan else []
+    )
     if not running and not orphaned:
         lines.append("  (no running tasks)")
         return lines
@@ -557,6 +560,7 @@ def format_run_report_messages(
     workspace_root: str | None = None,
     header: str,
     include_status_grid: bool = True,
+    include_orphan_scan: bool = True,
     max_chars: int = 1900,
 ) -> list[str]:
     """Discord-sized chunks; splits across messages instead of truncating."""
@@ -568,6 +572,7 @@ def format_run_report_messages(
             runs_root,
             workspace_root=workspace_root,
             include_running_detail=True,
+            include_orphan_scan=include_orphan_scan,
         )
     )
     progress_text = "\n".join(body_lines)

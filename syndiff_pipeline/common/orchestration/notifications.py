@@ -650,6 +650,7 @@ def format_status_reply_messages(
     runs_root: str,
     *,
     workspace_root: str | None = None,
+    include_orphan_scan: bool = True,
 ) -> list[str]:
     """On-demand progress + status grid; one or more Discord-sized messages."""
     if not run_ids:
@@ -670,6 +671,7 @@ def format_status_reply_messages(
                 workspace_root=workspace_root,
                 header=header,
                 max_chars=_DISCORD_PACK_MAX_CHARS,
+                include_orphan_scan=include_orphan_scan,
             )
         )
     return messages
