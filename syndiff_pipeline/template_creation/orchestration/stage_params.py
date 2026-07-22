@@ -38,6 +38,7 @@ MAPPING_ALLOWED = frozenset(
         "overwrite",
         "skip_download_catalog",
         "reference_ffi",
+        "reference_ffi_selection",
         "bkg_vector_path",
         "wcs_drift_savgol_window",
         "wcs_drift_savgol_polyorder",
@@ -197,6 +198,7 @@ class MappingStageParams:
     overwrite: bool = True
     skip_download_catalog: bool = False
     reference_ffi: str | None = None
+    reference_ffi_selection: str = "drift_arc_midpoint"
     bkg_vector_path: str | None = None
     wcs_drift_savgol_window: int | None = 11
     wcs_drift_savgol_polyorder: int = 2

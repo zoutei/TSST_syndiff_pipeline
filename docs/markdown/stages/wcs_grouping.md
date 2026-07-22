@@ -68,7 +68,15 @@ Projection uses `world_to_pixel_values` (not iterative `all_world2pix`) to avoid
 
 ## 5. Reference FFI selection
 
-`choose_reference_ffi_path()` picks the frame closest (in smoothed-drift space) to the **median smoothed drift**, subject to quality gates, with graceful fallback:
+`choose_reference_ffi_path()` applies quality gates, then picks a reference frame
+using ``selection_mode``:
+
+| Mode | Rule |
+|------|------|
+| `median_smoothed_drift` (linear/event default) | Closest smoothed drift to **median smoothed drift** |
+| `drift_arc_midpoint` (field SCC default via `stages.mapping.reference_ffi_selection`) | Frame at **50% arc length** along the BTJD-ordered smoothed drift path; falls back to temporal-median BTJD when path length is zero |
+
+Quality-gate trial cascade (unchanged):
 
 1. raw−smooth residual ≤ `max_smoothed_residual` (0.05 px) **and** `earth_deg ≥ 45°`, `moon_deg ≥ 25°` (scatter-light screening);
 2. angle cuts only;

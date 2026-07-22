@@ -88,7 +88,7 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid**, o
 **Template DAG** (`syndiff template submit --scc sccs.csv`; SCC-only input, no event coordinates):
 
 1. **`tess_ffi_download`** — download TESS FFIs for the SCC (optional if already on disk).
-2. **`mapping`** (“pancakes”) — choose the SCC's mapping-epoch reference FFI via an SCC-scoped chooser (median-CRVAL anchor + Earth/Moon-angle cuts + smoothed-residual; see [`scc_reference_ffi.py`](../../syndiff_pipeline/template_creation/processing/scc_reference_ffi.py)), then map TESS pixels to PS1 skycells and download the Gaia catalog for that reference FFI.
+2. **`mapping`** (“pancakes”) — choose the SCC's mapping-epoch reference FFI via an SCC-scoped chooser (median-CRVAL anchor + `reference_ffi_selection`, default `drift_arc_midpoint`; see [`scc_reference_ffi.py`](../../syndiff_pipeline/template_creation/processing/scc_reference_ffi.py)), then map TESS pixels to PS1 skycells and download the Gaia catalog for that reference FFI.
 3. **`ps1_download`** — fetch PS1 skycell cutouts into a shared Zarr store.
 4. **`ps1_process`** — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
 5. **`remap`** (short `remap`; alias `skycell_remap`) — field-mode L2–L4 only: per-skycell shift schedule, signature groups, hybrid Exact cache under `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/`. Scheduler pre-skips this stage when `geometry_mode: linear` is requested (v2 rejects non-field at dispatch). Does **not** write flux `contribs/`.
@@ -531,8 +531,8 @@ First resolves the SCC's **mapping-epoch reference FFI** (`resolve_scc_reference
 **Reference-FFI selection** (SCC-scoped — no event RA/Dec, since `mapping` runs before any event exists):
 
 1. Explicit override wins if set and resolvable: `--reference-ffi` (CLI) or `stages.mapping.reference_ffi` (config) — accepts an absolute path or a basename under `ffi_dir`.
-2. Otherwise: **median-CRVAL anchor** (chip-center sky anchor from all usable FFI WCS headers) → build a WCS drift table anchored there → Savitzky–Golay smooth → optional Earth/Moon-angle cuts (`bkg_vector_path`) → `choose_reference_ffi_path()` applies `earth_deg_min` / `moon_deg_min` / `max_smoothed_residual` cuts.
-3. The chosen path, its basename, `selection_rule` (`"override"` or `"scc_median_crval_anchor"`), and `oversampling_factor` are persisted to `bookkeeping/mapping/run_meta.json` (`mapping_run_meta_path()`; nested under `oversampling_{N}/` when `N != 1`) and reused on subsequent runs unless `force_rerun`.
+2. Otherwise: **median-CRVAL anchor** (chip-center sky anchor from all usable FFI WCS headers) → build a WCS drift table anchored there → Savitzky–Golay smooth → optional Earth/Moon-angle cuts (`bkg_vector_path`) → `choose_reference_ffi_path()` with `stages.mapping.reference_ffi_selection` (default **`drift_arc_midpoint`**: frame at 50% arc length along the smoothed drift path; legacy **`median_smoothed_drift`**: closest to median smoothed drift).
+3. The chosen path, its basename, `selection_rule` (`"override"`, `"scc_drift_arc_midpoint"`, or `"scc_median_crval_anchor"`), `reference_ffi_selection`, and `oversampling_factor` are persisted to `bookkeeping/mapping/run_meta.json` (`mapping_run_meta_path()`; nested under `oversampling_{N}/` when `N != 1`) and reused on subsequent runs unless `force_rerun`.
 
 **Algorithm summary** (see [PanCAKES deep-dive](stages/mapping_pancakes.md)):
 
@@ -842,7 +842,8 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `reference_ffi` | null | Explicit SCC reference-FFI override (absolute path or basename under `ffi_dir`); same as CLI `--reference-ffi`. Otherwise the SCC-scoped chooser (median-CRVAL anchor + Earth/Moon-angle cuts + smoothed residual) picks one — see the `mapping` stage section above |
+| `reference_ffi` | null | Explicit SCC reference-FFI override (absolute path or basename under `ffi_dir`); same as CLI `--reference-ffi`. Otherwise the SCC-scoped chooser picks one — see the `mapping` stage section above |
+| `reference_ffi_selection` | `drift_arc_midpoint` | `drift_arc_midpoint` (50% arc-length along smoothed drift) or `median_smoothed_drift` (legacy: closest to median smoothed drift) |
 | `buffer`, `tess_buffer`, `pad_distance` | various | Pancakes geometry buffers |
 | `edge_exclusion`, `edge_buffer_large`, `edge_buffer_small` | various | Edge handling |
 | `n_threads` | `8` | Thread count |
