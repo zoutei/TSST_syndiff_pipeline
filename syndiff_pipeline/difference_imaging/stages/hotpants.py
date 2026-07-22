@@ -1217,7 +1217,32 @@ def _process_one_frame(
         sci_shape=sci_crop.shape,
     )
 
-    mask_array = _resolve_hotpants_mask_array(mask, mask_catalog, btjd)
+    mask_array = np.asarray(_resolve_hotpants_mask_array(mask, mask_catalog, btjd))
+    # Mask must end up at sci_crop's final (post-pairing) shape. Derive the
+    # needed pad directly from the actual observed shapes rather than trusting
+    # `pad_rows` alone: mask_catalog.mask_at() sources its base shape from
+    # crop_bounds independently of the sci/tmpl pairing above, so if that ever
+    # drifts out of sync with mapping_grid's pad convention, padding by a
+    # stale/mismatched `pad_rows` would silently hand pyhotpants a wrongly
+    # shaped i_mask (opaque "must have shape" failure with no indication why).
+    row_diff = sci_crop.shape[0] - mask_array.shape[0]
+    if mask_array.shape[1] != sci_crop.shape[1] or row_diff < 0:
+        raise RuntimeError(
+            f"hotpants mask shape {mask_array.shape} is incompatible with the "
+            f"paired science shape {sci_crop.shape} (pad_rows={pad_rows}); "
+            "mask_catalog is not aligned to crop_bounds/mapping_grid."
+        )
+    if row_diff > 0:
+        from syndiff_pipeline.common.grid_pairing import zero_pad_science_bottom
+
+        if row_diff != pad_rows:
+            log.warning(
+                "hotpants mask needed %d pad rows to match sci_crop %s but "
+                "mapping_grid.conv_pad_native gave pad_rows=%s; padding by the "
+                "observed difference instead of the stale value.",
+                row_diff, sci_crop.shape, pad_rows,
+            )
+        mask_array = zero_pad_science_bottom(mask_array, row_diff)
 
     result = run_hotpants_frame(
         sci_array=sci_crop,

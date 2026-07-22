@@ -295,9 +295,9 @@ def build_field_mode_template_loader(
     grid = getattr(ctx, "mapping_grid", None)
     if grid is not None and not crop_to_science:
         if os_factor > 1:
-            w, h = grid.array_shape_os()
+            h, w = grid.array_shape_os()
         else:
-            w, h = grid.array_shape_native()
+            h, w = grid.array_shape_native()
         lx0, ly0, lx1, ly1 = 0, 0, int(w), int(h)
         x_min, y_min, x_max, y_max = ctx.template_roi_bounds
     elif grid is not None:

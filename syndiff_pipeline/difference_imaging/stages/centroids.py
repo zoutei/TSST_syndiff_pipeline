@@ -25,10 +25,16 @@ from syndiff_pipeline.common.joblib_progress import (
     tqdm_iter,
 )
 from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
+from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.stages.gridded_epsf import (
     GriddedEpsfCatalog,
     _diff_path_to_stem,
+    build_diff_image_fps,
+    build_epsf_fps,
     prepare_gaia_for_gridded_epsf,
+)
+from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    tess_product_id_from_ffi_path,
 )
 
 log = logging.getLogger(__name__)
@@ -65,6 +71,16 @@ def photresults_ecsv_path(output_dir: str, ffi_stem: str) -> str:
     return os.path.join(output_dir, f"{ffi_stem}{PHOTRESULTS_ECSV_SUFFIX}")
 
 
+def _is_valid_photresults_ecsv(path: str) -> bool:
+    """True when *path* is a readable, non-empty photometry ECSV table."""
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return False
+    try:
+        return len(Table.read(path, format="ascii.ecsv")) > 0
+    except Exception:
+        return False
+
+
 def save_centroids_index(output_dir: str, index: dict[str, str]) -> str:
     """Persist ffi_stem → photresults.ecsv path mapping."""
     path = os.path.join(output_dir, CENTROIDS_INDEX_BASENAME)
@@ -96,6 +112,12 @@ def _init_centroids_worker(
     epsf_catalog: GriddedEpsfCatalog,
     params,
     output_dir: str,
+    skip_existing: bool = True,
+    sck: tuple | None = None,
+    data_root: str | None = None,
+    centroids_label: str | None = None,
+    diff_image_fps: dict[str, str] | None = None,
+    epsf_fps: dict[str, str] | None = None,
 ) -> None:
     """Load shared centroid inputs once per loky worker."""
     _WORKER_CTX.clear()
@@ -105,6 +127,12 @@ def _init_centroids_worker(
             "epsf_catalog": epsf_catalog,
             "params": params,
             "output_dir": output_dir,
+            "skip_existing": bool(skip_existing),
+            "sck": sck,
+            "data_root": data_root,
+            "centroids_label": centroids_label,
+            "diff_image_fps": dict(diff_image_fps or {}),
+            "epsf_fps": dict(epsf_fps or {}),
         }
     )
 
@@ -157,8 +185,13 @@ def _photometry_one_frame(
 def _centroids_one_frame_task(
     frame_idx: int,
     diff_path: str,
-) -> tuple[int, str, bool]:
-    """Worker: PSF photometry on one frame and write ECSV."""
+) -> tuple[int, str, bool, bool]:
+    """Worker: PSF photometry on one frame and write ECSV.
+
+    Returns
+    -------
+    frame_idx, ffi_stem, ok, skipped_existing
+    """
     ctx = _WORKER_CTX
     gaia_df: pd.DataFrame = ctx["gaia_df"]
     epsf_catalog: GriddedEpsfCatalog = ctx["epsf_catalog"]
@@ -166,35 +199,95 @@ def _centroids_one_frame_task(
     output_dir: str = ctx["output_dir"]
 
     ffi_stem = _diff_path_to_stem(diff_path) if diff_path else f"frame_{frame_idx}"
+    product_id = tess_product_id_from_ffi_path(ffi_stem) or ffi_stem
+    out_path = photresults_ecsv_path(output_dir, ffi_stem)
+
+    if ctx.get("skip_existing", True):
+        if _is_valid_photresults_ecsv(out_path):
+            return frame_idx, ffi_stem, True, True
+        sck = ctx.get("sck")
+        data_root = ctx.get("data_root")
+        if sck is not None and data_root:
+            diff_image_fp = (ctx.get("diff_image_fps") or {}).get(product_id)
+            epsf_fp = (ctx.get("epsf_fps") or {}).get(product_id)
+            inputs = provenance_glue.required_input_fingerprints(diff_image_fp, epsf_fp)
+            prov_complete = None
+            if inputs is not None:
+                try:
+                    prov_complete = provenance_glue.artifact_complete_in_store(
+                        kind="centroids",
+                        sector=sck[0],
+                        camera=sck[1],
+                        ccd=sck[2],
+                        product_id=product_id,
+                        label=str(ctx.get("centroids_label") or "centroids"),
+                        params=params,
+                        input_fingerprints=inputs,
+                        data_root=data_root,
+                    )
+                except Exception:
+                    log.debug(
+                        "provenance resume check (centroids) failed for %s",
+                        ffi_stem,
+                        exc_info=True,
+                    )
+            if prov_complete is True and _is_valid_photresults_ecsv(out_path):
+                return frame_idx, ffi_stem, True, True
+            # Indexed complete but no locatable file — fall through to process.
+
     if diff_path is None or not os.path.exists(diff_path):
         log.warning("  centroids: diff frame missing: %s", diff_path)
-        return frame_idx, ffi_stem, False
+        return frame_idx, ffi_stem, False, False
 
     model = epsf_catalog.load_model(ffi_stem)
     if model is None:
         log.warning("  centroids: no gridded ePSF for %s", ffi_stem)
-        return frame_idx, ffi_stem, False
+        return frame_idx, ffi_stem, False, False
 
     try:
         diff_img = fits.getdata(diff_path).astype(np.float64)
     except Exception as exc:
         log.warning("  centroids: cannot load %s: %s", diff_path, exc)
-        return frame_idx, ffi_stem, False
+        return frame_idx, ffi_stem, False, False
 
     try:
         phot_results = _photometry_one_frame(diff_img, model, gaia_df, params)
     except Exception as exc:
         log.warning("  centroids: PSF photometry failed for %s: %s", ffi_stem, exc)
-        return frame_idx, ffi_stem, False
+        return frame_idx, ffi_stem, False, False
 
     if phot_results is None or len(phot_results) == 0:
         log.warning("  centroids: empty photometry result for %s", ffi_stem)
-        return frame_idx, ffi_stem, False
+        return frame_idx, ffi_stem, False, False
 
-    out_path = photresults_ecsv_path(output_dir, ffi_stem)
     os.makedirs(output_dir, exist_ok=True)
     phot_results.write(out_path, format="ascii.ecsv", overwrite=True)
-    return frame_idx, ffi_stem, True
+
+    sck = ctx.get("sck")
+    data_root = ctx.get("data_root")
+    if sck is not None and data_root:
+        try:
+            diff_image_fp = (ctx.get("diff_image_fps") or {}).get(product_id)
+            epsf_fp = (ctx.get("epsf_fps") or {}).get(product_id)
+            inputs = provenance_glue.required_input_fingerprints(diff_image_fp, epsf_fp)
+            if inputs is not None:
+                provenance_glue.emit_diff_artifact(
+                    kind="centroids",
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=product_id,
+                    label=str(ctx.get("centroids_label") or "centroids"),
+                    params=params,
+                    location=out_path,
+                    input_fingerprints=inputs,
+                    data_root=data_root,
+                    is_fits=False,
+                )
+        except Exception:
+            log.debug("provenance emit (centroids) failed for %s", ffi_stem, exc_info=True)
+
+    return frame_idx, ffi_stem, True, False
 
 
 def run_centroids_all_frames(
@@ -207,10 +300,17 @@ def run_centroids_all_frames(
     *,
     centroids_label: str | None = None,
     diffs_input: str | None = None,
+    epsf_input: str | None = None,
     diff_log_path: str | None = None,
+    force_rerun: bool = False,
 ) -> tuple[list[str], list[bool]]:
     """
     PSF photometry on every difference image (thread-parallel over frames).
+
+    Already-computed, valid ``_photresults.ecsv`` files are skipped unless
+    ``force_rerun`` is set (mirrors the hotpants/epsf stages' resume behavior,
+    including a provenance-store fallback for artifacts not locatable in this
+    workspace).
 
     Returns
     -------
@@ -223,6 +323,22 @@ def run_centroids_all_frames(
         stage_n_jobs=getattr(params, "centroids_n_jobs", None),
     )
     _configure_blas_threads(n_workers)
+
+    try:
+        sck = (int(cfg.sector), int(cfg.camera), int(cfg.ccd))
+    except Exception:
+        sck = None
+    data_root = getattr(cfg, "data_root", "") or None
+    diff_image_fps = build_diff_image_fps(
+        cfg, diff_paths, diffs_input=diffs_input, sck=sck
+    )
+    epsf_fps = build_epsf_fps(
+        cfg,
+        diff_paths,
+        epsf_label=epsf_input,
+        sck=sck,
+        diff_image_fps=diff_image_fps,
+    )
 
     # Reuse the same Gaia brightness filter as the ePSF stage.
     class _MagParams:
@@ -264,8 +380,10 @@ def run_centroids_all_frames(
     tasks = [(i, p) for i, p in enumerate(diff_paths)]
     tqdm_desc = f"centroids {centroids_label}" if track_progress else "centroids"
 
-    def _on_frame_done(result: tuple[int, str, bool]) -> None:
+    def _on_frame_done(result: tuple) -> None:
         if not track_progress or workspace_progress_path is None:
+            return
+        if result[3]:
             return
         record_frame_progress(
             workspace_progress_path,
@@ -273,8 +391,19 @@ def run_centroids_all_frames(
             success=bool(result[2]),
         )
 
-    worker_initargs = (gaia_filtered, epsf_catalog, params, output_dir)
-    results: list[tuple[int, str, bool]] = []
+    worker_initargs = (
+        gaia_filtered,
+        epsf_catalog,
+        params,
+        output_dir,
+        not force_rerun,
+        sck,
+        data_root,
+        centroids_label,
+        diff_image_fps,
+        epsf_fps,
+    )
+    results: list[tuple[int, str, bool, bool]] = []
 
     if n_workers <= 1 or n_frames <= 1:
         _init_centroids_worker(*worker_initargs)
@@ -314,6 +443,7 @@ def run_centroids_all_frames(
     results.sort(key=lambda r: r[0])
     ffi_stems = [r[1] for r in results]
     centroids_ok = [r[2] for r in results]
+    n_skipped = sum(1 for r in results if r[3])
 
     index: dict[str, str] = {}
     for stem, ok in zip(ffi_stems, centroids_ok):
@@ -322,11 +452,21 @@ def run_centroids_all_frames(
     save_centroids_index(output_dir, index)
 
     n_ok = sum(centroids_ok)
-    log.info(
-        "centroids [%s]: %d/%d frames wrote %s",
-        centroids_label or "?",
-        n_ok,
-        n_frames,
-        PHOTRESULTS_ECSV_SUFFIX,
-    )
+    if n_skipped:
+        log.info(
+            "centroids [%s]: %d/%d frames wrote %s (%d skipped existing)",
+            centroids_label or "?",
+            n_ok,
+            n_frames,
+            PHOTRESULTS_ECSV_SUFFIX,
+            n_skipped,
+        )
+    else:
+        log.info(
+            "centroids [%s]: %d/%d frames wrote %s",
+            centroids_label or "?",
+            n_ok,
+            n_frames,
+            PHOTRESULTS_ECSV_SUFFIX,
+        )
     return ffi_stems, centroids_ok

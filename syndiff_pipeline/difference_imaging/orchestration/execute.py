@@ -967,7 +967,12 @@ def run_config_pipeline(
             return
         if wcs_table is None or crop_bounds is None or not ref_ffi_path:
             return
-        if cfg.target_ra is None or cfg.target_dec is None:
+        if (
+            cfg.target_ra is None
+            or cfg.target_dec is None
+            or not np.isfinite(cfg.target_ra)
+            or not np.isfinite(cfg.target_dec)
+        ):
             log.warning("target_ra/target_dec not set; skipping targets.reg.")
             return
         write_targets_ds9_regions(
@@ -1410,6 +1415,7 @@ def run_config_pipeline(
                     diff_log_path=diff_log_path,
                     epsf_label=label_out,
                     diffs_input=str(inp["diffs"]),
+                    force_rerun=force_rerun,
                 )
             )
             if tile_centers_new is not None:
@@ -1491,7 +1497,9 @@ def run_config_pipeline(
                 ws_out,
                 centroids_label=label_out,
                 diffs_input=str(inp["diffs"]),
+                epsf_input=str(inp["epsf"]),
                 diff_log_path=diff_log_path,
+                force_rerun=force_rerun,
             )
 
         elif kind == "sat_template":

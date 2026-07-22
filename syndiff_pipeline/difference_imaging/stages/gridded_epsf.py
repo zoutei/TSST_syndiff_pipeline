@@ -675,7 +675,7 @@ def _diff_image_fp_for_product(
     )
 
 
-def _build_diff_image_fps(
+def build_diff_image_fps(
     cfg,
     diff_paths: list[str],
     *,
@@ -713,17 +713,110 @@ def _build_diff_image_fps(
     return out
 
 
+def _upstream_epsf_stage(cfg, epsf_label: str | None) -> dict | None:
+    """The ``epsf`` stage whose output feeds a downstream consumer (e.g. centroids)."""
+    pipeline = getattr(cfg, "pipeline", None)
+    if not pipeline:
+        return None
+    from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
+        split_pipeline,
+    )
+
+    _, _, stages = split_pipeline(pipeline)
+    label = (epsf_label or "").strip() or None
+    if label:
+        for _, st in stages:
+            if st.get("kind") == "epsf" and str(st.get("output", "")).strip() == label:
+                return st
+    for _, st in stages:
+        if st.get("kind") == "epsf":
+            return st
+    return None
+
+
+def _epsf_fp_for_product(
+    *,
+    sector: int,
+    camera: int,
+    ccd: int,
+    product_id: str,
+    epsf_stage: dict,
+    diff_image_fp: str | None,
+) -> str | None:
+    """Reconstruct one ``epsf`` fingerprint from its stage params + upstream diff_image_fp."""
+    from syndiff_pipeline.difference_imaging.orchestration.stage_params import parse_epsf
+
+    label = str(epsf_stage.get("output", "")).strip()
+    if not label:
+        return None
+    try:
+        params = parse_epsf(epsf_stage, 0)
+    except Exception:
+        log.debug("epsf stage param reparse failed", exc_info=True)
+        return None
+    inputs = provenance_glue.epsf_input_fingerprints(diff_image_fp)
+    if inputs is None:
+        return None
+    return provenance_glue.diff_kind_fingerprint(
+        "epsf",
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=label,
+        params=params,
+        input_fingerprints=inputs,
+    )
+
+
+def build_epsf_fps(
+    cfg,
+    diff_paths: list[str],
+    *,
+    epsf_label: str | None,
+    sck: tuple | None,
+    diff_image_fps: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Reconstruct ``{product_id: epsf_fp}`` for a downstream stage's bookkeeper skip-check."""
+    if sck is None:
+        return {}
+    epsf_stage = _upstream_epsf_stage(cfg, epsf_label)
+    if epsf_stage is None:
+        return {}
+    sector, camera, ccd = int(sck[0]), int(sck[1]), int(sck[2])
+    diff_image_fps = diff_image_fps or {}
+    out: dict[str, str] = {}
+    for diff_path in diff_paths:
+        if not diff_path:
+            continue
+        stem = _diff_path_to_stem(diff_path)
+        pid = tess_product_id_from_ffi_path(stem) or stem
+        fp = _epsf_fp_for_product(
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
+            product_id=pid,
+            epsf_stage=epsf_stage,
+            diff_image_fp=diff_image_fps.get(pid),
+        )
+        if fp is not None:
+            out[pid] = fp
+    return out
+
+
 def _fit_one_frame_task(
     frame_idx: int,
     diff_path: str,
-) -> tuple[int, str, bool, list[tuple[float, float]] | None, np.ndarray | None, bool]:
+) -> tuple[int, str, bool, list[tuple[float, float]] | None, np.ndarray | None, bool, str | None]:
     """Worker: fit one frame and write npz.
 
     Shared inputs come from :func:`_init_gridded_epsf_worker` (not pickled per frame).
 
     Returns
     -------
-    frame_idx, ffi_stem, ok, grid_xypos, stack, skipped_existing
+    frame_idx, ffi_stem, ok, grid_xypos, stack, skipped_existing, npz_path
+        ``npz_path`` is the actual on-disk location of the valid npz (SCC-lane
+        or workspace-local) when ``ok`` is True, else None.
     """
     ctx = _WORKER_CTX
     gaia_df = ctx["gaia_df"]
@@ -754,45 +847,77 @@ def _fit_one_frame_task(
         output_store_name=output_store_name,
         suffix=".npz",
     )
-    if ctx.get("skip_existing", True) and _is_valid_gridded_epsf_npz(write_path):
-        return frame_idx, ffi_stem, True, None, None, True
-    if (
-        sck is not None
-        and data_root
-        and ctx.get("workspace_root")
-        and epsf_params is not None
-    ):
-        try:
-            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                try_materialize_workspace_artifact,
-            )
+    if ctx.get("skip_existing", True):
+        if _is_valid_gridded_epsf_npz(write_path):
+            return frame_idx, ffi_stem, True, None, None, True, str(write_path)
+        if (
+            sck is not None
+            and data_root
+            and ctx.get("workspace_root")
+            and epsf_params is not None
+        ):
+            try:
+                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                    try_materialize_workspace_artifact,
+                )
 
-            if try_materialize_workspace_artifact(
-                data_root=str(data_root),
-                sck=sck,
-                kind="epsf",
-                stage_label=epsf_label,
-                product_id=product_id,
-                label=epsf_label,
-                params=epsf_params,
-                workspace_dest=ws_out_path,
-                workspace_root=ctx.get("workspace_root"),
-                output_store_name=output_store_name,
-                suffix=".npz",
-            ) and _is_valid_gridded_epsf_npz(ws_out_path):
-                return frame_idx, ffi_stem, True, None, None, True
-        except Exception:
-            log.debug("SCC diff-store epsf materialize failed for %s", ffi_stem, exc_info=True)
-    if scc_primary and _is_valid_gridded_epsf_npz(write_path):
-        return frame_idx, ffi_stem, True, None, None, True
+                if try_materialize_workspace_artifact(
+                    data_root=str(data_root),
+                    sck=sck,
+                    kind="epsf",
+                    stage_label=epsf_label,
+                    product_id=product_id,
+                    label=epsf_label,
+                    params=epsf_params,
+                    workspace_dest=ws_out_path,
+                    workspace_root=ctx.get("workspace_root"),
+                    output_store_name=output_store_name,
+                    suffix=".npz",
+                ) and _is_valid_gridded_epsf_npz(ws_out_path):
+                    return frame_idx, ffi_stem, True, None, None, True, str(ws_out_path)
+            except Exception:
+                log.debug("SCC diff-store epsf materialize failed for %s", ffi_stem, exc_info=True)
+        if scc_primary and _is_valid_gridded_epsf_npz(write_path):
+            return frame_idx, ffi_stem, True, None, None, True, str(write_path)
+        if sck is not None and data_root:
+            diff_image_fp = (ctx.get("diff_image_fps") or {}).get(product_id)
+            inputs = provenance_glue.epsf_input_fingerprints(diff_image_fp)
+            prov_complete = None
+            if inputs is not None:
+                try:
+                    prov_complete = provenance_glue.artifact_complete_in_store(
+                        kind="epsf",
+                        sector=sck[0],
+                        camera=sck[1],
+                        ccd=sck[2],
+                        product_id=product_id,
+                        label=epsf_label,
+                        params=epsf_params,
+                        input_fingerprints=inputs,
+                        data_root=data_root,
+                    )
+                except Exception:
+                    log.debug(
+                        "provenance resume check (epsf) failed for %s", ffi_stem, exc_info=True
+                    )
+            if prov_complete is True:
+                # Indexed-complete is not enough: require a locatable artifact.
+                hit_path: str | None = None
+                if _is_valid_gridded_epsf_npz(write_path):
+                    hit_path = str(write_path)
+                elif _is_valid_gridded_epsf_npz(ws_out_path):
+                    hit_path = str(ws_out_path)
+                if hit_path is not None:
+                    return frame_idx, ffi_stem, True, None, None, True, hit_path
+                # Indexed complete but no locatable file — fall through to process.
     if diff_path is None or not os.path.exists(diff_path):
         log.warning("  diff frame missing: %s", diff_path)
-        return frame_idx, ffi_stem, False, None, None, False
+        return frame_idx, ffi_stem, False, None, None, False, None
     try:
         diff_img = fits.getdata(diff_path).astype(np.float64)
     except Exception as exc:
         log.warning("  Cannot load %s: %s", diff_path, exc)
-        return frame_idx, ffi_stem, False, None, None, False
+        return frame_idx, ffi_stem, False, None, None, False, None
 
     model, grid_xypos, stack = build_gridded_psf_for_frame(
         diff_img,
@@ -802,7 +927,7 @@ def _fit_one_frame_task(
         frame_label=os.path.basename(diff_path),
     )
     if model is None or stack is None:
-        return frame_idx, ffi_stem, False, grid_xypos, None, False
+        return frame_idx, ffi_stem, False, grid_xypos, None, False, None
 
     save_gridded_epsf_npz(
         write_path,
@@ -838,7 +963,7 @@ def _fit_one_frame_task(
         except Exception:
             log.debug("provenance emit (epsf) failed for %s", ffi_stem, exc_info=True)
 
-    return frame_idx, ffi_stem, True, grid_xypos, stack, False
+    return frame_idx, ffi_stem, True, grid_xypos, stack, False, str(write_path)
 
 
 def fit_gridded_epsf_all_frames(
@@ -946,7 +1071,7 @@ def fit_gridded_epsf_all_frames(
     else:
         prov_workspace_root = workspace_root
 
-    diff_image_fps = _build_diff_image_fps(
+    diff_image_fps = build_diff_image_fps(
         cfg,
         diff_paths,
         diffs_input=diffs_input,
@@ -1014,9 +1139,9 @@ def fit_gridded_epsf_all_frames(
     index: dict[str, str] = {}
 
     stacks: list[np.ndarray | None] = []
-    for _idx, stem, ok, centers, stack, _skipped in results:
+    for _idx, stem, ok, centers, stack, _skipped, npz_path in results:
         if ok:
-            path = gridded_epsf_npz_path(output_dir, stem)
+            path = npz_path or gridded_epsf_npz_path(output_dir, stem)
             index[stem] = path
             if stack is None:
                 stack = _load_gridded_epsf_stack(path)
