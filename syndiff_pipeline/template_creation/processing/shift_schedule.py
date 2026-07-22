@@ -544,6 +544,9 @@ def build_skycell_shift_schedule(
     hysteresis_margin: float = 0.1,
     raw_drift_outlier_sigma: float | None = 5.0,
     orbit_csv_path: str | Path | None = None,
+    drift_source: str = "per_skycell",
+    target_drift: np.ndarray | None = None,
+    enforce_max_shift: bool = True,
 ) -> ShiftSchedule:
     """
     Measure real per-frame WCS drift directly at every skycell center and
@@ -587,21 +590,45 @@ def build_skycell_shift_schedule(
     frame_origin = np.full(n_frames, FRAME_ORIGIN_SYNTH_MISSING_WCS, dtype=np.int8)
     frame_measurable = np.zeros(n_frames, dtype=bool)
     drift_raw = np.full((n_frames, n_cells, 2), np.nan, dtype=np.float64)
-    for i, (_, wcs_f) in enumerate(frames):
-        if wcs_f is None:
-            continue
-        try:
-            fx, fy = wcs_f.world_to_pixel_values(ra, dec)
-        except Exception as exc:
-            log.warning("Shift schedule: WCS evaluation failed for frame index %d: %s", i, exc)
-            continue
-        drift_raw[i, :, 0] = np.asarray(fx, dtype=np.float64) - x_ref
-        drift_raw[i, :, 1] = np.asarray(fy, dtype=np.float64) - y_ref
-        if np.isfinite(drift_raw[i]).all():
+    drift_mode = str(drift_source or "per_skycell").strip().lower()
+    if drift_mode == "point":
+        if target_drift is None:
+            raise ValueError(
+                "build_skycell_shift_schedule requires target_drift when "
+                "drift_source='point'"
+            )
+        td = np.asarray(target_drift, dtype=np.float64)
+        if td.shape != (n_frames, 2):
+            raise ValueError(
+                f"target_drift must have shape ({n_frames}, 2), got {td.shape}"
+            )
+        for i in range(n_frames):
+            if not (np.isfinite(td[i, 0]) and np.isfinite(td[i, 1])):
+                continue
+            drift_raw[i, :, 0] = td[i, 0]
+            drift_raw[i, :, 1] = td[i, 1]
             frame_measurable[i] = True
             frame_origin[i] = FRAME_ORIGIN_MEASURED
-        else:
-            frame_origin[i] = FRAME_ORIGIN_SYNTH_MISSING_WCS
+    else:
+        if drift_mode != "per_skycell":
+            raise ValueError(
+                f"drift_source must be 'per_skycell' or 'point', got {drift_source!r}"
+            )
+        for i, (_, wcs_f) in enumerate(frames):
+            if wcs_f is None:
+                continue
+            try:
+                fx, fy = wcs_f.world_to_pixel_values(ra, dec)
+            except Exception as exc:
+                log.warning("Shift schedule: WCS evaluation failed for frame index %d: %s", i, exc)
+                continue
+            drift_raw[i, :, 0] = np.asarray(fx, dtype=np.float64) - x_ref
+            drift_raw[i, :, 1] = np.asarray(fy, dtype=np.float64) - y_ref
+            if np.isfinite(drift_raw[i]).all():
+                frame_measurable[i] = True
+                frame_origin[i] = FRAME_ORIGIN_MEASURED
+            else:
+                frame_origin[i] = FRAME_ORIGIN_SYNTH_MISSING_WCS
 
     if btjd is not None and len(btjd) != n_frames:
         raise ValueError(f"btjd length ({len(btjd)}) does not match frames length ({n_frames})")
@@ -672,15 +699,23 @@ def build_skycell_shift_schedule(
             (np.abs(sx_out) > MAX_SHIFT_PS1_PX) | (np.abs(sy_out) > MAX_SHIFT_PS1_PX)
         )
         if exceeded.any():
-            f0 = int(np.flatnonzero(exceeded)[0])
-            raise ValueError(
-                f"Computed PS1-pixel shift for {skycell_names[c]!r} at frame "
-                f"{f0} ({filenames[f0] if f0 < len(filenames) else '?'}) is "
-                f"sx={sx_out[f0]:+.1f} sy={sy_out[f0]:+.1f} px, exceeding the "
-                f"{MAX_SHIFT_PS1_PX}px valid-padding margin ({int(exceeded.sum())} "
-                f"frame(s) affected on this skycell alone). This is not real "
-                f"spacecraft drift — it indicates a broken WCS round-trip "
-                f"(compute_ps1_shift_vectorized) for this skycell/frame."
+            if enforce_max_shift:
+                f0 = int(np.flatnonzero(exceeded)[0])
+                raise ValueError(
+                    f"Computed PS1-pixel shift for {skycell_names[c]!r} at frame "
+                    f"{f0} ({filenames[f0] if f0 < len(filenames) else '?'}) is "
+                    f"sx={sx_out[f0]:+.1f} sy={sy_out[f0]:+.1f} px, exceeding the "
+                    f"{MAX_SHIFT_PS1_PX}px valid-padding margin ({int(exceeded.sum())} "
+                    f"frame(s) affected on this skycell alone). This is not real "
+                    f"spacecraft drift — it indicates a broken WCS round-trip "
+                    f"(compute_ps1_shift_vectorized) for this skycell/frame."
+                )
+            log.warning(
+                "Shift schedule: %d frame(s) on %s exceed MAX_SHIFT=%s px "
+                "(enforce_max_shift=False)",
+                int(exceeded.sum()),
+                skycell_names[c],
+                MAX_SHIFT_PS1_PX,
             )
 
         sx_float[:, c] = sx_out.astype(np.float32)

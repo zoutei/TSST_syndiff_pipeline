@@ -98,6 +98,9 @@ REMAP_ALLOWED = frozenset(
         "condor_requirements",
         "condor_rank",
         "store_name",
+        "drift_source",
+        "apply_intra_skycell",
+        "apply_inter_skycell",
     }
 )
 DOWNSAMPLE_ALLOWED = frozenset(
@@ -271,7 +274,8 @@ class RemapStageParams:
     """RemapStageParams."""
     cache_quantum_ps1_px: float = 1.0
     keying: str = "absolute"
-    # Intra-skycell (L4a) boundary dilation radius; inter-skycell (L4b) is always on.
+    # Intra-skycell (L4a) boundary dilation radius; inter-skycell (L4b) gated by
+    # ``apply_inter_skycell``.
     intra_skycell_R: int = 1
     # Pre-SG MAD gate on raw TESS drift (per orbit). ``None`` disables.
     raw_drift_outlier_sigma: float | None = 5.0
@@ -289,11 +293,21 @@ class RemapStageParams:
     condor_rank: str | None = "-LoadAvg"
     # Named remap lane → remap_{store_name}/; None → remap/
     store_name: str | None = None
+    drift_source: str = "per_skycell"
+    apply_intra_skycell: bool = True
+    apply_inter_skycell: bool = True
 
     def __post_init__(self):
         from syndiff_pipeline.common.scc_paths import normalize_store_name
 
         object.__setattr__(self, "store_name", normalize_store_name(self.store_name))
+        ds = str(self.drift_source or "per_skycell").strip().lower()
+        if ds not in ("per_skycell", "point"):
+            raise ValueError(
+                "stages.remap.drift_source must be 'per_skycell' or 'point', "
+                f"got {self.drift_source!r}"
+            )
+        object.__setattr__(self, "drift_source", ds)
 
 
 @dataclass
@@ -338,11 +352,7 @@ class DownsampleStageParams:
         if level not in ("INFO", "DEBUG"):
             raise ValueError(f"log_level must be INFO or DEBUG, got {self.log_level!r}")
         object.__setattr__(self, "log_level", level)
-        if not bool(self.apply_intra_skycell) and not bool(self.apply_inter_skycell):
-            raise ValueError(
-                "downsample requires at least one of apply_intra_skycell / "
-                "apply_inter_skycell to be true"
-            )
+        # Both false is valid for coarse/bootstrap templates (plain per-skycell roll).
         object.__setattr__(
             self, "remap_store_name", normalize_store_name(self.remap_store_name)
         )
