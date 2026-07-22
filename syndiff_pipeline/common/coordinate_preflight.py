@@ -86,7 +86,11 @@ def validate_coordinate_contract(
     for key in ("x_min", "x_max", "y_min", "y_max", "shape"):
         if key not in crop_bounds:
             raise CoordinatePreflightError(f"crop_bounds missing {key!r}")
-        if crop_bounds[key] != science[key]:
+        crop_val = crop_bounds[key]
+        science_val = science[key]
+        if isinstance(crop_val, (list, tuple)) or isinstance(science_val, (list, tuple)):
+            crop_val, science_val = tuple(crop_val), tuple(science_val)
+        if crop_val != science_val:
             raise CoordinatePreflightError(
                 f"crop_bounds[{key!r}]={crop_bounds[key]!r} != "
                 f"grid.science_ffi_bounds()[{key!r}]={science[key]!r}"

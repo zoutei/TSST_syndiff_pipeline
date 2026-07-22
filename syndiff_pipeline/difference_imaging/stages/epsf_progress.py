@@ -83,10 +83,23 @@ def _sidecar_is_stale(data: dict[str, Any]) -> bool:
 
 
 def count_gridded_epsf_artifacts(output_dir: Path | str) -> int:
-    """Count per-frame ``*_gridded_epsf.npz`` files on disk."""
+    """
+    Count completed per-frame gridded ePSF models.
+
+    Prefers the workspace's ``gridded_epsf_index.json`` (which may point at
+    SCC-lane paths under ``data_root``, not just this workspace directory) and
+    falls back to a local glob for older/index-less workspaces.
+    """
     root = Path(output_dir).expanduser().resolve()
     if not root.is_dir():
         return 0
+    from syndiff_pipeline.difference_imaging.stages.gridded_epsf import (
+        load_gridded_epsf_index,
+    )
+
+    index = load_gridded_epsf_index(str(root))
+    if index:
+        return sum(1 for p in index.values() if os.path.isfile(p))
     return sum(1 for _ in root.glob("*_gridded_epsf.npz"))
 
 

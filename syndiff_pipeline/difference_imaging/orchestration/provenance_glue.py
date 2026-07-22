@@ -1059,6 +1059,57 @@ def close_store(store: Any) -> None:
     return None
 
 
+def artifact_complete_in_store(
+    *,
+    kind: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    product_id: str,
+    label: str,
+    params: Any,
+    input_fingerprints: Sequence[Optional[str]],
+    data_root: Optional[str] = None,
+) -> Optional[bool]:
+    """
+    Whether ``provenance.db`` already indexes one artifact node as complete.
+
+    Generic skip-oracle shared by every per-FFI diff-pipeline stage (hotpants,
+    epsf, centroids, ...): callers resolve their own kind-specific
+    *input_fingerprints* (e.g. :func:`diff_image_input_fingerprints`,
+    :func:`epsf_input_fingerprints`) and pass them here.
+
+    Returns ``True`` when the fingerprint is not in ``missing_fingerprints``,
+    ``False`` when it is still missing, or ``None`` when the store or recipe
+    inputs cannot be resolved (fail-open — callers fall back to exists-check).
+    """
+    if not PROVENANCE_AVAILABLE or not _STORE_AVAILABLE or not data_root:
+        return None
+    if any(fp is None for fp in input_fingerprints):
+        return None
+    fp = diff_kind_fingerprint(
+        kind,
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        product_id=product_id,
+        label=label,
+        params=params,
+        input_fingerprints=input_fingerprints,
+    )
+    if fp is None:
+        return None
+    store = open_store(str(data_root))
+    if store is None:
+        return None
+    try:
+        missing = store.missing_fingerprints([fp], fallback_stat=True)
+        return fp not in missing
+    except Exception:
+        log.debug("artifact_complete_in_store(%s) query failed", kind, exc_info=True)
+        return None
+
+
 def diff_image_complete_in_store(
     *,
     sector: int,
@@ -1091,8 +1142,8 @@ def diff_image_complete_in_store(
     )
     if inputs is None:
         return None
-    fp = diff_kind_fingerprint(
-        "diff_image",
+    return artifact_complete_in_store(
+        kind="diff_image",
         sector=sector,
         camera=camera,
         ccd=ccd,
@@ -1100,15 +1151,5 @@ def diff_image_complete_in_store(
         label=label,
         params=params,
         input_fingerprints=inputs,
+        data_root=data_root,
     )
-    if fp is None:
-        return None
-    store = open_store(str(data_root))
-    if store is None:
-        return None
-    try:
-        missing = store.missing_fingerprints([fp], fallback_stat=True)
-        return fp not in missing
-    except Exception:
-        log.debug("diff_image_complete_in_store query failed", exc_info=True)
-        return None

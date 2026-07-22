@@ -318,7 +318,8 @@ def fit_epsf_all_frames(diff_paths: list,
                          wcs_table: pd.DataFrame | None = None,
                          diff_log_path: str | None = None,
                          epsf_label: str | None = None,
-                         diffs_input: str | None = None) -> tuple:
+                         diffs_input: str | None = None,
+                         force_rerun: bool = False) -> tuple:
     """
     Fit gridded ePSF on every difference image in diff_paths.
 
@@ -335,6 +336,8 @@ def fit_epsf_all_frames(diff_paths: list,
     mask_catalog : optional ``MaskCatalog`` — preferred; per-FFI ``mask_at`` (no FITS I/O)
     btjd_by_stem : optional stem→BTJD map (built from ``wcs_table`` when omitted)
     wcs_table : optional frame manifest for BTJD lookup
+    force_rerun : when True, ignore already-computed per-frame ePSF models and
+        recompute every frame (mirrors the hotpants stage's ``force_rerun``)
     """
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
@@ -364,6 +367,7 @@ def fit_epsf_all_frames(diff_paths: list,
         diff_log_path=diff_log_path,
         epsf_label=epsf_label,
         diffs_input=diffs_input,
+        skip_existing=not force_rerun,
     )
     epsf_stack, tile_centers, ffi_stems, epsf_ok = result
     save_epsf_stack_bundle(epsf_stack, ffi_stems, output_dir, round_id)

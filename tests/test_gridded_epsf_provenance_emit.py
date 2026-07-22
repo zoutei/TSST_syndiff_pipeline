@@ -152,7 +152,7 @@ class TestGriddedEpsfProvenanceEmit(unittest.TestCase):
         with patch.object(
             pg, "resolve_downsample_fingerprint_from_cfg", return_value=downsample_fp
         ):
-            built = gridded_epsf._build_diff_image_fps(
+            built = gridded_epsf.build_diff_image_fps(
                 self.cfg,
                 [diff_path],
                 diffs_input="hp_d",
