@@ -625,20 +625,88 @@ def _pick_closest_to_median_smoothed(
     return str(sub.iloc[pos]["path"])
 
 
+def _pick_temporal_median_btjd(sub: pd.DataFrame) -> str:
+    """Return the row whose BTJD is closest to the candidate-set temporal median."""
+    if "btjd" not in sub.columns or not sub["btjd"].notna().any():
+        raise ValueError("btjd column required for temporal-median reference pick")
+    btjd = pd.to_numeric(sub["btjd"], errors="coerce").to_numpy(dtype=float)
+    med = float(np.nanmedian(btjd))
+    pos = int(np.nanargmin(np.abs(btjd - med)))
+    return str(sub.iloc[pos]["path"])
+
+
+def _pick_drift_arc_midpoint(
+    sub: pd.DataFrame, median_dx: float, median_dy: float
+) -> str:
+    """
+    Pick the frame at 50% arc length along the BTJD-ordered smoothed drift path.
+
+    Falls back to temporal-median BTJD when drift path length is zero, or to
+    closest-to-median-smoothed when ``btjd`` is missing.
+    """
+    if "btjd" not in sub.columns or len(sub) < 2:
+        return _pick_closest_to_median_smoothed(sub, median_dx, median_dy)
+
+    ordered = sub.sort_values("btjd")
+    btjd = pd.to_numeric(ordered["btjd"], errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(btjd).all():
+        return _pick_closest_to_median_smoothed(sub, median_dx, median_dy)
+
+    dx = pd.to_numeric(ordered["delta_x"], errors="coerce").to_numpy(dtype=float)
+    dy = pd.to_numeric(ordered["delta_y"], errors="coerce").to_numpy(dtype=float)
+    if len(dx) == 1:
+        return str(ordered.iloc[0]["path"])
+
+    seg = np.hypot(np.diff(dx), np.diff(dy))
+    total = float(np.nansum(seg))
+    if total == 0.0 or not np.isfinite(total):
+        return _pick_temporal_median_btjd(sub)
+
+    path_len = np.zeros(len(ordered), dtype=np.float64)
+    path_len[1:] = np.cumsum(seg)
+    half = total / 2.0
+    frame_idx = int(np.argmin(np.abs(path_len - half)))
+    return str(ordered.iloc[frame_idx]["path"])
+
+
+def _pick_reference_from_candidates(
+    sub: pd.DataFrame,
+    median_dx: float,
+    median_dy: float,
+    *,
+    selection_mode: str,
+) -> str:
+    mode = str(selection_mode or "median_smoothed_drift").strip().lower()
+    if mode == "drift_arc_midpoint":
+        return _pick_drift_arc_midpoint(sub, median_dx, median_dy)
+    if mode != "median_smoothed_drift":
+        log.warning(
+            "Unknown reference_ffi selection_mode %r; using median_smoothed_drift",
+            selection_mode,
+        )
+    return _pick_closest_to_median_smoothed(sub, median_dx, median_dy)
+
+
 def choose_reference_ffi_path(
     wcs_table: pd.DataFrame,
     *,
     earth_deg_min: float = 45.0,
     moon_deg_min: float = 25.0,
     max_smoothed_residual: float = 0.05,
+    selection_mode: str = "median_smoothed_drift",
 ) -> str:
     """
     Pick a reference FFI path after WCS drift smoothing.
 
-    Uses smoothed ``delta_x``/``delta_y`` medians as the target pointing, prefers
-    frames with small raw–smooth residual (when ``delta_x_raw`` exist), TESSVectors
-    Earth/Moon angle cuts when ``earth_deg``/``moon_deg`` are present on the table,
-    and otherwise falls back with logged warnings.
+    ``selection_mode``:
+
+    - ``median_smoothed_drift`` (default): frame closest to median smoothed drift.
+    - ``drift_arc_midpoint``: frame at 50% arc length along the BTJD-ordered
+      smoothed drift path (field-mode SCC default when configured).
+
+    Quality gates prefer frames with small raw–smooth residual (when
+    ``delta_x_raw`` exist), TESSVectors Earth/Moon angle cuts when
+    ``earth_deg``/``moon_deg`` are present, with logged fallbacks.
 
     Call :func:`attach_tessvector_earth_moon_angles` first so angle columns are
     populated (unless intentionally omitting scatter-light screening).
@@ -692,7 +760,12 @@ def choose_reference_ffi_path(
         if not mask.any():
             continue
         sub = wcs_table.loc[mask]
-        path = _pick_closest_to_median_smoothed(sub, median_dx, median_dy)
+        path = _pick_reference_from_candidates(
+            sub,
+            median_dx,
+            median_dy,
+            selection_mode=selection_mode,
+        )
         if label != trials[0][0]:
             log.warning(
                 "Reference FFI: using fallback selection (%s); chosen path may have "
@@ -700,8 +773,10 @@ def choose_reference_ffi_path(
                 label,
             )
         log.info(
-            "Reference FFI selected (%s): median smoothed drift (%.4f, %.4f) px; %d candidates.",
+            "Reference FFI selected (%s, mode=%s): median smoothed drift "
+            "(%.4f, %.4f) px; %d candidates.",
             label,
+            selection_mode,
             median_dx,
             median_dy,
             len(sub),

@@ -68,6 +68,56 @@ class TestChooseReferenceFfiPath(unittest.TestCase):
         # Only row 1 passes angles; median dx=0.2 → row b is sole angle-qualified candidate.
         self.assertEqual(chosen, "/ffi/b.fits")
 
+    def test_drift_arc_midpoint_picks_middle_frame_for_monotonic_drift(self):
+        df = self._base_table()
+        chosen = choose_reference_ffi_path(
+            df,
+            selection_mode="drift_arc_midpoint",
+        )
+        self.assertEqual(chosen, "/ffi/b.fits")
+
+    def test_drift_arc_midpoint_differs_from_median_on_curved_drift(self):
+        df = pd.DataFrame(
+            {
+                "path": [
+                    "/ffi/a.fits",
+                    "/ffi/b.fits",
+                    "/ffi/c.fits",
+                    "/ffi/d.fits",
+                    "/ffi/e.fits",
+                ],
+                "wcs_ok": [True, True, True, True, True],
+                "btjd": [100.0, 101.0, 102.0, 103.0, 104.0],
+                "delta_x": [0.0, 0.1, 0.3, 0.6, 1.0],
+                "delta_y": [0.0, 0.0, 0.0, 0.0, 0.0],
+                "delta_x_raw": [0.0, 0.1, 0.3, 0.6, 1.0],
+                "delta_y_raw": [0.0, 0.0, 0.0, 0.0, 0.0],
+            }
+        )
+        median_pick = choose_reference_ffi_path(df, selection_mode="median_smoothed_drift")
+        arc_pick = choose_reference_ffi_path(df, selection_mode="drift_arc_midpoint")
+        self.assertEqual(median_pick, "/ffi/c.fits")
+        self.assertEqual(arc_pick, "/ffi/d.fits")
+        self.assertNotEqual(median_pick, arc_pick)
+
+    def test_drift_arc_midpoint_zero_drift_falls_back_to_temporal_median(self):
+        df = pd.DataFrame(
+            {
+                "path": ["/ffi/a.fits", "/ffi/b.fits", "/ffi/c.fits"],
+                "wcs_ok": [True, True, True],
+                "btjd": [100.0, 101.0, 102.0],
+                "delta_x": [1.0, 1.0, 1.0],
+                "delta_y": [2.0, 2.0, 2.0],
+            }
+        )
+        chosen = choose_reference_ffi_path(df, selection_mode="drift_arc_midpoint")
+        self.assertEqual(chosen, "/ffi/b.fits")
+
+    def test_drift_arc_midpoint_missing_btjd_falls_back_to_median_smoothed(self):
+        df = self._base_table().drop(columns=["btjd"])
+        chosen = choose_reference_ffi_path(df, selection_mode="drift_arc_midpoint")
+        self.assertEqual(chosen, "/ffi/b.fits")
+
 
 class TestAttachTessvectorAngles(unittest.TestCase):
     def test_interpolation_from_local_csv(self):

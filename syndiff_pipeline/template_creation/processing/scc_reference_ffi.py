@@ -160,8 +160,13 @@ def resolve_scc_reference_ffi(
             earth_deg_min=float(mp.earth_deg_min),
             moon_deg_min=float(mp.moon_deg_min),
             max_smoothed_residual=float(mp.max_smoothed_residual),
+            selection_mode=str(mp.reference_ffi_selection or "drift_arc_midpoint"),
         )
-        selection_rule = "scc_median_crval_anchor"
+        selection_mode = str(mp.reference_ffi_selection or "drift_arc_midpoint").strip().lower()
+        if selection_mode == "drift_arc_midpoint":
+            selection_rule = "scc_drift_arc_midpoint"
+        else:
+            selection_rule = "scc_median_crval_anchor"
 
     ref_resolved = _resolve_existing_ffi_path(resolved, ref) or os.path.abspath(ref)
     ref_abs = os.path.abspath(ref_resolved)
@@ -169,6 +174,7 @@ def resolve_scc_reference_ffi(
         "reference_ffi_path": ref_abs,
         "reference_ffi_basename": os.path.basename(ref_abs),
         "selection_rule": selection_rule,
+        "reference_ffi_selection": str(mp.reference_ffi_selection or "drift_arc_midpoint"),
         "oversampling_factor": int(mp.oversampling_factor),
         "sector": t.sector,
         "camera": t.camera,
