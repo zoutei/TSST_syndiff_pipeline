@@ -19,6 +19,8 @@ __all__ = [
     "abutting_rim_ps1_mask",
     "roll_assignment",
     "roll_mask",
+    "invalid_border_margin",
+    "seam_roll_is_exact_for_shift",
     "stencil_roll_is_exact",
     "build_l4a_hybrid_assignment",
 ]
@@ -136,38 +138,45 @@ def roll_mask(mask: np.ndarray, sx_int: int, sy_int: int) -> np.ndarray:
     )
 
 
+def invalid_border_margin(frozen_tid: np.ndarray, *, R: int = 1) -> int:
+    """Minimum distance from any assigned pixel to the nearest array edge."""
+    tid = np.asarray(frozen_tid)
+    valid = tid >= 0
+    if not valid.any():
+        return int(max(tid.shape))
+    rows, cols = np.nonzero(valid)
+    h, width = tid.shape
+    return int(
+        min(
+            int(rows.min()),
+            int(cols.min()),
+            h - 1 - int(rows.max()),
+            width - 1 - int(cols.max()),
+        )
+    )
+
+
+def seam_roll_is_exact_for_shift(
+    frozen_tid: np.ndarray,
+    sx_int: int,
+    sy_int: int,
+    *,
+    R: int = 1,
+) -> bool:
+    """True when intra-skycell seam masks for this shift may be precomputed and rolled."""
+    need = max(abs(int(sx_int)), abs(int(sy_int))) + int(R) + 1
+    return need <= invalid_border_margin(frozen_tid, R=int(R))
+
+
 def stencil_roll_is_exact(
     frozen_tid: np.ndarray,
     max_abs_shift: int,
     *,
     R: int = 1,
 ) -> bool:
-    """True when neighbour-stencil masks may be precomputed once and rolled.
-
-    :func:`abutting_rim_ps1_mask` is elementwise, so rolling always commutes with
-    it. :func:`needs_recompute_mask` is not: its boundary/edge stencils and the
-    dilation do **not** wrap, while :func:`np.roll` does, so the two orders can
-    disagree in a band around the wrap seam.
-
-    They agree whenever every pixel that can reach the seam is unassigned. After
-    rolling by at most ``max_abs_shift``, pixels within ``R + 1`` of the wrap seam
-    come from within ``max_abs_shift + R + 1`` of the original array border, so it
-    suffices that this border ring is entirely ``tid < 0``.
-    """
-    tid = np.asarray(frozen_tid)
-    w = int(max_abs_shift) + int(R) + 1
-    if w <= 0:
-        return True
-    h, width = tid.shape
-    if 2 * w >= h or 2 * w >= width:
-        return False
-    valid = tid >= 0
-    return not (
-        valid[:w, :].any()
-        or valid[-w:, :].any()
-        or valid[:, :w].any()
-        or valid[:, -w:].any()
-    )
+    """Backward-compatible skycell-wide seam-roll guard (uses ``max_abs_shift``)."""
+    need = int(max_abs_shift) + int(R) + 1
+    return need <= invalid_border_margin(frozen_tid, R=int(R))
 
 
 def apply_sparse_patch_inplace(

@@ -8,11 +8,12 @@
 | Mode | Config | This document | Output |
 |------|--------|---------------|--------|
 | **Field** (default) | `geometry_mode: field` | See [field templates](../field_geometry.md) | SCC sparse `contribs/` + on-demand assembly per `group_id` |
-| **Linear** (opt-out) | `geometry_mode: linear` | **Yes** — remainder of this file | Per-event `syndiff_template_*_dx*_dy*.fits.fz` |
+| **Linear** (removed) | `geometry_mode: linear` | **Not supported** — v2 dispatch raises `NotImplementedError` | Use `drift_source: point` under field mode instead ([field_geometry.md](../field_geometry.md)) |
 
-Linear mode measures drift at the science target and rolls each skycell's frozen
-regmap by a per-skycell PS1 integer shift derived from that single offset. Field mode
-measures drift at every skycell center, builds a hybrid roll+Exact assignment per
+The legacy linear path measured drift at a science target and rolled each skycell by
+a per-skycell PS1 integer shift derived from that single offset. Field mode
+measures drift at every skycell center (or broadcasts FFI-center point drift when
+`stages.remap.drift_source: point`), builds hybrid roll+Exact assignments per
 `(skycell, sx, sy)`, and caches sparse contributions — it does **not** use the
 `precompute_shifts_for_offsets` / `numpy.roll` path described below.
 

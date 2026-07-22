@@ -373,12 +373,12 @@ def compose_group_hybrid_assignment(
 
     Three further hoists, all per-skycell rather than per-key, and all producing
     bit-identical output (see
-    :func:`~...hybrid_regmaps.stencil_roll_is_exact` for the one precondition):
+    :func:`~...hybrid_regmaps.seam_roll_is_exact_for_shift` for the one precondition):
 
     ``seam_mask_base``
         Dilated recompute mask built on the *unrolled* frozen map; rolled here
         instead of recomputing ``needs_recompute_mask`` per key. Callers must
-        only pass this when ``stencil_roll_is_exact`` holds.
+        only pass this when ``seam_roll_is_exact_for_shift`` holds.
     ``rim_mask_base_by_neighbour``
         Per-neighbour rim masks built on the unrolled frozen map.
         ``abutting_rim_ps1_mask`` is elementwise, so rolling commutes exactly.
