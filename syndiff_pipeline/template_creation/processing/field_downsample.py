@@ -683,30 +683,12 @@ def _l5_skycell_batch(
     from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
         abutting_rim_ps1_mask,
         needs_recompute_mask,
-        stencil_roll_is_exact,
+        seam_roll_is_exact_for_shift,
     )
 
-    max_abs_shift = 0
-    for _ck, _gids in pending.items():
-        for _g, _sx, _sy in _gids:
-            max_abs_shift = max(max_abs_shift, abs(int(_sx)), abs(int(_sy)))
-
-    seam_mask_base = None
-    seam_roll_exact = stencil_roll_is_exact(
-        assignment_map, max_abs_shift, R=intra_skycell_R
-    )
-    if apply_intra_skycell and seam_roll_exact:
-        seam_mask_base = needs_recompute_mask(assignment_map, R=intra_skycell_R)
-    elif apply_intra_skycell:
-        # Assigned pixels reach close enough to the array border that np.roll's
-        # wraparound could disagree with the non-wrapping boundary stencils.
-        # Fall back to per-key recomputation for this skycell (slow but exact).
-        log.warning(
-            "skycell %s: assignment reaches within %d px of the array border; "
-            "using per-key seam-mask recomputation (slower, bit-identical)",
-            skycell,
-            max_abs_shift + int(intra_skycell_R) + 1,
-        )
+    seam_mask_unrolled = None
+    if apply_intra_skycell:
+        seam_mask_unrolled = needs_recompute_mask(assignment_map, R=intra_skycell_R)
 
     # Rim masks are built lazily: a skycell only pays for neighbours it actually
     # patches. Rolling commutes with abutting_rim_ps1_mask unconditionally
@@ -761,6 +743,21 @@ def _l5_skycell_batch(
                 )
                 l4a_cache_path = l4a_exact_path(
                     exact_cache_l4a_dir, str(skycell), epoch_id, int(sx_i), int(sy_i)
+                )
+        seam_mask_base = None
+        if apply_intra_skycell and seam_mask_unrolled is not None:
+            if seam_roll_is_exact_for_shift(
+                assignment_map, int(sx_i), int(sy_i), R=intra_skycell_R
+            ):
+                seam_mask_base = seam_mask_unrolled
+            else:
+                log.warning(
+                    "skycell %s key (%d,%d): assignment reaches within %d px of "
+                    "the array border; using per-key seam-mask recomputation",
+                    skycell,
+                    int(sx_i),
+                    int(sy_i),
+                    max(abs(int(sx_i)), abs(int(sy_i))) + int(intra_skycell_R) + 1,
                 )
         hybrid_map, _meta = compose_group_hybrid_assignment(
             assignment_map,

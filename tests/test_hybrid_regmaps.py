@@ -79,6 +79,23 @@ class TestHybridRegmaps(unittest.TestCase):
         np.testing.assert_array_equal(hybrid[mask], exact[mask])
         np.testing.assert_array_equal(hybrid[~mask], frozen[~mask])
 
+    def test_seam_roll_is_exact_for_shift_per_key(self):
+        from syndiff_pipeline.template_creation.processing.hybrid_regmaps import (
+            invalid_border_margin,
+            seam_roll_is_exact_for_shift,
+            stencil_roll_is_exact,
+        )
+
+        tid = np.full((20, 20), -1, dtype=np.int64)
+        tid[5:15, 5:15] = 1
+        self.assertGreater(invalid_border_margin(tid, R=1), 4)
+        self.assertTrue(seam_roll_is_exact_for_shift(tid, 1, 0, R=1))
+        self.assertFalse(seam_roll_is_exact_for_shift(tid, 10, 0, R=1))
+        self.assertEqual(
+            stencil_roll_is_exact(tid, 10, R=1),
+            seam_roll_is_exact_for_shift(tid, 10, 0, R=1),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
