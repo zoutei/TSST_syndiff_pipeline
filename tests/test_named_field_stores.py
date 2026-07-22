@@ -38,11 +38,20 @@ def _minimal_stages(**kwargs) -> TemplateStageParams:
 
 
 class TestNamedStoreParams(unittest.TestCase):
-    def test_downsample_rejects_both_apply_false(self):
+    def test_downsample_allows_both_apply_false(self):
+        ds = DownsampleStageParams(
+            apply_intra_skycell=False, apply_inter_skycell=False
+        )
+        self.assertFalse(ds.apply_intra_skycell)
+        self.assertFalse(ds.apply_inter_skycell)
+
+    def test_remap_rejects_invalid_drift_source(self):
         with self.assertRaises(ValueError):
-            DownsampleStageParams(
-                apply_intra_skycell=False, apply_inter_skycell=False
-            )
+            RemapStageParams(drift_source="invalid")
+
+    def test_parse_drift_source_point(self):
+        stages = _minimal_stages(remap={"drift_source": "point"})
+        self.assertEqual(stages.remap.drift_source, "point")
 
     def test_invalid_store_name_raises(self):
         with self.assertRaises(ValueError):

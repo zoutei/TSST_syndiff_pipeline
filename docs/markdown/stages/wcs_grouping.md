@@ -85,6 +85,12 @@ Quality-gate trial cascade (unchanged):
 
 The chosen path is stored as `reference_ffi_path` in the JSON. Everything downstream — mapping geometry, template WCS, Gaia projections, diff crop — is anchored to this frame's WCS.
 
+**SCC point drift (`drift_source: point`):** field-mode remap can measure drift once at the
+reference FFI's center pixel (not a science target) and broadcast that per-frame
+`(delta_x, delta_y)` to every skycell — see [field geometry](../field_geometry.md).
+The debug plot `plots/wcs_drift_template_debug.png` and `point_drift_table.csv` land
+under the remap store when this mode is enabled.
+
 ## 6. Template group assignment
 
 `assign_template_groups(offset_threshold=0.01)`:

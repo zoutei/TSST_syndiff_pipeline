@@ -332,6 +332,18 @@ def _execute_template_stage(
             master = hdul[1].data
             full_shape = (int(master.shape[0]), int(master.shape[1]))
         ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
+        target_drift = None
+        if str(rm.drift_source) == "point":
+            from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
+                resolve_scc_point_drift_table,
+            )
+
+            _wcs_table, target_drift = resolve_scc_point_drift_table(
+                resolved,
+                ref_ffi_path=ref_ffi,
+                store_root=resolved.remap_output_base or "",
+                force_rerun=force_rerun,
+            )
         field_result = run_field_remap_scc(
             sector=t.sector,
             camera=t.camera,
@@ -355,6 +367,10 @@ def _execute_template_stage(
             progress_path=progress_path,
             raw_drift_outlier_sigma=rm.raw_drift_outlier_sigma,
             stage_regmaps_to_scratch=rm.stage_regmaps_to_scratch,
+            drift_source=str(rm.drift_source),
+            target_drift=target_drift,
+            apply_intra_skycell=bool(rm.apply_intra_skycell),
+            apply_inter_skycell=bool(rm.apply_inter_skycell),
         )
         return _manifest_from_result(field_result)
 

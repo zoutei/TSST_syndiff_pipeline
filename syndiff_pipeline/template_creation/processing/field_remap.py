@@ -212,6 +212,8 @@ def _build_shift_schedule_for_scc(
     ref_ffi_path: str | Path,
     oversampling_factor: int = 1,
     raw_drift_outlier_sigma: float | None = 5.0,
+    drift_source: str = "per_skycell",
+    target_drift: np.ndarray | None = None,
 ) -> ShiftSchedule:
     """Build ``shift_schedule.npz`` from all SCC FFIs (no event handoff)."""
     from syndiff_pipeline.common.download import list_local_ffis, manifest_basename_from_local
@@ -301,10 +303,13 @@ def _build_shift_schedule_for_scc(
         frame_times=frame_times,
         sector=int(sector),
         raw_drift_outlier_sigma=raw_drift_outlier_sigma,
+        drift_source=drift_source,
+        target_drift=target_drift,
     )
     schedule.meta = dict(schedule.meta or {})
     schedule.meta["source"] = "built_from_scc_ffis"
     schedule.meta["reference_ffi"] = str(ref_path.resolve())
+    schedule.meta["drift_source"] = str(drift_source)
     schedule.meta["frame_filenames"] = [manifest_basename_from_local(p) for p in paths]
     with field_store_lock(store_root):
         schedule.save(store_root / "shift_schedule.npz")
@@ -479,6 +484,8 @@ def _ensure_shift_schedule(
     ref_ffi_path: str | Path | None = None,
     scc_only: bool = False,
     raw_drift_outlier_sigma: float | None = 5.0,
+    drift_source: str = "per_skycell",
+    target_drift: np.ndarray | None = None,
 ) -> ShiftSchedule:
     existing = _load_or_copy_shift_schedule(event_dir, store_root)
     if existing is not None:
@@ -497,6 +504,8 @@ def _ensure_shift_schedule(
             ref_ffi_path=ref_ffi_path,
             oversampling_factor=oversampling_factor,
             raw_drift_outlier_sigma=raw_drift_outlier_sigma,
+            drift_source=drift_source,
+            target_drift=target_drift,
         )
     return _build_shift_schedule_for_event(
         event_dir=event_dir,
@@ -1576,11 +1585,16 @@ def run_field_remap_scc(
     progress_path: str | Path | None = None,
     raw_drift_outlier_sigma: float | None = 5.0,
     stage_regmaps_to_scratch: bool | None = None,
+    drift_source: str = "per_skycell",
+    target_drift: np.ndarray | None = None,
+    apply_intra_skycell: bool = True,
+    apply_inter_skycell: bool = True,
 ) -> dict[str, Any]:
     """Build or reuse SCC remap artifacts (L2–L4).
 
     Writes under ``remap/oversampling_{N}/``: shift schedule, group artifacts,
-    ``exact_cache_l4a/`` (intra-skycell), ``exact_cache_l4b/`` (inter-skycell),
+    ``exact_cache_l4a/`` (intra-skycell, when ``apply_intra_skycell``),
+    ``exact_cache_l4b/`` (inter-skycell, when ``apply_inter_skycell``),
     and ``remap_manifest.json``.
     """
     from joblib import delayed
@@ -1619,6 +1633,8 @@ def run_field_remap_scc(
         ref_ffi_path=ref_ffi_path,
         scc_only=scc_only,
         raw_drift_outlier_sigma=raw_drift_outlier_sigma,
+        drift_source=drift_source,
+        target_drift=target_drift,
     )
     if progress_file is not None:
         remap_progress.set_progress_phase(progress_file, "grouping")
@@ -1689,8 +1705,8 @@ def run_field_remap_scc(
     n_inter_skycell_pair_states = int(len(pair_epochs))
     n_intra_skycell_written = 0
     n_inter_skycell_written = 0
-    run_intra = bool(n_intra_skycell_keys)
-    run_inter = True
+    run_intra = bool(n_intra_skycell_keys) and bool(apply_intra_skycell)
+    run_inter = bool(apply_inter_skycell)
 
     if rebuild_remap_cache:
         _wipe_exact_cache_tree(exact_l4a_dir)

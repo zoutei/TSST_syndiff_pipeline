@@ -737,6 +737,123 @@ def test_raw_drift_outlier_sigma_none_disables_in_schedule_build():
     assert int(schedule.frame_origin[5]) == FRAME_ORIGIN_MEASURED
 
 
+def test_shift_schedule_point_broadcasts_to_all_skycells():
+    """drift_source=point applies one TESS drift per frame to every skycell."""
+    ref_wcs = _make_wcs()
+    shifts = [(0.0025 * t, -0.0015 * t) for t in range(4)]
+    frames = [(f"f{t}.fits", _shifted_wcs(ref_wcs, s)) for t, s in enumerate(shifts)]
+    centers = [(f"skycell.0001.00{i}", 150.0, 20.0) for i in range(1, 5)]
+    skycell_df = pd.DataFrame([_make_ps1_row(*c) for c in centers])
+    td = np.array(
+        [[0.0, 0.0], [0.0025, -0.0015], [0.0050, -0.0030], [0.0075, -0.0045]],
+        dtype=np.float64,
+    )
+    point_sched = build_skycell_shift_schedule(
+        frames,
+        skycell_df,
+        ref_wcs,
+        drift_source="point",
+        target_drift=td,
+        savgol_window=3,
+        savgol_polyorder=1,
+        **_schedule_orbit_kwargs(4),
+    )
+    for c in range(1, len(skycell_df)):
+        np.testing.assert_allclose(
+            point_sched.sx_float[:, c],
+            point_sched.sx_float[:, 0],
+            rtol=0,
+            atol=1e-5,
+        )
+        np.testing.assert_allclose(
+            point_sched.sy_float[:, c],
+            point_sched.sy_float[:, 0],
+            rtol=0,
+            atol=1e-5,
+        )
+
+
+def test_shift_schedule_point_requires_target_drift():
+    ref_wcs = _make_wcs()
+    frames = [("f0.fits", ref_wcs), ("f1.fits", ref_wcs)]
+    skycell_df = _make_skycell_df()
+    with pytest.raises(ValueError, match="target_drift"):
+        build_skycell_shift_schedule(
+            frames,
+            skycell_df,
+            ref_wcs,
+            drift_source="point",
+            **_schedule_orbit_kwargs(2),
+        )
+
+
+def test_shift_schedule_point_target_drift_shape_mismatch():
+    ref_wcs = _make_wcs()
+    frames = [("f0.fits", ref_wcs), ("f1.fits", ref_wcs)]
+    skycell_df = _make_skycell_df()
+    with pytest.raises(ValueError, match="target_drift must have shape"):
+        build_skycell_shift_schedule(
+            frames,
+            skycell_df,
+            ref_wcs,
+            drift_source="point",
+            target_drift=np.zeros((2, 3)),
+            **_schedule_orbit_kwargs(2),
+        )
+
+
+def test_shift_schedule_per_skycell_default_unchanged():
+    ref_wcs = _make_wcs()
+    shifts = [(0.0025 * t, -0.0015 * t) for t in range(4)]
+    frames = [(f"f{t}.fits", _shifted_wcs(ref_wcs, s)) for t, s in enumerate(shifts)]
+    skycell_df = _make_skycell_df()
+    kwargs = dict(savgol_window=3, savgol_polyorder=1, **_schedule_orbit_kwargs(4))
+    explicit = build_skycell_shift_schedule(
+        frames, skycell_df, ref_wcs, drift_source="per_skycell", **kwargs
+    )
+    default = build_skycell_shift_schedule(frames, skycell_df, ref_wcs, **kwargs)
+    np.testing.assert_array_equal(explicit.sx_float, default.sx_float)
+    np.testing.assert_array_equal(explicit.sy_float, default.sy_float)
+    np.testing.assert_array_equal(explicit.sx_int, default.sx_int)
+    np.testing.assert_array_equal(explicit.sy_int, default.sy_int)
+
+
+def test_shift_schedule_point_rejects_unknown_drift_source():
+    ref_wcs = _make_wcs()
+    frames = [("f0.fits", ref_wcs)]
+    skycell_df = _make_skycell_df()
+    with pytest.raises(ValueError, match="drift_source must be"):
+        build_skycell_shift_schedule(
+            frames,
+            skycell_df,
+            ref_wcs,
+            drift_source="bogus",
+            target_drift=np.zeros((1, 2)),
+            **_schedule_orbit_kwargs(1),
+        )
+
+
+def test_shift_schedule_enforce_max_shift_false_warns_not_raises():
+    ref_wcs = _make_wcs()
+    frames: list[tuple[str, WCS | None]] = []
+    for t in range(10):
+        if t == 5:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (2000.0, 2000.0))))
+        else:
+            frames.append((f"f{t}.fits", _shifted_wcs(ref_wcs, (0.0025 * t, -0.001 * t))))
+    skycell_df = _make_skycell_df()
+    schedule = build_skycell_shift_schedule(
+        frames,
+        skycell_df,
+        ref_wcs,
+        savgol_window=5,
+        raw_drift_outlier_sigma=None,
+        enforce_max_shift=False,
+        **_schedule_orbit_kwargs(10),
+    )
+    assert schedule.frame_valid.all()
+
+
 def test_shift_exceeding_padding_margin_raises():
     """A shift beyond MAX_SHIFT_PS1_PX (the real per-skycell padding margin)
     cannot be a valid translation — it must fail loudly at the source rather

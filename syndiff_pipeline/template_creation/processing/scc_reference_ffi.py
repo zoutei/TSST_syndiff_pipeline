@@ -10,20 +10,33 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
+
 from syndiff_pipeline.common import wcs_grouping
-from syndiff_pipeline.common.download import ffi_glob_patterns, list_local_ffis
+from syndiff_pipeline.common.download import (
+    ffi_glob_patterns,
+    list_local_ffis,
+    manifest_basename_from_local,
+)
 from syndiff_pipeline.common.scc_paths import scc_bookkeeping_stage_dir, scc_ffi_list_parquet
 from syndiff_pipeline.common.wcs_header_cache import (
     ensure_scc_ffi_list,
     ffi_list_is_complete,
+    header_from_cached_row,
     load_ffi_list,
     median_crval_from_cache,
+    wcs_from_cached_row,
 )
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 
 log = logging.getLogger(__name__)
 
 RUN_META_FILENAME = "run_meta.json"
+POINT_DRIFT_TABLE_BASENAME = "point_drift_table.csv"
+POINT_DRIFT_GROUPS_BASENAME = "point_drift_groups.csv"
+POINT_DRIFT_META_BASENAME = "point_drift_meta.json"
+POINT_DRIFT_PLOTS_SUBDIR = "plots"
 
 
 def mapping_run_meta_path(resolved: ResolvedTargetConfig) -> Path:
@@ -184,6 +197,186 @@ def resolve_scc_reference_ffi(
     _write_run_meta(meta_path, payload)
     log.info("SCC reference FFI (%s): %s", selection_rule, ref_abs)
     return ref_abs
+
+
+def _point_drift_meta_path(store_root: Path) -> Path:
+    return store_root / POINT_DRIFT_META_BASENAME
+
+
+def _point_drift_table_path(store_root: Path) -> Path:
+    return store_root / POINT_DRIFT_TABLE_BASENAME
+
+
+def _point_drift_groups_path(store_root: Path) -> Path:
+    return store_root / POINT_DRIFT_GROUPS_BASENAME
+
+
+def _point_drift_debug_plot_path(store_root: Path) -> Path:
+    return (
+        store_root
+        / POINT_DRIFT_PLOTS_SUBDIR
+        / wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME
+    )
+
+
+def _point_drift_dict_from_table(wcs_table: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    """Map manifest filename → ``(delta_x, delta_y)`` from a point-drift table."""
+    out: dict[str, tuple[float, float]] = {}
+    path_col = "filename" if "filename" in wcs_table.columns else "path"
+    for _, row in wcs_table.iterrows():
+        key = str(row.get(path_col) or "").strip()
+        if not key:
+            continue
+        dx = row.get("delta_x")
+        dy = row.get("delta_y")
+        if pd.isna(dx) or pd.isna(dy):
+            continue
+        out[key] = (float(dx), float(dy))
+    return out
+
+
+def resolve_scc_point_drift_table(
+    resolved: ResolvedTargetConfig,
+    *,
+    ref_ffi_path: str,
+    store_root: str | Path,
+    force_rerun: bool = False,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """
+    Build (or load) an SCC FFI-center point-drift table for ``drift_source: point``.
+
+    The anchor is the center pixel of the **already-resolved** reference FFI
+    (not re-selected here). Returns the full ``wcs_table`` and a
+    ``(n_frames, 2)`` ``target_drift`` array in the same FFI sort order used by
+    ``_build_shift_schedule_for_scc``.
+    """
+    t = resolved.target
+    wg = resolved.stages.wcs_grouping
+    mp = resolved.stages.mapping
+    store = Path(store_root)
+    store.mkdir(parents=True, exist_ok=True)
+    meta_path = _point_drift_meta_path(store)
+    table_path = _point_drift_table_path(store)
+
+    if not force_rerun and meta_path.is_file() and table_path.is_file():
+        try:
+            with meta_path.open(encoding="utf-8") as fh:
+                cached_meta = json.load(fh)
+            cached_ref = str(cached_meta.get("reference_ffi_path") or "").strip()
+            if cached_ref and os.path.abspath(cached_ref) == os.path.abspath(ref_ffi_path):
+                wcs_table = pd.read_csv(table_path)
+                drift = _target_drift_array_for_ffi_order(
+                    wcs_table,
+                    sorted(
+                        list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd)
+                    ),
+                )
+                log.info("Using cached SCC point-drift table from %s", table_path)
+                return wcs_table, drift
+        except (OSError, json.JSONDecodeError, ValueError) as exc:
+            log.warning("Could not load cached point-drift table: %s", exc)
+
+    ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
+    if not ffi_paths:
+        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
+        raise FileNotFoundError(
+            f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
+        )
+
+    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
+        ffi_list_df = ensure_scc_ffi_list(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            ffi_paths,
+            open_fits=wcs_grouping.open_fits_memmap,
+        )
+
+    ref_logical = manifest_basename_from_local(ref_ffi_path)
+    if ref_logical not in ffi_list_df.index:
+        raise ValueError(f"Reference FFI {ref_logical!r} missing from ffi_list cache")
+    ref_row = ffi_list_df.loc[ref_logical]
+    if not bool(ref_row.get("wcs_ok", False)):
+        raise ValueError(f"Reference FFI has invalid WCS in ffi_list: {ref_logical!r}")
+    ref_header = header_from_cached_row(ref_row)
+    ref_wcs = wcs_from_cached_row(ref_row)
+    naxis1 = int(ref_header["NAXIS1"])
+    naxis2 = int(ref_header["NAXIS2"])
+    anchor_x = naxis1 / 2.0
+    anchor_y = naxis2 / 2.0
+    anchor_ra, anchor_dec = ref_wcs.pixel_to_world_values(anchor_x, anchor_y)
+
+    wcs_table = wcs_grouping.build_wcs_table_from_cache(
+        ffi_list_df, ffi_paths, float(anchor_ra), float(anchor_dec)
+    )
+    wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
+        wcs_table,
+        window_length=mp.wcs_drift_savgol_window,
+        polyorder=mp.wcs_drift_savgol_polyorder,
+    )
+    bkg_path = mp.bkg_vector_path or wg.bkg_vector_path
+    if bkg_path:
+        wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
+            wcs_table,
+            sector=t.sector,
+            camera=t.camera,
+            tessvectors_data_path=bkg_path,
+        )
+    wcs_table = wcs_grouping.reanchor_wcs_drift_to_reference(wcs_table, ref_ffi_path)
+    offset_threshold = float(wg.offset_threshold or 0.01)
+    wcs_table = wcs_grouping.assign_template_groups(wcs_table, offset_threshold)
+    summary = wcs_grouping.summarize_template_groups(wcs_table)
+
+    plot_path = _point_drift_debug_plot_path(store)
+    wcs_grouping.plot_wcs_drift_and_template_assignment(
+        wcs_table,
+        str(plot_path),
+        ref_ffi_path=ref_ffi_path,
+        sector=t.sector,
+        camera=t.camera,
+        ccd=t.ccd,
+    )
+
+    wcs_table.to_csv(table_path, index=False)
+    summary.to_csv(_point_drift_groups_path(store), index=False)
+    meta_payload = {
+        "reference_ffi_path": os.path.abspath(ref_ffi_path),
+        "reference_ffi_basename": os.path.basename(ref_ffi_path),
+        "anchor_pixel": [anchor_x, anchor_y],
+        "anchor_ra_deg": float(anchor_ra),
+        "anchor_dec_deg": float(anchor_dec),
+        "offset_threshold": offset_threshold,
+        "n_groups": int(len(summary)),
+        "plot_path": str(plot_path),
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_run_meta(meta_path, meta_payload)
+    log.info(
+        "SCC point-drift table: %d frames, %d groups; plot %s",
+        len(wcs_table),
+        len(summary),
+        plot_path,
+    )
+    target_drift = _target_drift_array_for_ffi_order(wcs_table, ffi_paths)
+    return wcs_table, target_drift
+
+
+def _target_drift_array_for_ffi_order(
+    wcs_table: pd.DataFrame, ffi_paths: list[str]
+) -> np.ndarray:
+    """Build ``(n_frames, 2)`` drift array aligned to sorted local FFI paths."""
+    drift_by_key = _point_drift_dict_from_table(wcs_table)
+    out = np.full((len(ffi_paths), 2), np.nan, dtype=np.float64)
+    for i, p in enumerate(ffi_paths):
+        logical = manifest_basename_from_local(p)
+        hit = drift_by_key.get(logical)
+        if hit is not None:
+            out[i, 0] = hit[0]
+            out[i, 1] = hit[1]
+    return out
 
 
 def load_mapping_reference_ffi(resolved: ResolvedTargetConfig) -> str | None:

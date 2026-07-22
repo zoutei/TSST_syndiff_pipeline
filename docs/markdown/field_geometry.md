@@ -47,14 +47,37 @@ Defaults (no YAML required beyond a normal site):
 | `stages.downsample.apply_intra_skycell` | `true` | Apply intra-skycell Exact patch at L5 |
 | `stages.downsample.apply_inter_skycell` | `true` | Apply inter-skycell rim patches at L5 |
 | `stages.mapping.template_conv_pad_spare_px` | `4` | Extra bottom pad rows for Hotpants kernel margin |
+| `stages.remap.drift_source` | `per_skycell` | `per_skycell` (default) or `point` (FFI-center broadcast drift for bootstrap templates) |
+| `stages.remap.apply_intra_skycell` | `true` | Build L4a Exact caches at remap |
+| `stages.remap.apply_inter_skycell` | `true` | Build L4b rim caches at remap |
 
-Opt out to linear:
+## Coarse point-drift bootstrap (`drift_source: point`)
+
+Round-1 WCS bootstrap templates use field-mode remap/downsample with a single
+per-frame shift measured at the **reference FFI center pixel** (not a science
+target), broadcast uniformly to every skycell:
 
 ```yaml
 stages:
+  remap:
+    drift_source: point
+    apply_intra_skycell: false
+    apply_inter_skycell: false
+    store_name: linear
   downsample:
-    geometry_mode: linear
+    apply_intra_skycell: false
+    apply_inter_skycell: false
+    remap_store_name: linear
+    output_store_name: linear
 ```
+
+Remap writes `point_drift_table.csv` and `plots/wcs_drift_template_debug.png`
+under the remap store. Diff can target `paths.template_store_name: linear` while
+mapping artifacts stay unchanged.
+
+> **Note:** `geometry_mode: linear` on `stages.downsample` is **not supported** in
+> the v2 template path (`NotImplementedError` at dispatch). Use `drift_source: point`
+> with field geometry instead.
 
 ## MappingGrid (canonical SCC grid)
 
@@ -314,7 +337,9 @@ stages:
     n_jobs: 16
 ```
 
-At least one of `apply_intra_skycell` / `apply_inter_skycell` must be `true`
+At least one of `apply_intra_skycell` / `apply_inter_skycell` should be `true`
+for production field templates. Both may be `false` for coarse bootstrap lanes
+(plain per-skycell roll only).
 (reject both `false` at parse). Remap still builds both Exact caches; the
 downsample toggles only control which layers L5 compose applies and which
 caches verify requires.
