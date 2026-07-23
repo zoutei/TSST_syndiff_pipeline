@@ -63,14 +63,14 @@ def _load_convolved_crop(path: str, crop_bounds: dict) -> np.ndarray:
     Returns
     -------
     np.ndarray"""
-    from astropy.io import fits
+    from syndiff_pipeline.common.fits_io import image_hdu_data
 
     ox = int(crop_bounds["x_min"])
     oy = int(crop_bounds["y_min"])
     x1 = int(crop_bounds["x_max"])
     y1 = int(crop_bounds["y_max"])
     with wcs_grouping.open_fits_memmap(path) as hdul:
-        data = hdul[0].data
+        data = image_hdu_data(hdul)
         if data.shape == tuple(crop_bounds["shape"]):
             return np.asarray(data, dtype=np.float64)
         return data[oy:y1, ox:x1].astype(np.float64)
@@ -107,6 +107,7 @@ def _process_one_frame(task: tuple) -> dict:
     diffs_label = p["diffs_label"]
     bkg_label = p.get("bkg_label")
     output_dir = p["output_dir"]
+    template_dir = p.get("template_dir")
     manifest = p["manifest"]
     sck = p.get("sck")
     data_root = p.get("data_root")
@@ -216,7 +217,10 @@ def _process_one_frame(task: tuple) -> dict:
             )
         else:
             group_dx, group_dy, template_path = resolve_template_for_ffi(
-                output_dir, manifest, ffi_path
+                output_dir,
+                manifest,
+                ffi_path,
+                template_dir=template_dir,
             )
             conv_path = lookup_convolved_path(convolved_table, group_dx, group_dy)
         ffi, _ = _load_ffi_cropped(ffi_path, crop_bounds)
@@ -465,6 +469,7 @@ def kernel_subtract_loop(
         "diffs_label": diffs_label,
         "bkg_label": bkg_label,
         "output_dir": output_dir,
+        "template_dir": (getattr(cfg, "template_dir", "") or None) if cfg is not None else None,
         "manifest": manifest,
         "field_mode": bool(field_mode),
         "sck": sck,

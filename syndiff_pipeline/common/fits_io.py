@@ -151,6 +151,28 @@ def write_hdul_fits(out_path: str | Path, hdul: fits.HDUList) -> str:
     return str(fz)
 
 
+def _primary_image_header(header: Optional[fits.Header]) -> Optional[fits.Header]:
+    """Return a copy of *header* safe for a single-image PRIMARY HDU."""
+    if header is None:
+        return None
+    hdr = fits.Header(header)
+    for key in ("EXTNAME", "XTENSION"):
+        if key in hdr:
+            del hdr[key]
+    return hdr
+
+
+def image_hdu_data(hdul: fits.HDUList) -> np.ndarray:
+    """Return the first 2D image array in *hdul* (PRIMARY or extension)."""
+    if hdul[0].data is not None and getattr(hdul[0].data, "ndim", 0) == 2:
+        return np.asarray(hdul[0].data)
+    for hdu in hdul[1:]:
+        data = getattr(hdu, "data", None)
+        if data is not None and getattr(data, "ndim", 0) == 2:
+            return np.asarray(data)
+    raise ValueError("No 2D image data in FITS HDUList")
+
+
 def write_image_fits(
     out_path: str | Path,
     data: np.ndarray,
@@ -160,7 +182,7 @@ def write_image_fits(
     """Write a single 2D image FITS (float32) as ``.fits.fz``."""
     target = Path(fits_fpack_path(out_path))
     plain = Path(fits_logical_path(target))
-    hdr = fits.Header(header) if header is not None else None
+    hdr = _primary_image_header(header)
     arr = np.asarray(data, dtype=np.float32)
 
     def _write(tmp: Path) -> None:
