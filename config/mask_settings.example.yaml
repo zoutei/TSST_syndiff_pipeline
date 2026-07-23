@@ -6,6 +6,7 @@
 geometry_file: null
 shared:
   style: empirical          # or tessreduce
+  epsf_mag_lim: 7.5         # bit 1 vs bit 2 split (Gaia tess_mag)
   bright_maglim: 13.0
   faint_maglim: 18.0
   scale: 1.0

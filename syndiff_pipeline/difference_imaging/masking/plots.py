@@ -319,8 +319,8 @@ def write_mask_debug_plots(
     static = catalog.static
 
     planes = [
-        (bits.BRIGHT_CAT, "bit1_bright_cat.png", "bit 1 BRIGHT_CAT"),
-        (bits.SAT_CROSS, "bit2_sat_cross.png", "bit 2 SAT_CROSS"),
+        (bits.BRIGHT_CAT, "bit1_bright_cat.png", "bit 1 very bright (T<7.5 + BSC)"),
+        (bits.SAT_CROSS, "bit2_sat_cross.png", "bit 2 mid bright (7.5≤T<13)"),
         (bits.FAINT_CAT, "bit32_faint_cat.png", "bit 32 FAINT_CAT"),
         (bits.TNS, "bit64_tns.png", "bit 64 TNS"),
     ]

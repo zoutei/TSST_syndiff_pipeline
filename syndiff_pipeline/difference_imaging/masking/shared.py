@@ -89,6 +89,7 @@ def Cat_mask(
     gaia_df: pd.DataFrame,
     straps_csv: str,
     maglim: float = 13.0,
+    epsf_mag_lim: float = 7.5,
     scale: float = 1.0,
     strapsize: int = 6,
     col_offset: int = 0,
@@ -97,29 +98,31 @@ def Cat_mask(
     """
     TESSreduce full bitmask (bits 1, 2, 4).
 
-    Bit layout:
-      bit 1 — catalog sources (faint_star_squares / historical gaia_auto_mask)
-      bit 2 — very bright star crosses (Big_sat, mag < 7; Gaia + BSC)
+    Bit layout (aligned with empirical mag tiers):
+      bit 1 — very bright crosses (Big_sat, mag < epsf_mag_lim; Gaia + all BSC)
+      bit 2 — mid-bright squares (faint_star_squares, epsf_mag_lim ≤ mag < maglim)
       bit 4 — TESS straps
     """
-    gaia_sub = gaia_df[gaia_df["mag"] < maglim].copy()
+    mag = gaia_df["mag"].to_numpy(float)
+    mid_bright = gaia_df[(mag >= epsf_mag_lim) & (mag < maglim)].copy()
+    very_bright = gaia_df[mag < epsf_mag_lim].copy()
 
-    mg = faint_star_squares(gaia_sub, data_image, scale)
-    bit1 = (mg["all"] > 0).astype(int)
+    mg = faint_star_squares(mid_bright, data_image, scale)
+    bit2 = (mg["all"] > 0).astype(int) * bits.SAT_CROSS
 
-    sat_table = gaia_sub
+    sat_table = very_bright
     if bsc_df is not None and len(bsc_df) > 0:
         bsc_sat = bsc_df.copy()
         bsc_sat["mag"] = bsc_sat["vmag"]
         sat_table = pd.concat(
-            [gaia_sub, bsc_sat[["x", "y", "mag"]]],
+            [very_bright, bsc_sat[["x", "y", "mag"]]],
             ignore_index=True,
         )
-    sat_list = Big_sat(sat_table, data_image, scale)
+    sat_list = Big_sat(sat_table, data_image, scale, epsf_mag_lim=epsf_mag_lim)
     if len(sat_list) > 0:
-        bit2 = (np.nansum(sat_list, axis=0) > 0).astype(int) * 2
+        bit1 = (np.nansum(sat_list, axis=0) > 0).astype(int) * bits.BRIGHT_CAT
     else:
-        bit2 = np.zeros_like(data_image, dtype=int)
+        bit1 = np.zeros_like(data_image, dtype=int)
 
     if strapsize > 0:
         bit4 = Strap_mask(data_image, col_offset, straps_csv, size=strapsize).astype(int) * 4
@@ -135,6 +138,7 @@ def make_shared_mask(
     crop_bounds: dict,
     straps_csv: str,
     maglim: float = 13.0,
+    epsf_mag_lim: float = 7.5,
     strapsize: int = 6,
     output_dir: str = None,
     *,
@@ -175,6 +179,7 @@ def make_shared_mask(
         gaia_df=gaia_df,
         straps_csv=straps_csv,
         maglim=maglim,
+        epsf_mag_lim=epsf_mag_lim,
         scale=scale,
         strapsize=strapsize,
         col_offset=crop_bounds["x_min"],
@@ -275,9 +280,9 @@ def build_static_mask(
     Build static shared bitmask.
 
     Default ``style: empirical``:
-      T < bright_maglim: empirical circles (T≥9 → bit 1) + crosses (T<9 → 1|2);
-      BSC ∪ Gaia for crosses.
-      bright_maglim ≤ T < faint_maglim: faint_star_squares → bit 32.
+      Gaia tess_mag < epsf_mag_lim (7.5) + all BSC → crosses → bit 1.
+      epsf_mag_lim ≤ tess_mag < bright_maglim (13) → circles → bit 2.
+      bright_maglim ≤ tess_mag < faint_maglim (18) → faint_star_squares → bit 32.
       straps → 4; edges → 8; PS1 → 16; optional TNS → 64.
 
     ``style: tessreduce``: legacy Cat_mask path (bits 1/2/4/8/16 only).
@@ -300,6 +305,7 @@ def build_static_mask(
             crop_bounds=crop_bounds,
             straps_csv=straps,
             maglim=shared.bright_maglim,
+            epsf_mag_lim=shared.epsf_mag_lim,
             strapsize=shared.strapsize if shared.include_straps else 0,
             output_dir=str(output_dir) if output_dir else None,
             ref_ffi_path=ref_ffi_path,
@@ -320,32 +326,39 @@ def build_static_mask(
 
     geo = load_geometry(settings.geometry_file)
     scale = float(shared.scale)
+    epsf_lim = float(shared.epsf_mag_lim)
     bright_lim = float(shared.bright_maglim)
     faint_lim = float(shared.faint_maglim)
 
     bsc_in_crop = _project_bsc(ref_ffi_path, crop_bounds, bsc_catalog_path)
 
     mag = gaia_df["mag"].to_numpy(float)
-    bright = gaia_df[mag < bright_lim].copy()
+    very_bright = gaia_df[mag < epsf_lim].copy()
+    mid_bright = gaia_df[(mag >= epsf_lim) & (mag < bright_lim)].copy()
     faint = gaia_df[(mag >= bright_lim) & (mag < faint_lim)].copy()
 
-    # Bit 1: empirical circles on bright with mag >= 9
-    mg = gaia_circle_mask(bright, ref_image, scale=scale, mag_min=9.0, geometry=geo)
-    bit1 = (mg["all"] > 0).astype(np.int16) * bits.BRIGHT_CAT
-
-    # Bits 1|2: crosses on bright ∪ BSC with mag < 9
-    sat_table = bright
+    # Bit 1: crosses on very bright Gaia + all BSC
+    sat_table = very_bright
     if bsc_in_crop is not None and len(bsc_in_crop) > 0:
         bsc_sat = bsc_in_crop.copy()
         bsc_sat["mag"] = bsc_sat["vmag"]
         sat_table = pd.concat(
-            [bright, bsc_sat[["x", "y", "mag"]]],
+            [very_bright, bsc_sat[["x", "y", "mag"]]],
             ignore_index=True,
         )
-    sat_mask = big_sat_empirical(sat_table, ref_image, scale=scale, mag_max=9.0)
-    bit2 = (sat_mask > 0).astype(np.int16) * bits.SAT_CROSS
-    # Cross body also sets bit 1 (plan: crosses → bits 1|2)
-    bit1 = bit1 | ((sat_mask > 0).astype(np.int16) * bits.BRIGHT_CAT)
+    sat_mask = big_sat_empirical(
+        sat_table, ref_image, scale=scale, mag_max=epsf_lim, geometry=geo
+    )
+    bit1 = (sat_mask > 0).astype(np.int16) * bits.BRIGHT_CAT
+
+    # Bit 2: empirical circles on mid-bright Gaia
+    if len(mid_bright):
+        mg = gaia_circle_mask(
+            mid_bright, ref_image, scale=scale, mag_min=epsf_lim, geometry=geo
+        )
+        bit2 = (mg["all"] > 0).astype(np.int16) * bits.SAT_CROSS
+    else:
+        bit2 = np.zeros(ref_image.shape, dtype=np.int16)
 
     # Bit 32: faint_star_squares on faint catalog stars
     if len(faint):

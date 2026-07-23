@@ -19,6 +19,7 @@ from syndiff_pipeline.difference_imaging.masking.settings import (
 def test_defaults_tns_asteroids_enabled():
     s = MaskSettings()
     assert s.shared.style == "empirical"
+    assert s.shared.epsf_mag_lim == 7.5
     assert s.tns.enabled is True
     assert s.asteroids.enabled is True
     assert s.tns.download_url == DEFAULT_TNS_PUBLIC_ZIP_URL
@@ -55,7 +56,14 @@ def test_resolve_order_stage_wins(tmp_path):
 
 def test_stage_overrides_bc():
     s = MaskSettings()
-    s2 = apply_stage_overrides(s, gaia_mag_bright=12.5, strapsize=8, ps1_min_hit_count=100)
+    s2 = apply_stage_overrides(
+        s,
+        epsf_mag_lim=8.0,
+        gaia_mag_bright=12.5,
+        strapsize=8,
+        ps1_min_hit_count=100,
+    )
+    assert s2.shared.epsf_mag_lim == 8.0
     assert s2.shared.bright_maglim == 12.5
     assert s2.shared.strapsize == 8
     assert s2.shared.ps1_min_hit_count == 100
@@ -78,6 +86,16 @@ def test_write_omits_default_download_url(tmp_path):
 def test_invalid_style_raises():
     try:
         mask_settings_from_dict({"shared": {"style": "nope"}})
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_epsf_mag_lim_must_be_below_bright_maglim():
+    try:
+        mask_settings_from_dict(
+            {"shared": {"epsf_mag_lim": 13.0, "bright_maglim": 12.0}}
+        )
         assert False, "expected ValueError"
     except ValueError:
         pass

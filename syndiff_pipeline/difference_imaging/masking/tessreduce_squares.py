@@ -18,15 +18,21 @@ log = logging.getLogger(__name__)
 gaia_auto_mask = faint_star_squares
 
 
-def Big_sat(table: pd.DataFrame, Image: np.ndarray, scale: float = 1.0) -> list:
+def Big_sat(
+    table: pd.DataFrame,
+    Image: np.ndarray,
+    scale: float = 1.0,
+    *,
+    epsf_mag_lim: float = 7.5,
+) -> list:
     """
-    Build cross + circular body masks for stars brighter than mag 7 (TESSreduce).
+    Build cross + circular body masks for stars brighter than epsf_mag_lim.
 
     Expects table columns: x, y, mag (crop-local pixels).
     Returns list of 2D mask arrays.
     """
     image = np.zeros_like(Image)
-    sat = table[table["mag"].values < 7].copy()
+    sat = table[table["mag"].values < epsf_mag_lim].copy()
     x = (np.round(sat["x"].values, 0)).astype(int)
     y = (np.round(sat["y"].values, 0)).astype(int)
     m = sat["mag"].values

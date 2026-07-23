@@ -26,6 +26,7 @@ DEFAULT_TESS_ORBIT_TIMES_URL = (
 @dataclass
 class SharedMaskSettings:
     style: str = "empirical"  # or tessreduce
+    epsf_mag_lim: float = 7.5
     bright_maglim: float = 13.0
     faint_maglim: float = 18.0
     scale: float = 1.0
@@ -95,6 +96,10 @@ def mask_settings_from_dict(raw: dict | None) -> MaskSettings:
     if style not in ("empirical", "tessreduce"):
         raise ValueError(f"shared.style must be 'empirical' or 'tessreduce', got {shared.style!r}")
     shared.style = style
+    if float(shared.epsf_mag_lim) >= float(shared.bright_maglim):
+        raise ValueError(
+            f"epsf_mag_lim ({shared.epsf_mag_lim}) must be < bright_maglim ({shared.bright_maglim})"
+        )
     if float(shared.faint_maglim) < float(shared.bright_maglim):
         raise ValueError(
             f"faint_maglim ({shared.faint_maglim}) must be >= bright_maglim ({shared.bright_maglim})"
@@ -151,6 +156,7 @@ def resolve_mask_settings(
 def apply_stage_overrides(
     settings: MaskSettings,
     *,
+    epsf_mag_lim: float | None = None,
     gaia_mag_bright: float | None = None,
     strapsize: int | None = None,
     ps1_min_hit_count: int | None = None,
@@ -162,6 +168,8 @@ def apply_stage_overrides(
     field unchanged (do not pass SharedMaskParams dataclass defaults).
     """
     shared = SharedMaskSettings(**asdict(settings.shared))
+    if epsf_mag_lim is not None:
+        shared.epsf_mag_lim = float(epsf_mag_lim)
     if gaia_mag_bright is not None:
         shared.bright_maglim = float(gaia_mag_bright)
     if strapsize is not None:

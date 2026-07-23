@@ -114,11 +114,13 @@ Square target aperture with optional sky annulus (TESSreduce `diff_lc` style).
 
 ### Why shared_mask, not a mag cut
 
-`shared_mask` already encodes Gaia stars with `mag < gaia_mag_bright` (default
-**13**, bit value 1), plus bright crosses (bit 2), straps (bit 4), and
-edges/PS1 bits. Re-deriving a mag cut in photometry would duplicate that and
-need Gaia I/O. Changing the brightness threshold remains a `shared_mask` stage
-concern (`gaia_mag_bright`), not an aperture knob.
+`shared_mask` encodes Gaia catalog stars in three tiers: bit 1 (all BSC +
+`tess_mag` &lt; `epsf_mag_lim`, default 7.5), bit 2 (`epsf_mag_lim` ≤
+`tess_mag` &lt; `bright_maglim`, default 13), bit 32 (`bright_maglim` ≤
+`tess_mag` &lt; `faint_maglim`), plus straps (bit 4) and edges/PS1 bits.
+Re-deriving a mag cut in photometry would duplicate that and need Gaia I/O.
+Changing brightness thresholds remains a `mask_settings.yaml` concern
+(`epsf_mag_lim`, `bright_maglim`), not an aperture knob.
 
 ### I/O cost
 
@@ -129,7 +131,7 @@ re-read of the mask.
 
 ### Which bits
 
-Default: catalog + bright-cross bits (`mask & 3 != 0`, i.e. bits 1|2).
+Default: catalog star tiers (`mask & 3 != 0`, i.e. bits 1|2).
 Straps/edges are not applied on this path.
 
 ### Fitting steps

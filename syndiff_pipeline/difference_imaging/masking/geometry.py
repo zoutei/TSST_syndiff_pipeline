@@ -47,13 +47,14 @@ def radius_from_mag(
     """
     Empirical circle radius for one magnitude.
 
-    Bright (T < 7): cross body radius. Outside bins: faint/default radii from YAML.
+    Bright (T < cross_mag_max): cross body radius. Outside bins: faint/default radii from YAML.
     """
     geo = geometry or load_geometry()
     if not np.isfinite(mag):
         return int(geo.get("default_radius", 4))
     m = float(mag)
-    if m < 7.0:
+    cross_max = float(geo.get("cross_mag_max", 7.5))
+    if m < cross_max:
         body, _, _ = cross_geometry_from_mag(m, scale, geometry=geo)
         return max(int(body), 1)
     r = empirical_circle_radius(m, scale, geometry=geo)
@@ -70,9 +71,9 @@ def empirical_circle_radius(
     *,
     geometry: dict[str, Any] | None = None,
 ) -> int:
-    """Integer circle radius for mag in circle bins (0 if outside / below 9)."""
+    """Integer circle radius for mag in circle bins (0 if outside / below circle_mag_min)."""
     geo = geometry or load_geometry()
-    mag_min = float(geo.get("circle_mag_min", 9.0))
+    mag_min = float(geo.get("circle_mag_min", 7.5))
     if not np.isfinite(mag) or float(mag) < mag_min:
         return 0
     m = float(mag)
@@ -93,7 +94,7 @@ def cross_geometry_from_mag(
     b, L, w = _cross_geometry_one(
         float(mag),
         float(scale),
-        float(geo.get("cross_mag_max", 9.0)),
+        float(geo.get("cross_mag_max", 7.5)),
         geo.get("cross_bins") or [],
     )
     return int(b), int(L), int(w)
@@ -160,7 +161,7 @@ def _radii_from_mags(
 @njit(cache=True)
 def _cross_geometry_numba(mag: float, scale: float) -> tuple:
     # Hard-coded bins matching packaged YAML (numba cannot take Python lists).
-    if mag < 9.0:
+    if mag < 7.5:
         if mag <= 4.0:
             body, length, width = 38.0, 97.0, 11.0
         elif mag <= 5.0:
@@ -169,10 +170,8 @@ def _cross_geometry_numba(mag: float, scale: float) -> tuple:
             body, length, width = 24.0, 45.0, 7.0
         elif mag <= 7.0:
             body, length, width = 20.0, 34.0, 5.0
-        elif mag <= 8.0:
-            body, length, width = 13.0, 19.0, 5.0
         else:
-            body, length, width = 10.0, 15.0, 3.0
+            body, length, width = 16.0, 26.0, 4.0
     else:
         return 0, 0, 0
     b = int(np.ceil(body * scale))
@@ -303,7 +302,7 @@ def gaia_circle_mask(
     image: np.ndarray,
     scale: float = 1.0,
     *,
-    mag_min: float = 9.0,
+    mag_min: float = 7.5,
     geometry: dict[str, Any] | None = None,
 ) -> dict:
     """Catalog mask with circular kernels (mag >= mag_min). Expects x, y, mag."""
@@ -342,9 +341,11 @@ def big_sat_empirical(
     image: np.ndarray,
     scale: float = 1.0,
     *,
-    mag_max: float = 9.0,
+    mag_max: float = 7.5,
+    geometry: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """Circular body + cross for mag < mag_max. Returns uint8 union mask."""
+    _ = geometry  # reserved for callers passing resolved geo alongside mag_max
     sat = table[table["mag"].to_numpy(float) < mag_max]
     ny, nx = image.shape
     mask = np.zeros((ny, nx), dtype=np.uint8)
@@ -376,7 +377,7 @@ def warmup_numba() -> None:
     mags = np.array([5.5], dtype=np.float64)
     paint_crosses(m, xs, ys, mags, 1.0)
     _radii_from_mags(
-        mags, 1.0, geo["_bin_hi"], geo["_bin_lo"], geo["_bin_rad"], 9.0
+        mags, 1.0, geo["_bin_hi"], geo["_bin_lo"], geo["_bin_rad"], 7.5
     )
     half = np.array([1], dtype=np.int64)
     active = np.array([1], dtype=np.uint8)

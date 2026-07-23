@@ -52,6 +52,7 @@ def generate_shared_mask_catalog(
     stage_mask_settings: str | None = None,
     site_dir: str | Path | None = None,
     gaia_mag_bright: float | None = None,
+    epsf_mag_lim: float | None = None,
     strapsize: int | None = None,
     ps1_min_hit_count: int | None = None,
     wcs_table: pd.DataFrame | None = None,
@@ -72,6 +73,7 @@ def generate_shared_mask_catalog(
         )
     settings = apply_stage_overrides(
         settings,
+        epsf_mag_lim=epsf_mag_lim,
         gaia_mag_bright=gaia_mag_bright,
         strapsize=strapsize,
         ps1_min_hit_count=ps1_min_hit_count,

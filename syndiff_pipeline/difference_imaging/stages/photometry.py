@@ -592,7 +592,7 @@ class EpsfLocator:
 
 
 # Shared-mask bits for optional aperture sky exclusion (catalog + bright crosses).
-_SHARED_MASK_SKY_BITS = 3  # bit 1 | bit 2
+_SHARED_MASK_SKY_BITS = 3  # bit 1 | bit 2 (very bright + mid-bright catalog)
 
 
 def _create_psf_surface_args(
