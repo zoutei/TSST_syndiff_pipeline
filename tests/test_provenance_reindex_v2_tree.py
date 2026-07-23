@@ -20,23 +20,20 @@ class TestReindexV2DiffTree(unittest.TestCase):
         self.store = ProvenanceStore(self.data_root / "bookkeeping" / "provenance.db")
 
     @staticmethod
-    def _make_recipe_dir(
+    def _make_label_dir(
         diff_root: Path,
         workspace_label: str,
-        recipe_fp: str,
         *,
         filename: str = "tess2020019142923_hp_d.fits.fz",
     ) -> Path:
-        recipe_dir = diff_root / workspace_label / recipe_fp
-        recipe_dir.mkdir(parents=True)
-        (recipe_dir / filename).write_bytes(b"fake")
-        return recipe_dir
+        label_dir = diff_root / workspace_label
+        label_dir.mkdir(parents=True)
+        (label_dir / filename).write_bytes(b"fake")
+        return label_dir
 
     def test_reindex_registers_default_and_named_diff_lanes(self) -> None:
-        default_recipe = self._make_recipe_dir(self.scc_dir / "diff", "hp_d", "recipefp1")
-        named_recipe = self._make_recipe_dir(
-            self.scc_dir / "diff_somelane", "hp_d", "recipefp2"
-        )
+        default_label = self._make_label_dir(self.scc_dir / "diff", "hp_d")
+        named_label = self._make_label_dir(self.scc_dir / "diff_somelane", "hp_d")
 
         n = reindex_scc_tree(self.store, self.scc_dir, 20, 1, 1)
         self.assertEqual(n, 2)
@@ -48,11 +45,10 @@ class TestReindexV2DiffTree(unittest.TestCase):
                 "c": 1,
                 "k": 1,
                 "workspace_label": "hp_d",
-                "recipe_fp": "recipefp1",
             },
         )
         self.assertEqual(len(default_rows), 1)
-        self.assertEqual(default_rows[0].location, str(default_recipe))
+        self.assertEqual(default_rows[0].location, str(default_label))
 
         named_rows = self.store.artifacts_by_kind_spatial(
             "diff_image_legacy_unverified",
@@ -61,45 +57,40 @@ class TestReindexV2DiffTree(unittest.TestCase):
                 "c": 1,
                 "k": 1,
                 "workspace_label": "hp_d",
-                "recipe_fp": "recipefp2",
                 "store_name": "somelane",
             },
         )
         self.assertEqual(len(named_rows), 1)
-        self.assertEqual(named_rows[0].location, str(named_recipe))
+        self.assertEqual(named_rows[0].location, str(named_label))
 
     def test_gc_report_lists_diff_recipe_dirs_in_all_lanes(self) -> None:
-        default_recipe = self._make_recipe_dir(self.scc_dir / "diff", "hp_d", "recipefp1")
-        named_recipe = self._make_recipe_dir(
-            self.scc_dir / "diff_somelane", "ks_d", "recipefp2"
-        )
-        # Event subtree under a diff lane must not be counted as a recipe dir.
+        default_label = self._make_label_dir(self.scc_dir / "diff", "hp_d")
+        named_label = self._make_label_dir(self.scc_dir / "diff_somelane", "ks_d")
+        # Event subtree under a diff lane must not be counted as a label dir.
         (self.scc_dir / "diff" / "events" / "evt1").mkdir(parents=True)
 
         report = gc_report(self.data_root)
         self.assertEqual(len(report.diff_recipe_dirs), 2)
-        self.assertIn(str(default_recipe), report.diff_recipe_dirs)
-        self.assertIn(str(named_recipe), report.diff_recipe_dirs)
+        self.assertIn(str(default_label), report.diff_recipe_dirs)
+        self.assertIn(str(named_label), report.diff_recipe_dirs)
 
-    def test_reindex_skips_empty_recipe_dirs(self) -> None:
-        empty = self.scc_dir / "diff" / "hp_d" / "empty_recipe"
+    def test_reindex_skips_empty_label_dirs(self) -> None:
+        empty = self.scc_dir / "diff" / "hp_d"
         empty.mkdir(parents=True)
-        self._make_recipe_dir(self.scc_dir / "diff", "hp_d", "has_content")
+        self._make_label_dir(self.scc_dir / "diff", "hp_d_has_content")
 
         n = reindex_scc_tree(self.store, self.scc_dir, 20, 1, 1)
         self.assertEqual(n, 1)
 
     def test_reindex_infers_background_and_shared_mask_kinds(self) -> None:
-        bkg_recipe = self._make_recipe_dir(
+        bkg_label = self._make_label_dir(
             self.scc_dir / "diff",
             "hp_bkg",
-            "bkgfp",
             filename="tess2020019142923_hp_bkg.fits.fz",
         )
-        mask_recipe = self._make_recipe_dir(
+        mask_label = self._make_label_dir(
             self.scc_dir / "diff",
             "shared_mask",
-            "maskfp",
             filename="shared_mask.fits.fz",
         )
 
@@ -113,18 +104,17 @@ class TestReindexV2DiffTree(unittest.TestCase):
                 "c": 1,
                 "k": 1,
                 "workspace_label": "hp_bkg",
-                "recipe_fp": "bkgfp",
             },
         )
         self.assertEqual(len(bkg_rows), 1)
-        self.assertEqual(bkg_rows[0].location, str(bkg_recipe))
+        self.assertEqual(bkg_rows[0].location, str(bkg_label))
 
         mask_rows = self.store.artifacts_by_kind_spatial(
             "shared_mask_legacy_unverified",
             {"s": 20, "c": 1, "k": 1},
         )
         self.assertEqual(len(mask_rows), 1)
-        self.assertEqual(mask_rows[0].location, str(mask_recipe))
+        self.assertEqual(mask_rows[0].location, str(mask_label))
 
 
 if __name__ == "__main__":

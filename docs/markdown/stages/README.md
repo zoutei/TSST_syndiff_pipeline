@@ -70,7 +70,7 @@ ps1_download               →  {data_root}/ps1_skycells_zarr/ps1_skycells.zarr
 ps1_process                →  {data_root}/s{SSSS}/c{C}/k{K}/convolved.zarr
 downsample                 →  {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/
 diff (scc_bootstrap)       →  {data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/ + bookkeeping/diff/
-star (after diff verify)   →  {workspace_root}/events/{target_label}/ws/host_star/
+star (after diff verify)   →  {workspace_root}/events/{target_label}/phot_{run_id}/host_star/
 ```
 
 ## Provenance

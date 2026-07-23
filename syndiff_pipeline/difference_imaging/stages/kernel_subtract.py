@@ -27,6 +27,7 @@ from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
     photutils_background_masked,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    ffi_frame_stem_from_path,
     resolve_pipeline_fits_path,
     tess_product_id_from_ffi_path,
     workspace_frame_fits_path,
@@ -114,60 +115,41 @@ def _process_one_frame(task: tuple) -> dict:
     cfg = p.get("cfg")
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
-    diff_stem = workspace_frame_stem(product_id, diffs_label)
+    try:
+        ffi_stem = ffi_frame_stem_from_path(ffi_path)
+    except ValueError:
+        ffi_stem = product_id
+    diff_stem = workspace_frame_stem(ffi_stem, diffs_label)
     ws_diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
     output_store_name = p.get("output_store_name")
     ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
 
-    if resolve_pipeline_fits_path(diffs_dir, diff_stem) is None:
-        if sck is not None and data_root and workspace_root:
-            try:
-                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                    try_materialize_workspace_artifact,
-                )
-
-                try_materialize_workspace_artifact(
-                    data_root=data_root,
-                    sck=sck,
-                    kind="diff_image",
-                    stage_label=diffs_label,
-                    product_id=product_id,
-                    label=diffs_label,
-                    params=ks_params,
-                    workspace_dest=ws_diff_out,
-                    workspace_root=workspace_root,
-                    output_store_name=output_store_name,
-                )
-            except Exception:
-                log.debug(
-                    "SCC diff-store materialize failed for %s", product_id, exc_info=True
-                )
-
-    if resolve_pipeline_fits_path(diffs_dir, diff_stem) is not None:
-        return {
-            "success": True,
-            "product_id": product_id,
-            "stem": diff_stem,
-            "skipped": True,
-        }
-
+    write_path: Optional[Path] = None
     if sck is not None and data_root:
         try:
             from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
                 resolve_diff_write_path,
             )
 
-            write_path, scc_primary = resolve_diff_write_path(
+            write_path = resolve_diff_write_path(
                 data_root=data_root,
                 sck=sck,
                 kind="diff_image",
                 stage_label=diffs_label,
-                product_id=product_id,
+                ffi_stem=ffi_stem,
                 label=diffs_label,
                 params=ks_params,
-                workspace_path=ws_diff_out,
                 output_store_name=output_store_name,
             )
+            if write_path.is_file():
+                return {
+                    "success": True,
+                    "product_id": product_id,
+                    "stem": diff_stem,
+                    "skipped": True,
+                    "path": str(write_path),
+                    "scc_store_hit": True,
+                }
             if downsample_fp is None and cfg is not None:
                 downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(
                     cfg
@@ -189,43 +171,14 @@ def _process_one_frame(task: tuple) -> dict:
                 "provenance resume check failed for %s", product_id, exc_info=True
             )
             prov_complete = None
-            write_path, scc_primary = Path(ws_diff_out), False
         if prov_complete is True:
-            # Indexed-complete is not enough: require a locatable artifact.
             hit_path: Optional[str] = None
-            if Path(write_path).is_file():
+            if write_path is not None and write_path.is_file():
                 hit_path = str(write_path)
-            elif Path(ws_diff_out).is_file():
-                hit_path = str(ws_diff_out)
             else:
                 existing_after_prov = resolve_pipeline_fits_path(diffs_dir, diff_stem)
                 if existing_after_prov is not None:
                     hit_path = existing_after_prov
-                elif data_root and workspace_root:
-                    try:
-                        from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                            try_materialize_workspace_artifact,
-                        )
-
-                        if try_materialize_workspace_artifact(
-                            data_root=data_root,
-                            sck=sck,
-                            kind="diff_image",
-                            stage_label=diffs_label,
-                            product_id=product_id,
-                            label=diffs_label,
-                            params=ks_params,
-                            workspace_dest=ws_diff_out,
-                            workspace_root=workspace_root,
-                            output_store_name=output_store_name,
-                        ):
-                            hit_path = ws_diff_out
-                    except Exception:
-                        log.debug(
-                            "SCC materialize after provenance_hit failed for %s",
-                            product_id,
-                            exc_info=True,
-                        )
             if hit_path is not None:
                 return {
                     "success": True,
@@ -234,9 +187,17 @@ def _process_one_frame(task: tuple) -> dict:
                     "skipped": True,
                     "path": hit_path,
                     "provenance_hit": True,
-                    "scc_store_hit": bool(scc_primary and Path(write_path).is_file()),
+                    "scc_store_hit": True,
                 }
             # Indexed complete but no file — fall through to process.
+
+    if resolve_pipeline_fits_path(diffs_dir, diff_stem) is not None:
+        return {
+            "success": True,
+            "product_id": product_id,
+            "stem": diff_stem,
+            "skipped": True,
+        }
 
     try:
         from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
@@ -288,17 +249,22 @@ def _process_one_frame(task: tuple) -> dict:
         )
 
         ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
-        write_path, scc_primary = resolve_diff_write_path(
-            data_root=data_root,
-            sck=sck,
-            kind="diff_image",
-            stage_label=diffs_label,
-            product_id=product_id,
-            label=diffs_label,
-            params=ks_params,
-            workspace_path=ws_diff_out,
-            output_store_name=output_store_name,
-        )
+        if data_root and sck is not None:
+            write_path = resolve_diff_write_path(
+                data_root=data_root,
+                sck=sck,
+                kind="diff_image",
+                stage_label=diffs_label,
+                ffi_stem=ffi_stem,
+                label=diffs_label,
+                params=ks_params,
+                output_store_name=output_store_name,
+            )
+            scc_primary = True
+        else:
+            raise RuntimeError(
+                "SCC-only kernel_subtract requires data_root and sector/camera/ccd"
+            )
         _write_image_fits(str(write_path), diff_raw, header=header)
         if sck is not None:
             try:
@@ -342,19 +308,24 @@ def _process_one_frame(task: tuple) -> dict:
                     exc_info=True,
                 )
         if bkg_dir and bkg_label:
-            bkg_stem = workspace_frame_stem(product_id, bkg_label)
+            bkg_stem = workspace_frame_stem(ffi_stem, bkg_label)
             bkg_ws_out = workspace_frame_fits_path(bkg_dir, bkg_stem)
-            bkg_write_path, bkg_scc_primary = resolve_diff_write_path(
-                data_root=data_root,
-                sck=sck,
-                kind="diff_background",
-                stage_label=bkg_label,
-                product_id=product_id,
-                label=bkg_label,
-                params=ks_params,
-                workspace_path=bkg_ws_out,
-                output_store_name=output_store_name,
-            )
+            if data_root and sck is not None:
+                bkg_write_path = resolve_diff_write_path(
+                    data_root=data_root,
+                    sck=sck,
+                    kind="diff_background",
+                    stage_label=bkg_label,
+                    ffi_stem=ffi_stem,
+                    label=bkg_label,
+                    params=ks_params,
+                    output_store_name=output_store_name,
+                )
+                bkg_scc_primary = True
+            else:
+                raise RuntimeError(
+                    "SCC-only kernel_subtract background write requires data_root and s/c/k"
+                )
             _write_image_fits(
                 str(bkg_write_path),
                 phot_bkg,

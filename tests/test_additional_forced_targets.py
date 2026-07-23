@@ -19,7 +19,7 @@ from syndiff_pipeline.difference_imaging.orchestration.config import (
     normalize_additional_forced_targets,
 )
 from syndiff_pipeline.difference_imaging.stages import photometry as ph
-from syndiff_pipeline.difference_imaging.orchestration.execute import (
+from syndiff_pipeline.photometry.runner import (
     _forced_photometry_lightcurve_plot_path,
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
@@ -269,11 +269,7 @@ class TestSitePolicyForcedTargets(unittest.TestCase):
             )
         )
         cfg = freeze_target_diff_config(path, _target_2020ut())
-        self.assertEqual(len(cfg.additional_forced_targets), 6)
-        names = [t["name"] for t in cfg.additional_forced_targets]
-        self.assertIn("offset_top", names)
-        self.assertIn("bottom", names)
-        self.assertIn("fixed_pixel_check", names)
+        self.assertEqual(cfg.additional_forced_targets, [])
 
     def test_freeze_other_target_gets_global_only(self):
         path = self._write_policy(
@@ -288,11 +284,7 @@ class TestSitePolicyForcedTargets(unittest.TestCase):
             )
         )
         cfg = freeze_target_diff_config(path, _target_other())
-        self.assertEqual(len(cfg.additional_forced_targets), 4)
-        self.assertEqual(
-            [t["position_mode"] for t in cfg.additional_forced_targets],
-            ["offset", "offset", "offset", "offset"],
-        )
+        self.assertEqual(cfg.additional_forced_targets, [])
 
 
 if __name__ == "__main__":

@@ -83,14 +83,6 @@ class TestPipelineWorkspaceInherit(unittest.TestCase):
                     "hp_bgo": 0,
                     "output": {"diffs": "hp_d", "convolved": "hp_c", "bkg": "hp_b"},
                 },
-                {
-                    "kind": "forced_photometry",
-                    "inputs": {"diffs": "hp_d"},
-                    "output": "lc_prf_on_hp_diffs",
-                    "methods": [
-                        {"name": "prf", "type": "psf", "psf_type": "prf"},
-                    ],
-                },
             ]
         )
         validate_pipeline(cfg)

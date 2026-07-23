@@ -87,7 +87,6 @@ class TestStarContext(unittest.TestCase):
     def test_validate_passes_when_all_present(self):
         with tempfile.TemporaryDirectory() as tmp:
             event = Path(tmp) / "event"
-            ws = event / "ws"
             templates = Path(tmp) / "templates"
             mapping = (
                 Path(tmp)
@@ -98,61 +97,25 @@ class TestStarContext(unittest.TestCase):
                 / "ccd_2"
             )
             gaia = Path(tmp) / "data" / "catalogs"
+            lane_root = Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff"
+            lane_hp = lane_root / "hp_d"
+            lane_hc = lane_root / "hp_c"
+            lane_bkg = lane_root / "ks_b_s"
+            from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
+
+            kernels_dir = Path(frame_kernels_dir(str(lane_hp)))
             for directory in (
-                ws / "hp_d",
-                ws / "hp_c",
-                ws / "ks_b_s",
-                ws / "hp_d_kernels",
+                lane_hp,
+                lane_hc,
+                lane_bkg,
+                kernels_dir,
                 templates,
                 mapping,
                 gaia,
             ):
                 directory.mkdir(parents=True, exist_ok=True)
 
-            (event / "event_job.json").write_text("{}", encoding="utf-8")
-            (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
-            (templates / "syndiff_template_0.fits").write_bytes(b"")
-            (ws / "hp_d" / "tess123_hp_d.fits.fz").write_bytes(b"")
-            (ws / "hp_c" / "tess123_hp_c.fits.fz").write_bytes(b"")
-            (ws / "ks_b_s" / "tess123_ks_b_s.fits.fz").write_bytes(b"")
-            (ws / "hp_d_kernels" / "tess123_kernel.npz").write_bytes(b"")
-            (ws / "shared_mask.fits.fz").write_bytes(b"")
-            (mapping / "tess_s0020_3_2_master_skycells_list.csv").write_bytes(b"")
-            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.fz").write_bytes(b"")
-            (gaia / "gaia.csv").write_bytes(b"")
-
-            ctx = _minimal_ctx(tmp)
-            validate_star_prerequisites(ctx)
-
-    def test_validate_accepts_scc_lane_baseline_diffs(self):
-        from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
-
-        with tempfile.TemporaryDirectory() as tmp:
-            event = Path(tmp) / "event"
-            ws = event / "ws"
-            templates = Path(tmp) / "templates"
-            mapping = (
-                Path(tmp)
-                / "data"
-                / "skycell_pixel_mapping"
-                / "sector_0020"
-                / "camera_3"
-                / "ccd_2"
-            )
-            gaia = Path(tmp) / "data" / "catalogs"
-            lane_hp = (
-                Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_d" / "recipe_abc"
-            )
-            lane_hc = (
-                Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_c" / "recipe_abc"
-            )
-            lane_bkg = (
-                Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "ks_b_s" / "recipe_abc"
-            )
-            kernels_dir = Path(frame_kernels_dir(str(lane_hp)))
-            for directory in (ws, lane_hp, lane_hc, lane_bkg, kernels_dir, templates, mapping, gaia):
-                directory.mkdir(parents=True, exist_ok=True)
-
+            event.mkdir(parents=True, exist_ok=True)
             (event / "event_job.json").write_text("{}", encoding="utf-8")
             (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
             (templates / "syndiff_template_0.fits").write_bytes(b"")
@@ -160,7 +123,52 @@ class TestStarContext(unittest.TestCase):
             (lane_hc / "tess123_hp_c.fits.fz").write_bytes(b"")
             (lane_bkg / "tess123_ks_b_s.fits.fz").write_bytes(b"")
             (kernels_dir / "tess123_kernel.npz").write_bytes(b"")
-            (ws / "shared_mask.fits.fz").write_bytes(b"")
+            (lane_root / "shared_mask.fits.fz").write_bytes(b"")
+            (mapping / "tess_s0020_3_2_master_skycells_list.csv").write_bytes(b"")
+            (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.fz").write_bytes(b"")
+            (gaia / "gaia.csv").write_bytes(b"")
+
+            ctx = _minimal_ctx(
+                tmp,
+                baseline_diffs_dir=str(lane_hp),
+                baseline_convolved_dir=str(lane_hc),
+                baseline_phot_bkg_dir=str(lane_bkg),
+                baseline_kernels_dir=str(kernels_dir),
+            )
+            validate_star_prerequisites(ctx)
+
+    def test_validate_accepts_scc_lane_baseline_diffs(self):
+        from syndiff_pipeline.difference_imaging.stages.hotpants import frame_kernels_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            event = Path(tmp) / "event"
+            templates = Path(tmp) / "templates"
+            mapping = (
+                Path(tmp)
+                / "data"
+                / "skycell_pixel_mapping"
+                / "sector_0020"
+                / "camera_3"
+                / "ccd_2"
+            )
+            gaia = Path(tmp) / "data" / "catalogs"
+            lane_root = Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff"
+            lane_hp = lane_root / "hp_d"
+            lane_hc = lane_root / "hp_c"
+            lane_bkg = lane_root / "ks_b_s"
+            kernels_dir = Path(frame_kernels_dir(str(lane_hp)))
+            for directory in (lane_hp, lane_hc, lane_bkg, kernels_dir, templates, mapping, gaia):
+                directory.mkdir(parents=True, exist_ok=True)
+
+            event.mkdir(parents=True, exist_ok=True)
+            (event / "event_job.json").write_text("{}", encoding="utf-8")
+            (event / "frames.csv").write_text("product_id\n", encoding="utf-8")
+            (templates / "syndiff_template_0.fits").write_bytes(b"")
+            (lane_hp / "tess123_hp_d.fits.fz").write_bytes(b"")
+            (lane_hc / "tess123_hp_c.fits.fz").write_bytes(b"")
+            (lane_bkg / "tess123_ks_b_s.fits.fz").write_bytes(b"")
+            (kernels_dir / "tess123_kernel.npz").write_bytes(b"")
+            (lane_root / "shared_mask.fits.fz").write_bytes(b"")
             (mapping / "tess_s0020_3_2_master_skycells_list.csv").write_bytes(b"")
             (mapping / "tess_s0020_3_2_master_pixels2skycells.fits.fz").write_bytes(b"")
             (gaia / "gaia.csv").write_bytes(b"")
@@ -190,7 +198,7 @@ class TestStarContext(unittest.TestCase):
             ws_hp = event / "ws" / "hp_d"
             ws_hp.mkdir(parents=True)
             (ws_hp / "legacy.fits.fz").write_bytes(b"")
-            lane = Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_d" / "fp1"
+            lane = Path(tmp) / "data" / "s0020" / "c3" / "k2" / "diff" / "hp_d"
             lane.mkdir(parents=True)
             (lane / "lane.fits.fz").write_bytes(b"")
             resolved = _resolve_baseline_label_dir(

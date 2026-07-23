@@ -1,4 +1,4 @@
-"""Tests for workspace-aware diff verification (debug ws_{id}/ trees)."""
+"""Tests for SCC-aware diff verification."""
 
 from __future__ import annotations
 
@@ -12,13 +12,22 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.common.scc_paths import event_scc_leaf
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    resolve_scc_diff_bookkeeping_dir,
+    scc_diff_dir,
+)
 from syndiff_pipeline.common.orchestration.spec import StageRunContext
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
     collect_diff_workspace_artifacts,
     diff_workspace_complete,
     frozen_diff_config_for_verify,
+    scc_diff_lane_complete,
+)
+from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+    DIFF_JOB_BASENAME,
+    FRAMES_CSV_BASENAME,
 )
 from syndiff_pipeline.difference_imaging.orchestration.stages import _diff_config_fingerprint
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
@@ -51,7 +60,6 @@ def _write_single_kernel_policy(path: Path) -> None:
                 "deployment_file: deployment.yaml",
                 "defaults:",
                 "  n_jobs: 2",
-                "  workspace_run_id: dbg",
                 "paths:",
                 "  template_base: shifted_downsampled",
                 "pipeline:",
@@ -67,19 +75,6 @@ def _write_single_kernel_policy(path: Path) -> None:
                 "      convolved: tmpl_conv",
                 "    output:",
                 "      diffs: ks_d",
-                "  - kind: forced_photometry",
-                "    inputs:",
-                "      diffs: ks_d",
-                "    output: lc_prf_on_diffs",
-                "    methods:",
-                "      - name: prf",
-                "        type: psf",
-                "        psf_type: prf",
-                "      - name: ap3",
-                "        type: aperture",
-                "        tar_ap: 3",
-                "        sky_in: 5",
-                "        sky_out: 9",
                 "condor:",
                 "  request_cpus: 4",
                 "  request_memory: 32000",
@@ -88,6 +83,24 @@ def _write_single_kernel_policy(path: Path) -> None:
         + "\n",
         encoding="utf-8",
     )
+
+
+def _write_scc_bookkeeping(data_root: Path, target: Target) -> Path:
+    bk = resolve_scc_diff_bookkeeping_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        oversampling_factor=1,
+        template_store_name=None,
+    )
+    bk.mkdir(parents=True, exist_ok=True)
+    (bk / FRAMES_CSV_BASENAME).write_text("ffi_product_id\n", encoding="utf-8")
+    (bk / DIFF_JOB_BASENAME).write_text(
+        json.dumps({"schema_version": 2, "mapping_grid": {"nx": 1, "ny": 1}}),
+        encoding="utf-8",
+    )
+    return bk
 
 
 class TestDiffWorkspaceVerify(unittest.TestCase):
@@ -140,69 +153,50 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
             meta=meta,
         )
 
-    def test_canonical_ws_ignored_when_debug_id_set(self):
-        canonical = self.event_dir / "ws" / "ks_d"
-        canonical.mkdir(parents=True)
-        (canonical / "frame.fits").write_bytes(b"SIMPLE  = T")
-        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve_prf.csv").parent.mkdir(
-            parents=True, exist_ok=True
-        )
-        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve_prf.csv").write_text(
-            "btjd,flux\n", encoding="utf-8"
-        )
-        (self.event_dir / "ws" / "lc_prf_on_diffs" / "lightcurve_ap3.csv").write_text(
-            "btjd,flux\n", encoding="utf-8"
+    def _lane_root(self) -> Path:
+        return scc_diff_dir(
+            self.data,
+            self.target.sector,
+            self.target.camera,
+            self.target.ccd,
         )
 
+    def test_incomplete_without_scc_lane_outputs(self):
+        _write_scc_bookkeeping(self.data, self.target)
         cfg = self._cfg()
+        self.assertFalse(scc_diff_lane_complete(cfg))
         self.assertFalse(diff_workspace_complete(cfg, self.event_dir))
 
-        result = verify_diff(resolve_config(self.target, self.runner), self.runner)
-        self.assertFalse(result.ok)
-
-    def test_partial_debug_tree_incomplete_without_lightcurve(self):
-        ws_dbg = self.event_dir / "ws_dbg"
-        (ws_dbg / "kernel_fit").mkdir(parents=True, exist_ok=True)
-        (ws_dbg / "kernel_fit" / "kernel_fit_meta.json").write_text("{}", encoding="utf-8")
-        (ws_dbg / "kernel_fit" / "kernel_r2.npz").write_bytes(b"PK")
-        kd = ws_dbg / "ks_d"
-        kd.mkdir(parents=True)
-        (kd / "tess0001_ks_d.fits").write_bytes(b"SIMPLE  = T")
+    def test_complete_when_final_diff_on_scc_lane(self):
+        _write_scc_bookkeeping(self.data, self.target)
+        lane = self._lane_root()
+        ks_d = lane / "ks_d"
+        ks_d.mkdir(parents=True)
+        (ks_d / "tess2020019142923-s0022-3-3_ks_d.fits.fz").write_bytes(b"SIMPLE  = T")
 
         cfg = self._cfg()
-        self.assertFalse(diff_workspace_complete(cfg, self.event_dir))
-
-    def test_complete_when_final_lightcurve_present_in_debug_tree(self):
-        ws_dbg = self.event_dir / "ws_dbg" / "lc_prf_on_diffs"
-        ws_dbg.mkdir(parents=True)
-        (ws_dbg / "lightcurve_prf.csv").write_text("btjd,flux\n1,2\n", encoding="utf-8")
-        (ws_dbg / "lightcurve_ap3.csv").write_text(
-            "btjd,flux,flux_wo_sky,sky,eflux\n1,2,1,1,0.1\n", encoding="utf-8"
-        )
-
-        cfg = self._cfg()
+        self.assertTrue(scc_diff_lane_complete(cfg))
         self.assertTrue(diff_workspace_complete(cfg, self.event_dir))
 
         result = verify_diff(resolve_config(self.target, self.runner), self.runner)
         self.assertTrue(result.ok)
-        self.assertIn("ws_dbg", result.message)
+        self.assertIn("SCC diff lane complete", result.message)
 
-    def test_meta_workspace_run_id_override(self):
-        cfg_yaml = self._cfg()
-        self.assertEqual(cfg_yaml.workspace_run_id, "dbg")
+    def test_event_ws_ignored_when_scc_lane_complete(self):
+        _write_scc_bookkeeping(self.data, self.target)
+        lane = self._lane_root()
+        ks_d = lane / "ks_d"
+        ks_d.mkdir(parents=True)
+        (ks_d / "tess2020019142923-s0022-3-3_ks_d.fits.fz").write_bytes(b"SIMPLE  = T")
 
-        cfg_meta = self._cfg(meta={"workspace_run_id": "cli_debug"})
-        self.assertEqual(cfg_meta.workspace_run_id, "cli_debug")
+        canonical = self.event_dir / "ws" / "ks_d"
+        canonical.mkdir(parents=True)
+        (canonical / "frame.fits").write_bytes(b"SIMPLE  = T")
 
-        ws = self.event_dir / "ws_cli_debug" / "lc_prf_on_diffs"
-        ws.mkdir(parents=True)
-        (ws / "lightcurve_prf.csv").write_text("btjd,flux\n", encoding="utf-8")
-        (ws / "lightcurve_ap3.csv").write_text("btjd,flux\n", encoding="utf-8")
+        cfg = self._cfg()
+        self.assertTrue(diff_workspace_complete(cfg, self.event_dir))
 
-        self.assertTrue(diff_workspace_complete(cfg_meta, self.event_dir))
-        self.assertFalse(diff_workspace_complete(cfg_yaml, self.event_dir))
-
-    def test_fingerprint_includes_workspace_run_id(self):
+    def test_fingerprint_stable_without_workspace_run_id(self):
         ctx = StageRunContext(
             run_id="run_a",
             runs_root=str(self.handoff / "runs"),
@@ -218,10 +212,12 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
 
         self.assertNotEqual(fp_default, fp_override)
 
-    def test_collect_artifacts_uses_debug_tree(self):
-        ws_dbg = self.event_dir / "ws_dbg" / "ks_d"
-        ws_dbg.mkdir(parents=True)
-        fits = ws_dbg / "tess0001_ks_d.fits"
+    def test_collect_artifacts_from_scc_lane(self):
+        _write_scc_bookkeeping(self.data, self.target)
+        lane = self._lane_root()
+        ks_d = lane / "ks_d"
+        ks_d.mkdir(parents=True)
+        fits = ks_d / "tess2020019142923-s0022-3-3_ks_d.fits.fz"
         fits.write_bytes(b"SIMPLE  = T")
 
         canonical = self.event_dir / "ws" / "ks_d"
@@ -236,7 +232,7 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
 
 
 class TestSharedMaskOnlyVerify(unittest.TestCase):
-    def test_shared_mask_only_complete(self):
+    def test_shared_mask_only_complete_on_scc_lane(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             site = root / "site"
@@ -273,9 +269,10 @@ class TestSharedMaskOnlyVerify(unittest.TestCase):
             event_dir.mkdir(parents=True)
             manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
             manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
-            ws = event_dir / "ws"
-            ws.mkdir(exist_ok=True)
-            (ws / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
+            _write_scc_bookkeeping(data, target)
+            lane = scc_diff_dir(data, target.sector, target.camera, target.ccd)
+            lane.mkdir(parents=True, exist_ok=True)
+            (lane / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
 
             runner = RunnerConfig(
                 workspace_root=str(handoff),

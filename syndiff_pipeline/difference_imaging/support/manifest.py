@@ -462,6 +462,65 @@ def ordered_photometry_diff_paths(
     return out
 
 
+def ordered_diff_paths_for_scc(
+    df: pd.DataFrame,
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    label: str,
+    *,
+    store_name: str | None = None,
+) -> list:
+    """
+    One FITS path per manifest row under an SCC diff lane ``diff_{store}/{label}/``.
+    """
+    from syndiff_pipeline.common.scc_paths import scc_diff_label_dir
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        ffi_frame_stem_from_path,
+    )
+
+    safe = sanitize_workspace_label(label)
+    lane_dir = scc_diff_label_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        store_name=store_name,
+        label=label,
+    )
+    path_col = f"diff_{safe}_path"
+    src_col = "filename" if "filename" in df.columns else "path"
+    df_reset = df.reset_index(drop=True)
+    use_col = path_col if path_col in df_reset.columns else None
+    out: list = []
+    for i in range(len(df_reset)):
+        p = None
+        if use_col is not None:
+            cell = df_reset.iloc[i][use_col]
+            if pd.notna(cell) and str(cell).strip():
+                cand = str(cell).strip()
+                if os.path.isfile(cand):
+                    p = str(Path(cand).resolve())
+        if p is None:
+            row = df_reset.iloc[i]
+            ffi_path = str(row.get(src_col, "") or "")
+            if ffi_path:
+                try:
+                    ffi_stem = ffi_frame_stem_from_path(ffi_path)
+                except ValueError:
+                    ffi_stem = ""
+                if ffi_stem:
+                    cand = resolve_pipeline_fits_path(
+                        str(lane_dir),
+                        workspace_frame_stem(ffi_stem, safe),
+                    )
+                    if cand is not None:
+                        p = str(Path(cand).resolve())
+        out.append(p)
+    return out
+
+
 def ordered_diff_paths_for_workspace(
     df: pd.DataFrame,
     output_dir: str,

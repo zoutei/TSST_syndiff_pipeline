@@ -1,18 +1,17 @@
-# SCC linear-store diff: shared_mask -> hotpants -> epsf -> centroids (full chip).
-# Templates read from templates_linear/ at oversampling_factor: 1.
+# SCC field_no_correction lane diff: shared_mask -> hotpants -> epsf -> centroids (full chip).
+# Templates read from templates_field_no_correction/ at oversampling_factor: 1.
 deployment_file: deployment.yaml
 
 defaults:
   n_jobs: 64
   workspace_run_id: s20_s22_linear_centroids_os1
   pipeline_plots: true
-  master_fits_mirror: true
   oversampling_factor: 1
 
 paths:
-  template_store_name: linear
-  remap_store_name: linear
-  output_store_name: linear
+  template_store_name: field_no_correction
+  remap_store_name: field_no_correction
+  output_store_name: field_no_correction
 
 pipeline:
   - kind: shared_mask
@@ -48,8 +47,8 @@ pipeline:
     tile_nx: 5
     tile_ny: 5
     epsf_oversample: 4
-    psf_size: 11
-    extract_size: 11
+    psf_size: 15
+    extract_size: 15
     min_stars_per_tile: 5
     mag_max_rp: 12.95
     epsf_maxiters: 15

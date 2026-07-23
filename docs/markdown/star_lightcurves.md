@@ -115,7 +115,7 @@ CLI flags on `syndiff star run` override merged config: `--stars-file`, `--basel
 
 ## Outputs
 
-Under `{baseline_ws}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/ws_star_full_lc/host_star/` when `baseline.workspace_run_id: star_full_lc`, or `events/{event_name}/s{SSSS}_c{C}_k{K}/ws/host_star/` when baseline is `none`):
+Under `phot_{photometry_run_id}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/phot_star_full_lc/host_star/` when `defaults.photometry_run_id: star_full_lc`):
 
 ```text
 {gaia_source_id}/
@@ -131,7 +131,7 @@ Under `{baseline_ws}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/ws
 batch_manifest.csv               # per-host status (ok | error | skipped_*)
 ```
 
-Legacy sibling trees `events/{label}/star/` and `star_{id}/` are still accepted by verify when `host_star/` is absent.
+Legacy sibling trees `events/{label}/star/` and `star_{id}/` are no longer read; star verify requires `phot_{run_id}/host_star/batch_manifest.csv`.
 
 ## Stamp formula
 

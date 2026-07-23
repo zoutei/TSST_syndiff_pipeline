@@ -1,9 +1,0 @@
-# Astrometry-only diff recipe for smoke tests (no template handoff required).
-deployment_file: deployment.yaml
-
-defaults:
-  pipeline_plots: true
-  workspace_run_id: astrometry_smoke
-
-pipeline:
-  - kind: astrometry

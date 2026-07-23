@@ -1,5 +1,5 @@
 # Inherit hp_d from ws_multi_hp_temp_calib; build gridded ePSF + gepsf photometry.
-# Smoke: defaults.max_ffis: 24 (set null for full run on 2020ut).
+# SCC-only: workspace_inherit removed; hp_d/hp_m must exist on the SCC diff lane.
 deployment_file: deployment.yaml
 
 defaults:
@@ -10,29 +10,10 @@ defaults:
   crop_box_size: 1024
   max_ffis: 24
 
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
-
 pipeline:
-  - workspace_inherit:
-      from: multi_hp_temp_calib
-      labels: [hp_d, hp_m]
-      root_artifacts:
-        - shared_mask.fits.fz
-        - gaia_catalog_pipeline.csv
-        - hotpants_substamp_stars.csv
-        - targets.reg
+  - external_workspaces:
+      - hp_d
+      - hp_m
   - kind: epsf
     inputs:
       diffs: hp_d
@@ -44,20 +25,6 @@ pipeline:
     min_stars_per_tile: 5
     mag_max_rp: 12.95
     epsf_n_jobs: 8
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-      epsf: epsf_r1
-    output: lc_gepsf_on_hp_diffs
-    methods:
-      - name: gepsf
-        type: psf
-        psf_type: epsf
-        fit_shape: 11
-        aperture_radius: 2
-      - name: prf
-        type: psf
-        psf_type: prf
 
 condor:
   request_cpus: 16

@@ -94,7 +94,7 @@ overrides:
 | `max_ffis` | `null` | Limit frames processed (debug) |
 | `overwrite` | `false` | Recompute existing stamps |
 
-Deprecated: `defaults.workspace_run_id` (formerly named sibling `star_{id}/` trees). Ignored for writes; still used only to locate legacy manifests during verify.
+Deprecated: `defaults.workspace_run_id` (ignored for output paths). Star writes under `phot_{photometry_run_id}/host_star/`.
 
 ### `baseline.*` labels
 

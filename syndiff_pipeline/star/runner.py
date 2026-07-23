@@ -10,7 +10,10 @@ from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
-from syndiff_pipeline.difference_imaging.support.paths import DEFAULT_MANIFEST_BASENAME
+from syndiff_pipeline.difference_imaging.support.paths import (
+    DEFAULT_MANIFEST_BASENAME,
+    photometry_root,
+)
 from syndiff_pipeline.star.context import (
     StarEventContext,
     StarPrerequisiteError,
@@ -44,41 +47,24 @@ logger = logging.getLogger(__name__)
 HOST_STAR_SUBDIR = "host_star"
 
 
-def star_output_root(ctx: StarEventContext) -> Path:
-    """Return ``{baseline_ws}/host_star`` for star-branch outputs."""
-    return Path(ctx.baseline_workspace_dir) / HOST_STAR_SUBDIR
-
-
-def legacy_star_output_root(
-    ctx: StarEventContext, workspace_run_id: str | None
-) -> Path | None:
-    """Return pre-``host_star`` sibling path ``events/{label}/star[_id]/`` if any.
-
-    Used only for backward-compatible verify of runs that wrote under the old
-    layout. New runs always write via :func:`star_output_root`.
-    """
-    from syndiff_pipeline.difference_imaging.support.paths import (
-        normalize_workspace_run_id,
-    )
-
-    event = Path(ctx.event_dir)
-    run_id = normalize_workspace_run_id(workspace_run_id)
-    if run_id:
-        return event / f"star_{run_id}"
-    return event / "star"
+def star_output_root(
+    ctx: StarEventContext,
+    *,
+    photometry_run_id: str | None = None,
+) -> Path:
+    """Return ``phot_{run_id}/host_star`` for star-branch outputs."""
+    return Path(photometry_root(ctx.event_dir, photometry_run_id)) / HOST_STAR_SUBDIR
 
 
 def resolve_star_host_root(
-    ctx: StarEventContext, workspace_run_id: str | None = None
+    ctx: StarEventContext,
+    workspace_run_id: str | None = None,
+    *,
+    photometry_run_id: str | None = None,
 ) -> Path:
-    """Prefer ``host_star/``; fall back to legacy sibling when only that exists."""
-    host_root = star_output_root(ctx)
-    if (host_root / "batch_manifest.csv").is_file():
-        return host_root
-    legacy = legacy_star_output_root(ctx, workspace_run_id)
-    if legacy is not None and (legacy / "batch_manifest.csv").is_file():
-        return legacy
-    return host_root
+    """Return ``phot_{run_id}/host_star`` (SCC-only storage layout)."""
+    del workspace_run_id  # legacy; photometry_run_id namespaces outputs
+    return star_output_root(ctx, photometry_run_id=photometry_run_id)
 
 
 def _mini_template_fits_paths(mini_paths: list[str]) -> dict[tuple[float, float], str]:
@@ -232,7 +218,7 @@ def run_star_pipeline(
         raise ValueError("stars_file is required")
 
     requests = load_star_hosts_file(hosts_path)
-    star_root = star_output_root(ctx)
+    star_root = star_output_root(ctx, photometry_run_id=run_config.photometry_run_id)
     star_root.mkdir(parents=True, exist_ok=True)
 
     manifest_rows: list[dict] = []

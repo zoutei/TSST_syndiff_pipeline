@@ -10,6 +10,7 @@ from astropy.io import fits
 
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     PIPELINE_FITS_EXT,
+    ffi_frame_stem_from_path,
     iter_pipeline_fits_paths,
     parse_workspace_frame_stem,
     resolve_pipeline_fits_path,
@@ -28,8 +29,24 @@ def test_strip_fits_suffix():
 
 
 def test_parse_workspace_frame_stem_with_fpack():
+    parsed = parse_workspace_frame_stem(
+        "tess2020057105921-s0020-3-3_epsf_r1.fits.fz"
+    )
+    assert parsed == ("tess2020057105921-s0020-3-3", "epsf_r1")
+
+
+def test_parse_workspace_frame_stem_legacy_short_product_id_unsupported():
     parsed = parse_workspace_frame_stem("tess2020057105921_ks_d.fits.fz")
-    assert parsed == ("tess2020057105921", "ks_d")
+    assert parsed is None
+
+
+def test_ffi_frame_stem_from_path():
+    assert (
+        ffi_frame_stem_from_path(
+            "tess2020057105921-s0020-3-3-0165-s_ffic.fits"
+        )
+        == "tess2020057105921-s0020-3-3"
+    )
 
 
 def test_workspace_frame_fits_basename():

@@ -7,6 +7,7 @@ unavailable, and ``diff_workspace_complete`` preferring the indexed answer.
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -18,7 +19,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.common.scc_paths import event_scc_leaf, provenance_db_path, provenance_spool_dir
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    provenance_db_path,
+    provenance_spool_dir,
+    resolve_scc_diff_bookkeeping_dir,
+    scc_diff_dir,
+)
+from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+    DIFF_JOB_BASENAME,
+    FRAMES_CSV_BASENAME,
+)
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.common.provenance.ingest import drain_spool
 from syndiff_pipeline.common.provenance.store import ProvenanceStore
@@ -122,6 +133,39 @@ class _BaseCase(unittest.TestCase):
 
         self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)
+        self._write_scc_handoff()
+
+    def _write_scc_handoff(self) -> None:
+        bk = resolve_scc_diff_bookkeeping_dir(
+            self.data, self.target.sector, self.target.camera, self.target.ccd
+        )
+        bk.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "path": list(self.ffi_paths.values()),
+                "ffi_basename": [Path(p).name for p in self.ffi_paths.values()],
+                "wcs_ok": [True, True],
+                "group_id": [0, 0],
+            }
+        ).to_csv(bk / FRAMES_CSV_BASENAME, index=False)
+        (bk / DIFF_JOB_BASENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "sector": self.target.sector,
+                    "camera": self.target.camera,
+                    "ccd": self.target.ccd,
+                    "geometry_mode": "field",
+                    "mapping_grid": {
+                        "sector": self.target.sector,
+                        "camera": self.target.camera,
+                        "ccd": self.target.ccd,
+                    },
+                    "crop_bounds": {"x_min": 0, "x_max": 10, "y_min": 0, "y_max": 10},
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def _hotpants_stage(self) -> dict:
         return {"kind": "hotpants", "output": {"diffs": "diffs", "convolved": "convolved"}}
@@ -280,8 +324,6 @@ class TestDiffStageCompleteIndexed(_BaseCase):
             )
         drain_spool(store, provenance_spool_dir(self.cfg.data_root))
 
-        ws_dir = dv.diff_workspace_root(self.cfg, self.event_dir)
-        ws_dir.mkdir(parents=True, exist_ok=True)
         self.assertTrue(dv.diff_workspace_complete(self.cfg, self.event_dir))
 
 
@@ -309,12 +351,29 @@ class TestFallsOpenWithoutPackage(_BaseCase):
         result = dv.diff_stage_complete_indexed(self.cfg, self.event_dir, self._hotpants_stage())
         self.assertIsNone(result)
 
-    def test_workspace_complete_falls_back_to_legacy_marker(self):
+    def test_workspace_complete_falls_back_to_scc_lane_marker(self):
         self.assertFalse(dv.diff_workspace_complete(self.cfg, self.event_dir))
 
-        ws_dir = dv.diff_workspace_root(self.cfg, self.event_dir) / "diffs"
-        ws_dir.mkdir(parents=True, exist_ok=True)
-        (ws_dir / "tess0001_diffs.fits").write_bytes(b"SIMPLE  = T")
+        bk = resolve_scc_diff_bookkeeping_dir(
+            self.cfg.data_root,
+            int(self.cfg.sector),
+            int(self.cfg.camera),
+            int(self.cfg.ccd),
+            oversampling_factor=1,
+            template_store_name=None,
+        )
+        bk.mkdir(parents=True, exist_ok=True)
+        (bk / DIFF_JOB_BASENAME).write_text('{"schema_version": 2}', encoding="utf-8")
+        (bk / FRAMES_CSV_BASENAME).write_text("ffi_product_id\n", encoding="utf-8")
+
+        diffs_dir = scc_diff_dir(
+            self.cfg.data_root,
+            int(self.cfg.sector),
+            int(self.cfg.camera),
+            int(self.cfg.ccd),
+        ) / "diffs"
+        diffs_dir.mkdir(parents=True, exist_ok=True)
+        (diffs_dir / "tess0001-s0020-3-3_diffs.fits").write_bytes(b"SIMPLE  = T")
         self.assertTrue(dv.diff_workspace_complete(self.cfg, self.event_dir))
 
 

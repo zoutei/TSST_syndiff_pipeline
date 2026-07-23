@@ -1,5 +1,5 @@
-# gepsf-only forced photometry on all hp_d frames (PRF/aperture live elsewhere).
-# Inherits per-frame gridded ePSF from ws_multi_hp_temp_calib_epsf as it is built.
+# gepsf-only forced photometry on hp_d frames (delegates to photometry_config).
+# SCC-only: workspace_inherit removed; hp_d and epsf_r1 must exist on the SCC diff lane.
 deployment_file: deployment.yaml
 
 defaults:
@@ -9,43 +9,9 @@ defaults:
   crop_mode: target_box
   crop_box_size: 1024
 
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
-
 pipeline:
-  - workspace_inherit:
-      from: multi_hp_temp_calib
-      labels: [hp_d]
-      root_artifacts:
-        - shared_mask.fits.fz
-        - gaia_catalog_pipeline.csv
-        - hotpants_substamp_stars.csv
-        - targets.reg
-  - workspace_inherit:
-      from: multi_hp_temp_calib_epsf
-      labels: [epsf_r1]
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-      epsf: epsf_r1
-    output: lc_gepsf
-    methods:
-      - name: gepsf
-        type: psf
-        psf_type: epsf
-        fit_shape: 11
-        aperture_radius: 2
+  - kind: photometry
+    config: photometry_config_2020ut_gepsf_lc.yaml
 
 condor:
   request_cpus: 16

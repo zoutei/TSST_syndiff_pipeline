@@ -209,7 +209,7 @@ class TestLoadDiffFramesForVerify(_SccFramesBase):
         self.assertIn("path", frames.columns)
         self.assertTrue(str(frames.iloc[0]["path"]).endswith(".fits"))
 
-    def test_falls_back_to_event_manifest_when_no_scc_handoff(self):
+    def test_raises_when_no_scc_handoff(self):
         _write_hotpants_policy(self.site / "diff_config.yaml")
         cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
         cfg.ffi_dir = str(self.ffi_dir)
@@ -233,8 +233,8 @@ class TestLoadDiffFramesForVerify(_SccFramesBase):
             }
         ).to_csv(manifest_csv, index=False)
 
-        frames = dv.load_diff_frames_for_verify(cfg, self.event_dir)
-        self.assertEqual(len(frames), 1)
+        with self.assertRaises(FileNotFoundError):
+            dv.load_diff_frames_for_verify(cfg, self.event_dir)
 
 
 @unittest.skipUnless(pg.PROVENANCE_AVAILABLE, "common.provenance not importable")

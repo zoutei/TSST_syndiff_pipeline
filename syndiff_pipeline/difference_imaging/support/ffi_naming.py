@@ -4,11 +4,11 @@ ffi_naming.py
 TESS FFI product-id parsing and per-workspace FITS basename helpers.
 
 Original SPOC FFIs on disk look like
-``tess2020019142923-s0020-3-3-0165-s_ffic.fits``; the leading ``tess<digits>``
-substring uniquely identifies the FFI epoch (sector / camera / CCD / cadence
-are encoded redundantly in path layout). The pipeline's per-FFI FITS outputs
-are written into ``ws/<label>/`` workspaces and use the basename
-``{ffi_product_id}_{label}.fits.fz`` so the file's directory determines what
+``tess2020019142923-s0020-3-3-0165-s_ffic.fits``; the leading
+``tess<digits>-s<sector>-<camera>-<ccd>`` substring (SPOC frame stem) uniquely
+identifies the FFI epoch within one SCC. The pipeline's per-FFI FITS outputs
+are written under SCC diff lanes and use the basename
+``{ffi_frame_stem}_{label}.fits.fz`` so the file's directory determines what
 stage it belongs to.
 
 The helpers below are the single source of truth for that mapping.
@@ -40,11 +40,10 @@ PIPELINE_FITS_EXT = FITS_FPACK_EXT
 LEGACY_PIPELINE_FITS_EXT = FITS_PLAIN_EXT
 LEGACY_PIPELINE_FITS_SUFFIXES = (FITS_GZIP_EXT, FITS_PLAIN_EXT)
 
-# ``tess<digits>`` (case-insensitive) at the start of the FFI basename.
-_TESS_PRODUCT_ID_RE = re.compile(r"^(tess\d+)", re.IGNORECASE)
-
-# Composite workspace stem: ``tess<digits>_<label>`` (label may contain ``_``).
-_WORKSPACE_FRAME_STEM_RE = re.compile(r"^(tess\d+)_(.+)$", re.IGNORECASE)
+# SPOC FFI frame stem: ``tess<digits>-s<sector>-<camera>-<ccd>``.
+_SPOC_FRAME_STEM_RE = re.compile(r"^(tess\d+-s\d+-\d+-\d+)", re.I)
+# Leading TESS product id token (``tess<digits>``) from any composite stem.
+_TESS_PRODUCT_ID_RE = re.compile(r"^(tess\d+)", re.I)
 
 
 def strip_fits_suffix(name: str) -> str:
@@ -129,32 +128,51 @@ def tess_product_id_from_ffi_path(path_or_basename: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def ffi_frame_stem_from_path(path_or_basename: str) -> str:
+    """Return the SPOC frame stem ``tess<digits>-s<sector>-<camera>-<ccd>``."""
+    stem = strip_fits_suffix(Path(str(path_or_basename)).name)
+    m = _SPOC_FRAME_STEM_RE.match(stem)
+    if not m:
+        raise ValueError(
+            f"cannot extract SPOC FFI frame stem from {path_or_basename!r}"
+        )
+    return m.group(1)
+
+
 def sanitize_workspace_label(label: str) -> str:
     """Filesystem-safe label that matches ``os.path.basename(workspace_dir(...))``."""
     return str(label).replace(" ", "_")
 
 
-def workspace_frame_stem(product_id: str, label: str) -> str:
+def workspace_frame_stem(ffi_stem: str, label: str) -> str:
     """Compose the per-frame basename used for FITS files in ``ws/<label>/``."""
-    return f"{product_id}_{sanitize_workspace_label(label)}"
+    return f"{ffi_stem}_{sanitize_workspace_label(label)}"
 
 
-def scc_diff_artifact_stem(product_id: str, label: str) -> str:
+def scc_diff_artifact_stem(ffi_stem: str, label: str) -> str:
     """Stem for SCC diff lane artifacts (without FITS suffix)."""
-    return workspace_frame_stem(product_id, label)
+    return workspace_frame_stem(ffi_stem, label)
 
 
 def parse_workspace_frame_stem(frame_stem: str) -> Optional[Tuple[str, str]]:
     """
-    Split ``tess<digits>_<label>`` back into ``(product_id, label)``.
+    Split ``{ffi_stem}_{label}`` back into ``(ffi_stem, label)``.
 
-    Returns None when *frame_stem* does not match the workspace pattern.
+    *label* may contain underscores (e.g. ``epsf_r1``); the split is on the
+    first ``_`` after the recognized FFI stem prefix. Returns None when
+    *frame_stem* does not match the workspace pattern.
     """
     stem = strip_fits_suffix(str(frame_stem))
-    m = _WORKSPACE_FRAME_STEM_RE.match(stem)
+    m = _SPOC_FRAME_STEM_RE.match(stem)
     if not m:
         return None
-    return m.group(1), m.group(2)
+    prefix = m.group(1)
+    if not stem.startswith(f"{prefix}_"):
+        return None
+    label = stem[len(prefix) + 1 :]
+    if not label:
+        return None
+    return prefix, label
 
 
 def workspace_label_from_dir(workspace_dir_path: str) -> str:
@@ -162,6 +180,6 @@ def workspace_label_from_dir(workspace_dir_path: str) -> str:
     return sanitize_workspace_label(os.path.basename(os.path.abspath(workspace_dir_path)))
 
 
-def workspace_frame_stem_for_dir(product_id: str, workspace_dir_path: str) -> str:
+def workspace_frame_stem_for_dir(ffi_stem: str, workspace_dir_path: str) -> str:
     """``workspace_frame_stem`` that derives its label from the destination dir."""
-    return workspace_frame_stem(product_id, workspace_label_from_dir(workspace_dir_path))
+    return workspace_frame_stem(ffi_stem, workspace_label_from_dir(workspace_dir_path))

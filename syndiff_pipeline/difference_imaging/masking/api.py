@@ -33,7 +33,7 @@ def generate_shared_mask_catalog(
     ref_image: np.ndarray,
     gaia_df: pd.DataFrame,
     crop_bounds: dict,
-    ws_root: str | Path,
+    lane_root: str | Path,
     data_root: str | Path,
     sector: int,
     camera: int,
@@ -58,18 +58,19 @@ def generate_shared_mask_catalog(
     wcs_table: pd.DataFrame | None = None,
     write_plots_dir: str | Path | None = None,
     mask_params: object | None = None,
+    output_store_name: str | None = None,
 ) -> MaskCatalog:
     """
     Resolve settings, build static FITS (+ TNS), load/generate asteroids, return catalog.
     """
-    ws_root = Path(ws_root)
-    ws_root.mkdir(parents=True, exist_ok=True)
+    lane_root = Path(lane_root)
+    lane_root.mkdir(parents=True, exist_ok=True)
 
     if settings is None:
         settings, _ = resolve_mask_settings(
             stage_mask_settings=stage_mask_settings,
             site_dir=site_dir,
-            ws_root=ws_root,
+            ws_root=lane_root,
         )
     settings = apply_stage_overrides(
         settings,
@@ -78,7 +79,7 @@ def generate_shared_mask_catalog(
         strapsize=strapsize,
         ps1_min_hit_count=ps1_min_hit_count,
     )
-    write_mask_settings(settings, ws_root / "mask_settings.yaml")
+    write_mask_settings(settings, lane_root / "mask_settings.yaml")
 
     tns_table = None
     if settings.tns.enabled and settings.shared.style == "empirical":
@@ -92,7 +93,7 @@ def generate_shared_mask_catalog(
                 sector, public, url=settings.tns.download_url or None
             )
             tns_table = load_or_build_transient_fixed(
-                ws_root=ws_root,
+                ws_root=lane_root,
                 sector=sector,
                 camera=camera,
                 ccd=ccd,
@@ -119,7 +120,7 @@ def generate_shared_mask_catalog(
         y_edge_strip=y_edge_strip,
         template_path=template_path,
         template_count_crop=template_count_crop,
-        output_dir=ws_root,
+        output_dir=lane_root,
         tns_table=tns_table if settings.tns.include_in_static_fits else None,
         sck=(int(sector), int(camera), int(ccd)),
         data_root=str(data_root) if data_root else None,

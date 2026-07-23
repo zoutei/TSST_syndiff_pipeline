@@ -16,8 +16,8 @@ from syndiff_pipeline.common.scc_paths import (
     provenance_db_path,
     provenance_spool_dir,
     scc_debug_plots_dir,
-    scc_diff_stage_dir,
-    scc_diff_workspace_index_path,
+    scc_diff_label_dir,
+    scc_diff_workspace_dir,
     scc_label,
     scc_remap_dir,
     scc_root,
@@ -87,14 +87,18 @@ class TestSccPaths(unittest.TestCase):
         )
 
     def test_scc_diff_store_paths(self):
-        stage = scc_diff_stage_dir("/data", 20, 3, 3, "diffs_r1", "recipefp")
-        self.assertEqual(
-            stage,
-            Path("/data/s0020/c3/k3/diff/diffs_r1/recipefp"),
+        label_dir = scc_diff_label_dir(
+            "/data", 20, 3, 3, store_name="lane_a", label="hp_d"
         )
         self.assertEqual(
-            scc_diff_workspace_index_path("/event/ws"),
-            Path("/event/ws/scc_diff_index.json"),
+            label_dir,
+            Path("/data/s0020/c3/k3/diff_lane_a/hp_d"),
+        )
+        self.assertEqual(
+            scc_diff_workspace_dir(
+                "/data", 20, 3, 3, store_name=None, workspace_label="hp_d"
+            ),
+            Path("/data/s0020/c3/k3/diff/hp_d"),
         )
 
     def test_named_store_subdir_and_paths(self):

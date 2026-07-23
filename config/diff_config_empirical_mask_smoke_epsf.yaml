@@ -1,30 +1,18 @@
-# Phase A follow-up (historical): inherit hp_d + empirical mask for ePSF-only.
-# Prefer config/diff_config_empirical_mask_smoke.yaml for full shared_mask+hotpants+epsf
-# now that Hotpants ignores FAINT_CAT (bit 32).
+# Phase A follow-up (historical): empirical mask + ePSF-only smoke.
+# SCC-only: workspace_inherit removed; hp_d and mask artifacts must exist on the SCC lane.
 deployment_file: deployment.yaml
 
 defaults:
   n_jobs: 8
   workspace_run_id: empirical_mask_smoke_epsf
   pipeline_plots: true
-  master_fits_mirror: false
   crop_mode: target_box
   crop_box_size: 1024
   max_ffis: 25
 
 pipeline:
-  - workspace_inherit:
-      from: empirical_mask_smoke
-      root_artifacts:
-        - shared_mask.fits.gz
-        - gaia_catalog_pipeline.csv
-        - hotpants_substamp_stars.csv
-        - targets.reg
-        - transient_fixed.parquet
-        - mask_settings.yaml
-  - workspace_inherit:
-      from: multi_hp_temp_calib
-      labels: [hp_d]
+  - external_workspaces:
+      - hp_d
   - kind: epsf
     inputs:
       diffs: hp_d

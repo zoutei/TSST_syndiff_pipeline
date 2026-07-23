@@ -73,11 +73,7 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
             ), patch(
                 "syndiff_pipeline.difference_imaging.orchestration.diff_store"
                 ".resolve_diff_write_path",
-                return_value=(Path(os.path.join(diffs_dir, "missing.fits.fz")), False),
-            ), patch(
-                "syndiff_pipeline.difference_imaging.orchestration.diff_store"
-                ".try_materialize_workspace_artifact",
-                return_value=False,
+                return_value=Path(os.path.join(diffs_dir, "missing.fits.fz")),
             ), patch.object(
                 ks_mod, "resolve_template_for_ffi", return_value=(0.0, 0.0, "/t.fits")
             ), patch.object(
@@ -128,11 +124,7 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
             ), patch(
                 "syndiff_pipeline.difference_imaging.orchestration.diff_store"
                 ".resolve_diff_write_path",
-                return_value=(Path(os.path.join(diffs_dir, "missing.fits.fz")), False),
-            ), patch(
-                "syndiff_pipeline.difference_imaging.orchestration.diff_store"
-                ".try_materialize_workspace_artifact",
-                return_value=False,
+                return_value=Path(os.path.join(diffs_dir, "missing.fits.fz")),
             ), patch.object(
                 hp_mod, "_load_ffi_cropped", return_value=(sci, err)
             ), patch.object(

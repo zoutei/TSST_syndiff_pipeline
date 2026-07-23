@@ -48,16 +48,15 @@ def _iter_diff_recipe_dirs(scc_dir: Path) -> Iterable[Path]:
     for _store_name, diff_root in _store_lane_roots(scc_dir, DIFF_SUBDIR):
         if not diff_root.is_dir():
             continue
-        for stage_dir in diff_root.iterdir():
+        for label_dir in diff_root.iterdir():
             if (
-                not stage_dir.is_dir()
-                or stage_dir.name == EVENTS_SUBDIR
-                or stage_dir.name.startswith("_tmp_")
+                not label_dir.is_dir()
+                or label_dir.name == EVENTS_SUBDIR
+                or label_dir.name.startswith("_tmp_")
             ):
                 continue
-            for recipe_dir in stage_dir.iterdir():
-                if recipe_dir.is_dir() and not recipe_dir.name.startswith("_tmp_"):
-                    yield recipe_dir
+            if any(label_dir.iterdir()):
+                yield label_dir
 
 
 def _fingerprint_dirs(root: Path) -> Iterable[Path]:

@@ -296,6 +296,11 @@ def main(argv: list[str] | None = None) -> int:
 
         return star_main(argv[1:])
 
+    if noun == "photometry":
+        from syndiff_pipeline.photometry.cli import main as photometry_main
+
+        return photometry_main(argv[1:])
+
     if noun in PRESET_NAMES:
         return _dispatch_execution(noun, argv[1:])
 

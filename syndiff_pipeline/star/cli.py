@@ -77,11 +77,24 @@ def _load_star_run_bundle(args: argparse.Namespace):
     policy = load_star_site_policy(star_config_path)
     star_rows = load_star_targets(star_targets_path, site_dir=paths.site_dir)
     star_row = find_star_target_row(star_rows, args.target_name)
-    run_config = resolve_star_run_config(policy, star_row, site_dir=paths.site_dir)
+    photometry_config_path = None
+    pipeline_config = getattr(args, "config", None)
+    if pipeline_config:
+        runner_cfg = load_runner_config(pipeline_config)
+        photometry_config_path = runner_cfg.photometry_config_path or None
+    elif paths.template_config.is_file():
+        runner_cfg = load_runner_config(paths.template_config)
+        photometry_config_path = runner_cfg.photometry_config_path or None
+    run_config = resolve_star_run_config(
+        policy,
+        star_row,
+        site_dir=paths.site_dir,
+        photometry_config_path=photometry_config_path,
+    )
     if args.workspace_run_id is not None:
         logger.warning(
             "--workspace-run-id is deprecated and ignored; "
-            "star outputs always land in {baseline_ws}/host_star/"
+            "star outputs land in phot_{photometry_run_id}/host_star/"
         )
     if args.cutout_size is not None:
         run_config.cutout_size = int(args.cutout_size)
@@ -144,7 +157,7 @@ def cmd_submit(args: argparse.Namespace) -> int:
     if getattr(args, "workspace_run_id", None) is not None:
         logger.warning(
             "--workspace-run-id is deprecated and ignored; "
-            "star outputs always land in {baseline_ws}/host_star/"
+            "star outputs land in phot_{photometry_run_id}/host_star/"
         )
 
     from syndiff_pipeline.common.orchestration.targets import write_normalized_targets
@@ -256,7 +269,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Deprecated and ignored. Star outputs always land in "
-            "{baseline_ws}/host_star/"
+            "{phot_root}/host_star/"
         ),
     )
 

@@ -26,12 +26,12 @@ from syndiff_pipeline.difference_imaging.stages.photometry import (
 )
 from syndiff_pipeline.difference_imaging.support.paths import (
     KERNEL_RECONSTRUCTION_NPZ_BASENAME,
-    MASTER_TESS_FFI_LINK,
     clear_diff_workspace,
-    link_master_workspace,
-    master_root,
     meta_workspace_dir_from_diffs_dir,
     meta_workspace_label,
+    normalize_photometry_run_id,
+    photometry_root,
+    photometry_tree_name,
     pipeline_plots_root,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import (
@@ -89,162 +89,33 @@ class TestLightcurveDiagnosticPlot(unittest.TestCase):
             self.assertGreater(os.path.getsize(out), 1000)
 
 
-class TestLinkMasterWorkspace(unittest.TestCase):
-    def test_creates_absolute_fits_and_flat_ffi_symlinks(self):
+class TestPhotometryPaths(unittest.TestCase):
+    def test_photometry_tree_name_default(self):
+        self.assertEqual(photometry_tree_name(), "phot")
+        self.assertEqual(photometry_tree_name(None), "phot")
+
+    def test_photometry_tree_name_with_run_id(self):
+        self.assertEqual(photometry_tree_name("debug1"), "phot_debug1")
+
+    def test_photometry_root_under_event(self):
         with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            hp = ws / "hp_d"
-            hp.mkdir(parents=True)
-            fits = hp / "tess2020_hp_d.fits"
-            fits.write_bytes(b"SIMPLE  =                    T")
-
-            ffi_leaf = Path(tmp) / "tess_ffi" / "s0020" / "cam3_ccd3"
-            ffi_leaf.mkdir(parents=True)
-            ffi = ffi_leaf / "tess2020-s0020-3-3-0165-s_ffic.fits"
-            ffi.write_bytes(b"SIMPLE  =                    T")
-
-            n1 = link_master_workspace(str(out), ffi_leaf=str(ffi_leaf))
-            self.assertGreaterEqual(n1, 2)
-
-            m_root = master_root(str(out))
-            link_fits = os.path.join(m_root, "tess2020_hp_d.fits")
-            self.assertTrue(os.path.islink(link_fits))
-            self.assertEqual(os.readlink(link_fits), str(fits.resolve()))
-            self.assertTrue(os.path.isfile(link_fits))
-
-            ffi_link = os.path.join(m_root, ffi.name)
-            self.assertTrue(os.path.islink(ffi_link))
-            self.assertEqual(os.readlink(ffi_link), str(ffi.resolve()))
-            self.assertFalse(os.path.exists(os.path.join(m_root, MASTER_TESS_FFI_LINK)))
-
-            n2 = link_master_workspace(str(out), ffi_leaf=str(ffi_leaf))
-            self.assertEqual(n2, 0)
-
-    def test_creates_symlink_for_gzipped_ffi_leaf(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            ws.mkdir(parents=True)
-
-            ffi_leaf = Path(tmp) / "tess_ffi" / "s0020" / "cam3_ccd3"
-            ffi_leaf.mkdir(parents=True)
-            ffi_gz = ffi_leaf / "tess2020-s0020-3-3-0165-s_ffic.fits.gz"
-            ffi_gz.write_bytes(b"SIMPLE  =                    T")
-
-            refreshed = link_master_workspace(str(out), ffi_leaf=str(ffi_leaf))
-            self.assertGreaterEqual(refreshed, 1)
-
-            m_root = master_root(str(out))
-            link = os.path.join(m_root, ffi_gz.name)
-            self.assertTrue(os.path.islink(link))
-            self.assertEqual(os.readlink(link), str(ffi_gz.resolve()))
-            self.assertTrue(os.path.isfile(link))
-
-    def test_replaces_broken_symlink(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            hp = ws / "hp_d"
-            hp.mkdir(parents=True)
-            fits = hp / "frame.fits"
-            fits.write_bytes(b"SIMPLE  =                    T")
-
-            m_root = master_root(str(out))
-            os.makedirs(m_root, exist_ok=True)
-            stale = os.path.join(m_root, "frame.fits")
-            os.symlink("/nonexistent/frame.fits", stale)
-
-            refreshed = link_master_workspace(str(out))
-            self.assertEqual(refreshed, 1)
-            self.assertEqual(os.readlink(stale), str(fits.resolve()))
-            self.assertTrue(os.path.isfile(stale))
-
-    def test_removes_legacy_tess_ffi_directory_symlink(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            hp = ws / "hp_d"
-            hp.mkdir(parents=True)
-            (hp / "a.fits").write_bytes(b"x")
-
-            ffi_leaf = Path(tmp) / "tess_ffi" / "s0020" / "cam3_ccd3"
-            ffi_leaf.mkdir(parents=True)
-            ffi = ffi_leaf / "tess2020-s0020-3-3-0165-s_ffic.fits"
-            ffi.write_bytes(b"x")
-
-            m_root = master_root(str(out))
-            os.makedirs(m_root, exist_ok=True)
-            legacy = os.path.join(m_root, MASTER_TESS_FFI_LINK)
-            os.symlink(str(Path(tmp) / "tess_ffi"), legacy)
-
-            refreshed = link_master_workspace(str(out), ffi_leaf=str(ffi_leaf))
-            self.assertGreaterEqual(refreshed, 2)
-            self.assertFalse(os.path.exists(legacy))
-            self.assertTrue(os.path.islink(os.path.join(m_root, ffi.name)))
-
-    def test_prefers_fpack_when_variants_exist(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            hp = ws / "hp_d"
-            hp.mkdir(parents=True)
-            stem = "tess2020_hp_d"
-            (hp / f"{stem}.fits").write_bytes(b"legacy")
-            (hp / f"{stem}.fits.gz").write_bytes(b"gzip")
-            (hp / f"{stem}.fits.fz").write_bytes(b"fpack")
-
-            link_master_workspace(str(out))
-            m_root = master_root(str(out))
-            link = os.path.join(m_root, f"{stem}.fits.fz")
-            self.assertTrue(os.path.islink(link))
-            self.assertEqual(os.readlink(link), str((hp / f"{stem}.fits.fz").resolve()))
-            self.assertFalse(os.path.exists(os.path.join(m_root, f"{stem}.fits")))
-            self.assertFalse(os.path.exists(os.path.join(m_root, f"{stem}.fits.gz")))
-
-    def test_skips_hotpants_stamp_fits(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            hp = ws / "hp_d"
-            stamps = ws / "hp_d_stamps"
-            hp.mkdir(parents=True)
-            stamps.mkdir(parents=True)
-            (hp / "tess2020_hp_d.fits").write_bytes(b"x")
-            (stamps / "tess2020_hp_d_stamps.fits").write_bytes(b"x")
-
-            m_root = master_root(str(out))
-            os.makedirs(m_root, exist_ok=True)
-            stale = os.path.join(m_root, "tess2020_hp_d_stamps.fits")
-            os.symlink(str((stamps / "tess2020_hp_d_stamps.fits").resolve()), stale)
-
-            refreshed = link_master_workspace(str(out))
-            self.assertGreaterEqual(refreshed, 1)
-            self.assertTrue(os.path.islink(os.path.join(m_root, "tess2020_hp_d.fits")))
-            self.assertFalse(os.path.exists(stale))
+            event = os.path.join(tmp, "events", "s0020_c3_k3_2020ut")
             self.assertEqual(
-                sorted(os.listdir(m_root)),
-                ["tess2020_hp_d.fits"],
+                photometry_root(event),
+                os.path.join(os.path.abspath(event), "phot"),
+            )
+            self.assertEqual(
+                photometry_root(event, "smoke"),
+                os.path.join(os.path.abspath(event), "phot_smoke"),
             )
 
-    def test_skips_master_subdir_when_scanning_workspaces(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            ws = out / "ws"
-            hp = ws / "hp_d"
-            hp.mkdir(parents=True)
-            (hp / "a.fits").write_bytes(b"x")
-            (ws / "master").mkdir(parents=True)
+    def test_normalize_photometry_run_id(self):
+        self.assertIsNone(normalize_photometry_run_id(None))
+        self.assertIsNone(normalize_photometry_run_id(""))
+        self.assertEqual(normalize_photometry_run_id("run_a"), "run_a")
 
-            refreshed = link_master_workspace(str(out))
-            self.assertEqual(refreshed, 1)
-            link_a = os.path.join(master_root(str(out)), "a.fits")
-            self.assertTrue(os.path.islink(link_a))
-            self.assertEqual(
-                os.listdir(master_root(str(out))),
-                ["a.fits"],
-            )
 
+class TestClearDiffWorkspace(unittest.TestCase):
     def test_clear_diff_workspace_restores_templates_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "event"

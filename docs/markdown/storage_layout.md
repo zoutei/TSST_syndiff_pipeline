@@ -21,11 +21,9 @@ Example paths (adjust for your site):
 | Term | Meaning |
 |------|---------|
 | **workspace** | The `workspace_root` directory — one SQLite DB, one supervisor, one `runs/` tree |
-| **event dir** | `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/` — handoff JSON + diff outputs for one event×SCC leaf |
-| **run dir** | `{workspace_root}/runs/{run_id}/` — frozen config and per-run stage sidecars |
-| **control dir** | `{workspace_root}/control/` — orchestrator-only files (SQLite, daemon, Discord) |
-| **workspace tree** | `events/{label}/ws/` (canonical) or `events/{label}/ws_{workspace_run_id}/` — diff sub-pipeline artifacts (and star outputs under `host_star/`) |
-| **workspace_run_id** | Namespaces the diff workspace tree (`ws_{id}/`) when set in `diff_config` / `star_config.baseline` |
+| **event dir** | `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/` — handoff JSON; photometry under `phot_{run_id}/` |
+| **workspace tree** | Legacy `ws/` trees (optional); SCC diff products live under `data_root/.../diff_{lane}/` |
+| **photometry_run_id** | Namespaces event photometry tree (`phot_{id}/`) from `photometry_config.yaml` |
 
 Deprecated in prose: *handoff root*, *template_handoffs* (old path name).
 
@@ -42,79 +40,33 @@ Only three top-level subtrees belong here long-term:
   events/                          # per-event nested SCC leaves
     {event_name}/                  # e.g. 2020ftl
       s{SSSS}_c{C}_k{K}/           # e.g. s0023_c1_k3
+      phot_{photometry_run_id}/   # astrometry + forced LCs (photometry stage)
+        targets.reg
+        astrometry_result.json
+        {lc_label}/lightcurve_*.csv
+        host_star/                 # star branch outputs
       frames.csv                   # optional event copy of SCC frame manifest
       ps1_removed_stars.csv        # crop-local Gaia (templates stage; linear geometry_mode)
-      ws/                          # canonical diff workspace tree (no workspace_run_id)
-      ws_{workspace_run_id}/       # namespaced tree when diff_config sets workspace_run_id
-        diff_config.yaml           # frozen copy for this tree
-        templates/                 # (removed) templates resolve from data_root/s{SSSS}/c{C}/k{K}/templates/
-        master/                    # flat FITS mirror + tess_ffi link (diff stage)
-        debug_plots/               # PNG diagnostics when pipeline_plots: true
-          wcs_drift_template_debug.png
-        shared_mask.fits.fz        # ws-root artifacts (see diff workspace table below)
-        hotpants_substamp_stars.csv
-        gaia_catalog_pipeline.csv
-        targets.reg
-        tile_centers.json
-        {diffs_label}/             # e.g. hp_d — per-FFI difference FITS
-          tess{pid}_{diffs_label}.fits.fz
-        {diffs_label}_m/           # meta workspace paired with diffs (hp_d → hp_m)
-          hotpants.progress.json
-          kernel_reconstruction.npz
-          phot_calib.csv
-        {diffs_label}_kernels/     # sibling of diffs dir; write_kernel_solutions: true only
-          {product_id}_kernel.npz
-        {epsf_label}/              # e.g. epsf_r1 — gridded ePSF
-          {ffi_stem}_gridded_epsf.npz
-          gridded_epsf_index.json
-          epsf.progress.json
-          group_epsf/              # optional group medians
-            group_epsf_{gid}.npz
-        {centroids_label}/         # e.g. centroids_r1
-          {ffi_stem}_photresults.ecsv
-          centroids_index.json
-          centroids.progress.json
-        {lc_label}/                # forced_photometry output; e.g. lc_gepsf_on_hp_diffs
-          lightcurve_{method}.csv  # e.g. lightcurve_gepsf.csv
-          lightcurve_{method}_{extra}.csv
-        host_star/                 # syndiff star outputs (nested in baseline ws)
-          batch_manifest.csv
-          {gaia_source_id}/
-            identifier.json
-            host_gaia_row.csv
-            mini_templates/
-            diff_stamps/
-            lightcurve_{method}_gaia_{id}.csv
-            plots/                 # when debug_plots: true
 ```
 
-### Diff workspace trees (`ws/` / `ws_{workspace_run_id}/`)
+SCC subtract/ePSF/centroids products are **not** stored under the event tree. They live on the shared lane at `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` (flat label dirs, `tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz` stems). Fingerprints are recorded in `provenance.db` only.
 
-Filesystem name comes from `workspace_tree_name()` in `difference_imaging/support/paths.py`: canonical `ws/` when `workspace_run_id` is unset, otherwise `ws_{workspace_run_id}/`. Each tree holds one ordered diff sub-pipeline (labels from stage `output:` keys). Per-FFI FITS use `{tess_product_id}_{label}.fits.fz` (`support/ffi_naming.py`). SynDiff-produced FITS (and local TESS FFIs) are written as CFITSIO fpack (`.fits.fz`); readers also accept legacy `.fits.gz` and plain `.fits`. Star-branch outputs live under `host_star/` inside the baseline workspace (not a sibling `star_*` tree).
+Legacy `ws/` / `ws_{workspace_run_id}/` trees may still exist from older runs but are no longer written by the diff stage.
 
-| Path (under active `ws*` tree) | Stage / role |
-|--------------------------------|--------------|
-| `templates/` | **Removed.** Diff resolves `cfg.template_dir` from `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` |
-| `master/` | Flat basename symlinks to all workspace FITS + optional `tess_ffi` link (`master_fits_mirror`); skips `host_star/` |
-| `debug_plots/` | Diagnostic PNGs when `pipeline_plots: true` (ePSF montages, light-curve figures, background GIFs) |
-| `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `tile_centers.json` | `shared_mask`, ePSF, `sat_template`, legacy photometry |
-| `{diffs_label}/` | Hotpants or `kernel_subtract` difference images (e.g. `hp_d/`) |
-| `{diffs_label}_m/` | Meta workspace for a diffs label (`hp_d` → `hp_m`): `hotpants.progress.json`, `kernel_reconstruction.npz`, `phot_calib.csv` |
-| `{diffs_label}_kernels/{product_id}_kernel.npz` | Per-frame Hotpants `kernel_solution` (sibling of `{diffs_label}/`; only when `write_kernel_solutions: true`) |
-| `{epsf_label}/*_gridded_epsf.npz` | Per-frame gridded ePSF archives (`data`, `grid_xypos`, `oversampling`) |
-| `{epsf_label}/gridded_epsf_index.json` | `ffi_stem` → npz path index |
-| `{epsf_label}/epsf.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.epsf.progress.json` beside `diff.log`) |
-| `{epsf_label}/group_epsf/group_epsf_{gid}.npz` | Optional median gridded cube per WCS group |
-| `{centroids_label}/*_photresults.ecsv` | Per-frame Gaia PSF photometry on diffs |
-| `{centroids_label}/centroids_index.json` | `ffi_stem` → photresults path index |
-| `{centroids_label}/centroids.progress.json` | Frame progress sidecar (CLI mirror: `runs/.../diff.centroids.progress.json` beside `diff.log`) |
-| `{lc_label}/lightcurve_{method}.csv` | Forced photometry (e.g. `lc_gepsf_on_hp_diffs/lightcurve_gepsf.csv`) |
-| `{lc_label}/lightcurve_{method}_{extra}.csv` | Additional forced targets (`additional_forced_targets`) |
-| `host_star/` | Host-star light curves (`syndiff star`): per-Gaia stamps, mini-templates, LCs |
+```text
+# removed from current diff writes (legacy layout)
+      ws/
+      ws_{workspace_run_id}/
+        master/
+        tile_centers.json
+        {diffs_label}/           # now on data_root diff lane only
+```
 
-**Legacy:** older star runs wrote sibling trees `events/{label}/star/` or `star_{id}/`. Verify still accepts those when `host_star/batch_manifest.csv` is absent.
+**Deprecated event `ws/` trees:** older runs stored diff FITS, masks, ePSF, and forced photometry under `events/{name}/s…/ws/` (or `ws_{workspace_run_id}/`). Current diff writes are **SCC-primary** on `data_root` (below). Event trees may still hold progress sidecars, frozen `diff_config.yaml`, and `templates`/`ffis` symlinks for exploration; they are not the source of truth for subtract/ePSF completeness. Per-event photometry lives under `phot_{photometry_run_id}/`, not `ws/{lc_label}/`.
 
-**`workspace_inherit`** (`difference_imaging/support/workspace_inherit.py`): preamble entry that symlinks selected labels and root artifacts from a parent `ws_{from_run_id}/` into a child `ws_{run_id}/` without modifying the parent tree. Relative links look like `../ws_{from_run_id}/{label}`. Typical inherited labels: `hp_d`, `hp_m`; typical root artifacts: `shared_mask.fits`, `gaia_catalog_pipeline.csv`, `hotpants_substamp_stars.csv`, `targets.reg`.
+**Legacy star layout:** older runs used `events/{label}/star/` or `star_{id}/`. SCC-only verify requires `phot_{run_id}/host_star/batch_manifest.csv`.
+
+**`workspace_inherit`** (removed): SCC-only diff no longer supports inheriting labels from a parent event `ws/` tree. Re-run upstream diff stages on the SCC lane instead.
 
 ### `control/` — orchestrator only
 
@@ -183,10 +135,20 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode)
     templates_{NAME}/              # optional named templates lane (downsample.output_store_name)
       oversampling_{N}/
-    diff/                          # default SCC diff lane
     diff_{NAME}/                   # named diff lane (paths.output_store_name)
-      {workspace_label}/{recipe_fp}/
-    debug_plots/                   # template-pipeline PNGs (shift schedule debug)
+      shared_mask.fits.fz
+      hotpants_substamp_stars.csv
+      gaia_catalog_pipeline.csv
+      hp_d/tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz
+      hp_b/
+      hp_c/
+      hp_d_kernels/
+      epsf_r1/
+      centroids_r1/
+      debug_plots/
+    bookkeeping/diff_{NAME}/oversampling_{N}/
+      frames.csv
+      diff_job.json
     legacy/                        # archived pre-cutover artifacts
     bookkeeping/                   # per-stage run_meta (mapping reference FFI, diff handoff, …)
       diff/
@@ -233,7 +195,7 @@ Code dual-reads legacy L2–L4 files colocated under `templates/` when
 
 Linear template FITS at `N>1` carry native `XMIN`/`XMAX`/`YMIN`/`YMAX` plus `OVERSAMP=N`; array planes are shape `(native_h·N, native_w·N)`. Diff crops stay native and are scaled at load time (`common/template_coverage.py`).
 
-`events/{event}/s_c_k/ws*/master/` is a **flat FITS mirror** for Condor/shared-FS access: every workspace-label `*.fits` appears as a basename symlink, plus `master/tess_ffi` → SCC `ffi/` when configured. It does **not** hold template FITS.
+`events/{event}/s_c_k/phot_{run_id}/` holds per-event astrometry and forced photometry. Star outputs default to `host_star/` under the baseline workspace or photometry tree.
 
 ---
 
@@ -273,17 +235,18 @@ SCC-scoped diff store (field mode v2 — SCC-primary write-through):
 ```text
 {data_root}/s{SSSS}/c{C}/k{K}/
   diff/                              # default lane (store_name null)
-  diff_{lane}/                       # named lane (e.g. diff_l4_split_smoke/)
-    {workspace_label}/               # e.g. hp_d, ks_d
-      {recipe_fp}/                   # content-addressed recipe id
-        tess<digits>_{label}.fits.fz
+  diff_{lane}/                       # named lane (e.g. diff_linear/)
+    shared_mask.fits.fz
+    hp_d/tess{digits}-s{SSSS}-{C}-{K}_hp_d.fits.fz
+    hp_d_kernels/
+    epsf_r1/gridded_epsf_index.json
   bookkeeping/
-    diff/
+    diff/oversampling_{N}/           # lane bookkeeping (or legacy flat bookkeeping/diff/)
       frames.csv                     # SCC frame manifest (bootstrap)
       diff_job.json                  # v2: mapping_grid, store names, crop_bounds
 ```
 
-Event workspaces may record pointers in `ws/scc_diff_index.json` and optionally materialize copies under `events/{name}/ws/{label}/` via `try_materialize_workspace_artifact`.
+Recipe fingerprints are recorded in `provenance.db` only; they are **not** encoded in the on-disk directory layout. Event workspaces do not receive mirrored diff FITS under `ws/{label}/`.
 
 Operator commands:
 

@@ -1,7 +1,5 @@
-# Full 2020ut gridded ePSF + gepsf forced photometry on inherited hp_d diffs.
-# ePSF: starpositioningscript.py flow + experiment B grid/oversample params.
-# Gaia pre-filter: phot_rp_mean_mag < 12.95 (reference script), crop-local x,y.
-# Parent hotpants workspace: ws_multi_hp_temp_calib (multi_hp_temp_calib).
+# Full 2020ut gridded ePSF + centroids on hp_d diffs.
+# SCC-only: workspace_inherit removed; hp_d/hp_m must exist on the SCC diff lane.
 deployment_file: deployment.yaml
 
 defaults:
@@ -12,29 +10,10 @@ defaults:
   crop_box_size: 1024
   # max_ffis omitted → all manifest frames with valid hp_d FITS
 
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
-
 pipeline:
-  - workspace_inherit:
-      from: multi_hp_temp_calib
-      labels: [hp_d, hp_m]
-      root_artifacts:
-        - shared_mask.fits.fz
-        - gaia_catalog_pipeline.csv
-        - hotpants_substamp_stars.csv
-        - targets.reg
+  - external_workspaces:
+      - hp_d
+      - hp_m
   - kind: epsf
     inputs:
       diffs: hp_d
@@ -59,18 +38,6 @@ pipeline:
     aperture_radius: 2
     psf_grouper_min_separation: 8
     centroids_n_jobs: 64
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-      epsf: epsf_r1
-    output: lc_gepsf_on_hp_diffs
-    methods:
-      - name: gepsf
-        type: psf
-        psf_type: epsf
-        fit_shape: 11
-        aperture_radius: 2
-        psf_grouper_min_separation: 10
 
 condor:
   request_cpus: 64
