@@ -31,6 +31,7 @@ from syndiff_pipeline.difference_imaging.stages.gridded_epsf import (
     _diff_path_to_stem,
     build_diff_image_fps,
     build_epsf_fps,
+    ffi_path_by_stem_from_wcs_table,
     prepare_gaia_for_gridded_epsf,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
@@ -107,6 +108,22 @@ def workspace_has_centroids(output_dir: str) -> bool:
     return any(root.glob(f"*{PHOTRESULTS_ECSV_SUFFIX}"))
 
 
+def _filter_gaia_for_centroids(gaia_df: pd.DataFrame, params) -> pd.DataFrame:
+    """Brightness cuts for centroid init (reference script: 7.5 < rp < 12.95)."""
+    df = gaia_df
+    if "phot_rp_mean_mag" not in df.columns:
+        return df.reset_index(drop=True)
+    rp = pd.to_numeric(df["phot_rp_mean_mag"], errors="coerce")
+    mag_max = getattr(params, "mag_max_rp", 12.95)
+    mag_min = getattr(params, "mag_min_rp", 7.5)
+    if mag_max is not None:
+        df = df.loc[rp < float(mag_max)]
+        rp = pd.to_numeric(df["phot_rp_mean_mag"], errors="coerce")
+    if mag_min is not None:
+        df = df.loc[rp > float(mag_min)]
+    return df.reset_index(drop=True)
+
+
 def _init_centroids_worker(
     gaia_df: pd.DataFrame,
     epsf_catalog: GriddedEpsfCatalog,
@@ -118,6 +135,9 @@ def _init_centroids_worker(
     centroids_label: str | None = None,
     diff_image_fps: dict[str, str] | None = None,
     epsf_fps: dict[str, str] | None = None,
+    ffi_list_df: pd.DataFrame | None = None,
+    science_bounds: dict | None = None,
+    ffi_path_by_stem: dict[str, str] | None = None,
 ) -> None:
     """Load shared centroid inputs once per loky worker."""
     _WORKER_CTX.clear()
@@ -133,6 +153,9 @@ def _init_centroids_worker(
             "centroids_label": centroids_label,
             "diff_image_fps": dict(diff_image_fps or {}),
             "epsf_fps": dict(epsf_fps or {}),
+            "ffi_list_df": ffi_list_df,
+            "science_bounds": science_bounds,
+            "ffi_path_by_stem": dict(ffi_path_by_stem or {}),
         }
     )
 
@@ -163,8 +186,8 @@ def _photometry_one_frame(
 
     init_params = _build_init_params(gaia_df)
     fit_shape = int(getattr(params, "fit_shape", 11) or 11)
-    aperture_radius = float(getattr(params, "aperture_radius", 2.0) or 2.0)
-    grouper_sep = float(getattr(params, "psf_grouper_min_separation", 8.0) or 8.0)
+    aperture_radius = float(getattr(params, "aperture_radius", 4.0) or 4.0)
+    grouper_sep = float(getattr(params, "psf_grouper_min_separation", 10.0) or 10.0)
 
     psf_phot = PSFPhotometry(
         gridded_model,
@@ -193,7 +216,7 @@ def _centroids_one_frame_task(
     frame_idx, ffi_stem, ok, skipped_existing
     """
     ctx = _WORKER_CTX
-    gaia_df: pd.DataFrame = ctx["gaia_df"]
+    gaia_base: pd.DataFrame = ctx["gaia_df"]
     epsf_catalog: GriddedEpsfCatalog = ctx["epsf_catalog"]
     params = ctx["params"]
     output_dir: str = ctx["output_dir"]
@@ -250,8 +273,28 @@ def _centroids_one_frame_task(
         log.warning("  centroids: cannot load %s: %s", diff_path, exc)
         return frame_idx, ffi_stem, False, False
 
+    ffi_path_by_stem = ctx.get("ffi_path_by_stem") or {}
+    ffi_path = ffi_path_by_stem.get(ffi_stem) or ffi_path_by_stem.get(product_id)
+    ffi_list_df = ctx.get("ffi_list_df")
+    science_bounds = ctx.get("science_bounds")
+    if ffi_path is None or ffi_list_df is None or science_bounds is None:
+        log.warning(
+            "  centroids: missing ffi_list/science_bounds for %s", ffi_stem
+        )
+        return frame_idx, ffi_stem, False, False
+    from syndiff_pipeline.common.wcs_grouping import gaia_science_xy_for_frame
+
     try:
-        phot_results = _photometry_one_frame(diff_img, model, gaia_df, params)
+        gaia_frame = gaia_science_xy_for_frame(
+            gaia_base, ffi_path, ffi_list_df, science_bounds
+        )
+        gaia_frame = _filter_gaia_for_centroids(gaia_frame, params)
+    except Exception as exc:
+        log.warning("  centroids: Gaia projection failed for %s: %s", ffi_stem, exc)
+        return frame_idx, ffi_stem, False, False
+
+    try:
+        phot_results = _photometry_one_frame(diff_img, model, gaia_frame, params)
     except Exception as exc:
         log.warning("  centroids: PSF photometry failed for %s: %s", ffi_stem, exc)
         return frame_idx, ffi_stem, False, False
@@ -303,6 +346,10 @@ def run_centroids_all_frames(
     epsf_input: str | None = None,
     diff_log_path: str | None = None,
     force_rerun: bool = False,
+    ffi_list_df: pd.DataFrame | None = None,
+    science_bounds: dict | None = None,
+    ffi_path_by_stem: dict[str, str] | None = None,
+    wcs_table: pd.DataFrame | None = None,
 ) -> tuple[list[str], list[bool]]:
     """
     PSF photometry on every difference image (thread-parallel over frames).
@@ -340,11 +387,15 @@ def run_centroids_all_frames(
         diff_image_fps=diff_image_fps,
     )
 
-    # Reuse the same Gaia brightness filter as the ePSF stage.
+    # Reuse the same Gaia upper-magnitude filter as the ePSF stage (lower cut per frame).
     class _MagParams:
         mag_max_rp = getattr(params, "mag_max_rp", 12.95)
 
+    if "ra" not in gaia_df.columns or "dec" not in gaia_df.columns:
+        raise ValueError("Gaia catalog for centroids requires ra, dec columns")
     gaia_filtered = prepare_gaia_for_gridded_epsf(gaia_df, _MagParams())
+    if ffi_path_by_stem is None and wcs_table is not None:
+        ffi_path_by_stem = ffi_path_by_stem_from_wcs_table(wcs_table)
     os.makedirs(output_dir, exist_ok=True)
 
     from syndiff_pipeline.difference_imaging.stages.centroids_progress import (
@@ -402,6 +453,9 @@ def run_centroids_all_frames(
         centroids_label,
         diff_image_fps,
         epsf_fps,
+        ffi_list_df,
+        science_bounds,
+        ffi_path_by_stem or {},
     )
     results: list[tuple[int, str, bool, bool]] = []
 

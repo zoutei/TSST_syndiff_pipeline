@@ -2054,6 +2054,61 @@ def ensure_gaia_crop_xy(
     return cropped
 
 
+def gaia_science_xy_for_frame(
+    gaia_df: pd.DataFrame,
+    ffi_path: str,
+    ffi_list_df: pd.DataFrame,
+    science_bounds: dict,
+    *,
+    ra_col: str = "ra",
+    dec_col: str = "dec",
+) -> pd.DataFrame:
+    """
+    Project Gaia ``ra``/``dec`` to science-array ``x``/``y`` for one FFI.
+
+    Uses full-FFI WCS from the shared ``ffi_list`` cache (not diff FITS headers),
+    then rebases to the science rectangle via *science_bounds*
+    (``MappingGrid.science_ffi_bounds()``).
+
+    Returns a new DataFrame; does not mutate *gaia_df* or read existing ``x``/``y``.
+    """
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+    from syndiff_pipeline.common.wcs_header_cache import header_from_cached_row
+
+    if ra_col not in gaia_df.columns or dec_col not in gaia_df.columns:
+        raise ValueError(
+            "Gaia catalog for science-array projection requires "
+            f"'{ra_col}'/'{dec_col}' columns"
+        )
+    logical = manifest_basename_from_local(ffi_path)
+    if logical not in ffi_list_df.index:
+        raise KeyError(f"FFI {logical!r} not found in ffi_list index")
+    header = header_from_cached_row(ffi_list_df.loc[logical])
+    wcs = _header_to_wcs(header)
+    x_ffi, y_ffi = world_ra_dec_to_pixel(
+        wcs,
+        gaia_df[ra_col].values,
+        gaia_df[dec_col].values,
+    )
+    x_min = int(science_bounds["x_min"])
+    y_min = int(science_bounds["y_min"])
+    ny, nx = (int(science_bounds["shape"][0]), int(science_bounds["shape"][1]))
+    x_sci = np.asarray(x_ffi, dtype=np.float64) - float(x_min)
+    y_sci = np.asarray(y_ffi, dtype=np.float64) - float(y_min)
+    inside = (
+        np.isfinite(x_sci)
+        & np.isfinite(y_sci)
+        & (x_sci >= 0.0)
+        & (x_sci < float(nx))
+        & (y_sci >= 0.0)
+        & (y_sci < float(ny))
+    )
+    out = gaia_df.loc[inside].copy()
+    out["x"] = x_sci[inside]
+    out["y"] = y_sci[inside]
+    return out.reset_index(drop=True)
+
+
 def build_unique_gaia_catalog(removed_stars_csv: str,
                                ref_ffi_path: str,
                                crop_bounds: dict,

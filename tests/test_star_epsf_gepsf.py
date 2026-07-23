@@ -44,6 +44,9 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
     }
     event = tmp / "events" / "s20_astrometry" / "s0020_c3_k2"
     ws = event / ws_name
+    data = tmp / "data" / "s0020" / "c3" / "k2" / "diff"
+    for sub in ("hp_d", "hp_c", "ks_b_s", "hp_d_kernels", "epsf_r1"):
+        (data / sub).mkdir(parents=True, exist_ok=True)
     for sub in ("hp_d", "hp_c", "ks_b_s", "hp_d_kernels"):
         (ws / sub).mkdir(parents=True, exist_ok=True)
     ffi_name = "tess2019358235923-s0020-3-2-0165-s_ffic.fits.gz"
@@ -58,7 +61,15 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
         }
     )
     manifest.to_csv(event / "frames.csv", index=False)
-    gaia = pd.DataFrame({"x": [32.0], "y": [32.0], "phot_rp_mean_mag": [10.0]})
+    gaia = pd.DataFrame(
+        {
+            "ra": [100.0],
+            "dec": [20.0],
+            "x": [32.0],
+            "y": [32.0],
+            "phot_rp_mean_mag": [10.0],
+        }
+    )
     gaia.to_csv(tmp / "gaia.csv", index=False)
     return StarEventContext(
         target=Target(
@@ -86,11 +97,12 @@ def _minimal_ctx(tmp: Path, *, ws_name: str = "ws") -> StarEventContext:
         ccd=2,
         baseline_workspace_dir=str(ws),
         baseline_diffs_label="hp_d",
-        baseline_diffs_dir=str(ws / "hp_d"),
-        baseline_convolved_dir=str(ws / "hp_c"),
-        baseline_phot_bkg_dir=str(ws / "ks_b_s"),
+        baseline_diffs_dir=str(data / "hp_d"),
+        baseline_convolved_dir=str(data / "hp_c"),
+        baseline_phot_bkg_dir=str(data / "ks_b_s"),
         baseline_phot_bkg_label="ks_b_s",
-        baseline_kernels_dir=str(ws / "hp_d_kernels"),
+        baseline_kernels_dir=str(data / "hp_d_kernels"),
+        output_store_name=None,
     )
 
 
@@ -165,11 +177,11 @@ class TestStarEpsfRunner(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             ctx = _minimal_ctx(tmp_path)
-            hp_d = Path(ctx.baseline_workspace_dir) / "hp_d"
+            hp_d = Path(ctx.baseline_diffs_dir)
             from syndiff_pipeline.difference_imaging.stages import hotpants
 
             hotpants._write_image_fits(
-                str(hp_d / "tess2019358235923_hp_d.fits.fz"),
+                str(hp_d / "tess2019358235923-s0020-3-2_hp_d.fits.fz"),
                 np.zeros((64, 64), dtype=np.float32),
             )
 
@@ -201,6 +213,12 @@ class TestStarEpsfRunner(unittest.TestCase):
                     ), mock.patch(
                         "syndiff_pipeline.star.epsf_runner.load_catalog_for_event",
                         return_value=None,
+                    ), mock.patch(
+                        "syndiff_pipeline.star.epsf_runner.os.path.isfile",
+                        return_value=True,
+                    ), mock.patch(
+                        "syndiff_pipeline.common.wcs_header_cache.load_ffi_list",
+                        return_value=pd.DataFrame(),
                     ):
                         ensure_star_epsf_catalog(
                             ctx,

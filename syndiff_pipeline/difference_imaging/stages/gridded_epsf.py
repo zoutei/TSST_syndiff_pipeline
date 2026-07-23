@@ -73,6 +73,9 @@ def _init_gridded_epsf_worker(
     mask_catalog=None,
     btjd_by_stem: dict | None = None,
     diff_image_fps: dict[str, str] | None = None,
+    ffi_list_df: pd.DataFrame | None = None,
+    science_bounds: dict | None = None,
+    ffi_path_by_stem: dict[str, str] | None = None,
 ) -> None:
     """Load shared ePSF inputs once per loky worker (see starpositioningscript)."""
     _suppress_photutils_epsf_noise()
@@ -92,6 +95,9 @@ def _init_gridded_epsf_worker(
             "mask_catalog": mask_catalog,
             "btjd_by_stem": btjd_by_stem or {},
             "diff_image_fps": dict(diff_image_fps or {}),
+            "ffi_list_df": ffi_list_df,
+            "science_bounds": science_bounds,
+            "ffi_path_by_stem": dict(ffi_path_by_stem or {}),
         }
     )
 
@@ -132,7 +138,7 @@ def _filter_gaia_for_epsf(
 
         combined_filter = (df['phot_rp_mean_mag'] < 12.95) & in_crop
 
-    Expects crop-local ``x``/``y`` (from :func:`ensure_gaia_crop_xy`).
+    Expects ``ra``/``dec`` (science-array ``x``/``y`` are computed per frame).
     """
     df = gaia_df
     if mag_max_rp is not None and "phot_rp_mean_mag" in df.columns:
@@ -168,8 +174,8 @@ def prepare_gaia_for_gridded_epsf(
     """
     mag_max = _resolve_mag_max_rp(epsf_params)
     out = _filter_gaia_for_epsf(gaia_df, mag_max_rp=mag_max)
-    if "x" not in out.columns or "y" not in out.columns:
-        raise ValueError("Gaia catalog for ePSF requires crop-local columns x, y")
+    if "ra" not in out.columns or "dec" not in out.columns:
+        raise ValueError("Gaia catalog for ePSF requires ra, dec columns")
     n = len(out)
     log.info(
         "ePSF Gaia catalog: %d stars after phot_rp_mean_mag < %s pre-filter",
@@ -252,6 +258,35 @@ def _filter_stars_off_mask(
     return stars_df.loc[good].copy()
 
 
+def _filter_stars_geometric_mask(
+    stars_tbl: Table,
+    section_mask: np.ndarray,
+    box_radius: int,
+) -> Table:
+    """Keep stars whose mask cutout has enough unmasked 2D area (reference script)."""
+    if len(stars_tbl) == 0:
+        return stars_tbl
+    mask = np.asarray(section_mask, dtype=bool)
+    ny, nx = mask.shape
+    valid: list[int] = []
+    for idx, row in enumerate(stars_tbl):
+        cx = int(round(float(row["x"])))
+        cy = int(round(float(row["y"])))
+        y0 = max(0, cy - box_radius)
+        y1 = min(ny, cy + box_radius + 1)
+        x0 = max(0, cx - box_radius)
+        x1 = min(nx, cx + box_radius + 1)
+        cutout = mask[y0:y1, x0:x1]
+        unmasked_y, unmasked_x = np.where(~cutout)
+        if (
+            len(unmasked_x) >= 10
+            and len(np.unique(unmasked_x)) >= 3
+            and len(np.unique(unmasked_y)) >= 3
+        ):
+            valid.append(idx)
+    return stars_tbl[valid]
+
+
 def fit_epsf_section(
     section_data: np.ndarray,
     stars_tbl: Table,
@@ -260,14 +295,24 @@ def fit_epsf_section(
     oversampling: int,
     maxiters: int,
     recentering_maxiters: int = 20,
+    smoothing_kernel: str = "quadratic",
+    builder_fit_shape: int = 5,
+    recentering_boxsize: int = 3,
     section_mask: np.ndarray | None = None,
     use_mask: bool = False,
+    star_box_radius: int = 7,
 ) -> np.ndarray | None:
     """
     Fit one grid-section ePSF stamp with photutils.
 
     Returns oversampled 2D stamp array or None on failure.
     """
+    if len(stars_tbl) == 0:
+        return None
+    if section_mask is not None and star_box_radius > 0:
+        stars_tbl = _filter_stars_geometric_mask(
+            stars_tbl, section_mask, int(star_box_radius)
+        )
     if len(stars_tbl) == 0:
         return None
     data = np.asarray(section_data, dtype=np.float64)
@@ -288,6 +333,9 @@ def fit_epsf_section(
                 oversampling=int(oversampling),
                 maxiters=int(maxiters),
                 recentering_maxiters=int(recentering_maxiters),
+                smoothing_kernel=str(smoothing_kernel),
+                fit_shape=int(builder_fit_shape),
+                recentering_boxsize=int(recentering_boxsize),
                 progress_bar=False,
             )
             epsf, _fitted = builder(extracted)
@@ -340,6 +388,12 @@ def build_gridded_psf_for_frame(
     extract_size = int(
         getattr(epsf_params, "extract_size", None) or epsf_params.psf_size
     )
+    smoothing_kernel = str(getattr(epsf_params, "epsf_smoothing_kernel", "quadratic"))
+    builder_fit_shape = int(getattr(epsf_params, "epsf_builder_fit_shape", 5))
+    recentering_boxsize = int(getattr(epsf_params, "epsf_recentering_boxsize", 3))
+    star_box_radius = int(getattr(epsf_params, "epsf_star_box_radius", 7))
+    use_section_mask = bool(getattr(epsf_params, "epsf_use_section_mask", True))
+    stamp_border_crop = int(getattr(epsf_params, "epsf_stamp_border_crop", 0))
     # experiment B section edge margin: extract_size // 2 + 2
     star_margin = float(extract_size) / 2.0 + 2.0
 
@@ -367,7 +421,9 @@ def build_gridded_psf_for_frame(
             sec_stars = _stars_in_section(
                 gaia_df, x_min, x_max, y_min, y_max, margin=star_margin
             )
+            section_mask = None
             if mask_2d is not None:
+                section_mask = np.asarray(mask_2d[y_min:y_max, x_min:x_max], dtype=bool)
                 sec_stars = _filter_stars_off_mask(sec_stars, mask_2d, ny=ny, nx=nx)
             if len(sec_stars) < min_stars:
                 epsf_grid[(i, j)] = "too_few"
@@ -384,7 +440,12 @@ def build_gridded_psf_for_frame(
                 oversampling=oversampling,
                 maxiters=maxiters,
                 recentering_maxiters=recentering_maxiters,
-                use_mask=False,
+                smoothing_kernel=smoothing_kernel,
+                builder_fit_shape=builder_fit_shape,
+                recentering_boxsize=recentering_boxsize,
+                section_mask=section_mask,
+                use_mask=use_section_mask and section_mask is not None,
+                star_box_radius=star_box_radius,
             )
             if stamp is None:
                 epsf_grid[(i, j)] = "fit_failed"
@@ -406,6 +467,16 @@ def build_gridded_psf_for_frame(
                 psf_list.append(result)
             else:
                 psf_list.append(fallback)
+
+    if stamp_border_crop > 0:
+        cropped: list[np.ndarray] = []
+        for arr in psf_list:
+            bc = int(stamp_border_crop)
+            if bc * 2 >= arr.shape[0] or bc * 2 >= arr.shape[1]:
+                cropped.append(arr)
+            else:
+                cropped.append(arr[bc:-bc, bc:-bc])
+        psf_list = cropped
 
     stack = np.array(psf_list, dtype=np.float64)
     meta = {"grid_xypos": grid_xypos, "oversampling": oversampling}
@@ -542,6 +613,29 @@ def _diff_path_to_stem(diff_path: str) -> str:
     if parsed is not None:
         return parsed[0]
     return tess_product_id_from_ffi_path(stem) or stem
+
+
+def ffi_path_by_stem_from_wcs_table(wcs_table: pd.DataFrame | None) -> dict[str, str]:
+    """Map TESS product id → science FFI path from a frame manifest."""
+    if wcs_table is None or len(wcs_table) == 0:
+        return {}
+    if "path" in wcs_table.columns:
+        col = "path"
+    elif "filename" in wcs_table.columns:
+        col = "filename"
+    else:
+        return {}
+    out: dict[str, str] = {}
+    for _, row in wcs_table.iterrows():
+        ffi_path = str(row[col])
+        stem = (
+            str(row["product_id"])
+            if "product_id" in wcs_table.columns and pd.notna(row.get("product_id"))
+            else tess_product_id_from_ffi_path(ffi_path) or ""
+        )
+        if stem:
+            out[stem] = ffi_path
+    return out
 
 
 def _is_valid_gridded_epsf_npz(path: str) -> bool:
@@ -819,15 +913,34 @@ def _fit_one_frame_task(
         or workspace-local) when ``ok`` is True, else None.
     """
     ctx = _WORKER_CTX
-    gaia_df = ctx["gaia_df"]
+    gaia_base = ctx["gaia_df"]
     epsf_params = ctx["epsf_params"]
     output_dir = ctx["output_dir"]
 
     ffi_stem = _diff_path_to_stem(diff_path) if diff_path else f"frame_{frame_idx}"
+    product_id = tess_product_id_from_ffi_path(ffi_stem) or ffi_stem
+    ffi_path_by_stem = ctx.get("ffi_path_by_stem") or {}
+    ffi_path = ffi_path_by_stem.get(ffi_stem) or ffi_path_by_stem.get(product_id)
+    ffi_list_df = ctx.get("ffi_list_df")
+    science_bounds = ctx.get("science_bounds")
+    if ffi_path is None or ffi_list_df is None or science_bounds is None:
+        log.warning(
+            "  ePSF: missing ffi_list/science_bounds for %s", ffi_stem
+        )
+        return frame_idx, ffi_stem, False, None, None, False, None
+    from syndiff_pipeline.common.wcs_grouping import gaia_science_xy_for_frame
+
+    try:
+        gaia_df = gaia_science_xy_for_frame(
+            gaia_base, ffi_path, ffi_list_df, science_bounds
+        )
+    except Exception as exc:
+        log.warning("  ePSF: Gaia projection failed for %s: %s", ffi_stem, exc)
+        return frame_idx, ffi_stem, False, None, None, False, None
+
     mask_2d = _resolve_epsf_frame_mask(ctx, ffi_stem)
     ws_out_path = gridded_epsf_npz_path(output_dir, ffi_stem)
     epsf_label = str(ctx.get("epsf_label") or "epsf")
-    product_id = tess_product_id_from_ffi_path(ffi_stem) or ffi_stem
     data_root = ctx.get("data_root")
     output_store_name = ctx.get("output_store_name")
     from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
@@ -835,49 +948,25 @@ def _fit_one_frame_task(
     )
 
     sck = ctx.get("sck")
-    write_path, scc_primary = resolve_diff_write_path(
-        data_root=data_root,
-        sck=sck,
-        kind="epsf",
-        stage_label=epsf_label,
-        product_id=product_id,
-        label=epsf_label,
-        params=epsf_params,
-        workspace_path=ws_out_path,
-        output_store_name=output_store_name,
-        suffix=".npz",
-    )
+    if data_root and sck is not None:
+        write_path = resolve_diff_write_path(
+            data_root=data_root,
+            sck=sck,
+            kind="epsf",
+            stage_label=epsf_label,
+            ffi_stem=ffi_stem,
+            label=epsf_label,
+            params=epsf_params,
+            output_store_name=output_store_name,
+            suffix=".npz",
+        )
+        scc_primary = True
+    else:
+        raise RuntimeError(
+            "SCC-only gridded_epsf requires deployment data_root and sector/camera/ccd"
+        )
     if ctx.get("skip_existing", True):
         if _is_valid_gridded_epsf_npz(write_path):
-            return frame_idx, ffi_stem, True, None, None, True, str(write_path)
-        if (
-            sck is not None
-            and data_root
-            and ctx.get("workspace_root")
-            and epsf_params is not None
-        ):
-            try:
-                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                    try_materialize_workspace_artifact,
-                )
-
-                if try_materialize_workspace_artifact(
-                    data_root=str(data_root),
-                    sck=sck,
-                    kind="epsf",
-                    stage_label=epsf_label,
-                    product_id=product_id,
-                    label=epsf_label,
-                    params=epsf_params,
-                    workspace_dest=ws_out_path,
-                    workspace_root=ctx.get("workspace_root"),
-                    output_store_name=output_store_name,
-                    suffix=".npz",
-                ) and _is_valid_gridded_epsf_npz(ws_out_path):
-                    return frame_idx, ffi_stem, True, None, None, True, str(ws_out_path)
-            except Exception:
-                log.debug("SCC diff-store epsf materialize failed for %s", ffi_stem, exc_info=True)
-        if scc_primary and _is_valid_gridded_epsf_npz(write_path):
             return frame_idx, ffi_stem, True, None, None, True, str(write_path)
         if sck is not None and data_root:
             diff_image_fp = (ctx.get("diff_image_fps") or {}).get(product_id)
@@ -901,12 +990,9 @@ def _fit_one_frame_task(
                         "provenance resume check (epsf) failed for %s", ffi_stem, exc_info=True
                     )
             if prov_complete is True:
-                # Indexed-complete is not enough: require a locatable artifact.
                 hit_path: str | None = None
                 if _is_valid_gridded_epsf_npz(write_path):
                     hit_path = str(write_path)
-                elif _is_valid_gridded_epsf_npz(ws_out_path):
-                    hit_path = str(ws_out_path)
                 if hit_path is not None:
                     return frame_idx, ffi_stem, True, None, None, True, hit_path
                 # Indexed complete but no locatable file — fall through to process.
@@ -982,6 +1068,10 @@ def fit_gridded_epsf_all_frames(
     diffs_input: str | None = None,
     skip_existing: bool = True,
     workspace_root: str | None = None,
+    ffi_list_df: pd.DataFrame | None = None,
+    science_bounds: dict | None = None,
+    ffi_path_by_stem: dict[str, str] | None = None,
+    wcs_table: pd.DataFrame | None = None,
 ) -> tuple[np.ndarray, list[tuple[float, float]], list[str], list[bool]]:
     """
     Fit gridded ePSF on every difference image (thread-parallel over frames).
@@ -1015,6 +1105,8 @@ def fit_gridded_epsf_all_frames(
 
     gaia_df = prepare_gaia_for_gridded_epsf(gaia_df, epsf_params)
     os.makedirs(output_dir, exist_ok=True)
+    if ffi_path_by_stem is None and wcs_table is not None:
+        ffi_path_by_stem = ffi_path_by_stem_from_wcs_table(wcs_table)
 
     track_progress = epsf_label is not None
     cli_progress_path = (
@@ -1092,6 +1184,9 @@ def fit_gridded_epsf_all_frames(
         mask_catalog,
         btjd_by_stem or {},
         diff_image_fps,
+        ffi_list_df,
+        science_bounds,
+        ffi_path_by_stem or {},
     )
     results: list[tuple] = []
     if n_workers <= 1 or n_frames <= 1:
