@@ -9,9 +9,12 @@ import json
 import logging
 import os
 import re
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import numpy as np
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 log = logging.getLogger(__name__)
 
@@ -28,15 +31,7 @@ def gridded_epsf_frame_plot_path(
     """PNG path for one frame's gridded ePSF tile montage."""
     return os.path.join(
         plot_dir,
-        f"epsf_{_safe_plot_token(epsf_label)}_{_safe_plot_token(ffi_stem)}.png",
-    )
-
-
-def gridded_epsf_group_plot_path(plot_dir: str, epsf_label: str, group_id: int) -> str:
-    """PNG path for a template-group median gridded ePSF."""
-    return os.path.join(
-        plot_dir,
-        f"epsf_{_safe_plot_token(epsf_label)}_group_{int(group_id)}.png",
+        f"{_safe_plot_token(epsf_label)}_{_safe_plot_token(ffi_stem)}.png",
     )
 
 
@@ -61,19 +56,90 @@ def _normalize_stamp(stamp: np.ndarray) -> np.ndarray:
     return out
 
 
+def _btjd_for_stem(stem: str, btjd_by_stem: dict[str, float]) -> float:
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        tess_product_id_from_ffi_path,
+    )
+
+    t = btjd_by_stem.get(stem)
+    if t is not None and np.isfinite(t):
+        return float(t)
+    product_id = tess_product_id_from_ffi_path(stem) or ""
+    if product_id:
+        t = btjd_by_stem.get(product_id)
+        if t is not None and np.isfinite(t):
+            return float(t)
+    return float("nan")
+
+
+def select_evenly_spaced_stems(
+    stems: list[str],
+    *,
+    wcs_table: "pd.DataFrame | None" = None,
+    max_frames: int = 10,
+) -> list[str]:
+    """Pick up to *max_frames* stems evenly spaced in BTJD (or sorted stem order)."""
+    if max_frames <= 0 or len(stems) <= max_frames:
+        return list(stems)
+
+    btjd_map: dict[str, float] = {}
+    if wcs_table is not None:
+        from syndiff_pipeline.difference_imaging.stages.epsf import (
+            btjd_by_stem_from_manifest,
+        )
+
+        btjd_map = btjd_by_stem_from_manifest(wcs_table)
+
+    if btjd_map:
+        ordered = sorted(stems, key=lambda s: (_btjd_for_stem(s, btjd_map), s))
+    else:
+        ordered = sorted(stems)
+
+    n = len(ordered)
+    pick_idx = np.linspace(0, n - 1, num=max_frames, dtype=int)
+    return [ordered[int(i)] for i in np.unique(pick_idx)]
+
+
+def spatial_tile_subplot_grid(
+    grid_xypos: np.ndarray,
+) -> tuple[int, int, list[tuple[int, int, int]]]:
+    """
+    Return ``(n_rows, n_cols, placements)`` for a spatial tile montage.
+
+    Each placement is ``(node_index, matplotlib_row, col)`` with the
+    bottom-left subplot at the lowest ``(x, y)`` and top-right at the highest.
+    """
+    grid_xypos = np.asarray(grid_xypos, dtype=np.float64)
+    n_grid = int(grid_xypos.shape[0])
+    xs = [float(grid_xypos[k, 0]) for k in range(n_grid)]
+    ys = [float(grid_xypos[k, 1]) for k in range(n_grid)]
+    unique_xs = sorted(set(xs))
+    unique_ys = sorted(set(ys))
+    n_rows = max(1, len(unique_ys))
+    n_cols = max(1, len(unique_xs))
+    x_rank = {x: i for i, x in enumerate(unique_xs)}
+    y_rank = {y: i for i, y in enumerate(unique_ys)}
+    placements: list[tuple[int, int, int]] = []
+    for k in range(n_grid):
+        col = x_rank[xs[k]]
+        row_from_bottom = y_rank[ys[k]]
+        mrow = n_rows - 1 - row_from_bottom
+        placements.append((k, mrow, col))
+    return n_rows, n_cols, placements
+
+
 def write_gridded_epsf_frame_plot(
     npz_path: str,
     png_path: str,
     *,
     dpi: int = 150,
     title: str = "",
-    crop_shape: tuple[int, int] | None = None,
 ) -> Optional[str]:
     """
     Plot the gridded ePSF tiles from one per-frame ``*_gridded_epsf.npz``.
 
-    Layout is a square grid of normalized stamp images with grid-node
-  positions annotated.
+    Tiles are laid out by crop-local position: bottom-left is lowest ``(x, y)``,
+    top-right is highest ``(x, y)``.
     """
     try:
         import matplotlib.pyplot as plt
@@ -91,15 +157,15 @@ def write_gridded_epsf_frame_plot(
     finally:
         z.close()
 
-    n_grid = stack.shape[0]
-    n_cols = int(np.ceil(np.sqrt(n_grid)))
-    n_rows = int(np.ceil(n_grid / n_cols))
+    n_rows, n_cols, placements = spatial_tile_subplot_grid(grid_xypos)
 
-    fig = plt.figure(figsize=(2.2 * n_cols + 1.5, 2.2 * n_rows + 1.8), layout="constrained")
-    gs = fig.add_gridspec(n_rows, n_cols + 1, width_ratios=[1.0] * n_cols + [1.1])
+    fig = plt.figure(
+        figsize=(2.2 * n_cols + 0.5, 2.2 * n_rows + 1.0),
+        layout="constrained",
+    )
+    gs = fig.add_gridspec(n_rows, n_cols)
 
-    for k in range(n_grid):
-        row, col = divmod(k, n_cols)
+    for k, row, col in placements:
         ax = fig.add_subplot(gs[row, col])
         stamp = _normalize_stamp(stack[k])
         ax.imshow(stamp, origin="lower", cmap="viridis", interpolation="nearest")
@@ -110,21 +176,6 @@ def write_gridded_epsf_frame_plot(
             ax.set_title(f"node {k}", fontsize=8)
         ax.set_xticks([])
         ax.set_yticks([])
-
-    ax_map = fig.add_subplot(gs[:, -1])
-    if crop_shape is not None:
-        ny, nx = crop_shape
-        ax_map.set_xlim(0, nx)
-        ax_map.set_ylim(0, ny)
-        ax_map.set_aspect("equal")
-        ax_map.invert_yaxis()
-    for k, (gx, gy) in enumerate(grid_xypos):
-        ax_map.plot(gx, gy, "o", ms=8, color=f"C{k % 10}")
-        ax_map.annotate(str(k), (gx, gy), xytext=(4, 4), textcoords="offset points", fontsize=8)
-    ax_map.set_title("grid nodes\n(crop-local px)", fontsize=9)
-    ax_map.set_xlabel("x")
-    ax_map.set_ylabel("y")
-    ax_map.grid(True, alpha=0.25)
 
     head = title or os.path.basename(npz_path)
     fig.suptitle(f"Gridded ePSF · {head} · oversample={oversampling}", fontsize=11)
@@ -142,13 +193,10 @@ def write_gridded_epsf_workspace_plots(
     *,
     epsf_label: str = "epsf_r1",
     dpi: int = 150,
-    max_frames: int = 3,
-    crop_shape: tuple[int, int] | None = None,
+    max_frames: int = 10,
+    wcs_table: "pd.DataFrame | None" = None,
 ) -> list[str]:
-    """
-    Write diagnostic PNGs for representative per-frame gridded ePSFs and any
-    group-level median cubes under ``group_epsf/``.
-    """
+    """Write diagnostic PNGs for representative per-frame gridded ePSFs."""
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
     written: list[str] = []
@@ -167,10 +215,11 @@ def write_gridded_epsf_workspace_plots(
         )
         return written
 
-    stems = sorted(index.keys())
-    if max_frames > 0 and len(stems) > max_frames:
-        pick_idx = np.linspace(0, len(stems) - 1, num=max_frames, dtype=int)
-        stems = [stems[i] for i in np.unique(pick_idx)]
+    stems = select_evenly_spaced_stems(
+        list(index.keys()),
+        wcs_table=wcs_table,
+        max_frames=max_frames,
+    )
 
     os.makedirs(plot_dir, exist_ok=True)
     for stem in stems:
@@ -185,30 +234,11 @@ def write_gridded_epsf_workspace_plots(
             png_path,
             dpi=dpi,
             title=stem,
-            crop_shape=crop_shape,
         )
         if out:
             written.append(out)
 
-    group_dir = os.path.join(epsf_workspace_dir, "group_epsf")
-    for npz_path in sorted(glob.glob(os.path.join(group_dir, "group_epsf_*.npz"))):
-        gid = int(
-            os.path.basename(npz_path)
-            .replace("group_epsf_", "")
-            .replace(".npz", "")
-        )
-        png_path = gridded_epsf_group_plot_path(plot_dir, epsf_label, gid)
-        out = write_gridded_epsf_frame_plot(
-            npz_path,
-            png_path,
-            dpi=dpi,
-            title=f"group {gid} median",
-            crop_shape=crop_shape,
-        )
-        if out:
-            written.append(out)
-
-    summary_path = os.path.join(plot_dir, f"epsf_{_safe_plot_token(epsf_label)}_index.json")
+    summary_path = os.path.join(plot_dir, f"{_safe_plot_token(epsf_label)}_index.json")
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(
             {

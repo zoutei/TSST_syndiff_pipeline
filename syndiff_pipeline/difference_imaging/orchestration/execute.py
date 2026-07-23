@@ -256,8 +256,37 @@ def _run_background_stage(
     return shared_mask, mask_catalog
 
 
+def _resolve_scc_pipeline_plots_dir(
+    cfg: SynDiffConfig,
+    *,
+    category: str,
+) -> str:
+    from syndiff_pipeline.common.scc_paths import scc_diff_pipeline_plots_dir
+
+    data_root = _infer_data_root(cfg)
+    if not data_root:
+        raise RuntimeError("SCC pipeline plots require data_root on config")
+    path = scc_diff_pipeline_plots_dir(
+        data_root,
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+        category,
+        store_name=_scc_store_name(cfg),
+    )
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
+
+
+def _resolve_scc_epsf_plots_dir(cfg: SynDiffConfig, epsf_label: str) -> str:
+    label = str(epsf_label).strip()
+    if not label:
+        raise ValueError("epsf plot directory requires a non-empty label")
+    return _resolve_scc_pipeline_plots_dir(cfg, category=label)
+
+
 def _pipeline_plots_root(cfg: SynDiffConfig) -> str:
-    """Workspace-tree path for diagnostic figures."""
+    """Legacy event workspace-tree path (astrometry and other per-target plots)."""
     from syndiff_pipeline.difference_imaging.support.paths import (
         normalize_workspace_run_id,
         pipeline_plots_root,
@@ -289,8 +318,10 @@ def _maybe_write_background_gif(
         return
     from syndiff_pipeline.difference_imaging.support import plot as plot_pipeline
 
-    plot_dir = _pipeline_plots_root(cfg)
-    os.makedirs(plot_dir, exist_ok=True)
+    plot_dir = _resolve_scc_pipeline_plots_dir(
+        cfg,
+        category="background",
+    )
     plot_pipeline.write_background_removal_animation(
         cube,
         wcs_table,
@@ -1009,7 +1040,10 @@ def run_config_pipeline(
 
             plots_dir = None
             if getattr(cfg, "pipeline_plots", False):
-                plots_dir = os.path.join(_pipeline_plots_root(cfg), "masks")
+                plots_dir = _resolve_scc_pipeline_plots_dir(
+                    cfg,
+                    category="masks",
+                )
 
             lane_root = _diff_lane_root_dir(cfg, ctx)
 
@@ -1364,16 +1398,15 @@ def run_config_pipeline(
                     write_gridded_epsf_workspace_plots,
                 )
 
-                crop_shape = None
-                if crop_bounds is not None and "shape" in crop_bounds:
-                    crop_shape = tuple(crop_bounds["shape"])
                 dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+                plot_dir = _resolve_scc_epsf_plots_dir(cfg, label_out)
                 write_gridded_epsf_workspace_plots(
                     ws_out,
-                    _pipeline_plots_root(cfg),
+                    plot_dir,
                     epsf_label=label_out,
                     dpi=dpi,
-                    crop_shape=crop_shape,
+                    max_frames=10,
+                    wcs_table=wcs_table,
                 )
 
         elif kind == "centroids":
