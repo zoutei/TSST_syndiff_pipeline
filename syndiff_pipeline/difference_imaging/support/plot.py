@@ -56,6 +56,35 @@ def _normalize_stamp(stamp: np.ndarray) -> np.ndarray:
     return out
 
 
+def _epsf_asinh_norm(stamps: np.ndarray) -> "matplotlib.colors.AsinhNorm":
+    """
+    AsinhNorm for peak-normalized ePSF tiles.
+
+    vmin is pinned at 0 (negative residuals are display noise). vmax is 1 after
+    per-tile peak normalization. linear_width sets the linear cutoff in the same
+    units: wings sit near ~0.001–0.01, so ~5× wing scatter is a good default.
+    """
+    from matplotlib.colors import AsinhNorm
+
+    norm_stamps = np.stack([_normalize_stamp(s) for s in stamps], axis=0)
+    finite = norm_stamps[np.isfinite(norm_stamps)]
+    if finite.size == 0:
+        return AsinhNorm(vmin=0.0, vmax=1.0, linear_width=0.01)
+
+    med = float(np.nanmedian(finite))
+    mad = float(np.nanmedian(np.abs(finite - med)))
+    if not np.isfinite(mad) or mad <= 0:
+        mad = float(np.nanstd(finite))
+    if not np.isfinite(mad) or mad <= 0:
+        mad = 0.01
+
+    linear_width = float(np.clip(5.0 * mad, 0.005, 0.05))
+    return AsinhNorm(vmin=0.0, vmax=1.0, linear_width=linear_width)
+
+
+_EPSF_COLORBAR_TICKS = (0.0, 0.005, 0.01, 0.05, 0.1, 0.3, 0.5, 1.0)
+
+
 def _btjd_for_stem(stem: str, btjd_by_stem: dict[str, float]) -> float:
     from syndiff_pipeline.difference_imaging.support.ffi_naming import (
         tess_product_id_from_ffi_path,
@@ -134,15 +163,18 @@ def write_gridded_epsf_frame_plot(
     *,
     dpi: int = 150,
     title: str = "",
+    cmap: str = "viridis",
 ) -> Optional[str]:
     """
     Plot the gridded ePSF tiles from one per-frame ``*_gridded_epsf.npz``.
 
     Tiles are laid out by crop-local position: bottom-left is lowest ``(x, y)``,
-    top-right is highest ``(x, y)``.
+    top-right is highest ``(x, y)``. Uses peak-normalized stamps with a shared
+    AsinhNorm colorbar so PSF wings remain visible across the montage.
     """
     try:
         import matplotlib.pyplot as plt
+        from matplotlib import cm
     except ImportError:
         log.warning(
             "pipeline_plots: matplotlib is not installed; skipping ePSF frame plot."
@@ -158,9 +190,10 @@ def write_gridded_epsf_frame_plot(
         z.close()
 
     n_rows, n_cols, placements = spatial_tile_subplot_grid(grid_xypos)
+    norm = _epsf_asinh_norm(stack)
 
     fig = plt.figure(
-        figsize=(2.2 * n_cols + 0.5, 2.2 * n_rows + 1.0),
+        figsize=(2.0 * n_cols + 1.2, 2.0 * n_rows + 1.0),
         layout="constrained",
     )
     gs = fig.add_gridspec(n_rows, n_cols)
@@ -168,7 +201,13 @@ def write_gridded_epsf_frame_plot(
     for k, row, col in placements:
         ax = fig.add_subplot(gs[row, col])
         stamp = _normalize_stamp(stack[k])
-        ax.imshow(stamp, origin="lower", cmap="viridis", interpolation="nearest")
+        ax.imshow(
+            stamp,
+            origin="lower",
+            cmap=cmap,
+            norm=norm,
+            interpolation="nearest",
+        )
         if k < len(grid_xypos):
             gx, gy = grid_xypos[k]
             ax.set_title(f"node {k}\n({gx:.0f}, {gy:.0f})", fontsize=8)
@@ -178,7 +217,27 @@ def write_gridded_epsf_frame_plot(
         ax.set_yticks([])
 
     head = title or os.path.basename(npz_path)
-    fig.suptitle(f"Gridded ePSF · {head} · oversample={oversampling}", fontsize=11)
+    lw = getattr(norm, "linear_width", None)
+    fig.suptitle(
+        f"Gridded ePSF · {head} · oversample={oversampling} · "
+        f"Asinh linear_width={lw:.4g}",
+        fontsize=11,
+    )
+
+    mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+    mappable.set_array([])
+    cbar = fig.colorbar(
+        mappable,
+        ax=fig.axes,
+        location="right",
+        shrink=0.85,
+        pad=0.02,
+        fraction=0.035,
+    )
+    cbar.set_label("peak-normalized flux")
+    cbar.set_ticks(list(_EPSF_COLORBAR_TICKS))
+    cbar.set_ticklabels([f"{v:g}" for v in _EPSF_COLORBAR_TICKS])
+    cbar.minorticks_off()
 
     os.makedirs(os.path.dirname(os.path.abspath(png_path)) or ".", exist_ok=True)
     fig.savefig(png_path, dpi=dpi)
