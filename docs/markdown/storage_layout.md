@@ -145,12 +145,20 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       hp_d_kernels/
       epsf_r1/
       centroids_r1/
-      debug_plots/
+      debug_plots/                 # diff-stage diagnostics (default lane: diff/debug_plots/)
+        epsf_r1/                   # ePSF montage PNGs ({label}_{ffi_stem}.png)
+        masks/                     # shared_mask QA when pipeline_plots: true
+        background/                # background GIFs when pipeline_plots: true
+    debug_plots/                   # template-pipeline diagnostics only
+      wcs_drift_linear_template.png  # written by linear downsample / remap drift_source:point (ref-FFI-center point-drift groups; not by mapping)
+      mapping_projection_overlay.png
+      skycell_shift_*_debug.png
     bookkeeping/diff_{NAME}/oversampling_{N}/
       frames.csv
       diff_job.json
     legacy/                        # archived pre-cutover artifacts
     bookkeeping/                   # per-stage run_meta (mapping reference FFI, diff handoff, …)
+      mapping/                     # run_meta.json = reference FFI path only (no drift PNG)
       diff/
         frames.csv
         diff_job.json

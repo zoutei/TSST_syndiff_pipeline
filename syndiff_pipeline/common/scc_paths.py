@@ -87,6 +87,7 @@ __all__ = [
     "scc_convolved_removed_stars_csv",
     "scc_convolved_zarr",
     "scc_debug_plots_dir",
+    "scc_diff_pipeline_plots_dir",
     "scc_diff_dir",
     "scc_diff_label_dir",
     "scc_diff_workspace_dir",
@@ -333,6 +334,31 @@ def scc_debug_plots_dir(
 ) -> Path:
     """SCC-scoped template-pipeline diagnostics directory (``debug_plots/``)."""
     return scc_root(data_root, sector, camera, ccd) / DEBUG_PLOTS_SUBDIR
+
+
+def scc_diff_pipeline_plots_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    category: str,
+    *,
+    store_name: str | None = None,
+) -> Path:
+    """Diff-lane diagnostic subdirectory under ``diff/debug_plots/{category}/``.
+
+    Examples: ``masks``, ``background``, ePSF labels (``epsf_r1``). Named lanes
+    use ``diff_{store_name}/debug_plots/{category}/``. Template-pipeline plots
+    stay under :func:`scc_debug_plots_dir`.
+    """
+    cat = str(category).strip()
+    if not cat:
+        raise ValueError("category must be non-empty")
+    return (
+        scc_diff_dir(data_root, sector, camera, ccd, store_name=store_name)
+        / DEBUG_PLOTS_SUBDIR
+        / cat
+    )
 
 
 def scc_legacy_dir(

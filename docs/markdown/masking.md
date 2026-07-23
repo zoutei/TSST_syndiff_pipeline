@@ -99,7 +99,7 @@ Two freeze locations (do not confuse them):
 | TNS public CSV | `{data_root}/catalogs/tns/tns_public_objects.csv` |
 | `pixel_intervals.parquet` + `asteroid_ffi_times.parquet` | `{data_root}/catalogs/sector_*/camera_*/ccd_*/asteroids/` |
 | `TESS_orbit_times.csv` | `{data_root}/catalogs/` (auto-downloaded from MIT) |
-| QA PNGs | `{pipeline_plots}/masks/` when `pipeline_plots: true` — bit planes, ePSF/Hotpants predicates, plus TSST-style `tns_locations.png` and `asteroid_tracks_by_epoch.png` |
+| QA PNGs | `{scc}/diff/debug_plots/masks/` when `pipeline_plots: true` — bit planes, ePSF/Hotpants predicates, plus TSST-style `tns_locations.png` and `asteroid_tracks_by_epoch.png` |
 
 ## `MaskCatalog.mask_at`
 
@@ -166,4 +166,4 @@ pip install git+https://github.com/bengebre/sbident
 1. One empirical `syndiff diff run` with defaults (TNS+asteroids on).
 2. Compare Hotpants residuals vs a tessreduce rollback (`style: tessreduce`).
 3. Confirm ePSF keeps catalog stars (bits 1|2|32 ignored) and rejects straps/TNS/asteroids.
-4. Spot-check `debug_plots/masks/` including bits 64/128 on a known SCC.
+4. Spot-check `diff/debug_plots/masks/` including bits 64/128 on a known SCC.

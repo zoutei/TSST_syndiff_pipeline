@@ -16,6 +16,7 @@ from syndiff_pipeline.common.scc_paths import (
     provenance_db_path,
     provenance_spool_dir,
     scc_debug_plots_dir,
+    scc_diff_pipeline_plots_dir,
     scc_diff_label_dir,
     scc_diff_workspace_dir,
     scc_label,
@@ -127,6 +128,16 @@ class TestSccPaths(unittest.TestCase):
         self.assertEqual(
             scc_debug_plots_dir("/data", 20, 1, 1),
             Path("/data/s0020/c1/k1/debug_plots"),
+        )
+        self.assertEqual(
+            scc_diff_pipeline_plots_dir("/data", 20, 3, 3, "masks"),
+            Path("/data/s0020/c3/k3/diff/debug_plots/masks"),
+        )
+        self.assertEqual(
+            scc_diff_pipeline_plots_dir(
+                "/data", 20, 3, 3, "background", store_name="smoke"
+            ),
+            Path("/data/s0020/c3/k3/diff_smoke/debug_plots/background"),
         )
 
 
