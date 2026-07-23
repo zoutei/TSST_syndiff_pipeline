@@ -19,7 +19,11 @@ from syndiff_pipeline.common.download import (
     list_local_ffis,
     manifest_basename_from_local,
 )
-from syndiff_pipeline.common.scc_paths import scc_bookkeeping_stage_dir, scc_ffi_list_parquet
+from syndiff_pipeline.common.scc_paths import (
+    scc_bookkeeping_stage_dir,
+    scc_debug_plots_dir,
+    scc_ffi_list_parquet,
+)
 from syndiff_pipeline.common.wcs_header_cache import (
     ensure_scc_ffi_list,
     ffi_list_is_complete,
@@ -36,7 +40,48 @@ RUN_META_FILENAME = "run_meta.json"
 POINT_DRIFT_TABLE_BASENAME = "point_drift_table.csv"
 POINT_DRIFT_GROUPS_BASENAME = "point_drift_groups.csv"
 POINT_DRIFT_META_BASENAME = "point_drift_meta.json"
-POINT_DRIFT_PLOTS_SUBDIR = "plots"
+def scc_wcs_drift_debug_plot_path(resolved: ResolvedTargetConfig) -> Path:
+    """SCC ``debug_plots/wcs_drift_linear_template.png`` (written at ref-FFI selection)."""
+    t = resolved.target
+    return (
+        scc_debug_plots_dir(resolved.data_root, t.sector, t.camera, t.ccd)
+        / wcs_grouping.WCS_DRIFT_LINEAR_TEMPLATE_FILENAME
+    )
+
+
+def _screen_earth_moon_angles(resolved: ResolvedTargetConfig) -> bool:
+    mp = resolved.stages.mapping
+    wg = resolved.stages.wcs_grouping
+    return bool(mp.screen_earth_moon_angles or wg.screen_earth_moon_angles)
+
+
+def _bkg_vector_path(resolved: ResolvedTargetConfig) -> str | None:
+    mp = resolved.stages.mapping
+    wg = resolved.stages.wcs_grouping
+    path = (mp.bkg_vector_path or wg.bkg_vector_path or "").strip()
+    return path or None
+
+
+def _maybe_attach_earth_moon_angles(
+    wcs_table: pd.DataFrame,
+    resolved: ResolvedTargetConfig,
+) -> pd.DataFrame:
+    if not _screen_earth_moon_angles(resolved):
+        return wcs_table
+    bkg_path = _bkg_vector_path(resolved)
+    if not bkg_path:
+        log.warning(
+            "screen_earth_moon_angles enabled but bkg_vector_path unset; "
+            "skipping TESSVectors attach"
+        )
+        return wcs_table
+    t = resolved.target
+    return wcs_grouping.attach_tessvector_earth_moon_angles(
+        wcs_table,
+        sector=t.sector,
+        camera=t.camera,
+        tessvectors_data_path=bkg_path,
+    )
 
 
 def mapping_run_meta_path(resolved: ResolvedTargetConfig) -> Path:
@@ -92,6 +137,7 @@ def resolve_scc_reference_ffi(
     if explicit and not force_rerun:
         ref = _resolve_existing_ffi_path(resolved, explicit)
         if ref:
+            write_scc_wcs_drift_debug_plot(resolved, ref, force_rerun=False)
             return ref
 
     if not force_rerun:
@@ -112,6 +158,7 @@ def resolve_scc_reference_ffi(
                     _write_run_meta(meta_path, payload)
                 else:
                     log.info("Using cached SCC reference FFI from %s", meta_path)
+                write_scc_wcs_drift_debug_plot(resolved, resolved_ref, force_rerun=False)
                 return resolved_ref
 
     ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
@@ -160,20 +207,14 @@ def resolve_scc_reference_ffi(
             window_length=mp.wcs_drift_savgol_window,
             polyorder=mp.wcs_drift_savgol_polyorder,
         )
-        bkg_path = mp.bkg_vector_path
-        if bkg_path:
-            wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
-                wcs_table,
-                sector=t.sector,
-                camera=t.camera,
-                tessvectors_data_path=bkg_path,
-            )
+        wcs_table = _maybe_attach_earth_moon_angles(wcs_table, resolved)
         ref = wcs_grouping.choose_reference_ffi_path(
             wcs_table,
             earth_deg_min=float(mp.earth_deg_min),
             moon_deg_min=float(mp.moon_deg_min),
             max_smoothed_residual=float(mp.max_smoothed_residual),
             selection_mode=str(mp.reference_ffi_selection or "drift_arc_midpoint"),
+            screen_earth_moon_angles=_screen_earth_moon_angles(resolved),
         )
         selection_mode = str(mp.reference_ffi_selection or "drift_arc_midpoint").strip().lower()
         if selection_mode == "drift_arc_midpoint":
@@ -196,7 +237,79 @@ def resolve_scc_reference_ffi(
     }
     _write_run_meta(meta_path, payload)
     log.info("SCC reference FFI (%s): %s", selection_rule, ref_abs)
+    write_scc_wcs_drift_debug_plot(resolved, ref_abs, force_rerun=force_rerun)
     return ref_abs
+
+
+def write_scc_wcs_drift_debug_plot(
+    resolved: ResolvedTargetConfig,
+    ref_ffi_path: str,
+    *,
+    force_rerun: bool = False,
+) -> Path | None:
+    """
+    Write the WCS drift / template-group debug plot when the SCC reference FFI
+    is chosen (same figure as event-mode ``wcs_grouping``).
+    """
+    plot_path = scc_wcs_drift_debug_plot_path(resolved)
+    if plot_path.is_file() and not force_rerun:
+        return plot_path
+
+    t = resolved.target
+    mp = resolved.stages.mapping
+    wg = resolved.stages.wcs_grouping
+
+    ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
+    if not ffi_paths:
+        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
+        raise FileNotFoundError(
+            f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
+        )
+
+    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
+        ffi_list_df = ensure_scc_ffi_list(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            ffi_paths,
+            open_fits=wcs_grouping.open_fits_memmap,
+        )
+
+    anchor_ra, anchor_dec = median_crval_from_cache(ffi_list_df, ffi_paths)
+    wcs_table = wcs_grouping.build_wcs_table_from_cache(
+        ffi_list_df, ffi_paths, anchor_ra, anchor_dec
+    )
+    wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
+        wcs_table,
+        window_length=mp.wcs_drift_savgol_window,
+        polyorder=mp.wcs_drift_savgol_polyorder,
+    )
+    wcs_table = _maybe_attach_earth_moon_angles(wcs_table, resolved)
+    wcs_table, _chosen = wcs_grouping.finalize_wcs_table_with_reference_anchor(
+        wcs_table,
+        offset_threshold=float(wg.offset_threshold or 0.01),
+        ref_ffi_path=ref_ffi_path,
+        ref_earth_deg_min=float(mp.earth_deg_min),
+        ref_moon_deg_min=float(mp.moon_deg_min),
+        ref_max_smoothed_residual=float(mp.max_smoothed_residual),
+        screen_earth_moon_angles=_screen_earth_moon_angles(resolved),
+    )
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
+    wcs_grouping.plot_wcs_drift_and_template_assignment(
+        wcs_table,
+        str(plot_path),
+        ref_ffi_path=ref_ffi_path,
+        sector=t.sector,
+        camera=t.camera,
+        ccd=t.ccd,
+        target_name=t.target_name,
+        include_earth_moon_panel=_screen_earth_moon_angles(resolved),
+    )
+    log.info("SCC WCS drift debug plot: %s", plot_path)
+    return plot_path
 
 
 def _point_drift_meta_path(store_root: Path) -> Path:
@@ -209,14 +322,6 @@ def _point_drift_table_path(store_root: Path) -> Path:
 
 def _point_drift_groups_path(store_root: Path) -> Path:
     return store_root / POINT_DRIFT_GROUPS_BASENAME
-
-
-def _point_drift_debug_plot_path(store_root: Path) -> Path:
-    return (
-        store_root
-        / POINT_DRIFT_PLOTS_SUBDIR
-        / wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME
-    )
 
 
 def _point_drift_dict_from_table(wcs_table: pd.DataFrame) -> dict[str, tuple[float, float]]:
@@ -317,28 +422,11 @@ def resolve_scc_point_drift_table(
         window_length=mp.wcs_drift_savgol_window,
         polyorder=mp.wcs_drift_savgol_polyorder,
     )
-    bkg_path = mp.bkg_vector_path or wg.bkg_vector_path
-    if bkg_path:
-        wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
-            wcs_table,
-            sector=t.sector,
-            camera=t.camera,
-            tessvectors_data_path=bkg_path,
-        )
+    wcs_table = _maybe_attach_earth_moon_angles(wcs_table, resolved)
     wcs_table = wcs_grouping.reanchor_wcs_drift_to_reference(wcs_table, ref_ffi_path)
     offset_threshold = float(wg.offset_threshold or 0.01)
     wcs_table = wcs_grouping.assign_template_groups(wcs_table, offset_threshold)
     summary = wcs_grouping.summarize_template_groups(wcs_table)
-
-    plot_path = _point_drift_debug_plot_path(store)
-    wcs_grouping.plot_wcs_drift_and_template_assignment(
-        wcs_table,
-        str(plot_path),
-        ref_ffi_path=ref_ffi_path,
-        sector=t.sector,
-        camera=t.camera,
-        ccd=t.ccd,
-    )
 
     wcs_table.to_csv(table_path, index=False)
     summary.to_csv(_point_drift_groups_path(store), index=False)
@@ -350,15 +438,13 @@ def resolve_scc_point_drift_table(
         "anchor_dec_deg": float(anchor_dec),
         "offset_threshold": offset_threshold,
         "n_groups": int(len(summary)),
-        "plot_path": str(plot_path),
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
     _write_run_meta(meta_path, meta_payload)
     log.info(
-        "SCC point-drift table: %d frames, %d groups; plot %s",
+        "SCC point-drift table: %d frames, %d groups",
         len(wcs_table),
         len(summary),
-        plot_path,
     )
     target_drift = _target_drift_array_for_ffi_order(wcs_table, ffi_paths)
     return wcs_table, target_drift

@@ -355,17 +355,19 @@ class TestStageParamsFieldGeometry(unittest.TestCase):
         self.assertTrue(stages.downsample.apply_intra_skycell)
         self.assertFalse(stages.downsample.apply_inter_skycell)
 
-    def test_rejects_both_apply_skycell_false(self):
-        with self.assertRaises(ValueError) as ctx:
-            parse_stage_params(
-                {
-                    "downsample": {
-                        "apply_intra_skycell": False,
-                        "apply_inter_skycell": False,
-                    }
+    def test_allows_both_apply_skycell_false(self):
+        """Both false = pure per-skycell roll (L5 only), no Exact-cache consumption
+        at all -- valid for coarse/bootstrap drift_source="point" remap runs."""
+        stages = parse_stage_params(
+            {
+                "downsample": {
+                    "apply_intra_skycell": False,
+                    "apply_inter_skycell": False,
                 }
-            )
-        self.assertIn("apply_intra_skycell", str(ctx.exception))
+            }
+        )
+        self.assertFalse(stages.downsample.apply_intra_skycell)
+        self.assertFalse(stages.downsample.apply_inter_skycell)
 
 
 class TestVerifyDownsampleSkycellToggles(unittest.TestCase):

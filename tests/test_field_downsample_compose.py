@@ -546,6 +546,66 @@ def test_composite_key_index_skips_skycells_missing_from_master_map():
     assert list(index.keys()) == ["skycell.1.1"]
 
 
+def test_l5_skycell_batch_skips_missing_convolved_cell(monkeypatch, tmp_path: Path):
+    import syndiff_pipeline.template_creation.processing.field_downsample as fd
+    from syndiff_pipeline.template_creation.processing.field_abutting import (
+        abutting_undirected_pairs,
+    )
+
+    master, name_to_id = _tiny_master()
+    id_to_name = {int(v): k for k, v in name_to_id.items()}
+    neighbours = fd._neighbours_by_skycell_id(abutting_undirected_pairs(master))
+    store = tmp_path / "templates"
+    (store / "contribs").mkdir(parents=True)
+
+    regmap_calls: list[str] = []
+
+    def fake_read(skycell: str) -> np.ndarray:
+        regmap_calls.append(skycell)
+        return np.arange(12, dtype=np.int32).reshape(4, 3)
+
+    monkeypatch.setattr(fd, "_read_regmap_assignment_l5", fake_read)
+    monkeypatch.setattr(fd, "_load_ps1_skycell_for_l5", lambda _sc: None)
+
+    shifts = {"skycell.1.1": (1, 0)}
+    buckets = {(1, 0, ((20, 0, 1),)): [(0, 1, 0), (1, 1, 0)]}
+    fd._reset_l5_worker()
+    fd._init_l5_worker(
+        {
+            "store": str(store),
+            "rebuild_field_store": True,
+            "mapping_root": str(tmp_path),
+            "sector": 1,
+            "camera": 1,
+            "ccd": 1,
+            "oversampling_factor": 1,
+            "scratch_regmaps": {},
+            "zarr_path": str(tmp_path / "dummy.zarr"),
+            "name_to_id": name_to_id,
+            "id_to_name": id_to_name,
+            "master_map": master,
+            "pair_ids": abutting_undirected_pairs(master),
+            "neighbours_by_id": neighbours,
+            "group_shifts_by_gid": {0: shifts, 1: shifts},
+            "epoch_index": None,
+            "exact_cache_l4a_dir": str(tmp_path / "l4a"),
+            "exact_cache_l4b_dir": str(tmp_path / "l4b"),
+            "base_tess_shape": (4, 6),
+            "roi_bounds": (0, 0, 6, 4),
+            "ignore_mask": 0,
+            "intra_skycell_R": 1,
+        }
+    )
+    result = fd._l5_skycell_batch("skycell.1.1", buckets)
+    fd._reset_l5_worker()
+
+    assert regmap_calls == []
+    assert result["n_writes"] == 0
+    assert result["n_skips"] == 2
+    assert result["n_regmap_opens"] == 0
+    assert result["n_zarr_loads"] == 0
+
+
 def test_l5_skycell_batch_loads_regmap_and_zarr_once(monkeypatch, tmp_path: Path):
     import syndiff_pipeline.template_creation.processing.field_downsample as fd
     from syndiff_pipeline.template_creation.processing.field_abutting import (

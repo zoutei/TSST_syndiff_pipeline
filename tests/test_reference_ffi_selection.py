@@ -50,6 +50,7 @@ class TestChooseReferenceFfiPath(unittest.TestCase):
             earth_deg_min=45.0,
             moon_deg_min=25.0,
             max_smoothed_residual=0.05,
+            screen_earth_moon_angles=True,
         )
         # Rows 0 and 2 pass residual; distances to (0.2, 0): 0.04 and 0.04 — first wins.
         self.assertEqual(chosen, "/ffi/a.fits")
@@ -64,6 +65,7 @@ class TestChooseReferenceFfiPath(unittest.TestCase):
             earth_deg_min=45.0,
             moon_deg_min=25.0,
             max_smoothed_residual=0.05,
+            screen_earth_moon_angles=True,
         )
         # Only row 1 passes angles; median dx=0.2 → row b is sole angle-qualified candidate.
         self.assertEqual(chosen, "/ffi/b.fits")
@@ -222,6 +224,7 @@ class TestDriftPlot(unittest.TestCase):
                 camera=3,
                 ccd=3,
                 target_name="2020ut",
+                include_earth_moon_panel=True,
             )
             self.assertEqual(r, outp)
             self.assertTrue(os.path.isfile(outp))
