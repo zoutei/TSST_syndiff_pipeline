@@ -27,6 +27,7 @@ Code lives in [`syndiff_pipeline/difference_imaging/masking/`](../../syndiff_pip
 | `asteroids.py` | SCC intervals load/generate + bit 128 |
 | `asteroid_discover.py` | `sbident` discover + MIT orbit-times auto-download |
 | `catalog.py` | `MaskCatalog.mask_at` |
+| `ffi_mask.py` | Resolve per-FFI temporal mask FITS products when written |
 | `api.py` | `generate_shared_mask_catalog` entry point |
 
 [`difference_imaging/stages/masking.py`](../../syndiff_pipeline/difference_imaging/stages/masking.py)

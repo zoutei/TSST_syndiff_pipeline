@@ -8,89 +8,70 @@ description: Architecture, data flow, artifact paths, and invariants of the synd
 ## Stage DAG and where the code lives
 
 ```
-tess_ffi_download → wcs_grouping → mapping → ps1_download → ps1_process → downsample → diff
-   (network)          (local)     (Condor)    (network)      (Condor)     (cpu)      (Condor)
+tess_ffi_download → mapping → ps1_download → ps1_process → remap → downsample → diff
+   (network)         (Condor)   (network)      (Condor)    (Condor)   (cpu/Condor) (Condor)
+                         ↘ stream skips ps1_download; linear skips remap
 
-completed template + diff artifacts ──verify──→ star
-                                                (Condor; separate star_targets.csv)
+completed diff lane ──verify──→ photometry   (Condor; event targets.csv)
+completed template + diff ──verify──→ star   (Condor; star_targets.csv)
 ```
 
-The composed stage registry has eight stages. The first seven form the normal
-template+diff DAG; `star` is an independent branch whose prerequisites are
-verified from an existing event workspace.
+`wcs_grouping` is a **config block** (linear drift), not a scheduler stage.
+The composed registry has **nine** stages (six template + `diff` + `photometry` + `star`).
 
 | Stage | Module | Deep-dive doc |
 |-------|--------|---------------|
 | `tess_ffi_download` | `common/download.py` | `docs/markdown/stages/tess_ffi_download.md` |
-| `wcs_grouping` | `common/wcs_grouping.py` + `template_creation/orchestration/handoff.py` | `docs/markdown/stages/wcs_grouping.md` |
-| `mapping` (PanCAKES + Gaia download) | `template_creation/processing/pancakes.py` | `docs/markdown/stages/mapping_pancakes.md` |
-| `ps1_download` | `template_creation/processing/ps1_download.py` | `docs/markdown/stages/README.md` |
+| `mapping` (PanCAKES + Gaia) | `template_creation/processing/pancakes.py` | `docs/markdown/stages/mapping_pancakes.md` |
+| `ps1_download` | `template_creation/processing/ps1_download.py` | `docs/markdown/stages/ps1_download.md` |
 | `ps1_process` | `template_creation/processing/ps1_process.py`, `band_utils.py` | `docs/markdown/stages/ps1_process_technical.md` |
-| `downsample` | `template_creation/processing/downsample.py` | `docs/markdown/stages/downsample_technical.md` |
-| `diff` (internal sub-pipeline) | `difference_imaging/orchestration/execute.py` + `difference_imaging/stages/` + `difference_imaging/masking/` | `docs/markdown/stages/diff_pipeline.md`, `docs/markdown/masking.md` |
-| `star` (host-star light curves) | `star/runner.py`, `star/epsf_runner.py`, `star/orchestration/stages.py` | `docs/markdown/star_lightcurves.md`, `docs/markdown/stages/star_pipeline.md` |
+| `remap` | `template_creation/processing/field_remap.py` | `docs/markdown/field_geometry.md` |
+| `downsample` | `field_downsample.py` / `linear_downsample.py` | `docs/markdown/stages/downsample_technical.md`, `field_geometry.md` |
+| `diff` | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` | `docs/markdown/stages/diff_pipeline.md`, `masking.md` |
+| `photometry` | `photometry/runner.py`, `photometry/orchestration/stages.py` | `docs/markdown/photometry.md`, `stages/photometry_pipeline.md` |
+| `star` | `star/runner.py`, `star/epsf_runner.py`, `star/orchestration/stages.py` | `docs/markdown/star_lightcurves.md`, `stages/star_pipeline.md` |
 
 Mask library code lives under **`difference_imaging/masking/`** (consumers: diff stages + star ePSF). Template creation does **not** import it.
 
-Orchestration (scheduler, SQLite state, Condor, verify): `docs/markdown/template_pipeline.md`, `docs/markdown/template_runner_architecture.md`. Read the relevant deep-dive doc before editing a stage.
+Orchestration: `docs/markdown/template_pipeline.md`, `docs/markdown/template_runner_architecture.md`, `docs/markdown/syndiff_cli.md`.
 
 ## Site config layout (`config/`)
 
 | File | Git | Owns |
 |------|-----|------|
 | `pipeline.yaml` | committed | Template policy: stages, pools, notifications |
-| `diff_config.yaml` | committed | Diff sub-pipeline: `defaults` (crop/n_jobs/plots) + `pipeline:` stage knobs. **Omit stage keys that match dataclass defaults.** |
-| `mask_settings.yaml` | optional | Mask geometry/policy (empirical/tessreduce, maglims, TNS, asteroids). Sibling of `diff_config`; **not** embedded in `diff_config`. Bare `- kind: shared_mask` uses site file or packaged defaults. |
+| `diff_config.yaml` | committed | Diff sub-pipeline. **Default = shared_mask + hotpants.** |
+| `mask_settings.yaml` | optional | Mask geometry/policy. Sibling of `diff_config`. |
+| `photometry_config.yaml` | optional | Event photometry (`syndiff photometry`) |
 | `star_config.yaml` | committed | Star-branch policy |
-| `deployment.yaml` | **gitignored** | `workspace_root`, `data_root`, Gaia + Discord credentials (copy from `deployment.yaml.example`) |
+| `deployment.yaml` | **gitignored** | `workspace_root`, `data_root`, credentials |
 
 Targets are always passed on the CLI (`--targets` / `--star-targets`), never embedded in config.
 
-Frozen copies: each run freezes effective template config under `runs/{run_id}/`; each diff workspace freezes a **slim** `ws/diff_config.yaml` (`cfg_to_snapshot_dict` — empties/defaults/bundled straps|BSC paths omitted) plus `ws/mask_settings.yaml` after `shared_mask`. Check the frozen copies when debugging, not only site YAML defaults.
+## Artifact map (SCC layout)
 
-Deep dive: `docs/markdown/stages/diff_pipeline.md` §0 (config ownership), `docs/markdown/masking.md`.
-
-## Artifact map
-
-Two roots: `data_root` (SCC-wide, shared across targets) and `workspace_root` (per-target events). See `docs/markdown/storage_layout.md`.
+See `docs/markdown/storage_layout.md`. Canonical trees:
 
 ```
-{data_root}/
-  tess_ffi/s{SSSS}/cam{C}_ccd{K}/*.fits(.gz)                      ← FFIs
-  skycell_pixel_mapping/sector_*/camera_*/ccd_*/
-      [oversampling_{N}/]                                         ← present when oversampling_factor > 1
-      tess_s*_master_skycells_list.csv                            ← mapping verify gate
-      tess_s*_master_pixels2skycells.fits.gz                      ← TESS WCS + skycell-ID map
-      tess_s*_skycell.{proj}.{cell}.fits.gz                       ← per-skycell PS1→TESS reg maps
-  catalogs/sector_*/camera_*/ccd_*/gaia_catalog_s*.csv            ← Gaia DR3 (downloaded in mapping stage)
-  ps1_skycells_zarr/ps1_skycells.zarr                             ← raw PS1 bands (shared, file-locked)
-  ps1_skycells.zarr                                               ← star cache default (same schema, different path)
-  convolved_results/sector_*_camera_*_ccd_*.zarr                  ← ps1_process output: flat {skycell}_data/_mask arrays
-  convolved_results/..._removed_stars.csv                         ← removed-star records
-  shifted_downsampled/sector*_camera*_ccd*[_roi]/syndiff_template_*_dx*_dy*.fits.gz
+{data_root}/s{SSSS}/c{C}/k{K}/
+  ffi/
+  mapping/oversampling_{N}/
+  remap/oversampling_{N}/          # field mode
+  templates/oversampling_{N}/      # downsample product path (stage name: downsample)
+  convolved.zarr
+  diff_{lane}/                     # SCC-primary Hotpants / ePSF / kernels
+  bookkeeping/diff/{frames.csv,diff_job.json}
 
-{workspace_root}/events/{target_label}/
-  cluster_template_job.json          ← reference FFI, groups (group_dx/dy), crop bounds
-  syndiff_ffi_frames.csv             ← per-FFI manifest: drift, btjd, group_id, hotpants status
-  ps1_removed_stars.csv              ← removed stars projected to crop-local x,y
-  ws/templates → (symlink to shifted_downsampled dir)
-  ws/{label}/tess{product_id}_{label}.fits.gz                     ← diff sub-stage outputs (hp_d, ks_d, …)
-  ws/{diffs_m}/phot_calib.csv, kernel_reconstruction.npz          ← hotpants meta
-  ws/{diffs_label}_kernels/{product_id}_kernel.npz                ← optional per-frame Hotpants kernels
-  ws/kernel_fit/kernel_r2.npz                                     ← reusable target-level kernel
-  {baseline_ws}/{epsf_label}/{*_gridded_epsf.npz, gridded_epsf_index.json}
-                                                                    ← reusable/built-on-demand star gepsf models
-  ws/{lc_label}/lightcurve_{method}[_{extra}].csv                 ← light curves
-  ws/debug_plots/                                                 ← WCS/diff diagnostics
-  {baseline_ws}/host_star/
-      batch_manifest.csv
-      {gaia_source_id}/{identifier.json, mini_templates/, diff_stamps/,
-                        lightcurve_{method}_gaia_{id}.csv, plots/}
+{data_root}/ps1_skycells_zarr/ps1_skycells.zarr
+
+{workspace_root}/events/{event}/s{SSSS}_c{C}_k{K}/
+  phot_{photometry_run_id}/        # astrometry + forced LCs
+  host_star/                       # star branch (or under baseline ws)
 ```
 
 The star cache defaults to `{data_root}/ps1_skycells.zarr`, while
 `ps1_download` writes `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`.
-Set top-level `ps1_zarr_path` in `star_config.yaml` to reuse the latter.
+Set `ps1_zarr_path` in `star_config.yaml` to reuse the latter.
 
 ## Invariants that bite
 

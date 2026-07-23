@@ -14,7 +14,9 @@ Subpackages
 
    syndiff_pipeline.common
    syndiff_pipeline.difference_imaging
+   syndiff_pipeline.photometry
    syndiff_pipeline.resources
+   syndiff_pipeline.star
    syndiff_pipeline.template_creation
 
 Submodules
