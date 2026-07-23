@@ -102,9 +102,10 @@ Outputs land in `events/{label}/ws_{workspace_run_id}/` (not production `ws/`).
 ### `shared_mask` (`stages/masking.py` → `syndiff_pipeline.difference_imaging.masking`)
 
 Builds the shared bitmask and selects isolated Hotpants reference stars.
-**Default style is empirical** (see [masking.md](../masking.md)): T&lt;13 empirical
-circles/crosses (bits 1/2; Gaia ∪ BSC for crosses), 13≤T&lt;18 `faint_star_squares`
-(bit 32), straps/edges/PS1 (4/8/16), optional TNS (64) and per-cadence asteroids
+**Default style is empirical** (see [masking.md](../masking.md)): Gaia
+`tess_mag` &lt; `epsf_mag_lim` (7.5) + all BSC → bit 1 (crosses);
+`epsf_mag_lim` ≤ `tess_mag` &lt; `bright_maglim` (13) → bit 2 (circles);
+13≤T&lt;18 `faint_star_squares` (bit 32), straps/edges/PS1 (4/8/16), optional TNS (64) and per-cadence asteroids
 (128 via `MaskCatalog`). Rollback: site `mask_settings.yaml` with
 `shared.style: tessreduce` (bits 1/2/4/8/16 only).
 
@@ -177,7 +178,7 @@ Per-frame linear combination of workspace planes (or the virtual cropped `ffi` l
 
 ### `epsf` (`stages/epsf.py`, `stages/gridded_epsf.py`)
 
-Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction uses per-FFI `mask_at` and **ignores bits 1|2|32** (bright catalog / saturation crosses / faint squares) so Gaia ePSF stars are kept; any other set bit (4/8/16/64/128) rejects. See [masking.md](../masking.md).
+Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction uses per-FFI `mask_at` and **ignores bits 1|2|32** (very bright / mid-bright / faint squares) so Gaia ePSF stars are kept; any other set bit (4/8/16/64/128) rejects. See [masking.md](../masking.md).
 
 Primary outputs under `ws/{output}/`:
 

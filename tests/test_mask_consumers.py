@@ -1,4 +1,4 @@
-"""Consumer helpers: Hotpants mask (ignore bit 32) + strap source bits 1|32."""
+"""Consumer helpers: Hotpants mask (ignore bit 32) + strap source bits 1|2|32."""
 
 import numpy as np
 import pandas as pd
@@ -37,11 +37,11 @@ def test_hotpants_helper_catalog_full():
     assert not out[1, 1]
 
 
-def test_strap_uses_bright_and_faint():
+def test_strap_uses_catalog_tiers():
     m = np.array([1, 32, 2, 4], dtype=np.int16)
     s = strap_source_mask(m)
-    assert s.tolist() == [True, True, False, False]
-    assert bits.STRAP_SOURCE_BITS == (1 | 32)
+    assert s.tolist() == [True, True, True, False]
+    assert bits.STRAP_SOURCE_BITS == (1 | 2 | 32)
 
 
 def test_resume_loads_scc_asteroids(tmp_path):

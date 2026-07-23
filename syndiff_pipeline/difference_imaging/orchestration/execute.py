@@ -1058,6 +1058,7 @@ def run_config_pipeline(
             )
             mask_settings = apply_stage_overrides(
                 mask_settings,
+                epsf_mag_lim=legacy_mask.get("epsf_mag_lim"),
                 gaia_mag_bright=legacy_mask.get("gaia_mag_bright"),
                 strapsize=legacy_mask.get("strapsize"),
                 ps1_min_hit_count=legacy_mask.get("ps1_min_hit_count"),

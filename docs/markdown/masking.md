@@ -34,10 +34,10 @@ re-exports public names for backward compatibility.
 
 ## Bit layout
 
-| Value | Name | Geometry |
-|------:|------|----------|
-| 1 | `BRIGHT_CAT` | Empirical circles (T≥9) + cross body; T &lt; `bright_maglim` (13) |
-| 2 | `SAT_CROSS` | Cross arms/body only; T &lt; 9; Gaia ∪ BSC |
+| Value | Name | Magnitude rule |
+|------:|------|----------------|
+| 1 | `BRIGHT_CAT` | All **BSC** + Gaia `tess_mag` &lt; `epsf_mag_lim` (7.5); crosses |
+| 2 | `SAT_CROSS` | Gaia `epsf_mag_lim` ≤ `tess_mag` &lt; `bright_maglim` (13); circles |
 | 4 | `STRAP` | Strap columns |
 | 8 | `EDGE` | Detector dead zones |
 | 16 | `PS1` | Template COUNT &lt; threshold |
@@ -45,7 +45,7 @@ re-exports public names for backward compatibility.
 | 64 | `TNS` | Circles from `transient_fixed` (usually static) |
 | 128 | `ASTEROID` | Per-cadence only — never in static FITS |
 
-Catalog source is **Gaia** (+ BSC for crosses). Never `ps1_removed_stars`.
+Catalog source is **Gaia** (+ all **BSC** for bit 1). Never `ps1_removed_stars`.
 
 ## Settings
 
@@ -66,14 +66,14 @@ alone does **not** change an existing workspace until you remove/replace
 `{ws}/mask_settings.yaml` (or force-rerun `shared_mask`).
 
 Copy [`config/mask_settings.example.yaml`](../../config/mask_settings.example.yaml)
-to site `mask_settings.yaml` when you want non-default maglims / style / TNS /
-asteroids.
+to site `mask_settings.yaml` when you want non-default maglims (`epsf_mag_lim`,
+`bright_maglim`, `faint_maglim`) / style / TNS / asteroids.
 
 `tns.download_url` is omitted from the example — code default
 `DEFAULT_TNS_PUBLIC_ZIP_URL`.
 
 **Do not** put maglims / strapsize / PS1 thresholds in the `shared_mask` stage.
-Legacy stage keys `gaia_mag_bright` / `strapsize` / `ps1_min_hit_count` are still
+Legacy stage keys `epsf_mag_lim` / `gaia_mag_bright` / `strapsize` / `ps1_min_hit_count` are still
 accepted for BC and override the corresponding settings fields **only when
 explicitly present** (they no longer clobber `mask_settings.yaml` via dataclass
 defaults). Prefer editing `mask_settings.yaml`.
@@ -133,8 +133,8 @@ write_sector_sample_mask_fits(cat, manifest, "out_dir/")
 |-------|-----------|
 | Hotpants | `hotpants_mask_bool(mask_at(..., which="full"))` — ignore bit 32 (`FAINT_CAT`) |
 | kernel_fit / kernel_subtract / spatial bkg | `full_mask_bool(mask_at(..., which="full"))` |
-| Strap QE / phot_mask | source bits `1\|32`; strap bit `4` |
-| ePSF / star ePSF | ignore all star stamps `1\|2\|32` (bright / crosses / faint squares); reject any other set bit via per-FFI `mask_at` |
+| Strap QE / phot_mask | source bits `1\|2\|32`; strap bit `4` |
+| ePSF / star ePSF | ignore all star stamps `1\|2\|32` (very bright / mid-bright / faint squares); reject any other set bit via per-FFI `mask_at` |
 
 Hotpants and ePSF loky workers install the catalog once and resolve BTJD→mask per frame (no static-mask FITS I/O per frame).
 On-disk artifact remains `shared_mask.fits.gz` (static layer only; bit 128 never written there).

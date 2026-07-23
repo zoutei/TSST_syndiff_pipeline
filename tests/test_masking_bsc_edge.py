@@ -54,7 +54,7 @@ class TestDetectorEdgeMask(unittest.TestCase):
 
 
 class TestBigSatBscMerge(unittest.TestCase):
-    def test_bsc_adds_bit2_beyond_gaia_crosses(self):
+    def test_bsc_adds_bit1_beyond_gaia_crosses(self):
         image = np.zeros((100, 100), dtype=np.float64)
         gaia_df = pd.DataFrame({"x": [50.0], "y": [50.0], "mag": [10.0]})
         bsc_df = pd.DataFrame({"x": [20.0], "y": [20.0], "vmag": [5.0]})
@@ -73,10 +73,10 @@ class TestBigSatBscMerge(unittest.TestCase):
             strapsize=0,
             bsc_df=bsc_df,
         )
-        self.assertGreater((mask_both & 2).sum(), (mask_gaia & 2).sum())
-        self.assertTrue(mask_both[20, 20] & 2)
+        self.assertGreater((mask_both & 1).sum(), (mask_gaia & 1).sum())
+        self.assertTrue(mask_both[20, 20] & 1)
 
-    def test_gaia_bit1_unchanged_when_bsc_added(self):
+    def test_gaia_bit2_unchanged_when_bsc_added(self):
         image = np.zeros((100, 100), dtype=np.float64)
         gaia_df = pd.DataFrame({"x": [50.0], "y": [50.0], "mag": [12.0]})
         mask_gaia = masking.Cat_mask(
@@ -95,7 +95,7 @@ class TestBigSatBscMerge(unittest.TestCase):
             strapsize=0,
             bsc_df=bsc_df,
         )
-        self.assertEqual((mask_gaia & 1).sum(), (mask_both & 1).sum())
+        self.assertEqual((mask_gaia & 2).sum(), (mask_both & 2).sum())
 
 
 class TestBscFootprintFilter(unittest.TestCase):

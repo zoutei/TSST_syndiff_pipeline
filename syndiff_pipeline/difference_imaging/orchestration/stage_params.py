@@ -328,7 +328,7 @@ class SharedMaskParams:
 
 
 _LEGACY_MASK_STAGE_KEYS = frozenset(
-    {"gaia_mag_bright", "strapsize", "ps1_min_hit_count"}
+    {"epsf_mag_lim", "gaia_mag_bright", "strapsize", "ps1_min_hit_count"}
 )
 
 

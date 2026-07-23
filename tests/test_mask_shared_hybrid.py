@@ -36,12 +36,12 @@ def test_hybrid_stamp_table():
         settings=_settings(),
         straps_csv="/nonexistent/straps.csv",
     )
-    # mag 11 → bit 1
-    assert mask[20, 20] & bits.BRIGHT_CAT
-    assert not (mask[20, 20] & bits.SAT_CROSS)
-    # mag 6 → 1|2
+    # mag 11 → bit 2 (mid bright)
+    assert mask[20, 20] & bits.SAT_CROSS
+    assert not (mask[20, 20] & bits.BRIGHT_CAT)
+    # mag 6 → bit 1 only (very bright)
     assert mask[40, 40] & bits.BRIGHT_CAT
-    assert mask[40, 40] & bits.SAT_CROSS
+    assert not (mask[40, 40] & bits.SAT_CROSS)
     # mag 15 → bit 32
     assert mask[60, 60] & bits.FAINT_CAT
     assert not (mask[60, 60] & bits.BRIGHT_CAT)
@@ -70,8 +70,8 @@ def test_bsc_cross_only():
         )
     finally:
         shared_mod._project_bsc = orig
-    assert mask[50, 50] & bits.SAT_CROSS
     assert mask[50, 50] & bits.BRIGHT_CAT
+    assert not (mask[50, 50] & bits.SAT_CROSS)
 
 
 def test_tessreduce_no_bit32():
@@ -95,8 +95,8 @@ def test_tessreduce_no_bit32():
         straps_csv="/nonexistent/straps.csv",
     )
     assert not (mask & bits.FAINT_CAT).any()
-    # tessreduce maglim includes 15 → bit 1 squares
-    assert (mask & bits.BRIGHT_CAT).any()
+    # tessreduce mid-bright (mag 15) → bit 2 squares
+    assert (mask & bits.SAT_CROSS).any()
 
 
 def test_make_shared_mask_writes_canonical_basename(tmp_path):
