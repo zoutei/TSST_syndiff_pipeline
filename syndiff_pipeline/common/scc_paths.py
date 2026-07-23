@@ -87,9 +87,8 @@ __all__ = [
     "scc_convolved_removed_stars_csv",
     "scc_convolved_zarr",
     "scc_debug_plots_dir",
-    "scc_diff_stage_dir",
-    "scc_diff_workspace_index_path",
     "scc_diff_dir",
+    "scc_diff_label_dir",
     "scc_diff_workspace_dir",
     "scc_diff_event_dir",
     "scc_diff_bookkeeping_dir",
@@ -379,6 +378,22 @@ def scc_diff_dir(
     return scc_root(data_root, sector, camera, ccd) / store_subdir(DIFF_SUBDIR, store_name)
 
 
+def scc_diff_label_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    store_name: str | None,
+    label: str,
+) -> Path:
+    """Per-label directory under a diff lane, e.g. ``diff_{lane}/hp_d/``."""
+    return (
+        scc_diff_dir(data_root, sector, camera, ccd, store_name=store_name)
+        / str(label).strip()
+    )
+
+
 def scc_diff_workspace_dir(
     data_root: str | Path,
     sector: int,
@@ -387,13 +402,15 @@ def scc_diff_workspace_dir(
     *,
     store_name: str | None,
     workspace_label: str,
-    recipe_fp: str,
 ) -> Path:
-    """Per-recipe workspace under a diff lane, e.g. ``diff_{lane}/hp_d/{recipe_fp}/``."""
-    return (
-        scc_diff_dir(data_root, sector, camera, ccd, store_name=store_name)
-        / str(workspace_label).strip()
-        / str(recipe_fp).strip()
+    """Alias for :func:`scc_diff_label_dir` (workspace label = lane subdirectory)."""
+    return scc_diff_label_dir(
+        data_root,
+        sector,
+        camera,
+        ccd,
+        store_name=store_name,
+        label=workspace_label,
     )
 
 
@@ -428,8 +445,7 @@ def scc_diff_bookkeeping_dir(
     Mirrors the ``templates``/``remap`` lane layout (:func:`scc_templates_dir`)
     so diff handoff bookkeeping partitions by ``(template_store_name,
     oversampling_factor)`` instead of a single flat directory. Always the
-    *write* path — see :func:`resolve_scc_diff_bookkeeping_dir` for read-side
-    legacy fallback.
+    *write* path — canonical bookkeeping location for diff handoff artifacts.
     """
     return (
         scc_bookkeeping_dir(data_root, sector, camera, ccd)
@@ -457,14 +473,8 @@ def resolve_scc_diff_bookkeeping_dir(
     oversampling_factor: int = 1,
     template_store_name: str | None = None,
 ) -> Path:
-    """Read-resolve one lane's bookkeeping dir, with legacy flat fallback.
-
-    For the default lane (``template_store_name=None``, ``oversampling_factor
-    == 1``), if the new lane path has no ``diff_job.json`` yet but the legacy
-    flat ``bookkeeping/diff/`` does, return the legacy path (read-only —
-    writers must always target :func:`scc_diff_bookkeeping_dir`).
-    """
-    new_dir = scc_diff_bookkeeping_dir(
+    """Return the canonical bookkeeping dir for one diff template lane."""
+    return scc_diff_bookkeeping_dir(
         data_root,
         sector,
         camera,
@@ -472,34 +482,6 @@ def resolve_scc_diff_bookkeeping_dir(
         oversampling_factor=oversampling_factor,
         template_store_name=template_store_name,
     )
-    os_n = max(1, int(oversampling_factor))
-    if normalize_store_name(template_store_name) is None and os_n == 1:
-        legacy_dir = legacy_scc_diff_bookkeeping_dir(data_root, sector, camera, ccd)
-        if not (new_dir / "diff_job.json").is_file() and (legacy_dir / "diff_job.json").is_file():
-            return legacy_dir
-    return new_dir
-
-
-def scc_diff_stage_dir(
-    data_root: str | Path,
-    sector: int,
-    camera: int,
-    ccd: int,
-    stage_label: str,
-    recipe_fp: str,
-) -> Path:
-    """SCC-scoped diff store directory for one finalized recipe (plan §14.2)."""
-    return (
-        scc_root(data_root, sector, camera, ccd)
-        / DIFF_SUBDIR
-        / str(stage_label).strip()
-        / str(recipe_fp).strip()
-    )
-
-
-def scc_diff_workspace_index_path(workspace_root: str | Path) -> Path:
-    """Per-workspace index of SCC-scoped diff artifacts (decision #16: new runs only)."""
-    return Path(workspace_root).expanduser() / "scc_diff_index.json"
 
 
 def scc_mapping_master_skycells_csv(

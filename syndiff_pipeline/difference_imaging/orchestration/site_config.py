@@ -27,7 +27,6 @@ from syndiff_pipeline.common.scc_paths import (
 from syndiff_pipeline.difference_imaging.orchestration.config import (
     SynDiffConfig,
     absolutize_config,
-    normalize_additional_forced_targets,
     resolve_config_path,
     save_config,
 )
@@ -474,9 +473,8 @@ def resolve_diff_config(
         if hasattr(cfg, key):
             setattr(cfg, key, val)
 
-    per_event = _per_event_force_targets_for_target(policy, target)
-    combined_forced = list(policy.additional_forced_targets) + per_event
-    cfg.additional_forced_targets = normalize_additional_forced_targets(combined_forced)
+    # Diff execute no longer consumes additional_forced_targets; photometry stage owns them.
+    cfg.additional_forced_targets = []
 
     return absolutize_config(cfg, site_dir)
 

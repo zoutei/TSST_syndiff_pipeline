@@ -539,6 +539,7 @@ def _prepare_run_directory(
     inline_scc_targets: list | None = None,
     source_diff_config_path: str | None = None,
     source_star_config_path: str | None = None,
+    source_photometry_config_path: str | None = None,
     workspace_run_id: str | None = None,
     skip_artifact_verify: bool = False,
 ) -> Path:
@@ -629,6 +630,24 @@ def _prepare_run_directory(
 
         rcfg = load_runner_config(config_path)
         rcfg.star_config_path = frozen_star
+        write_runner_config(rcfg, config_path)
+
+    if source_photometry_config_path:
+        meta["source_photometry_config_path"] = str(
+            Path(source_photometry_config_path).resolve()
+        )
+        phot_dest = run_directory / "photometry_config.yaml"
+        if not phot_dest.is_file():
+            shutil.copy2(source_photometry_config_path, phot_dest)
+        frozen_phot = str(phot_dest.resolve())
+        meta["photometry_config_path"] = frozen_phot
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            load_runner_config,
+            write_runner_config,
+        )
+
+        rcfg = load_runner_config(config_path)
+        rcfg.photometry_config_path = frozen_phot
         write_runner_config(rcfg, config_path)
 
     # Freeze site mask_settings.yaml when present (star_config pattern).

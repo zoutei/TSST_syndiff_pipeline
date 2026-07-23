@@ -14,6 +14,7 @@ from syndiff_pipeline.common.scc_paths import (
     normalize_store_name,
     resolve_scc_diff_bookkeeping_dir,
     scc_diff_dir,
+    scc_diff_label_dir,
 )
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
@@ -162,20 +163,24 @@ def _label_dir_has_fits(
     target: Target | None = None,
     output_store_name: str | None = None,
 ) -> bool:
-    """True when *label* exists under the SCC diff lane or event workspace."""
-    if data_root is not None and target is not None:
-        lane_root = scc_diff_dir(
-            data_root,
-            target.sector,
-            target.camera,
-            target.ccd,
-            store_name=output_store_name,
-        )
-        if lane_root.is_dir():
-            for recipe_dir in sorted(lane_root.glob(f"{label}/*/")):
-                if any(recipe_dir.glob("*.fits*")):
-                    return True
-    return (Path(baseline_workspace_dir) / label).is_dir()
+    """True when *label* exists under the flat SCC diff lane."""
+    del baseline_workspace_dir  # SCC-only; no event workspace fallback
+    if data_root is None or target is None or not label:
+        return False
+    lane_dir = scc_diff_label_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        store_name=output_store_name,
+        label=label,
+    )
+    if not lane_dir.is_dir():
+        return False
+    return any(
+        p.is_file() and p.name.endswith((".fits", ".fits.fz", ".fits.gz"))
+        for p in lane_dir.rglob("*")
+    )
 
 
 def _resolve_photutils_bkg_label(
@@ -191,7 +196,7 @@ def _resolve_photutils_bkg_label(
     Workspace label for per-frame photutils background (e.g. ``ks_b`` / ``ks_b_s``).
 
     Star stamps subtract this map from raw science. Hotpants ``hp_b`` is not used.
-    Prefers SCC ``diff_{lane}/`` when present, else the event workspace.
+    Prefers SCC ``diff_{lane}/`` when present.
     """
     ws_dir = Path(baseline_workspace_dir)
     config_paths = [
@@ -223,7 +228,7 @@ def _resolve_photutils_bkg_label(
 
     tried = ", ".join(repr(label) for label in candidates)
     raise ValueError(
-        f"No photutils background workspace found under SCC lane or {ws_dir} "
+        f"No photutils background workspace found under SCC lane "
         f"(tried {tried}). Run kernel_subtract (ks_b) and/or inherit ks_b_s "
         "before star run."
     )
@@ -383,21 +388,19 @@ def _resolve_baseline_label_dir(
     baseline_run_id: str,
     output_store_name: str | None,
 ) -> str:
-    """Prefer ``diff_{lane}/{label}/{recipe_fp}/``; fall back to event ``ws/{label}/``."""
+    """Return flat SCC ``diff_{lane}/{label}/`` directory for one pipeline label."""
+    del event_dir, baseline_run_id  # SCC-only reads
     if not label:
         return ""
-    lane_root = scc_diff_dir(
+    lane_dir = scc_diff_label_dir(
         data_root,
         target.sector,
         target.camera,
         target.ccd,
         store_name=output_store_name,
+        label=label,
     )
-    if lane_root.is_dir():
-        for recipe_dir in sorted(lane_root.glob(f"{label}/*/")):
-            if any(recipe_dir.glob("*.fits*")):
-                return str(recipe_dir.resolve())
-    return workspace_dir(event_dir, label, run_id=baseline_run_id)
+    return str(lane_dir.resolve())
 
 
 def load_event_context(
@@ -698,14 +701,21 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "re-run the baseline hotpants stage with write_kernel_solutions: true"
         )
 
+    lane_root = scc_diff_dir(
+        ctx.data_root,
+        ctx.sector,
+        ctx.camera,
+        ctx.ccd,
+        store_name=ctx.output_store_name,
+    )
     shared_mask = resolve_pipeline_artifact_path(
-        ctx.baseline_workspace_dir, SHARED_MASK_FITS_BASENAME
+        str(lane_root), SHARED_MASK_FITS_BASENAME
     )
     if shared_mask is None:
         missing.append(
-            f"shared_mask missing under {ctx.baseline_workspace_dir} "
-            f"(expected {SHARED_MASK_FITS_BASENAME} or legacy .fits.gz/.fits); "
-            "run the shared_mask diff stage for this event"
+            f"shared_mask missing under SCC lane {lane_root} "
+            f"(expected {SHARED_MASK_FITS_BASENAME}); "
+            "run the shared_mask diff stage for this SCC"
         )
 
     mapping_csv = Path(ctx.mapping_csv)

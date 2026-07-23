@@ -28,6 +28,7 @@ from syndiff_pipeline.template_creation.processing.field_remap import (
 DIFF_JOB_BASENAME = "diff_job.json"
 FRAMES_CSV_BASENAME = "frames.csv"
 FIELD_MODE_ASSEMBLY_BASENAME = "field_mode_assembly.json"
+LINEAR_MODE_ASSEMBLY_BASENAME = "linear_mode_assembly.json"
 
 
 @dataclass(frozen=True)
@@ -168,6 +169,15 @@ def bootstrap_scc_diff(
     )
 
 
+def _template_store_geometry_mode(template_store: Path) -> str | None:
+    """``"field"`` / ``"linear"`` / ``None`` (neither sidecar present yet)."""
+    if (template_store / LINEAR_MODE_ASSEMBLY_BASENAME).is_file():
+        return "linear"
+    if (template_store / FIELD_MODE_ASSEMBLY_BASENAME).is_file():
+        return "field"
+    return None
+
+
 def _load_mapping_grid_from_template_store(template_store: Path) -> MappingGrid:
     from syndiff_pipeline.common.mapping_grid import MappingGridError
 
@@ -182,6 +192,142 @@ def _load_mapping_grid_from_template_store(template_store: Path) -> MappingGrid:
         f"template store {template_store} is v1/v2 field mode "
         f"(field_mode_assembly schema_version={schema}; need >=3 with mapping_grid). "
         "Rebuild mapping (MAPGRID>=2) and field downsample before scc_bootstrap."
+    )
+
+
+def bootstrap_scc_diff_linear(
+    *,
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    template_store_name: str | None,
+    output_store_name: str | None,
+    remap_store_name: str | None,
+    oversampling_factor: int = 1,
+    event_name: str | None = None,
+) -> SccDiffBootstrapResult:
+    """Assemble ``bookkeeping/diff/frames.csv`` and ``diff_job.json`` for linear-mode diff.
+
+    Mirrors :func:`bootstrap_scc_diff` but sources per-frame ``group_id`` from
+    the SCC point-drift table (``point_drift_table.csv``) instead of a
+    remap-produced ``group_id_per_frame.npy`` -- linear mode skips the remap
+    *stage* entirely (``SKIP_REASON_LINEAR_GEOMETRY``), so that file never
+    gets written.
+    """
+    from syndiff_pipeline.common.download import list_local_ffis, manifest_basename_from_local
+    from syndiff_pipeline.common.scc_paths import scc_ffi_dir
+    from syndiff_pipeline.common.wcs_header_cache import load_ffi_list
+
+    data_root = Path(data_root).expanduser()
+    os_factor = max(1, int(oversampling_factor))
+
+    template_store = scc_templates_dir(
+        data_root, sector, camera, ccd,
+        oversampling_factor=os_factor,
+        store_name=template_store_name,
+    )
+    sidecar = template_store / LINEAR_MODE_ASSEMBLY_BASENAME
+    if not sidecar.is_file():
+        raise FileNotFoundError(f"Missing linear mode sidecar: {sidecar}")
+    doc = json.loads(sidecar.read_text(encoding="utf-8"))
+    if int(doc.get("schema_version", 0)) < 3 or "mapping_grid" not in doc:
+        raise ValueError(
+            f"linear mode sidecar {sidecar} missing mapping_grid "
+            "(schema_version >= 3 required); rebuild linear downsample."
+        )
+    mapping_grid = MappingGrid.from_mapping_dict(doc)
+
+    point_drift_store = scc_remap_dir(
+        data_root, sector, camera, ccd,
+        oversampling_factor=os_factor, store_name="linear",
+    )
+    point_drift_table_path = point_drift_store / "point_drift_table.csv"
+    if not point_drift_table_path.is_file():
+        raise FileNotFoundError(f"Missing point-drift table: {point_drift_table_path}")
+    drift_table = pd.read_csv(point_drift_table_path)
+    if "group_id" not in drift_table.columns:
+        raise ValueError(f"{point_drift_table_path} missing group_id column")
+    name_col = "filename" if "filename" in drift_table.columns else (
+        "ffi_basename" if "ffi_basename" in drift_table.columns else None
+    )
+    if name_col is None:
+        raise ValueError(
+            f"{point_drift_table_path} missing a per-frame FFI name column "
+            "(expected filename or ffi_basename)"
+        )
+    if "group_dx" not in drift_table.columns or "group_dy" not in drift_table.columns:
+        raise ValueError(f"{point_drift_table_path} missing group_dx/group_dy columns")
+    group_id_by_name = dict(zip(drift_table[name_col].astype(str), drift_table["group_id"]))
+    group_dx_by_name = dict(zip(drift_table[name_col].astype(str), drift_table["group_dx"]))
+    group_dy_by_name = dict(zip(drift_table[name_col].astype(str), drift_table["group_dy"]))
+
+    ffi_dir = scc_ffi_dir(data_root, sector, camera, ccd)
+    paths = sorted(list_local_ffis(str(ffi_dir), sector, camera, ccd))
+    ffi_list_path = scc_ffi_list_parquet(data_root, sector, camera, ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path) if ffi_list_path.is_file() else None
+
+    rows: list[dict[str, Any]] = []
+    for p in paths:
+        logical = manifest_basename_from_local(p)
+        if logical not in group_id_by_name:
+            continue
+        row: dict[str, Any] = {
+            "path": str(p),
+            "ffi_basename": logical,
+            "group_id": int(group_id_by_name[logical]),
+            "group_dx": float(group_dx_by_name[logical]),
+            "group_dy": float(group_dy_by_name[logical]),
+        }
+        if ffi_list_df is not None and logical in ffi_list_df.index:
+            src = ffi_list_df.loc[logical]
+            for col in ("DATE-OBS", "BTJD", "wcs_ok"):
+                if col in src.index:
+                    row[col] = src[col]
+        rows.append(row)
+    frames_df = pd.DataFrame(rows)
+    if frames_df.empty:
+        raise ValueError(
+            f"No FFIs under {ffi_dir} matched point-drift table entries in {point_drift_table_path}"
+        )
+
+    crop_bounds = mapping_grid.science_ffi_bounds()
+    from syndiff_pipeline.common.coordinate_preflight import validate_coordinate_contract
+
+    validate_coordinate_contract(mapping_grid, crop_bounds)
+    bookkeeping_dir = scc_diff_bookkeeping_dir(
+        data_root, sector, camera, ccd,
+        oversampling_factor=os_factor, template_store_name=template_store_name,
+    )
+    bookkeeping_dir.mkdir(parents=True, exist_ok=True)
+    frames_csv_path = bookkeeping_dir / FRAMES_CSV_BASENAME
+    frames_df.to_csv(frames_csv_path, index=False)
+
+    diff_job = {
+        "schema_version": 2,
+        "sector": int(sector), "camera": int(camera), "ccd": int(ccd),
+        "geometry_mode": "linear",
+        "mapping_grid": mapping_grid.to_mapping_dict(),
+        "crop_bounds": crop_bounds,
+        "template_store_name": template_store_name,
+        "output_store_name": output_store_name,
+        "remap_store_name": remap_store_name,
+        "oversampling_factor": os_factor,
+        "event_name": event_name,
+    }
+    diff_job_path = bookkeeping_dir / DIFF_JOB_BASENAME
+    _atomic_write_json(diff_job_path, diff_job)
+
+    diff_store_root = scc_diff_dir(data_root, sector, camera, ccd, store_name=output_store_name)
+
+    return SccDiffBootstrapResult(
+        mapping_grid=mapping_grid,
+        crop_bounds=crop_bounds,
+        frames_df=frames_df,
+        diff_store_root=diff_store_root,
+        bookkeeping_dir=bookkeeping_dir,
+        diff_job_path=diff_job_path,
+        frames_csv_path=frames_csv_path,
     )
 
 
@@ -304,7 +450,16 @@ def ensure_scc_diff_handoff(
                 diff_job_path=job_path,
                 frames_csv_path=frames_path,
             )
-    return bootstrap_scc_diff(
+    template_store = scc_templates_dir(
+        data_root, sector, camera, ccd,
+        oversampling_factor=os_factor, store_name=template_store_name,
+    )
+    builder = (
+        bootstrap_scc_diff_linear
+        if _template_store_geometry_mode(template_store) == "linear"
+        else bootstrap_scc_diff
+    )
+    return builder(
         data_root=data_root,
         sector=sector,
         camera=camera,

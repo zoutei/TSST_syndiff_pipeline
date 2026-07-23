@@ -7,7 +7,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -44,17 +43,11 @@ from syndiff_pipeline.difference_imaging.support.manifest import (
     apply_epsf_status,
     apply_hotpants_workspace_results,
     group_ids_from_ffi_stems,
-    load_frame_manifest,
-    manifest_csv_exists,
-    manifest_path_from_output_dir,
-    ordered_diff_paths_for_workspace,
+    ordered_diff_paths_for_scc,
     limit_diff_paths,
     save_frame_manifest,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import HotpantsWorkspaceDirs
-from syndiff_pipeline.difference_imaging.support.ds9_regions import (
-    write_targets_ds9_regions,
-)
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_ffis_symlink,
     ensure_event_templates_symlink,
@@ -65,7 +58,6 @@ from syndiff_pipeline.difference_imaging.support.paths import (
     GAIA_CATALOG_PIPELINE_BASENAME,
     HOTPANTS_SUBSTAMP_STARS_BASENAME,
     SHARED_MASK_FITS_BASENAME,
-    link_master_workspace,
 )
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.context import PipelineInvocationContext
@@ -78,15 +70,11 @@ from syndiff_pipeline.difference_imaging.orchestration.workspace_lock import (
     assert_workspace_config_lock,
     write_immutable_workspace_config_snapshot,
 )
-from syndiff_pipeline.difference_imaging.support.workspace_inherit import (
-    bootstrap_workspace_inherit,
-)
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     parse_background,
     parse_centroids,
     parse_epsf,
-    parse_forced_photometry,
     parse_hotpants,
     parse_kernel_fit,
     parse_kernel_subtract,
@@ -167,14 +155,15 @@ def _run_background_stage(
     params = parse_background(stage, idx)
     inp = stage.get("inputs") or {}
     label_out = str(stage["output"]).strip()
-    out_ws = ctx.workspace(label_out)
+    out_ws = _diff_stage_dir(cfg, ctx, label_out)
     os.makedirs(out_ws, exist_ok=True)
-    shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+    shared_mask = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
     mask_catalog = _ensure_mask_catalog_loaded(
         ws_root,
         mask_catalog,
         shared_mask,
         crop_bounds=crop_bounds,
+        cfg=cfg,
         data_root=_infer_data_root(cfg) or None,
         sector=int(cfg.sector) if cfg.sector is not None else None,
         camera=int(cfg.camera) if cfg.camera is not None else None,
@@ -186,9 +175,9 @@ def _run_background_stage(
     bkg_label = str(inp.get("bkg") or "").strip()
     bkg_in_label = str(inp.get("bkg_in") or "").strip()
 
-    diff_dir = ctx.workspace(diff_label) if diff_label else None
-    bkg_dir = ctx.workspace(bkg_label) if bkg_label else None
-    bkg_in_dir = ctx.workspace(bkg_in_label) if bkg_in_label else None
+    diff_dir = _diff_stage_dir(cfg, ctx, diff_label) if diff_label else None
+    bkg_dir = _diff_stage_dir(cfg, ctx, bkg_label) if bkg_label else None
+    bkg_in_dir = _diff_stage_dir(cfg, ctx, bkg_in_label) if bkg_in_label else None
 
     if diff_dir:
         records = background.build_frame_records(
@@ -232,7 +221,7 @@ def _run_background_stage(
         fit_flux=fit_flux,
         strap_flux=strap_flux,
         bkg_in_stack=bkg_in_stack,
-        workspace_resolver=ctx.workspace,
+        workspace_resolver=lambda label: _diff_stage_dir(cfg, ctx, label),
     )
 
     if params.write_stack:
@@ -280,22 +269,6 @@ def _pipeline_plots_root(cfg: SynDiffConfig) -> str:
         sub,
         run_id=normalize_workspace_run_id(getattr(cfg, "workspace_run_id", None)),
     )
-
-
-def _forced_photometry_lightcurve_plot_path(
-    plot_dir: str,
-    label_out: str,
-    method_name: str,
-    target_name: Optional[str],
-) -> str:
-    """Return the light-curve diagnostic PNG path for one forced-photometry target."""
-    safe_method = re.sub(r"[^0-9A-Za-z._-]+", "_", method_name)
-    if target_name:
-        safe = re.sub(r"[^0-9A-Za-z._-]+", "_", target_name)
-        return os.path.join(
-            plot_dir, f"lightcurve_{label_out}_{safe_method}_{safe}.png"
-        )
-    return os.path.join(plot_dir, f"lightcurve_{label_out}_{safe_method}.png")
 
 
 def _maybe_write_background_gif(
@@ -355,58 +328,26 @@ def _load_template_handoff(
     cfg: SynDiffConfig, out: str, manifest_path: str | None
 ) -> tuple[pd.DataFrame, dict, str, float]:
     """
-    Load template-pipeline handoff: frame manifest, crop bounds, reference FFI,
-    and offset threshold from ``output_dir`` or SCC bookkeeping.
+    Load template-pipeline handoff from SCC bookkeeping (frames + diff job).
     """
-    if getattr(cfg, "data_root", None):
-        try:
-            from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
-                load_scc_diff_handoff_for_config,
-            )
-
-            wcs_table, crop_bounds, ref_ffi_path, offset_threshold, _grid = (
-                load_scc_diff_handoff_for_config(cfg)
-            )
-            log.info(
-                "Loaded SCC-primary diff handoff (bookkeeping/diff/) for "
-                "s%04d/c%d/k%d",
-                int(cfg.sector),
-                int(cfg.camera),
-                int(cfg.ccd),
-            )
-            return wcs_table, crop_bounds, ref_ffi_path, offset_threshold
-        except (FileNotFoundError, ValueError, RuntimeError) as exc:
-            log.debug(
-                "SCC diff handoff unavailable for %s; trying legacy event handoff: %s",
-                out,
-                exc,
-            )
-
-    if not manifest_csv_exists(out, manifest_path):
-        man = manifest_path_from_output_dir(out, manifest_path)
+    del out, manifest_path
+    if not getattr(cfg, "data_root", None):
         raise RuntimeError(
-            f"Missing template handoff manifest {man!r}. "
-            "Template handoff required: run the template pipeline before differencing."
+            "SCC-only diff requires data_root for template handoff (bookkeeping/diff/)"
         )
-    wcs_table = load_frame_manifest(out, manifest_path)
-    log.info(
-        "  Loaded frame manifest from template handoff: %s",
-        manifest_path_from_output_dir(out, manifest_path),
+    from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+        load_scc_diff_handoff_for_config,
     )
-    try:
-        crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, out)
-    except FileNotFoundError as exc:
-        raise RuntimeError(
-            f"Missing crop bounds in {out!r} (expected cluster_template_job.json). "
-            "Template handoff required: run the template pipeline before differencing."
-        ) from exc
-    ref_ffi_path = wcs_grouping.load_reference_ffi_path(out, cfg.ref_ffi_path)
-    if not ref_ffi_path:
-        raise RuntimeError(
-            f"Missing reference_ffi_path in cluster_template_job.json under {out!r}."
-        )
-    job = wcs_grouping.load_cluster_template_job(out)
-    offset_threshold = float(job.get("offset_threshold", 0.01))
+
+    wcs_table, crop_bounds, ref_ffi_path, offset_threshold, _grid = (
+        load_scc_diff_handoff_for_config(cfg)
+    )
+    log.info(
+        "Loaded SCC diff handoff (bookkeeping/diff/) for s%04d/c%d/k%d",
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+    )
     return wcs_table, crop_bounds, ref_ffi_path, offset_threshold
 
 
@@ -453,34 +394,37 @@ def _ffi_paths_for_processing(cfg: SynDiffConfig) -> list:
 
 def _load_gaia_catalog(
     cfg: SynDiffConfig,
-    output_dir: str,
-    *,
-    ws_root: str | None = None,
 ) -> Optional[pd.DataFrame]:
     # When diff_config overrides the template ROI, always load the source catalog
     # so ensure_gaia_crop_xy can reproject; skip a cached pipeline CSV from another crop.
-    """Load gaia catalog.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    output_dir : str
-    ws_root : str | None, optional, default ``None``
-    
-    Returns
-    -------
-    Optional[pd.DataFrame]"""
+    """Load gaia catalog from the SCC diff lane or site config."""
     prefer_source_catalog = wcs_grouping.diff_crop_explicitly_configured(cfg)
-    if ws_root and not prefer_source_catalog:
-        pipeline_csv = os.path.join(ws_root, GAIA_CATALOG_PIPELINE_BASENAME)
-        if os.path.isfile(pipeline_csv):
+    if not prefer_source_catalog:
+        lane_root = _require_scc_lane_root(cfg)
+        pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
+        if pipeline_csv.is_file():
             return pd.read_csv(pipeline_csv)
     if cfg.gaia_catalog and os.path.isfile(cfg.gaia_catalog):
         return pd.read_csv(cfg.gaia_catalog)
-    legacy = os.path.join(output_dir, "unique_gaia_stars_for_cropped_template.csv")
-    if os.path.isfile(legacy):
-        log.warning("Loading Gaia catalog from output_dir (legacy path).")
-        return pd.read_csv(legacy)
+    return None
+
+
+def _load_ffi_list_for_cfg(cfg) -> pd.DataFrame | None:
+    """Load SCC ``ffi_list.parquet`` for per-frame full-FFI WCS (ePSF/centroids)."""
+    from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
+    from syndiff_pipeline.common.wcs_header_cache import load_ffi_list
+
+    data_root = getattr(cfg, "data_root", None)
+    if not data_root:
+        return None
+    try:
+        ffi_list_path = scc_ffi_list_parquet(
+            data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+        )
+    except Exception:
+        return None
+    if ffi_list_path and os.path.isfile(ffi_list_path):
+        return load_ffi_list(ffi_list_path)
     return None
 
 
@@ -508,36 +452,6 @@ def _ensure_gaia_crop(
         crop_bounds,
         force_reproject=wcs_grouping.diff_crop_explicitly_configured(cfg),
     )
-
-
-def _load_tile_centers_json(ws_root: str) -> Optional[list]:
-    """Load tile centers json.
-    
-    Parameters
-    ----------
-    ws_root : str
-    
-    Returns
-    -------
-    Optional[list]"""
-    path = os.path.join(ws_root, "tile_centers.json")
-    if not os.path.exists(path):
-        return None
-    with open(path) as fh:
-        raw = json.load(fh)
-    return [tuple(c) for c in raw]
-
-
-def _save_tile_centers(tile_centers: list, ws_root: str) -> None:
-    """Save tile centers.
-    
-    Parameters
-    ----------
-    tile_centers : list
-    ws_root : str"""
-    path = os.path.join(ws_root, "tile_centers.json")
-    with open(path, "w") as fh:
-        json.dump(tile_centers, fh)
 
 
 def _path_to_group_from_wcs(wcs_table: Optional[pd.DataFrame]) -> dict[str, int]:
@@ -587,29 +501,43 @@ def _tqdm_frames(
 
 
 def _ensure_shared_mask_loaded(
-    ws_root: str,
     shared_mask: Optional[np.ndarray],
+    *,
+    cfg: SynDiffConfig,
 ) -> np.ndarray:
-    """Ensure shared mask loaded.
-    
-    Parameters
-    ----------
-    ws_root : str
-    shared_mask : Optional[np.ndarray]
-    
-    Returns
-    -------
-    np.ndarray"""
+    """Load shared mask FITS from the SCC diff lane root."""
     if shared_mask is not None:
         return shared_mask
-    sm_path = resolve_pipeline_artifact_path(ws_root, SHARED_MASK_FITS_BASENAME)
+    lane_root = _require_scc_lane_root(cfg)
+    sm_path = resolve_pipeline_artifact_path(
+        str(lane_root), SHARED_MASK_FITS_BASENAME
+    )
     if sm_path is not None:
         mask = np.asarray(fits.getdata(sm_path), dtype=np.int16)
-        log.info("  Loaded shared_mask from prior run (%s)", sm_path)
+        log.info("  Loaded shared_mask from SCC lane (%s)", sm_path)
         return mask
     raise RuntimeError(
         "Background stages need shared_mask in memory (run shared_mask first) "
-        f"or an existing shared_mask FITS under {ws_root!r} from a prior run."
+        f"or an existing shared_mask FITS under {lane_root!r}."
+    )
+
+
+def _ensure_ref_stars_loaded(
+    ref_stars: Optional[pd.DataFrame],
+    *,
+    cfg: SynDiffConfig,
+) -> pd.DataFrame:
+    """Load hotpants substamp stars CSV from the SCC diff lane root."""
+    if ref_stars is not None:
+        return ref_stars
+    lane_root = _require_scc_lane_root(cfg)
+    rs_path = lane_root / HOTPANTS_SUBSTAMP_STARS_BASENAME
+    if rs_path.is_file():
+        log.info("  Loaded hotpants_substamp_stars from SCC lane (%s)", rs_path)
+        return pd.read_csv(rs_path)
+    raise RuntimeError(
+        "Kernel fit requires hotpants_substamp_stars (run shared_mask first) or "
+        f"an existing {HOTPANTS_SUBSTAMP_STARS_BASENAME!r} under {lane_root!r}."
     )
 
 
@@ -626,6 +554,7 @@ def _ensure_mask_catalog_loaded(
     camera: int | None = None,
     ccd: int | None = None,
     intervals_dir: str | None = None,
+    cfg: SynDiffConfig | None = None,
 ):
     """Load MaskCatalog from memory or workspace FITS (+ SCC asteroid sidecars)."""
     from syndiff_pipeline.difference_imaging.masking.asteroids import (
@@ -679,11 +608,13 @@ def _ensure_mask_catalog_loaded(
             mask_catalog.static, mask_catalog.tns_table, iv, tm
         )
 
-    static = _ensure_shared_mask_loaded(ws_root, shared_mask)
+    static = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
     tns_table = None
-    tns_path = Path(ws_root) / TRANSIENT_FIXED_BASENAME
-    if tns_path.is_file():
-        tns_table = pd.read_parquet(tns_path)
+    lane_root = _require_scc_lane_root(cfg) if cfg is not None else None
+    if lane_root is not None:
+        tns_path = lane_root / TRANSIENT_FIXED_BASENAME
+        if tns_path.is_file():
+            tns_table = pd.read_parquet(tns_path)
     iv, tm = _load_scc_asteroids()
     return _attach_asteroids(static, tns_table, iv, tm)
 
@@ -702,6 +633,92 @@ def _infer_data_root(cfg: SynDiffConfig) -> str:
     return ""
 
 
+def _scc_store_name(cfg: SynDiffConfig) -> str | None:
+    from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+    return normalize_store_name(getattr(cfg, "output_store_name", None))
+
+
+def _scc_lane_root_path(cfg: SynDiffConfig) -> Path | None:
+    data_root = _infer_data_root(cfg) or None
+    if not data_root:
+        return None
+    from syndiff_pipeline.common.scc_paths import scc_diff_dir
+
+    return scc_diff_dir(
+        data_root,
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+        store_name=_scc_store_name(cfg),
+    )
+
+
+def _scc_label_dir_path(cfg: SynDiffConfig, label: str) -> Path | None:
+    lane_root = _scc_lane_root_path(cfg)
+    safe = str(label).strip()
+    if lane_root is None or not safe:
+        return None
+    return lane_root / safe
+
+
+def _require_scc_lane_root(cfg: SynDiffConfig) -> Path:
+    """Return the SCC diff lane root; raise when ``data_root`` is not configured."""
+    lane_root = _scc_lane_root_path(cfg)
+    if lane_root is None:
+        raise RuntimeError(
+            "SCC-only diff requires deployment data_root and sector/camera/ccd on config"
+        )
+    lane_root.mkdir(parents=True, exist_ok=True)
+    return lane_root
+
+
+def _diff_lane_root_dir(
+    cfg: SynDiffConfig,
+    ctx: PipelineInvocationContext,
+) -> str:
+    """SCC diff lane root under ``data_root``."""
+    del ctx
+    return str(_require_scc_lane_root(cfg))
+
+
+def _diff_stage_dir(
+    cfg: SynDiffConfig,
+    ctx: PipelineInvocationContext,
+    label: str,
+) -> str:
+    """Per-label directory under the SCC diff lane."""
+    del ctx
+    safe = str(label).strip()
+    if not safe:
+        raise ValueError("diff stage label must be non-empty")
+    label_dir = _require_scc_lane_root(cfg) / safe
+    label_dir.mkdir(parents=True, exist_ok=True)
+    return str(label_dir)
+
+
+def _ordered_diff_paths(
+    cfg: SynDiffConfig,
+    ctx: PipelineInvocationContext,
+    wcs_table: pd.DataFrame,
+    label: str,
+) -> list:
+    data_root = _infer_data_root(cfg) or None
+    if not data_root:
+        raise RuntimeError(
+            "SCC-only diff requires data_root to resolve per-FFI diff paths"
+        )
+    return ordered_diff_paths_for_scc(
+        wcs_table,
+        data_root,
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+        label,
+        store_name=_scc_store_name(cfg),
+    )
+
+
 def _mask_catalog_scc_kwargs(cfg: SynDiffConfig) -> dict:
     """Common SCC asteroid-load kwargs for Hotpants/kernel/background resume."""
     return {
@@ -710,33 +727,6 @@ def _mask_catalog_scc_kwargs(cfg: SynDiffConfig) -> dict:
         "camera": int(cfg.camera) if cfg.camera is not None else None,
         "ccd": int(cfg.ccd) if cfg.ccd is not None else None,
     }
-
-
-def _ensure_ref_stars_loaded(
-    ws_root: str,
-    ref_stars: Optional[pd.DataFrame],
-) -> pd.DataFrame:
-    """Ensure ref stars loaded.
-    
-    Parameters
-    ----------
-    ws_root : str
-    ref_stars : Optional[pd.DataFrame]
-    
-    Returns
-    -------
-    pd.DataFrame"""
-    if ref_stars is not None:
-        return ref_stars
-    rs_path = os.path.join(ws_root, HOTPANTS_SUBSTAMP_STARS_BASENAME)
-    if os.path.isfile(rs_path):
-        log.info("  Loaded hotpants_substamp_stars from prior run (%s)", rs_path)
-        return pd.read_csv(rs_path)
-    raise RuntimeError(
-        "Kernel fit requires hotpants_substamp_stars (run shared_mask first) or "
-        f"an existing {rs_path!r} from a prior run."
-    )
-
 
 def _ensure_workspace_tree_symlinks(ctx: PipelineInvocationContext, cfg: SynDiffConfig) -> None:
     """Ensure ffis symlink exists in the active workspace tree (templates are SCC-absolute)."""
@@ -787,53 +777,6 @@ def _ensure_template_paths_for_kernel(
         )
 
 
-def _warn_if_forced_target_outside_crop(
-    target_x: float,
-    target_y: float,
-    crop_bounds: dict,
-    phot_cutout_size: int,
-    *,
-    ra: float,
-    dec: float,
-    tag: str,
-) -> None:
-    """Warn if forced target outside crop.
-    
-    Parameters
-    ----------
-    target_x : float
-    target_y : float
-    crop_bounds : dict
-    phot_cutout_size : int
-    ra : float
-    dec : float
-    tag : str"""
-    sh = crop_bounds.get("shape")
-    if not sh or len(sh) != 2:
-        return
-    ny, nx = int(sh[0]), int(sh[1])
-    half = phot_cutout_size // 2
-    margin = half + 2
-    if (
-        target_x < -margin
-        or target_x > nx - 1 + margin
-        or target_y < -margin
-        or target_y > ny - 1 + margin
-    ):
-        log.warning(
-            "forced_photometry: position %r (ra=%s dec=%s) crop-local (%.2f, %.2f) "
-            "is outside the crop [0,%d) x [0,%d) with margin %d; expect weak/NaN cutouts.",
-            tag,
-            ra,
-            dec,
-            target_x,
-            target_y,
-            nx,
-            ny,
-            margin,
-        )
-
-
 def run_config_pipeline(
     cfg: SynDiffConfig,
     *,
@@ -873,12 +816,12 @@ def run_config_pipeline(
     os.makedirs(ws_root, exist_ok=True)
 
     assert_workspace_config_lock(ws_root, cfg)
+    _require_scc_lane_root(cfg)
     _, inherit_specs, _ = split_pipeline(cfg.pipeline)
-    for spec in inherit_specs:
-        bootstrap_workspace_inherit(
-            out,
-            run_id=ctx.workspace_run_id,
-            spec=spec,
+    if inherit_specs:
+        raise RuntimeError(
+            "workspace_inherit is not supported under SCC-only diff storage; "
+            "re-run upstream diff stages on the SCC lane instead."
         )
 
     _ensure_workspace_tree_symlinks(ctx, cfg)
@@ -894,15 +837,10 @@ def run_config_pipeline(
     convolved_ws: Optional[str] = None
 
     from syndiff_pipeline.difference_imaging.stages.astrometry import (
-        load_astrometry_coords,
         pipeline_needs_template_handoff,
-        run_astrometry_stage,
     )
 
     needs_handoff = pipeline_needs_template_handoff(cfg.pipeline)
-    has_astrometry = any(
-        isinstance(s, dict) and s.get("kind") == "astrometry" for s in cfg.pipeline
-    )
     wcs_table: Optional[pd.DataFrame] = None
     crop_bounds: Optional[dict] = None
     ref_ffi_path: Optional[str] = None
@@ -955,54 +893,6 @@ def run_config_pipeline(
                         )
                         break
 
-    coords = load_astrometry_coords(ws_root)
-    if coords is not None:
-        cfg.target_ra, cfg.target_dec = coords
-
-    ds9_regions_written = False
-
-    def _maybe_write_targets_ds9_regions() -> None:
-        nonlocal ds9_regions_written
-        if ds9_regions_written or not needs_handoff:
-            return
-        if wcs_table is None or crop_bounds is None or not ref_ffi_path:
-            return
-        if (
-            cfg.target_ra is None
-            or cfg.target_dec is None
-            or not np.isfinite(cfg.target_ra)
-            or not np.isfinite(cfg.target_dec)
-        ):
-            log.warning("target_ra/target_dec not set; skipping targets.reg.")
-            return
-        write_targets_ds9_regions(
-            ws_root,
-            target_ra=float(cfg.target_ra),
-            target_dec=float(cfg.target_dec),
-            target_name=str(getattr(cfg, "target_name", "") or Path(out).name),
-            sector=int(cfg.sector),
-            camera=int(cfg.camera),
-            ccd=int(cfg.ccd),
-            additional_forced_targets=getattr(cfg, "additional_forced_targets", None) or [],
-            wcs_table=wcs_table,
-            crop_bounds=crop_bounds,
-            ref_ffi_path=ref_ffi_path,
-        )
-        ds9_regions_written = True
-
-    if needs_handoff and not has_astrometry:
-        _maybe_write_targets_ds9_regions()
-
-    if needs_handoff and getattr(cfg, "master_fits_mirror", True):
-        try:
-            link_master_workspace(
-                out,
-                ffi_leaf=_cfg_ffi_leaf(cfg) if cfg.ffi_dir else None,
-                run_id=ctx.workspace_run_id,
-            )
-        except Exception as exc:
-            log.warning("master workspace link update failed at pipeline start: %s", exc)
-
     for idx, stage in enumerate(cfg.pipeline):
         if is_external_workspaces_entry(stage) or is_workspace_inherit_entry(stage):
             continue
@@ -1010,14 +900,21 @@ def run_config_pipeline(
         log.info("=" * 70)
         log.info("Stage: %s", kind)
 
-        if kind == "astrometry":
-            run_astrometry_stage(cfg, stage, ws_root, force_rerun=force_rerun)
-            _maybe_write_targets_ds9_regions()
+        if kind == "photometry":
+            from syndiff_pipeline.photometry.runner import run_photometry_delegator
+
+            site_dir = getattr(cfg, "site_config_dir", None) or out
+            run_photometry_delegator(
+                cfg,
+                stage,
+                site_dir,
+                force_rerun=force_rerun,
+            )
             continue
 
         if kind == "shared_mask":
             sm = parse_shared_mask(stage, idx)
-            gaia_df = _load_gaia_catalog(cfg, out, ws_root=ws_root)
+            gaia_df = _load_gaia_catalog(cfg)
             if gaia_df is None:
                 raise RuntimeError("gaia_catalog required for shared_mask.")
             gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
@@ -1042,7 +939,12 @@ def run_config_pipeline(
             )
 
             data_root = _infer_data_root(cfg)
+            if not data_root:
+                raise RuntimeError(
+                    "SCC-only shared_mask requires deployment data_root on config"
+                )
             site_dir = getattr(cfg, "site_config_dir", None) or None
+            lane_root = _diff_lane_root_dir(cfg, ctx)
             legacy_mask = legacy_mask_stage_overrides(stage)
             if legacy_mask:
                 log.warning(
@@ -1054,7 +956,7 @@ def run_config_pipeline(
             mask_settings, _ = resolve_mask_settings(
                 stage_mask_settings=sm.mask_settings,
                 site_dir=site_dir,
-                ws_root=ws_root,
+                ws_root=lane_root,
             )
             mask_settings = apply_stage_overrides(
                 mask_settings,
@@ -1109,15 +1011,18 @@ def run_config_pipeline(
             if getattr(cfg, "pipeline_plots", False):
                 plots_dir = os.path.join(_pipeline_plots_root(cfg), "masks")
 
+            lane_root = _diff_lane_root_dir(cfg, ctx)
+
             mask_catalog = generate_shared_mask_catalog(
                 ref_image=ref_crop,
                 gaia_df=gaia_mask_df,
                 crop_bounds=crop_bounds,
-                ws_root=ws_root,
-                data_root=data_root or out,
+                lane_root=lane_root,
+                data_root=data_root,
                 sector=int(cfg.sector),
                 camera=int(cfg.camera),
                 ccd=int(cfg.ccd),
+                output_store_name=_scc_store_name(cfg),
                 straps_csv=cfg.straps_csv or None,
                 ref_ffi_path=ref_ffi_path,
                 bsc_catalog_path=cfg.bsc_catalog or None,
@@ -1144,9 +1049,9 @@ def run_config_pipeline(
                 isolation_mag=sm.ref_isolation_mag,
                 isolation_radius_px=sm.ref_isolation_px,
                 separation_px=sm.ref_separation_px,
-                output_dir=ws_root,
+                output_dir=lane_root,
             )
-            pipe_csv = os.path.join(ws_root, GAIA_CATALOG_PIPELINE_BASENAME)
+            pipe_csv = os.path.join(lane_root, GAIA_CATALOG_PIPELINE_BASENAME)
             gaia_mask_df.to_csv(pipe_csv, index=False)
             gaia_df = gaia_mask_df.drop(columns=["mag"], errors="ignore")
 
@@ -1158,17 +1063,19 @@ def run_config_pipeline(
                     "(template handoff required: syndiff_ffi_frames.csv and "
                     "cluster_template_job.json in output_dir)."
                 )
-            shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+            shared_mask = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
             mask_catalog = _ensure_mask_catalog_loaded(
                 ws_root,
                 mask_catalog,
                 shared_mask,
                 crop_bounds=crop_bounds,
+                cfg=cfg,
                 **_mask_catalog_scc_kwargs(cfg),
             )
             shared_mask = mask_catalog.static
             if ref_stars is None:
-                rs_path = os.path.join(ws_root, HOTPANTS_SUBSTAMP_STARS_BASENAME)
+                lane_root = _diff_lane_root_dir(cfg, ctx)
+                rs_path = os.path.join(lane_root, HOTPANTS_SUBSTAMP_STARS_BASENAME)
                 if not os.path.isfile(rs_path):
                     raise RuntimeError(
                         "hotpants requires hotpants_substamp_stars (run shared_mask first) or "
@@ -1196,9 +1103,9 @@ def run_config_pipeline(
             conv_l = o["convolved"]
             bkg_l = o.get("bkg")
 
-            diff_dir = ctx.workspace(diffs_l)
-            conv_dir = ctx.workspace(conv_l)
-            bkg_dir = ctx.workspace(bkg_l) if bkg_l else None
+            diff_dir = _diff_stage_dir(cfg, ctx, diffs_l)
+            conv_dir = _diff_stage_dir(cfg, ctx, conv_l)
+            bkg_dir = _diff_stage_dir(cfg, ctx, bkg_l) if bkg_l else None
 
             dirs = HotpantsWorkspaceDirs(
                 diffs=diff_dir,
@@ -1207,12 +1114,12 @@ def run_config_pipeline(
             )
 
             processing_ffi_paths = _ffi_paths_for_processing(cfg)
-            sci_bkg_ws = ctx.workspace(inp["bkg"]) if inp.get("bkg") else None
+            sci_bkg_ws = _diff_stage_dir(cfg, ctx, inp["bkg"]) if inp.get("bkg") else None
 
             round_id = 2 if inp.get("bkg") else 1
             sci_label = str(stage.get("science", "ffi")).strip()
             sci_workspace_dir = (
-                None if sci_label == "ffi" else ctx.workspace(sci_label)
+                None if sci_label == "ffi" else _diff_stage_dir(cfg, ctx, sci_label)
             )
             results = hotpants_runner.hotpants_loop(
                 ffi_paths=processing_ffi_paths,
@@ -1258,21 +1165,22 @@ def run_config_pipeline(
                 raise RuntimeError(
                     "kernel_fit requires wcs_table and crop_bounds from template handoff."
                 )
-            shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+            shared_mask = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
             mask_catalog = _ensure_mask_catalog_loaded(
                 ws_root,
                 mask_catalog,
                 shared_mask,
                 crop_bounds=crop_bounds,
+                cfg=cfg,
                 **_mask_catalog_scc_kwargs(cfg),
             )
             shared_mask = mask_catalog.static
-            ref_stars = _ensure_ref_stars_loaded(ws_root, ref_stars)
+            ref_stars = _ensure_ref_stars_loaded(ref_stars, cfg=cfg)
             ref_stars_xy = ref_stars[["x", "y"]].to_numpy(dtype=np.float64)
             hp = kernel_fit_params_to_hotpants(kf_params)
             kernel_fit_hp = hp
             kernel_fit_label = str(stage["output"]).strip()
-            kernel_fit_ws = ctx.workspace(kernel_fit_label)
+            kernel_fit_ws = _diff_stage_dir(cfg, ctx, kernel_fit_label)
             kernel_fit_runner.run_kernel_fit(
                 output_dir=out,
                 manifest=wcs_table,
@@ -1301,9 +1209,9 @@ def run_config_pipeline(
             hp = kernel_fit_hp or HotpantsParams()
             inp = stage.get("inputs") or {}
             kernel_fit_label = str(inp["kernel_fit"]).strip()
-            kernel_fit_ws = ctx.workspace(kernel_fit_label)
+            kernel_fit_ws = _diff_stage_dir(cfg, ctx, kernel_fit_label)
             conv_label = str(stage["output"]).strip()
-            conv_ws = ctx.workspace(conv_label)
+            conv_ws = _diff_stage_dir(cfg, ctx, conv_label)
             convolved_ws = conv_ws
             convolved_templates_runner.run_convolved_templates(
                 kernel_fit_dir=kernel_fit_ws,
@@ -1321,18 +1229,19 @@ def run_config_pipeline(
                 raise RuntimeError(
                     "kernel_subtract requires wcs_table and crop_bounds from template handoff."
                 )
-            shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
+            shared_mask = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
             mask_catalog = _ensure_mask_catalog_loaded(
                 ws_root,
                 mask_catalog,
                 shared_mask,
                 crop_bounds=crop_bounds,
+                cfg=cfg,
                 **_mask_catalog_scc_kwargs(cfg),
             )
             shared_mask = mask_catalog.static
             inp = stage.get("inputs") or {}
             conv_label = str(inp["convolved"]).strip()
-            conv_ws = convolved_ws or ctx.workspace(conv_label)
+            conv_ws = convolved_ws or _diff_stage_dir(cfg, ctx, conv_label)
             convolved_table = convolved_templates_runner.load_convolved_templates_table(
                 conv_ws
             )
@@ -1340,8 +1249,8 @@ def run_config_pipeline(
             diffs_l = str(o["diffs"]).strip()
             bkg_l = o.get("phot_bkg")
             bkg_l = str(bkg_l).strip() if bkg_l else None
-            diff_dir = ctx.workspace(diffs_l)
-            bkg_dir = ctx.workspace(bkg_l) if bkg_l else None
+            diff_dir = _diff_stage_dir(cfg, ctx, diffs_l)
+            bkg_dir = _diff_stage_dir(cfg, ctx, bkg_l) if bkg_l else None
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg)
             n_jobs = ks_params.kernel_subtract_n_jobs or cfg.n_jobs
@@ -1371,32 +1280,35 @@ def run_config_pipeline(
             epsf_p = parse_epsf(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
-            diff_paths = ordered_diff_paths_for_workspace(
-                wcs_table,
-                out,
-                inp["diffs"],
-                manifest_path,
-                run_id=ctx.workspace_run_id,
-            )
+            diff_paths = _ordered_diff_paths(cfg, ctx, wcs_table, str(inp["diffs"]))
             if cfg.max_ffis is not None:
                 diff_paths, _epsf_rows = limit_diff_paths(diff_paths, cfg.max_ffis)
             if gaia_df is None:
-                gaia_df = _load_gaia_catalog(cfg, out, ws_root=ws_root)
+                gaia_df = _load_gaia_catalog(cfg)
             if gaia_df is None:
                 raise RuntimeError("epsf requires gaia_catalog.")
-            gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
+            ffi_list_df = _load_ffi_list_for_cfg(cfg)
+            if ffi_list_df is None:
+                raise RuntimeError(
+                    "epsf requires ffi_list.parquet under data_root for per-frame WCS."
+                )
+            from syndiff_pipeline.difference_imaging.stages import gridded_epsf as _gridded_epsf
+
+            ffi_path_by_stem = _gridded_epsf.ffi_path_by_stem_from_wcs_table(wcs_table)
             mask_catalog = _ensure_mask_catalog_loaded(
                 ws_root,
                 mask_catalog,
                 shared_mask,
                 crop_bounds=crop_bounds,
+                cfg=cfg,
                 **_mask_catalog_scc_kwargs(cfg),
             )
             shared_mask = mask_catalog.static
+            lane_root = _diff_lane_root_dir(cfg, ctx)
             shared_mask_path = resolve_pipeline_artifact_path(
-                out, SHARED_MASK_FITS_BASENAME
+                lane_root, SHARED_MASK_FITS_BASENAME
             )
-            ws_out = ctx.workspace(label_out)
+            ws_out = _diff_stage_dir(cfg, ctx, label_out)
             os.makedirs(ws_out, exist_ok=True)
             epsf_stack, tile_centers_new, ffi_stems, epsf_ok = (
                 epsf_fitting.fit_epsf_all_frames(
@@ -1417,6 +1329,9 @@ def run_config_pipeline(
                     epsf_label=label_out,
                     diffs_input=str(inp["diffs"]),
                     force_rerun=force_rerun,
+                    ffi_list_df=ffi_list_df,
+                    science_bounds=crop_bounds,
+                    ffi_path_by_stem=ffi_path_by_stem,
                 )
             )
             if tile_centers_new is not None:
@@ -1439,9 +1354,6 @@ def run_config_pipeline(
                 epsf_smooth, group_ids, output_dir=ws_out
             )
 
-            if tile_centers is not None:
-                _save_tile_centers(tile_centers, ws_root)
-
             if getattr(cfg, "pipeline_plots", False):
                 from syndiff_pipeline.difference_imaging.support.plot import (
                     write_gridded_epsf_workspace_plots,
@@ -1463,29 +1375,31 @@ def run_config_pipeline(
             centroids_p = parse_centroids(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
-            diff_paths = ordered_diff_paths_for_workspace(
-                wcs_table,
-                out,
-                inp["diffs"],
-                manifest_path,
-                run_id=ctx.workspace_run_id,
-            )
+            diff_paths = _ordered_diff_paths(cfg, ctx, wcs_table, str(inp["diffs"]))
             if cfg.max_ffis is not None:
                 diff_paths, _centroids_rows = limit_diff_paths(diff_paths, cfg.max_ffis)
             if gaia_df is None:
-                gaia_df = _load_gaia_catalog(cfg, out, ws_root=ws_root)
+                gaia_df = _load_gaia_catalog(cfg)
             if gaia_df is None:
                 raise RuntimeError("centroids requires gaia_catalog.")
-            gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
-            epsf_ws = ctx.workspace(inp["epsf"])
+            ffi_list_df = _load_ffi_list_for_cfg(cfg)
+            if ffi_list_df is None:
+                raise RuntimeError(
+                    "centroids requires ffi_list.parquet under data_root for per-frame WCS."
+                )
+            from syndiff_pipeline.difference_imaging.stages import gridded_epsf as _gridded_epsf
+
+            ffi_path_by_stem = _gridded_epsf.ffi_path_by_stem_from_wcs_table(wcs_table)
+            epsf_ws = _diff_stage_dir(cfg, ctx, str(inp["epsf"]))
             from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
             epsf_catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
             if epsf_catalog is None:
                 raise RuntimeError(
-                    f"centroids requires gridded ePSF in workspace {inp['epsf']!r}"
+                    f"centroids requires gridded ePSF under SCC lane {inp['epsf']!r} "
+                    f"({epsf_ws})"
                 )
-            ws_out = ctx.workspace(label_out)
+            ws_out = _diff_stage_dir(cfg, ctx, label_out)
             os.makedirs(ws_out, exist_ok=True)
             from syndiff_pipeline.difference_imaging.stages import centroids
 
@@ -1501,17 +1415,20 @@ def run_config_pipeline(
                 epsf_input=str(inp["epsf"]),
                 diff_log_path=diff_log_path,
                 force_rerun=force_rerun,
+                ffi_list_df=ffi_list_df,
+                science_bounds=crop_bounds,
+                ffi_path_by_stem=ffi_path_by_stem,
+                wcs_table=wcs_table,
             )
 
         elif kind == "sat_template":
             sat_p = parse_sat_template(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
-            ws_epsf = ctx.workspace(inp["epsf"])
+            ws_epsf = _diff_stage_dir(cfg, ctx, inp["epsf"])
             epsf_smooth, _ = epsf_fitting.load_epsf_smooth(ws_epsf, 1)
             group_epsf = _load_group_epsf_from_dir(ws_epsf, "group_epsf")
 
-            tile_centers = _load_tile_centers_json(ws_root)
             if tile_centers is None and crop_bounds is not None:
                 from syndiff_pipeline.difference_imaging.stages.epsf import _make_tile_grid
 
@@ -1520,7 +1437,6 @@ def run_config_pipeline(
                 tile_centers = [
                     (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
                 ]
-                _save_tile_centers(tile_centers, ws_root)
 
             removed_df = _load_removed_stars_in_crop(
                 cfg.removed_stars_csv,
@@ -1529,7 +1445,7 @@ def run_config_pipeline(
                 ref_ffi_path,
                 force_reproject=wcs_grouping.diff_crop_explicitly_configured(cfg),
             )
-            ws_sat = ctx.workspace(label_out)
+            ws_sat = _diff_stage_dir(cfg, ctx, label_out)
             os.makedirs(ws_sat, exist_ok=True)
             sat_native, sat_hr = sat_template.build_all_group_templates(
                 removed_df, group_epsf, tile_centers, crop_bounds, sat_p
@@ -1540,7 +1456,7 @@ def run_config_pipeline(
             parse_subtract(stage, idx)
             inp = stage["inputs"]
             label_out = stage["output"]
-            out_ws = ctx.workspace(label_out)
+            out_ws = _diff_stage_dir(cfg, ctx, label_out)
             os.makedirs(out_ws, exist_ok=True)
 
             expr = inp.get("expression")
@@ -1600,7 +1516,7 @@ def run_config_pipeline(
                             sigma = None
                     else:
                         plane, sigma = _subtract_load_plane_and_sigma(
-                            ctx.workspace(str(lab)), pid, i, npy_cache
+                            _diff_stage_dir(cfg, ctx, str(lab)), pid, i, npy_cache
                         )
                     if plane is None:
                         skip = True
@@ -1661,296 +1577,8 @@ def run_config_pipeline(
                 crop_bounds=crop_bounds,
             )
 
-        elif kind == "forced_photometry":
-            phot_params = parse_forced_photometry(stage, idx)
-            inp = stage["inputs"]
-            label_out = stage["output"]
-            phot_out = ctx.workspace(label_out)
-            os.makedirs(phot_out, exist_ok=True)
-
-            if wcs_table is None or crop_bounds is None or not ref_ffi_path:
-                raise RuntimeError(
-                    "forced_photometry needs WCS/crop state (template handoff required: "
-                    "syndiff_ffi_frames.csv and cluster_template_job.json in output_dir)."
-                )
-
-            if cfg.target_ra is None or cfg.target_dec is None:
-                log.warning("target_ra/target_dec not set; skipping forced_photometry.")
-                continue
-
-            diff_label = inp["diffs"]
-            diff_ws = ctx.workspace(diff_label)
-            if not any(
-                p.is_file()
-                for p in Path(diff_ws).rglob("*")
-                if is_pipeline_fits_filename(p.name)
-            ):
-                raise RuntimeError(
-                    f"forced_photometry: no diff FITS under workspace {diff_label!r} "
-                    f"({diff_ws}); hotpants may have failed."
-                )
-            paths_for_phot = ordered_diff_paths_for_workspace(
-                wcs_table,
-                out,
-                diff_label,
-                manifest_path,
-                run_id=ctx.workspace_run_id,
-            )
-            if cfg.max_ffis is not None:
-                paths_for_phot, phot_rows = limit_diff_paths(paths_for_phot, cfg.max_ffis)
-            else:
-                phot_rows = list(range(len(paths_for_phot)))
-            wcs_for_phot = wcs_table.iloc[phot_rows].reset_index(drop=True)
-            ref_idx = wcs_grouping.ref_manifest_row_index(wcs_table, ref_ffi_path)
-            if ref_idx is not None and ref_idx in phot_rows:
-                ref_idx = phot_rows.index(ref_idx)
-            elif ref_idx is not None:
-                ref_idx = None
-                log.warning(
-                    "forced_photometry: reference FFI not in max_ffis subset; "
-                    "phot_snap='ref' may use (0,0) offsets."
-                )
-            elif ref_idx is None:
-                log.warning(
-                    "forced_photometry: ref_ffi_path not found in manifest %r; "
-                    "phot_snap='ref' may use (0,0) offsets.",
-                    ref_ffi_path,
-                )
-
-            if tile_centers is None:
-                tile_centers = _load_tile_centers_json(ws_root)
-            if tile_centers is None and crop_bounds is not None:
-                from syndiff_pipeline.difference_imaging.stages.epsf import _make_tile_grid
-
-                ny, nx = crop_bounds["shape"]
-                tiles = _make_tile_grid(
-                    ny, nx, phot_params.tile_ny, phot_params.tile_nx
-                )
-                tile_centers = [
-                    (c0 + ts / 2, r0 + ts / 2) for (r0, c0, ts) in tiles
-                ]
-
-            epsf_by_workspace: dict[str, np.ndarray] = {}
-            gridded_epsf_by_workspace: dict = {}
-            stage_epsf_ws = inp.get("epsf")
-            from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-                PsfPhotometryMethodParams,
-            )
-
-            def _load_epsf_workspace(ws_lab: str) -> None:
-                if ws_lab in epsf_by_workspace or ws_lab in gridded_epsf_by_workspace:
-                    return
-                epsf_ws = ctx.workspace(ws_lab)
-                from syndiff_pipeline.difference_imaging.stages import gridded_epsf
-
-                catalog = gridded_epsf.catalog_from_workspace(epsf_ws)
-                if catalog is not None:
-                    gridded_epsf_by_workspace[ws_lab] = catalog
-                    return
-                # Tile-smooth stacks are no longer used for forced photometry.
-                stage_lab = (
-                    str(stage_epsf_ws).strip() if stage_epsf_ws else None
-                )
-
-                def _method_epsf_label(m: PsfPhotometryMethodParams) -> Optional[str]:
-                    return m.epsf_workspace or stage_lab
-
-                needs_epsf = any(
-                    isinstance(m, PsfPhotometryMethodParams)
-                    and m.psf_type == "epsf"
-                    and _method_epsf_label(m) == ws_lab
-                    for m in phot_params.methods
-                )
-                if needs_epsf:
-                    raise ValueError(
-                        f"forced_photometry: ePSF workspace {ws_lab!r} has no "
-                        "gridded_epsf_index.json. Rebuild the ePSF stage; the legacy "
-                        "tile-smooth stack is no longer used for forced photometry."
-                    )
-
-            if stage_epsf_ws:
-                _load_epsf_workspace(str(stage_epsf_ws).strip())
-            for method in phot_params.methods:
-                if isinstance(method, PsfPhotometryMethodParams) and method.epsf_workspace:
-                    _load_epsf_workspace(method.epsf_workspace)
-
-            extras = list(getattr(cfg, "additional_forced_targets", None) or [])
-            science = (float(cfg.target_ra), float(cfg.target_dec))
-            primary_xy = photometry.per_frame_target_crop_xy(
-                wcs_table,
-                float(cfg.target_ra),
-                float(cfg.target_dec),
-                crop_bounds,
-                manifest_science_ra_dec=science,
-            )
-            primary_xy = primary_xy[phot_rows]
-
-            target_specs: list[tuple] = [
-                (
-                    primary_xy,
-                    None,
-                    "primary",
-                    {
-                        "position_mode": "sky",
-                        "ra": float(cfg.target_ra),
-                        "dec": float(cfg.target_dec),
-                    },
-                ),
-            ]
-            for j, pt in enumerate(extras):
-                extra_xy = photometry.resolve_forced_target_xy(
-                    pt,
-                    primary_xy,
-                    wcs_for_phot,
-                    crop_bounds,
-                    manifest_science_ra_dec=science,
-                )
-                target_specs.append(
-                    (
-                        extra_xy,
-                        str(pt["name"]),
-                        f"extra[{j}]",
-                        pt,
-                    )
-                )
-
-            for target_xy, lc_name, tag, pt in target_specs:
-                mx = float(np.nanmedian(target_xy[:, 0]))
-                my = float(np.nanmedian(target_xy[:, 1]))
-                mode = pt.get("position_mode", "sky")
-                if mode == "sky":
-                    ra_log = float(pt["ra"])
-                    dec_log = float(pt["dec"])
-                else:
-                    ra_log = float("nan")
-                    dec_log = float("nan")
-
-                psf_sizes = [
-                    m.phot_cutout_size
-                    for m in phot_params.methods
-                    if hasattr(m, "phot_cutout_size")
-                ]
-                warn_cutout = int(max(psf_sizes)) if psf_sizes else 15
-                if np.isfinite(mx) and np.isfinite(my):
-                    _warn_if_forced_target_outside_crop(
-                        mx,
-                        my,
-                        crop_bounds,
-                        warn_cutout,
-                        ra=ra_log,
-                        dec=dec_log,
-                        tag=tag,
-                    )
-                else:
-                    log.warning(
-                        "forced_photometry: no finite per-FFI positions for %s (%s)",
-                        tag,
-                        (
-                            f"ra={ra_log} dec={dec_log}"
-                            if mode == "sky"
-                            else f"mode={mode} name={pt.get('name', lc_name)}"
-                        ),
-                    )
-                n_fin = int(np.isfinite(target_xy).all(axis=1).sum())
-                pos_desc = (
-                    f"ra={ra_log} dec={dec_log}"
-                    if mode == "sky"
-                    else (
-                        f"dx={pt['dx']} dy={pt['dy']}"
-                        if mode == "offset"
-                        else f"x={pt['x']} y={pt['y']}"
-                    )
-                )
-                log.info(
-                    "  forced_photometry: %s %s → per-FFI crop-local xy "
-                    "(median %.3f, %.3f; finite %d/%d)",
-                    tag,
-                    pos_desc,
-                    mx,
-                    my,
-                    n_fin,
-                    len(target_xy),
-                )
-
-            def _plot_path(method_name: str, extra_name: Optional[str]) -> str:
-                """Plot path.
-                
-                Parameters
-                ----------
-                method_name : str
-                extra_name : Optional[str]
-                
-                Returns
-                -------
-                str"""
-                pdir = _pipeline_plots_root(cfg)
-                os.makedirs(pdir, exist_ok=True)
-                return _forced_photometry_lightcurve_plot_path(
-                    pdir, label_out, method_name, extra_name
-                )
-
-            from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-                AperturePhotometryMethodParams,
-            )
-
-            shared_mask_for_phot = None
-            if any(
-                isinstance(m, AperturePhotometryMethodParams)
-                and getattr(m, "mask_sky_with_shared_mask", False)
-                for m in phot_params.methods
-            ):
-                shared_mask = _ensure_shared_mask_loaded(ws_root, shared_mask)
-                shared_mask_for_phot = shared_mask
-
-            photometry.run_forced_photometry_stage(
-                diff_paths=paths_for_phot,
-                target_specs=target_specs,
-                phot_stage=phot_params,
-                epsf_by_workspace=epsf_by_workspace,
-                gridded_epsf_by_workspace=gridded_epsf_by_workspace,
-                stage_epsf_workspace=(
-                    str(stage_epsf_ws).strip() if stage_epsf_ws else None
-                ),
-                tile_centers=tile_centers,
-                wcs_table=wcs_for_phot,
-                crop_bounds=crop_bounds,
-                cfg=cfg,
-                output_dir=phot_out,
-                ref_frame_index=ref_idx,
-                plot_title_suffix=label_out,
-                output_label=label_out,
-                diffs_input=diff_label,
-                diff_log_path=diff_log_path,
-                plot_path_fn=_plot_path,
-                diffs_dir=ctx.workspace(diff_label),
-                shared_mask=shared_mask_for_phot,
-            )
-
-            if getattr(cfg, "pipeline_plots", False):
-                from syndiff_pipeline.difference_imaging.support.plot import (
-                    write_lightcurve_diagnostics_from_workspace,
-                )
-
-                dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
-                write_lightcurve_diagnostics_from_workspace(
-                    phot_out,
-                    _pipeline_plots_root(cfg),
-                    lc_label=label_out,
-                    dpi=dpi,
-                )
-
         else:
             raise RuntimeError(f"Unhandled stage kind {kind!r}")
-
-        if getattr(cfg, "master_fits_mirror", True):
-            try:
-                link_master_workspace(
-                    out,
-                    ffi_leaf=_cfg_ffi_leaf(cfg) if cfg.ffi_dir else None,
-                    run_id=ctx.workspace_run_id,
-                )
-            except Exception as exc:
-                log.warning("master workspace link update failed after stage %r: %s", kind, exc)
 
     log.info("=" * 70)
     log.info("Config pipeline complete. Outputs: %s", ws_root)

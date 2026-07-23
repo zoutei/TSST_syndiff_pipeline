@@ -4,6 +4,7 @@
 deployment_file: deployment.yaml
 diff_config: diff_config_single_kernel.yaml
 star_config: star_config.yaml
+# photometry_config: photometry_config.yaml  # optional; namespaces phot_{run_id}/ + host_star/
 
 stages:
   wcs_grouping:

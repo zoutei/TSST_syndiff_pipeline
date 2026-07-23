@@ -18,7 +18,7 @@ Two kinds of tree are walked:
    ``convolved.zarr`` (checkpoint-only, presence == complete),
    ``remap[/_{NAME}]/oversampling_{N}/remap_manifest.json``,
    ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``,
-   ``diff[/_{NAME}]/{workspace_label}/{recipe_fp}/``. These have
+   ``diff[/_{NAME}]/{label}/``. These have
    no recoverable recipe, so per decision #8 they are ingested under
    ``{kind}_legacy_unverified`` with a synthetic, deterministic (idempotent)
    fingerprint tied to their on-disk path -- visible in queries, but never
@@ -271,11 +271,11 @@ def collect_reindex_clear_warnings(data_root: str | Path) -> list[str]:
     return warnings
 
 
-def _recipe_dir_has_content(recipe_dir: Path) -> bool:
-    if not recipe_dir.is_dir():
+def _diff_label_dir_has_content(label_dir: Path) -> bool:
+    if not label_dir.is_dir():
         return False
     return any(
-        child.is_file() and not child.name.startswith("_tmp_") for child in recipe_dir.iterdir()
+        child.is_file() and not child.name.startswith("_tmp_") for child in label_dir.iterdir()
     )
 
 
@@ -302,7 +302,7 @@ def reindex_scc_tree(store: ProvenanceStore, scc_dir: str | Path, s: int, c: int
     Legacy-marker sweep of one SCC directory: ``convolved.zarr`` presence,
     ``remap[/_{NAME}]/oversampling_{N}/remap_manifest.json``,
     ``templates[/_{NAME}]/oversampling_{N}/``, ``mapping/oversampling_{N}/``,
-    ``diff[/_{NAME}]/{workspace_label}/{recipe_fp}/``.
+    ``diff[/_{NAME}]/{label}/``.
 
     Returns the count of legacy_unverified artifacts ingested.
     """
@@ -355,36 +355,32 @@ def reindex_scc_tree(store: ProvenanceStore, scc_dir: str | Path, s: int, c: int
     for store_name, diff_root in _store_lane_roots(scc_dir, DIFF_SUBDIR):
         if not diff_root.is_dir():
             continue
-        for ws_dir in sorted(p for p in diff_root.iterdir() if p.is_dir()):
-            if ws_dir.name == EVENTS_SUBDIR or ws_dir.name.startswith("_tmp_"):
+        for label_dir in sorted(p for p in diff_root.iterdir() if p.is_dir()):
+            if label_dir.name == EVENTS_SUBDIR or label_dir.name.startswith("_tmp_"):
                 continue
-            workspace_label = ws_dir.name
+            if not _diff_label_dir_has_content(label_dir):
+                continue
+            workspace_label = label_dir.name
             kind = _diff_kind_from_workspace_label(workspace_label)
-            for recipe_dir in sorted(p for p in ws_dir.iterdir() if p.is_dir()):
-                if recipe_dir.name.startswith("_tmp_"):
-                    continue
-                if not _recipe_dir_has_content(recipe_dir):
-                    continue
-                if kind == "shared_mask":
-                    spatial = {"s": s, "c": c, "k": k}
-                else:
-                    spatial = {
-                        "s": s,
-                        "c": c,
-                        "k": k,
-                        "workspace_label": workspace_label,
-                        "recipe_fp": recipe_dir.name,
-                    }
-                if store_name is not None:
-                    spatial["store_name"] = store_name
-                _legacy_artifact(
-                    store,
-                    kind,
-                    spatial,
-                    str(recipe_dir),
-                    disk_key=f"{workspace_label}/{recipe_dir.name}",
-                )
-                n += 1
+            if kind == "shared_mask":
+                spatial = {"s": s, "c": c, "k": k}
+            else:
+                spatial = {
+                    "s": s,
+                    "c": c,
+                    "k": k,
+                    "workspace_label": workspace_label,
+                }
+            if store_name is not None:
+                spatial["store_name"] = store_name
+            _legacy_artifact(
+                store,
+                kind,
+                spatial,
+                str(label_dir),
+                disk_key=workspace_label,
+            )
+            n += 1
 
     return n
 

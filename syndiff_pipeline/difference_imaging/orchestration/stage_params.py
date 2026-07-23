@@ -1013,6 +1013,16 @@ def upcoming_phot_cutout_size(pipeline: list, pipeline_idx: int) -> int:
     return max(sizes)
 
 
+PHOTOMETRY_DELEGATOR_ALLOWED = frozenset({"kind", "config"})
+
+
+def validate_photometry_delegator(stage: dict, pipeline_idx: int) -> None:
+    validate_stage_keys(stage, pipeline_idx, "photometry", PHOTOMETRY_DELEGATOR_ALLOWED)
+    config_ref = stage.get("config")
+    if not config_ref or not str(config_ref).strip():
+        raise ValueError(f"pipeline[{pipeline_idx}]: photometry stage requires config:")
+
+
 def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
     """Strict key allow-list for *kind* (no merge). Used from validate_pipeline."""
     parsers = {
@@ -1028,6 +1038,7 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "kernel_fit": lambda: parse_kernel_fit(stage, pipeline_idx),
         "convolved_templates": lambda: parse_convolved_templates(stage, pipeline_idx),
         "kernel_subtract": lambda: parse_kernel_subtract(stage, pipeline_idx),
+        "photometry": lambda: validate_photometry_delegator(stage, pipeline_idx),
     }
     fn = parsers.get(kind)
     if fn is None:

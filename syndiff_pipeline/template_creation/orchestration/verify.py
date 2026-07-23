@@ -1752,8 +1752,8 @@ def verify_diff(
     -------
     VerifyResult"""
     from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+        _scc_lane_root,
         diff_workspace_complete,
-        diff_workspace_root,
         frozen_diff_config_for_verify,
         resolve_diff_site_config_path,
     )
@@ -1779,29 +1779,70 @@ def verify_diff(
         meta=meta,
     )
     event_dir = Path(resolved.event_dir)
-    ws_dir = diff_workspace_root(cfg, event_dir)
     manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
+    lane_root = _scc_lane_root(cfg)
     if diff_workspace_complete(cfg, event_dir):
-        return VerifyResult(
-            "diff",
-            True,
-            f"Frame manifest and final pipeline outputs present under {ws_dir.name}/",
-            str(ws_dir),
-        )
-    if not Path(manifest_csv).is_file():
-        return VerifyResult("diff", False, "Missing frame manifest CSV", manifest_csv)
-    if not ws_dir.is_dir():
+        detail = str(lane_root) if lane_root is not None else ""
+        return VerifyResult("diff", True, "SCC diff lane complete", detail)
+
+    data_root = getattr(cfg, "data_root", "") or ""
+    if not data_root:
         return VerifyResult(
             "diff",
             False,
-            f"Missing workspace tree {ws_dir.name}/ under event_dir",
-            str(ws_dir),
+            "deployment missing data_root for SCC diff verification",
+            str(event_dir),
         )
+    if not Path(manifest_csv).is_file():
+        return VerifyResult("diff", False, "Missing frame manifest CSV", manifest_csv)
+
+    lane_detail = str(lane_root) if lane_root is not None else "SCC diff lane path unavailable"
     return VerifyResult(
         "diff",
         False,
-        f"Final pipeline outputs missing under {ws_dir.name}/",
-        str(ws_dir),
+        "SCC diff lane incomplete (bookkeeping or final stage outputs missing)",
+        lane_detail,
+    )
+
+
+def verify_photometry(
+    resolved: ResolvedTargetConfig,
+    runner_cfg: RunnerConfig | None = None,
+    *,
+    meta: dict | None = None,
+) -> VerifyResult:
+    """Verify photometry outputs under ``phot_{run_id}/``."""
+    from syndiff_pipeline.photometry.orchestration.verify import photometry_complete
+    from syndiff_pipeline.photometry.site_config import (
+        load_photometry_site_policy,
+        resolve_photometry_config_path,
+        resolve_photometry_run_config,
+    )
+
+    if runner_cfg is None or not getattr(runner_cfg, "photometry_config_path", ""):
+        return VerifyResult(
+            "photometry",
+            False,
+            "photometry verification requires photometry_config_path on RunnerConfig",
+            resolved.event_dir,
+        )
+    policy = load_photometry_site_policy(
+        resolve_photometry_config_path(meta=meta, runner_cfg=runner_cfg)
+    )
+    run_config = resolve_photometry_run_config(
+        policy, resolved.target, site_dir=Path(policy.config_path).parent
+    )
+    event_dir = Path(resolved.event_dir)
+    if photometry_complete(run_config, event_dir, run_config.photometry_run_id):
+        from syndiff_pipeline.difference_imaging.support.paths import photometry_root
+
+        phot_root = photometry_root(str(event_dir), run_config.photometry_run_id)
+        return VerifyResult("photometry", True, "Photometry outputs present", str(phot_root))
+    return VerifyResult(
+        "photometry",
+        False,
+        "Photometry outputs missing under phot_{run_id}/",
+        str(event_dir),
     )
 
 
@@ -1887,12 +1928,10 @@ def stage_absence_probe(
         if runner_cfg is None or not runner_cfg.diff_config_path:
             return AbsenceProbeResult.UNKNOWN
         from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
-            diff_workspace_root,
+            _diff_frame_manifest_available,
+            _scc_lane_root,
             frozen_diff_config_for_verify,
             resolve_diff_site_config_path,
-        )
-        from syndiff_pipeline.difference_imaging.support.manifest import (
-            manifest_path_from_output_dir,
         )
 
         cfg = frozen_diff_config_for_verify(
@@ -1900,10 +1939,11 @@ def stage_absence_probe(
             resolved.target,
             meta=meta,
         )
-        event_dir = Path(resolved.event_dir)
-        manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
-        ws_dir = diff_workspace_root(cfg, event_dir)
-        if ws_dir.is_dir() or manifest_csv.is_file():
+
+        if _diff_frame_manifest_available(cfg, resolved.event_dir):
+            return AbsenceProbeResult.MAYBE_PRESENT
+        lane_root = _scc_lane_root(cfg)
+        if lane_root is not None and lane_root.is_dir() and any(lane_root.iterdir()):
             return AbsenceProbeResult.MAYBE_PRESENT
         return AbsenceProbeResult.ABSENT
 
@@ -1918,6 +1958,7 @@ VERIFY_FUNCS = {
     "remap": verify_remap,
     "downsample": verify_downsample,
     "diff": verify_diff,
+    "photometry": verify_photometry,
 }
 
 
@@ -1956,6 +1997,8 @@ def verify_stage(
     if fn is None:
         raise ValueError(f"Unknown stage: {stage!r}")
     if stage == "diff":
+        return fn(resolved, runner_cfg, meta=meta)
+    if stage == "photometry":
         return fn(resolved, runner_cfg, meta=meta)
     return fn(resolved)
 

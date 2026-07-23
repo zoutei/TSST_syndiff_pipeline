@@ -15,6 +15,12 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     is_pipeline_fits_filename,
     resolve_pipeline_artifact_path,
 )
+from syndiff_pipeline.common.scc_paths import (
+    normalize_store_name,
+    resolve_scc_diff_bookkeeping_dir,
+    scc_diff_dir,
+    scc_diff_label_dir,
+)
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import (
     SHARED_MASK_FITS_BASENAME,
@@ -111,77 +117,77 @@ def load_diff_frames_for_verify(
     cfg: SynDiffConfig, event_dir: str | Path
 ) -> "pd.DataFrame":
     """
-    Frame manifest for indexed diff verify.
-
-    Prefers SCC ``bookkeeping/diff/frames.csv`` when present (read-only — never
-    bootstraps); falls back to the event ``syndiff_ffi_frames.csv`` manifest.
+    Frame manifest for indexed diff verify from SCC ``bookkeeping/diff/frames.csv``.
     """
     import pandas as pd
 
+    del event_dir
     data_root = getattr(cfg, "data_root", "") or ""
-    if data_root:
-        try:
-            from syndiff_pipeline.common.scc_paths import (
-                normalize_store_name,
-                resolve_scc_diff_bookkeeping_dir,
-            )
-            from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
-                DIFF_JOB_BASENAME,
-                FRAMES_CSV_BASENAME,
-            )
+    if not data_root:
+        raise RuntimeError(
+            "load_diff_frames_for_verify requires deployment data_root on diff config"
+        )
+    from syndiff_pipeline.common.scc_paths import (
+        normalize_store_name,
+        resolve_scc_diff_bookkeeping_dir,
+    )
+    from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+        DIFF_JOB_BASENAME,
+        FRAMES_CSV_BASENAME,
+    )
 
-            bk_dir = resolve_scc_diff_bookkeeping_dir(
-                data_root,
-                int(cfg.sector),
-                int(cfg.camera),
-                int(cfg.ccd),
-                oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
-                template_store_name=normalize_store_name(
-                    getattr(cfg, "template_store_name", None)
-                ),
-            )
-            frames_path = bk_dir / FRAMES_CSV_BASENAME
-            job_path = bk_dir / DIFF_JOB_BASENAME
-            if frames_path.is_file() and job_path.is_file():
-                return pd.read_csv(frames_path)
-        except Exception:
-            log.debug("load_diff_frames_for_verify: SCC handoff read failed", exc_info=True)
-
-    from syndiff_pipeline.difference_imaging.support.manifest import load_frame_manifest
-
-    return load_frame_manifest(str(event_dir))
+    bk_dir = resolve_scc_diff_bookkeeping_dir(
+        data_root,
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+        oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
+        template_store_name=normalize_store_name(
+            getattr(cfg, "template_store_name", None)
+        ),
+    )
+    frames_path = bk_dir / FRAMES_CSV_BASENAME
+    job_path = bk_dir / DIFF_JOB_BASENAME
+    if frames_path.is_file() and job_path.is_file():
+        return pd.read_csv(frames_path)
+    raise FileNotFoundError(
+        f"SCC diff handoff missing under {bk_dir!r} "
+        f"(need {FRAMES_CSV_BASENAME!r} and {DIFF_JOB_BASENAME!r})"
+    )
 
 
 def _diff_frame_manifest_available(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
-    """True when SCC bookkeeping or the event frame manifest is on disk."""
+    """True when SCC bookkeeping frames + diff job exist."""
+    del event_dir
     data_root = getattr(cfg, "data_root", "") or ""
-    if data_root:
-        try:
-            from syndiff_pipeline.common.scc_paths import (
-                normalize_store_name,
-                resolve_scc_diff_bookkeeping_dir,
-            )
-            from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
-                DIFF_JOB_BASENAME,
-                FRAMES_CSV_BASENAME,
-            )
+    if not data_root:
+        return False
+    try:
+        from syndiff_pipeline.common.scc_paths import (
+            normalize_store_name,
+            resolve_scc_diff_bookkeeping_dir,
+        )
+        from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+            DIFF_JOB_BASENAME,
+            FRAMES_CSV_BASENAME,
+        )
 
-            bk_dir = resolve_scc_diff_bookkeeping_dir(
-                data_root,
-                int(cfg.sector),
-                int(cfg.camera),
-                int(cfg.ccd),
-                oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
-                template_store_name=normalize_store_name(
-                    getattr(cfg, "template_store_name", None)
-                ),
-            )
-            if (bk_dir / FRAMES_CSV_BASENAME).is_file() and (bk_dir / DIFF_JOB_BASENAME).is_file():
-                return True
-        except Exception:
-            log.debug("_diff_frame_manifest_available: SCC check failed", exc_info=True)
-    manifest_csv = Path(manifest_path_from_output_dir(str(event_dir), None))
-    return manifest_csv.is_file()
+        bk_dir = resolve_scc_diff_bookkeeping_dir(
+            data_root,
+            int(cfg.sector),
+            int(cfg.camera),
+            int(cfg.ccd),
+            oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
+            template_store_name=normalize_store_name(
+                getattr(cfg, "template_store_name", None)
+            ),
+        )
+        return (bk_dir / FRAMES_CSV_BASENAME).is_file() and (
+            bk_dir / DIFF_JOB_BASENAME
+        ).is_file()
+    except Exception:
+        log.debug("_diff_frame_manifest_available: SCC check failed", exc_info=True)
+        return False
 
 
 def diff_workspace_root(cfg: SynDiffConfig, event_dir: str | Path) -> Path:
@@ -200,70 +206,44 @@ def diff_workspace_root(cfg: SynDiffConfig, event_dir: str | Path) -> Path:
     )
 
 
-def _last_executable_stage(cfg: SynDiffConfig) -> dict | None:
-    """Last executable stage.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    
-    Returns
-    -------
-    dict | None"""
-    _, _, stages = split_pipeline(cfg.pipeline)
-    if not stages:
+_NON_SCC_DIFF_STAGE_KINDS = frozenset(
+    {"photometry", "astrometry", "forced_photometry"}
+)
+
+
+def _scc_lane_root(cfg: SynDiffConfig) -> Path | None:
+    data_root = getattr(cfg, "data_root", "") or ""
+    if not data_root:
         return None
-    return stages[-1][1]
-
-
-def _label_dir_has_files(ws_dir: Path, label: str) -> bool:
-    """Label dir has files.
-    
-    Parameters
-    ----------
-    ws_dir : Path
-    label : str
-    
-    Returns
-    -------
-    bool"""
-    d = ws_dir / label
-    if not d.is_dir():
-        return False
-    return any(p.is_file() for p in d.rglob("*"))
-
-
-def _label_dir_has_fits(ws_dir: Path, label: str) -> bool:
-    """Label dir has fits.
-    
-    Parameters
-    ----------
-    ws_dir : Path
-    label : str
-    
-    Returns
-    -------
-    bool"""
-    d = ws_dir / label
-    if not d.is_dir():
-        return False
-    return any(
-        is_pipeline_fits_filename(p.name) for p in d.rglob("*") if p.is_file()
+    return scc_diff_dir(
+        data_root,
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+        store_name=normalize_store_name(getattr(cfg, "output_store_name", None)),
     )
 
 
-def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
-    """Final stage complete.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    ws_dir : Path
-    
-    Returns
-    -------
-    bool"""
-    stage = _last_executable_stage(cfg)
+def _last_scc_executable_stage(cfg: SynDiffConfig) -> dict | None:
+    """Last diff pipeline stage that writes SCC lane artifacts."""
+    _, _, stages = split_pipeline(cfg.pipeline)
+    for _idx, stage in reversed(stages):
+        kind = str(stage.get("kind") or "").strip()
+        if kind not in _NON_SCC_DIFF_STAGE_KINDS:
+            return stage
+    return None
+
+
+def _scc_label_dir_has_fits(label_dir: Path) -> bool:
+    if not label_dir.is_dir():
+        return False
+    return any(
+        is_pipeline_fits_filename(p.name) for p in label_dir.rglob("*") if p.is_file()
+    )
+
+
+def _scc_final_stage_complete(cfg: SynDiffConfig, lane_root: Path) -> bool:
+    stage = _last_scc_executable_stage(cfg)
     if stage is None:
         return False
 
@@ -271,78 +251,43 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
 
     if kind == "shared_mask":
         return (
-            resolve_pipeline_artifact_path(str(ws_dir), SHARED_MASK_FITS_BASENAME)
+            resolve_pipeline_artifact_path(str(lane_root), SHARED_MASK_FITS_BASENAME)
             is not None
         )
-
-    if kind == "forced_photometry":
-        from syndiff_pipeline.difference_imaging.stages.photometry import (
-            lightcurve_csv_basename,
-        )
-
-        label = str(stage["output"]).strip()
-        phot_dir = ws_dir / label
-        if not phot_dir.is_dir():
-            return False
-        methods = stage.get("methods") or []
-        if not methods:
-            return False
-        extras = getattr(cfg, "additional_forced_targets", None) or []
-        for entry in methods:
-            if not isinstance(entry, dict):
-                return False
-            name = str(entry.get("name", "")).strip()
-            if not name:
-                return False
-            primary_csv = lightcurve_csv_basename(name)
-            if not (phot_dir / primary_csv).is_file():
-                return False
-            for pt in extras:
-                if not isinstance(pt, dict):
-                    continue
-                extra_name = str(pt.get("name", "")).strip()
-                if not extra_name:
-                    continue
-                extra_csv = lightcurve_csv_basename(name, extra_name)
-                if not (phot_dir / extra_csv).is_file():
-                    return False
-        return True
 
     if kind == "kernel_subtract":
         o = stage.get("output") or {}
         diffs = str(o.get("diffs", "")).strip()
-        return bool(diffs) and _label_dir_has_fits(ws_dir, diffs)
+        return bool(diffs) and _scc_label_dir_has_fits(lane_root / diffs)
 
     if kind == "background":
         label = str(stage.get("output", "")).strip()
         if not label:
             return False
-        out_dir = ws_dir / label
+        out_dir = lane_root / label
         if not out_dir.is_dir():
             return False
-        stack_npz = out_dir / "stack.npz"
-        stack_npy = out_dir / "stack.npy"
-        if stack_npz.is_file() or stack_npy.is_file():
+        if (out_dir / "stack.npz").is_file() or (out_dir / "stack.npy").is_file():
             return True
-        return _label_dir_has_fits(ws_dir, label)
+        return _scc_label_dir_has_fits(out_dir)
 
-    if kind in (
-        "subtract",
-        "sat_template",
-    ):
+    if kind in ("subtract", "sat_template"):
         outputs = _outputs_for_stage(stage)
-        return bool(outputs) and all(_label_dir_has_files(ws_dir, lab) for lab in outputs)
+        return bool(outputs) and all(
+            (lane_root / lab).is_dir() and any((lane_root / lab).rglob("*"))
+            for lab in outputs
+        )
 
     if kind == "epsf":
         label = str(stage["output"]).strip()
-        epsf_dir = ws_dir / label
+        epsf_dir = lane_root / label
         if not epsf_dir.is_dir():
             return False
         return any(epsf_dir.rglob("group_epsf_*.npy"))
 
     if kind == "centroids":
         label = str(stage["output"]).strip()
-        centroids_dir = ws_dir / label
+        centroids_dir = lane_root / label
         if not centroids_dir.is_dir():
             return False
         from syndiff_pipeline.difference_imaging.stages.centroids import (
@@ -368,19 +313,46 @@ def _final_stage_complete(cfg: SynDiffConfig, ws_dir: Path) -> bool:
         label = str(stage.get("output", "")).strip()
         if not label:
             return False
-        d = ws_dir / label
-        return (d / KERNEL_FIT_META_BASENAME).is_file() and (d / KERNEL_R2_NPZ_BASENAME).is_file()
+        d = lane_root / label
+        return (d / KERNEL_FIT_META_BASENAME).is_file() and (
+            d / KERNEL_R2_NPZ_BASENAME
+        ).is_file()
 
     if kind == "convolved_templates":
         label = str(stage.get("output", "")).strip()
-        return bool(label) and (ws_dir / label / "convolved_templates.csv").is_file()
+        return bool(label) and (lane_root / label / "convolved_templates.csv").is_file()
 
     if kind == "hotpants":
         o = stage.get("output") or {}
         diffs = str(o.get("diffs", "")).strip()
-        return bool(diffs) and _label_dir_has_fits(ws_dir, diffs)
+        return bool(diffs) and _scc_label_dir_has_fits(lane_root / diffs)
 
     return False
+
+
+def scc_diff_lane_complete(cfg: SynDiffConfig) -> bool:
+    """True when SCC bookkeeping and final diff pipeline outputs exist on the lane."""
+    lane_root = _scc_lane_root(cfg)
+    if lane_root is None or not lane_root.is_dir():
+        return False
+    from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+        DIFF_JOB_BASENAME,
+        FRAMES_CSV_BASENAME,
+    )
+
+    bk_dir = resolve_scc_diff_bookkeeping_dir(
+        cfg.data_root,
+        int(cfg.sector),
+        int(cfg.camera),
+        int(cfg.ccd),
+        oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
+        template_store_name=normalize_store_name(getattr(cfg, "template_store_name", None)),
+    )
+    if not (bk_dir / DIFF_JOB_BASENAME).is_file():
+        return False
+    if not (bk_dir / FRAMES_CSV_BASENAME).is_file():
+        return False
+    return _scc_final_stage_complete(cfg, lane_root)
 
 
 def _label_for_indexed_stage(stage: dict, kind: str) -> Optional[str]:
@@ -698,55 +670,40 @@ def diff_stage_complete_indexed(
 
 
 def diff_workspace_complete(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
-    """True when handoff manifest and final pipeline outputs exist in the active workspace tree."""
+    """True when SCC diff lane bookkeeping and final pipeline outputs exist."""
     event_dir = Path(event_dir)
     if not _diff_frame_manifest_available(cfg, event_dir):
         return False
-    ws_dir = diff_workspace_root(cfg, event_dir)
-    if not ws_dir.is_dir():
+
+    data_root = getattr(cfg, "data_root", "") or ""
+    if not data_root:
         return False
 
-    stage = _last_executable_stage(cfg)
-    if stage is not None:
-        try:
-            indexed = diff_stage_complete_indexed(cfg, event_dir, stage)
-        except Exception:
-            log.debug("diff_stage_complete_indexed raised; falling open", exc_info=True)
-            indexed = None
-        if indexed is not None:
-            return indexed
-
-    # Fail-open fallback: legacy last-stage marker check (unchanged).
-    return _final_stage_complete(cfg, ws_dir)
+    try:
+        indexed = diff_stage_complete_indexed(cfg, event_dir, _last_scc_executable_stage(cfg))
+    except Exception:
+        log.debug("diff_stage_complete_indexed raised; falling open", exc_info=True)
+        indexed = None
+    if indexed is not None:
+        return indexed
+    return scc_diff_lane_complete(cfg)
 
 
 def collect_diff_workspace_artifacts(cfg: SynDiffConfig, event_dir: str | Path) -> list[str]:
-    """List artifact paths under the active workspace tree for diff manifest collection."""
-    from syndiff_pipeline.difference_imaging.support.paths import DEFAULT_MANIFEST_BASENAME
-
+    """List SCC diff lane artifact paths for diff manifest collection."""
     event_dir = Path(event_dir)
     artifacts: list[str] = []
     manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
     if Path(manifest_csv).is_file():
         artifacts.append(manifest_csv)
 
-    ws_dir = diff_workspace_root(cfg, event_dir)
-    if not ws_dir.is_dir():
+    lane_root = _scc_lane_root(cfg)
+    if lane_root is None or not lane_root.is_dir():
         return artifacts
 
-    for child in sorted(ws_dir.iterdir()):
-        if not child.is_dir():
-            if child.is_file():
-                artifacts.append(str(child.resolve()))
-            continue
-        if child.name == "master":
-            master_manifest = child / DEFAULT_MANIFEST_BASENAME
-            if master_manifest.is_file():
-                artifacts.append(str(master_manifest.resolve()))
-            continue
-        for path in sorted(child.rglob("*")):
-            if path.is_file():
-                artifacts.append(str(path.resolve()))
+    for path in sorted(lane_root.rglob("*")):
+        if path.is_file():
+            artifacts.append(str(path.resolve()))
     return artifacts
 
 

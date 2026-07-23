@@ -6,25 +6,10 @@ deployment_file: deployment.yaml
 defaults:
   n_jobs: 16
   pipeline_plots: false
-  master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
   workspace_run_id: multi_hp_temp_calib
   # workspace_run_id: null  # omit → canonical events/{target}/ws/
-
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
 
 pipeline:
   - kind: shared_mask
@@ -100,19 +85,6 @@ pipeline:
       convolved: hp_c
       bkg: hp_b
     write_kernel_solutions: true
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-    output: lc_prf_on_hp_diffs
-    methods:
-      - name: prf
-        type: psf
-        psf_type: prf
-      - name: ap3
-        type: aperture
-        tar_ap: 3
-        sky_in: 5
-        sky_out: 9
 
 condor:
   request_cpus: 16

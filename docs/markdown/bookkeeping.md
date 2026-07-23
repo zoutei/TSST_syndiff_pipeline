@@ -196,8 +196,9 @@ Directory artifacts include `_provenance.json` for offline `reindex`.
   templates/... or templates_{lane}/...
   convolved.zarr              # read-only fallback when shared store is enabled
   diff/ or diff_{lane}/
-    {workspace_label}/{recipe_fp}/tess{pid}_{label}.fits.fz
-  bookkeeping/diff/
+    hp_d/tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz
+    epsf_r1/gridded_epsf_index.json
+  bookkeeping/diff/oversampling_{N}/
     frames.csv
     diff_job.json
 ```
@@ -205,10 +206,13 @@ Directory artifacts include `_provenance.json` for offline `reindex`.
 ### Event workspace
 
 ```text
-{workspace_root}/events/{event}/s{SSSS}_c{C}_k{K}/ws/
+{workspace_root}/events/{event}/s{SSSS}_c{C}_k{K}/
+  phot_{photometry_run_id}/
+    astrometry_result.json
+    {lc_label}/lightcurve_*.csv
 ```
 
-Photometry outputs and optional exploration diff artifacts live here. SCC-primary diff writes go to `data_root/.../diff_{lane}/` in field mode; photometry is tracked as event-scoped provenance nodes either way.
+Photometry outputs live under `phot_{run_id}/`. SCC-primary diff FITS are on `data_root/.../diff_{lane}/`; recipe fingerprints are in `provenance.db` only (not directory names).
 
 ---
 
@@ -314,10 +318,10 @@ Required frames = product IDs from SCC `bookkeeping/diff/frames.csv` (preferred)
 ### SCC diff store (field mode)
 
 ```text
-{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/{label}/{recipe_fp}/tess{pid}_{label}.fits.fz
+{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/{label}/tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz
 ```
 
-One tree per recipe fingerprint. Multiple parameter sets coexist as sibling directories.
+Flat label directories per lane. Recipe identity is tracked in `provenance.db`; multiple recipes for the same label coexist as separate indexed fingerprints, not as nested `{recipe_fp}/` directories.
 
 ---
 

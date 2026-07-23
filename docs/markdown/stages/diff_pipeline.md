@@ -17,9 +17,9 @@
 
 The orchestrator sees a single stage `diff` (`orchestration/stages.py`, `deps=("downsample",)`, Condor pool `diff`). Internally it runs an **ordered YAML pipeline of sub-stages** (`orchestration/execute.py: run_config_pipeline()`), validated against `STAGE_KINDS` in `orchestration/validate.py`:
 
-`astrometry`, `shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `centroids`, `sat_template`, `subtract`, `background`, `forced_photometry`
+`shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `centroids`, `sat_template`, `subtract`, `background`, `photometry` (delegates to `syndiff photometry`)
 
-Preamble entries (no `kind`, must precede the first stage): `external_workspaces`, `workspace_inherit`.
+Preamble entries (no `kind`, must precede the first stage): `external_workspaces` only. `workspace_inherit` is **not supported** under SCC-only diff storage.
 
 ### Field-mode v2 handoff (`scc_bootstrap`)
 
@@ -31,7 +31,7 @@ When `data_root` is set and templates exist with `field_mode_assembly.json` **sc
 
 No separate scheduler stage. No `crop_mode` / `target_box` for geometry.
 
-Per-FFI diff completeness and resume use `data_root/bookkeeping/provenance.db` when indexed (BK-5); SCC handoff `bookkeeping/diff/frames.csv` is preferred over event `syndiff_ffi_frames.csv`. See [storage layout](../storage_layout.md#provenance-bookkeeping-data_rootbookkeeping) and [`doc/template_bookkeeping_plan.md`](../../doc/template_bookkeeping_plan.md).
+Per-FFI diff completeness and resume use `data_root/bookkeeping/provenance.db` when indexed (BK-5). Frame manifests for verify come from SCC handoff `bookkeeping/diff/frames.csv` only (no event `syndiff_ffi_frames.csv` fallback). See [storage layout](../storage_layout.md#provenance-bookkeeping-data_rootbookkeeping) and [`doc/template_bookkeeping_plan.md`](../../doc/template_bookkeeping_plan.md).
 
 **Exception:** astrometry-only pipeline (`pipeline: [{kind: astrometry}]`) skips template handoff.
 
@@ -43,7 +43,7 @@ Site authoring is intentionally split:
 
 | File | Owns |
 |------|------|
-| `diff_config.yaml` `defaults:` / top-level | Multi-stage knobs: crop, `n_jobs`, `max_ffis`, `workspace_run_id`, `pipeline_plots*`, `master_fits_mirror`, `additional_forced_targets` |
+| `diff_config.yaml` `defaults:` / top-level | Multi-stage knobs: crop, `n_jobs`, `max_ffis`, `workspace_run_id`, `pipeline_plots*`, `additional_forced_targets` |
 | `diff_config.yaml` `pipeline:` `kind:` blocks | Stage-only knobs. **Omit keys that match dataclass defaults** in `stage_params.py` |
 | `mask_settings.yaml` (optional sibling) | Mask geometry/policy (style, maglims, strap/edge/PS1 *policy*, TNS, asteroids). **Not** embedded in `diff_config` |
 | `deployment.yaml` | `workspace_root`, `data_root`, credentials |
@@ -58,13 +58,14 @@ Bundled straps / BSC: leave `straps_csv` / `bsc_catalog` unset (empty = packaged
 
 ## 1. Workspace layout and naming
 
-- Event root: `{workspace_root}/events/{target_label}/`; pipeline tree `events/{label}/ws/` (or `ws_{workspace_run_id}/`).
-- Per-sub-stage dirs: `ws/{label}/` where `label` comes from the stage's `output:` key (e.g. `hp_d`, `hp_c`, `hp_b`, `ep`, `lc_prf_on_diffs`).
-- Per-FFI FITS: `{tess_product_id}_{label}.fits.fz` (e.g. `tess2020019142923_hp_d.fits.fz`); see `support/ffi_naming.py`.
-- Root artifacts in `ws/`: `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv`, `targets.reg`, `diff_config.yaml` (frozen copy), `tile_centers.json`.
-- Astrometry artifacts in the active workspace root (`ws/` or `ws_{workspace_run_id}/`): `astrometry_result.json`, optional `debug_plots/astrometry_mix.png` when `pipeline_plots: true`.
-- Meta workspace paired with a diffs label (`hp_d` → `hp_m`): `kernel_reconstruction.npz`, `phot_calib.csv`, `hotpants.progress.json`.
-- Optional flat mirror of all workspace FITS: `ws/master/` (symlinks, `master_fits_mirror: true`).
+**SCC-primary (field mode v2):** subtract, ePSF, centroids, and shared-mask FITS are written under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` (flat label subdirs such as `hp_d/`, `epsf_r1/`). Per-FFI stems use `tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz` (`support/ffi_naming.py`). Completeness is indexed in `provenance.db`; event `ws/` trees are not populated with diff FITS.
+
+- Event root: `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`.
+- Photometry tree: `phot_{photometry_run_id}/` (astrometry JSON, `targets.reg`, `{lc_label}/lightcurve_*.csv`).
+- Optional exploration tree: `events/{label}/ws/` (or `ws_{workspace_run_id}/`) — frozen `diff_config.yaml`, progress sidecars, `templates`/`ffis` symlinks; not used for SCC diff completeness.
+- Lane root artifacts: `shared_mask.fits.fz`, `hotpants_substamp_stars.csv`, `gaia_catalog_pipeline.csv` under `diff_{lane}/`.
+- Meta paired with a diffs label (`hp_d` → `hp_m`): `kernel_reconstruction.npz`, `phot_calib.csv`, `hotpants.progress.json` (lane-local when written).
+- Astrometry for photometry runs: `phot_{run_id}/astrometry_result.json` (not the legacy `ws/` root).
 
 ## 2. Sub-stages
 
@@ -178,7 +179,7 @@ Per-frame linear combination of workspace planes (or the virtual cropped `ffi` l
 
 ### `epsf` (`stages/epsf.py`, `stages/gridded_epsf.py`)
 
-Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (e.g. 2×2 or 3×3); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95) with crop-local `x`/`y`. Star extraction uses per-FFI `mask_at` and **ignores bits 1|2|32** (very bright / mid-bright / faint squares) so Gaia ePSF stars are kept; any other set bit (4/8/16/64/128) rejects. See [masking.md](../masking.md).
+Per-frame gridded empirical PSF fitting on difference images with **photutils** (`EPSFBuilder` + `GriddedPSFModel`), not TGLC. Each frame is tiled into `tile_ny × tile_nx` sections (default **5×5**); Gaia stars are pre-filtered to `phot_rp_mean_mag < mag_max_rp` (default 12.95). Star positions use **per-frame full-FFI WCS** from `ffi_list.parquet` (`gaia_science_xy_for_frame`), rebased to the science array via `MappingGrid.science_ffi_bounds()` — not diff FITS headers or catalog `x`/`y`. Star extraction uses per-FFI temporal `mask_at` and **ignores bits 1|2|32**; geometric mask filtering (`epsf_star_box_radius=7`) and section `NDData.mask` when `epsf_use_section_mask: true`. Oversampled stamps are symmetrically trimmed by `epsf_stamp_border_crop` (default 8) before `GriddedPSFModel`. See [masking.md](../masking.md).
 
 Primary outputs under `ws/{output}/`:
 
@@ -190,11 +191,11 @@ Primary outputs under `ws/{output}/`:
 
 Legacy tile-stack bundles are still written for ``sat_template`` (not for forced photometry): `epsf_stack_r1.npz`, `epsf_r1_smooth.npz`, `group_epsf/group_epsf_{gid}.npy`, and `group_epsf/group_epsf_{gid}.npz` (median gridded cube per WCS group). `tile_centers.json` is saved in `ws/` root for `sat_template`. Forced photometry with `psf_type: epsf` requires `gridded_epsf_index.json` only.
 
-Key YAML params: `tile_nx`, `tile_ny`, `epsf_oversample`, `psf_size`, `extract_size`, `min_stars_per_tile`, `mag_max_rp`, `epsf_maxiters`, `epsf_recentering_maxiters`, `epsf_n_jobs`.
+Key YAML params: `tile_nx`, `tile_ny`, `epsf_oversample`, `psf_size`, `extract_size`, `min_stars_per_tile`, `mag_max_rp`, `epsf_maxiters`, `epsf_recentering_maxiters`, `epsf_smoothing_kernel`, `epsf_builder_fit_shape`, `epsf_recentering_boxsize`, `epsf_star_box_radius`, `epsf_use_section_mask`, `epsf_stamp_border_crop`, `epsf_n_jobs`.
 
 ### `centroids` (`stages/centroids.py`)
 
-Gaia-star PSF photometry on difference images using per-frame `GriddedPSFModel` from an `epsf` workspace (`photutils.PSFPhotometry` with the same brightness pre-filter as ePSF fitting). Inputs: `diffs` (difference-image label), `epsf` (gridded ePSF workspace label).
+Gaia-star PSF photometry on difference images using per-frame `GriddedPSFModel` from an `epsf` workspace (`photutils.PSFPhotometry`). Star positions use the same per-frame `ffi_list` WCS → science-array projection as ePSF; **no mask** is passed to `PSFPhotometry`. Brightness selection: `phot_rp_mean_mag < mag_max_rp` (default 12.95) and `phot_rp_mean_mag > mag_min_rp` (default 7.5). Inputs: `diffs` (difference-image label), `epsf` (gridded ePSF workspace label).
 
 Outputs under `ws/{output}/`:
 
@@ -205,7 +206,7 @@ Outputs under `ws/{output}/`:
 | `centroids.progress.json` | Frame progress sidecar (also mirrored as `diff.centroids.progress.json` beside `diff.log`) |
 | `centroids.progress.json` | Frame progress sidecar (also mirrored as `diff.centroids.progress.json` beside `diff.log`) |
 
-Key YAML params: `mag_max_rp`, `fit_shape`, `aperture_radius`, `psf_grouper_min_separation`, `centroids_n_jobs`.
+Key YAML params: `mag_max_rp`, `mag_min_rp`, `fit_shape`, `aperture_radius` (default 4), `psf_grouper_min_separation` (default 10), `centroids_n_jobs`.
 
 ### `sat_template` (`stages/sat_template.py`) — see §6
 
@@ -240,8 +241,8 @@ zero-point calibration columns are added.
 | `config/diff_config_astrometry_only.yaml` | `astrometry` (smoke test; no template handoff) |
 | `config/diff_config_single_kernel.yaml` | `shared_mask` → `kernel_fit` → `convolved_templates` → `kernel_subtract` → `background` → `subtract` → `forced_photometry` |
 | `config/diff_config_multi_kernel.yaml` | same prefix → `background` → `hotpants` (round 2, `hp_bgo=0`) → `forced_photometry` |
-| `config/diff_config_multi_kernel_resume.yaml` | `workspace_inherit` → `background` → `hotpants` → `forced_photometry` |
-| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `workspace_inherit` (from `multi_hp_temp_calib`: `hp_d`, `hp_m`, shared mask, Gaia catalog, substamp stars) → `epsf` (3×3 grid) → `centroids` → `forced_photometry` (`psf_type: epsf`, photutils; prefer method names `epsf` / `epsf_bkg`) on `hp_d` |
+| `config/diff_config_multi_kernel_resume.yaml` | `background` → `hotpants` (requires upstream SCC lane labels) |
+| `config/pipeline_epsf_gepsf.yaml` / `config/diff_config_2020ut_epsf_gepsf.yaml` | `epsf` → `centroids` on `hp_d` (photometry via `syndiff photometry`) |
 
 ## 4. Template resolution
 
@@ -291,7 +292,7 @@ Produce `ks_b` via `kernel_subtract`; smooth to `ks_b_s` with the `background` s
 
 ## 7. Config schema highlights
 
-Top-level keys in `diff_config.yaml`: `deployment_file`, `defaults` (merged into `SynDiffConfig`: `n_jobs`, `crop_mode`, `crop_box_size`, `pipeline_plots`, `master_fits_mirror`, `workspace_run_id`, …), `pipeline` (ordered stage list; unknown keys per stage fail validation via `*_ALLOWED` frozensets in `orchestration/stage_params.py`), `additional_forced_targets`, `per_event_force_targets`, `overrides` (keyed `"sector/camera/ccd"`), `condor`.
+Top-level keys in `diff_config.yaml`: `deployment_file`, `defaults` (merged into `SynDiffConfig`: `n_jobs`, `crop_mode`, `crop_box_size`, `pipeline_plots`, `workspace_run_id`, …), `pipeline` (ordered stage list; unknown keys per stage fail validation via `*_ALLOWED` frozensets in `orchestration/stage_params.py`), `additional_forced_targets`, `per_event_force_targets`, `overrides` (keyed `"sector/camera/ccd"`), `condor`.
 
 A frozen per-target copy of the effective config is written to `runs/.../per_target/{label}/diff_config.yaml` at orchestrator launch (`site_config.freeze_target_diff_config()`).
 
@@ -299,10 +300,10 @@ A frozen per-target copy of the effective config is written to `runs/.../per_tar
 
 | Goal | What to reuse | What to re-run |
 |------|---------------|----------------|
-| New photometry on existing diffs | `ws/hp_d/*.fits.fz` | `forced_photometry` only |
+| New photometry on existing diffs | `{data_root}/…/diff_{lane}/hp_d/*.fits.fz` | `forced_photometry` only (or `syndiff` photometry stage) |
 | Modified templates, kernel-fit path | `kernel_r2.npz` + `kernel_fit_meta.json` | `convolved_templates` → `kernel_subtract` → (`background`/`subtract`) → `forced_photometry` |
 | Modified templates, hotpants path | shared mask, substamp stars | full `hotpants` (per-frame kernels re-fit) |
-| Continue a multi-kernel run | inherit labels via `workspace_inherit` + `workspace_run_id` | remaining stages in the new run id |
+| Continue a multi-kernel run | re-run upstream diff stages on the SCC lane | remaining stages in a new run |
 
 ## 9. Key files
 

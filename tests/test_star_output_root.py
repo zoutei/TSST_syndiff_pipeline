@@ -1,4 +1,4 @@
-"""Tests for star output path resolution under baseline ws/host_star."""
+"""Tests for star output path resolution under phot_{run_id}/host_star."""
 
 from __future__ import annotations
 
@@ -13,12 +13,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from syndiff_pipeline.difference_imaging.support.paths import photometry_root
 from syndiff_pipeline.star.runner import (
     HOST_STAR_SUBDIR,
-    legacy_star_output_root,
     resolve_star_host_root,
     star_output_root,
-    verify_star_batch_manifest,
 )
 from syndiff_pipeline.star.site_config import (
     find_star_target_row,
@@ -36,65 +35,32 @@ def _fake_ctx(*, event_dir: Path, baseline_ws: Path) -> SimpleNamespace:
 
 
 class TestStarOutputRoot(unittest.TestCase):
-    def test_star_output_root_is_host_star_under_baseline(self):
+    def test_star_output_root_is_host_star_under_photometry_tree(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             event = Path(tmpdir) / "events" / "s0020_c3_k2_s20_astrometry"
             baseline = event / "ws_star_full_lc"
             baseline.mkdir(parents=True)
             ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
-            self.assertEqual(star_output_root(ctx), baseline / HOST_STAR_SUBDIR)
-
-    def test_legacy_star_output_root_sibling_paths(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            event = Path(tmpdir) / "events" / "evt"
-            baseline = event / "ws"
-            event.mkdir(parents=True)
-            ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
-            self.assertEqual(legacy_star_output_root(ctx, None), event / "star")
             self.assertEqual(
-                legacy_star_output_root(ctx, "star_lc_full"),
-                event / "star_star_lc_full",
+                star_output_root(ctx, photometry_run_id="star_full_lc"),
+                Path(photometry_root(str(event), "star_full_lc")) / HOST_STAR_SUBDIR,
             )
-            self.assertEqual(legacy_star_output_root(ctx, "none"), event / "star")
-            self.assertEqual(legacy_star_output_root(ctx, "null"), event / "star")
+            self.assertEqual(
+                star_output_root(ctx, photometry_run_id=None),
+                Path(photometry_root(str(event), None)) / HOST_STAR_SUBDIR,
+            )
 
-    def test_resolve_prefers_host_star_when_manifest_present(self):
+    def test_resolve_returns_phot_host_star(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             event = Path(tmpdir) / "evt"
             baseline = event / "ws_star_full_lc"
-            host = baseline / "host_star"
+            host = Path(photometry_root(str(event), "run_a")) / HOST_STAR_SUBDIR
             host.mkdir(parents=True)
-            (host / "batch_manifest.csv").write_text(
-                "gaia_source_id,status\n1,ok\n", encoding="utf-8"
-            )
-            legacy = event / "star_star_lc_full"
-            legacy.mkdir(parents=True)
-            (legacy / "batch_manifest.csv").write_text(
-                "gaia_source_id,status\n2,ok\n", encoding="utf-8"
-            )
             ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
             self.assertEqual(
-                resolve_star_host_root(ctx, "star_lc_full"),
+                resolve_star_host_root(ctx, "star_lc_full", photometry_run_id="run_a"),
                 host,
             )
-
-    def test_resolve_falls_back_to_legacy_sibling(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            event = Path(tmpdir) / "evt"
-            baseline = event / "ws_star_full_lc"
-            baseline.mkdir(parents=True)
-            legacy = event / "star_star_lc_full"
-            legacy.mkdir(parents=True)
-            (legacy / "batch_manifest.csv").write_text(
-                "gaia_source_id,tic_id,label,status,blend_flag,"
-                "frames_processed,frames_failed,lightcurve_paths,error\n"
-                "1,,,ok,False,1,0,,\n",
-                encoding="utf-8",
-            )
-            ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
-            resolved = resolve_star_host_root(ctx, "star_lc_full")
-            self.assertEqual(resolved, legacy)
-            self.assertTrue(verify_star_batch_manifest(resolved / "batch_manifest.csv"))
 
     def test_deprecated_workspace_run_id_warns_and_does_not_affect_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,6 +70,7 @@ class TestStarOutputRoot(unittest.TestCase):
                 """
 defaults:
   workspace_run_id: star_lc_full
+  photometry_run_id: star_full_lc
 baseline:
   workspace_run_id: star_full_lc
   diffs: hp_d
@@ -128,15 +95,20 @@ baseline:
                 run_cfg = resolve_star_run_config(policy, row, site_dir=site)
             self.assertTrue(any("deprecated" in m for m in cm.output))
             self.assertEqual(run_cfg.workspace_run_id, "star_lc_full")
+            self.assertEqual(run_cfg.photometry_run_id, "star_full_lc")
             self.assertEqual(run_cfg.baseline.workspace_run_id, "star_full_lc")
 
             event = site / "events" / "s0020_c3_k2_s20_astrometry"
             baseline = event / "ws_star_full_lc"
             baseline.mkdir(parents=True)
             ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
-            self.assertEqual(star_output_root(ctx), baseline / "host_star")
+            expected = Path(photometry_root(str(event), "star_full_lc")) / "host_star"
+            self.assertEqual(
+                star_output_root(ctx, photometry_run_id=run_cfg.photometry_run_id),
+                expected,
+            )
             self.assertNotEqual(
-                star_output_root(ctx),
+                star_output_root(ctx, photometry_run_id=run_cfg.photometry_run_id),
                 event / "star_star_lc_full",
             )
 

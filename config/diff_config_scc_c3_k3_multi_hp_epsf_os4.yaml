@@ -10,7 +10,6 @@ defaults:
   n_jobs: 64
   workspace_run_id: s20_s22_c3_k3_hp_epsf_os4
   pipeline_plots: true
-  master_fits_mirror: true
   oversampling_factor: 4
 
 paths:

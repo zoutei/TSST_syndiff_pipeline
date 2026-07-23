@@ -11,28 +11,12 @@ deployment_file: deployment.yaml
 defaults:
   n_jobs: 16
   pipeline_plots: false
-  master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
 
 # Global forced-photometry extras — applied to every target.
 # dx/dy are crop-local pixel offsets from the primary target's per-frame WCS position.
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
-
 pipeline:
-  - kind: astrometry
   - kind: shared_mask
   - kind: hotpants
     science: ffi
@@ -47,19 +31,6 @@ pipeline:
       diffs: hp_d
       convolved: hp_c
       bkg: hp_b
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-    output: lc_prf_on_diffs
-    methods:
-      - name: prf
-        type: psf
-        psf_type: prf
-      - name: ap3
-        type: aperture
-        tar_ap: 3
-        sky_in: 5
-        sky_out: 9
 
 condor:
   request_cpus: 16

@@ -1,37 +1,18 @@
-# Per-FFI Hotpants + photometry in a new workspace tree with inherited inputs.
-# Prerequisite: diff_config_single_kernel.yaml completed under ws_single_hp_kernel/.
+# Per-FFI Hotpants + photometry in a new workspace tree.
+# SCC-only: workspace_inherit removed; ks_b/ks_d must exist on the SCC diff lane.
 # Use: syndiff diff submit/run with --config config/diff_config_multi_kernel_resume.yaml
 deployment_file: deployment.yaml
 
 defaults:
   n_jobs: 16
   pipeline_plots: false
-  master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
   workspace_run_id: multi_hp_kernel
 
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
-
 pipeline:
-  - workspace_inherit:
-      from: single_hp_kernel
-      labels: [ks_b, ks_d]
-      root_artifacts:
-        - shared_mask.fits.fz
-        - hotpants_substamp_stars.csv
+  - external_workspaces:
+      - ks_b
   - kind: background
     inputs:
       bkg_in: ks_b
@@ -72,19 +53,6 @@ pipeline:
       convolved: hp_c
       bkg: hp_b
     write_kernel_solutions: true
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-    output: lc_prf_on_hp_diffs
-    methods:
-      - name: prf
-        type: psf
-        psf_type: prf
-      - name: ap3
-        type: aperture
-        tar_ap: 3
-        sky_in: 5
-        sky_out: 9
 
 condor:
   request_cpus: 16

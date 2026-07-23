@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -21,6 +22,11 @@ from syndiff_pipeline.common.scc_paths import (
     event_scc_leaf,
     provenance_db_path,
     provenance_spool_dir,
+    resolve_scc_diff_bookkeeping_dir,
+)
+from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+    DIFF_JOB_BASENAME,
+    FRAMES_CSV_BASENAME,
 )
 from syndiff_pipeline.difference_imaging.orchestration import diff_verify as dv
 from syndiff_pipeline.difference_imaging.orchestration import provenance_glue as pg
@@ -144,6 +150,39 @@ class TestBackgroundProvenanceEmit(unittest.TestCase):
             (self.diff_dir / workspace_frame_fits_basename(stem)).write_bytes(b"SIMPLE  = T")
         self.out_dir = self.ws_tree / "bkg_s1"
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self._write_scc_handoff()
+
+    def _write_scc_handoff(self) -> None:
+        bk = resolve_scc_diff_bookkeeping_dir(
+            self.data, self.target.sector, self.target.camera, self.target.ccd
+        )
+        bk.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(
+            {
+                "path": list(self.ffi_paths.values()),
+                "ffi_basename": [Path(p).name for p in self.ffi_paths.values()],
+                "wcs_ok": [True, True],
+                "group_id": [0, 0],
+            }
+        ).to_csv(bk / FRAMES_CSV_BASENAME, index=False)
+        (bk / DIFF_JOB_BASENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "sector": self.target.sector,
+                    "camera": self.target.camera,
+                    "ccd": self.target.ccd,
+                    "geometry_mode": "field",
+                    "mapping_grid": {
+                        "sector": self.target.sector,
+                        "camera": self.target.camera,
+                        "ccd": self.target.ccd,
+                    },
+                    "crop_bounds": {"x_min": 0, "x_max": 10, "y_min": 0, "y_max": 10},
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def _seed_downsample(self) -> str:
         from syndiff_pipeline.common.provenance.fingerprint import (

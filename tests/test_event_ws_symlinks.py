@@ -18,8 +18,6 @@ from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
 )
 from syndiff_pipeline.difference_imaging.support.paths import (
     clear_diff_workspace,
-    link_master_workspace,
-    master_root,
 )
 
 
@@ -115,22 +113,6 @@ class TestFfiHandoff(unittest.TestCase):
         self.assertEqual(removed, 2)
         self.assertFalse(stale_d.exists())
         self.assertFalse(stale_e.exists())
-
-    def test_link_master_workspace_creates_ws_ffis_not_per_workspace(self):
-        out = self.event_dir
-        ws = out / "ws"
-        hp = ws / "hp_d"
-        hp.mkdir(parents=True)
-        (hp / "tess2020_hp_d.fits").write_bytes(b"x")
-
-        refreshed = link_master_workspace(str(out), ffi_leaf=str(self.ffi_leaf))
-        self.assertGreaterEqual(refreshed, 2)
-
-        ffis_link = event_ffis_symlink_path(out)
-        self.assertTrue(ffis_link.is_symlink())
-        self.assertEqual(ffis_link.resolve(), self.ffi_leaf.resolve())
-        self.assertFalse((hp / FFIS_WS_LABEL).exists())
-        self.assertTrue(os.path.islink(os.path.join(master_root(str(out)), "tess2020_hp_d.fits")))
 
     def test_clear_diff_workspace_restores_ffis_symlink(self):
         ensure_event_ffis_symlink(self.event_dir, self.ffi_leaf)

@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from syndiff_pipeline.common.orchestration.targets import Target, _parse_bool, find_target
+from syndiff_pipeline.difference_imaging.support.paths import normalize_photometry_run_id
 
 log = logging.getLogger(__name__)
 
@@ -126,6 +127,7 @@ class StarRunConfig:
     epsf: StarEpsfConfig | None = None
     stars_file: str = ""
     ps1_zarr_path: str | None = None
+    photometry_run_id: str | None = None
 
 
 def normalize_ps1_source(value: str | None, *, warn_legacy: bool = True) -> str:
@@ -350,6 +352,42 @@ def load_star_targets(path: str | Path, *, site_dir: str | Path | None = None) -
     return out
 
 
+def resolve_star_photometry_run_id(
+    *,
+    star_defaults: dict,
+    site_dir: str | Path,
+    photometry_config_path: str | None = None,
+    target: Target | None = None,
+) -> str | None:
+    """Resolve photometry tree id from star defaults, then photometry site policy."""
+    raw = star_defaults.get("photometry_run_id")
+    if raw is not None:
+        rid = normalize_photometry_run_id(str(raw).strip() or None)
+        if rid is not None:
+            return rid
+
+    phot_path = str(photometry_config_path or "").strip()
+    site = Path(site_dir).expanduser().resolve()
+    if not phot_path:
+        candidate = site / "photometry_config.yaml"
+        if candidate.is_file():
+            phot_path = str(candidate)
+    if not phot_path:
+        return None
+
+    from syndiff_pipeline.photometry.site_config import (
+        load_photometry_site_policy,
+        resolve_photometry_run_config,
+    )
+
+    policy = load_photometry_site_policy(phot_path)
+    if target is not None:
+        return resolve_photometry_run_config(policy, target, site_dir=site).photometry_run_id
+    return normalize_photometry_run_id(
+        str((policy.defaults or {}).get("photometry_run_id") or "").strip() or None
+    )
+
+
 def find_star_target_row(rows: list[StarTargetRow], scc: str) -> StarTargetRow:
     """Find a star target row by SCC key or full event label."""
     targets = [row.target for row in rows]
@@ -365,6 +403,7 @@ def resolve_star_run_config(
     star_target_row: StarTargetRow,
     *,
     site_dir: str | Path,
+    photometry_config_path: str | None = None,
 ) -> StarRunConfig:
     """Merge policy defaults, SCC overrides, and star_targets row."""
     site = Path(site_dir).expanduser().resolve()
@@ -408,9 +447,15 @@ def resolve_star_run_config(
     if workspace_run_id is not None:
         log.warning(
             "star defaults/overrides workspace_run_id=%r is deprecated and ignored; "
-            "star outputs always land in {baseline_ws}/host_star/",
+            "star outputs land in phot_{photometry_run_id}/host_star/",
             workspace_run_id,
         )
+    photometry_run_id = resolve_star_photometry_run_id(
+        star_defaults=merged_defaults,
+        site_dir=site,
+        photometry_config_path=photometry_config_path,
+        target=star_target_row.target,
+    )
     max_ffis_raw = merged_defaults.get("max_ffis")
     max_ffis = int(max_ffis_raw) if max_ffis_raw not in (None, "") else None
     oversampling_factor = max(1, int(merged_defaults.get("oversampling_factor", 1) or 1))
@@ -426,7 +471,7 @@ def resolve_star_run_config(
         kernel_margin_px=int(merged_defaults.get("kernel_margin_px", 470)),
         ps1_source=ps1_source,
         debug_plots=bool(merged_defaults.get("debug_plots", True)),
-        # Deprecated: kept for legacy verify fallback of old star_{id}/ trees.
+        # Deprecated: kept for config compatibility only; outputs use phot_{run_id}/host_star/.
         workspace_run_id=workspace_run_id,
         max_ffis=max_ffis,
         overwrite=bool(merged_defaults.get("overwrite", False)),
@@ -437,6 +482,7 @@ def resolve_star_run_config(
         epsf=epsf_cfg,
         stars_file=star_target_row.stars_file,
         ps1_zarr_path=policy.ps1_zarr_path,
+        photometry_run_id=photometry_run_id,
     )
 
 

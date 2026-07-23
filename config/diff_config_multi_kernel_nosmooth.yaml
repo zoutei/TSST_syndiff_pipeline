@@ -1,37 +1,18 @@
 # Resume multi-kernel diff without temporal background smoothing.
-# Inherits ks_b from ws_multi_hp_temp_calib; Hotpants R2 uses per-FFI photutils bkg directly.
+# SCC-only: workspace_inherit removed; ks_b must exist on the SCC diff lane.
 # Use: point run source_diff_config_path here, then syndiff retry --stage diff
 deployment_file: deployment.yaml
 
 defaults:
   n_jobs: 16
   pipeline_plots: false
-  master_fits_mirror: true
   crop_mode: target_box
   crop_box_size: 1024
   workspace_run_id: multi_hp_nosmooth
 
-additional_forced_targets:
-  - name: offset_top
-    dx: 0
-    dy: -7
-  - name: offset_bottom
-    dx: 0
-    dy: 7
-  - name: offset_right
-    dx: 7
-    dy: 0
-  - name: offset_left
-    dx: -7
-    dy: 0
-
 pipeline:
-  - workspace_inherit:
-      from: multi_hp_temp_calib
-      labels: [ks_b]
-      root_artifacts:
-        - shared_mask.fits.fz
-        - hotpants_substamp_stars.csv
+  - external_workspaces:
+      - ks_b
   - kind: hotpants
     inputs:
       bkg: ks_b
@@ -58,19 +39,6 @@ pipeline:
       convolved: hp_c
       bkg: hp_b
     write_kernel_solutions: true
-  - kind: forced_photometry
-    inputs:
-      diffs: hp_d
-    output: lc_prf_on_hp_diffs
-    methods:
-      - name: prf
-        type: psf
-        psf_type: prf
-      - name: ap3
-        type: aperture
-        tar_ap: 3
-        sky_in: 5
-        sky_out: 9
 
 condor:
   request_cpus: 16

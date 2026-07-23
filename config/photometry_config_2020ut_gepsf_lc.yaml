@@ -1,0 +1,33 @@
+# 2020ut gepsf-only forced photometry on hp_d (reads SCC diff lane + epsf_r1).
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: multi_hp_temp_calib_gepsf_lc
+  n_jobs: 16
+  pipeline_plots: true
+  max_ffis: null
+
+paths:
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_gepsf_2020ut
+    methods:
+      - name: gepsf
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 8
+
+condor:
+  request_cpus: 16
+  request_memory: 64000
+  requirements: "Memory >= 64000 && LoadAvg < 10"
+  rank: "-LoadAvg"

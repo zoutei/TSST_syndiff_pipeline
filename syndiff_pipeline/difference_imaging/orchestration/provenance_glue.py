@@ -870,25 +870,6 @@ def emit_diff_artifact(
             data_root=str(data_root),
             meta=full_meta,
         ):
-            if scc_primary and workspace_root:
-                try:
-                    from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                        record_scc_artifact_pointer,
-                    )
-
-                    rid = _recipe_id_fn(kind, recipe["params"], recipe["code_version"])
-                    record_scc_artifact_pointer(
-                        workspace_root=workspace_root,
-                        product_id=product_id,
-                        label=label,
-                        scc_path=location_str,
-                        kind=kind,
-                        fingerprint=fp,
-                        stage_label=label,
-                        recipe_fp=rid,
-                    )
-                except Exception:
-                    log.debug("SCC diff-store pointer record failed", exc_info=True)
             return fp
         return None
     except Exception:

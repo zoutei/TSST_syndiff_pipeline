@@ -2,10 +2,8 @@
 Workspace and manifest path conventions for the config-driven pipeline.
 
 Workspaces live under ``{output_dir}/ws/{label}/``.
-``{output_dir}/ws/master/`` contains absolute symlinks to every ``ws/<label>/*.fits``
-file (flat basenames), plus flat symlinks for each FFI in the target
-sector/camera/CCD leaf directory when configured.
-``{output_dir}/ws/ffis`` symlink points at that same FFI leaf directory.
+``{output_dir}/ws/ffis`` symlink points at the FFI leaf directory for the
+target sector/camera/CCD when configured.
 Template FITS for differencing are linked at ``{output_dir}/ws/templates`` (see
 ``event_ws_symlinks``).
 The default per-FFI manifest basename is ``syndiff_ffi_frames.csv`` at ``output_dir``.
@@ -22,7 +20,7 @@ from typing import Optional, Union
 log = logging.getLogger(__name__)
 
 WORKSPACE_SUBDIR = "ws"
-MASTER_SUBDIR = "master"
+PHOTOMETRY_SUBDIR = "phot"
 HOST_STAR_WS_LABEL = "host_star"
 DEFAULT_MANIFEST_BASENAME = "frames.csv"
 LEGACY_MANIFEST_BASENAME = "syndiff_ffi_frames.csv"
@@ -41,21 +39,6 @@ WORKSPACE_ROOT_ARTIFACTS = (
     GAIA_CATALOG_PIPELINE_BASENAME,
     TARGETS_DS9_REGION_BASENAME,
     DIFF_CONFIG_SNAPSHOT_BASENAME,
-)
-
-MASTER_TESS_FFI_LINK = "tess_ffi"
-HOTPANTS_STAMPS_WS_SUFFIX = "_stamps"
-HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits.fz"
-LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX = "_stamps.fits"
-
-from syndiff_pipeline.common.download import (  # noqa: E402
-    is_spoc_ffi_filename,
-    manifest_basename_from_local,
-    resolve_local_ffi_path,
-)
-from syndiff_pipeline.difference_imaging.support.ffi_naming import (  # noqa: E402
-    is_pipeline_fits_filename,
-    strip_fits_suffix,
 )
 
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (  # noqa: E402
@@ -159,6 +142,27 @@ def workspace_root(output_dir: str, *, run_id: str | None = None) -> str:
     )
 
 
+def normalize_photometry_run_id(run_id: str | None) -> str | None:
+    """Return a non-empty photometry run id or ``None`` for canonical ``photometry/``."""
+    if run_id is None:
+        return None
+    s = str(run_id).strip()
+    if not s or s.lower() in ("null", "none"):
+        return None
+    return s
+
+
+def photometry_tree_name(run_id: str | None = None) -> str:
+    """Filesystem name for the photometry tree: ``phot`` or ``phot_{run_id}``."""
+    rid = normalize_photometry_run_id(run_id)
+    return f"{PHOTOMETRY_SUBDIR}_{rid}" if rid else PHOTOMETRY_SUBDIR
+
+
+def photometry_root(event_dir: str, run_id: str | None = None) -> str:
+    """Absolute path of the photometry tree under one event directory."""
+    return os.path.join(os.path.abspath(event_dir), photometry_tree_name(run_id))
+
+
 def workspace_artifact_path(
     output_dir: str,
     basename: str,
@@ -205,233 +209,6 @@ def clear_diff_workspace(
     if ffis_target is not None and ffis_target.is_dir():
         ensure_event_ffis_symlink(root, ffis_target, run_id=run_id)
         log.info("Force rerun: restored ffis symlink -> %s", ffis_target)
-
-
-def master_root(output_dir: str, *, run_id: str | None = None) -> str:
-    """Absolute path of ``ws/master/`` (or debug tree) under *output_dir*."""
-    return os.path.join(workspace_root(output_dir, run_id=run_id), MASTER_SUBDIR)
-
-
-def _abs_path(path: str) -> str:
-    """Abs path.
-    
-    Parameters
-    ----------
-    path : str
-    
-    Returns
-    -------
-    str"""
-    return os.path.abspath(os.path.expanduser(path))
-
-
-def _resolved_symlink_target(link_path: str) -> Optional[str]:
-    """Return the absolute path a symlink points to, or None if not a symlink."""
-    if not os.path.islink(link_path):
-        return None
-    try:
-        raw = os.readlink(link_path)
-    except OSError:
-        return None
-    if os.path.isabs(raw):
-        return os.path.abspath(raw)
-    return os.path.abspath(os.path.join(os.path.dirname(link_path), raw))
-
-
-def _ensure_abs_symlink(link_path: str, target_path: str) -> bool:
-    """
-    Create or refresh *link_path* as a symlink to the absolute *target_path*.
-
-    Returns True if the symlink was created or replaced in this call.
-    """
-    abs_target = _abs_path(target_path)
-    if os.path.islink(link_path):
-        if _resolved_symlink_target(link_path) == abs_target and os.path.exists(link_path):
-            return False
-        try:
-            os.unlink(link_path)
-        except OSError as exc:
-            log.warning("master workspace: unlink %s failed: %s", link_path, exc)
-            return False
-    elif os.path.lexists(link_path):
-        log.warning(
-            "master workspace: %s already exists and is not a symlink to %s; skipping",
-            link_path,
-            abs_target,
-        )
-        return False
-    try:
-        os.symlink(abs_target, link_path)
-        return True
-    except OSError as exc:
-        log.warning(
-            "master workspace: symlink %s -> %s failed: %s",
-            link_path,
-            abs_target,
-            exc,
-        )
-        return False
-
-
-def _is_hotpants_stamps_workspace_label(label: str) -> bool:
-    """Is hotpants stamps workspace label.
-    
-    Parameters
-    ----------
-    label : str
-    
-    Returns
-    -------
-    bool"""
-    return label.endswith(HOTPANTS_STAMPS_WS_SUFFIX)
-
-
-def _is_hotpants_stamps_fits_basename(name: str) -> bool:
-    """Is hotpants stamps fits basename.
-    
-    Parameters
-    ----------
-    name : str
-    
-    Returns
-    -------
-    bool"""
-    lower = name.lower()
-    return (
-        lower.endswith(HOTPANTS_STAMPS_FITS_SUFFIX)
-        or lower.endswith("_stamps.fits.gz")
-        or lower.endswith(LEGACY_HOTPANTS_STAMPS_FITS_SUFFIX)
-    )
-
-
-def _prune_master_stamp_symlinks(m_root: str) -> int:
-    """Remove stale Hotpants stamp FITS symlinks from ``ws/master/``."""
-    removed = 0
-    if not os.path.isdir(m_root):
-        return removed
-    for entry in os.listdir(m_root):
-        if not _is_hotpants_stamps_fits_basename(entry):
-            continue
-        if _remove_legacy_master_link(os.path.join(m_root, entry)):
-            removed += 1
-    return removed
-
-
-def _remove_legacy_master_link(link_path: str) -> bool:
-    """Drop a stale ``ws/master/`` entry (e.g. legacy ``tess_ffi`` directory link)."""
-    if not os.path.lexists(link_path):
-        return False
-    try:
-        os.unlink(link_path)
-        return True
-    except OSError as exc:
-        log.warning("master workspace: unlink %s failed: %s", link_path, exc)
-        return False
-
-
-def link_master_workspace(
-    output_dir: str,
-    *,
-    ffi_leaf: Optional[str] = None,
-    run_id: str | None = None,
-) -> int:
-    """
-    Populate ``ws/master/`` with absolute symlinks for Condor / shared-FS access.
-
-    - Every ``ws/<label>/*.fits`` file is mirrored as a flat basename under
-      ``ws/master/`` (skips ``master``, ``templates``, and Hotpants ``*_stamps``
-      workspaces).
-    - When *ffi_leaf* is set and exists, each ``*.fits`` in that sector/camera/CCD
-      directory is mirrored as a flat basename under ``ws/master/``.
-
-    Idempotent: correct symlinks are left in place; broken or stale ones are
-    replaced. Returns the number of symlinks created or refreshed in this call.
-    """
-    ws_root = workspace_root(output_dir, run_id=run_id)
-    if not os.path.isdir(ws_root):
-        return 0
-    m_root = master_root(output_dir, run_id=run_id)
-    os.makedirs(m_root, exist_ok=True)
-    refreshed = _prune_master_stamp_symlinks(m_root)
-
-    for label in sorted(os.listdir(ws_root)):
-        if label in (MASTER_SUBDIR, TEMPLATES_WS_LABEL, FFIS_WS_LABEL, HOST_STAR_WS_LABEL):
-            continue
-        if _is_hotpants_stamps_workspace_label(label):
-            continue
-        ws_label_dir = os.path.join(ws_root, label)
-        if not os.path.isdir(ws_label_dir):
-            continue
-        linked_stems: set[str] = set()
-        for entry in sorted(os.listdir(ws_label_dir)):
-            if not is_pipeline_fits_filename(entry):
-                continue
-            if _is_hotpants_stamps_fits_basename(entry):
-                continue
-            stem = strip_fits_suffix(entry)
-            if stem in linked_stems:
-                continue
-            from syndiff_pipeline.common.fits_variants import resolve_stem_in_directory
-
-            resolved = resolve_stem_in_directory(ws_label_dir, stem)
-            if not resolved:
-                continue
-            entry = os.path.basename(resolved)
-            linked_stems.add(stem)
-            target = resolved
-            if not os.path.isfile(target):
-                continue
-            link = os.path.join(m_root, entry)
-            if _ensure_abs_symlink(link, target):
-                refreshed += 1
-
-    if ffi_leaf and str(ffi_leaf).strip():
-        ffi_leaf_abs = _abs_path(str(ffi_leaf))
-        legacy_link = os.path.join(m_root, MASTER_TESS_FFI_LINK)
-        if _remove_legacy_master_link(legacy_link):
-            refreshed += 1
-        if os.path.isdir(ffi_leaf_abs):
-            linked_manifest: set[str] = set()
-            for entry in sorted(os.listdir(ffi_leaf_abs)):
-                if not is_spoc_ffi_filename(entry):
-                    continue
-                manifest_bn = manifest_basename_from_local(entry)
-                if manifest_bn in linked_manifest:
-                    continue
-                resolved = resolve_local_ffi_path(ffi_leaf_abs, manifest_bn)
-                if not resolved:
-                    continue
-                entry = os.path.basename(resolved)
-                linked_manifest.add(manifest_bn)
-                target = resolved
-                if not os.path.isfile(target):
-                    continue
-                link = os.path.join(m_root, entry)
-                if _ensure_abs_symlink(link, target):
-                    refreshed += 1
-            try:
-                ffis_link = event_ffis_symlink_path(output_dir, run_id=run_id)
-                existed_ok = False
-                if ffis_link.is_symlink():
-                    try:
-                        existed_ok = ffis_link.resolve() == Path(ffi_leaf_abs)
-                    except OSError:
-                        existed_ok = False
-                ensure_event_ffis_symlink(output_dir, ffi_leaf_abs, run_id=run_id)
-                refreshed += int(not existed_ok)
-                refreshed += prune_stale_per_workspace_ffis_symlinks(
-                    output_dir, run_id=run_id
-                )
-            except OSError as exc:
-                log.warning(
-                    "master workspace: ws/ffis symlink failed: %s", exc
-                )
-        else:
-            log.debug("master workspace: skip FFI leaf — not a directory: %s", ffi_leaf_abs)
-
-    if refreshed:
-        log.info("master workspace: refreshed %d symlink(s) under %s", refreshed, m_root)
-    return refreshed
 
 
 def resolve_manifest_path(output_dir: str, manifest_cfg: Optional[str]) -> str:

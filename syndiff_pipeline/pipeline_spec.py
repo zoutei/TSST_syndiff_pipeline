@@ -14,6 +14,7 @@ _STAGE_SHORT_NAMES: dict[str, str] | None = None
 # TEMPLATE_STAGES + diff/star without importing heavy stage modules.
 _STATIC_STAGE_SHORT_NAMES: dict[str, str] = {
     "diff": "diff",
+    "photometry": "phot",
     "star": "star",
 }
 
@@ -43,12 +44,13 @@ def get_syndiff_pipeline() -> PipelineSpec:
     -------
     PipelineSpec"""
     from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGES
+    from syndiff_pipeline.photometry.orchestration.stages import PHOTOMETRY_STAGES
     from syndiff_pipeline.star.orchestration.stages import STAR_STAGES
     from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
 
     return PipelineSpec(
         name="syndiff",
-        stages=TEMPLATE_STAGES + DIFF_STAGES + STAR_STAGES,
+        stages=TEMPLATE_STAGES + DIFF_STAGES + PHOTOMETRY_STAGES + STAR_STAGES,
     )
 
 
@@ -121,7 +123,7 @@ def build_stage_context(
         force_rerun=force_rerun,
         progress_path=progress_path,
     )
-    if stage not in ("diff", "star"):
+    if stage not in ("diff", "photometry", "star"):
         return resolve_template_context(ctx)
     return ctx
 
@@ -140,7 +142,7 @@ def stage_snapshot(ctx: StageRunContext, stage: str) -> dict:
     from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
 
     spec = _pipeline().require(stage)
-    if stage not in ("diff", "star"):
+    if stage not in ("diff", "photometry", "star"):
         ctx = resolve_template_context(ctx)
     if spec.stage_snapshot is not None:
         return spec.stage_snapshot(ctx)
@@ -161,7 +163,7 @@ def config_fingerprint(ctx: StageRunContext, stage: str) -> str:
     from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
 
     spec = _pipeline().require(stage)
-    if stage not in ("diff", "star"):
+    if stage not in ("diff", "photometry", "star"):
         ctx = resolve_template_context(ctx)
     return spec.config_fingerprint(ctx)
 

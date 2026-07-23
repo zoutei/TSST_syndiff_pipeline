@@ -16,7 +16,6 @@ from syndiff_pipeline.difference_imaging.support.subtract import parse_subtract_
 
 STAGE_KINDS = frozenset(
     {
-        "astrometry",
         "shared_mask",
         "hotpants",
         "kernel_fit",
@@ -27,7 +26,7 @@ STAGE_KINDS = frozenset(
         "sat_template",
         "subtract",
         "background",
-        "forced_photometry",
+        "photometry",
     }
 )
 
@@ -66,7 +65,7 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         "sat_template",
         "subtract",
         "background",
-        "forced_photometry",
+        "photometry",
     ):
         return [stage["output"]]
     return []

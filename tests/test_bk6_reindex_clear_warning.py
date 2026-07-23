@@ -71,9 +71,9 @@ class TestBackgroundKindInference(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp)
             scc_dir = data_root / "s0020" / "c1" / "k1"
-            recipe_dir = scc_dir / "diff" / "hp_b" / "recipefp"
-            recipe_dir.mkdir(parents=True)
-            (recipe_dir / "tess2020019142923_hp_b.fits.fz").write_bytes(b"fake")
+            label_dir = scc_dir / "diff" / "hp_b"
+            label_dir.mkdir(parents=True)
+            (label_dir / "tess2020019142923_hp_b.fits.fz").write_bytes(b"fake")
 
             store = ProvenanceStore(data_root / "bookkeeping" / "provenance.db")
             n = reindex_scc_tree(store, scc_dir, 20, 1, 1)
@@ -86,22 +86,21 @@ class TestBackgroundKindInference(unittest.TestCase):
                     "c": 1,
                     "k": 1,
                     "workspace_label": "hp_b",
-                    "recipe_fp": "recipefp",
                 },
             )
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0].location, str(recipe_dir))
+            self.assertEqual(rows[0].location, str(label_dir))
 
-    def test_gc_skips_tmp_recipe_dirs(self) -> None:
+    def test_gc_skips_tmp_label_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp)
             scc_dir = data_root / "s0020" / "c1" / "k1"
-            real = scc_dir / "diff" / "hp_d" / "recipefp"
+            real = scc_dir / "diff" / "hp_d"
             real.mkdir(parents=True)
             (real / "frame.fits.fz").write_bytes(b"x")
-            tmp_recipe = scc_dir / "diff" / "hp_d" / "_tmp_publish"
-            tmp_recipe.mkdir(parents=True)
-            (tmp_recipe / "partial.fits.fz").write_bytes(b"x")
+            tmp_label = scc_dir / "diff" / "_tmp_publish"
+            tmp_label.mkdir(parents=True)
+            (tmp_label / "partial.fits.fz").write_bytes(b"x")
 
             report = gc_report(data_root)
             self.assertEqual(len(report.diff_recipe_dirs), 1)

@@ -269,7 +269,11 @@ class TestMaterializeFieldFits(unittest.TestCase):
         with fits.open(find_field_fits_by_group_id(self.store, 1)) as hdul:
             np.testing.assert_allclose(hdul[0].data, flux_g1)
 
-    def test_missing_group_contrib_fails_loud(self):
+    @mock.patch(
+        "syndiff_pipeline.template_creation.processing.field_downsample.write_field_group_fits",
+        side_effect=_plain_write_field_group_fits,
+    )
+    def test_materialize_tolerates_missing_contrib_in_group(self, _mock_write):
         write_contrib(
             self.store,
             "skycell.1.1",
@@ -278,6 +282,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             indices=np.array([_flat(0, 0)], dtype=np.int64),
             flux_sum=np.array([1.0]),
             count=np.array([1.0]),
+            group_id=0,
         )
         shifts_df = pd.DataFrame(
             [
@@ -285,15 +290,59 @@ class TestMaterializeFieldFits(unittest.TestCase):
                 dict(group_id=0, skycell="skycell.9.9", sx_int=0, sy_int=0),
             ]
         )
-        with self.assertRaises(FileNotFoundError):
-            materialize_field_fits_for_store(
-                self.store,
-                shifts_df,
-                sector=1,
-                camera=1,
-                ccd=1,
-                base_tess_shape=(NY, NX),
-            )
+        result = materialize_field_fits_for_store(
+            self.store,
+            shifts_df,
+            sector=1,
+            camera=1,
+            ccd=1,
+            base_tess_shape=(NY, NX),
+        )
+        self.assertEqual(result["n_groups"], 1)
+        expected = assemble_field_group_flux(
+            self.store,
+            shifts_df,
+            0,
+            shape=(NY, NX),
+            present_only=True,
+            group_scoped_contribs=True,
+        )
+        with fits.open(find_field_fits_by_group_id(self.store, 0)) as hdul:
+            np.testing.assert_allclose(hdul[0].data, expected)
+
+    @mock.patch(
+        "syndiff_pipeline.template_creation.processing.field_downsample.write_field_group_fits",
+        side_effect=_plain_write_field_group_fits,
+    )
+    def test_materialize_skips_group_with_no_contribs(self, _mock_write):
+        write_contrib(
+            self.store,
+            "skycell.2.2",
+            1,
+            0,
+            indices=np.array([_flat(4, 5)], dtype=np.int64),
+            flux_sum=np.array([20.0]),
+            count=np.array([4.0]),
+            group_id=1,
+        )
+        shifts_df = pd.DataFrame(
+            [
+                dict(group_id=0, skycell="skycell.9.9", sx_int=0, sy_int=0),
+                dict(group_id=1, skycell="skycell.2.2", sx_int=1, sy_int=0),
+            ]
+        )
+        result = materialize_field_fits_for_store(
+            self.store,
+            shifts_df,
+            sector=1,
+            camera=1,
+            ccd=1,
+            base_tess_shape=(NY, NX),
+        )
+        self.assertEqual(result["n_groups"], 1)
+        self.assertEqual(result["skipped_groups"][0]["group_id"], 0)
+        self.assertIsNone(find_field_fits_by_group_id(self.store, 0))
+        self.assertIsNotNone(find_field_fits_by_group_id(self.store, 1))
 
     def test_materialize_false_writes_no_fits(self):
         self._seed_group_contribs()

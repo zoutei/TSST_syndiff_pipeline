@@ -176,12 +176,13 @@ def test_verify_scc_diff_os4_does_not_see_os1_tree(tmp_path: Path) -> None:
     assert any("frames.csv" in e for e in errors)
 
 
-def test_verify_scc_diff_success_legacy_flat_path(tmp_path: Path) -> None:
-    """Pre-lane runs wrote a flat bookkeeping/diff/ with no oversampling leaf."""
+def test_verify_scc_diff_rejects_legacy_flat_bookkeeping_path(tmp_path: Path) -> None:
+    """Pre-lane ``bookkeeping/diff/`` (no oversampling leaf) is not read."""
     data_root = tmp_path / "data"
     _write_ok_tree(data_root, legacy_path=True)
     errors = verify_scc_diff(data_root, SECTOR, CAMERA, CCD)
-    assert errors == []
+    assert any("diff_job.json" in e for e in errors)
+    assert any("frames.csv" in e for e in errors)
 
 
 def test_verify_scc_diff_sidecar_schema_too_old(tmp_path: Path) -> None:

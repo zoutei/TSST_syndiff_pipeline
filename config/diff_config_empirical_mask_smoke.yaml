@@ -6,7 +6,6 @@ defaults:
   n_jobs: 8
   workspace_run_id: empirical_mask_smoke_hp32
   pipeline_plots: true
-  master_fits_mirror: false
   crop_mode: target_box
   crop_box_size: 1024
   max_ffis: 25

@@ -359,9 +359,12 @@ def _resolve_diff_image_fingerprint_for_background(
     if not rec.diff_path:
         return None
     parsed = parse_workspace_frame_stem(rec.stem)
-    if not parsed:
-        return None
-    _product_id, diff_label = parsed
+    if parsed:
+        _product_id, diff_label = parsed
+    else:
+        diff_label = workspace_label_from_dir(os.path.dirname(rec.diff_path))
+        if not diff_label:
+            return None
     fp = _diff_image_fingerprint_from_frozen_config(
         rec=rec,
         sck=sck,

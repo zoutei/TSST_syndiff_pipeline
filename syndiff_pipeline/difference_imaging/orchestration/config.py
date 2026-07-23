@@ -230,11 +230,6 @@ class SynDiffConfig:
     reloads the frame manifest and ``cluster_template_job.json`` from ``output_dir``
     when template handoff files are present."""
 
-    master_fits_mirror: bool = True
-    """If True (default), refresh ``ws/master/`` absolute symlinks (flat FITS mirror plus
-    flat FFI links for the target sector/camera/CCD when configured) after each pipeline
-    stage. Disable for read-only filesystems where symlink creation is unsupported."""
-
     workspace_run_id: Optional[str] = None
     """When set, write all diff outputs under ``ws_{workspace_run_id}/`` instead of
     canonical ``ws/``. Use for debug runs that must not touch production artifacts."""

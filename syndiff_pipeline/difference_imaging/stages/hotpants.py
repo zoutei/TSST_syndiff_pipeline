@@ -68,6 +68,7 @@ from syndiff_pipeline.common.fits_variants import (
     storage_suffix_rank,
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+    ffi_frame_stem_from_path,
     iter_pipeline_fits_paths,
     resolve_pipeline_fits_path,
     sanitize_workspace_label,
@@ -969,66 +970,40 @@ def _process_one_frame(
     per-cadence Hotpants mask (FAINT_CAT ignored).
     """
     diffs_label = workspace_label_from_dir(dirs.diffs)
-    diff_stem = workspace_frame_stem(product_id, diffs_label)
+    try:
+        ffi_stem = ffi_frame_stem_from_path(ffi_path)
+    except ValueError:
+        ffi_stem = product_id
+    diff_stem = workspace_frame_stem(ffi_stem, diffs_label)
     ws_diff_out = workspace_frame_fits_path(dirs.diffs, diff_stem)
 
     if not force_rerun:
-        from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-            resolve_diff_write_path,
-        )
+        write_path: Optional[Path] = None
+        if data_root and sck is not None:
+            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                resolve_diff_write_path,
+            )
 
-        write_path, scc_primary = resolve_diff_write_path(
-            data_root=data_root,
-            sck=sck,
-            kind="diff_image",
-            stage_label=diffs_label,
-            product_id=product_id,
-            label=diffs_label,
-            params=hp,
-            workspace_path=ws_diff_out,
-            output_store_name=output_store_name,
-        )
-        if sck is not None and data_root and workspace_root:
-            try:
-                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                    try_materialize_workspace_artifact,
-                )
-
-                if try_materialize_workspace_artifact(
-                    data_root=data_root,
-                    sck=sck,
-                    kind="diff_image",
-                    stage_label=diffs_label,
-                    product_id=product_id,
-                    label=diffs_label,
-                    params=hp,
-                    workspace_dest=ws_diff_out,
-                    workspace_root=workspace_root,
-                    output_store_name=output_store_name,
-                ):
-                    return {
-                        "stem": diff_stem,
-                        "ffi_product_id": product_id,
-                        "group_id": group_id,
-                        "success": True,
-                        "skipped": True,
-                        "path": ws_diff_out,
-                        "scc_store_hit": True,
-                    }
-            except Exception:
-                log.debug(
-                    "SCC diff-store materialize failed for %s", product_id, exc_info=True
-                )
-        if scc_primary and write_path.is_file():
-            return {
-                "stem": diff_stem,
-                "ffi_product_id": product_id,
-                "group_id": group_id,
-                "success": True,
-                "skipped": True,
-                "path": str(write_path),
-                "scc_store_hit": True,
-            }
+            write_path = resolve_diff_write_path(
+                data_root=data_root,
+                sck=sck,
+                kind="diff_image",
+                stage_label=diffs_label,
+                ffi_stem=ffi_stem,
+                label=diffs_label,
+                params=hp,
+                output_store_name=output_store_name,
+            )
+            if write_path.is_file():
+                return {
+                    "stem": diff_stem,
+                    "ffi_product_id": product_id,
+                    "group_id": group_id,
+                    "success": True,
+                    "skipped": True,
+                    "path": str(write_path),
+                    "scc_store_hit": True,
+                }
         existing_diff = resolve_pipeline_fits_path(dirs.diffs, diff_stem)
         if existing_diff is not None:
             return {
@@ -1058,43 +1033,15 @@ def _process_one_frame(
                 )
                 prov_complete = None
             if prov_complete is True:
-                # Indexed-complete is not enough: require a locatable artifact.
                 hit_path: Optional[str] = None
-                if Path(write_path).is_file():
+                if write_path is not None and write_path.is_file():
                     hit_path = str(write_path)
-                elif Path(ws_diff_out).is_file():
-                    hit_path = str(ws_diff_out)
                 else:
                     existing_after_prov = resolve_pipeline_fits_path(
                         dirs.diffs, diff_stem
                     )
                     if existing_after_prov is not None:
                         hit_path = existing_after_prov
-                    elif data_root and workspace_root:
-                        try:
-                            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                                try_materialize_workspace_artifact,
-                            )
-
-                            if try_materialize_workspace_artifact(
-                                data_root=data_root,
-                                sck=sck,
-                                kind="diff_image",
-                                stage_label=diffs_label,
-                                product_id=product_id,
-                                label=diffs_label,
-                                params=hp,
-                                workspace_dest=ws_diff_out,
-                                workspace_root=workspace_root,
-                                output_store_name=output_store_name,
-                            ):
-                                hit_path = ws_diff_out
-                        except Exception:
-                            log.debug(
-                                "SCC materialize after provenance_hit failed for %s",
-                                product_id,
-                                exc_info=True,
-                            )
                 if hit_path is not None:
                     return {
                         "stem": diff_stem,
@@ -1109,7 +1056,7 @@ def _process_one_frame(
 
     if sci_workspace_dir:
         sci_label = workspace_label_from_dir(sci_workspace_dir)
-        sci_stem = workspace_frame_stem(product_id, sci_label)
+        sci_stem = workspace_frame_stem(ffi_stem, sci_label)
         sp = resolve_pipeline_fits_path(sci_workspace_dir, sci_stem)
         if sp is None:
             log.error("science workspace FITS missing for %s: %s", product_id, sci_stem)
@@ -1193,19 +1140,24 @@ def _process_one_frame(
         resolve_diff_write_path,
     )
 
-    write_path, scc_primary = resolve_diff_write_path(
-        data_root=data_root,
-        sck=sck,
-        kind="diff_image",
-        stage_label=diffs_label,
-        product_id=product_id,
-        label=diffs_label,
-        params=hp,
-        workspace_path=diff_out_path,
-        output_store_name=output_store_name,
-    )
+    if data_root and sck is not None:
+        write_path = resolve_diff_write_path(
+            data_root=data_root,
+            sck=sck,
+            kind="diff_image",
+            stage_label=diffs_label,
+            ffi_stem=ffi_stem,
+            label=diffs_label,
+            params=hp,
+            output_store_name=output_store_name,
+        )
+        scc_primary = True
+    else:
+        raise RuntimeError(
+            "SCC-only hotpants requires deployment data_root and sector/camera/ccd"
+        )
     conv_label = workspace_label_from_dir(dirs.convolved)
-    conv_stem = workspace_frame_stem(product_id, conv_label)
+    conv_stem = workspace_frame_stem(ffi_stem, conv_label)
     conv_out_path = workspace_frame_fits_path(dirs.convolved, conv_stem)
     hp_config = build_hotpants_config(
         hp=hp,
@@ -1329,14 +1281,29 @@ def _process_one_frame(
             and result["success"]
             and result.get("convolved") is not None
         ):
+            if data_root and sck is not None:
+                conv_write_path = resolve_diff_write_path(
+                    data_root=data_root,
+                    sck=sck,
+                    kind="diff_image",
+                    stage_label=conv_label,
+                    ffi_stem=ffi_stem,
+                    label=conv_label,
+                    params=hp,
+                    output_store_name=output_store_name,
+                )
+            else:
+                raise RuntimeError(
+                    "SCC-only hotpants convolved write requires data_root and s/c/k"
+                )
             try:
                 _write_image_fits(
-                    conv_out_path,
+                    str(conv_write_path),
                     result["convolved"],
                     header=crop_header,
                 )
             except Exception as exc:
-                log.error("Failed writing %s: %s", conv_out_path, exc)
+                log.error("Failed writing %s: %s", conv_write_path, exc)
                 result["success"] = False
                 result["error_msg"] = str(exc)
         if hp.write_bkg and legacy_diff_sidecar_bkg and result.get("bkg") is not None:
@@ -1345,23 +1312,28 @@ def _process_one_frame(
             )
         elif hp.write_bkg and dirs.bkg and result.get("bkg") is not None:
             bkg_label = workspace_label_from_dir(dirs.bkg)
-            bkg_basename = workspace_frame_stem(product_id, bkg_label)
+            bkg_basename = workspace_frame_stem(ffi_stem, bkg_label)
             bkg_ws_out = workspace_frame_fits_path(dirs.bkg, bkg_basename)
             from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
                 resolve_diff_write_path,
             )
 
-            bkg_write_path, bkg_scc_primary = resolve_diff_write_path(
-                data_root=data_root,
-                sck=sck,
-                kind="diff_background",
-                stage_label=bkg_label,
-                product_id=product_id,
-                label=bkg_label,
-                params=hp,
-                workspace_path=bkg_ws_out,
-                output_store_name=output_store_name,
-            )
+            if data_root and sck is not None:
+                bkg_write_path = resolve_diff_write_path(
+                    data_root=data_root,
+                    sck=sck,
+                    kind="diff_background",
+                    stage_label=bkg_label,
+                    ffi_stem=ffi_stem,
+                    label=bkg_label,
+                    params=hp,
+                    output_store_name=output_store_name,
+                )
+                bkg_scc_primary = True
+            else:
+                raise RuntimeError(
+                    "SCC-only hotpants background write requires data_root and s/c/k"
+                )
             _write_image_fits(
                 str(bkg_write_path),
                 result["bkg"],
