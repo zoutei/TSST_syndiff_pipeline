@@ -313,6 +313,163 @@ def write_gridded_epsf_workspace_plots(
     return written
 
 
+def centroids_residual_fits_path(
+    plot_dir: str,
+    centroids_label: str,
+    ffi_stem: str,
+) -> str:
+    """FITS path for one frame's PSF-subtraction residual image."""
+    return os.path.join(
+        plot_dir,
+        f"{_safe_plot_token(centroids_label)}_{_safe_plot_token(ffi_stem)}_epsf_photometry_residual.fits",
+    )
+
+
+def select_pipeline_debug_stems(
+    available_stems: list[str],
+    *,
+    reference_plot_dir: str | None = None,
+    reference_label: str | None = None,
+    wcs_table: "pd.DataFrame | None" = None,
+    max_frames: int = 10,
+) -> list[str]:
+    """
+    Pick debug frames, preferring an existing reference plot index (e.g. ePSF).
+
+    When ``reference_plot_dir`` contains ``{reference_label}_index.json`` with a
+    ``frames_plotted`` list, those stems are used (intersected with
+    *available_stems*). Otherwise falls back to :func:`select_evenly_spaced_stems`.
+    """
+    available = list(available_stems)
+    if reference_plot_dir and reference_label:
+        summary_path = os.path.join(
+            reference_plot_dir,
+            f"{_safe_plot_token(reference_label)}_index.json",
+        )
+        if os.path.isfile(summary_path):
+            try:
+                with open(summary_path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                frames = [str(s) for s in (data.get("frames_plotted") or [])]
+                picked = [s for s in frames if s in available]
+                if picked:
+                    return picked[:max_frames]
+            except Exception as exc:
+                log.warning(
+                    "pipeline_plots: cannot read reference index %s: %s",
+                    summary_path,
+                    exc,
+                )
+    return select_evenly_spaced_stems(
+        available,
+        wcs_table=wcs_table,
+        max_frames=max_frames,
+    )
+
+
+def write_centroids_workspace_plots(
+    centroids_workspace_dir: str,
+    plot_dir: str,
+    *,
+    centroids_label: str = "centroids_r1",
+    diff_paths_by_stem: dict[str, str],
+    gaia_df: "pd.DataFrame",
+    epsf_catalog,
+    params,
+    ffi_list_df: "pd.DataFrame",
+    science_bounds: dict,
+    ffi_path_by_stem: dict[str, str],
+    max_frames: int = 10,
+    wcs_table: "pd.DataFrame | None" = None,
+    reference_plot_dir: str | None = None,
+    reference_label: str | None = None,
+) -> list[str]:
+    """Write PSF-subtraction residual FITS for representative centroid frames."""
+    from syndiff_pipeline.difference_imaging.stages import centroids as centroids_stage
+
+    written: list[str] = []
+    index = centroids_stage.load_centroids_index(centroids_workspace_dir)
+    available = [s for s in index if s in diff_paths_by_stem]
+    if not available:
+        available = sorted(diff_paths_by_stem)
+    if not available:
+        log.warning(
+            "pipeline_plots: no centroid frames available in %s; skip centroids debug FITS.",
+            centroids_workspace_dir,
+        )
+        return written
+
+    stems = select_pipeline_debug_stems(
+        available,
+        reference_plot_dir=reference_plot_dir,
+        reference_label=reference_label,
+        wcs_table=wcs_table,
+        max_frames=max_frames,
+    )
+
+    from syndiff_pipeline.difference_imaging.stages.gridded_epsf import (
+        prepare_gaia_for_gridded_epsf,
+    )
+
+    class _MagParams:
+        mag_max_rp = getattr(params, "mag_max_rp", 12.95)
+
+    gaia_filtered = prepare_gaia_for_gridded_epsf(gaia_df, _MagParams())
+
+    os.makedirs(plot_dir, exist_ok=True)
+    for stem in stems:
+        diff_path = diff_paths_by_stem.get(stem)
+        if not diff_path:
+            continue
+        ffi_path = ffi_path_by_stem.get(stem)
+        if not ffi_path:
+            from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+                tess_product_id_from_ffi_path,
+            )
+
+            product_id = tess_product_id_from_ffi_path(stem) or ""
+            ffi_path = ffi_path_by_stem.get(product_id)
+        if not ffi_path:
+            log.warning("pipeline_plots: no FFI path for centroid debug stem %s", stem)
+            continue
+
+        residual_path = centroids_residual_fits_path(plot_dir, centroids_label, stem)
+        if not os.path.isfile(residual_path):
+            centroids_stage.write_frame_residual_fits(
+                diff_path,
+                stem,
+                gaia_filtered,
+                epsf_catalog,
+                params,
+                residual_path,
+                ffi_path=ffi_path,
+                ffi_list_df=ffi_list_df,
+                science_bounds=science_bounds,
+            )
+        if os.path.isfile(residual_path):
+            written.append(residual_path)
+            log.info("  pipeline_plots: centroids residual FITS %s", residual_path)
+
+    summary_path = os.path.join(
+        plot_dir, f"{_safe_plot_token(centroids_label)}_index.json"
+    )
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "centroids_workspace": centroids_workspace_dir,
+                "frames_plotted": stems,
+                "reference_plot_dir": reference_plot_dir,
+                "reference_label": reference_label,
+                "residual_fits_paths": list(written),
+            },
+            fh,
+            indent=2,
+            sort_keys=True,
+        )
+    written.append(summary_path)
+    return written
+
+
 def write_lightcurve_diagnostics_from_workspace(
     lc_workspace_dir: str,
     plot_dir: str,
