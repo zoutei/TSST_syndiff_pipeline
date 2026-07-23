@@ -874,16 +874,16 @@ def _legacy_save_bkg_sidecar(
 
 def _load_sci_bkg_crop(
     sci_bkg_ws: str,
-    product_id: str,
+    frame_stem: str,
     expected_shape: tuple[int, int],
 ) -> np.ndarray:
     """Load one frame's per-FFI background map from a workspace directory."""
     ny, nx = expected_shape
     label = workspace_label_from_dir(sci_bkg_ws)
-    stem = workspace_frame_stem(product_id, label)
+    stem = workspace_frame_stem(frame_stem, label)
     bp = resolve_pipeline_fits_path(sci_bkg_ws, stem)
     if bp is None:
-        log.warning("sci_bkg missing for %s under %s", product_id, sci_bkg_ws)
+        log.warning("sci_bkg missing for %s under %s", frame_stem, sci_bkg_ws)
         return np.zeros((ny, nx), dtype=np.float64)
     bkg = fits.getdata(bp).astype(np.float64)
     if bkg.shape != (ny, nx):
@@ -891,7 +891,7 @@ def _load_sci_bkg_crop(
             "sci_bkg shape %s != %s for %s; using zeros",
             bkg.shape,
             expected_shape,
-            product_id,
+            frame_stem,
         )
         return np.zeros((ny, nx), dtype=np.float64)
     return bkg
@@ -1084,7 +1084,7 @@ def _process_one_frame(
         sci_crop, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
 
     if round_id > 1 and sci_bkg_ws:
-        sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, product_id, sci_crop.shape)
+        sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, ffi_stem, sci_crop.shape)
         sci_crop = sci_crop - sci_bkg
 
     tmpl_path = template_path_map.get(group_id) if template_path_map else None

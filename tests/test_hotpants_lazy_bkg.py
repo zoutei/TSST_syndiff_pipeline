@@ -51,5 +51,15 @@ class TestLoadSciBkgCrop(unittest.TestCase):
         self.assertTrue(np.all(out == 0))
 
 
+    def test_loads_spoc_frame_stem(self):
+        ffi_stem = "tess2026039233236-s0020-3-3"
+        data = np.ones(self.shape, dtype=np.float64) * 2.0
+        stem = hotpants.workspace_frame_stem(ffi_stem, "ks_b")
+        path = self.bkg_ws / f"{stem}.fits"
+        fits.writeto(path, data.astype(np.float32), overwrite=True)
+        out = hotpants._load_sci_bkg_crop(str(self.bkg_ws), ffi_stem, self.shape)
+        np.testing.assert_array_equal(out, data)
+
+
 if __name__ == "__main__":
     unittest.main()
