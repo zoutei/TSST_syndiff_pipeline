@@ -404,23 +404,86 @@ def _sorted_local_ffis(cfg: SynDiffConfig) -> list:
     return sorted(list_local_ffis(_cfg_ffi_leaf(cfg), cfg.sector, cfg.camera, cfg.ccd))
 
 
-def _ffi_paths_for_processing(cfg: SynDiffConfig) -> list:
+def _ffi_paths_for_processing(
+    cfg: SynDiffConfig, wcs_table: Optional[pd.DataFrame] = None
+) -> list:
     """Ffi paths for processing.
     
     Parameters
     ----------
     cfg : SynDiffConfig
+    wcs_table : pd.DataFrame | None
+        SCC frames manifest; used when there is no science target (field lane).
     
     Returns
     -------
     list"""
+    import math
+
     all_sorted = _sorted_local_ffis(cfg)
+    if cfg.max_ffis is None:
+        return all_sorted
+
+    ra, dec = cfg.target_ra, cfg.target_dec
+    target_missing = (
+        ra is None
+        or dec is None
+        or (isinstance(ra, float) and math.isnan(ra))
+        or (isinstance(dec, float) and math.isnan(dec))
+    )
+    if target_missing:
+        return _select_ffis_for_field_lane(
+            all_sorted, wcs_table, max_ffis=int(cfg.max_ffis)
+        )
     return wcs_grouping.select_ffis_with_valid_target_wcs(
         all_sorted,
         cfg.target_ra,
         cfg.target_dec,
         max_ffis=cfg.max_ffis,
     )
+
+
+def _select_ffis_for_field_lane(
+    sorted_paths: list[str],
+    wcs_table: Optional[pd.DataFrame],
+    *,
+    max_ffis: int,
+) -> list[str]:
+    """Pick up to *max_ffis* paths using manifest ``wcs_ok`` (SCC field lane)."""
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+
+    cap = int(max_ffis)
+    if wcs_table is None or "path" not in wcs_table.columns:
+        selected = list(sorted_paths[:cap])
+    else:
+        by_key = {manifest_basename_from_local(p): p for p in sorted_paths}
+        selected = []
+        for _, row in wcs_table.iterrows():
+            if "wcs_ok" in wcs_table.columns:
+                wok = row["wcs_ok"]
+                if not (
+                    wok is True or str(wok).lower() in {"true", "1", "yes", "t"}
+                ):
+                    continue
+            key = manifest_basename_from_local(str(row["path"]))
+            path = by_key.get(key)
+            if path is None:
+                continue
+            selected.append(path)
+            if len(selected) >= cap:
+                break
+    if len(selected) < cap:
+        raise RuntimeError(
+            f"Only {len(selected)} FFI(s) with wcs_ok in manifest among "
+            f"{len(sorted_paths)} on disk (need {cap} for max_ffis={cap}). "
+            "Check frames.csv or lower max_ffis."
+        )
+    log.info(
+        "  Using %d FFI(s) from manifest wcs_ok (max_ffis=%d; SCC field lane).",
+        len(selected),
+        cap,
+    )
+    return selected
 
 
 def _load_gaia_catalog(
@@ -1147,7 +1210,7 @@ def run_config_pipeline(
                 bkg=bkg_dir,
             )
 
-            processing_ffi_paths = _ffi_paths_for_processing(cfg)
+            processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
             sci_bkg_ws = _diff_stage_dir(cfg, ctx, inp["bkg"]) if inp.get("bkg") else None
 
             round_id = 2 if inp.get("bkg") else 1
@@ -1291,7 +1354,7 @@ def run_config_pipeline(
             diff_dir = _diff_stage_dir(cfg, ctx, diffs_l)
             bkg_dir = _diff_stage_dir(cfg, ctx, bkg_l) if bkg_l else None
             if not processing_ffi_paths:
-                processing_ffi_paths = _ffi_paths_for_processing(cfg)
+                processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
             n_jobs = ks_params.kernel_subtract_n_jobs or cfg.n_jobs
             results = kernel_subtract_runner.kernel_subtract_loop(
                 ffi_paths=processing_ffi_paths,
@@ -1600,7 +1663,7 @@ def run_config_pipeline(
                     "background requires wcs_table from template handoff."
                 )
             if not processing_ffi_paths:
-                processing_ffi_paths = _ffi_paths_for_processing(cfg)
+                processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
             shared_mask, mask_catalog = _run_background_stage(
                 stage=stage,
                 idx=idx,
