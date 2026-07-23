@@ -46,7 +46,7 @@ Only three top-level subtrees belong here long-term:
         {lc_label}/lightcurve_*.csv
         host_star/                 # star branch outputs
       frames.csv                   # optional event copy of SCC frame manifest
-      ps1_removed_stars.csv        # crop-local Gaia (templates stage; linear geometry_mode)
+      ps1_removed_stars.csv        # crop-local Gaia (downsample stage; linear geometry_mode)
 ```
 
 SCC subtract/ePSF/centroids products are **not** stored under the event tree. They live on the shared lane at `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` (flat label dirs, `tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz` stems). Fingerprints are recorded in `provenance.db` only.

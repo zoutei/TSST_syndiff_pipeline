@@ -210,7 +210,8 @@ remap drift source / bookkeeping path feeding field downsample.
 | Diff stage algorithms | [stages/diff_pipeline.md](stages/diff_pipeline.md) |
 | SCC storage layout | [storage_layout.md](storage_layout.md) |
 | Orchestration / Condor | [template_pipeline.md](template_pipeline.md) |
-| Distortion-aware master plan | [`doc/distortion_aware_templates_master_plan.md`](../../doc/distortion_aware_templates_master_plan.md) |
+| Field geometry + padded SCC | [field_geometry.md](field_geometry.md), [`doc/padded_scc_v2_implementation.md`](../../doc/padded_scc_v2_implementation.md) |
+| Centroids stage | [stages/centroids.md](stages/centroids.md) |
 
 ---
 

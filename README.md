@@ -10,45 +10,49 @@ TESS Full Frame Image (FFI) template building and difference-imaging pipeline fo
 
 ## Overview
 
-SynDiff is an end-to-end pipeline for TESS Full Frame Image (FFI) transient work: it builds PS1-based templates on the TESS pixel grid, then runs difference imaging and forced photometry at a science target. Template building is **SCC-scoped** (sector/camera/CCD; shared across every event that lands on it), while difference imaging is **event-scoped**. The `syndiff template` and `syndiff diff` CLI nouns submit these as two separate DAGs — there is no combined "run everything" preset.
-
-An independent **`star`** branch can then use a completed template+diff
-workspace to produce TIC/Gaia host-star light curves without re-running
-Hotpants.
+SynDiff is an end-to-end pipeline for TESS Full Frame Image (FFI) transient work: it builds PS1-based templates on the TESS pixel grid, runs SCC-primary difference imaging, then optional **event photometry** and **host-star** light curves. Template building is **SCC-scoped** (sector/camera/CCD). CLI nouns are separate: `syndiff template`, `syndiff diff`, `syndiff photometry`, `syndiff star` — there is no combined "run everything" preset.
 
 ### Template creation (TESS FFIs + PS1 → SCC-shared template store)
 
 `syndiff template submit --scc sccs.csv` (SCC-only input; no event coordinates):
 
-1. **FFI download** (`tess_ffi_download`) — bulk download of calibrated TESS FFIs from MAST into `{data_root}/s{SSSS}/c{C}/k{K}/ffi/`.
-2. **Mapping (PanCAKES)** (`mapping`) — choose the SCC's mapping-epoch reference FFI (median-CRVAL anchor + Earth/Moon-angle cuts), map TESS pixels to PS1 skycells, and download the Gaia catalog for that reference FFI. Uses a customized **[MOCPy](#forked-dependencies)** fork.
-3. **PS1 download** (`ps1_download`) — fetch PS1 skycell cutouts into a shared Zarr store.
-4. **PS1 process** (`ps1_process`) — convolve PS1 data onto the TESS grid (CPU-heavy; optionally on HTCondor).
-5. **Templates** (`templates`; legacy config key/alias: `downsample`) — combine convolved skycells at multiple sub-pixel offsets into the SCC's shared template store under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/`.
+1. **FFI download** (`tess_ffi_download`) — calibrated TESS FFIs from MAST into `{data_root}/s{SSSS}/c{C}/k{K}/ffi/`.
+2. **Mapping (PanCAKES)** (`mapping`) — reference FFI + TESS↔PS1 skycell maps + Gaia. Uses a customized **[MOCPy](#forked-dependencies)** fork.
+3. **PS1 download** (`ps1_download`) — PS1 skycells into a shared Zarr store (skipped when `ps1_source: stream`).
+4. **PS1 process** (`ps1_process`) — convolve PS1 onto the TESS grid (often HTCondor).
+5. **Remap** (`remap`) — field-mode L2–L4 drift / Exact cache (skipped when `geometry_mode: linear`).
+6. **Downsample** (`downsample`) — L5 templates under `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (stage name is `downsample`; directory name remains `templates/`).
 
 ### Field-mode difference imaging (`syndiff diff submit --scc sccs.csv`)
 
-After templates exist (with `MAPGRID=2` and `field_mode_assembly.json` schema v3), **`diff`** runs `scc_bootstrap` inside execute: it reads the SCC template sidecar + `mapping_grid`, writes `bookkeeping/diff/{frames.csv,diff_job.json}`, and subtracts on the full science grid. Products land SCC-primary under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`. See [`docs/markdown/field_geometry.md`](docs/markdown/field_geometry.md).
+After templates exist (with `MAPGRID=2` and `field_mode_assembly.json` schema v3), **`diff`** runs `scc_bootstrap` inside execute and writes SCC-primary products under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`. Default site `diff_config.yaml` is `shared_mask` → `hotpants`. See [`docs/markdown/field_geometry.md`](docs/markdown/field_geometry.md).
 
-For per-event forced photometry under `events/{name}/ws/`, use `syndiff diff submit --targets targets.csv` instead (`--scc` and `--targets` are mutually exclusive).
+### Event photometry (`syndiff photometry`)
 
-### Difference imaging (templates + FFIs → light curves)
+Forced photometry (and optional astrometry) on completed SCC diff lanes → `events/{event}/s…/phot_{run_id}/`. See [`docs/markdown/photometry.md`](docs/markdown/photometry.md).
 
-After templates exist, the **`diff`** stage runs a YAML-ordered pipeline ([`config/diff_config.yaml`](config/diff_config.yaml)). You choose which steps to include; the default site config is a short path (mask → Hotpants → forced photometry with the official TESS PRF). A fuller recipe might look like:
+### Host-star light curves (`syndiff star`)
 
-1. **Shared masking** — bitmask from Gaia (bright stars, saturation crosses, TESS straps).
-2. **Image differencing** — kernel-matching subtraction via **[pyhotpants](#forked-dependencies)** (FFI crops vs PS1 templates).
-3. **Forced photometry** — PSF-fitted flux at the target (official TESS PRF by default, or ePSF when that stage is enabled).
+Independent branch that reuses Hotpants kernels / convolved templates / backgrounds without re-running Hotpants. See [`docs/markdown/star_lightcurves.md`](docs/markdown/star_lightcurves.md).
+
+### Difference imaging sub-stages
+
+The **`diff`** stage runs a YAML-ordered pipeline ([`config/diff_config.yaml`](config/diff_config.yaml)). A fuller recipe might include:
+
+1. **Shared masking** — bitmask from Gaia / straps / optional TNS / asteroids.
+2. **Image differencing** — **[pyhotpants](#forked-dependencies)** or the multi-kernel path.
+3. **ePSF / centroids** — optional gridded ePSF and Gaia centroid tables on the SCC lane.
+4. **Background / subtract** — unified background and algebraic plane combinations.
 
 Optional steps you can add to the `pipeline:` list:
 
-- **Empirical PSF fitting** — tiled gridded ePSF via photutils (`epsf` stage; `GriddedPSFModel` with configurable `tile_nx`×`tile_ny`; use with `psf_type: epsf` in forced photometry for spatially varying **gepsf**).
-- **Gaia centroids** — PSF photometry on bright Gaia stars (`centroids` stage; outputs per-frame `*_photresults.ecsv`).
-- **Saturated star templates** — model and subtract bright saturated sources (`sat_template` + `subtract`).
-- **Background removal** — the unified `background` stage composes spatial, temporal, and strap corrections before optional `subtract`.
-- **Second round of differencing** — run Hotpants again on background-subtracted science images for cleaner residuals (see commented blocks in [`config/diff_config.yaml`](config/diff_config.yaml) and [`config/example/diff_config_c_second_hotpants.yaml`](config/example/diff_config_c_second_hotpants.yaml)).
+- **Empirical PSF fitting** — tiled gridded ePSF via photutils (`epsf` stage; see [`docs/markdown/stages/gridded_epsf.md`](docs/markdown/stages/gridded_epsf.md)).
+- **Gaia centroids** — PSF photometry on bright Gaia stars (`centroids` stage).
+- **Saturated star templates** — known limitations; see [`docs/markdown/stages/diff_pipeline.md`](docs/markdown/stages/diff_pipeline.md) §6.
+- **Background removal** — unified `background` stage (spatial / temporal / strap).
+- **Second round of differencing** — Hotpants again on background-subtracted science images.
 
-Run template building with `syndiff template submit --scc sccs.csv`, then field-mode diff with `syndiff diff submit --scc sccs.csv` (or event photometry with `--targets`).
+Run templates with `syndiff template submit --scc sccs.csv`, SCC subtract with `syndiff diff submit --scc sccs.csv`, event LCs with `syndiff photometry submit --targets …`, host stars with `syndiff star submit`.
 
 ---
 

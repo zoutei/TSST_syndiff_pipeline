@@ -7,7 +7,8 @@ This directory is the **config root** passed to `syndiff --site config`.
 | File | Role |
 |------|------|
 | `pipeline.yaml` | Orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
-| `diff_config.yaml` | Site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor |
+| `diff_config.yaml` | Site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor. **Default = shared_mask + hotpants.** |
+| `photometry_config_*.yaml` | Event photometry policy for `syndiff photometry` ([guide](../docs/markdown/photometry.md)) |
 | `mask_settings.example.yaml` | Copy to site `mask_settings.yaml` for empirical/TNS/asteroid mask policy (`difference_imaging/masking`) |
 | `diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `ks_b_s`, per-frame kernels; `write_convolved: false`) |
 | `diff_config_star_full_backfill.yaml` | One-time Hotpants backfill (`write_convolved` + `write_kernel_solutions`) for star |
@@ -50,8 +51,10 @@ syndiff diff submit --site config \
   --config config/diff_config_single_kernel.yaml \
   --scc config/scc_example.csv --run-id my_diff_run
 
-# Event photometry (optional)
-syndiff diff submit --site config --targets config/targets_example.csv --run-id my_event_diff
+# Event photometry (after SCC diffs exist)
+syndiff photometry submit --site config \
+  --photometry-config config/photometry_config_2020ut_gepsf_lc.yaml \
+  --targets config/targets_example.csv --run-id my_phot
 ```
 
 **Host-star light curves** (after transient diff artifacts exist on disk):
@@ -80,6 +83,7 @@ On submit, the orchestrator copies policy into the workspace:
 
 - `{workspace_root}/runs/{run_id}/config.yaml` — frozen orchestrator
 - `{workspace_root}/runs/{run_id}/targets.csv` — frozen targets (`targets.csv` or `star_targets.csv`)
+- `{workspace_root}/runs/{run_id}/photometry_config.yaml` — frozen photometry policy (photometry submit)
 - `{workspace_root}/runs/{run_id}/star_config.yaml` — frozen star policy (star submit only)
 - `{workspace_root}/runs/{run_id}/per_target/{label}/diff_config.yaml` — frozen per-target diff
 
@@ -189,14 +193,14 @@ Full algorithm, naming (`ks_` vs `hp_`), Savitzky–Golay details, meta artifact
 
 ## Hotpants: per-frame kernels for `syndiff star`
 
-Every active `hotpants` stage in site and example diff configs sets **`write_kernel_solutions: true`**, which writes one `{product_id}_kernel.npz` per FFI under `ws/hp_d_kernels/`. The star pipeline reads these (plus `hp_c` convolved templates and `ks_b_s`/`ks_b` photometry background) and does **not** re-run Hotpants.
+Every active `hotpants` stage in site and example diff configs sets **`write_kernel_solutions: true`**, which writes one `{product_id}_kernel.npz` per FFI under `diff_{lane}/hp_d_kernels/` (SCC-primary). The star pipeline reads these (plus `hp_c` convolved templates and `ks_b_s`/`ks_b` photometry background) and does **not** re-run Hotpants.
 
 For a workspace that already has `hp_d` but no kernels (e.g. `multi_hp_temp_calib` before backfill), run a one-time Hotpants-only backfill with [`diff_config_star_full_backfill.yaml`](diff_config_star_full_backfill.yaml) (`write_convolved: true` + `write_kernel_solutions: true`). See [docs/markdown/stages/star_pipeline.md](../docs/markdown/stages/star_pipeline.md).
 
 ### Oversampling (`F`) and stamp modes
 
 Template `oversampling_factor` lives in `pipeline.yaml` (`stages.mapping` /
-`stages.templates`). Diff Hotpants accepts optional `oversample`,
+`stages.downsample`). Diff Hotpants accepts optional `oversample`,
 `stamp_mode` (`grid` \| `connected_regions`), `use_c_extension`, and
 `region_*` on the `kind: hotpants` stage. Star uses
 `defaults.oversampling_factor` in `star_config.yaml` (must match template

@@ -1,37 +1,39 @@
 # SynDiff unified pipeline (`syndiff`)
 
 This document describes the **orchestrated SynDiff pipeline** behind the
-`syndiff` CLI. One supervisor daemon and one SQLite state DB know about **eight**
+`syndiff` CLI. One supervisor daemon and one SQLite state DB know about **nine**
 registered stages: a six-stage **template** DAG (`tess_ffi_download → mapping
-→ ps1_download → ps1_process → remap → downsample`), a single **`diff`** stage
-(with in-process `scc_bootstrap` when `data_root` is set), plus the independent
-`star` branch for host-star light curves from an existing event. There is **no**
-`syndiff all` preset — template and diff are separate CLI nouns with their own
-SCC/targets inputs. CLI presets select stage subsets:
+→ ps1_download → ps1_process → remap → downsample`), a **`diff`** stage
+(with in-process `scc_bootstrap` when `data_root` is set), plus independent
+**`photometry`** and **`star`** branches. There is **no** `syndiff all` preset —
+template, diff, photometry, and star are separate CLI nouns. CLI presets select
+stage subsets:
 
 ```text
-syndiff template submit --site SITE --scc sccs.csv               # template DAG only
-syndiff diff submit --site SITE --scc sccs.csv                   # SCC field subtract (default --stages diff)
-syndiff diff submit --site SITE --targets targets.csv            # event photometry at transient RA/Dec
-syndiff star submit --site SITE --star-targets star_targets.csv  # host-star light curves only; prerequisites verified in stage
+syndiff template submit --site SITE --scc sccs.csv                 # template DAG only
+syndiff diff submit --site SITE --scc sccs.csv                     # SCC field subtract (default --stages diff)
+syndiff photometry submit --site SITE --targets targets.csv …      # event astrometry + forced LCs
+syndiff star submit --site SITE --star-targets star_targets.csv    # host-star light curves
 ```
 
 `syndiff template` takes an **SCC-only** input (`--scc sccs.csv`, or
 `--sector/--camera/--ccd` for one SCC) — no event coordinates. `syndiff diff`
 takes **either** `--scc` (SCC-only field subtraction; mutually exclusive with
-`--targets`) **or** `--targets` (event catalog with transient RA/Dec/name for
-forced photometry). The default `diff` preset selects **`["diff"]` only**;
-`diff` depends on `downsample` in the DAG and, on launch, verifies
-`tess_ffi_download` + `downsample` on disk via `DIFF_VERIFY_UPSTREAM` in
-`common/orchestration/spec.py`. Inside `diff` execute, `scc_bootstrap` loads
-`field_mode_assembly.json` (schema v3 + `mapping_grid`) and writes
-`bookkeeping/diff/{frames.csv,diff_job.json}` before Hotpants runs. See
-[Runs and stages](#runs-and-stages) below.
+`--targets`) **or** `--targets` (event-oriented submit). The default `diff`
+preset selects **`["diff"]` only** (site `diff_config.yaml` defaults to
+`shared_mask` + `hotpants`). Event forced photometry is **`syndiff photometry`**
+(see [photometry.md](photometry.md)). `diff` depends on `downsample` in the DAG
+and, on launch, verifies `tess_ffi_download` + `downsample` on disk via
+`DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`. Inside `diff` execute,
+`scc_bootstrap` loads `field_mode_assembly.json` (schema v3 + `mapping_grid`)
+and writes `bookkeeping/diff/{frames.csv,diff_job.json}` before Hotpants runs.
+See [Runs and stages](#runs-and-stages) below.
 
 Invoking the removed `syndiff all` preset prints a guiding error pointing at
 `template submit` + `diff submit`.
 
 Host-star configuration and outputs: [star_lightcurves.md](star_lightcurves.md), [stages/star_pipeline.md](stages/star_pipeline.md).
+Event photometry: [photometry.md](photometry.md), [stages/photometry_pipeline.md](stages/photometry_pipeline.md).
 
 Monitoring verbs (`progress`, `status`, `retry`, …) are workspace-wide and work identically regardless of which preset started the run.
 
@@ -332,7 +334,7 @@ mamba activate syndiff
 syndiff template submit \
   --site config \
   --scc config/scc_example.csv \
-  --stages ps1_process,templates
+  --stages ps1_process,downsample
 ```
 
 Template submits take `--scc` (an SCC CSV, `sector,camera,ccd[,enabled]`) or
@@ -393,7 +395,7 @@ syndiff retry --run-id 20260607_210919
 
 Template output lands in the SCC's shared store at
 `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` (`N` always
-nested, including `N=1`; override the root with `stages.templates.output_base`
+nested, including `N=1`; override the root with `stages.downsample.output_base`
 / legacy key `stages.downsample.output_base`). There is **no** `ws/templates`
 symlink anymore — the `diff` stage resolves `cfg.template_dir` directly from
 that SCC path (or an explicit `paths.template_dir` override in
@@ -848,7 +850,7 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 | `edge_exclusion`, `edge_buffer_large`, `edge_buffer_small` | various | Edge handling |
 | `n_threads` | `8` | Thread count |
 | `max_workers` | null | Optional process pool cap |
-| `oversampling_factor` | `1` | Sub-pixel oversampling `F`. Writes under `mapping/oversampling_{F}/` (always nested, including `F=1`). Must match `stages.templates`/`downsample`. Full guide: [oversampled templates](oversampled_templates.md) |
+| `oversampling_factor` | `1` | Sub-pixel oversampling `F`. Writes under `mapping/oversampling_{F}/` (always nested, including `F=1`). Must match `stages.downsample`. Full guide: [oversampled templates](oversampled_templates.md) |
 | `overwrite` | `true` | Overwrite mapping FITS |
 | `skip_download_catalog` | `false` | Skip Gaia download if catalog exists |
 | `executor` | `"condor"` | `"condor"` or `"local"` |
@@ -883,15 +885,18 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 | `condor_requirements` | `Memory >= 500000 && LoadAvg < 10` | Machine requirements expression |
 | `condor_rank` | `-LoadAvg` | Prefer lower load average |
 
-#### `stages.templates` (legacy config key: `stages.downsample`)
+#### `stages.downsample`
 
-Either YAML key is accepted (`parse_stage_params` reads `stages.templates` first, falling back to `stages.downsample`); the underlying dataclass is still named `DownsampleStageParams` with a `templates` property alias.
+Canonical YAML key is **`stages.downsample`**. Strict config parse **rejects**
+`stages.templates` (rename error). The on-disk product directory remains
+`templates/oversampling_{N}/` (or `templates_{NAME}/`). Legacy SQLite stage
+rows named `templates`/`tmpl` map to `downsample` in the status grid only.
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `ignore_mask_bits` | `[12]` | PS1 mask bits to ignore |
 | `oversampling_factor` | `1` | Must match `stages.mapping`. Linear templates get `OVERSAMP=F` + HR arrays; field stores use HR `base_tess_shape` / `roi_bounds`. See [oversampled templates](oversampled_templates.md) |
-| `geometry_mode` | `"field"` | `"field"` (default) or `"linear"` — v2 accepts **`field` only** at dispatch |
+| `geometry_mode` | `"field"` | `"field"` (default) or `"linear"` (centroids campaign via `linear_downsample.py`) |
 | `mapping_dir` | null | Override mapping root |
 | `convolved_dir` | null | Override convolved Zarr directory |
 | `output_base` | null | Template store output root (default: SCC's `templates/oversampling_{N}/`) |
@@ -923,7 +928,7 @@ For each target, `runner_config.resolve_config()` derives (`ResolvedTargetConfig
 | `ffi_dir` | `{data_root}/s{SSSS}/c{C}/k{K}/ffi/` | `scc_ffi_dir()` |
 | `mapping_root` | `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/` | `scc_mapping_dir(..., oversampling_factor=N)` (`N` from `stages.mapping.oversampling_factor`) |
 | `zarr_dir` | `{data_root}/ps1_skycells_zarr/` | plain `Path(data_root) / "ps1_skycells_zarr"` (unchanged by the refactor) |
-| `template_output_base` | `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` | `scc_templates_dir(..., oversampling_factor=N)` (`N` from `stages.templates`/`stages.downsample.oversampling_factor`) |
+| `template_output_base` | `{data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/` | `scc_templates_dir(..., oversampling_factor=N)` (`N` from `stages.downsample.oversampling_factor`) |
 
 ---
 
@@ -1025,7 +1030,7 @@ Commands fall into three scopes:
 syndiff template submit \
   --config my_pipeline.yaml \
   --scc my_sccs.csv \
-  [--stages mapping,ps1_process,templates] \
+  [--stages mapping,ps1_process,downsample] \
   [--run-id batch_no5] \
   [--force-rerun]
 
@@ -1075,7 +1080,7 @@ syndiff diff submit \
 syndiff template submit \
   --site config \
   --scc config/scc_example.csv \
-  --stages mapping,ps1_process,templates \
+  --stages mapping,ps1_process,downsample \
   --run-id batch_stream_01
 ```
 
@@ -1215,7 +1220,7 @@ syndiff retry --run-dir ... --no-start-daemon
 
 By default, `retry` also calls `ensure_daemon_running` for the run's `workspace_root`.
 
-On partial runs (`--stages mapping,templates`, etc.), retry reopens non-selected upstream
+On partial runs (`--stages mapping,downsample`, etc.), retry reopens non-selected upstream
 stages to `external` for artifact re-verification (not `pending`). See
 [`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md) for the
 full state-machine matrix.
@@ -1386,7 +1391,7 @@ syndiff verify --site config --targets config/targets_example.csv
 syndiff template submit \
   --site config \
   --scc config/scc_example.csv \
-  --stages ps1_process,templates \
+  --stages ps1_process,downsample \
   --run-id smoke_01
 
 syndiff progress
@@ -1768,7 +1773,7 @@ references are vendored under [`docs/markdown/stages/`](stages/README.md):
 |-------|----------|------------|
 | `mapping` | [mapping_pancakes.md](stages/mapping_pancakes.md) | MOC filtering, master pixel map, padding skycells, output FITS layout |
 | `ps1_process` | [ps1_process_technical.md](stages/ps1_process_technical.md) | 5-stage pipeline, queues, memory guards, cross-projection padding |
-| `templates` | [downsample_technical.md](stages/downsample_technical.md) | Shift precompute, sparse binning, ROI/oversampling, FITS HDUs |
+| `downsample` | [downsample_technical.md](stages/downsample_technical.md) | Shift precompute, sparse binning, ROI/oversampling, FITS HDUs |
 | All (legacy CLI) | [standalone_pipeline_overview.md](stages/standalone_pipeline_overview.md) | `pipeline.py`, per-script invocations, `run.sh` equivalents |
 
 ---

@@ -16,9 +16,9 @@ Required before running any Python in this repo (pipeline, scripts, tests).
 ## Launching
 
 ```bash
-syndiff all submit --site config/ --targets config/targets_example.csv      # full 7-stage DAG
-syndiff template submit --site config/ --targets config/targets_example.csv # through downsample
-syndiff diff submit --site config/ --targets config/targets_example.csv     # diff only
+syndiff template submit --site config/ --scc config/scc_example.csv         # template DAG through downsample
+syndiff diff submit --site config/ --scc config/scc_example.csv             # SCC subtract
+syndiff photometry submit --site config/ --targets config/targets_example.csv  # event LCs
 syndiff diff run --site config/ --targets config/targets_example.csv --target-name {label}
 syndiff star submit --site config/ --star-targets {star_targets.csv}
 syndiff star run --site config/ --star-targets {star_targets.csv} --target-name {scc_or_label}
@@ -26,8 +26,9 @@ syndiff star run --site config/ --star-targets {star_targets.csv} --target-name 
 
 - `--site DIR` loads `pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`.
 - Optional sibling `mask_settings.yaml` owns mask policy (not required in `diff_config`; bare `- kind: shared_mask` uses site file or packaged defaults). Library code: `syndiff_pipeline.difference_imaging.masking` (diff/star only; not template creation). See `docs/markdown/masking.md`.
+- `photometry` loads `photometry_config.yaml` (or `--photometry-config`) + event `--targets`; verifies SCC diff lane complete. See `docs/markdown/photometry.md`.
 - `star` additionally loads `star_config.yaml` and a separate `star_targets.csv`; it verifies an existing template+diff workspace rather than depending on the main DAG in SQLite.
-- `--local` on submit rewrites the frozen run config so `stages.diff.executor: local` (Condor bypass for smoke tests).
+- `--local` on submit rewrites the frozen run config so the noun’s stage executor is `local` (Condor bypass for smoke tests).
 - `--local` on `star submit` instead rewrites `stages.star.executor: local`.
 - `--stages`, `--targets`, `--force-rerun`, `--run-id` override presets.
 - Heavy stages run on HTCondor by default: `mapping`, `ps1_process`, `diff`, `star`.

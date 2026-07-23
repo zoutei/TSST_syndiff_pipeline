@@ -1,64 +1,33 @@
 # Template stage deep-dive documentation
 
-These documents describe the **science algorithms** behind each template pipeline stage. For running the multi-target scheduler, configuration, and HTCondor, see the [template pipeline guide](../template_pipeline.md).
+These documents describe the **science algorithms** behind each pipeline stage. For running the scheduler, configuration, and HTCondor, see the [template pipeline guide](../template_pipeline.md) and [`syndiff` CLI](../syndiff_cli.md).
 
 ## Documents
 
-| Document | Stage | Legacy script | Package module |
-|----------|-------|---------------|----------------|
-| [Field (distortion-aware) templates](../field_geometry.md) | `remap` + `downsample` (**default** `geometry_mode: field`) | — | `field_remap.py`, `field_downsample.py`, … |
-| [Oversampled templates + Hotpants stamp modes](../oversampled_templates.md) | `mapping` / `templates` / `diff` / `star` | — | `template_coverage.py`, `hotpants.py`, `kernel.py`, `star/*` |
-| [Standalone pipeline overview](standalone_pipeline_overview.md) | All four core steps | `pipeline.py` | — |
-| [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | — | `common/download.py` |
-| [WCS grouping](wcs_grouping.md) | Linear-mode drift algorithms (reference) | — | `common/wcs_grouping.py` |
-| [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `pancakes_v2.py` | `template_creation/processing/pancakes.py` |
-| [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `process_ps1.py` | `template_creation/processing/ps1_process.py` |
-| [Multi-offset downsample](downsample_technical.md) | `templates` (linear `geometry_mode`) | `multi_offset_downsampling.py` | `template_creation/processing/downsample.py` |
-| [Diff pipeline internals](diff_pipeline.md) | `diff` | — | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` |
-| [Forced photometry](forced_photometry.md) | `forced_photometry` (diff sub-stage) | — | `difference_imaging/stages/photometry.py` |
-| [Static masking](../masking.md) | `shared_mask` (diff sub-stage) | — | `difference_imaging/masking/` |
-| [Host-star light curves](../star_lightcurves.md) | `star` | — | `syndiff_pipeline/star/cli.py` |
-| [Star pipeline (technical)](star_pipeline.md) | `star` | — | `syndiff_pipeline/star/` |
-| [Star configuration](star_config.md) | — | — | `config/star_config.yaml`, `star_targets.csv` |
-| [Unified background stage](background.md) | `background` (diff sub-stage) | — | `difference_imaging/stages/background/` |
-
-## PS1 download (no separate deep-dive)
-
-The **`ps1_download`** stage wraps `download_and_store_zarr.py` logic in `template_creation/processing/ps1_download.py`. See [standalone pipeline overview — Download PS1 Data](standalone_pipeline_overview.md#2-download-ps1-data) for CLI options and the shared Zarr layout.
-
-Key points:
-
-- One shared store per `data_root`: `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`
-- File lock serializes concurrent writers across SCCs
-- Reads skycell names from the mapping stage CSV
-
-## TESS FFI download (runner-only)
-
-There is no legacy `syndiff/` script — **`tess_ffi_download`** fetches sector FFI FITS via `common/download.py` before mapping.
-
-## WCS drift (field vs linear)
-
-Field mode measures drift at every skycell center during **`remap`** (see [field_geometry.md](../field_geometry.md)). Linear mode uses target-anchored grouping algorithms documented in [WCS grouping](wcs_grouping.md). Diff field mode uses **`scc_bootstrap`** inside `diff` execute — not a separate scheduler stage.
-
-## Diff imaging
-
-**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../config/diff_config.yaml). See the [diff pipeline internals](diff_pipeline.md) for all sub-stage kinds (shared_mask, hotpants, kernel_fit, convolved_templates, kernel_subtract, epsf, sat_template, subtract, background, forced_photometry), workspace naming, template resolution, and kernel persistence. Forced-photometry modes and parameters: [forced_photometry.md](forced_photometry.md). For oversampled templates (`F>1`) and Hotpants `stamp_mode` / `region_*`, see [oversampled templates](../oversampled_templates.md). Empirical/TNS/asteroid mask library: [`difference_imaging/masking/`](../../syndiff_pipeline/difference_imaging/masking/) — see [Static masking](../masking.md). Orchestration, SCC overrides, and Condor settings are in the [template pipeline guide](../template_pipeline.md) and [`config/README.md`](../../config/README.md).
-
-## Host-star light curves
-
-**`star`** is a third pipeline branch after template + diff. It reads per-frame Hotpants kernels (`hp_d_kernels`), convolved templates (`hp_c`), and photutils background (`ks_b_s` / `ks_b`) from an existing transient workspace — it does **not** re-run Hotpants.
-
-- Quick start: [Host-star light curves](../star_lightcurves.md)
-- Algorithms: [Star pipeline (technical)](star_pipeline.md)
-- Config schema: [Star configuration](star_config.md)
-- Kernel backfill for older workspaces: [`config/diff_config_star_full_backfill.yaml`](../../config/diff_config_star_full_backfill.yaml)
-
-**Sub-stage deep-dives:**
-
-| Document | Stage |
-|----------|-------|
-| [Unified background stage](background.md) | `background` — spatial / temporal Savitzky–Golay / strap on `ks_b` → `ks_b_s` |
-| [Forced photometry](forced_photometry.md) | `forced_photometry` — aperture / PRF / ePSF photutils / ePSF tessreduce |
+| Document | Stage | Package module |
+|----------|-------|----------------|
+| [Field (distortion-aware) templates](../field_geometry.md) | `remap` + `downsample` (default `geometry_mode: field`) | `field_remap.py`, `field_downsample.py`, … |
+| [Oversampled templates + Hotpants stamp modes](../oversampled_templates.md) | `mapping` / `downsample` / `diff` / `star` | `hotpants.py`, `kernel.py`, … |
+| [TESS FFI download](tess_ffi_download.md) | `tess_ffi_download` | `common/download.py` |
+| [WCS grouping](wcs_grouping.md) | Linear-mode drift algorithms (config `stages.wcs_grouping`; not a scheduler stage) | `common/wcs_grouping.py` |
+| [PanCAKES mapping](mapping_pancakes.md) | `mapping` | `template_creation/processing/pancakes.py` |
+| [PS1 download](ps1_download.md) | `ps1_download` | `template_creation/processing/ps1_download.py` |
+| [PS1 process (technical)](ps1_process_technical.md) | `ps1_process` | `template_creation/processing/ps1_process.py` |
+| [Multi-offset downsample](downsample_technical.md) | `downsample` (product path `templates/`) | `field_downsample.py`, `linear_downsample.py` |
+| [Diff pipeline internals](diff_pipeline.md) | `diff` | `difference_imaging/orchestration/execute.py` + `stages/` + `masking/` |
+| [Multi-kernel diff path](multi_kernel_diff.md) | `kernel_fit` → `convolved_templates` → `kernel_subtract` | `kernel_*.py` |
+| [Gridded ePSF](gridded_epsf.md) | `epsf` (gridded models) | `gridded_epsf.py` |
+| [Centroids](centroids.md) | `centroids` | `centroids.py` |
+| [Forced photometry](forced_photometry.md) | `forced_photometry` (photometry pipeline kind) | `difference_imaging/stages/photometry.py` |
+| [Static masking](../masking.md) | `shared_mask` | `difference_imaging/masking/` |
+| [Event photometry](../photometry.md) | `photometry` | `photometry/cli.py` |
+| [Photometry pipeline (technical)](photometry_pipeline.md) | `photometry` | `photometry/runner.py` |
+| [Photometry configuration](photometry_config.md) | — | `photometry_config.yaml` |
+| [Host-star light curves](../star_lightcurves.md) | `star` | `star/cli.py` |
+| [Star pipeline (technical)](star_pipeline.md) | `star` | `syndiff_pipeline/star/` |
+| [Star configuration](star_config.md) | — | `star_config.yaml` |
+| [Unified background stage](background.md) | `background` | `difference_imaging/stages/background/` |
+| [Standalone pipeline overview](standalone_pipeline_overview.md) | **LEGACY** | — |
 
 ## Typical data flow
 
@@ -70,9 +39,19 @@ ps1_download               →  {data_root}/ps1_skycells_zarr/ps1_skycells.zarr
 ps1_process                →  {data_root}/s{SSSS}/c{C}/k{K}/convolved.zarr
 downsample                 →  {data_root}/s{SSSS}/c{C}/k{K}/templates/oversampling_{N}/
 diff (scc_bootstrap)       →  {data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/ + bookkeeping/diff/
-star (after diff verify)   →  {workspace_root}/events/{target_label}/phot_{run_id}/host_star/
+photometry (after diff)    →  {workspace_root}/events/{event}/s…/phot_{run_id}/
+star (after diff verify)   →  host_star/ under baseline workspace or photometry tree
 ```
 
-## Provenance
+## WCS drift (field vs linear)
 
-These files are copies of the step READMEs from the sibling [`syndiff`](../../../syndiff/) repository, imported into `syndiff-pipeline` for the open-source release. When updating algorithm documentation, edit both locations or consolidate here and treat `syndiff/` as the development sandbox.
+Field mode measures drift during **`remap`** (see [field_geometry.md](../field_geometry.md)). Linear mode uses point-drift grouping documented in [WCS grouping](wcs_grouping.md) and `linear_downsample.py`. Diff field mode uses **`scc_bootstrap`** inside `diff` execute — not a separate scheduler stage.
+
+## Diff imaging
+
+**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../../config/diff_config.yaml) (default: `shared_mask` + `hotpants`). See [diff pipeline internals](diff_pipeline.md). Multi-kernel path: [multi_kernel_diff.md](multi_kernel_diff.md). Masks: [masking.md](../masking.md). Oversampling: [oversampled templates](../oversampled_templates.md).
+
+## Event photometry and host stars
+
+- Photometry: [photometry.md](../photometry.md), [photometry_pipeline.md](photometry_pipeline.md), [photometry_config.md](photometry_config.md)
+- Star: [star_lightcurves.md](../star_lightcurves.md), [star_pipeline.md](star_pipeline.md), [star_config.md](star_config.md)

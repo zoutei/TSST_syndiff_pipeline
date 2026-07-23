@@ -24,15 +24,15 @@ Docs build: `pip install -e ".[docs]"` then `cd docs/sphinx && make html` (third
 ### Running the pipeline
 
 ```bash
-syndiff all submit --site config/ --targets config/targets_example.csv   # full 7-stage DAG
-syndiff template submit ...   # through downsample only
-syndiff diff submit ...       # diff only (verifies upstream artifacts on disk)
-syndiff diff run --site config/ --targets t.csv --target-name {label}    # foreground, one target, no daemon
-syndiff star submit --site config/ --star-targets {star_targets.csv}     # host-star branch
-syndiff verify --site config/ --targets ...                              # pre-run artifact check
+syndiff template submit --site config/ --scc config/scc_example.csv   # template DAG through downsample
+syndiff diff submit --site config/ --scc …                            # SCC subtract (verifies upstream on disk)
+syndiff photometry submit --site config/ --targets …                  # event forced photometry
+syndiff diff run --site config/ --targets t.csv --target-name {label} # foreground diff debug
+syndiff star submit --site config/ --star-targets {star_targets.csv}  # host-star branch
+syndiff verify --site config/ --targets ...                           # pre-run artifact check
 ```
 
-Monitoring/control: `syndiff progress`, `syndiff status --watch`, `syndiff tail`, `syndiff retry`, `syndiff pause|resume|kill`, `syndiff runs`, `syndiff active`, `syndiff logs`. Control verbs take `--run-id` + `--deployment` (or `--run-dir`), **not** `--site`; they write intents to SQLite which the supervisor applies on its next tick.
+Monitoring/control: `syndiff progress`, `syndiff status --watch`, `syndiff tail`, `syndiff retry`, `syndiff launch`, `syndiff pause|resume|kill`, `syndiff runs`, `syndiff active`, `syndiff logs`, `syndiff bookkeeping`. Control verbs take `--run-id` + `--deployment` (or `--run-dir`), **not** `--site`; they write intents to SQLite which the supervisor applies on its next tick.
 
 Cheap testing of changes: foreground `syndiff diff run` (add `--validate-only` for config checks), `--local` on submit to bypass Condor, `max_ffis` in `star_config.yaml` for short star runs, `crop_mode: target_box` for small/fast events. Stage modules also have standalone entry points (e.g. `python -m syndiff_pipeline.template_creation.processing.pancakes <cluster_template_job.json>`).
 
@@ -41,8 +41,9 @@ Cheap testing of changes: foreground `syndiff diff run` (add `--validate-only` f
 | File | Git | Contains |
 |------|-----|----------|
 | `pipeline.yaml` | committed | Template policy: stages, pools, notifications |
-| `diff_config.yaml` | committed | Diff sub-pipeline: `defaults` + `pipeline:` stage knobs (omit dataclass defaults). Mask policy is **not** here. |
+| `diff_config.yaml` | committed | Diff sub-pipeline: `defaults` + `pipeline:` stage knobs (omit dataclass defaults). Mask policy is **not** here. Default = `shared_mask` + `hotpants`. |
 | `mask_settings.yaml` | optional | Mask geometry/policy (sibling of `diff_config`; bare `- kind: shared_mask` uses this or packaged defaults) |
+| `photometry_config.yaml` | optional site | Event photometry policy (`syndiff photometry`); examples `photometry_config_*.yaml` |
 | `star_config.yaml` | committed | Star-branch policy |
 | `deployment.yaml` | **gitignored** | `workspace_root`, `data_root`, Gaia + Discord credentials (copy from `deployment.yaml.example`) |
 
@@ -53,31 +54,31 @@ Targets are always passed on the CLI (`--targets` / `--star-targets`), never emb
 ### Stage DAG
 
 ```
-tess_ffi_download → wcs_grouping → mapping → ps1_download → ps1_process → downsample → diff
-   (network)          (local)     (Condor)    (network)      (Condor)       (cpu)     (Condor)
+tess_ffi_download → mapping → ps1_download → ps1_process → remap → downsample → diff
+   (network)         (Condor)   (network)      (Condor)    (Condor)  (cpu/Condor) (Condor)
 
-completed template + diff artifacts ──verify──→ star   (Condor; separate star_targets.csv)
+completed diff lane ──verify──→ photometry   (event targets)
+completed template + diff ──verify──→ star   (star_targets.csv)
 ```
 
-`pipeline_spec.py` composes the registry from `TEMPLATE_STAGES + DIFF_STAGES + STAR_STAGES`. `star` is an independent branch: it verifies prerequisites from an existing event workspace rather than depending on the main DAG in SQLite. With `ps1_process.ps1_source: stream`, `ps1_download` is skipped and `ps1_process` reads directly after `mapping`.
+`pipeline_spec.py` composes `TEMPLATE_STAGES + DIFF_STAGES + PHOTOMETRY_STAGES + STAR_STAGES` (**nine** stages). `wcs_grouping` is config-only (linear drift), not a scheduler stage. With `ps1_process.ps1_source: stream`, `ps1_download` is skipped. With `geometry_mode: linear`, `remap` is skipped.
 
 ### Package layout
 
-- `syndiff_pipeline/cli.py` — noun/verb CLI (`syndiff all|template|diff|star submit/run`, monitor/control verbs).
-- `syndiff_pipeline/common/orchestration/` — the run engine shared by all stages: supervisor `daemon.py`, `scheduler.py`, SQLite `state.py` (`{workspace_root}/control/pipeline_state.sqlite`), `condor.py` + `condor_wrapper.sh`, `verify_worker.py`, stage/pipeline `spec.py`.
-- `syndiff_pipeline/common/` — FFI download, WCS grouping, parallelism helpers.
-- `syndiff_pipeline/template_creation/processing/` — `pancakes.py` (TESS→PS1 skycell mapping + Gaia), `ps1_download.py` (shared Zarr), `ps1_process.py`/`band_utils.py` (convolution to TESS grid), `downsample.py` (templates).
-- `syndiff_pipeline/difference_imaging/` — `orchestration/execute.py` runs a YAML-ordered sub-pipeline of `stages/` (shared_mask, hotpants, epsf/gridded_epsf, background, photometry, centroids, astrometry, kernel_*, sat_template, …). The `pipeline:` list in `diff_config.yaml` decides which steps run and in what order. Empirical/TNS/asteroid mask library: `difference_imaging/masking/` (not used by template creation; star imports it for per-FFI `mask_at`).
-- `syndiff_pipeline/star/` — host-star light curves (`runner.py`, `epsf_runner.py`, `orchestration/stages.py`); reuses diff-stage side products instead of re-running Hotpants.
+- `syndiff_pipeline/cli.py` — noun/verb CLI (`syndiff template|diff|photometry|star`, monitor/control verbs; `all` removed).
+- `syndiff_pipeline/common/orchestration/` — supervisor, scheduler, SQLite state, Condor, verify.
+- `syndiff_pipeline/template_creation/processing/` — pancakes, ps1_download/process, field_remap, field_downsample / linear_downsample.
+- `syndiff_pipeline/difference_imaging/` — `execute.py` + `stages/` + `masking/`. Default site diff = shared_mask + hotpants.
+- `syndiff_pipeline/photometry/` — event astrometry + forced photometry on SCC diff lanes.
+- `syndiff_pipeline/star/` — host-star light curves.
 
-Heavy stages run on HTCondor by default: `mapping`, `ps1_process`, `diff`, `star`.
+Heavy stages on HTCondor by default: `mapping`, `ps1_process`, `remap`, `downsample`, `diff`, `photometry`, `star`.
 
 ### Storage: two roots
 
-`data_root` holds SCC-wide (sector/camera/ccd) artifacts shared across targets: `tess_ffi/`, `skycell_pixel_mapping/`, `catalogs/` (Gaia), `ps1_skycells_zarr/ps1_skycells.zarr`, `convolved_results/*.zarr`, `shifted_downsampled/` (templates). `workspace_root` holds per-target `events/{label}/` workspaces: `cluster_template_job.json` (reference FFI, offset groups, crop bounds), `syndiff_ffi_frames.csv` (per-FFI manifest), `ws/` (diff outputs, light curves, kernels), `star*/` (star-branch outputs). Full reference: `docs/markdown/storage_layout.md`.
+`data_root` holds SCC trees under `s{SSSS}/c{C}/k{K}/` (ffi, mapping, remap, templates, convolved.zarr, `diff_{lane}/`, bookkeeping). `workspace_root` holds `events/{event}/s{SSSS}_c{C}_k{K}/` (photometry under `phot_{run_id}/`, star under `host_star/`). Full reference: `docs/markdown/storage_layout.md`.
 
 In this checkout, `data` and `workspace` are symlinks to `/astro` storage; `pyhotpants`, `TESSreduce`, `syndiff_viewer` are symlinks to sibling checkouts. `scripts/`, `dev/`, `experimental/`, `config/example/` are locally gitignored scratch/backfill areas — don't assume they're in git history.
-
 ## Invariants that bite
 
 1. **Offset quantization**: 1 PS1 px = 0.258″ ≈ 0.0124 TESS px; `offset_threshold` = 0.01 TESS px. Template offsets are realized as integer PS1-pixel rolls per skycell; sub-pixel WCS drift never requires re-running `mapping`.
@@ -110,4 +111,4 @@ In this checkout, `data` and `workspace` are symlinks to `/astro` storage; `pyho
 
 ## Documentation map
 
-Deep-dive docs live in `docs/markdown/` — read the relevant stage doc before editing a stage: `template_pipeline.md` (orchestration/Condor/run lifecycle), `syndiff_cli.md` (all verbs/flags + worker entry points), `storage_layout.md`, `star_lightcurves.md`, `stages/` (per-stage algorithms), `pipeline_state_machine_reference.md`. Docs may lag the code; the frozen run configs and `pipeline_spec.py` are ground truth. Historical design notes and improvement plans are in `.cursor/plans/`; active design documents live in `doc/` — in particular `doc/distortion_aware_templates_master_plan.md` (velocity-aberration-aware templates, the current major feature effort). Claude skills for this repo are in `.claude/skills/` (`syndiff-pipeline-map`, `syndiff-run-ops`).
+Deep-dive docs live in `docs/markdown/` — read the relevant stage doc before editing a stage: `template_pipeline.md` (orchestration/Condor/run lifecycle), `syndiff_cli.md` (all verbs/flags + worker entry points), `storage_layout.md`, `field_geometry.md`, `photometry.md`, `star_lightcurves.md`, `stages/` (per-stage algorithms), `pipeline_state_machine_reference.md`. Docs may lag the code; the frozen run configs and `pipeline_spec.py` are ground truth. Historical design notes and improvement plans are in `.cursor/plans/`; active design documents live in `doc/` (e.g. `padded_scc_v2_implementation.md`, `template_bookkeeping_plan.md`). Claude skills for this repo are in `.claude/skills/` (`syndiff-pipeline-map`, `syndiff-run-ops`).

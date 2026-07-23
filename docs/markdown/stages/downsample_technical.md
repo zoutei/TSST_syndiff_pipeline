@@ -1,5 +1,5 @@
-> **Package integration**: `syndiff` stage `templates` (legacy alias: `downsample`) · modules `template_creation/processing/downsample.py` (linear) and `field_downsample.py` (field) · legacy script `multi_offset_downsampling.py`  
-> **Orchestration docs**: [template pipeline guide](../template_pipeline.md)
+> **Package integration**: `syndiff` stage **`downsample`** · modules `template_creation/processing/field_downsample.py` (field) and `linear_downsample.py` (linear) · product path `templates/oversampling_{N}/` · legacy script `multi_offset_downsampling.py`  
+> **Orchestration docs**: [template pipeline guide](../template_pipeline.md) · [field geometry](../field_geometry.md)
 
 # Multi-Offset Downsampling — Detailed Technical Reference
 
@@ -8,14 +8,13 @@
 | Mode | Config | This document | Output |
 |------|--------|---------------|--------|
 | **Field** (default) | `geometry_mode: field` | See [field templates](../field_geometry.md) | SCC sparse `contribs/` + on-demand assembly per `group_id` |
-| **Linear** (removed) | `geometry_mode: linear` | **Not supported** — v2 dispatch raises `NotImplementedError` | Use `drift_source: point` under field mode instead ([field_geometry.md](../field_geometry.md)) |
+| **Linear** | `geometry_mode: linear` | Implemented via `linear_downsample.py` (centroids campaign); the old `downsample.main()` ROI CLI raises `NotImplementedError` | Offset-group FITS under `templates/` / named linear lanes |
 
-The legacy linear path measured drift at a science target and rolled each skycell by
-a per-skycell PS1 integer shift derived from that single offset. Field mode
-measures drift at every skycell center (or broadcasts FFI-center point drift when
+Field mode measures drift at every skycell center (or broadcasts FFI-center point drift when
 `stages.remap.drift_source: point`), builds hybrid roll+Exact assignments per
 `(skycell, sx, sy)`, and caches sparse contributions — it does **not** use the
-`precompute_shifts_for_offsets` / `numpy.roll` path described below.
+legacy `precompute_shifts_for_offsets` / `numpy.roll` path described below for
+historical linear ROI scripts.
 
 ---
 
