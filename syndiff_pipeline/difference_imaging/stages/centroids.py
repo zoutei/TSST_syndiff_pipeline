@@ -176,13 +176,13 @@ def _photometry_one_frame(
     gridded_model,
     gaia_df: pd.DataFrame,
     params,
-) -> Table | None:
+) -> tuple[Table | None, Any | None]:
     """Run multi-star PSFPhotometry on one difference image."""
     from photutils.psf import PSFPhotometry, SourceGrouper
 
     if gaia_df.empty:
         log.warning("  centroids: no Gaia stars after magnitude filter")
-        return None
+        return None, None
 
     init_params = _build_init_params(gaia_df)
     fit_shape = int(getattr(params, "fit_shape", 11) or 11)
@@ -202,7 +202,81 @@ def _photometry_one_frame(
             np.asarray(diff_img, dtype=np.float64),
             init_params=init_params,
         )
-    return result if hasattr(result, "colnames") else result.to_table()
+    table = result if hasattr(result, "colnames") else result.to_table()
+    return table, psf_phot
+
+
+def write_frame_residual_fits(
+    diff_path: str,
+    ffi_stem: str,
+    gaia_df: pd.DataFrame,
+    epsf_catalog: GriddedEpsfCatalog,
+    params,
+    residual_fits_path: str,
+    *,
+    ffi_path: str,
+    ffi_list_df: pd.DataFrame,
+    science_bounds: dict,
+) -> Table | None:
+    """
+    Run PSF photometry on one frame and write the full-frame residual FITS.
+
+    Returns the photometry table on success, else ``None``.
+    """
+    model = epsf_catalog.load_model(ffi_stem)
+    if model is None:
+        log.warning("  centroids debug: no gridded ePSF for %s", ffi_stem)
+        return None
+    if not os.path.isfile(diff_path):
+        log.warning("  centroids debug: diff frame missing: %s", diff_path)
+        return None
+
+    try:
+        diff_img = fits.getdata(diff_path).astype(np.float64)
+    except Exception as exc:
+        log.warning("  centroids debug: cannot load %s: %s", diff_path, exc)
+        return None
+
+    from syndiff_pipeline.common.wcs_grouping import gaia_science_xy_for_frame
+
+    try:
+        gaia_frame = gaia_science_xy_for_frame(
+            gaia_df, ffi_path, ffi_list_df, science_bounds
+        )
+        gaia_frame = _filter_gaia_for_centroids(gaia_frame, params)
+    except Exception as exc:
+        log.warning(
+            "  centroids debug: Gaia projection failed for %s: %s", ffi_stem, exc
+        )
+        return None
+
+    try:
+        phot_results, psf_phot = _photometry_one_frame(
+            diff_img, model, gaia_frame, params
+        )
+    except Exception as exc:
+        log.warning("  centroids debug: PSF photometry failed for %s: %s", ffi_stem, exc)
+        return None
+
+    if phot_results is None or len(phot_results) == 0 or psf_phot is None:
+        log.warning("  centroids debug: empty photometry result for %s", ffi_stem)
+        return None
+
+    try:
+        residual = psf_phot.make_residual_image(diff_img)
+        os.makedirs(os.path.dirname(os.path.abspath(residual_fits_path)) or ".", exist_ok=True)
+        fits.PrimaryHDU(np.asarray(residual, dtype=np.float32)).writeto(
+            residual_fits_path,
+            overwrite=True,
+        )
+    except Exception as exc:
+        log.warning(
+            "  centroids debug: cannot write residual FITS %s: %s",
+            residual_fits_path,
+            exc,
+        )
+        return None
+    return phot_results
 
 
 def _centroids_one_frame_task(
@@ -294,7 +368,7 @@ def _centroids_one_frame_task(
         return frame_idx, ffi_stem, False, False
 
     try:
-        phot_results = _photometry_one_frame(diff_img, model, gaia_frame, params)
+        phot_results, _psf_phot = _photometry_one_frame(diff_img, model, gaia_frame, params)
     except Exception as exc:
         log.warning("  centroids: PSF photometry failed for %s: %s", ffi_stem, exc)
         return frame_idx, ffi_stem, False, False

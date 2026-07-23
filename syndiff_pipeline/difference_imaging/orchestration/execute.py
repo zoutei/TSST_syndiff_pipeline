@@ -1522,6 +1522,34 @@ def run_config_pipeline(
                 wcs_table=wcs_table,
             )
 
+            if getattr(cfg, "pipeline_plots", False):
+                from syndiff_pipeline.difference_imaging.support.plot import (
+                    write_centroids_workspace_plots,
+                )
+
+                plot_dir = _resolve_scc_pipeline_plots_dir(cfg, category=label_out)
+                epsf_label = str(inp["epsf"])
+                epsf_plot_dir = _resolve_scc_epsf_plots_dir(cfg, epsf_label)
+                diff_paths_by_stem = {
+                    gridded_epsf._diff_path_to_stem(p): p for p in diff_paths if p
+                }
+                write_centroids_workspace_plots(
+                    ws_out,
+                    plot_dir,
+                    centroids_label=label_out,
+                    diff_paths_by_stem=diff_paths_by_stem,
+                    gaia_df=gaia_df,
+                    epsf_catalog=epsf_catalog,
+                    params=centroids_p,
+                    ffi_list_df=ffi_list_df,
+                    science_bounds=crop_bounds,
+                    ffi_path_by_stem=ffi_path_by_stem,
+                    max_frames=10,
+                    wcs_table=wcs_table,
+                    reference_plot_dir=epsf_plot_dir,
+                    reference_label=epsf_label,
+                )
+
         elif kind == "sat_template":
             sat_p = parse_sat_template(stage, idx)
             inp = stage["inputs"]
