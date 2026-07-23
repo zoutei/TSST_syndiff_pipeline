@@ -1193,6 +1193,11 @@ def run_config_pipeline(
                 debug_ws_dir=kernel_fit_ws,
                 field_ctx=field_ctx,
                 mask_catalog=mask_catalog,
+                sector=int(cfg.sector) if cfg.sector is not None else None,
+                camera=int(cfg.camera) if cfg.camera is not None else None,
+                data_root=_infer_data_root(cfg) or None,
+                ccd=int(cfg.ccd) if cfg.ccd is not None else None,
+                template_dir=(getattr(cfg, "template_dir", "") or None),
             )
 
         elif kind == "convolved_templates":
