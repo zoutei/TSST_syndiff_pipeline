@@ -22,6 +22,9 @@ WCS_GROUPING_ALLOWED = frozenset(
         "y_edge_strip",
         "geometry_mode",
         "grouping_quantum_ps1_px",
+        "screen_earth_moon_angles",
+        "earth_deg_min",
+        "moon_deg_min",
     }
 )
 MAPPING_ALLOWED = frozenset(
@@ -42,6 +45,7 @@ MAPPING_ALLOWED = frozenset(
         "bkg_vector_path",
         "wcs_drift_savgol_window",
         "wcs_drift_savgol_polyorder",
+        "screen_earth_moon_angles",
         "earth_deg_min",
         "moon_deg_min",
         "max_smoothed_residual",
@@ -81,6 +85,7 @@ PS1_PROCESS_ALLOWED = frozenset(
 )
 DIFF_ALLOWED = frozenset({"executor"})
 STAR_ALLOWED = frozenset({"executor"})
+PHOTOMETRY_ALLOWED = frozenset({"executor"})
 REMAP_ALLOWED = frozenset(
     {
         "cache_quantum_ps1_px",
@@ -184,6 +189,9 @@ class WcsGroupingStageParams:
     # field (default) = SCC signature groups; linear = target-anchored dx/dy groups
     geometry_mode: str = "field"
     grouping_quantum_ps1_px: float = 1.0
+    screen_earth_moon_angles: bool = False
+    earth_deg_min: float = 45.0
+    moon_deg_min: float = 25.0
 
 
 @dataclass
@@ -205,6 +213,7 @@ class MappingStageParams:
     bkg_vector_path: str | None = None
     wcs_drift_savgol_window: int | None = 11
     wcs_drift_savgol_polyorder: int = 2
+    screen_earth_moon_angles: bool = False
     earth_deg_min: float = 45.0
     moon_deg_min: float = 25.0
     max_smoothed_residual: float = 0.05
@@ -266,6 +275,12 @@ class DiffStageParams:
 @dataclass
 class StarStageParams:
     """StarStageParams."""
+    executor: str = "condor"
+
+
+@dataclass
+class PhotometryStageParams:
+    """PhotometryStageParams."""
     executor: str = "condor"
 
 
@@ -378,6 +393,7 @@ class TemplateStageParams:
     downsample: DownsampleStageParams
     diff: DiffStageParams = field(default_factory=DiffStageParams)
     star: StarStageParams = field(default_factory=StarStageParams)
+    photometry: PhotometryStageParams = field(default_factory=PhotometryStageParams)
 
 
 def _filter_allowed_keys(stage_dict: dict, allowed: FrozenSet[str]) -> dict:
@@ -414,6 +430,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
         ds = stages_raw.get("downsample", {}) or stages_raw.get("templates", {}) or {}
     df = stages_raw.get("diff", {}) or {}
     st = stages_raw.get("star", {}) or {}
+    ph = stages_raw.get("photometry", {}) or {}
     if not strict:
         wg = _filter_allowed_keys(wg, WCS_GROUPING_ALLOWED)
         mp = _filter_allowed_keys(mp, MAPPING_ALLOWED)
@@ -423,6 +440,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
         ds = _filter_allowed_keys(ds, DOWNSAMPLE_ALLOWED)
         df = _filter_allowed_keys(df, DIFF_ALLOWED)
         st = _filter_allowed_keys(st, STAR_ALLOWED)
+        ph = _filter_allowed_keys(ph, PHOTOMETRY_ALLOWED)
     validate_stage_keys(wg, WCS_GROUPING_ALLOWED, "wcs_grouping")
     validate_stage_keys(mp, MAPPING_ALLOWED, "mapping")
     validate_stage_keys(pd, PS1_DOWNLOAD_ALLOWED, "ps1_download")
@@ -431,6 +449,7 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     validate_stage_keys(ds, DOWNSAMPLE_ALLOWED, "downsample")
     validate_stage_keys(df, DIFF_ALLOWED, "diff")
     validate_stage_keys(st, STAR_ALLOWED, "star")
+    validate_stage_keys(ph, PHOTOMETRY_ALLOWED, "photometry")
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
     ps1_source = pp.get("ps1_source", "zarr")
@@ -442,6 +461,8 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
         raise ValueError("stages.diff.executor must be 'local' or 'condor'")
     if st.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.star.executor must be 'local' or 'condor'")
+    if ph.get("executor", "condor") not in ("local", "condor"):
+        raise ValueError("stages.photometry.executor must be 'local' or 'condor'")
     if rm.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.remap.executor must be 'local' or 'condor'")
     if ds.get("executor", "local") not in ("local", "condor"):
@@ -458,4 +479,5 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
         downsample=_merge_dataclass(DownsampleStageParams, ds),
         diff=_merge_dataclass(DiffStageParams, df),
         star=_merge_dataclass(StarStageParams, st),
+        photometry=_merge_dataclass(PhotometryStageParams, ph),
     )

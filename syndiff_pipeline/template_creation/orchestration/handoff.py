@@ -92,16 +92,27 @@ def run_wcs_grouping(
         window_length=wg.wcs_drift_savgol_window,
         polyorder=wg.wcs_drift_savgol_polyorder,
     )
-    wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
-        wcs_table,
-        sector=t.sector,
-        camera=t.camera,
-        tessvectors_data_path=_norm_bkg_vector_path(wg.bkg_vector_path),
-    )
+    if wg.screen_earth_moon_angles:
+        bkg_path = _norm_bkg_vector_path(wg.bkg_vector_path)
+        if bkg_path:
+            wcs_table = wcs_grouping.attach_tessvector_earth_moon_angles(
+                wcs_table,
+                sector=t.sector,
+                camera=t.camera,
+                tessvectors_data_path=bkg_path,
+            )
+        else:
+            log.warning(
+                "screen_earth_moon_angles enabled but bkg_vector_path unset; "
+                "skipping TESSVectors attach"
+            )
     wcs_table, chosen_ref = wcs_grouping.finalize_wcs_table_with_reference_anchor(
         wcs_table,
         offset_threshold=wg.offset_threshold,
         ref_ffi_path=ref_ffi_path,
+        ref_earth_deg_min=float(wg.earth_deg_min),
+        ref_moon_deg_min=float(wg.moon_deg_min),
+        screen_earth_moon_angles=bool(wg.screen_earth_moon_angles),
     )
     log.info("Reference FFI: %s", chosen_ref)
 
@@ -148,12 +159,13 @@ def run_wcs_grouping(
         wcs_table,
         os.path.join(
             pipeline_plots_root(event_dir),
-            wcs_grouping.WCS_DRIFT_TEMPLATE_DEBUG_FILENAME,
+            wcs_grouping.WCS_DRIFT_LINEAR_TEMPLATE_FILENAME,
         ),
         ref_ffi_path=chosen_ref,
         sector=t.sector,
         camera=t.camera,
         ccd=t.ccd,
         target_name=t.target_name,
+        include_earth_moon_panel=bool(wg.screen_earth_moon_angles),
     )
     return out_path

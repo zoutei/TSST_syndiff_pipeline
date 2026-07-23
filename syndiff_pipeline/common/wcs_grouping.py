@@ -55,7 +55,9 @@ FRAMES_CSV_BASENAME = "frames.csv"
 CLUSTER_TEMPLATE_JOB_FILENAME = EVENT_JOB_FILENAME
 LEGACY_CLUSTER_TEMPLATE_JOB_FILENAME = "cluster_template_job.json"
 LEGACY_FRAMES_CSV_BASENAME = "syndiff_ffi_frames.csv"
-WCS_DRIFT_TEMPLATE_DEBUG_FILENAME = "wcs_drift_template_debug.png"
+WCS_DRIFT_LINEAR_TEMPLATE_FILENAME = "wcs_drift_linear_template.png"
+# Backward-compatible alias (event plots dir and older docs).
+WCS_DRIFT_TEMPLATE_DEBUG_FILENAME = WCS_DRIFT_LINEAR_TEMPLATE_FILENAME
 
 _VALID_CROP_MODES = frozenset({"full", "tl", "tr", "bl", "br"})
 
@@ -694,6 +696,7 @@ def choose_reference_ffi_path(
     moon_deg_min: float = 25.0,
     max_smoothed_residual: float = 0.05,
     selection_mode: str = "median_smoothed_drift",
+    screen_earth_moon_angles: bool = False,
 ) -> str:
     """
     Pick a reference FFI path after WCS drift smoothing.
@@ -705,11 +708,12 @@ def choose_reference_ffi_path(
       smoothed drift path (field-mode SCC default when configured).
 
     Quality gates prefer frames with small raw–smooth residual (when
-    ``delta_x_raw`` exist), TESSVectors Earth/Moon angle cuts when
-    ``earth_deg``/``moon_deg`` are present, with logged fallbacks.
+    ``delta_x_raw`` exist). When ``screen_earth_moon_angles`` is true and
+    ``earth_deg``/``moon_deg`` are present, TESSVectors Earth/Moon angle cuts
+    are applied with logged fallbacks.
 
-    Call :func:`attach_tessvector_earth_moon_angles` first so angle columns are
-    populated (unless intentionally omitting scatter-light screening).
+    Call :func:`attach_tessvector_earth_moon_angles` first when screening is
+    enabled (unless intentionally omitting scatter-light screening).
     """
     dx = pd.to_numeric(wcs_table["delta_x"], errors="coerce")
     dy = pd.to_numeric(wcs_table["delta_y"], errors="coerce")
@@ -737,7 +741,7 @@ def choose_reference_ffi_path(
     else:
         residual_ok = pd.Series(True, index=wcs_table.index)
 
-    if has_angles:
+    if screen_earth_moon_angles and has_angles:
         ed = pd.to_numeric(wcs_table["earth_deg"], errors="coerce")
         md = pd.to_numeric(wcs_table["moon_deg"], errors="coerce")
         angle_ok = (
@@ -749,12 +753,15 @@ def choose_reference_ffi_path(
     else:
         angle_ok = pd.Series(True, index=wcs_table.index)
 
-    trials = [
-        ("residual+Earth/Moon angle cuts", S & residual_ok & angle_ok),
-        ("Earth/Moon angle cuts only (no residual gate)", S & angle_ok),
-        ("residual gate only (no angle cuts)", S & residual_ok),
-        ("all usable WCS rows", S),
-    ]
+    if screen_earth_moon_angles and has_angles:
+        trials = [
+            ("residual+Earth/Moon angle cuts", S & residual_ok & angle_ok),
+            ("Earth/Moon angle cuts only (no residual gate)", S & angle_ok),
+            ("residual gate only (no angle cuts)", S & residual_ok),
+            ("all usable WCS rows", S),
+        ]
+    else:
+        trials = [("residual gate only", S & residual_ok), ("all usable WCS rows", S)]
 
     for label, mask in trials:
         if not mask.any():
@@ -886,6 +893,7 @@ def finalize_wcs_table_with_reference_anchor(
     ref_earth_deg_min: float = 45.0,
     ref_moon_deg_min: float = 25.0,
     ref_max_smoothed_residual: float = 0.05,
+    screen_earth_moon_angles: bool = False,
 ) -> tuple[pd.DataFrame, str]:
     """
     Pick (or accept) a reference FFI, re-anchor drifts to it, and assign
@@ -903,6 +911,7 @@ def finalize_wcs_table_with_reference_anchor(
             earth_deg_min=ref_earth_deg_min,
             moon_deg_min=ref_moon_deg_min,
             max_smoothed_residual=ref_max_smoothed_residual,
+            screen_earth_moon_angles=screen_earth_moon_angles,
         )
     wcs_table = reanchor_wcs_drift_to_reference(wcs_table, chosen_ref)
     wcs_table = assign_template_groups(wcs_table, offset_threshold)
@@ -1214,10 +1223,11 @@ def plot_wcs_drift_and_template_assignment(
     camera: Optional[int] = None,
     ccd: Optional[int] = None,
     target_name: Optional[str] = None,
+    include_earth_moon_panel: bool = False,
 ) -> Optional[str]:
     """
-    Four stacked panels: ``delta_x``, ``delta_y``, ``group_id``, and Earth/Moon
-    camera angles (TESSVectors) vs time.
+    Stacked panels: ``delta_x``, ``delta_y``, ``group_id``, and optionally
+    Earth/Moon camera angles (TESSVectors) vs time.
 
     ``delta_x``/``delta_y`` are expected to be reference-FFI-relative (see
     :func:`reanchor_wcs_drift_to_reference`). When ``delta_x_raw`` /
@@ -1250,9 +1260,17 @@ def plot_wcs_drift_and_template_assignment(
     t_ref = _ref_ffi_btjd(wcs_table, ref_ffi_path)
     show_vline = np.isfinite(t_ref)
 
-    fig, axes = plt.subplots(4, 1, figsize=(12, 12), sharex=True, layout="constrained")
+    show_angles = bool(include_earth_moon_panel) and {"earth_deg", "moon_deg"}.issubset(
+        wcs_table.columns
+    )
+    n_panels = 4 if show_angles else 3
+    fig_height = 12 if show_angles else 9
+    fig, axes = plt.subplots(
+        n_panels, 1, figsize=(12, fig_height), sharex=True, layout="constrained"
+    )
 
-    ax0, ax1, ax2, ax3 = axes
+    ax0, ax1, ax2 = axes[0], axes[1], axes[2]
+    ax3 = axes[3] if show_angles else None
     has_raw = {"delta_x_raw", "delta_y_raw"}.issubset(wcs_table.columns)
     if has_raw:
         dx0 = pd.to_numeric(wcs_table["delta_x_raw"], errors="coerce")
@@ -1348,7 +1366,7 @@ def plot_wcs_drift_and_template_assignment(
     if gids_sorted:
         ax2.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.9)
 
-    if {"earth_deg", "moon_deg"}.issubset(wcs_table.columns):
+    if show_angles and ax3 is not None:
         earth = pd.to_numeric(wcs_table["earth_deg"], errors="coerce")
         moon = pd.to_numeric(wcs_table["moon_deg"], errors="coerce")
         ma = t.notna() & earth.notna() & moon.notna()
@@ -1380,9 +1398,6 @@ def plot_wcs_drift_and_template_assignment(
         h3, _ = ax3.get_legend_handles_labels()
         if h3:
             ax3.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.9)
-    else:
-        ax3.text(0.5, 0.5, "no earth_deg/moon_deg (run TESSVectors attach)", ha="center", va="center", transform=ax3.transAxes, fontsize=9)
-        ax3.set_ylabel("angle (deg)")
 
     if show_vline:
         ax0.axvline(
@@ -1393,7 +1408,8 @@ def plot_wcs_drift_and_template_assignment(
             zorder=5,
             label="reference FFI",
         )
-        for ax in (ax1, ax2, ax3):
+        vline_axes = (ax1, ax2, ax3) if show_angles and ax3 is not None else (ax1, ax2)
+        for ax in vline_axes:
             ax.axvline(
                 t_ref,
                 color="0.25",
@@ -1406,7 +1422,11 @@ def plot_wcs_drift_and_template_assignment(
     if h0:
         ax0.legend(loc="upper right", fontsize=8, framealpha=0.9)
 
-    ax3.set_xlabel(f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col)
+    xlabel = f"{time_col} (TESS BTJD)" if time_col == "btjd" else time_col
+    if show_angles and ax3 is not None:
+        ax3.set_xlabel(xlabel)
+    else:
+        ax2.set_xlabel(xlabel)
     if (
         sector is not None
         and camera is not None

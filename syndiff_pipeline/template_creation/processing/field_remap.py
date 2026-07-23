@@ -313,19 +313,20 @@ def _build_shift_schedule_for_scc(
     schedule.meta["frame_filenames"] = [manifest_basename_from_local(p) for p in paths]
     with field_store_lock(store_root):
         schedule.save(store_root / "shift_schedule.npz")
-        _try_write_skycell_shift_debug_plots(
-            schedule,
-            store_root=store_root,
-            mapping_root=mapping_root,
-            btjd=btjd,
-            ref_wcs=ref_wcs,
-            skycell_df=skycell_df,
-            sector=sector,
-            camera=camera,
-            ccd=ccd,
-            oversampling_factor=oversampling_factor,
-            data_root=data_root,
-        )
+        if str(drift_source or "per_skycell").strip().lower() != "point":
+            _try_write_skycell_shift_debug_plots(
+                schedule,
+                store_root=store_root,
+                mapping_root=mapping_root,
+                btjd=btjd,
+                ref_wcs=ref_wcs,
+                skycell_df=skycell_df,
+                sector=sector,
+                camera=camera,
+                ccd=ccd,
+                oversampling_factor=oversampling_factor,
+                data_root=data_root,
+            )
     log.info(
         "Built SCC shift_schedule.npz (%d frames × %d skycells)",
         schedule.sx_int.shape[0],

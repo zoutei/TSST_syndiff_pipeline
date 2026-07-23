@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import List
 
@@ -225,39 +226,79 @@ def _execute_template_stage(
 
         ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
         mp = resolved.stages.mapping
+
+        # Gaia catalog download and the TESS<->PS1 skycell geometric mapping
+        # are independent: process_tess_image_optimized() takes no Gaia
+        # input, and the Gaia step is a slow (multi-minute) async TAP query
+        # that was previously blocking pancakes for no reason other than
+        # sharing this function. Run them concurrently instead. Different
+        # output directories (gaia_catalog_dir vs resolved.mapping_root), no
+        # shared state -- safe to overlap.
+        gaia_thread = None
+        gaia_exc: list[BaseException] = []
         if not mp.skip_download_catalog:
             from syndiff_pipeline.common.scc_paths import scc_catalogs_dir
 
             gaia_catalog_dir = str(
                 scc_catalogs_dir(resolved.data_root, t.sector, t.camera, t.ccd)
             )
-            log.info("Downloading Gaia catalog for %s → %s", ref_ffi, gaia_catalog_dir)
-            _download_gaia_catalog(
-                site_config_path=resolved.config_path or None,
-                tess_file=ref_ffi,
-                output_path=gaia_catalog_dir,
-                force_download=force_rerun,
+            log.info(
+                "Downloading Gaia catalog for %s → %s (concurrently with mapping)",
+                ref_ffi, gaia_catalog_dir,
             )
-        pancakes.process_tess_image_optimized(
-            tess_file=ref_ffi,
-            skycell_wcs_csv=resolved.skycell_wcs_csv,
-            output_path=resolved.mapping_root,
-            pad_distance=mp.pad_distance,
-            edge_exclusion=mp.edge_exclusion,
-            edge_buffer_large=mp.edge_buffer_large,
-            edge_buffer_small=mp.edge_buffer_small,
-            buffer=mp.buffer,
-            tess_buffer=mp.tess_buffer,
-            n_threads=mp.n_threads,
-            overwrite=mp.overwrite,
-            max_workers=mp.max_workers,
-            oversampling_factor=mp.oversampling_factor,
-            x_left_dead=mp.x_left_dead,
-            x_right_dead=mp.x_right_dead,
-            y_edge_strip=mp.y_edge_strip,
-            template_conv_pad_spare_px=mp.template_conv_pad_spare_px,
-            sci_fwhm=mp.sci_fwhm,
-        )
+
+            def _run_gaia_download() -> None:
+                try:
+                    _download_gaia_catalog(
+                        site_config_path=resolved.config_path or None,
+                        tess_file=ref_ffi,
+                        output_path=gaia_catalog_dir,
+                        force_download=force_rerun,
+                    )
+                except BaseException as exc:  # noqa: BLE001 -- re-raised on join below
+                    gaia_exc.append(exc)
+
+            gaia_thread = threading.Thread(
+                target=_run_gaia_download, name="gaia-catalog-download", daemon=True,
+            )
+            gaia_thread.start()
+
+        try:
+            pancakes.process_tess_image_optimized(
+                tess_file=ref_ffi,
+                skycell_wcs_csv=resolved.skycell_wcs_csv,
+                output_path=resolved.mapping_root,
+                pad_distance=mp.pad_distance,
+                edge_exclusion=mp.edge_exclusion,
+                edge_buffer_large=mp.edge_buffer_large,
+                edge_buffer_small=mp.edge_buffer_small,
+                buffer=mp.buffer,
+                tess_buffer=mp.tess_buffer,
+                n_threads=mp.n_threads,
+                overwrite=mp.overwrite,
+                max_workers=mp.max_workers,
+                oversampling_factor=mp.oversampling_factor,
+                x_left_dead=mp.x_left_dead,
+                x_right_dead=mp.x_right_dead,
+                y_edge_strip=mp.y_edge_strip,
+                template_conv_pad_spare_px=mp.template_conv_pad_spare_px,
+                sci_fwhm=mp.sci_fwhm,
+            )
+        finally:
+            if gaia_thread is not None:
+                gaia_thread.join()
+                if gaia_exc:
+                    raise gaia_exc[0]
+        try:
+            from syndiff_pipeline.template_creation.processing.mapping_plots import (
+                write_mapping_projection_overlay_for_scc,
+            )
+
+            write_mapping_projection_overlay_for_scc(
+                resolved, force_rerun=force_rerun
+            )
+        except Exception as exc:
+            log.warning("Mapping projection overlay skipped: %s", exc)
         return None
 
     if stage == "ps1_download":
@@ -392,10 +433,10 @@ def _execute_template_stage(
         wg = resolved.stages.wcs_grouping
         mp = resolved.stages.mapping
         geometry_mode = str(ds.geometry_mode or wg.geometry_mode or "field").lower()
-        if geometry_mode != "field":
+        if geometry_mode not in ("field", "linear"):
             raise NotImplementedError(
-                "v2 template downsample supports geometry_mode='field' only; "
-                "linear/event ROI templates were removed."
+                f"v2 template downsample supports geometry_mode='field' or "
+                f"'linear', got {geometry_mode!r}."
             )
 
         convolved = resolve_downsample_convolved_dir(resolved)
@@ -420,6 +461,40 @@ def _execute_template_stage(
         )
 
         ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
+
+        if geometry_mode == "linear":
+            from syndiff_pipeline.template_creation.processing.linear_downsample import (
+                run_linear_downsample_scc,
+            )
+
+            linear_result = run_linear_downsample_scc(
+                resolved,
+                convolved_dir=convolved,
+                mapping_root=ds.mapping_dir or resolved.mapping_root,
+                mapping_grid=mapping_grid,
+                base_tess_shape=base_shape,
+                roi_bounds=tuple(
+                    int(v)
+                    for v in (
+                        mapping_grid.ffi_xmin,
+                        mapping_grid.ffi_ymin,
+                        mapping_grid.ffi_xmax,
+                        mapping_grid.ffi_ymax,
+                    )
+                ),
+                store_root=ds.output_base or resolved.template_output_base,
+                ref_ffi_path=ref_ffi,
+                oversampling_factor=ds.oversampling_factor,
+                ignore_mask_bits=list(ds.ignore_mask_bits),
+                n_jobs=ds.n_jobs,
+                rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
+                force_rerun=force_rerun,
+                progress_path=progress_path,
+            )
+            linear_result = dict(linear_result)
+            linear_result["template_dir_physical"] = str(linear_result["output_dir"])
+            return _manifest_from_result(linear_result)
+
         field_result = run_field_downsample_scc(
             sector=t.sector,
             camera=t.camera,

@@ -296,7 +296,59 @@ def _load_zarr_skycell(zstore, skycell: str) -> tuple[np.ndarray, np.ndarray]:
     return data, mask
 
 
-def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray]:
+def _legacy_convolved_skycell_available(zarr_path: str | Path, skycell: str) -> bool:
+    """Metadata-only probe: legacy flat ``{skycell}_data`` has materialized chunks."""
+    from syndiff_pipeline.template_creation.orchestration.verify import (
+        _zarr_array_has_chunks,
+    )
+
+    return _zarr_array_has_chunks(Path(zarr_path) / f"{skycell}_data")
+
+
+def _convolved_skycell_available(payload: dict[str, Any], skycell: str) -> bool:
+    """True when convolved image data for *skycell* is present (no array IO)."""
+    data_root = payload.get("data_root")
+    if bool(payload.get("shared_convolved_store")) and data_root:
+        parsed = _projection_and_cell(skycell)
+        if parsed is not None:
+            projection, cell = parsed
+            if _discover_shared_convolved_fp(data_root, projection, cell) is not None:
+                return True
+    legacy_path = payload.get("legacy_zarr_path") or (
+        None
+        if bool(payload.get("shared_convolved_store"))
+        else payload.get("zarr_path")
+    )
+    if legacy_path:
+        return _legacy_convolved_skycell_available(legacy_path, skycell)
+    return False
+
+
+def _filter_skycell_batches_missing_convolved(
+    skycell_batches: list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]],
+    payload: dict[str, Any],
+) -> tuple[
+    list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]],
+    list[str],
+]:
+    """Drop skycell batches with no convolved store entry; warn once."""
+    kept: list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]] = []
+    skipped: list[str] = []
+    for skycell, buckets in skycell_batches:
+        if _convolved_skycell_available(payload, skycell):
+            kept.append((skycell, buckets))
+        else:
+            skipped.append(skycell)
+    if skipped:
+        log.warning(
+            "Skipped %d skycell batch(es) missing from convolved store (e.g. %s)",
+            len(skipped),
+            skipped[:5],
+        )
+    return kept, skipped
+
+
+def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | None:
     """Shared-store first (when enabled), else legacy flat ``*_data`` zarr keys.
 
     Shared path: ``ps1_convolved.zarr/{projection}/{cell}/{fp}/arrays.npz`` via
@@ -320,15 +372,15 @@ def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray]:
             else _L5_WORKER.get("zarr_path")
         )
         if not legacy_path:
-            raise FileNotFoundError(
-                f"No shared convolved cell for {skycell!r} and no legacy "
-                f"convolved zarr fallback configured"
-            )
+            return None
         import zarr
 
         zstore = zarr.open(str(legacy_path), mode="r")
         _L5_WORKER["zstore"] = zstore
-    return _load_zarr_skycell(zstore, skycell)
+    try:
+        return _load_zarr_skycell(zstore, skycell)
+    except KeyError:
+        return None
 
 
 def _neighbours_by_skycell_id(
@@ -667,9 +719,28 @@ def _l5_skycell_batch(
             "n_zarr_loads": 0,
         }
 
+    loaded = _load_ps1_skycell_for_l5(skycell)
+    if loaded is None:
+        log.warning(
+            "Convolved data missing for %s; skipping L5 batch (%d pending contrib key(s))",
+            skycell,
+            sum(len(v) for v in pending.values()),
+        )
+        n_skips += sum(len(v) for v in pending.values())
+        return {
+            "skycell": skycell,
+            "n_composite_keys": len(buckets),
+            "n_compose": 0,
+            "n_writes": n_writes,
+            "n_skips": n_skips,
+            "n_nonempty": n_nonempty,
+            "n_regmap_opens": 0,
+            "n_zarr_loads": 0,
+        }
+
     assignment_map = _read_regmap_assignment_l5(skycell)
     n_regmap_opens = 1
-    ps1_data, ps1_mask = _load_ps1_skycell_for_l5(skycell)
+    ps1_data, ps1_mask = loaded
     n_zarr_loads = 1
 
     # ---- per-skycell hoists -------------------------------------------------
@@ -1213,6 +1284,12 @@ def run_field_downsample_scc(
         "mapping_grid": mapping_grid,
     }
 
+    skycell_batches, _skipped_convolved = _filter_skycell_batches_missing_convolved(
+        skycell_batches,
+        worker_payload,
+    )
+    n_composite_keys = sum(len(buckets) for _, buckets in skycell_batches)
+
     if progress_file is not None:
         field_downsample_progress.init_field_progress(
             progress_file,
@@ -1352,6 +1429,8 @@ def run_field_downsample_scc(
         "mapping_grid": mapping_grid.to_mapping_dict(),
         "geometry_mode": "field",
     }
+    if _skipped_convolved:
+        sidecar["skipped_convolved_skycells"] = list(_skipped_convolved)
     # Infer lane names from path leaves for provenance / A/B bookkeeping.
     from syndiff_pipeline.common.scc_paths import REMAP_SUBDIR, TEMPLATES_SUBDIR
 
@@ -1404,21 +1483,26 @@ def run_field_downsample_scc(
 
     if not scc_only:
         event_dir.mkdir(parents=True, exist_ok=True)
-        serialized_keys = [
-            [int(gid), str(s), int(x), int(y)] for gid, s, x, y in key_list
+        present_keys = [
+            (int(gid), str(s), int(x), int(y))
+            for gid, s, x, y in key_list
+            if contrib_path(store, s, x, y, group_id=int(gid)).is_file()
         ]
+        serialized_keys = [
+            [int(gid), str(s), int(x), int(y)] for gid, s, x, y in present_keys
+        ]
+        keys_payload: dict[str, Any] = {
+            "schema_version": 2,
+            "store_root": str(store),
+            "remap_root": str(remap_store),
+            "n_contrib_keys": len(present_keys),
+            "n_composite_keys": int(n_composite_keys),
+            "keys": serialized_keys,
+        }
+        if _skipped_convolved:
+            keys_payload["skipped_convolved_skycells"] = list(_skipped_convolved)
         (event_dir / "field_contrib_keys.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 2,
-                    "store_root": str(store),
-                    "remap_root": str(remap_store),
-                    "n_contrib_keys": len(key_list),
-                    "n_composite_keys": int(n_composite_keys),
-                    "keys": serialized_keys,
-                }
-            )
-            + "\n"
+            json.dumps(keys_payload) + "\n"
         )
 
     assembly_path = store / "field_mode_assembly.json"
@@ -1595,26 +1679,36 @@ def materialize_field_fits_for_store(
     fits_dir.mkdir(parents=True, exist_ok=True)
     prov = dict(provenance or {})
     written: list[dict[str, Any]] = []
+    skipped_groups: list[dict[str, Any]] = []
 
     for gid in group_ids:
-        flux = assemble_field_group_flux(
-            root,
-            shifts_df,
-            gid,
-            shape=base_tess_shape,
-            crop=crop,
-            present_only=False,
-            group_scoped_contribs=group_scoped_contribs,
-        )
-        count = assemble_field_group_count(
-            root,
-            shifts_df,
-            gid,
-            shape=base_tess_shape,
-            crop=crop,
-            present_only=False,
-            group_scoped_contribs=group_scoped_contribs,
-        )
+        try:
+            flux = assemble_field_group_flux(
+                root,
+                shifts_df,
+                gid,
+                shape=base_tess_shape,
+                crop=crop,
+                present_only=True,
+                group_scoped_contribs=group_scoped_contribs,
+            )
+            count = assemble_field_group_count(
+                root,
+                shifts_df,
+                gid,
+                shape=base_tess_shape,
+                crop=crop,
+                present_only=True,
+                group_scoped_contribs=group_scoped_contribs,
+            )
+        except FileNotFoundError as exc:
+            log.warning(
+                "Skipping field FITS materialization for group_id=%d: %s",
+                gid,
+                exc,
+            )
+            skipped_groups.append({"group_id": int(gid), "reason": str(exc)})
+            continue
         out_path = field_fits_path(
             root,
             sector,
@@ -1643,6 +1737,12 @@ def materialize_field_fits_for_store(
         )
         log.info("Materialized field FITS group_id=%d -> %s", gid, written_path)
 
+    if not written:
+        raise RuntimeError(
+            f"no field template FITS materialized under {root} "
+            f"({len(skipped_groups)} group(s) had no on-disk contribs)"
+        )
+
     payload = {
         "schema_version": 1,
         "fits_dir": FITS_DIRNAME,
@@ -1650,6 +1750,8 @@ def materialize_field_fits_for_store(
         "groups": written,
         "provenance": prov,
     }
+    if skipped_groups:
+        payload["skipped_groups"] = skipped_groups
     (root / MATERIALIZED_FITS_SIDECAR).write_text(
         json.dumps(payload, indent=2) + "\n", encoding="utf-8"
     )

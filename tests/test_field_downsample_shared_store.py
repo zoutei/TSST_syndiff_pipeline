@@ -167,7 +167,50 @@ def test_l5_loader_legacy_only_when_shared_flag_off(tmp_path: Path):
     fd._reset_l5_worker()
 
 
-def test_shared_miss_without_legacy_raises(tmp_path: Path):
+def test_convolved_skycell_available_legacy_zarr(tmp_path: Path):
+    skycell = "skycell.8888.004"
+    zpath = tmp_path / "convolved.zarr"
+    _write_legacy_flat_cell(
+        zpath,
+        skycell,
+        np.ones((2, 2), dtype=np.float32),
+        np.zeros((2, 2), dtype=np.int32),
+    )
+    payload = {
+        "data_root": str(tmp_path),
+        "shared_convolved_store": False,
+        "zarr_path": str(zpath),
+        "legacy_zarr_path": None,
+    }
+    assert fd._convolved_skycell_available(payload, skycell)
+    assert not fd._convolved_skycell_available(payload, "skycell.8888.999")
+
+
+def test_filter_skycell_batches_missing_convolved(tmp_path: Path):
+    skycell = "skycell.8888.004"
+    zpath = tmp_path / "convolved.zarr"
+    _write_legacy_flat_cell(
+        zpath,
+        skycell,
+        np.ones((2, 2), dtype=np.float32),
+        np.zeros((2, 2), dtype=np.int32),
+    )
+    payload = {
+        "data_root": str(tmp_path),
+        "shared_convolved_store": False,
+        "zarr_path": str(zpath),
+        "legacy_zarr_path": None,
+    }
+    batches = [
+        (skycell, {(0, 0, ()): [(0, 0, 0)]}),
+        ("skycell.missing.001", {(0, 0, ()): [(0, 0, 0)]}),
+    ]
+    kept, skipped = fd._filter_skycell_batches_missing_convolved(batches, payload)
+    assert [sc for sc, _ in kept] == [skycell]
+    assert skipped == ["skycell.missing.001"]
+
+
+def test_shared_miss_without_legacy_returns_none(tmp_path: Path):
     ps1_convolved_zarr_path(tmp_path).mkdir(parents=True)
     fd._reset_l5_worker()
     fd._init_l5_worker(
@@ -178,6 +221,5 @@ def test_shared_miss_without_legacy_raises(tmp_path: Path):
             "legacy_zarr_path": None,
         }
     )
-    with pytest.raises(FileNotFoundError, match="No shared convolved cell"):
-        fd._load_ps1_skycell_for_l5("skycell.1234.000")
+    assert fd._load_ps1_skycell_for_l5("skycell.1234.000") is None
     fd._reset_l5_worker()

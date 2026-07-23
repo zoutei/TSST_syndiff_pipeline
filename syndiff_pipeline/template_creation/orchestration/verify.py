@@ -1526,6 +1526,22 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
             f"SCC templates store present under {store.name}/",
             str(store),
         )
+    # New SCC-scoped linear mode: go straight to the SCC-scoped check.
+    # Deliberately bypasses _geometry_mode_for_resolved (and its
+    # cluster_template_job.json / event_dir probe) -- that probe is what
+    # stalled the verify scan on greenfield SCCs (see linear_downsample
+    # module docstring). Only "linear" is fast-pathed here; "field" is left
+    # alone since it's also the DownsampleStageParams dataclass default and
+    # can't be distinguished from "not configured" without the job-file check
+    # legacy event-scoped stores rely on. Also gated on `output_base` being
+    # unset: the legacy event-scoped linear path (flat offset FITS under a
+    # caller-chosen output_base, e.g. the old `shifted_downsampled/`
+    # convention) also uses geometry_mode="linear" but is a different,
+    # still-supported store layout -- the new SCC-scoped writer never sets
+    # output_base (it uses output_store_name under templates_{name}/ instead).
+    ds = resolved.stages.downsample
+    if not ds.output_base and str(getattr(ds, "geometry_mode", None) or "").lower() == "linear":
+        return verify_downsample_linear_mode(resolved)
     legacy = _verify_downsample_legacy(resolved)
     return VerifyResult(
         "downsample",
@@ -1536,9 +1552,63 @@ def verify_downsample(resolved: ResolvedTargetConfig) -> VerifyResult:
     )
 
 
+def verify_downsample_linear_mode(resolved: ResolvedTargetConfig) -> VerifyResult:
+    """Verify SCC linear-mode templates store (geometry_mode: linear).
+
+    SCC-scoped only -- deliberately never touches ``event_dir`` /
+    ``cluster_template_job.json`` (that legacy per-event check is what made
+    this stage's verify scan stall on greenfield SCCs; see
+    ``linear_downsample.run_linear_downsample_scc``).
+    """
+    import json
+
+    from syndiff_pipeline.template_creation.processing.linear_downsample import (
+        LINEAR_ASSEMBLY_BASENAME,
+    )
+
+    ds = resolved.stages.downsample
+    store = (
+        Path(ds.output_base)
+        if ds.output_base
+        else Path(resolved.template_output_base)
+    )
+    if not store.is_dir():
+        return VerifyResult("downsample", False, f"No linear templates store at {store}", str(store))
+
+    assembly_path = store / LINEAR_ASSEMBLY_BASENAME
+    if not assembly_path.is_file():
+        return VerifyResult(
+            "downsample", False, f"Missing {LINEAR_ASSEMBLY_BASENAME}", str(assembly_path)
+        )
+    try:
+        payload = json.loads(assembly_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return VerifyResult("downsample", False, f"Unreadable {LINEAR_ASSEMBLY_BASENAME}: {exc}", str(assembly_path))
+
+    expected = [store / name for name in payload.get("artifacts", [])]
+    missing = [str(p) for p in expected if not p.is_file()]
+    if missing:
+        return VerifyResult(
+            "downsample", False,
+            f"Partial linear downsample: {len(expected) - len(missing)}/{len(expected)} group FITS present",
+            missing[0],
+        )
+    n_groups = int(payload.get("n_groups", len(expected)))
+    return VerifyResult(
+        "downsample", True, f"All {n_groups} linear group FITS present", str(store)
+    )
+
+
 def _verify_downsample_legacy(resolved: ResolvedTargetConfig) -> VerifyResult:
-    """Verify downsample (linear offset FITS or field SCC store)."""
-    if _geometry_mode_for_resolved(resolved) == "field":
+    """Verify downsample (legacy event-scoped linear offset FITS, or field SCC store).
+
+    The new SCC-scoped linear mode is routed to ``verify_downsample_linear_mode``
+    directly from ``verify_downsample`` (before this function is called) --
+    this function's "linear" fallback below is the older, still-supported
+    event-scoped flat-offset-FITS convention (``output_base`` explicitly set).
+    """
+    mode = _geometry_mode_for_resolved(resolved)
+    if mode == "field":
         return verify_downsample_field_mode(resolved)
 
     t = resolved.target

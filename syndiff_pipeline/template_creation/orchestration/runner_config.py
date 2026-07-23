@@ -98,6 +98,7 @@ class RunnerConfig:
     skycell_wcs_csv: str = ""
     diff_config_path: str = ""
     star_config_path: str = ""
+    photometry_config_path: str = ""
     stages: TemplateStageParams = field(default_factory=lambda: parse_stage_params({}))
     resources: Dict[str, ResourcePoolParams] = field(
         default_factory=lambda: _parse_resources({})
@@ -160,6 +161,8 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out["diff"] = ResourcePoolParams(max_concurrent=2)
     if "star" not in out:
         out["star"] = ResourcePoolParams(max_concurrent=4)
+    if "photometry" not in out:
+        out["photometry"] = ResourcePoolParams(max_concurrent=4)
     return out
 
 
@@ -237,6 +240,15 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
     if star_site:
         star_config_path = _resolve_path(base_dir, star_site) or ""
 
+    phot_site = str(
+        raw.get("photometry_config", "")
+        or raw.get("photometry_site_config", "")
+        or raw.get("photometry_config_path", "")
+    ).strip()
+    photometry_config_path = ""
+    if phot_site:
+        photometry_config_path = _resolve_path(base_dir, phot_site) or ""
+
     return RunnerConfig(
         deployment_file=deployment_file,
         data_root=data,
@@ -247,6 +259,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         skycell_wcs_csv=wcs,
         diff_config_path=diff_config_path,
         star_config_path=star_config_path,
+        photometry_config_path=photometry_config_path,
         stages=parse_stage_params(raw.get("stages", {})),
         resources=_parse_resources(raw.get("resources")),
         overrides=dict(raw.get("overrides", {}) or {}),
@@ -348,11 +361,14 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "downsample": asdict(cfg.stages.downsample),
         "diff": asdict(cfg.stages.diff),
         "star": asdict(cfg.stages.star),
+        "photometry": asdict(cfg.stages.photometry),
     }
     if cfg.diff_config_path:
         data["diff_config_path"] = cfg.diff_config_path
     if cfg.star_config_path:
         data["star_config_path"] = cfg.star_config_path
+    if cfg.photometry_config_path:
+        data["photometry_config_path"] = cfg.photometry_config_path
     data["resources"] = {name: asdict(pool) for name, pool in cfg.resources.items()}
     data["bookkeeping"] = {"trust_index": cfg.bookkeeping_trust_index}
     data["scheduler"] = {
@@ -439,6 +455,13 @@ def load_and_materialize_runner_config(
                 raw.get("star_config_path")
                 or raw.get("star_config")
                 or raw.get("star_site_config"),
+            )
+            or "",
+            photometry_config_path=_resolve_path(
+                base,
+                raw.get("photometry_config_path")
+                or raw.get("photometry_config")
+                or raw.get("photometry_site_config"),
             )
             or "",
             # Frozen configs may contain keys from newer feature branches;
