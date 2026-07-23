@@ -158,6 +158,12 @@ EPSF_ALLOWED = frozenset(
         "epsf_recentering_maxiters",
         "extract_size",
         "epsf_n_jobs",
+        "epsf_smoothing_kernel",
+        "epsf_builder_fit_shape",
+        "epsf_recentering_boxsize",
+        "epsf_star_box_radius",
+        "epsf_use_section_mask",
+        "epsf_stamp_border_crop",
     }
 )
 
@@ -167,6 +173,7 @@ CENTROIDS_ALLOWED = frozenset(
         "inputs",
         "output",
         "mag_max_rp",
+        "mag_min_rp",
         "fit_shape",
         "aperture_radius",
         "psf_grouper_min_separation",
@@ -388,25 +395,32 @@ class HotpantsParams:
 @dataclass
 class EpsfParams:
     """EpsfParams."""
-    tile_nx: int = 3
-    tile_ny: int = 3
+    tile_nx: int = 5
+    tile_ny: int = 5
     epsf_oversample: int = 4
-    psf_size: int = 11
+    psf_size: int = 15
     min_stars_per_tile: int = 5
     mag_max_rp: Optional[float] = 12.95
     epsf_maxiters: int = 15
     epsf_recentering_maxiters: int = 20
-    extract_size: Optional[int] = None
+    extract_size: Optional[int] = 15
     epsf_n_jobs: Optional[int] = None
+    epsf_smoothing_kernel: str = "quadratic"
+    epsf_builder_fit_shape: int = 5
+    epsf_recentering_boxsize: int = 3
+    epsf_star_box_radius: int = 7
+    epsf_use_section_mask: bool = True
+    epsf_stamp_border_crop: int = 8
 
 
 @dataclass
 class CentroidsParams:
     """CentroidsParams."""
     mag_max_rp: Optional[float] = 12.95
+    mag_min_rp: float = 7.5
     fit_shape: int = 11
-    aperture_radius: float = 2.0
-    psf_grouper_min_separation: float = 8.0
+    aperture_radius: float = 4.0
+    psf_grouper_min_separation: float = 10.0
     centroids_n_jobs: Optional[int] = None
 
 

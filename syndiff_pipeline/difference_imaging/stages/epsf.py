@@ -319,14 +319,17 @@ def fit_epsf_all_frames(diff_paths: list,
                          diff_log_path: str | None = None,
                          epsf_label: str | None = None,
                          diffs_input: str | None = None,
-                         force_rerun: bool = False) -> tuple:
+                         force_rerun: bool = False,
+                         ffi_list_df=None,
+                         science_bounds: dict | None = None,
+                         ffi_path_by_stem: dict | None = None) -> tuple:
     """
     Fit gridded ePSF on every difference image in diff_paths.
 
     Parameters
     ----------
     diff_paths  : list of str (FITS files from hotpants)
-    gaia_df     : pd.DataFrame (crop-local Gaia catalog)
+    gaia_df     : pd.DataFrame (Gaia with ra/dec; science x/y per frame)
     cfg         : SynDiffConfig
     epsf        : EpsfParams
     output_dir  : str, optional
@@ -368,6 +371,10 @@ def fit_epsf_all_frames(diff_paths: list,
         epsf_label=epsf_label,
         diffs_input=diffs_input,
         skip_existing=not force_rerun,
+        ffi_list_df=ffi_list_df,
+        science_bounds=science_bounds,
+        ffi_path_by_stem=ffi_path_by_stem,
+        wcs_table=wcs_table,
     )
     epsf_stack, tile_centers, ffi_stems, epsf_ok = result
     save_epsf_stack_bundle(epsf_stack, ffi_stems, output_dir, round_id)

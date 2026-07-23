@@ -30,8 +30,8 @@ def test_prepare_gaia_matches_starpositioningscript_filter():
     n = 200
     df = pd.DataFrame(
         {
-            "x": np.linspace(10, 900, n),
-            "y": np.linspace(10, 900, n),
+            "ra": np.linspace(100.0, 101.0, n),
+            "dec": np.linspace(20.0, 21.0, n),
             "phot_rp_mean_mag": np.linspace(8.0, 16.0, n),
         }
     )
@@ -46,8 +46,8 @@ def test_prepare_gaia_null_mag_max_uses_reference_default():
     n = 100
     df = pd.DataFrame(
         {
-            "x": np.linspace(10, 900, n),
-            "y": np.linspace(10, 900, n),
+            "ra": np.linspace(100.0, 101.0, n),
+            "dec": np.linspace(20.0, 21.0, n),
             "phot_rp_mean_mag": np.linspace(8.0, 16.0, n),
         }
     )
@@ -66,6 +66,8 @@ def test_build_gridded_psf_synthetic():
 
     gaia = pd.DataFrame(
         {
+            "ra": [100.0] * len(stars),
+            "dec": [20.0] * len(stars),
             "x": [s[1] for s in stars],
             "y": [s[0] for s in stars],
             "phot_g_mean_mag": [10.0] * len(stars),
@@ -125,10 +127,117 @@ def test_is_valid_gridded_epsf_npz(tmp_path):
     assert gridded_epsf._is_valid_gridded_epsf_npz(path) is True
 
 
+def test_filter_stars_geometric_mask():
+    mask = np.ones((40, 40), dtype=bool)
+    mask[0:12, 0:12] = False
+    stars = Table()
+    stars["x"] = [20.0, 5.0]
+    stars["y"] = [20.0, 5.0]
+    kept = gridded_epsf._filter_stars_geometric_mask(stars, mask, box_radius=7)
+    assert len(kept) == 1
+    assert float(kept["x"][0]) == 5.0
+
+
+def test_epsf_defaults_match_reference():
+    params = EpsfParams()
+    assert params.tile_nx == 5
+    assert params.tile_ny == 5
+    assert params.psf_size == 15
+    assert params.epsf_stamp_border_crop == 8
+    assert params.epsf_smoothing_kernel == "quadratic"
+
+
+def test_stamp_border_crop_applied(monkeypatch):
+    ny, nx = 64, 64
+    image = np.zeros((ny, nx))
+    gaia = pd.DataFrame(
+        {
+            "ra": [100.0],
+            "dec": [20.0],
+            "x": [32.0],
+            "y": [32.0],
+            "phot_rp_mean_mag": [10.0],
+        }
+    )
+    stamp = np.ones((21, 21), dtype=np.float64)
+
+    def _fake_fit(*_a, **_k):
+        return stamp
+
+    monkeypatch.setattr(gridded_epsf, "fit_epsf_section", _fake_fit)
+    params = EpsfParams(
+        tile_nx=1,
+        tile_ny=1,
+        psf_size=5,
+        min_stars_per_tile=1,
+        epsf_stamp_border_crop=8,
+    )
+    gaia = gridded_epsf.prepare_gaia_for_gridded_epsf(gaia, params)
+    _model, _centers, stack = gridded_epsf.build_gridded_psf_for_frame(
+        image, gaia, params
+    )
+    assert stack is not None
+    assert stack.shape == (1, 5, 5)
+
+
+def _worker_wcs_context(monkeypatch, tmp_path, stem: str = "tess111"):
+    gaia_base = pd.DataFrame(
+        {"ra": [100.0], "dec": [20.0], "phot_rp_mean_mag": [10.0]}
+    )
+
+    def _fake_gaia(*_a, **_k):
+        return pd.DataFrame({"x": [10.0], "y": [10.0], "phot_rp_mean_mag": [10.0]})
+
+    monkeypatch.setattr(
+        "syndiff_pipeline.common.wcs_grouping.gaia_science_xy_for_frame",
+        _fake_gaia,
+    )
+    return gaia_base, {
+        "ffi_list_df": pd.DataFrame(),
+        "science_bounds": {"x_min": 0, "y_min": 0, "shape": (32, 32)},
+        "ffi_path_by_stem": {stem: str(tmp_path / "ffi.fits")},
+        "data_root": str(tmp_path / "data"),
+        "sck": (20, 1, 1),
+        "epsf_label": "epsf_r1",
+    }
+
+
+def _scc_epsf_npz_path(tmp_path, stem: str):
+    from syndiff_pipeline.difference_imaging.orchestration import diff_store
+
+    path = diff_store.resolve_diff_write_path(
+        data_root=str(tmp_path / "data"),
+        sck=(20, 1, 1),
+        kind="epsf",
+        stage_label="epsf_r1",
+        ffi_stem=stem,
+        label="epsf_r1",
+        params=EpsfParams(),
+        suffix=".npz",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def test_centroids_defaults_and_mag_filter():
+    from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
+        CentroidsParams,
+    )
+    from syndiff_pipeline.difference_imaging.stages import centroids
+
+    params = CentroidsParams()
+    assert params.aperture_radius == 4.0
+    assert params.psf_grouper_min_separation == 10.0
+    assert params.mag_min_rp == 7.5
+    df = pd.DataFrame({"phot_rp_mean_mag": [7.0, 7.6, 12.0, 13.0]})
+    out = centroids._filter_gaia_for_centroids(df, params)
+    assert list(out["phot_rp_mean_mag"]) == [7.6, 12.0]
+
+
 def test_fit_one_frame_skips_existing_npz(tmp_path, monkeypatch):
     output_dir = str(tmp_path)
     stem = "tess111"
-    path = gridded_epsf.gridded_epsf_npz_path(output_dir, stem)
+    path = _scc_epsf_npz_path(tmp_path, stem)
     stack = np.ones((4, 11, 11), dtype=np.float64)
     grid_xypos = [(32.0, 32.0), (96.0, 32.0), (32.0, 96.0), (96.0, 96.0)]
     gridded_epsf.save_gridded_epsf_npz(path, stack, grid_xypos, oversampling=2)
@@ -140,12 +249,14 @@ def test_fit_one_frame_skips_existing_npz(tmp_path, monkeypatch):
         raise AssertionError("should not fit when npz exists")
 
     monkeypatch.setattr(gridded_epsf, "build_gridded_psf_for_frame", _boom)
+    gaia_base, wcs_ctx = _worker_wcs_context(monkeypatch, tmp_path, stem)
     gridded_epsf._init_gridded_epsf_worker(
-        pd.DataFrame({"x": [10.0], "y": [10.0]}),
+        gaia_base,
         EpsfParams(),
         output_dir,
         None,
         skip_existing=True,
+        **wcs_ctx,
     )
     result = gridded_epsf._fit_one_frame_task(
         0, str(tmp_path / f"{stem}_hp_d.fits")
@@ -158,7 +269,7 @@ def test_fit_one_frame_skips_existing_npz(tmp_path, monkeypatch):
 def test_fit_one_frame_refits_when_skip_existing_disabled(tmp_path, monkeypatch):
     output_dir = str(tmp_path)
     stem = "tess111"
-    path = gridded_epsf.gridded_epsf_npz_path(output_dir, stem)
+    path = _scc_epsf_npz_path(tmp_path, stem)
     stack = np.ones((4, 11, 11), dtype=np.float64)
     grid_xypos = [(32.0, 32.0), (96.0, 32.0), (32.0, 96.0), (96.0, 96.0)]
     gridded_epsf.save_gridded_epsf_npz(path, stack, grid_xypos, oversampling=2)
@@ -170,12 +281,14 @@ def test_fit_one_frame_refits_when_skip_existing_disabled(tmp_path, monkeypatch)
         return None, grid_xypos, None
 
     monkeypatch.setattr(gridded_epsf, "build_gridded_psf_for_frame", _fake_fit)
+    gaia_base, wcs_ctx = _worker_wcs_context(monkeypatch, tmp_path, stem)
     gridded_epsf._init_gridded_epsf_worker(
-        pd.DataFrame({"x": [10.0], "y": [10.0]}),
+        gaia_base,
         EpsfParams(),
         output_dir,
         None,
         skip_existing=False,
+        **wcs_ctx,
     )
     ny, nx = 32, 32
     diff_path = tmp_path / f"{stem}_hp_d.fits"
