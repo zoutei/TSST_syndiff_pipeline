@@ -71,9 +71,11 @@ stages:
     output_store_name: linear
 ```
 
-Remap writes `point_drift_table.csv` and `plots/wcs_drift_template_debug.png`
-under the remap store. Diff can target `paths.template_store_name: linear` while
-mapping artifacts stay unchanged.
+Remap writes `point_drift_table.csv` under the remap store and
+`debug_plots/wcs_drift_linear_template.png` from that table (ref-FFI-center
+point-drift groups). Mapping does **not** write that PNG — it only persists the
+reference FFI path in `bookkeeping/mapping/run_meta.json`. Diff can target
+`paths.template_store_name: linear` while mapping artifacts stay unchanged.
 
 > **Note:** `geometry_mode: linear` on `stages.downsample` is **not supported** in
 > the v2 template path (`NotImplementedError` at dispatch). Use `drift_source: point`

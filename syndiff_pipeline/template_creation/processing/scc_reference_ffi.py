@@ -40,8 +40,10 @@ RUN_META_FILENAME = "run_meta.json"
 POINT_DRIFT_TABLE_BASENAME = "point_drift_table.csv"
 POINT_DRIFT_GROUPS_BASENAME = "point_drift_groups.csv"
 POINT_DRIFT_META_BASENAME = "point_drift_meta.json"
+
+
 def scc_wcs_drift_debug_plot_path(resolved: ResolvedTargetConfig) -> Path:
-    """SCC ``debug_plots/wcs_drift_linear_template.png`` (written at ref-FFI selection)."""
+    """SCC ``debug_plots/wcs_drift_linear_template.png`` (point-drift owners write this)."""
     t = resolved.target
     return (
         scc_debug_plots_dir(resolved.data_root, t.sector, t.camera, t.ccd)
@@ -84,6 +86,57 @@ def _maybe_attach_earth_moon_angles(
     )
 
 
+def _load_scc_ffi_context(
+    resolved: ResolvedTargetConfig,
+) -> tuple[list[str], pd.DataFrame]:
+    """Sorted local FFI paths + complete ``ffi_list`` parquet dataframe."""
+    t = resolved.target
+    ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
+    if not ffi_paths:
+        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
+        raise FileNotFoundError(
+            f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
+        )
+
+    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
+    ffi_list_df = load_ffi_list(ffi_list_path)
+    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
+        log.info("FFI list missing/incomplete (%s); backfilling ...", ffi_list_path)
+        t0 = time.monotonic()
+        ffi_list_df = ensure_scc_ffi_list(
+            resolved.data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            ffi_paths,
+            open_fits=wcs_grouping.open_fits_memmap,
+        )
+        log.info("FFI list ensure finished in %.1fs", time.monotonic() - t0)
+    return ffi_paths, ffi_list_df
+
+
+def _build_smoothed_wcs_table(
+    resolved: ResolvedTargetConfig,
+    ffi_list_df: pd.DataFrame,
+    ffi_paths: list[str],
+    anchor_ra: float,
+    anchor_dec: float,
+) -> pd.DataFrame:
+    """Build WCS table from cache, SG-smooth, optionally attach Earth/Moon angles."""
+    mp = resolved.stages.mapping
+    t0 = time.monotonic()
+    wcs_table = wcs_grouping.build_wcs_table_from_cache(
+        ffi_list_df, ffi_paths, float(anchor_ra), float(anchor_dec)
+    )
+    log.info("WCS table from ffi_list built in %.2fs", time.monotonic() - t0)
+    wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
+        wcs_table,
+        window_length=mp.wcs_drift_savgol_window,
+        polyorder=mp.wcs_drift_savgol_polyorder,
+    )
+    return _maybe_attach_earth_moon_angles(wcs_table, resolved)
+
+
 def mapping_run_meta_path(resolved: ResolvedTargetConfig) -> Path:
     """Path to persisted mapping reference-FFI bookkeeping for one SCC."""
     t = resolved.target
@@ -122,12 +175,18 @@ def resolve_scc_reference_ffi(
     *,
     force_rerun: bool = False,
     override_path: str | None = None,
+    write_debug_plot: bool = False,
 ) -> str:
     """
     Choose the mapping-epoch reference FFI for one SCC and persist bookkeeping.
 
     Returns the absolute path to the on-disk reference FFI (``.fits``,
     ``.fits.gz``, or ``.fits.fz`` — whichever exists).
+
+    By default this does **not** write ``wcs_drift_linear_template.png``; that
+    PNG is owned by point-drift callers (linear downsample / remap
+    ``drift_source: point``). Pass ``write_debug_plot=True`` only for legacy
+    callers that still want a median-CRVAL diagnostic plot.
     """
     t = resolved.target
     meta_path = mapping_run_meta_path(resolved)
@@ -137,7 +196,8 @@ def resolve_scc_reference_ffi(
     if explicit and not force_rerun:
         ref = _resolve_existing_ffi_path(resolved, explicit)
         if ref:
-            write_scc_wcs_drift_debug_plot(resolved, ref, force_rerun=False)
+            if write_debug_plot:
+                write_scc_wcs_drift_debug_plot(resolved, ref, force_rerun=False)
             return ref
 
     if not force_rerun:
@@ -158,30 +218,13 @@ def resolve_scc_reference_ffi(
                     _write_run_meta(meta_path, payload)
                 else:
                     log.info("Using cached SCC reference FFI from %s", meta_path)
-                write_scc_wcs_drift_debug_plot(resolved, resolved_ref, force_rerun=False)
+                if write_debug_plot:
+                    write_scc_wcs_drift_debug_plot(
+                        resolved, resolved_ref, force_rerun=False
+                    )
                 return resolved_ref
 
-    ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
-    if not ffi_paths:
-        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
-        raise FileNotFoundError(
-            f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
-        )
-
-    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
-    ffi_list_df = load_ffi_list(ffi_list_path)
-    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
-        log.info("FFI list missing/incomplete (%s); backfilling ...", ffi_list_path)
-        t0 = time.monotonic()
-        ffi_list_df = ensure_scc_ffi_list(
-            resolved.data_root,
-            t.sector,
-            t.camera,
-            t.ccd,
-            ffi_paths,
-            open_fits=wcs_grouping.open_fits_memmap,
-        )
-        log.info("FFI list ensure finished in %.1fs", time.monotonic() - t0)
+    ffi_paths, ffi_list_df = _load_scc_ffi_context(resolved)
 
     if explicit:
         ref = _resolve_existing_ffi_path(resolved, explicit)
@@ -197,17 +240,9 @@ def resolve_scc_reference_ffi(
             anchor_dec,
             time.monotonic() - t0,
         )
-        t0 = time.monotonic()
-        wcs_table = wcs_grouping.build_wcs_table_from_cache(
-            ffi_list_df, ffi_paths, anchor_ra, anchor_dec
+        wcs_table = _build_smoothed_wcs_table(
+            resolved, ffi_list_df, ffi_paths, anchor_ra, anchor_dec
         )
-        log.info("WCS table from ffi_list built in %.2fs", time.monotonic() - t0)
-        wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
-            wcs_table,
-            window_length=mp.wcs_drift_savgol_window,
-            polyorder=mp.wcs_drift_savgol_polyorder,
-        )
-        wcs_table = _maybe_attach_earth_moon_angles(wcs_table, resolved)
         ref = wcs_grouping.choose_reference_ffi_path(
             wcs_table,
             earth_deg_min=float(mp.earth_deg_min),
@@ -237,7 +272,8 @@ def resolve_scc_reference_ffi(
     }
     _write_run_meta(meta_path, payload)
     log.info("SCC reference FFI (%s): %s", selection_rule, ref_abs)
-    write_scc_wcs_drift_debug_plot(resolved, ref_abs, force_rerun=force_rerun)
+    if write_debug_plot:
+        write_scc_wcs_drift_debug_plot(resolved, ref_abs, force_rerun=force_rerun)
     return ref_abs
 
 
@@ -245,61 +281,58 @@ def write_scc_wcs_drift_debug_plot(
     resolved: ResolvedTargetConfig,
     ref_ffi_path: str,
     *,
+    wcs_table: pd.DataFrame | None = None,
     force_rerun: bool = False,
 ) -> Path | None:
     """
-    Write the WCS drift / template-group debug plot when the SCC reference FFI
-    is chosen (same figure as event-mode ``wcs_grouping``).
+    Write the WCS drift / template-group debug plot.
+
+    Preferred callers pass a point-drift ``wcs_table`` that already has
+    ``group_id`` (ref-FFI-center anchor). Without ``wcs_table``, falls back to
+    a median-CRVAL rebuild for legacy/compat use.
     """
     plot_path = scc_wcs_drift_debug_plot_path(resolved)
-    if plot_path.is_file() and not force_rerun:
+    # Point-drift callers pass wcs_table and always overwrite so a stale
+    # median-CRVAL PNG (from older mapping runs) cannot stick around.
+    # Legacy path (no table): skip if PNG exists unless force_rerun.
+    if wcs_table is None and plot_path.is_file() and not force_rerun:
         return plot_path
 
     t = resolved.target
     mp = resolved.stages.mapping
     wg = resolved.stages.wcs_grouping
 
-    ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
-    if not ffi_paths:
-        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
-        raise FileNotFoundError(
-            f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
+    if wcs_table is not None:
+        table = wcs_table
+        if "group_id" not in table.columns:
+            table, _chosen = wcs_grouping.finalize_wcs_table_with_reference_anchor(
+                table,
+                offset_threshold=float(wg.offset_threshold or 0.01),
+                ref_ffi_path=ref_ffi_path,
+                ref_earth_deg_min=float(mp.earth_deg_min),
+                ref_moon_deg_min=float(mp.moon_deg_min),
+                ref_max_smoothed_residual=float(mp.max_smoothed_residual),
+                screen_earth_moon_angles=_screen_earth_moon_angles(resolved),
+            )
+    else:
+        ffi_paths, ffi_list_df = _load_scc_ffi_context(resolved)
+        anchor_ra, anchor_dec = median_crval_from_cache(ffi_list_df, ffi_paths)
+        table = _build_smoothed_wcs_table(
+            resolved, ffi_list_df, ffi_paths, anchor_ra, anchor_dec
+        )
+        table, _chosen = wcs_grouping.finalize_wcs_table_with_reference_anchor(
+            table,
+            offset_threshold=float(wg.offset_threshold or 0.01),
+            ref_ffi_path=ref_ffi_path,
+            ref_earth_deg_min=float(mp.earth_deg_min),
+            ref_moon_deg_min=float(mp.moon_deg_min),
+            ref_max_smoothed_residual=float(mp.max_smoothed_residual),
+            screen_earth_moon_angles=_screen_earth_moon_angles(resolved),
         )
 
-    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
-    ffi_list_df = load_ffi_list(ffi_list_path)
-    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
-        ffi_list_df = ensure_scc_ffi_list(
-            resolved.data_root,
-            t.sector,
-            t.camera,
-            t.ccd,
-            ffi_paths,
-            open_fits=wcs_grouping.open_fits_memmap,
-        )
-
-    anchor_ra, anchor_dec = median_crval_from_cache(ffi_list_df, ffi_paths)
-    wcs_table = wcs_grouping.build_wcs_table_from_cache(
-        ffi_list_df, ffi_paths, anchor_ra, anchor_dec
-    )
-    wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
-        wcs_table,
-        window_length=mp.wcs_drift_savgol_window,
-        polyorder=mp.wcs_drift_savgol_polyorder,
-    )
-    wcs_table = _maybe_attach_earth_moon_angles(wcs_table, resolved)
-    wcs_table, _chosen = wcs_grouping.finalize_wcs_table_with_reference_anchor(
-        wcs_table,
-        offset_threshold=float(wg.offset_threshold or 0.01),
-        ref_ffi_path=ref_ffi_path,
-        ref_earth_deg_min=float(mp.earth_deg_min),
-        ref_moon_deg_min=float(mp.moon_deg_min),
-        ref_max_smoothed_residual=float(mp.max_smoothed_residual),
-        screen_earth_moon_angles=_screen_earth_moon_angles(resolved),
-    )
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     wcs_grouping.plot_wcs_drift_and_template_assignment(
-        wcs_table,
+        table,
         str(plot_path),
         ref_ffi_path=ref_ffi_path,
         sector=t.sector,
@@ -357,7 +390,6 @@ def resolve_scc_point_drift_table(
     """
     t = resolved.target
     wg = resolved.stages.wcs_grouping
-    mp = resolved.stages.mapping
     store = Path(store_root)
     store.mkdir(parents=True, exist_ok=True)
     meta_path = _point_drift_meta_path(store)
@@ -381,24 +413,7 @@ def resolve_scc_point_drift_table(
         except (OSError, json.JSONDecodeError, ValueError) as exc:
             log.warning("Could not load cached point-drift table: %s", exc)
 
-    ffi_paths = sorted(list_local_ffis(resolved.ffi_dir, t.sector, t.camera, t.ccd))
-    if not ffi_paths:
-        patterns = ffi_glob_patterns(t.sector, t.camera, t.ccd)
-        raise FileNotFoundError(
-            f"No FFI files matching {patterns!r} under {resolved.ffi_dir!r}"
-        )
-
-    ffi_list_path = scc_ffi_list_parquet(resolved.data_root, t.sector, t.camera, t.ccd)
-    ffi_list_df = load_ffi_list(ffi_list_path)
-    if not ffi_list_is_complete(ffi_paths, ffi_list_df):
-        ffi_list_df = ensure_scc_ffi_list(
-            resolved.data_root,
-            t.sector,
-            t.camera,
-            t.ccd,
-            ffi_paths,
-            open_fits=wcs_grouping.open_fits_memmap,
-        )
+    ffi_paths, ffi_list_df = _load_scc_ffi_context(resolved)
 
     ref_logical = manifest_basename_from_local(ref_ffi_path)
     if ref_logical not in ffi_list_df.index:
@@ -414,15 +429,9 @@ def resolve_scc_point_drift_table(
     anchor_y = naxis2 / 2.0
     anchor_ra, anchor_dec = ref_wcs.pixel_to_world_values(anchor_x, anchor_y)
 
-    wcs_table = wcs_grouping.build_wcs_table_from_cache(
-        ffi_list_df, ffi_paths, float(anchor_ra), float(anchor_dec)
+    wcs_table = _build_smoothed_wcs_table(
+        resolved, ffi_list_df, ffi_paths, float(anchor_ra), float(anchor_dec)
     )
-    wcs_table = wcs_grouping.smooth_wcs_drift_savgol(
-        wcs_table,
-        window_length=mp.wcs_drift_savgol_window,
-        polyorder=mp.wcs_drift_savgol_polyorder,
-    )
-    wcs_table = _maybe_attach_earth_moon_angles(wcs_table, resolved)
     wcs_table = wcs_grouping.reanchor_wcs_drift_to_reference(wcs_table, ref_ffi_path)
     offset_threshold = float(wg.offset_threshold or 0.01)
     wcs_table = wcs_grouping.assign_template_groups(wcs_table, offset_threshold)
@@ -478,6 +487,23 @@ def load_mapping_reference_ffi(resolved: ResolvedTargetConfig) -> str | None:
     if not ref:
         return None
     return _resolve_existing_ffi_path(resolved, ref)
+
+
+def resolve_cached_or_select_reference_ffi(
+    resolved: ResolvedTargetConfig,
+) -> str:
+    """Load mapping ref FFI from cache, or select once without writing the debug PNG.
+
+    Downstream stages (linear downsample, remap ``drift_source: point``) must
+    use this instead of ``resolve_scc_reference_ffi(..., force_rerun=...)`` so
+    stage ``--force-rerun`` cannot reselect the mapping reference FFI.
+    """
+    ref = load_mapping_reference_ffi(resolved)
+    if ref:
+        return ref
+    return resolve_scc_reference_ffi(
+        resolved, force_rerun=False, write_debug_plot=False
+    )
 
 
 def _resolve_existing_ffi_path(resolved: ResolvedTargetConfig, value: str) -> str | None:

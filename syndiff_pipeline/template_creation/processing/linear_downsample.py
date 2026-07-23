@@ -386,6 +386,7 @@ def run_linear_downsample_scc(
     )
     from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
         resolve_scc_point_drift_table,
+        write_scc_wcs_drift_debug_plot,
     )
 
     t = resolved.target
@@ -408,6 +409,13 @@ def run_linear_downsample_scc(
     )
     wcs_table, _drift = resolve_scc_point_drift_table(
         resolved, ref_ffi_path=ref_ffi_path, store_root=point_drift_store,
+        force_rerun=force_rerun,
+    )
+    # Point-drift owns wcs_drift_linear_template.png (ref-FFI-center groups).
+    write_scc_wcs_drift_debug_plot(
+        resolved,
+        ref_ffi_path,
+        wcs_table=wcs_table,
         force_rerun=force_rerun,
     )
     from syndiff_pipeline.common import wcs_grouping

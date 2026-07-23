@@ -224,7 +224,12 @@ def _execute_template_stage(
             resolve_scc_reference_ffi,
         )
 
-        ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
+        # Mapping owns ref selection + run_meta.json only; the linear-template
+        # debug PNG is written by point-drift owners (linear downsample / remap
+        # drift_source: point).
+        ref_ffi = resolve_scc_reference_ffi(
+            resolved, force_rerun=force_rerun, write_debug_plot=False
+        )
         mp = resolved.stages.mapping
 
         # Gaia catalog download and the TESS<->PS1 skycell geometric mapping
@@ -362,6 +367,7 @@ def _execute_template_stage(
             run_field_remap_scc,
         )
         from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
+            resolve_cached_or_select_reference_ffi,
             resolve_scc_reference_ffi,
         )
 
@@ -372,18 +378,30 @@ def _execute_template_stage(
         with __import__("astropy.io.fits", fromlist=["open"]).open(master_path) as hdul:
             master = hdul[1].data
             full_shape = (int(master.shape[0]), int(master.shape[1]))
-        ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
         target_drift = None
         if str(rm.drift_source) == "point":
             from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
                 resolve_scc_point_drift_table,
+                write_scc_wcs_drift_debug_plot,
             )
 
+            # Do not reselect mapping ref on remap --force-rerun.
+            ref_ffi = resolve_cached_or_select_reference_ffi(resolved)
             _wcs_table, target_drift = resolve_scc_point_drift_table(
                 resolved,
                 ref_ffi_path=ref_ffi,
                 store_root=resolved.remap_output_base or "",
                 force_rerun=force_rerun,
+            )
+            write_scc_wcs_drift_debug_plot(
+                resolved,
+                ref_ffi,
+                wcs_table=_wcs_table,
+                force_rerun=force_rerun,
+            )
+        else:
+            ref_ffi = resolve_scc_reference_ffi(
+                resolved, force_rerun=force_rerun, write_debug_plot=False
             )
         field_result = run_field_remap_scc(
             sector=t.sector,
@@ -426,6 +444,7 @@ def _execute_template_stage(
             run_field_downsample_scc,
         )
         from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
+            resolve_cached_or_select_reference_ffi,
             resolve_scc_reference_ffi,
         )
 
@@ -460,7 +479,14 @@ def _execute_template_stage(
             else mapping_grid.array_shape_native()
         )
 
-        ref_ffi = resolve_scc_reference_ffi(resolved, force_rerun=force_rerun)
+        if geometry_mode == "linear":
+            # Never reselect mapping ref on downsample --force-rerun; point-drift
+            # rebuild uses its own force_rerun keyed on the cached ref path.
+            ref_ffi = resolve_cached_or_select_reference_ffi(resolved)
+        else:
+            ref_ffi = resolve_scc_reference_ffi(
+                resolved, force_rerun=force_rerun, write_debug_plot=False
+            )
 
         if geometry_mode == "linear":
             from syndiff_pipeline.template_creation.processing.linear_downsample import (
