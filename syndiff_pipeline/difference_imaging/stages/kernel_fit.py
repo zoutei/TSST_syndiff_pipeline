@@ -182,6 +182,11 @@ def run_kernel_fit(
     skip_existing: bool = True,
     field_ctx=None,
     mask_catalog=None,
+    sector: Optional[int] = None,
+    camera: Optional[int] = None,
+    data_root: Optional[str] = None,
+    ccd: Optional[int] = None,
+    template_dir: Optional[str] = None,
 ) -> KernelFitResult:
     """
     Fit PSF kernel on angle-ranked min-background FFI through HP1 + phot + HP2.
@@ -190,6 +195,7 @@ def run_kernel_fit(
     ``ws/kernel_fit/``), not the event root.
     """
     from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
+    from syndiff_pipeline.difference_imaging.stages.hotpants import _resolve_hotpants_mask_array
 
     meta_root = artifact_dir or debug_ws_dir or output_dir
     os.makedirs(meta_root, exist_ok=True)
@@ -216,7 +222,12 @@ def run_kernel_fit(
         )
 
     min_bg_path, angle_score = pick_best_angle_ffi(
-        manifest, weighting_factor=params.weighting_factor
+        manifest,
+        weighting_factor=params.weighting_factor,
+        sector=sector,
+        camera=camera,
+        data_root=data_root,
+        ccd=ccd,
     )
     product_id = tess_product_id_from_ffi_path(min_bg_path) or "unknown"
     if field_ctx is not None:
@@ -256,7 +267,10 @@ def run_kernel_fit(
             )
     else:
         group_dx, group_dy, template_path = resolve_template_for_ffi(
-            output_dir, manifest, min_bg_path
+            output_dir,
+            manifest,
+            min_bg_path,
+            template_dir=template_dir,
         )
         field_template = None
 
@@ -306,19 +320,23 @@ def run_kernel_fit(
                 pass
             break
 
+    hotpants_mask = np.asarray(
+        _resolve_hotpants_mask_array(shared_mask, mask_catalog, btjd)
+    )
     if mask_catalog is not None:
-        frame_mask = full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
+        phot_mask = full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
     else:
-        frame_mask = shared_mask
+        phot_mask = full_mask_bool(shared_mask)
 
     if mapping_grid is not None and pad_rows > 0:
         from syndiff_pipeline.common.grid_pairing import zero_pad_science_bottom
 
-        frame_mask = zero_pad_science_bottom(np.asarray(frame_mask), pad_rows)
+        hotpants_mask = zero_pad_science_bottom(np.asarray(hotpants_mask), pad_rows)
+        phot_mask = zero_pad_science_bottom(np.asarray(phot_mask), pad_rows)
 
-    if ffi.shape != np.asarray(frame_mask).shape:
+    if ffi.shape != np.asarray(hotpants_mask).shape:
         raise ValueError(
-            f"FFI shape {ffi.shape} != shared_mask shape {np.asarray(frame_mask).shape}"
+            f"FFI shape {ffi.shape} != hotpants mask shape {np.asarray(hotpants_mask).shape}"
         )
 
 
@@ -328,7 +346,7 @@ def run_kernel_fit(
             sci=ffi,
             err=err,
             template=template,
-            mask=frame_mask,
+            mask=hotpants_mask,
             ref_stars_xy=ref_stars_xy,
             hp=hp,
             work_dir=os.path.join(work_root, "hp1"),
@@ -341,7 +359,7 @@ def run_kernel_fit(
             )
 
         phot_bkg_hp1 = photutils_background_masked(
-            hp1["diff"], frame_mask, box_size=params.phot_box_size
+            hp1["diff"], phot_mask, box_size=params.phot_box_size
         )
         hp1_bkg = hp1["bkg"] if hp1.get("bkg") is not None else 0.0
         sci_clean = ffi - hp1_bkg - phot_bkg_hp1
@@ -351,7 +369,7 @@ def run_kernel_fit(
             sci=sci_clean,
             err=err,
             template=template,
-            mask=frame_mask,
+            mask=hotpants_mask,
             ref_stars_xy=ref_stars_xy,
             hp=hp2_params,
             work_dir=os.path.join(work_root, "hp2"),
