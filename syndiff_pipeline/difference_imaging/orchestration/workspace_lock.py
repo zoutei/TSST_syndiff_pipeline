@@ -26,6 +26,19 @@ log = logging.getLogger(__name__)
 DIFF_CONFIG_FINGERPRINT_BASENAME = "diff_config.fingerprint"
 _WORKSPACE_SNAPSHOT_MODE = 0o444
 
+# Downstream analysis stages have per-artifact recipe_ids; omitting them from the
+# workspace lock lets you append epsf/centroids without a new workspace_run_id.
+_WORKSPACE_FINGERPRINT_EXEMPT_STAGE_KINDS = frozenset({"epsf", "centroids"})
+
+
+def _pipeline_for_workspace_fingerprint(pipeline: list) -> list:
+    """Return pipeline stages that participate in the workspace config lock."""
+    return [
+        stage
+        for stage in pipeline
+        if str(stage.get("kind", "")).strip() not in _WORKSPACE_FINGERPRINT_EXEMPT_STAGE_KINDS
+    ]
+
 
 class WorkspaceConfigMismatchError(RuntimeError):
     """Raised when a diff config does not match the frozen workspace snapshot."""
@@ -38,7 +51,7 @@ def diff_config_fingerprint(cfg: SynDiffConfig) -> str:
         str(cfg.sector),
         str(cfg.camera),
         str(cfg.ccd),
-        json.dumps(cfg.pipeline, sort_keys=True, default=str),
+        json.dumps(_pipeline_for_workspace_fingerprint(cfg.pipeline), sort_keys=True, default=str),
         json.dumps(cfg.additional_forced_targets, sort_keys=True, default=str),
         str(cfg.pipeline_plots),
         str(getattr(cfg, "workspace_run_id", None) or ""),

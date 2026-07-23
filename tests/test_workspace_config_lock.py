@@ -56,6 +56,52 @@ class TestWorkspaceConfigLock(unittest.TestCase):
         b = _minimal_cfg(pipeline=[{"kind": "shared_mask"}])
         self.assertNotEqual(diff_config_fingerprint(a), diff_config_fingerprint(b))
 
+    def test_fingerprint_ignores_epsf_and_centroids(self):
+        base = [
+            {"kind": "shared_mask"},
+            {
+                "kind": "hotpants",
+                "inputs": {"bkg": "ks_b"},
+                "output": {"diffs": "hp_d", "bkg": "hp_b"},
+            },
+        ]
+        extended = base + [
+            {"kind": "epsf", "inputs": {"diffs": "hp_d"}, "output": "epsf_r1"},
+            {
+                "kind": "centroids",
+                "inputs": {"diffs": "hp_d", "epsf": "epsf_r1"},
+                "output": "centroids_r1",
+            },
+        ]
+        a = _minimal_cfg(pipeline=base)
+        b = _minimal_cfg(pipeline=extended)
+        self.assertEqual(diff_config_fingerprint(a), diff_config_fingerprint(b))
+
+    def test_fingerprint_epsf_param_change_still_ignored(self):
+        base = _minimal_cfg(
+            pipeline=[
+                {"kind": "shared_mask"},
+                {
+                    "kind": "epsf",
+                    "inputs": {"diffs": "hp_d"},
+                    "output": "epsf_r1",
+                    "tile_nx": 5,
+                },
+            ]
+        )
+        other = _minimal_cfg(
+            pipeline=[
+                {"kind": "shared_mask"},
+                {
+                    "kind": "epsf",
+                    "inputs": {"diffs": "hp_d"},
+                    "output": "epsf_r1",
+                    "tile_nx": 3,
+                },
+            ]
+        )
+        self.assertEqual(diff_config_fingerprint(base), diff_config_fingerprint(other))
+
     def test_assert_lock_no_snapshot_ok(self):
         with tempfile.TemporaryDirectory() as tmp:
             assert_workspace_config_lock(tmp, _minimal_cfg())
