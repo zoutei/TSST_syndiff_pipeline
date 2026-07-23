@@ -21,6 +21,7 @@ This directory is the **config root** passed to `syndiff --site config`.
 | `deployment.yaml` | Gitignored: `workspace_root`, `data_root`, credentials (copy from `deployment.yaml.example`) |
 | `targets_example.csv` | Example event targets CSV for `syndiff diff --targets` |
 | `scc_example.csv` | Example SCC-only CSV (`sector,camera,ccd[,enabled]`) for `syndiff template --scc` |
+| [`linear_centroids/`](linear_centroids/) | Phase-1 linear templates + kernel diff through centroids ([guide](../docs/markdown/linear_centroids_pipeline.md)) |
 
 ## Foreground diff (two entry points)
 

@@ -12,6 +12,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` (SCC + nested-event layout) filesystem reference |
 | [Bookkeeping (provenance graph)](bookkeeping.md) | All users / ops | Content-addressed provenance: fingerprints, spool/ingest, skip/resume, CLI |
 | [Field (distortion-aware) templates](field_geometry.md) | Users / maintainers | **Default** `geometry_mode: field` — L0–L5, L4a/L4b, storage, verify, ops |
+| [Linear → centroids campaign](linear_centroids_pipeline.md) | Users / maintainers | Phase 1 linear + centroids; phase 2 TV WCS planned; phase 3 uses existing field diff configs |
 | [Oversampled templates + Hotpants stamp modes](oversampled_templates.md) | Users / maintainers | `oversampling_factor` (`F`), native vs HR coords, Hotpants `stamp_mode` / `region_*`, star OS |
 | [`syndiff` CLI reference](syndiff_cli.md) | All users | Noun/verb commands, stages, internal modules |
 | [Cluster smoke checklist](cluster_smoke_checklist.md) | Ops | Manual validation on HTCondor + NFS after setup |
@@ -31,6 +32,7 @@ docs/markdown/
 ├── syndiff_cli.md                ← CLI noun/verb reference
 ├── storage_layout.md             ← SCC + nested-event on-disk layout
 ├── field_geometry.md             ← default field templates (L0–L5, L4a/L4b F2)
+├── linear_centroids_pipeline.md  ← linear bootstrap → centroids → (planned) field diff
 ├── oversampled_templates.md      ← F>1 templates + Hotpants stamp_mode / region_*
 ├── masking.md                    ← empirical/TNS/asteroid masks (difference_imaging/masking)
 ├── star_lightcurves.md           ← host-star quick start (syndiff star)
