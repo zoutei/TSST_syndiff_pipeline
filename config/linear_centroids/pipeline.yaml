@@ -1,0 +1,33 @@
+# Phase 1b — diff only: linear kernel-fit subtraction + ePSF + centroids.
+# Pass any SCC list with --scc (sector,camera,ccd CSV).
+#
+#   syndiff diff submit \
+#     --config config/linear_centroids/pipeline.yaml \
+#     --scc config/scc_my_lanes.csv \
+#     --stages diff \
+#     --run-id my_linear_centroids_run
+deployment_file: ../deployment.yaml
+diff_config: diff_config.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  skip_artifact_verify: true
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

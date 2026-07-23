@@ -1,0 +1,80 @@
+# Phase 1a — build linear templates from TESS FFI WCS (point drift at ref FFI).
+# Writes templates_linear/ + remap_linear/ on each SCC lane.
+#
+# Prereq: tess_ffi, mapping, ps1_process for the SCC.
+#
+#   syndiff template submit \
+#     --config config/linear_centroids/pipeline_templates.yaml \
+#     --scc config/scc_my_lanes.csv \
+#     --stages remap,downsample \
+#     --run-id my_linear_templates_run \
+#     --force-rerun --skip-artifact-verify
+deployment_file: ../deployment.yaml
+diff_config: diff_config.yaml
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 1
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  remap:
+    drift_source: point
+    store_name: linear
+    n_jobs: 32
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  downsample:
+    geometry_mode: linear
+    remap_store_name: linear
+    output_store_name: linear
+    rebuild_field_store: true
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    n_jobs: 32
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_request_disk: 4096
+    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
+    condor_rank: "-LoadAvg"
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 2
+  ps1_process:
+    max_concurrent: 2
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  skip_artifact_verify: true
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

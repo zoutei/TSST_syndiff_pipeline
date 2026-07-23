@@ -12,3 +12,9 @@ scripts/
 dev/
 doc/
 docs/_build/
+
+data
+pyhotpants
+TESSreduce
+workspace
+.claude_plan
