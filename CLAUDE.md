@@ -32,7 +32,7 @@ syndiff star submit --site config/ --star-targets {star_targets.csv}  # host-sta
 syndiff verify --site config/ --targets ...                           # pre-run artifact check
 ```
 
-Monitoring/control: `syndiff progress`, `syndiff status --watch`, `syndiff tail`, `syndiff retry`, `syndiff launch`, `syndiff pause|resume|kill`, `syndiff runs`, `syndiff active`, `syndiff logs`, `syndiff bookkeeping`. Control verbs take `--run-id` + `--deployment` (or `--run-dir`), **not** `--site`; they write intents to SQLite which the supervisor applies on its next tick.
+Monitoring/control: `syndiff progress`, `syndiff status --watch`, `syndiff cluster` (execute-host sampler table; `--check` for placement preview), `syndiff tail`, `syndiff retry`, `syndiff launch`, `syndiff pause|resume|kill`, `syndiff runs`, `syndiff active`, `syndiff logs`, `syndiff bookkeeping`. Control verbs take `--run-id` + `--deployment` (or `--run-dir`), **not** `--site`; they write intents to SQLite which the supervisor applies on its next tick.
 
 Cheap testing of changes: foreground `syndiff diff run` (add `--validate-only` for config checks), `--local` on submit to bypass Condor, `max_ffis` in `star_config.yaml` for short star runs, `crop_mode: target_box` for small/fast events. Stage modules also have standalone entry points (e.g. `python -m syndiff_pipeline.template_creation.processing.pancakes <cluster_template_job.json>`).
 

@@ -451,10 +451,15 @@ subprocess.Popen(cmd, start_new_session=True, stdout=DEVNULL, stderr=DEVNULL)
 
 ### Condor executor (`condor.py` + `condor_wrapper.sh`)
 
-1. Write `{stage}.condor.submit` beside the stage log.
-2. `condor_submit` → cluster id stored as `native_id`.
-3. Execute node runs wrapper → `conda activate syndiff` → `exec` the same `run_stage.py` command.
-4. Poll with `condor_q` / `condor_history` after a 120 s grace window.
+1. Build `CondorResourceRequest` from stage/site YAML (`host_stats_min_mem_mb`, `host_stats_max_load15`).
+2. Apply `host_stats.py` at submit (sampler JSON → `requirements` + load15 `rank`; fallback `-LoadAvg`).
+3. Merge reactive `{stage}.condor.bad_machines` exclusions.
+4. Write `{stage}.condor.submit` beside the stage log.
+5. `condor_submit` → cluster id stored as `native_id`.
+6. Execute node runs wrapper → `conda activate syndiff` → `exec` the same `run_stage.py` command.
+7. Poll with `condor_q` / `condor_history` after a 120 s grace window.
+
+**Inspect / debug:** `syndiff cluster` (`host_stats_cli.py`) formats the same sampler JSON for humans; `--check` previews exclusions before submit. Discord bot replies with the compact table when a channel message contains `cluster`.
 
 **Important**: submit host must run `syndiff template submit` with `syndiff` activated so `sys.executable` in the command points at the right env on NFS.
 

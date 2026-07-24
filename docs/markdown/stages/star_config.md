@@ -185,10 +185,20 @@ Per-target stage logs and manifests live under `per_target/{label}/star.*`.
 
 ## HTCondor resources
 
-The `condor` block controls the independent `star` stage claim. The committed
-site policy requests 8 CPUs and 100000 MB of memory. Keep `requirements`
-consistent with `request_memory`; `--local` on `syndiff star submit` bypasses
-Condor for a smoke test.
+The `condor` block controls the independent `star` stage cgroup claim and host-stats
+thresholds. Example:
+
+```yaml
+condor:
+  request_cpus: 8
+  request_memory: 100000
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0
+```
+
+Legacy `requirements` / `rank` keys are rejected at load time. Machine selection at
+submit uses cluster host sampler JSON (see [template pipeline HTCondor section](../template_pipeline.md#htcondor-integration)).
+`--local` on `syndiff star submit` bypasses Condor for a smoke test.
 
 ## Baseline workspace pairing
 

@@ -503,10 +503,13 @@ Configure under `resources:` in YAML. For Condor stages, each pool's `max_concur
 
 The Condor path:
 
-1. Writes a `.condor.submit` file next to the stage log.
-2. Submits via `condor_submit`.
-3. Stores the **cluster ID** in SQLite as `pid`.
-4. Polls with `condor_q` / `condor_history`.
+1. Builds a `CondorResourceRequest` from stage YAML (`pipeline.yaml` template stages, or `condor:` in `diff_config.yaml` / `star_config.yaml` / `photometry_config.yaml`).
+2. At submit time, reads cluster host sampler JSON from `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`) and sets `requirements` + `rank` automatically — see [HTCondor Integration](#htcondor-integration).
+3. Merges reactive exclusions from `{stage}.condor.bad_machines` (eviction / memory-hold hosts).
+4. Writes a `.condor.submit` file next to the stage log.
+5. Submits via `condor_submit`.
+6. Stores the **cluster ID** in SQLite as `pid`.
+7. Polls with `condor_q` / `condor_history`.
 
 Execute nodes run `common/orchestration/condor_wrapper.sh`, which activates the `syndiff` conda env and `exec`s the same `run_stage.py` command the local launcher would use.
 
@@ -661,7 +664,7 @@ When `data_root` is set on the frozen diff config, `difference_imaging/orchestra
 |-----|---------|-------------|
 | `executor` | `"condor"` | `"condor"` or `"local"`; uses resource pool `diff` |
 
-Condor resource requests (`request_cpus`, `request_memory`, …) are defined in `diff_config.yaml` under `condor:`.
+Condor cgroup claims (`request_cpus`, `request_memory`, optional `request_disk`) and host-stats thresholds (`host_stats_min_mem_mb`, `host_stats_max_load15`) are defined in `diff_config.yaml` under `condor:`.
 
 **Verification**: SCC bookkeeping (`bookkeeping/diff/diff_job.json` + `frames.csv`) and template sidecar when using field mode; frame manifest CSV and workspace label directories for event photometry workspaces.
 
@@ -792,6 +795,35 @@ syndiff template submit --site config --targets my_targets.csv
 
 Any message you post in the configured channel gets a reply with live `progress` + `status` (same format as event alerts). Include a `run_id` in the message to query a specific run; otherwise the bot reports all active runs (or the most recent run if none are active).
 
+**On-demand shell-style commands** (exact match on the full message text, case-insensitive after trim):
+
+| Message | Reply |
+|---------|-------|
+| `condor_q` | `condor_q` output in a fenced code block |
+| `condor_qn` | Your jobs: `ClusterId`, `ProcId`, `JobStatus`, `RemoteHost` |
+| `condor_status` | Full `condor_status` |
+| `condor_status -tla` | `Name` + `TotalLoadAvg` |
+
+**Cluster host snapshot** (substring match): any message whose text **contains the word `cluster`** gets the compact `syndiff cluster` table in a fenced code block (header `**syndiff cluster**`). Examples: `cluster`, `how is the cluster?`, `syndiff cluster`. The table shows `HOST`, `SLOT`, `AVAIL`, `LOAD15`, `AGE` with fixed-width columns — **no `VERDICT` column** (use the CLI with `--check` for placement preview).
+
+| Trigger type | Match rule | Precedence |
+|--------------|------------|------------|
+| Condor shell | Exact message only | Checked first |
+| Cluster snapshot | `"cluster" in message.lower()` | Second |
+| Pipeline status | All other messages | Default |
+
+A message that is only `condor_q` never triggers the cluster table. A message containing `cluster` returns the host table, not pipeline status.
+
+CLI equivalents:
+
+```bash
+syndiff cluster                              # same table as Discord (no VERDICT)
+syndiff cluster --check --preset 500gb       # placement preview with VERDICT
+syndiff cluster --check --site config/ --stage ps1_process
+```
+
+Full reference: [`syndiff_cli.md` — Cluster host snapshot](syndiff_cli.md#cluster-host-snapshot). Sampler deployment: [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md).
+
 **Test** (read-only; does not write `notification_events` or change run state):
 
 ```bash
@@ -855,9 +887,9 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 | `skip_download_catalog` | `false` | Skip Gaia download if catalog exists |
 | `executor` | `"condor"` | `"condor"` or `"local"` |
 | `condor_request_cpus` | `16` | HTCondor `request_cpus` |
-| `condor_request_memory` | `100000` | HTCondor `request_memory` (MB) |
-| `condor_requirements` | `Memory <= 500000 && LoadAvg < 10` | Machine requirements expression (avoids 512 GB nodes) |
-| `condor_rank` | `-LoadAvg` | Prefer lower load average |
+| `condor_request_memory` | `100000` | HTCondor `request_memory` (MB cgroup limit) |
+| `host_stats_min_mem_mb` | `128000` | Exclude execute hosts whose sampler `mem_available_mb` is below this (pass/fail filter only) |
+| `host_stats_max_load15` | `10.0` | Exclude hosts with 15-minute load at or above this; rank survivors by lowest `load15` |
 
 #### `stages.ps1_download`
 
@@ -881,9 +913,9 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 | `bright_star_mag_threshold` | `13.0` | Bright-star cutoff |
 | `executor` | `"condor"` | `"condor"` or `"local"` |
 | `condor_request_cpus` | `64` | HTCondor `request_cpus` |
-| `condor_request_memory` | `500000` | HTCondor `request_memory` (MB) |
-| `condor_requirements` | `Memory >= 500000 && LoadAvg < 10` | Machine requirements expression |
-| `condor_rank` | `-LoadAvg` | Prefer lower load average |
+| `condor_request_memory` | `300000` | HTCondor `request_memory` (MB cgroup limit) |
+| `host_stats_min_mem_mb` | `300000` | Exclude execute hosts whose sampler `mem_available_mb` is below this |
+| `host_stats_max_load15` | `10.0` | Exclude hosts with 15-minute load at or above this; rank survivors by lowest `load15` |
 
 #### `stages.downsample`
 
@@ -904,9 +936,10 @@ rows named `templates`/`tmpl` map to `downsample` in the status grid only.
 | `allow_reference_ffi_mismatch` | `false` | Continue when mapping `TESS_FFI` ≠ SCC reference-FFI bookkeeping |
 | `executor` | `"local"` | `"condor"` or `"local"` |
 | `condor_request_cpus` | `16` | HTCondor `request_cpus` |
-| `condor_request_memory` | `128000` | HTCondor `request_memory` (MB) |
-| `condor_requirements` | `Memory >= 128000 && LoadAvg < 10` | Machine requirements expression |
-| `condor_rank` | `-LoadAvg` | Prefer lower load average |
+| `condor_request_memory` | `128000` | HTCondor `request_memory` (MB cgroup limit) |
+| `condor_request_disk` | null | Optional `request_disk` (MB); omit from submit when null |
+| `host_stats_min_mem_mb` | `128000` | Exclude execute hosts whose sampler `mem_available_mb` is below this |
+| `host_stats_max_load15` | `10.0` | Exclude hosts with 15-minute load at or above this; rank survivors by lowest `load15` |
 
 Field-mode-only keys (`apply_intra_skycell`, `apply_inter_skycell`, `rebuild_field_store`, `n_jobs`, `stage_regmaps_to_scratch`, `materialize_fits`, `output_store_name`, `remap_store_name`, …): see [field_geometry.md](field_geometry.md). Removed keys (`apply_hybrid_exact`, `l4b_policy`, `hybrid_R` on downsample) are rejected at parse.
 
@@ -1595,6 +1628,62 @@ re-scanning the store.
 - Submit host: Condor client tools, `syndiff` conda env, NFS access to `data_root`, `workspace_root`, and `runs_root`.
 - Execute nodes: same NFS mounts for `/home` (conda) and science data; no inbound file transfer (`should_transfer_files = NO`).
 - Jobs run as the submitting Unix user (`getenv = false` — wrapper sets up environment).
+- **Host sampler heartbeats** (optional but recommended): per-host JSON under `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`). Deploy with `tools/cluster_host_monitor/launch_monitors.sh`. See [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md).
+
+### How machine selection works at submit time
+
+Syndiff no longer accepts YAML `condor_requirements`, `condor_rank`, or `diff_config.yaml` / `star_config.yaml` / `photometry_config.yaml` `condor.requirements` / `condor.rank`. Those keys raise `ValueError` at config load.
+
+At every `condor_submit`, `common/orchestration/host_stats.py` reads the sampler JSON and:
+
+1. **Sets base requirements** — `Memory >= request_memory_mb` (HTCondor slot memory classad).
+2. **Filters execute hosts** (pass/fail, not ranking):
+   - missing or stale heartbeat (>300 s),
+   - `mem_available_mb < host_stats_min_mem_mb`,
+   - `load15 >= host_stats_max_load15`.
+3. **Ranks survivors** by lowest `load15` only (more free RAM does not improve rank once above the minimum).
+4. **Merges reactive exclusions** from `{stage}.condor.bad_machines` (eviction loops, low-usage memory holds).
+
+If no usable sampler JSON exists, syndiff falls back to `Memory >= request_memory_mb` and `rank = -LoadAvg` (Condor's own load classad) and logs a warning.
+
+#### Inspect before submit (`syndiff cluster`)
+
+Use `syndiff cluster` to read the same sampler JSON the submit path uses. Two modes:
+
+| Mode | Command | Use when |
+|------|---------|----------|
+| Status | `syndiff cluster` | Quick health check — memory, load, heartbeat age per host |
+| Placement check | `syndiff cluster --check [--preset …]` | Preview which hosts would be excluded/ranked for a stage |
+
+```bash
+syndiff cluster                              # live heartbeats (no VERDICT)
+syndiff cluster --check --preset 500gb       # ps1_process thresholds (300 GB min mem)
+syndiff cluster --check --preset 128gb       # mapping / remap thresholds
+syndiff cluster --check --site config/ --stage mapping
+syndiff cluster --check --site config/ --stage diff
+python3 tools/cluster_host_monitor/read_host_stats.py --preset 500gb   # legacy; same as --check
+```
+
+Example status output (columns auto-sized for alignment):
+
+```text
+HOST                   SLOT   AVAIL LOAD15 AGE
+--------------------- ----- ------- ------ ---
+plscience5.stsci.edu  515GB 423.7GB   4.75  0s
+plscience7.stsci.edu      ?       ?      ?   ?
+```
+
+`?` = missing or unreadable heartbeat. In Discord, post any message containing `cluster` for this compact table; use `--check` on the CLI for `VERDICT` and Condor exclusion preview.
+
+See [`syndiff_cli.md` — Cluster host snapshot](syndiff_cli.md#cluster-host-snapshot) and [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md).
+
+**Filter vs rank**
+
+| Signal | Role |
+|--------|------|
+| `mem_available_mb` | Filter only — must be ≥ `host_stats_min_mem_mb` |
+| `load15` | Filter (must be < `host_stats_max_load15`) **and** sole ranking key among eligible hosts |
+| Stale / missing JSON | Filter only — exclude (conservative) |
 
 ### Wrapper script
 
@@ -1614,40 +1703,45 @@ Per job, written to `per_target/{target}/{stage}.condor.submit`:
 
 - `executable = .../condor_wrapper.sh`
 - `arguments = /path/to/python -m syndiff_pipeline.common.orchestration.run_stage ...`
-- `request_cpus`, `request_memory`, `requirements`, `rank`
+- `request_cpus`, `request_memory`, optional `request_disk`
+- `requirements` — auto-generated (`Memory >= …` plus `Machine != "…"` exclusions)
+- `rank` — load15-weighted `Machine == "…"` expression when host stats are usable, else `-LoadAvg`
 - `output`, `error`, `log` → sibling `.condor.*` files
 
 ### Resource sizing (example: STScI science cluster)
 
-Typical `mapping` settings for 128 GB science nodes (excludes 512 GB whole-node machines):
+Template stages set cgroup claims and host-stats thresholds under `stages.*` in `pipeline.yaml`:
 
 ```yaml
 stages:
   mapping:
     condor_request_cpus: 16
     condor_request_memory: 100000
-    condor_requirements: "Memory <= 500000 && LoadAvg < 10"
-    condor_rank: "-LoadAvg"
+    host_stats_min_mem_mb: 128000
+    host_stats_max_load15: 10.0
+  ps1_process:
+    condor_request_cpus: 64
+    condor_request_memory: 300000
+    host_stats_min_mem_mb: 300000
+    host_stats_max_load15: 10.0
 resources:
   mapping:
     max_concurrent: 6
-```
-
-Typical `ps1_process` settings for 64-core / 512 GB nodes:
-
-```yaml
-stages:
-  ps1_process:
-    condor_request_cpus: 64
-    condor_request_memory: 500000
-    condor_requirements: "Memory >= 500000 && LoadAvg < 10"
-    condor_rank: "-LoadAvg"
-resources:
   ps1_process:
     max_concurrent: 4
 ```
 
-`ps1_process` auto-scales workers to the allocated machine; partial-node claims are not supported.
+Diff / star / photometry stages use the same host-stats keys under `condor:` in their site config files:
+
+```yaml
+condor:
+  request_cpus: 64
+  request_memory: 100000
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0
+```
+
+`host_stats_min_mem_mb` defaults to `request_memory` when omitted. `ps1_process` auto-scales workers to the allocated machine; partial-node claims are not supported.
 
 ### Monitoring Condor jobs
 
