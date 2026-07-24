@@ -89,5 +89,5 @@ pipeline:
 condor:
   request_cpus: 64
   request_memory: 100000
-  requirements: "Memory >= 100000 && LoadAvg < 10"
-  rank: "-LoadAvg"
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0

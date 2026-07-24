@@ -37,8 +37,6 @@ stages:
     executor: condor
     condor_request_cpus: 32
     condor_request_memory: 128000
-    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
-    condor_rank: "-LoadAvg"
   downsample:
     geometry_mode: field
     apply_intra_skycell: true
@@ -55,8 +53,6 @@ stages:
     condor_request_cpus: 32
     condor_request_memory: 128000
     condor_request_disk: 4096
-    condor_requirements: "Memory >= 128000 && LoadAvg < 10"
-    condor_rank: "-LoadAvg"
   diff:
     executor: condor
 
