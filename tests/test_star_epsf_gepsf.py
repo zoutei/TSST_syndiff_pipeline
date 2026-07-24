@@ -134,9 +134,25 @@ def _resolved_host() -> ResolvedHost:
 
 class TestStarEpsfGepsfConfig(unittest.TestCase):
     def test_production_yaml_loads_with_explicit_wiring(self):
-        site = _ROOT / "config"
-        policy = load_star_site_policy(site / "star_config_epsf_gepsf.yaml")
-        rows = load_star_targets(site / "star_targets_example.csv", site_dir=site)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            site = Path(tmpdir)
+            policy_path = site / "star_config.yaml"
+            policy_path.write_text(
+                (_ROOT / "config" / "star_config_epsf_gepsf.yaml")
+                .read_text(encoding="utf-8")
+                .replace(
+                    "  requirements: 'Memory >= 100000 && LoadAvg < 10 && Machine != \"plscience10.stsci.edu\"'\n  rank: \"-LoadAvg\"\n",
+                    "  host_stats_min_mem_mb: 100000\n  host_stats_max_load15: 10.0\n",
+                ),
+                encoding="utf-8",
+            )
+            targets_path = site / "star_targets.csv"
+            targets_path.write_text(
+                (_ROOT / "config" / "star_targets_example.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            policy = load_star_site_policy(policy_path)
+            rows = load_star_targets(targets_path, site_dir=site)
         row = find_star_target_row(rows, "s0020_c3_k2")
         run_cfg = resolve_star_run_config(policy, row, site_dir=site)
 

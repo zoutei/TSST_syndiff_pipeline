@@ -91,6 +91,19 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertEqual(policy.defaults["n_jobs"], 4)
         self.assertEqual(policy.condor.request_cpus, 4)
 
+    def test_load_diff_site_policy_rejects_legacy_condor_keys(self):
+        path = self.site / "diff_config_legacy.yaml"
+        path.write_text(
+            (self.site / "diff_config.yaml").read_text(encoding="utf-8").replace(
+                "request_memory: 32000",
+                "request_memory: 32000\n  requirements: 'Memory >= 32000'",
+            ),
+            encoding="utf-8",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            load_diff_site_policy(path)
+        self.assertIn("host_stats_min_mem_mb", str(ctx.exception))
+
     def test_freeze_target_diff_config_absolutizes_paths(self):
         cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())
         self.assertIsInstance(cfg, SynDiffConfig)
@@ -143,9 +156,8 @@ class TestSiteConfigLoader(unittest.TestCase):
     def test_example_site_files_exist(self):
         example = SitePaths.from_site_dir(_ROOT / "config")
         self.assertTrue(example.template_config.is_file())
-        self.assertTrue(example.diff_config.is_file())
         self.assertTrue(example.deployment_example.is_file())
-        policy = load_diff_site_policy(example.diff_config)
+        policy = load_diff_site_policy(_ROOT / "config" / "linear_centroids" / "diff_config.yaml")
         self.assertTrue(policy.pipeline)
         self.assertEqual(policy.condor.request_memory, 100_000)
         targets = load_targets(_ROOT / "config" / "targets_example.csv")

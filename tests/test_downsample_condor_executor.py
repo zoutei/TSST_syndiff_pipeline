@@ -37,10 +37,16 @@ class TestDownsampleCondorExecutor(unittest.TestCase):
         stages = parse_stage_params({})
         self.assertEqual(stages.downsample.executor, "local")
 
-    def test_parse_stage_params_rejects_templates_key(self):
+    def test_parse_stage_params_rejects_legacy_condor_keys(self):
         with self.assertRaises(ValueError) as ctx:
-            parse_stage_params({"templates": {"executor": "condor"}})
-        self.assertIn("downsample", str(ctx.exception))
+            parse_stage_params(
+                {
+                    "mapping": {
+                        "condor_requirements": "LoadAvg < 10",
+                    }
+                }
+            )
+        self.assertIn("condor_requirements", str(ctx.exception))
 
     def test_resolve_executor_downsample_condor(self):
         cfg = RunnerConfig(
@@ -60,7 +66,7 @@ class TestDownsampleCondorExecutor(unittest.TestCase):
                         "condor_request_cpus": 64,
                         "condor_request_memory": 500000,
                         "condor_request_disk": 10000,
-                        "condor_requirements": "Memory >= 500000",
+                        "host_stats_min_mem_mb": 500000,
                     }
                 }
             ),
@@ -71,7 +77,8 @@ class TestDownsampleCondorExecutor(unittest.TestCase):
         self.assertEqual(req.request_cpus, 64)
         self.assertEqual(req.request_memory_mb, 500000)
         self.assertEqual(req.request_disk_kb, 10000 * 1024)
-        self.assertEqual(req.requirements, "Memory >= 500000")
+        self.assertEqual(req.host_stats_min_mem_mb, 500000)
+        self.assertIsNone(req.requirements)
 
     def test_write_submit_file_includes_request_disk(self):
         with tempfile.TemporaryDirectory() as tmpdir:

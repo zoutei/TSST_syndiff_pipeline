@@ -15,7 +15,9 @@ if str(_ROOT) not in sys.path:
 from syndiff_pipeline.template_creation.orchestration.discord_bot import (
     _channel_matches,
     _condor_shell_argv,
+    cluster_status_trigger,
     condor_shell_trigger,
+    run_cluster_status_command,
     run_condor_shell_command,
 )
 
@@ -82,6 +84,23 @@ class TestCondorShellCommands(unittest.TestCase):
         with mock.patch("subprocess.run", side_effect=FileNotFoundError):
             messages = run_condor_shell_command("condor_status")
         self.assertIn("not found", messages[0])
+
+
+class TestClusterStatusCommand(unittest.TestCase):
+    def test_cluster_status_trigger_substring(self):
+        self.assertTrue(cluster_status_trigger("how is the cluster?"))
+        self.assertTrue(cluster_status_trigger("syndiff cluster"))
+        self.assertFalse(cluster_status_trigger("condor_q"))
+
+    def test_run_cluster_status_command_formats_output(self):
+        with mock.patch(
+            "syndiff_pipeline.common.orchestration.host_stats_cli.render_cluster_table_text",
+            return_value="HOST  SLOT\nplscience1.stsci.edu  515GB",
+        ):
+            messages = run_cluster_status_command()
+        self.assertEqual(len(messages), 1)
+        self.assertIn("**syndiff cluster**", messages[0])
+        self.assertIn("plscience1.stsci.edu", messages[0])
 
 
 if __name__ == "__main__":
