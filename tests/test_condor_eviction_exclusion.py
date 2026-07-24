@@ -763,6 +763,11 @@ class TestCondorRequirementsExclusion(unittest.TestCase):
 
 
 class TestCondorSubmitExclusions(unittest.TestCase):
+    def _empty_host_stats_env(self, tmp: str):
+        stats_dir = Path(tmp) / "empty_host_stats"
+        stats_dir.mkdir()
+        return unittest.mock.patch.dict(os.environ, {"HOST_STATS_DIR": str(stats_dir)})
+
     def test_submit_job_merges_bad_machines_into_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
             runs_root = str(Path(tmp) / "runs")
@@ -773,7 +778,9 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 stderr="",
                 returncode=0,
             )
-            with unittest.mock.patch.object(condor, "_run_condor", return_value=proc):
+            with self._empty_host_stats_env(tmp), unittest.mock.patch.object(
+                condor, "_run_condor", return_value=proc
+            ):
                 cluster_id, _epoch = condor.submit_job(
                     ["echo", "hi"],
                     runs_root,
@@ -785,7 +792,7 @@ class TestCondorSubmitExclusions(unittest.TestCase):
             self.assertEqual(cluster_id, 42)
             submit_text = artifacts["submit"].read_text(encoding="utf-8")
             self.assertIn('Machine != "plscience10.stsci.edu"', submit_text)
-            self.assertIn("LoadAvg < 10", submit_text)
+            self.assertIn("Memory >= 500000", submit_text)
 
     def test_submit_without_bad_machines_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -796,7 +803,9 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 stderr="",
                 returncode=0,
             )
-            with unittest.mock.patch.object(condor, "_run_condor", return_value=proc):
+            with self._empty_host_stats_env(tmp), unittest.mock.patch.object(
+                condor, "_run_condor", return_value=proc
+            ):
                 condor.submit_job(
                     ["echo", "hi"],
                     runs_root,
@@ -807,7 +816,8 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 )
             submit_text = artifacts["submit"].read_text(encoding="utf-8")
             self.assertEqual(submit_text.count("Machine !="), 0)
-            self.assertIn("requirements = LoadAvg < 10", submit_text)
+            self.assertIn("requirements = Memory >= 500000", submit_text)
+            self.assertIn("rank = -LoadAvg", submit_text)
 
     def test_submit_with_default_resources_and_no_bad_machines(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -818,7 +828,9 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 stderr="",
                 returncode=0,
             )
-            with unittest.mock.patch.object(condor, "_run_condor", return_value=proc):
+            with self._empty_host_stats_env(tmp), unittest.mock.patch.object(
+                condor, "_run_condor", return_value=proc
+            ):
                 cluster_id, _epoch = condor.submit_job(
                     ["echo", "hi"], runs_root, "run_a", "target", "star"
                 )

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -416,6 +417,76 @@ class TestCondorEvictionExclusion(unittest.TestCase):
             bad = condor.read_bad_machines(artifacts["bad_machines"])
             self.assertIn("plscience10.stsci.edu", bad)
 
+    def _held_timeout_reconcile(self, tmp_path: Path, *, hold_reason: str):
+        cluster_id = 888_030
+        target = Target(
+            sector=20,
+            camera=3,
+            ccd=2,
+            target_ra=210.0,
+            target_dec=81.0,
+            target_name="s20_astrometry",
+        )
+        state, run_dir = _minimal_condor_run(tmp_path, target)
+        label = target.label()
+        runs_root = tmp_path / "runs"
+        log_path = logs.target_log_path(str(runs_root), "run_a", label, "star")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text("starting\n", encoding="utf-8")
+        artifacts = condor.condor_artifact_paths(str(runs_root), "run_a", label, "star")
+        state.update_stage_status("run_a", label, "star", STATUS_READY)
+        state.try_atomic_claim(
+            "run_a",
+            label,
+            "star",
+            launch_token=state.new_launch_token(),
+            executor="condor",
+            native_id=cluster_id,
+            log_path=str(log_path),
+            submit_epoch=time.time() - 601.0,
+        )
+        ctx = resolve_run_context(run_dir=run_dir)
+        with unittest.mock.patch.object(
+            condor,
+            "query_clusters",
+            return_value={cluster_id: (condor._JOB_HELD, None)},
+        ), unittest.mock.patch.object(
+            condor, "_query_hold_reason", return_value=hold_reason
+        ), unittest.mock.patch.object(
+            condor, "remove_cluster", return_value=True
+        ) as rm:
+            condor._held_times[cluster_id] = time.time() - 601.0
+            counts = reconcile_running_stages(state, "run_a", ctx)
+        row = state.get_stage_run("run_a", label, "star")
+        return counts, row, rm, artifacts
+
+    def test_reconcile_requeues_any_held_timeout_regardless_of_reason(self):
+        # General behavior confirmed with the user: every hold reason gets
+        # bounded auto-retry, not just the memory-specific signature.
+        with tempfile.TemporaryDirectory() as tmp:
+            counts, row, rm, artifacts = self._held_timeout_reconcile(
+                Path(tmp), hold_reason="Policy violation, killed by admin"
+            )
+            self.assertEqual(counts["requeued"], 1)
+            self.assertEqual(row.status, STATUS_READY)
+            rm.assert_called_once()
+            self.assertFalse(artifacts["bad_machines"].exists())
+
+    def test_reconcile_requeues_and_excludes_low_usage_memory_host(self):
+        reason = (
+            "Error from slot1_1@plscience7.stsci.edu: Job has gone over cgroup "
+            "memory limit of 500096 megabytes. Last measured usage: 86221 "
+            "megabytes.  Consider resubmitting with a higher request_memory."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            counts, row, rm, artifacts = self._held_timeout_reconcile(
+                Path(tmp), hold_reason=reason
+            )
+            self.assertEqual(counts["requeued"], 1)
+            self.assertEqual(row.status, STATUS_READY)
+            bad = condor.read_bad_machines(artifacts["bad_machines"])
+            self.assertIn("plscience7.stsci.edu", bad)
+
 
 class TestCondorHoldTimeoutConfig(unittest.TestCase):
     def test_runner_config_defaults_hold_timeout(self):
@@ -584,6 +655,129 @@ class TestCondorHeldJob(unittest.TestCase):
             )
             self.assertFalse(hold_path.exists())
 
+    def test_held_past_timeout_excludes_low_usage_memory_host(self):
+        cluster_id = 777_006
+        condor._held_times[cluster_id] = time.time() - 601.0
+        # Real hold-reason string captured from s53's ps1_process failure.
+        reason = (
+            "Error from slot1_1@plscience7.stsci.edu: Job has gone over cgroup "
+            "memory limit of 500096 megabytes. Last measured usage: 86221 "
+            "megabytes.  Consider resubmitting with a higher request_memory."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_machines_path = Path(tmp) / "ps1_process.condor.bad_machines"
+            with unittest.mock.patch.object(
+                condor, "_query_hold_reason", return_value=reason
+            ), unittest.mock.patch.object(condor, "remove_cluster", return_value=True):
+                exit_code = condor.poll_cluster_status(
+                    cluster_id,
+                    condor._JOB_HELD,
+                    None,
+                    submitted_at=time.time(),
+                    hold_timeout_s=600.0,
+                    bad_machines_path=bad_machines_path,
+                )
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(
+                condor.read_bad_machines(bad_machines_path), {"plscience7.stsci.edu"}
+            )
+
+    def test_held_past_timeout_does_not_exclude_genuine_oom_host(self):
+        cluster_id = 777_007
+        condor._held_times[cluster_id] = time.time() - 601.0
+        # Real hold-reason string captured from the band_cache-bloat OOM (usage
+        # close to the limit) -- excluding the host here would be wrong, this
+        # is a genuine app-level memory need, not host-specific pressure.
+        reason = (
+            "Error from slot1_1@plscience14.stsci.edu: Job has gone over cgroup "
+            "memory limit of 500096 megabytes. Last measured usage: 378797 "
+            "megabytes.  Consider resubmitting with a higher request_memory."
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_machines_path = Path(tmp) / "ps1_process.condor.bad_machines"
+            with unittest.mock.patch.object(
+                condor, "_query_hold_reason", return_value=reason
+            ), unittest.mock.patch.object(condor, "remove_cluster", return_value=True):
+                exit_code = condor.poll_cluster_status(
+                    cluster_id,
+                    condor._JOB_HELD,
+                    None,
+                    submitted_at=time.time(),
+                    hold_timeout_s=600.0,
+                    bad_machines_path=bad_machines_path,
+                )
+            self.assertEqual(exit_code, 1)
+            self.assertFalse(bad_machines_path.exists())
+
+    def test_held_past_timeout_without_bad_machines_path_does_not_probe(self):
+        cluster_id = 777_008
+        condor._held_times[cluster_id] = time.time() - 601.0
+        with unittest.mock.patch.object(
+            condor, "_query_hold_reason", return_value="Memory exceeded"
+        ), unittest.mock.patch.object(
+            condor, "remove_cluster", return_value=True
+        ), unittest.mock.patch.object(
+            condor, "add_bad_machine"
+        ) as add_bad:
+            exit_code = condor.poll_cluster_status(
+                cluster_id,
+                condor._JOB_HELD,
+                None,
+                submitted_at=time.time(),
+                hold_timeout_s=600.0,
+            )
+        self.assertEqual(exit_code, 1)
+        add_bad.assert_not_called()
+
+
+class TestParseLowUsageMemoryHold(unittest.TestCase):
+    def test_matches_real_plscience7_signature(self):
+        reason = (
+            "Error from slot1_1@plscience7.stsci.edu: Job has gone over cgroup "
+            "memory limit of 500096 megabytes. Last measured usage: 86346 "
+            "megabytes.  Consider resubmitting with a higher request_memory."
+        )
+        self.assertEqual(
+            condor.parse_low_usage_memory_hold(reason), "plscience7.stsci.edu"
+        )
+
+    def test_does_not_match_genuine_near_limit_usage(self):
+        reason = (
+            "Error from slot1_1@plscience14.stsci.edu: Job has gone over cgroup "
+            "memory limit of 500096 megabytes. Last measured usage: 378797 "
+            "megabytes.  Consider resubmitting with a higher request_memory."
+        )
+        self.assertIsNone(condor.parse_low_usage_memory_hold(reason))
+
+    def test_none_hold_reason(self):
+        self.assertIsNone(condor.parse_low_usage_memory_hold(None))
+
+    def test_unparseable_hold_reason(self):
+        self.assertIsNone(
+            condor.parse_low_usage_memory_hold("Policy violation, killed by admin")
+        )
+
+    def test_zero_limit_is_not_divided_by(self):
+        reason = (
+            "Error from slot1_1@plscience7.stsci.edu: Job has gone over cgroup "
+            "memory limit of 0 megabytes. Last measured usage: 0 megabytes."
+        )
+        self.assertIsNone(condor.parse_low_usage_memory_hold(reason))
+
+    def test_custom_threshold(self):
+        reason = (
+            "Error from slot1_1@plscience7.stsci.edu: Job has gone over cgroup "
+            "memory limit of 100000 megabytes. Last measured usage: 60000 "
+            "megabytes."
+        )
+        # 60% usage: excluded at a strict 0.9 threshold...
+        self.assertEqual(
+            condor.parse_low_usage_memory_hold(reason, usage_ratio_threshold=0.9),
+            "plscience7.stsci.edu",
+        )
+        # ...but not at the default (0.5) threshold.
+        self.assertIsNone(condor.parse_low_usage_memory_hold(reason))
+
 
 class TestQueryHistoryLimit(unittest.TestCase):
     def test_query_history_uses_limit(self):
@@ -610,6 +804,51 @@ class TestQueryClustersBatch(unittest.TestCase):
         self.assertEqual(result[100003], (2, None))
         self.assertEqual(result[100002], (condor._JOB_COMPLETED, 0))
         history.assert_called_once_with(100002)
+
+
+class TestCondorQueryTimeouts(unittest.TestCase):
+    """A hung condor_q/condor_history subprocess must not block the caller
+    forever: _run_condor's timeout_s is now passed through, and a
+    subprocess.TimeoutExpired degrades to the same "no data yet" result the
+    callers already handle (falls back to history / retries next tick),
+    rather than propagating and taking down the scheduler tick."""
+
+    def test_query_queue_timeout_returns_none(self):
+        with unittest.mock.patch.object(
+            condor, "_run_condor", side_effect=subprocess.TimeoutExpired(cmd="condor_q", timeout=15.0)
+        ):
+            self.assertEqual(condor._query_queue(12345, timeout_s=0.01), (None, None))
+
+    def test_query_history_timeout_returns_none(self):
+        with unittest.mock.patch.object(
+            condor,
+            "_run_condor",
+            side_effect=subprocess.TimeoutExpired(cmd="condor_history", timeout=15.0),
+        ):
+            self.assertEqual(condor._query_history(12345, timeout_s=0.01), (None, None))
+
+    def test_query_hold_reason_timeout_returns_none(self):
+        with unittest.mock.patch.object(
+            condor, "_run_condor", side_effect=subprocess.TimeoutExpired(cmd="condor_q", timeout=15.0)
+        ):
+            self.assertIsNone(condor._query_hold_reason(12345, timeout_s=0.01))
+
+    def test_query_clusters_once_timeout_falls_back_to_history_per_cluster(self):
+        with unittest.mock.patch.object(
+            condor, "_run_condor", side_effect=subprocess.TimeoutExpired(cmd="condor_q", timeout=15.0)
+        ), unittest.mock.patch.object(
+            condor, "_query_history", return_value=(condor._JOB_COMPLETED, 0)
+        ) as history:
+            result = condor._query_clusters_once([100001, 100002], timeout_s=0.01)
+        self.assertEqual(result[100001], (condor._JOB_COMPLETED, 0))
+        self.assertEqual(result[100002], (condor._JOB_COMPLETED, 0))
+        self.assertEqual(history.call_count, 2)
+
+    def test_query_timeout_passed_through_to_run_condor(self):
+        with unittest.mock.patch.object(condor, "_run_condor") as run:
+            run.return_value = unittest.mock.Mock(stdout="", stderr="", returncode=0)
+            condor._query_queue(12345, timeout_s=7.5)
+            self.assertEqual(run.call_args.kwargs.get("timeout_s"), 7.5)
 
 
 class TestGarbledCondorOutput(unittest.TestCase):
