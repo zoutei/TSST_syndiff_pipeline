@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 _CONDOR_SHELL_COMMANDS = frozenset(
     {"condor_q", "condor_qn", "condor_status", "condor_status -tla"}
 )
+_CLUSTER_STATUS_HEADER = "syndiff cluster"
 _CONDOR_SHELL_TIMEOUT_S = 30.0
 _CONDOR_SHELL_TIMEOUT_OVERRIDES = {"condor_status -tla": 60.0}
 _STATUS_BUILD_TIMEOUT_S = 120.0
@@ -58,6 +59,11 @@ def condor_shell_trigger(message_text: str) -> str | None:
     if key in _CONDOR_SHELL_COMMANDS:
         return key
     return None
+
+
+def cluster_status_trigger(message_text: str) -> bool:
+    """True when *message_text* asks for a cluster host snapshot (contains ``cluster``)."""
+    return "cluster" in message_text.strip().lower()
 
 
 def _condor_shell_argv(trigger: str) -> list[str]:
@@ -125,6 +131,27 @@ def run_condor_shell_command(trigger: str, *, timeout_s: float | None = None) ->
         body = body[: max_body - 20] + "\n… (truncated)"
 
     header = f"**{trigger}**"
+    return pack_message_lines([header, f"```\n{body}\n```"], max_chars=_DISCORD_PACK_MAX_CHARS)
+
+
+def run_cluster_status_command(*, timeout_s: float | None = None) -> list[str]:
+    """Return compact cluster host table for Discord (no VERDICT column)."""
+    if timeout_s is None:
+        timeout_s = _CONDOR_SHELL_TIMEOUT_S
+    try:
+        from syndiff_pipeline.common.orchestration.host_stats_cli import (
+            render_cluster_table_text,
+        )
+
+        body = render_cluster_table_text(include_verdict=False)
+    except Exception as exc:
+        return [f"Failed to read cluster host stats: {exc}"]
+
+    max_body = _DISCORD_PACK_MAX_CHARS - len(_CLUSTER_STATUS_HEADER) - 20
+    if len(body) > max_body:
+        body = body[: max_body - 20] + "\n… (truncated)"
+
+    header = f"**{_CLUSTER_STATUS_HEADER}**"
     return pack_message_lines([header, f"```\n{body}\n```"], max_chars=_DISCORD_PACK_MAX_CHARS)
 
 
@@ -258,6 +285,7 @@ class PipelineDiscordBot:
                 getattr(message.channel, "name", message.channel.id),
             )
             trigger = condor_shell_trigger(message.content)
+            cluster_trigger = cluster_status_trigger(message.content)
             try:
                 await message.channel.trigger_typing()
             except Exception:
@@ -267,6 +295,10 @@ class PipelineDiscordBot:
                 if trigger is not None:
                     build_coro = loop.run_in_executor(
                         executor, run_condor_shell_command, trigger
+                    )
+                elif cluster_trigger:
+                    build_coro = loop.run_in_executor(
+                        executor, run_cluster_status_command
                     )
                 else:
                     build_coro = loop.run_in_executor(
@@ -279,6 +311,11 @@ class PipelineDiscordBot:
                 log.warning("Discord status build timed out after %.0fs", _STATUS_BUILD_TIMEOUT_S)
                 if trigger is not None:
                     replies = [f"`{trigger}` timed out after {_STATUS_BUILD_TIMEOUT_S:.0f}s."]
+                elif cluster_trigger:
+                    replies = [
+                        f"`{_CLUSTER_STATUS_HEADER}` timed out after "
+                        f"{_STATUS_BUILD_TIMEOUT_S:.0f}s."
+                    ]
                 else:
                     replies = [
                         "Pipeline status is taking too long (supervisor may be busy on NFS). "
@@ -288,6 +325,10 @@ class PipelineDiscordBot:
                 log.exception("Failed to build Discord reply")
                 if trigger is not None:
                     replies = [f"Failed to run `{trigger}` (see bot logs)."]
+                elif cluster_trigger:
+                    replies = [
+                        f"Failed to read `{_CLUSTER_STATUS_HEADER}` (see bot logs)."
+                    ]
                 else:
                     replies = ["Failed to read pipeline status (see bot logs)."]
             try:

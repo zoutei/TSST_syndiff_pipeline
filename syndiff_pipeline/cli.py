@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
             "  syndiff star run --site SITE --star-targets STAR_TARGETS.csv "
             "--target-name 20/3/2\n\n"
             "Monitoring & control:\n"
-            "  syndiff status|progress|runs|active|show|logs|tail|retry|pause|resume|kill\n"
+            "  syndiff status|progress|active|cluster|runs|show|logs|tail|retry|pause|resume|kill\n"
             "  syndiff verify|reconcile-manifests|daemon|notify\n\n"
             "Run: syndiff <command> --help"
         )
