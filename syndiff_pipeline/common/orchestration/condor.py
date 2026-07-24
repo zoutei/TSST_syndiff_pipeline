@@ -37,6 +37,11 @@ _DISCONNECT_CYCLE_START_RE = re.compile(
 _RECONNECT_TARGET_RE = re.compile(r"reconnect to\s+([^\s,<]+)", re.IGNORECASE)
 _NOT_FOUND_RE = re.compile(r"not found at execution machine", re.IGNORECASE)
 
+_HOLD_MEMORY_HOST_RE = re.compile(r"Error from\s+\S+@([^\s:]+):")
+_HOLD_MEMORY_LIMIT_RE = re.compile(r"cgroup memory limit of\s+(\d+)\s+megabytes")
+_HOLD_MEMORY_USAGE_RE = re.compile(r"[Ll]ast measured usage:\s+(\d+)\s+megabytes")
+_HOLD_LOW_USAGE_RATIO_THRESHOLD = 0.5
+
 _submission_times: dict[int, float] = {}
 _held_times: dict[int, float] = {}
 
@@ -47,11 +52,62 @@ class CondorResourceRequest:
     request_cpus: int = 64
     request_memory_mb: int = 500_000
     request_disk_kb: int | None = None
-    requirements: str | None = "Memory >= 500000 && LoadAvg < 10"
-    rank: str | None = "-LoadAvg"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
+    requirements: str | None = None
+    rank: str | None = None
 
 
-def wrapper_path() -> Path:
+CONDOR_POLICY_ALLOWED = frozenset(
+    {
+        "request_cpus",
+        "request_memory",
+        "host_stats_min_mem_mb",
+        "host_stats_max_load15",
+    }
+)
+LEGACY_CONDOR_POLICY_KEYS = frozenset(
+    {
+        "requirements",
+        "rank",
+        "condor_requirements",
+        "condor_rank",
+    }
+)
+
+
+def parse_condor_policy_block(
+    raw: dict | None,
+    *,
+    context: str,
+    default_cpus: int,
+    default_memory: int,
+    default_min_mem_mb: int | None = None,
+) -> tuple[int, int, int, float]:
+    """Parse a YAML ``condor:`` block; reject legacy requirements/rank keys."""
+    block = dict(raw or {})
+    legacy = sorted(k for k in block if k in LEGACY_CONDOR_POLICY_KEYS)
+    if legacy:
+        raise ValueError(
+            f"{context}: removed Condor keys {legacy}; use "
+            "host_stats_min_mem_mb and host_stats_max_load15 instead"
+        )
+    unknown = sorted(k for k in block if k not in CONDOR_POLICY_ALLOWED)
+    if unknown:
+        raise ValueError(f"{context}: unknown condor keys {unknown}")
+    request_memory = int(block.get("request_memory", default_memory))
+    min_mem = int(
+        block.get(
+            "host_stats_min_mem_mb",
+            default_min_mem_mb if default_min_mem_mb is not None else request_memory,
+        )
+    )
+    return (
+        int(block.get("request_cpus", default_cpus)),
+        request_memory,
+        min_mem,
+        float(block.get("host_stats_max_load15", 10.0)),
+    )
     """Wrapper path.
     
     Returns
@@ -464,6 +520,33 @@ def _write_eviction_state(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def parse_low_usage_memory_hold(
+    hold_reason: str | None,
+    *,
+    usage_ratio_threshold: float = _HOLD_LOW_USAGE_RATIO_THRESHOLD,
+) -> str | None:
+    """Return the host to exclude when a cgroup memory-limit hold's measured
+    usage is far below the limit (host-specific pressure, not genuine app need).
+
+    Genuine memory-bloat holds (measured usage close to the limit) return
+    None so a perfectly good host isn't excluded for a real app-level OOM.
+    """
+    if not hold_reason:
+        return None
+    host_match = _HOLD_MEMORY_HOST_RE.search(hold_reason)
+    limit_match = _HOLD_MEMORY_LIMIT_RE.search(hold_reason)
+    usage_match = _HOLD_MEMORY_USAGE_RE.search(hold_reason)
+    if not (host_match and limit_match and usage_match):
+        return None
+    limit_mb = int(limit_match.group(1))
+    if limit_mb <= 0:
+        return None
+    usage_mb = int(usage_match.group(1))
+    if usage_mb / limit_mb >= usage_ratio_threshold:
+        return None
+    return normalize_condor_host(host_match.group(1))
+
+
 def eviction_requeue_host(
     log_path: Path | str,
     *,
@@ -589,6 +672,9 @@ def submit_job(
     """Submit one stage command to Condor; return (cluster id, wall-clock submit epoch)."""
     resources = resources or CondorResourceRequest()
     artifacts = condor_artifact_paths(runs_root, run_id, target_label, stage)
+    from syndiff_pipeline.common.orchestration.host_stats import apply_host_stats_policy
+
+    resources = apply_host_stats_policy(resources)
     resources = apply_bad_machine_exclusions(resources, artifacts)
     write_submit_file(artifacts["submit"], cmd, artifacts, resources)
     proc = _run_condor(["condor_submit", str(artifacts["submit"])])
@@ -613,79 +699,115 @@ def submit_job(
     return cluster_id, submit_epoch
 
 
-def _query_queue(cluster_id: int) -> tuple[int | None, int | None]:
+def _query_queue(
+    cluster_id: int, *, timeout_s: float | None = _DISPLAY_QUERY_TIMEOUT_S
+) -> tuple[int | None, int | None]:
     """Query queue.
-    
+
     Parameters
     ----------
     cluster_id : int
-    
+
     Returns
     -------
     tuple[int | None, int | None]"""
-    proc = _run_condor(
-        ["condor_q", str(cluster_id), "-af", "JobStatus", "ExitCode"],
-        check=False,
-    )
+    try:
+        proc = _run_condor(
+            ["condor_q", str(cluster_id), "-af", "JobStatus", "ExitCode"],
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("condor_q timed out after %.0fs for cluster %s", timeout_s or 0.0, cluster_id)
+        return None, None
     line = proc.stdout.strip()
     if not line:
         return None, None
     return _parse_status_exit(line.split())
 
 
-def _query_history(cluster_id: int) -> tuple[int | None, int | None]:
+def _query_history(
+    cluster_id: int, *, timeout_s: float | None = _DISPLAY_QUERY_TIMEOUT_S
+) -> tuple[int | None, int | None]:
     """Query history.
-    
+
     Parameters
     ----------
     cluster_id : int
-    
+
     Returns
     -------
     tuple[int | None, int | None]"""
-    proc = _run_condor(
-        ["condor_history", str(cluster_id), "-af", "JobStatus", "ExitCode", "-limit", "1"],
-        check=False,
-    )
+    try:
+        proc = _run_condor(
+            ["condor_history", str(cluster_id), "-af", "JobStatus", "ExitCode", "-limit", "1"],
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "condor_history timed out after %.0fs for cluster %s", timeout_s or 0.0, cluster_id
+        )
+        return None, None
     line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
     if not line:
         return None, None
     return _parse_status_exit(line.split())
 
 
-def _query_hold_reason(cluster_id: int) -> str | None:
+def _query_hold_reason(
+    cluster_id: int, *, timeout_s: float | None = _DISPLAY_QUERY_TIMEOUT_S
+) -> str | None:
     """Query hold reason.
-    
+
     Parameters
     ----------
     cluster_id : int
-    
+
     Returns
     -------
     str | None"""
-    proc = _run_condor(
-        ["condor_q", str(cluster_id), "-af", "HoldReason"],
-        check=False,
-    )
+    try:
+        proc = _run_condor(
+            ["condor_q", str(cluster_id), "-af", "HoldReason"],
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "condor_q (hold reason) timed out after %.0fs for cluster %s",
+            timeout_s or 0.0,
+            cluster_id,
+        )
+        return None
     line = proc.stdout.strip()
     return line or None
 
 
 def _query_clusters_once(
-    unique_ids: list[int],
+    unique_ids: list[int], *, timeout_s: float | None = _DISPLAY_QUERY_TIMEOUT_S
 ) -> dict[int, tuple[int | None, int | None]]:
     result: dict[int, tuple[int | None, int | None]] = {}
-    proc = _run_condor(
-        [
-            "condor_q",
-            *[str(cluster_id) for cluster_id in unique_ids],
-            "-af",
-            "ClusterId",
-            "JobStatus",
-            "ExitCode",
-        ],
-        check=False,
-    )
+    try:
+        proc = _run_condor(
+            [
+                "condor_q",
+                *[str(cluster_id) for cluster_id in unique_ids],
+                "-af",
+                "ClusterId",
+                "JobStatus",
+                "ExitCode",
+            ],
+            check=False,
+            timeout_s=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "condor_q timed out after %.0fs for %d cluster(s)", timeout_s or 0.0, len(unique_ids)
+        )
+        for cluster_id in unique_ids:
+            result[cluster_id] = _query_history(cluster_id, timeout_s=timeout_s)
+        return result
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -783,6 +905,7 @@ def poll_cluster_status(
     submitted_at: float | None = None,
     hold_timeout_s: float = HOLD_TIMEOUT_S,
     hold_path: Path | None = None,
+    bad_machines_path: Path | None = None,
 ) -> int | None:
     """Map a Condor JobStatus/ExitCode pair to a stage exit code, or None if still running."""
     if status is None:
@@ -819,6 +942,16 @@ def poll_cluster_status(
                 hold_timeout_s,
                 hold_reason or "unknown",
             )
+            if bad_machines_path is not None:
+                bad_host = parse_low_usage_memory_hold(hold_reason)
+                if bad_host is not None:
+                    log.warning(
+                        "Condor cluster %s held on %s with usage far below the "
+                        "memory limit; excluding host",
+                        cluster_id,
+                        bad_host,
+                    )
+                    add_bad_machine(bad_machines_path, bad_host)
             _clear_hold_epoch(hold_path)
             remove_cluster(cluster_id)
             return 1

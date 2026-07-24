@@ -52,8 +52,8 @@ MAPPING_ALLOWED = frozenset(
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
-        "condor_requirements",
-        "condor_rank",
+        "host_stats_min_mem_mb",
+        "host_stats_max_load15",
         "x_left_dead",
         "x_right_dead",
         "y_edge_strip",
@@ -79,8 +79,8 @@ PS1_PROCESS_ALLOWED = frozenset(
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
-        "condor_requirements",
-        "condor_rank",
+        "host_stats_min_mem_mb",
+        "host_stats_max_load15",
     }
 )
 DIFF_ALLOWED = frozenset({"executor"})
@@ -100,8 +100,8 @@ REMAP_ALLOWED = frozenset(
         "condor_request_cpus",
         "condor_request_memory",
         "condor_request_disk",
-        "condor_requirements",
-        "condor_rank",
+        "host_stats_min_mem_mb",
+        "host_stats_max_load15",
         "store_name",
         "drift_source",
         "apply_intra_skycell",
@@ -126,8 +126,8 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "condor_request_cpus",
         "condor_request_memory",
         "condor_request_disk",
-        "condor_requirements",
-        "condor_rank",
+        "host_stats_min_mem_mb",
+        "host_stats_max_load15",
         "geometry_mode",
         "materialize_fits",
         "rebuild_field_store",
@@ -220,8 +220,8 @@ class MappingStageParams:
     executor: str = "condor"
     condor_request_cpus: int = 16
     condor_request_memory: int = 100_000
-    condor_requirements: str | None = "Memory <= 500000 && LoadAvg < 10"
-    condor_rank: str | None = "-LoadAvg"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
     x_left_dead: int = 44
     x_right_dead: int = 44
     y_edge_strip: int = 30
@@ -254,9 +254,9 @@ class Ps1ProcessStageParams:
     write_per_scc_convolved_zarr: bool = True
     executor: str = "condor"
     condor_request_cpus: int = 64
-    condor_request_memory: int = 500_000
-    condor_requirements: str | None = "Memory >= 500000 && LoadAvg < 10"
-    condor_rank: str | None = "-LoadAvg"
+    condor_request_memory: int = 300_000
+    host_stats_min_mem_mb: int = 300_000
+    host_stats_max_load15: float = 10.0
 
     def __post_init__(self) -> None:
         if self.use_shared_convolved_store and self.write_per_scc_convolved_zarr:
@@ -304,8 +304,8 @@ class RemapStageParams:
     condor_request_cpus: int = 32
     condor_request_memory: int = 128_000
     condor_request_disk: int | None = None  # MB; None → omit request_disk
-    condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
-    condor_rank: str | None = "-LoadAvg"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
     # Named remap lane → remap_{store_name}/; None → remap/
     store_name: str | None = None
     drift_source: str = "per_skycell"
@@ -344,12 +344,12 @@ class DownsampleStageParams:
     condor_request_cpus: int = 16
     condor_request_memory: int = 128_000
     condor_request_disk: int | None = None  # MB; None → omit request_disk
-    condor_requirements: str | None = "Memory >= 128000 && LoadAvg < 10"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
     geometry_mode: str = "field"
     materialize_fits: bool = False
     rebuild_field_store: bool = False
     prematerialize_top_n: int | None = None
-    condor_rank: str | None = "-LoadAvg"
     apply_intra_skycell: bool = True
     apply_inter_skycell: bool = True
     # INPUT: which remap lane to read; None → inherit stages.remap.store_name

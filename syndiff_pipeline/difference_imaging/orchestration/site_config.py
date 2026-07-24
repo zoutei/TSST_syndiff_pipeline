@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from syndiff_pipeline.common.orchestration.condor import parse_condor_policy_block
 from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
     load_deployment,
@@ -73,8 +74,8 @@ class CondorResources:
     """CondorResources."""
     request_cpus: int = 16
     request_memory: int = 64_000
-    requirements: str | None = "Memory >= 64000 && LoadAvg < 10"
-    rank: str | None = "-LoadAvg"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
 
 
 @dataclass
@@ -124,12 +125,17 @@ def _parse_condor(raw: dict | None) -> CondorResources:
     Returns
     -------
     CondorResources"""
-    raw = raw or {}
+    cpus, mem, min_mem, max_load15 = parse_condor_policy_block(
+        raw,
+        context="diff_config.yaml condor",
+        default_cpus=16,
+        default_memory=64_000,
+    )
     return CondorResources(
-        request_cpus=int(raw.get("request_cpus", 16)),
-        request_memory=int(raw.get("request_memory", 64_000)),
-        requirements=raw.get("requirements"),
-        rank=raw.get("rank"),
+        request_cpus=cpus,
+        request_memory=mem,
+        host_stats_min_mem_mb=min_mem,
+        host_stats_max_load15=max_load15,
     )
 
 

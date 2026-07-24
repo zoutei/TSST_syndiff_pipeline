@@ -117,8 +117,8 @@ def _photometry_condor_resources(cfg):
     return condor.CondorResourceRequest(
         request_cpus=c.request_cpus,
         request_memory_mb=c.request_memory,
-        requirements=c.requirements,
-        rank=c.rank,
+        host_stats_min_mem_mb=c.host_stats_min_mem_mb,
+        host_stats_max_load15=c.host_stats_max_load15,
     )
 
 

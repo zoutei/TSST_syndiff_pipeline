@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from syndiff_pipeline.common.orchestration.condor import parse_condor_policy_block
 from syndiff_pipeline.common.orchestration.targets import Target, _parse_bool, find_target
 from syndiff_pipeline.difference_imaging.support.paths import normalize_photometry_run_id
 
@@ -73,8 +74,8 @@ class StarCondorConfig:
 
     request_cpus: int = 8
     request_memory: int = 100_000
-    requirements: str | None = 'Memory >= 100000 && LoadAvg < 10 && Machine != "plscience10.stsci.edu"'
-    rank: str | None = "-LoadAvg"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
 
 
 @dataclass
@@ -260,15 +261,17 @@ def _parse_star_epsf(raw: dict | None) -> StarEpsfConfig | None:
 
 def _parse_star_condor(raw: dict | None) -> StarCondorConfig:
     raw = raw or {}
-    mem = int(raw.get("request_memory", 100_000))
-    req = raw.get("requirements")
-    if req is None:
-        req = f"Memory >= {mem} && LoadAvg < 10"
+    cpus, mem, min_mem, max_load15 = parse_condor_policy_block(
+        raw,
+        context="star_config.yaml condor",
+        default_cpus=8,
+        default_memory=100_000,
+    )
     return StarCondorConfig(
-        request_cpus=int(raw.get("request_cpus", 8)),
+        request_cpus=cpus,
         request_memory=mem,
-        requirements=str(req) if req else None,
-        rank=raw.get("rank", "-LoadAvg"),
+        host_stats_min_mem_mb=min_mem,
+        host_stats_max_load15=max_load15,
     )
 
 
@@ -513,8 +516,8 @@ def write_frozen_star_config(policy: StarSitePolicy, dest: str | Path) -> Path:
     payload["condor"] = {
         "request_cpus": policy.condor.request_cpus,
         "request_memory": policy.condor.request_memory,
-        "requirements": policy.condor.requirements,
-        "rank": policy.condor.rank,
+        "host_stats_min_mem_mb": policy.condor.host_stats_min_mem_mb,
+        "host_stats_max_load15": policy.condor.host_stats_max_load15,
     }
     dest_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return dest_path
