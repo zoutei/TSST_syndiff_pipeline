@@ -1,0 +1,81 @@
+# Sector 20 exoplanet-host-star campaign: template policy.
+# Separate site dir (not config/pipeline.yaml) so this campaign's
+# geometry_mode: field default and higher Condor CPU requests don't change
+# behavior for any other target using the shared site config.
+deployment_file: ../deployment.yaml
+diff_config: diff_config.yaml
+star_config: star_config.yaml
+
+stages:
+  wcs_grouping:
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+    crop_mode: full
+    geometry_mode: field
+    grouping_quantum_ps1_px: 1.0
+  mapping:
+    oversampling_factor: 1
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  ps1_download:
+    num_workers: 8
+    overwrite: false
+  ps1_process:
+    ps1_source: zarr
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+    psf_sigma: 40.0
+    projections_limit: null
+  remap:
+    cache_quantum_ps1_px: 0.25
+    keying: phase
+    condor_request_cpus: 32
+    condor_request_memory: 65536
+  downsample:
+    ignore_mask_bits: [12]
+    oversampling_factor: 1
+    n_jobs: 32
+    materialize_fits: false
+  diff:
+    executor: condor
+  star:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2
+  mapping:
+    max_concurrent: 6
+  ps1_process:
+    max_concurrent: 4
+  diff:
+    max_concurrent: 6
+  star:
+    max_concurrent: 4
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    run_canceled: true
+    run_retried: true
+    run_stalled: true
+    run_resumed: true
+    stage_failed: true
+    stage_completed: true
+    stage_canceled: true
+    stage_died: true
+    daemon_unhealthy: true
+  bot:
+    enabled: true

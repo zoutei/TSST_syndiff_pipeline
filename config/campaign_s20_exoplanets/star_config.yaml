@@ -1,0 +1,47 @@
+# Sector 20 exoplanet-host-star campaign: star branch (light curves).
+# Consumes this campaign's own diff-branch outputs (hp_d, hp_c, epsf_r1) --
+# no separate background stage in this campaign's diff_config, so
+# phot_bkg is null. gepsf reuses the diff branch's already-built epsf_r1
+# gridded ePSF (ensure_star_epsf_catalog finds it under the baseline
+# workspace and reuses it without rebuilding).
+deployment_file: ../deployment.yaml
+
+defaults:
+  cutout_size: 96
+  stamp_size: 24
+  kernel_margin_px: 470
+  ps1_source: zarr_local_only
+  debug_plots: true
+  max_ffis: null
+  overwrite: false
+
+baseline:
+  workspace_run_id: none
+  diffs: hp_d
+  convolved: hp_c
+  phot_bkg: null
+
+photometry:
+  methods:
+    - name: gepsf
+      type: psf
+      psf_type: epsf
+      inputs:
+        epsf: epsf_r1
+      fit_shape: 11
+      aperture_radius: 2
+      psf_grouper_min_separation: 10
+    - name: prf
+      type: psf
+      psf_type: prf
+    - name: ap3
+      type: aperture
+      tar_ap: 3
+      sky_in: 5
+      sky_out: 9
+
+condor:
+  request_cpus: 16
+  request_memory: 100000
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0
