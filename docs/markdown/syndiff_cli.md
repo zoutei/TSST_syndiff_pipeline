@@ -17,6 +17,7 @@ There is **no `all` noun**. Invoking `syndiff all ...` prints a guiding error te
 
 - [Execution presets (nouns)](#execution-presets-nouns)
 - [Monitoring and control verbs](#monitoring-and-control-verbs)
+  - [Cluster host snapshot (`syndiff cluster`)](#cluster-host-snapshot)
 - [Pipeline stages (main DAG + branches)](#pipeline-stages-main-dag--branches)
 - [Internal worker entry points](#internal-worker-entry-points)
 - [Science modules](#science-modules)
@@ -123,6 +124,7 @@ syndiff retry \
 |---------|--------------|
 | **`syndiff progress`** | Aggregate stage counts; optional per-task detail from stage logs and progress sidecars (`downsample.progress.json`, `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json`). Condor detail lines show `condor_q` state. Use `--no-detail` for summary-only. |
 | **`syndiff status`** | Per-target stage grid: `tess_dl \| map \| ps1_dl \| ps1_pr \| remap \| down \| diff` (`photometry` and `star` omitted). `--watch` for live refresh. |
+| **`syndiff cluster`** | Compact table of science-cluster execute hosts from sampler JSON (`HOST`, `SLOT`, `AVAIL`, `LOAD15`, `AGE`). No VERDICT column by default. Use `--check` for placement preview (VERDICT + exclusion summary). See [Cluster host snapshot](#cluster-host-snapshot). |
 | **`syndiff show`** | Dump `run_meta.json`. |
 | **`syndiff logs`** / **`syndiff tail`** | Daemon log or `per_target/<label>/<stage>.log`. |
 
@@ -165,6 +167,104 @@ Insert **command intents** into SQLite; the supervisor applies them on the next 
 | **`syndiff notify test`** | Discord preview (`--dry-run` prints locally). |
 
 There is **no** `syndiff discord bot` CLI. When `notifications.bot.enabled` is true, the status-reply bot runs **in-process inside the supervisor daemon**.
+
+### Cluster host snapshot
+
+`syndiff cluster` reads per-host sampler JSON from `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`) and prints a **fixed-width, monospace-friendly table** of all expected execute hosts (`plscience1`–`plscience15`). This is the same heartbeat data syndiff uses at `condor_submit` for host filtering and `load15` ranking (see [HTCondor integration](template_pipeline.md#htcondor-integration)).
+
+Implementation: `common/orchestration/host_stats_cli.py` (table formatting + CLI); selection logic lives in `common/orchestration/host_stats.py`.
+
+#### Default vs placement check
+
+| Mode | Command | Output |
+|------|---------|--------|
+| **Status** (default) | `syndiff cluster` | `HOST`, `SLOT`, `AVAIL`, `LOAD15`, `AGE` — no pass/fail column |
+| **Placement check** | `syndiff cluster --check` | Above + `VERDICT`, threshold footer, Condor `requirements` exclusion snippet |
+
+Status mode answers “what does the cluster look like right now?” Placement check answers “would stage *X* be able to land on these hosts with the configured thresholds?”
+
+#### Example output
+
+Default (live heartbeats):
+
+```text
+HOST                   SLOT   AVAIL LOAD15 AGE
+--------------------- ----- ------- ------ ---
+plscience4.stsci.edu  515GB 361.7GB  37.90  8s
+plscience5.stsci.edu  515GB 423.7GB   4.75  0s
+plscience7.stsci.edu      ?       ?      ?   ?
+```
+
+`?` means no sampler JSON (or unreadable file) for that host. Column widths are computed from the data so values like `361.7GB` stay aligned.
+
+Placement check (`--check --preset 500gb`):
+
+```text
+HOST                   SLOT   AVAIL LOAD15 AGE VERDICT
+--------------------- ----- ------- ------ --- -------------------------------------------
+plscience4.stsci.edu  515GB 361.7GB  37.90  9s EXCLUDE (high load15 37.90)
+plscience5.stsci.edu  515GB 423.7GB   4.75  1s OK
+plscience7.stsci.edu      ?       ?      ?   ? EXCLUDE (missing)
+```
+
+Footer (not shown): `Thresholds: …`, `Excluded: N  OK: M`, and a `requirements:` block listing `Machine != "…"` exclusions.
+
+#### Column reference
+
+| Column | Align | Source | Notes |
+|--------|-------|--------|-------|
+| `HOST` | left | `plscienceN.stsci.edu` | Fixed list of 15 execute hosts |
+| `SLOT` | right | `mem_total_mb` | Rounded to Condor `Memory` buckets (`128GB`, `515GB`, …) |
+| `AVAIL` | right | `mem_available_mb` | Decimal GB (`MemAvailable` from sampler) |
+| `LOAD15` | right | `load15` | 15-minute load average; sole **ranking** key at submit |
+| `AGE` | right | heartbeat timestamp | Seconds since last JSON write; stale if >300 s at submit |
+| `VERDICT` | left | `--check` only | `OK` or `EXCLUDE (reason, …)` |
+
+At submit time, `mem_available_mb` is a **filter only** (must be ≥ `host_stats_min_mem_mb`); more free RAM does not improve rank once above the threshold.
+
+#### Common commands
+
+```bash
+syndiff cluster                              # status only (no VERDICT)
+syndiff cluster --check --preset 500gb       # placement preview for ps1_process
+syndiff cluster --check --preset 128gb       # mapping / remap class hosts
+syndiff cluster --check --site config/ --stage ps1_process   # thresholds from pipeline.yaml
+syndiff cluster --check --site config/ --stage diff          # thresholds from diff_config.yaml
+syndiff cluster --check --site config/ --stage star          # star_config.yaml condor block
+syndiff cluster --format requirements --check --preset 500gb  # Condor exclusion expression only
+```
+
+#### Flags
+
+| Flag | Purpose |
+|------|---------|
+| `--check` | Add `VERDICT` column, threshold footer, and Condor `requirements` exclusion snippet |
+| `--preset 128gb\|500gb` | Shortcut thresholds for `--check` (`128000`/`300000` MB min mem, `10.0` max load15) |
+| `--min-mem-mb`, `--max-load15`, `--max-age-s` | Override thresholds for `--check` (default max age: 300 s) |
+| `--site` + `--stage` | Load `host_stats_min_mem_mb` / `host_stats_max_load15` from site config for that stage |
+| `--format requirements\|bad-machines\|hosts` | Machine-readable exclusion lists (implies `--check`) |
+| `--include-ok` | With `--format`, include passing hosts instead of excluded only |
+| `--stats-dir` | Override `HOST_STATS_DIR` |
+
+**`--stage` values** for `--site`: template stages `mapping`, `ps1_process`, `remap`, `downsample`; branch stages `diff`, `star`, `photometry` (read from the matching site YAML `condor:` block).
+
+#### Discord bot
+
+When `notifications.bot.enabled` is true, the in-process status bot handles on-demand queries in the configured channel:
+
+| Trigger | Match rule | Reply |
+|---------|------------|-------|
+| Condor shell | **Exact** message (trimmed, case-insensitive): `condor_q`, `condor_qn`, `condor_status`, `condor_status -tla` | Shell output in a fenced code block |
+| Cluster snapshot | Message text **contains** the word `cluster` (substring, case-insensitive) | Compact `syndiff cluster` table (no `VERDICT`), header `**syndiff cluster**` |
+| Pipeline status | Everything else | Live `progress` + `status` grid |
+
+**Precedence:** exact Condor triggers win over the cluster substring. A message that is only `condor_q` does not also match cluster. A message like `how is the cluster?` returns the host table, not pipeline status.
+
+#### Sampler deployment and legacy script
+
+Deploy and troubleshoot the sampler with [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md) (`launch_monitors.sh` on science hosts).
+
+`tools/cluster_host_monitor/read_host_stats.py` is a thin wrapper around the same code path as `syndiff cluster --check` (VERDICT on by default). Prefer `syndiff cluster` for day-to-day use.
 
 ---
 
@@ -242,7 +342,9 @@ Template and diff science code lives under `template_creation/processing/` and `
 | `star/orchestration/stages.py` | Star registry + verifier. |
 | `common/orchestration/state.py` | SQLite schema, status machine. |
 | `common/orchestration/scheduler.py` | Supervisor tick. |
-| `common/orchestration/condor.py` | Submit / poll / held jobs. |
+| `common/orchestration/condor.py` | Submit / poll / held jobs; host-stats `requirements` + `rank`. |
+| `common/orchestration/host_stats.py` | Sampler JSON discovery, host filter/rank at `condor_submit`. |
+| `common/orchestration/host_stats_cli.py` | `syndiff cluster` table formatting and placement-check CLI. |
 | `common/scc_paths.py` | SCC + event path helpers. |
 | `template_creation/orchestration/stages.py` | Template registry (`…`, `remap`, `downsample`). |
 | `template_creation/orchestration/verify.py` | On-disk verifiers + manifests. |
@@ -259,6 +361,7 @@ Template and diff science code lives under `template_creation/processing/` and `
 | [`storage_layout.md`](storage_layout.md) | `diff_{lane}/`, `bookkeeping/diff/`, `phot_{run_id}/` |
 | [`bookkeeping.md`](bookkeeping.md) | Provenance CLI |
 | [`template_runner_architecture.md`](template_runner_architecture.md) | Scheduler, verify, recovery |
+| [`../../tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md) | Host sampler deploy + `syndiff cluster` |
 | [`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md) | SQLite status transitions |
 | [`../config/`](../../config/) | Site config examples |
 | [`README.md`](README.md) | Documentation index |

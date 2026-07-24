@@ -38,6 +38,8 @@ syndiff star run --site config/ --star-targets {star_targets.csv} --target-name 
 ```bash
 syndiff status --site config/ --watch        # per-target stage grid
 syndiff progress --site config/              # aggregate + per-task progress
+syndiff cluster                              # execute-host sampler table (HOST/SLOT/AVAIL/LOAD15/AGE)
+syndiff cluster --check --preset 500gb       # placement preview before ps1_process submit
 syndiff tail --run-id {rid} --deployment config/deployment.yaml --scc {label} --stage {stage}
 syndiff retry --run-id {rid} --deployment config/deployment.yaml --scc {label} --stage {stage}
 syndiff pause|resume|kill --run-id {rid} --deployment config/deployment.yaml
@@ -45,6 +47,8 @@ syndiff verify --site config/ --targets config/targets_example.csv  # pre-run ar
 ```
 
 Run-control verbs (`retry`, `pause`, `kill`, `logs`, `tail`, `show`) take `--run-dir` or `--run-id` + `--deployment`, **not** `--site`. Control commands write intents to SQLite; the supervisor applies them on its next tick.
+
+**Cluster host snapshot:** `syndiff cluster` reads sampler JSON from `HOST_STATS_DIR` (default `~/.syndiff/host_stats`) — same data used at `condor_submit` for host filter/rank. Discord bot replies with the compact table when a channel message contains `cluster`. Deploy samplers: `tools/cluster_host_monitor/launch_monitors.sh`. Full docs: `docs/markdown/syndiff_cli.md#cluster-host-snapshot`, `tools/cluster_host_monitor/README.md`.
 
 ## Where to look when something fails
 

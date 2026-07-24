@@ -16,7 +16,7 @@ Site policy file: **`photometry_config.yaml`** (or any path passed as `--photome
 | `additional_forced_targets` | no | Extra forced positions applied to every event |
 | `per_event_force_targets` | no | Map of event label → extra forced-target list |
 | `overrides` | no | Per-SCC (`sector/camera/ccd`) overrides of `defaults` / `paths` / `pipeline` |
-| `condor` | no | `request_cpus`, `request_memory`, `requirements`, `rank` |
+| `condor` | no | `request_cpus`, `request_memory`, `host_stats_min_mem_mb`, `host_stats_max_load15` (legacy `requirements` / `rank` rejected) |
 
 ## `defaults`
 
