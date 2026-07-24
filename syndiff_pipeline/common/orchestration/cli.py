@@ -1156,6 +1156,34 @@ def cmd_active(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_cluster(args: argparse.Namespace) -> int:
+    """Show cluster execute-host sampler snapshot (optional placement check)."""
+    from syndiff_pipeline.common.orchestration.host_stats_cli import main as cluster_main
+
+    argv: list[str] = []
+    if args.stats_dir is not None:
+        argv.extend(["--stats-dir", str(args.stats_dir)])
+    if args.check:
+        argv.append("--check")
+    if args.preset:
+        argv.extend(["--preset", args.preset])
+    if args.min_mem_mb is not None:
+        argv.extend(["--min-mem-mb", str(args.min_mem_mb)])
+    if args.max_load15 is not None:
+        argv.extend(["--max-load15", str(args.max_load15)])
+    if args.max_age_s != 300:
+        argv.extend(["--max-age-s", str(args.max_age_s)])
+    if args.site:
+        argv.extend(["--site", args.site])
+    if args.stage:
+        argv.extend(["--stage", args.stage])
+    if args.format != "table":
+        argv.extend(["--format", args.format])
+    if args.include_ok:
+        argv.append("--include-ok")
+    return cluster_main(argv)
+
+
 def cmd_show(args: argparse.Namespace) -> int:
     """Cmd show.
     
@@ -1690,6 +1718,47 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("active", help="Show active runs and supervisor")
     _add_workspace_scope(sp)
     sp.set_defaults(func=cmd_active)
+
+    sp = sub.add_parser(
+        "cluster",
+        help="Execute-host memory/load snapshot from cluster host sampler JSON",
+    )
+    sp.add_argument(
+        "--stats-dir",
+        type=Path,
+        default=None,
+        help="Per-host JSON directory (default: HOST_STATS_DIR or ~/.syndiff/host_stats)",
+    )
+    sp.add_argument(
+        "--check",
+        action="store_true",
+        help="Placement preview: VERDICT column + exclusion summary",
+    )
+    sp.add_argument(
+        "--preset",
+        choices=["128gb", "500gb"],
+        help="Threshold preset for --check (128gb mapping/remap, 500gb ps1_process)",
+    )
+    sp.add_argument("--min-mem-mb", type=int, default=None)
+    sp.add_argument("--max-load15", type=float, default=None)
+    sp.add_argument("--max-age-s", type=int, default=300)
+    sp.add_argument(
+        "--site",
+        default=None,
+        help="Site config dir; with --check --stage, load host_stats thresholds",
+    )
+    sp.add_argument(
+        "--stage",
+        default=None,
+        help="Stage for --site (mapping, ps1_process, remap, downsample, diff, star, photometry)",
+    )
+    sp.add_argument(
+        "--format",
+        choices=("table", "requirements", "bad-machines", "hosts"),
+        default="table",
+    )
+    sp.add_argument("--include-ok", action="store_true")
+    sp.set_defaults(func=cmd_cluster)
 
     sp = sub.add_parser("show", help="Show run metadata JSON")
     _add_run_scope(sp)
