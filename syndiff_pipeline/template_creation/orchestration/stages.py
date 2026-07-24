@@ -37,8 +37,8 @@ def _condor_resources_for_mapping(cfg):
     return condor.CondorResourceRequest(
         request_cpus=params.condor_request_cpus,
         request_memory_mb=params.condor_request_memory,
-        requirements=params.condor_requirements,
-        rank=params.condor_rank,
+        host_stats_min_mem_mb=params.host_stats_min_mem_mb,
+        host_stats_max_load15=params.host_stats_max_load15,
     )
 
 
@@ -54,8 +54,8 @@ def _condor_resources_for_ps1_process(cfg):
     return condor.CondorResourceRequest(
         request_cpus=params.condor_request_cpus,
         request_memory_mb=params.condor_request_memory,
-        requirements=params.condor_requirements,
-        rank=params.condor_rank,
+        host_stats_min_mem_mb=params.host_stats_min_mem_mb,
+        host_stats_max_load15=params.host_stats_max_load15,
     )
 
 
@@ -82,8 +82,8 @@ def _condor_resources_for_remap(cfg):
     return condor.CondorResourceRequest(
         request_cpus=params.condor_request_cpus,
         request_memory_mb=params.condor_request_memory,
-        requirements=params.condor_requirements,
-        rank=params.condor_rank,
+        host_stats_min_mem_mb=params.host_stats_min_mem_mb,
+        host_stats_max_load15=params.host_stats_max_load15,
     )
 
 
@@ -98,8 +98,8 @@ def _condor_resources_for_downsample(cfg):
         request_cpus=params.condor_request_cpus,
         request_memory_mb=params.condor_request_memory,
         request_disk_kb=request_disk_kb,
-        requirements=params.condor_requirements,
-        rank=params.condor_rank,
+        host_stats_min_mem_mb=params.host_stats_min_mem_mb,
+        host_stats_max_load15=params.host_stats_max_load15,
     )
 
 

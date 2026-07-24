@@ -10,6 +10,7 @@ from typing import Any
 
 import yaml
 
+from syndiff_pipeline.common.orchestration.condor import parse_condor_policy_block
 from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
     load_deployment,
@@ -38,8 +39,8 @@ class PhotometryCondorConfig:
 
     request_cpus: int = 16
     request_memory: int = 100_000
-    requirements: str | None = "Memory >= 100000 && LoadAvg < 10"
-    rank: str | None = "-LoadAvg"
+    host_stats_min_mem_mb: int = 128_000
+    host_stats_max_load15: float = 10.0
 
 
 @dataclass
@@ -79,16 +80,17 @@ class PhotometryRunConfig:
 
 
 def _parse_condor(raw: dict | None) -> PhotometryCondorConfig:
-    raw = raw or {}
-    mem = int(raw.get("request_memory", 100_000))
-    req = raw.get("requirements")
-    if req is None:
-        req = f"Memory >= {mem} && LoadAvg < 10"
+    cpus, mem, min_mem, max_load15 = parse_condor_policy_block(
+        raw,
+        context="photometry_config.yaml condor",
+        default_cpus=16,
+        default_memory=100_000,
+    )
     return PhotometryCondorConfig(
-        request_cpus=int(raw.get("request_cpus", 16)),
+        request_cpus=cpus,
         request_memory=mem,
-        requirements=str(req) if req else None,
-        rank=raw.get("rank", "-LoadAvg"),
+        host_stats_min_mem_mb=min_mem,
+        host_stats_max_load15=max_load15,
     )
 
 
@@ -304,8 +306,8 @@ def write_frozen_photometry_config(policy: PhotometrySitePolicy, dest: str | Pat
         "condor": {
             "request_cpus": policy.condor.request_cpus,
             "request_memory": policy.condor.request_memory,
-            "requirements": policy.condor.requirements,
-            "rank": policy.condor.rank,
+            "host_stats_min_mem_mb": policy.condor.host_stats_min_mem_mb,
+            "host_stats_max_load15": policy.condor.host_stats_max_load15,
         },
     }
     dest_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
