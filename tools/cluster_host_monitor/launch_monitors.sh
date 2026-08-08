@@ -18,12 +18,32 @@ HOSTS=(
   science{1..15}.stsci.edu
 )
 
+resolve_host() {
+  # Map scienceN / plscienceN / FQDN forms to SSH target scienceN.stsci.edu.
+  local raw="$1" n
+  raw="${raw%.stsci.edu}"
+  if [[ "${raw}" =~ ^science([0-9]+)$ ]]; then
+    n="${BASH_REMATCH[1]}"
+  elif [[ "${raw}" =~ ^plscience([0-9]+)$ ]]; then
+    n="${BASH_REMATCH[1]}"
+  else
+    echo "Unrecognized host: $1 (expected scienceN[.stsci.edu] or plscienceN[.stsci.edu])" >&2
+    return 1
+  fi
+  if (( n < 1 || n > 15 )); then
+    echo "Host index out of range: $1 (expected 1..15)" >&2
+    return 1
+  fi
+  printf 'science%s.stsci.edu' "${n}"
+}
+
 usage() {
   cat <<EOF
 Usage: $(basename "$0") <start|stop|restart|status|ls|debug> [--force] [--install] [host]
 
-Start host_sampler.sh on all science hosts via SSH. The sampler script and
-heartbeat JSON files live on shared home NFS (/home/kshukawa/...).
+Start host_sampler.sh on all science hosts via SSH (or one host if given).
+The sampler script and heartbeat JSON files live on shared home NFS
+(/home/kshukawa/...).
 
 Defaults:
   REMOTE_SAMPLER=${REMOTE_SAMPLER}
@@ -33,11 +53,15 @@ Options:
   --install   scp host_sampler.sh from this repo to REMOTE_SAMPLER first
   --force     kill and restart even when a fresh heartbeat exists
   --quiet     less output (HOST_MONITOR_VERBOSE=0)
+  host        optional: limit start/stop/restart/status/debug to one server
+              (science5, science5.stsci.edu, plscience5, plscience5.stsci.edu)
 
 Examples:
   $(basename "$0") start
+  $(basename "$0") start science5
+  $(basename "$0") start --install --force plscience12.stsci.edu
   $(basename "$0") debug science1.stsci.edu
-  $(basename "$0") status
+  $(basename "$0") status science5
 EOF
 }
 
@@ -237,28 +261,44 @@ run_all() {
 }
 
 cmd="${1:-}"; shift || true
-DEBUG_HOST=""
+TARGET_HOST=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force) FORCE_START=1; shift ;;
     --install) INSTALL_SAMPLERS=1; shift ;;
     --quiet) VERBOSE=0; shift ;;
-    science*.stsci.edu) DEBUG_HOST="$1"; shift ;;
+    --host)
+      shift
+      [[ $# -gt 0 ]] || { echo "--host requires an argument" >&2; exit 2; }
+      TARGET_HOST="$(resolve_host "$1")" || exit 2
+      shift
+      ;;
+    science*|plscience*)
+      TARGET_HOST="$(resolve_host "$1")" || exit 2
+      shift
+      ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
 done
+
+if [[ -n "${TARGET_HOST}" ]]; then
+  HOSTS=("${TARGET_HOST}")
+fi
 
 case "${cmd}" in
   start)
     echo "sampler: ${REMOTE_SAMPLER}"
     echo "stats:   ${STATS_DIR}"
+    [[ -n "${TARGET_HOST}" ]] && echo "host:    ${TARGET_HOST}"
     run_all remote_start_one
     ;;
   stop)
+    [[ -n "${TARGET_HOST}" ]] && echo "host:    ${TARGET_HOST}"
     run_all remote_stop_one
     ;;
   restart)
     FORCE_START=1
+    [[ -n "${TARGET_HOST}" ]] && echo "host:    ${TARGET_HOST}"
     echo "=== stop ==="
     run_all remote_stop_one || true
     echo "=== start ==="
@@ -273,7 +313,7 @@ case "${cmd}" in
     done
     ;;
   debug)
-    remote_debug_one "${DEBUG_HOST:-science1.stsci.edu}"
+    remote_debug_one "${TARGET_HOST:-science1.stsci.edu}"
     ;;
   ls)
     echo "stats: ${STATS_DIR}"
