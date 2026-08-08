@@ -132,6 +132,52 @@ def ensure_control_files(workspace_root: str | Path) -> None:
         _atomic_write_json(stop_path, dict(_STOP_CLEARED_PAYLOAD))
 
 
+def ensure_bot_lease_file(workspace_root: str | Path) -> None:
+    """Create a stable Discord bot lease file if missing (NFS ENOENT safety)."""
+    path = logs.discord_bot_lease_path(workspace_root)
+    if not path.is_file():
+        _atomic_write_json(path, dict(_LEASE_RELEASED_PAYLOAD))
+
+
+def _read_lease_at(lease_path: Path) -> Lease | None:
+    """Read a Lease from *lease_path*, or None if missing/released/corrupt."""
+    data = _read_json(lease_path)
+    if data is None:
+        return None
+    return Lease.from_dict(data)
+
+
+def _write_lease_at(lease_path: Path, owned: Lease) -> None:
+    """Atomically write *owned* to *lease_path* (file must already exist when possible)."""
+    lease_path.parent.mkdir(parents=True, exist_ok=True)
+    if not lease_path.is_file():
+        _atomic_write_json(lease_path, dict(_LEASE_RELEASED_PAYLOAD))
+    _atomic_write_json(lease_path, owned.to_dict())
+
+
+def _next_generation_at(lease_path: Path) -> int:
+    """Return the next lease generation for *lease_path*, including released markers."""
+    current = _read_lease_at(lease_path)
+    if current is not None:
+        return max(1, current.generation + 1)
+    data = _read_json(lease_path) or {}
+    for key in ("released_generation", "generation"):
+        try:
+            value = int(data.get(key, 0))
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value + 1
+    return 1
+
+
+def _local_owner_pid_dead_for(owned: Lease) -> bool:
+    """True when *owned* is for this host and the recorded pid is gone."""
+    if not daemon.identity_on_local_host(owned.host):
+        return False
+    return not daemon.is_process_alive(owned.pid)
+
+
 @dataclass(frozen=True)
 class Lease:
     """Workspace ownership lease."""
@@ -241,16 +287,13 @@ class StopRequest:
 
 def read_lease(workspace_root: str | Path) -> Lease | None:
     """Read the current daemon lease, or None if missing/corrupt."""
-    data = _read_json(logs.daemon_lease_path(workspace_root))
-    if data is None:
-        return None
-    return Lease.from_dict(data)
+    return _read_lease_at(logs.daemon_lease_path(workspace_root))
 
 
 def write_lease_atomic(workspace_root: str | Path, lease: Lease) -> None:
     """Atomically write *lease* to the control directory."""
     ensure_control_files(workspace_root)
-    _atomic_write_json(logs.daemon_lease_path(workspace_root), lease.to_dict())
+    _write_lease_at(logs.daemon_lease_path(workspace_root), lease)
 
 
 def release_lease(
@@ -290,15 +333,13 @@ def lease_is_fresh(
     stale_after_s: float = DEFAULT_LEASE_STALE_S,
 ) -> bool:
     """True when a lease exists and was renewed within *stale_after_s*."""
-    lease = read_lease(workspace_root)
-    return lease is not None and lease.is_fresh(stale_after_s=stale_after_s)
+    owned = read_lease(workspace_root)
+    return owned is not None and owned.is_fresh(stale_after_s=stale_after_s)
 
 
 def _local_owner_pid_dead(lease: Lease) -> bool:
     """True when lease is for this host and the recorded pid is gone."""
-    if not daemon.identity_on_local_host(lease.host):
-        return False
-    return not daemon.is_process_alive(lease.pid)
+    return _local_owner_pid_dead_for(lease)
 
 
 def lease_is_reclaimable(
@@ -307,12 +348,12 @@ def lease_is_reclaimable(
     stale_after_s: float = DEFAULT_LEASE_STALE_S,
 ) -> bool:
     """True when there is no live foreign owner blocking a new acquire."""
-    lease = read_lease(workspace_root)
-    if lease is None:
+    owned = read_lease(workspace_root)
+    if owned is None:
         return True
-    if _local_owner_pid_dead(lease):
+    if _local_owner_pid_dead(owned):
         return True
-    return not lease.is_fresh(stale_after_s=stale_after_s)
+    return not owned.is_fresh(stale_after_s=stale_after_s)
 
 
 def read_stop_request(workspace_root: str | Path) -> StopRequest | None:
@@ -370,18 +411,7 @@ def stop_targets_owner(req: StopRequest | None, lease: Lease | None) -> bool:
 
 def _next_generation(workspace_root: str | Path) -> int:
     """Return the next lease generation, including across released markers."""
-    current = read_lease(workspace_root)
-    if current is not None:
-        return max(1, current.generation + 1)
-    data = _read_json(logs.daemon_lease_path(workspace_root)) or {}
-    for key in ("released_generation", "generation"):
-        try:
-            value = int(data.get(key, 0))
-        except (TypeError, ValueError):
-            continue
-        if value > 0:
-            return value + 1
-    return 1
+    return _next_generation_at(logs.daemon_lease_path(workspace_root))
 
 
 def try_acquire_lease(
@@ -485,21 +515,190 @@ def wait_until_lease_released(
     """Wait until the lease is gone, stale, or no longer the target generation."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        lease = read_lease(workspace_root)
-        if lease is None:
+        owned = read_lease(workspace_root)
+        if owned is None:
             return True
-        if target_generation is not None and lease.generation != target_generation:
+        if target_generation is not None and owned.generation != target_generation:
             return True
-        if _local_owner_pid_dead(lease):
+        if _local_owner_pid_dead(owned):
             return True
-        if not lease.is_fresh(stale_after_s=stale_after_s):
+        if not owned.is_fresh(stale_after_s=stale_after_s):
             return True
         time.sleep(poll_s)
-    lease = read_lease(workspace_root)
-    if lease is None:
+    owned = read_lease(workspace_root)
+    if owned is None:
         return True
-    if target_generation is not None and lease.generation != target_generation:
+    if target_generation is not None and owned.generation != target_generation:
         return True
-    if _local_owner_pid_dead(lease):
+    if _local_owner_pid_dead(owned):
         return True
-    return not lease.is_fresh(stale_after_s=stale_after_s)
+    return not owned.is_fresh(stale_after_s=stale_after_s)
+
+
+# ---------------------------------------------------------------------------
+# Discord bot lease (same Lease struct; no stop-request layer — supervisor owns lifecycle)
+# ---------------------------------------------------------------------------
+
+
+def read_bot_lease(workspace_root: str | Path) -> Lease | None:
+    """Read the Discord bot ownership lease, or None if missing/released."""
+    return _read_lease_at(logs.discord_bot_lease_path(workspace_root))
+
+
+def bot_lease_is_fresh(
+    workspace_root: str | Path,
+    *,
+    stale_after_s: float = DEFAULT_LEASE_STALE_S,
+) -> bool:
+    """True when a Discord bot lease exists and was renewed within *stale_after_s*."""
+    owned = read_bot_lease(workspace_root)
+    return owned is not None and owned.is_fresh(stale_after_s=stale_after_s)
+
+
+def bot_lease_is_alive(
+    workspace_root: str | Path,
+    *,
+    stale_after_s: float = DEFAULT_LEASE_STALE_S,
+) -> bool:
+    """True when a fresh bot lease exists and the owner pid is live (local) or trusted (remote)."""
+    owned = read_bot_lease(workspace_root)
+    if owned is None or not owned.is_fresh(stale_after_s=stale_after_s):
+        return False
+    if daemon.identity_on_local_host(owned.host):
+        return daemon.is_process_alive(owned.pid)
+    return True
+
+
+def bot_lease_is_reclaimable(
+    workspace_root: str | Path,
+    *,
+    stale_after_s: float = DEFAULT_LEASE_STALE_S,
+) -> bool:
+    """True when no live foreign Discord bot owner blocks a new acquire."""
+    owned = read_bot_lease(workspace_root)
+    if owned is None:
+        return True
+    if _local_owner_pid_dead_for(owned):
+        return True
+    return not owned.is_fresh(stale_after_s=stale_after_s)
+
+
+def try_acquire_bot_lease(
+    workspace_root: str | Path,
+    *,
+    host: str | None = None,
+    pid: int | None = None,
+    stale_after_s: float = DEFAULT_LEASE_STALE_S,
+    settle_s: float = DEFAULT_LEASE_SETTLE_S,
+) -> Lease | None:
+    """Attempt to become the Discord bot owner for *workspace_root*.
+
+    Same race/settle semantics as ``try_acquire_lease``, without stop-request gating.
+    """
+    local_host = host if host is not None else daemon.local_hostname()
+    local_pid = pid if pid is not None else os.getpid()
+    ensure_bot_lease_file(workspace_root)
+    lease_path = logs.discord_bot_lease_path(workspace_root)
+
+    current = _read_lease_at(lease_path)
+    if current is not None and current.is_ours(host=local_host, pid=local_pid):
+        if current.is_fresh(stale_after_s=stale_after_s):
+            return current
+
+    if current is not None and current.is_fresh(stale_after_s=stale_after_s):
+        if not _local_owner_pid_dead_for(current):
+            return None
+
+    now = _utc_now_iso()
+    candidate = Lease(
+        host=local_host,
+        pid=local_pid,
+        generation=_next_generation_at(lease_path),
+        started_at=now,
+        renewed_at=now,
+    )
+    _write_lease_at(lease_path, candidate)
+    if settle_s > 0:
+        time.sleep(settle_s)
+    confirmed = _read_lease_at(lease_path)
+    if confirmed is None:
+        return None
+    if not confirmed.matches(local_host, local_pid, candidate.generation):
+        return None
+    return confirmed
+
+
+def renew_bot_lease(
+    workspace_root: str | Path,
+    owned: Lease,
+    *,
+    host: str | None = None,
+    pid: int | None = None,
+) -> Lease | None:
+    """Renew the Discord bot lease without changing generation."""
+    local_host = host if host is not None else daemon.local_hostname()
+    local_pid = pid if pid is not None else os.getpid()
+    lease_path = logs.discord_bot_lease_path(workspace_root)
+    current = _read_lease_at(lease_path)
+    if current is None:
+        return None
+    if not current.matches(local_host, local_pid, owned.generation):
+        return None
+    renewed = Lease(
+        host=local_host,
+        pid=local_pid,
+        generation=owned.generation,
+        started_at=current.started_at,
+        renewed_at=_utc_now_iso(),
+    )
+    _write_lease_at(lease_path, renewed)
+    confirmed = _read_lease_at(lease_path)
+    if confirmed is None:
+        return None
+    if not confirmed.matches(local_host, local_pid, owned.generation):
+        return None
+    return confirmed
+
+
+def release_bot_lease(
+    workspace_root: str | Path,
+    *,
+    host: str | None = None,
+    pid: int | None = None,
+    generation: int | None = None,
+) -> bool:
+    """Mark the Discord bot lease released without unlinking the file."""
+    ensure_bot_lease_file(workspace_root)
+    lease_path = logs.discord_bot_lease_path(workspace_root)
+    current = _read_lease_at(lease_path)
+    if current is None:
+        _atomic_write_json(lease_path, dict(_LEASE_RELEASED_PAYLOAD))
+        return True
+    local_host = host if host is not None else daemon.local_hostname()
+    local_pid = pid if pid is not None else os.getpid()
+    if not current.is_ours(host=local_host, pid=local_pid):
+        return False
+    if generation is not None and current.generation != generation:
+        return False
+    payload = dict(_LEASE_RELEASED_PAYLOAD)
+    payload["released_at"] = _utc_now_iso()
+    payload["released_by_host"] = local_host
+    payload["released_generation"] = current.generation
+    _atomic_write_json(lease_path, payload)
+    return _read_lease_at(lease_path) is None
+
+
+def clear_bot_lease_if_reclaimable(workspace_root: str | Path) -> bool:
+    """Force-clear a stale/dead Discord bot lease (for stop_all cleanup)."""
+    if not bot_lease_is_reclaimable(workspace_root):
+        return False
+    ensure_bot_lease_file(workspace_root)
+    lease_path = logs.discord_bot_lease_path(workspace_root)
+    current = _read_lease_at(lease_path)
+    payload = dict(_LEASE_RELEASED_PAYLOAD)
+    payload["released_at"] = _utc_now_iso()
+    payload["released_by_host"] = daemon.local_hostname()
+    if current is not None:
+        payload["released_generation"] = current.generation
+    _atomic_write_json(lease_path, payload)
+    return True

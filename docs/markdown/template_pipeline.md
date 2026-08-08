@@ -783,7 +783,7 @@ Event notifications (except `run_started`) include the same **progress** summary
 
 1. Create a bot in the [Discord Developer Portal](https://discord.com/developers/applications), enable **Message Content Intent**, invite it to your server with send/read permissions.
 2. Set `notifications.bot.enabled: true` and configure the channel ID (config or `deployment.yaml`).
-3. Install `discord.py`, then submit a run or start the supervisor — the bot starts **in-process** inside the daemon when enabled (no separate CLI or detached process):
+3. Install `discord.py`, then submit a run or start the supervisor — the bot starts as a **supervisor-managed subprocess** when enabled (one bot per `workspace_root`, lease-guarded like the daemon):
 
 ```bash
 pip install 'discord.py>=2.3'   # or: pip install -e '.[discord]'
@@ -791,7 +791,9 @@ syndiff template submit --site config --targets my_targets.csv
 # or: syndiff daemon start --deployment config/deployment.yaml
 ```
 
-`submit` starts the supervisor (and thus the in-process bot when enabled). `daemon stop` requests shutdown via `control/daemon.stop` (works from any host); the supervisor and bot exit together. Check with `syndiff daemon status` (`discord_bot.expected_in_process`). Legacy detached `discord_bot --detached` processes are terminated on supervisor start.
+`submit` starts the supervisor (and thus the bot when enabled). `daemon stop` requests shutdown via `control/daemon.stop` (works from any host); the supervisor stops all local Discord bot processes for the workspace. Check with `syndiff daemon status` (`discord_bot.alive`, `lease_generation`, `lease_age_s`).
+
+**Singleton (mirrors supervisor daemon):** `{workspace}/control/discord_bot.lease.json` is authoritative across NFS hosts; `discord_bot.lock` is best-effort flock; `discord_bot.pid` records host+pid. A second bot exits before connecting to Discord. Orphans are killed via `/proc` scan on start/stop (not only the pid-file PID).
 
 Any message you post in the configured channel gets a reply with live `progress` + `status` (same format as event alerts). Include a `run_id` in the message to query a specific run; otherwise the bot reports all active runs (or the most recent run if none are active).
 
@@ -1335,9 +1337,11 @@ syndiff reconcile-manifests --run-dir /path/to/runs/batch_no5 --quiet
 
 ### Daemon and Discord
 
-**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running`. The Discord status bot runs **inside the supervisor process** when enabled (token + channel + `notifications.bot.enabled`).
+**You usually do not run `daemon start` manually.** `submit` (and `retry` by default) call `ensure_daemon_running`. The Discord status bot runs as a **supervisor-managed subprocess** when enabled (token + channel + `notifications.bot.enabled`).
 
 **Cross-host ownership:** `control/daemon.lease` is the authoritative source of truth for which host owns the workspace (renewed ~every 15s; stale after 120s). `daemon.lock` (flock) is best-effort only and never overrides lease decisions. On the supervisor host, liveness also checks that the lease PID is a live non-zombie process (`/proc` state), so a defunct owner is not treated as alive.
+
+**Discord bot singleton:** `control/discord_bot.lease.json` mirrors the daemon lease (one bot per workspace across all machines). The bot renews while connected, releases on exit, and uses `PR_SET_PDEATHSIG` so it dies if the spawning supervisor dies. `daemon stop` and supervisor shutdown call `stop_all_workspace_discord_bots` (full `/proc` scan).
 
 **Remote stop:** `syndiff daemon stop` works from **any** machine — it writes `control/daemon.stop` targeting the current lease generation. On the owner host the CLI also sends SIGTERM/SIGKILL; remotely it waits for lease release.
 
@@ -1359,9 +1363,9 @@ syndiff daemon status
 
 | Action | Notes |
 |--------|-------|
-| `start` | Starts supervisor on this host when no fresh foreign lease exists; Discord bot starts in-process when enabled |
-| `stop` | Writes `daemon.stop`, waits for lease release (local SIGTERM/SIGKILL escalation when on owner host) |
-| `status` | JSON: supervisor liveness + lease fields + expected in-process bot state |
+| `start` | Starts supervisor on this host when no fresh foreign lease exists; Discord bot subprocess starts when enabled |
+| `stop` | Writes `daemon.stop`, waits for lease release (local SIGTERM/SIGKILL escalation when on owner host); clears local Discord bots |
+| `status` | JSON: supervisor liveness + lease fields + Discord bot lease/pid/alive |
 
 Daemon files on disk (under `control/`):
 
@@ -1372,6 +1376,10 @@ Daemon files on disk (under `control/`):
 {workspace_root}/control/daemon.log
 {workspace_root}/control/daemon.lock       # best-effort flock (not authoritative)
 {workspace_root}/control/pipeline_state.sqlite
+{workspace_root}/control/discord_bot.lease.json  # bot singleton (authoritative)
+{workspace_root}/control/discord_bot.lock        # best-effort flock
+{workspace_root}/control/discord_bot.pid
+{workspace_root}/control/discord_bot.log
 {workspace_root}/control/discord_bot_config.path
 {workspace_root}/control/workspace_deployment.path
 ```

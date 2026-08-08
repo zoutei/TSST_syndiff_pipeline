@@ -176,3 +176,5 @@ ls -la /home/kshukawa/.syndiff/host_stats/
 | All hosts `EXCLUDE (missing)` | Wrong `HOST_STATS_DIR` or NFS mount | Check `stats_dir:` line from `syndiff cluster` |
 | Submit warns, uses `-LoadAvg` rank | No fresh heartbeats | Restart samplers; verify JSON age <300 s |
 | Discord shows table but CLI empty | Bot runs on submit host with NFS access | Run `syndiff cluster` on same host |
+| Discord replies **N identical** cluster/status tables | N Discord bot processes with the same token (orphans after daemon restarts) | `pgrep -af orchestration.discord_bot` on every science host that has run the supervisor; `pkill -f 'template_creation.orchestration.discord_bot'`; single `syndiff daemon start`. After the lease fix, bots hold `control/discord_bot.lease.json` so a second instance exits before connecting. |
+

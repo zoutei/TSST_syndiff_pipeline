@@ -80,11 +80,15 @@ Legacy `ws/` / `ws_{workspace_run_id}/` trees may still exist from older runs bu
   daemon.lock                      # best-effort same-host flock (lease wins)
   daemon.pid
   daemon.log
-  discord_bot_config.path          # site pipeline.yaml for in-process bot.enabled
+  discord_bot.lease.json           # bot singleton lease (authoritative; mirrors daemon.lease)
+  discord_bot.lock                  # best-effort flock (lease wins)
+  discord_bot.pid
+  discord_bot.log
+  discord_bot_config.path          # site pipeline.yaml for bot.enabled
   workspace_deployment.path        # recorded path to deployment.yaml
 ```
 
-The Discord status bot runs **inside the supervisor process** (no separate `discord_bot.pid` / lock). Legacy detached bot pid/lock files may still exist on older workspaces and are cleaned up on supervisor start.
+The Discord status bot is a **supervisor-managed subprocess** with an NFS lease (`discord_bot.lease.json`), pid file, and best-effort lock under `control/`. Legacy detached bot pid/lock files may still exist on older workspaces and are cleaned up on supervisor start/stop.
 
 Code resolves these via `control_root()` and `state_db_path()` in `syndiff_pipeline.common.orchestration.workspace`.
 

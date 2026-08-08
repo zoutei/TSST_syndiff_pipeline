@@ -101,15 +101,62 @@ def _start_in_process_discord_bot(workspace_root: str):
 
 
 def _cleanup_legacy_bots_async(workspace_root: str) -> None:
-    """Best-effort orphan cleanup off the critical startup path."""
+    """Best-effort cleanup of legacy ``--detached`` bots only.
+
+    Full singleton cleanup (all spawn styles) runs in ``InProcessDiscordBot.start``
+    / ``stop`` so this background scan must not kill a freshly spawned bot.
+    """
     from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
-        cleanup_legacy_detached_bots,
+        discover_legacy_detached_bot_pids,
     )
+    from syndiff_pipeline.common.orchestration import daemon as daemon_mod
+    import signal as signal_mod
 
     try:
-        cleanup_legacy_detached_bots(workspace_root)
+        pids = discover_legacy_detached_bot_pids(workspace_root)
+        for pid in pids:
+            try:
+                daemon_mod.terminate_process_tree(pid, signal_mod.SIGTERM)
+            except Exception:
+                log.warning("Failed to terminate legacy Discord bot pid=%s", pid, exc_info=True)
+        if pids:
+            log.info(
+                "Signaled %s legacy detached Discord bot process(es) for cleanup",
+                len(pids),
+            )
     except Exception:
         log.warning("Legacy Discord bot cleanup failed", exc_info=True)
+
+
+def _maybe_respawn_discord_bot(workspace_root: str, discord_bot) -> object | None:
+    """Respawn the Discord bot only when the lease is stale and no local bots remain."""
+    from syndiff_pipeline.common.orchestration import lease as lease_mod
+    from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+        discover_workspace_bot_pids,
+        should_start_in_process_bot,
+    )
+
+    if discord_bot is not None and discord_bot.running:
+        return discord_bot
+    if lease_mod.bot_lease_is_alive(workspace_root):
+        return discord_bot
+    if discover_workspace_bot_pids(workspace_root):
+        return discord_bot
+    should_start, reason, deploy_path = should_start_in_process_bot(workspace_root)
+    if not should_start or deploy_path is None:
+        return discord_bot
+    if discord_bot is None:
+        from syndiff_pipeline.template_creation.orchestration.discord_bot import (
+            InProcessDiscordBot,
+        )
+
+        discord_bot = InProcessDiscordBot(deploy_path)
+    if discord_bot.start():
+        log.info("Discord bot respawned after lease stale / no local bots")
+        return discord_bot
+    if discord_bot.skipped_reason:
+        log.warning("Discord bot respawn skipped: %s", discord_bot.skipped_reason)
+    return discord_bot
 
 
 def _age_seconds(iso_ts: str | None) -> float:
@@ -2289,6 +2336,13 @@ def run_supervisor_daemon(workspace_root: str) -> int:
                         # down scheduling for every other active run.
                         log.exception("Error while processing run %s", run_id)
 
+                try:
+                    discord_bot = _maybe_respawn_discord_bot(
+                        workspace_root, discord_bot
+                    )
+                except Exception:
+                    log.warning("Discord bot watchdog failed", exc_info=True)
+
                 worker = _verify_worker()
                 active_runs = state.list_active_runs()
                 by_run = _collect_verify_status_by_run(state, active_runs)
@@ -2324,6 +2378,16 @@ def run_supervisor_daemon(workspace_root: str) -> int:
                     discord_bot.stop()
                 except Exception:
                     log.warning("Discord bot stop failed", exc_info=True)
+            else:
+                # Belt-and-suspenders when bot was never started / already None.
+                try:
+                    from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+                        stop_all_workspace_discord_bots,
+                    )
+
+                    stop_all_workspace_discord_bots(workspace_root)
+                except Exception:
+                    log.warning("Discord bot cleanup on shutdown failed", exc_info=True)
             try:
                 state.clear_supervisor()
             except Exception:

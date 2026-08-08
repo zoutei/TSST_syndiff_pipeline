@@ -1616,6 +1616,11 @@ def cmd_daemon(args: argparse.Namespace) -> int:
             "enabled": bot.enabled,
             "expected_in_process": bot.expected_in_process,
             "skipped_reason": bot.skipped_reason,
+            "alive": bot.alive,
+            "pid": bot.pid,
+            "host": bot.host,
+            "lease_generation": bot.lease_generation,
+            "lease_age_s": bot.lease_age_s,
         }
         print(
             json.dumps(

@@ -166,7 +166,7 @@ Insert **command intents** into SQLite; the supervisor applies them on the next 
 |---------|--------------|
 | **`syndiff notify test`** | Discord preview (`--dry-run` prints locally). |
 
-There is **no** `syndiff discord bot` CLI. When `notifications.bot.enabled` is true, the status-reply bot runs **in-process inside the supervisor daemon**.
+There is **no** `syndiff discord bot` CLI. When `notifications.bot.enabled` is true, the status-reply bot runs as a **supervisor-managed subprocess** (one per `workspace_root`, lease-guarded via `control/discord_bot.lease.json`).
 
 ### Cluster host snapshot
 
@@ -250,7 +250,7 @@ syndiff cluster --format requirements --check --preset 500gb  # Condor exclusion
 
 #### Discord bot
 
-When `notifications.bot.enabled` is true, the in-process status bot handles on-demand queries in the configured channel:
+When `notifications.bot.enabled` is true, the supervisor-managed status bot handles on-demand queries in the configured channel:
 
 | Trigger | Match rule | Reply |
 |---------|------------|-------|
@@ -316,7 +316,7 @@ Composed registry (**9** stages): six template + `diff` + `photometry` + `star`.
 | **`common/orchestration/run_stage.py`** | `python -m syndiff_pipeline.common.orchestration.run_stage --run-id … --stage …` | Single target + stage worker. |
 | **`common/orchestration/scheduler.py`** | `--daemon --deployment …` | Supervisor loop: verify, promote, launch, reconcile. |
 | **`common/orchestration/condor_wrapper.sh`** | HTCondor `executable` | Conda activation + `run_stage.py`. |
-| **`template_creation/.../discord_bot.py`** | In-process inside supervisor | On-demand status replies when bot enabled. |
+| **`template_creation/.../discord_bot.py`** | Supervisor-spawned subprocess (`--deployment`) | On-demand status replies when bot enabled; NFS lease singleton. |
 
 ---
 
