@@ -5,16 +5,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import concurrent.futures
+import ctypes
 import getpass
 import logging
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
 
-from syndiff_pipeline.common.orchestration import daemon, logs
+from syndiff_pipeline.common.orchestration import daemon, lease, logs
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     load_workspace_root_from_deployment,
@@ -37,6 +40,20 @@ _CONDOR_SHELL_TIMEOUT_S = 30.0
 _CONDOR_SHELL_TIMEOUT_OVERRIDES = {"condor_status -tla": 60.0}
 _STATUS_BUILD_TIMEOUT_S = 120.0
 _STATUS_EXECUTOR_WORKERS = 2
+_BOT_LEASE_RENEW_INTERVAL_S = 30.0
+# prctl(PR_SET_PDEATHSIG) — Linux only; bot dies when spawning supervisor dies.
+_PR_SET_PDEATHSIG = 1
+
+
+def _install_parent_death_signal(sig: int = signal.SIGTERM) -> None:
+    """Ask the kernel to deliver *sig* when the parent process exits."""
+    try:
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        if libc.prctl(_PR_SET_PDEATHSIG, sig) != 0:
+            err = ctypes.get_errno()
+            log.warning("prctl(PR_SET_PDEATHSIG) failed errno=%s", err)
+    except OSError as exc:
+        log.warning("Could not install parent-death signal: %s", exc)
 
 
 def _channel_matches(message: Any, channel_id: int) -> bool:
@@ -418,28 +435,28 @@ def stop_discord_bot_subprocess(
     *,
     timeout_s: float = 5.0,
 ) -> None:
-    """Terminate the supervisor-managed Discord bot child, if recorded locally."""
-    pid_path = logs.discord_bot_pid_path(workspace_root)
-    host, pid = daemon.read_process_identity(pid_path)
-    if pid is None:
-        return
-    if host is not None and host != daemon.local_hostname():
-        log.warning(
-            "Discord bot pid file points to host %s (local %s); not signaling pid=%s",
-            host,
-            daemon.local_hostname(),
-            pid,
-        )
-        return
-    if daemon.is_process_alive(pid):
-        daemon.terminate_process_tree(pid)
-        deadline = time.monotonic() + timeout_s
-        while daemon.is_process_alive(pid):
-            if time.monotonic() >= deadline:
-                log.warning("Discord bot pid=%s did not exit within %.1fs", pid, timeout_s)
-                break
-            time.sleep(0.1)
-    daemon.remove_pid_file(pid_path)
+    """Terminate all local Discord bot children for *workspace_root*."""
+    from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+        stop_all_workspace_discord_bots,
+    )
+
+    stop_all_workspace_discord_bots(workspace_root, timeout_s=timeout_s)
+
+
+def _bot_lease_renew_loop(
+    workspace_root: str,
+    owned: lease.Lease,
+    stop_event: threading.Event,
+) -> None:
+    """Renew the Discord bot lease until *stop_event* is set or ownership is lost."""
+    current = owned
+    while not stop_event.wait(_BOT_LEASE_RENEW_INTERVAL_S):
+        renewed = lease.renew_bot_lease(workspace_root, current)
+        if renewed is None:
+            log.error("Lost Discord bot lease ownership; exiting renew loop")
+            stop_event.set()
+            return
+        current = renewed
 
 
 class InProcessDiscordBot:
@@ -461,6 +478,12 @@ class InProcessDiscordBot:
             return True
         if self._pid is not None and daemon.is_process_alive(self._pid):
             return True
+        # Cross-check lease (another tick may have adopted an existing bot).
+        if lease.bot_lease_is_alive(self._workspace_root):
+            owned = lease.read_bot_lease(self._workspace_root)
+            if owned is not None and daemon.identity_on_local_host(owned.host):
+                self._pid = owned.pid
+                return True
         return False
 
     @property
@@ -469,12 +492,31 @@ class InProcessDiscordBot:
             return self._process.pid
         if self._pid is not None and daemon.is_process_alive(self._pid):
             return self._pid
+        owned = lease.read_bot_lease(self._workspace_root)
+        if owned is not None and lease.bot_lease_is_alive(self._workspace_root):
+            return owned.pid
         return None
 
     def start(self) -> bool:
         """Start the bot subprocess. Returns False when skipped or already running."""
         if self.running:
             return True
+
+        # Mirror ensure_daemon_running: do not spawn when a fresh bot lease is held.
+        if lease.bot_lease_is_alive(self._workspace_root):
+            owned = lease.read_bot_lease(self._workspace_root)
+            if owned is not None:
+                self._pid = owned.pid if daemon.identity_on_local_host(owned.host) else None
+                self._started = True
+                self.skipped_reason = None
+                log.info(
+                    "Discord bot already owns lease host=%s pid=%s generation=%s; not spawning",
+                    owned.host,
+                    owned.pid,
+                    owned.generation,
+                )
+                return True
+
         try:
             bot = PipelineDiscordBot(self._deployment_path)
         except Exception as exc:
@@ -494,6 +536,7 @@ class InProcessDiscordBot:
             log.warning("Discord bot not started: discord.py not installed")
             return False
 
+        # Kill orphans before spawn (pid file + /proc scan).
         stop_discord_bot_subprocess(self._workspace_root, timeout_s=2.0)
         try:
             pid = spawn_discord_bot_subprocess(
@@ -507,6 +550,8 @@ class InProcessDiscordBot:
 
         self._pid = pid
         self._process = None
+        # Pid file is also written by the child after it acquires the lease;
+        # write eagerly so status works before the child settles.
         daemon.write_process_identity(
             logs.discord_bot_pid_path(self._workspace_root),
             pid,
@@ -522,16 +567,8 @@ class InProcessDiscordBot:
         return True
 
     def stop(self, *, timeout_s: float = 5.0) -> None:
-        """Stop the bot subprocess and wait briefly for exit."""
-        proc = self._process
-        if proc is not None and proc.poll() is None:
-            daemon.terminate_process_tree(proc.pid)
-            try:
-                proc.wait(timeout=timeout_s)
-            except subprocess.TimeoutExpired:
-                log.warning("Discord bot subprocess did not exit within %.1fs", timeout_s)
-        elif self._pid is not None:
-            stop_discord_bot_subprocess(self._workspace_root, timeout_s=timeout_s)
+        """Stop all workspace Discord bot processes and clear the lease."""
+        stop_discord_bot_subprocess(self._workspace_root, timeout_s=timeout_s)
         self._process = None
         self._pid = None
 
@@ -546,12 +583,72 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     deploy = Path(args.deployment).expanduser().resolve()
-    workspace_root = load_workspace_root_from_deployment(deploy)
+    workspace_root = str(load_workspace_root_from_deployment(deploy))
     daemon.configure_process_logging("discord-bot")
-    try:
-        PipelineDiscordBot(deploy).run_forever()
-    except KeyboardInterrupt:
-        return 0
+    _install_parent_death_signal()
+
+    lock_path = logs.discord_bot_lock_path(workspace_root)
+    with daemon.file_lock(lock_path, blocking=False) as lock_fd:
+        if lock_fd is None:
+            log.info(
+                "Another Discord bot holds discord_bot.lock for %s; exiting",
+                workspace_root,
+            )
+            return 0
+
+        pid = os.getpid()
+        host = daemon.local_hostname()
+        owned = lease.try_acquire_bot_lease(
+            workspace_root,
+            host=host,
+            pid=pid,
+            settle_s=0.25,
+        )
+        if owned is None:
+            log.info(
+                "Another Discord bot owns the lease for %s; exiting without connecting",
+                workspace_root,
+            )
+            return 0
+
+        daemon.write_process_identity(
+            logs.discord_bot_pid_path(workspace_root),
+            pid,
+            host=host,
+        )
+        log.info(
+            "Acquired Discord bot lease generation=%s host=%s pid=%s",
+            owned.generation,
+            owned.host,
+            owned.pid,
+        )
+
+        stop_renew = threading.Event()
+        renew_thread = threading.Thread(
+            target=_bot_lease_renew_loop,
+            args=(workspace_root, owned, stop_renew),
+            name="discord-bot-lease-renew",
+            daemon=True,
+        )
+        renew_thread.start()
+        try:
+            PipelineDiscordBot(deploy).run_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop_renew.set()
+            renew_thread.join(timeout=2.0)
+            lease.release_bot_lease(
+                workspace_root,
+                host=host,
+                pid=pid,
+                generation=owned.generation,
+            )
+            try:
+                daemon.remove_pid_file(logs.discord_bot_pid_path(workspace_root))
+            except Exception:
+                pass
+            log.info("Released Discord bot lease generation=%s", owned.generation)
     return 0
 
 

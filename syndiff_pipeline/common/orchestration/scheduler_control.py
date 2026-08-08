@@ -392,6 +392,14 @@ def stop_daemon(
             )
             lease.clear_stop_request(workspace_root, only_generation=target_generation)
             lock_reclaimed = _reclaim_stale_lock_if_local(workspace_root)
+            try:
+                from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+                    stop_all_workspace_discord_bots,
+                )
+
+                stop_all_workspace_discord_bots(workspace_root)
+            except Exception:
+                pass
         return StopDaemonResult(
             pid=pid,
             was_running=True,
@@ -420,6 +428,15 @@ def stop_daemon(
             )
         lease.clear_stop_request(workspace_root, only_generation=target_generation)
         lock_reclaimed = _reclaim_stale_lock_if_local(workspace_root)
+        # Local-host belt-and-suspenders: kill any orphan bots left on this machine.
+        try:
+            from syndiff_pipeline.template_creation.orchestration.discord_bot_control import (
+                stop_all_workspace_discord_bots,
+            )
+
+            stop_all_workspace_discord_bots(workspace_root)
+        except Exception:
+            pass
         return StopDaemonResult(
             pid=pid,
             was_running=was_running,

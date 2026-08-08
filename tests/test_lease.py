@@ -190,5 +190,55 @@ class TestStopRequest(unittest.TestCase):
             )
 
 
+class TestBotLease(unittest.TestCase):
+    def test_bot_second_acquire_loses_while_fresh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = lease.try_acquire_bot_lease(tmp, host="host-a", pid=111, settle_s=0.05)
+            self.assertIsNotNone(first)
+            second = lease.try_acquire_bot_lease(tmp, host="host-b", pid=222, settle_s=0.05)
+            self.assertIsNone(second)
+            current = lease.read_bot_lease(tmp)
+            assert current is not None
+            self.assertEqual(current.pid, 111)
+            self.assertTrue(logs.discord_bot_lease_path(tmp).is_file())
+
+    def test_bot_release_allows_reacquire(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = lease.try_acquire_bot_lease(tmp, host="host-a", pid=111, settle_s=0.02)
+            self.assertIsNotNone(first)
+            assert first is not None
+            self.assertTrue(
+                lease.release_bot_lease(
+                    tmp, host="host-a", pid=111, generation=first.generation
+                )
+            )
+            self.assertIsNone(lease.read_bot_lease(tmp))
+            second = lease.try_acquire_bot_lease(tmp, host="host-b", pid=222, settle_s=0.02)
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertEqual(second.generation, first.generation + 1)
+
+    def test_bot_lease_is_alive_requires_local_pid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            owned = lease.try_acquire_bot_lease(tmp, host="host-a", pid=111, settle_s=0.02)
+            self.assertIsNotNone(owned)
+            with mock.patch(
+                "syndiff_pipeline.common.orchestration.lease.daemon.identity_on_local_host",
+                return_value=True,
+            ), mock.patch(
+                "syndiff_pipeline.common.orchestration.lease.daemon.is_process_alive",
+                return_value=False,
+            ):
+                self.assertFalse(lease.bot_lease_is_alive(tmp))
+            with mock.patch(
+                "syndiff_pipeline.common.orchestration.lease.daemon.identity_on_local_host",
+                return_value=True,
+            ), mock.patch(
+                "syndiff_pipeline.common.orchestration.lease.daemon.is_process_alive",
+                return_value=True,
+            ):
+                self.assertTrue(lease.bot_lease_is_alive(tmp))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -366,6 +366,11 @@ def discord_bot_lock_path(workspace_root: str | Path) -> Path:
     return _control_dir(workspace_root) / "discord_bot.lock"
 
 
+def discord_bot_lease_path(workspace_root: str | Path) -> Path:
+    """NFS-authoritative Discord bot ownership lease (mirrors daemon.lease.json)."""
+    return _control_dir(workspace_root) / "discord_bot.lease.json"
+
+
 def discord_bot_pid_path(workspace_root: str | Path) -> Path:
     """Discord bot pid path.
     

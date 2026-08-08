@@ -1,15 +1,16 @@
-"""Discord bot configuration helpers (bot runs in-process inside the supervisor)."""
+"""Discord bot configuration helpers (bot runs as supervisor-managed subprocess)."""
 
 from __future__ import annotations
 
 import logging
 import signal
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
-from syndiff_pipeline.common.orchestration import daemon, logs
+from syndiff_pipeline.common.orchestration import daemon, lease, logs
 from syndiff_pipeline.common.orchestration.deployment import (
     load_deployment_file,
     load_workspace_root_from_deployment,
@@ -20,6 +21,9 @@ from syndiff_pipeline.common.orchestration.workspace import (
 )
 
 log = logging.getLogger(__name__)
+
+_BOT_MODULE_MARKER = "template_creation.orchestration.discord_bot"
+_DEFAULT_STOP_TIMEOUT_S = 5.0
 
 
 def _bot_overrides_from_site_config(site_config_path: str | Path) -> tuple[bool, str]:
@@ -45,6 +49,8 @@ class DiscordBotStatus:
     alive: bool = False
     pid: int | None = None
     host: str | None = None
+    lease_generation: int | None = None
+    lease_age_s: float | None = None
 
 
 def _channel_id_from_deployment(
@@ -99,20 +105,26 @@ def _bot_child_status(
     deployment: dict,
     *,
     daemon_alive: bool,
-) -> tuple[bool, int | None, str | None]:
-    """Return (alive, pid, host) for the supervisor-managed bot child."""
-    if not daemon_alive:
-        return False, None, None
+) -> tuple[bool, int | None, str | None, int | None, float | None]:
+    """Return (alive, pid, host, lease_generation, lease_age_s)."""
     workspace_root = str(deployment.get("workspace_root", "")).strip()
     if not workspace_root:
-        return False, None, None
+        return False, None, None, None, None
+    owned = lease.read_bot_lease(workspace_root)
+    lease_gen = owned.generation if owned is not None else None
+    lease_age = owned.age_s() if owned is not None else None
+    if owned is not None and lease.bot_lease_is_alive(workspace_root):
+        return True, owned.pid, owned.host, lease_gen, lease_age
+    # Fallback to pid file when lease is missing (upgrade path).
+    if not daemon_alive:
+        return False, None, None, lease_gen, lease_age
     pid_path = logs.discord_bot_pid_path(workspace_root)
     host, pid = daemon.read_process_identity(pid_path)
     if pid is None:
-        return False, None, host
-    if host is not None and host != daemon.local_hostname():
-        return False, pid, host
-    return daemon.is_process_alive(pid), pid, host
+        return False, None, host, lease_gen, lease_age
+    if host is not None and not daemon.identity_on_local_host(host):
+        return False, pid, host, lease_gen, lease_age
+    return daemon.is_process_alive(pid), pid, host, lease_gen, lease_age
 
 
 def discord_bot_status(
@@ -151,7 +163,7 @@ def discord_bot_status(
             expected_in_process=False,
             skipped_reason=reason,
         )
-    child_alive, child_pid, child_host = _bot_child_status(
+    child_alive, child_pid, child_host, lease_gen, lease_age = _bot_child_status(
         deployment,
         daemon_alive=daemon_alive,
     )
@@ -162,6 +174,8 @@ def discord_bot_status(
         alive=child_alive,
         pid=child_pid,
         host=child_host or (daemon.local_hostname() if daemon_alive else None),
+        lease_generation=lease_gen,
+        lease_age_s=lease_age,
     )
 
 
@@ -213,6 +227,55 @@ def should_start_in_process_bot(workspace_root: str | Path) -> tuple[bool, str |
     return True, None, deployment_path
 
 
+def discover_workspace_bot_pids(workspace_root: str | Path) -> list[int]:
+    """Return live Discord bot PIDs for *workspace_root* (any spawn style).
+
+    Matches supervisor-spawned bots and legacy ``--detached`` bots whose
+    ``--deployment`` resolves to this workspace.
+    """
+    target = str(normalize_workspace_root(workspace_root))
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return []
+
+    pids: list[int] = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        parts = [p.decode("utf-8", errors="replace") for p in raw.split(b"\0") if p]
+        if not parts:
+            continue
+        joined = " ".join(parts)
+        if _BOT_MODULE_MARKER not in joined:
+            continue
+        try:
+            idx = parts.index("--deployment")
+            deploy_path = parts[idx + 1]
+        except (ValueError, IndexError):
+            continue
+        try:
+            resolved_handoff = str(load_workspace_root_from_deployment(deploy_path))
+        except Exception:
+            continue
+        if resolved_handoff != target:
+            continue
+        pid = int(entry.name)
+        if daemon.is_process_alive(pid):
+            pids.append(pid)
+
+    seen: set[int] = set()
+    unique: list[int] = []
+    for pid in pids:
+        if pid not in seen:
+            seen.add(pid)
+            unique.append(pid)
+    return unique
+
+
 def discover_legacy_detached_bot_pids(workspace_root: str | Path) -> list[int]:
     """Return live legacy ``discord_bot --detached`` PIDs for *workspace_root*."""
     target = str(normalize_workspace_root(workspace_root))
@@ -232,7 +295,7 @@ def discover_legacy_detached_bot_pids(workspace_root: str | Path) -> list[int]:
         if not parts:
             continue
         joined = " ".join(parts)
-        if "template_creation.orchestration.discord_bot" not in joined:
+        if _BOT_MODULE_MARKER not in joined:
             continue
         if "--detached" not in parts:
             continue
@@ -260,25 +323,76 @@ def discover_legacy_detached_bot_pids(workspace_root: str | Path) -> list[int]:
     return unique
 
 
-def cleanup_legacy_detached_bots(workspace_root: str | Path) -> int:
-    """Terminate leftover detached Discord bot processes from older installs.
+def stop_all_workspace_discord_bots(
+    workspace_root: str | Path,
+    *,
+    timeout_s: float = _DEFAULT_STOP_TIMEOUT_S,
+) -> int:
+    """Terminate all local Discord bot processes for *workspace_root*.
 
-    Returns the number of processes signaled.
+    Scans ``/proc`` (not only the pid file), waits briefly for exit, clears the
+    pid file, and releases a reclaimable bot lease. Returns the number of PIDs
+    signaled.
     """
-    pids = discover_legacy_detached_bot_pids(workspace_root)
+    pids = discover_workspace_bot_pids(workspace_root)
+    pid_path = logs.discord_bot_pid_path(workspace_root)
+    host, recorded_pid = daemon.read_process_identity(pid_path)
+    if (
+        recorded_pid is not None
+        and daemon.identity_on_local_host(host)
+        and daemon.is_process_alive(recorded_pid)
+        and recorded_pid not in pids
+    ):
+        pids.append(recorded_pid)
+
     for pid in pids:
         try:
             daemon.terminate_process_tree(pid, signal.SIGTERM)
         except Exception:
-            log.warning("Failed to terminate legacy Discord bot pid=%s", pid, exc_info=True)
+            log.warning("Failed to terminate Discord bot pid=%s", pid, exc_info=True)
+
     if pids:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            alive = [p for p in pids if daemon.is_process_alive(p)]
+            if not alive:
+                break
+            time.sleep(0.1)
+        still = [p for p in pids if daemon.is_process_alive(p)]
+        for pid in still:
+            try:
+                daemon.terminate_process_tree(pid, signal.SIGKILL)
+            except Exception:
+                log.warning("Failed to SIGKILL Discord bot pid=%s", pid, exc_info=True)
         log.info(
-            "Signaled %s legacy detached Discord bot process(es) for cleanup",
+            "Signaled %s Discord bot process(es) for workspace cleanup",
             len(pids),
         )
-    # Clear stale pid file from older installs.
+
     try:
-        daemon.remove_pid_file(logs.discord_bot_pid_path(workspace_root))
+        daemon.remove_pid_file(pid_path)
     except Exception:
         pass
+
+    # If we hold the lease locally, release it; else clear when reclaimable.
+    owned = lease.read_bot_lease(workspace_root)
+    if owned is not None and owned.is_ours():
+        lease.release_bot_lease(
+            workspace_root,
+            host=owned.host,
+            pid=owned.pid,
+            generation=owned.generation,
+        )
+    else:
+        lease.clear_bot_lease_if_reclaimable(workspace_root)
+
     return len(pids)
+
+
+def cleanup_legacy_detached_bots(workspace_root: str | Path) -> int:
+    """Terminate leftover Discord bot processes from older installs.
+
+    Prefer ``stop_all_workspace_discord_bots`` for full singleton cleanup.
+    Returns the number of processes signaled.
+    """
+    return stop_all_workspace_discord_bots(workspace_root)

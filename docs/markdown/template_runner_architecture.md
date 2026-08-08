@@ -586,27 +586,36 @@ Foreground `run_scheduler` (debug) uses the same `_tick_run` but sleeps 1 s betw
 
 ## Discord bot lifecycle
 
-The on-demand status bot is a **sidecar** to the supervisor — not required for pipeline execution. Like the supervisor, at most **one bot per `workspace_root`**.
+The on-demand status bot is a **sidecar subprocess** of the supervisor — not required for pipeline execution. Like the supervisor, at most **one bot per `workspace_root`** across all machines.
 
 | File | Role |
 |------|------|
-| `discord_bot.lock` | flock guard (same pattern as `daemon.lock`) |
-| `discord_bot.pid` | PID of the canonical detached bot |
+| `discord_bot.lease.json` | Authoritative NFS lease (host, pid, generation, renewed_at) |
+| `discord_bot.lock` | Best-effort flock (same pattern as `daemon.lock`; lease wins) |
+| `discord_bot.pid` | Host + PID of the lease owner |
 | `discord_bot_config.path` | Site `pipeline.yaml` path, recorded on `submit` |
 
 **Who starts the bot:**
 
 | Trigger | When bot is ensured |
 |---------|---------------------|
-| Supervisor startup | Always (if recorded config + bot enabled) |
-| `submit` / `retry` / `daemon start` | Only when `ensure_daemon_running()` returns `spawned=False` (supervisor already up) |
-| Supervisor main loop | Never (no periodic poll) |
+| Supervisor startup | Always (if recorded config + bot enabled); kills local orphans first |
+| Supervisor tick watchdog | Only when bot lease is stale/absent **and** zero local bot PIDs |
+| `submit` / `retry` / `daemon start` | Via supervisor startup (not a second independent spawn) |
 
-This avoids the race where `submit` spawns a new supervisor **and** starts a bot while that supervisor also starts a bot on its own startup.
+**Stop:** `daemon stop` and supervisor shutdown call `stop_all_workspace_discord_bots` — terminate **all** live `discord_bot` processes for the workspace (via `/proc` scan), not only the PID in `discord_bot.pid`, then release/clear the bot lease.
 
-**Stop:** `daemon stop` terminates all live `discord_bot --detached` processes whose config maps to the workspace (via `/proc` scan), not only the PID in `discord_bot.pid`.
+**Multiple supervisors:** one per `workspace_root` (`daemon.lease.json`). Multiple workspaces on one host each get their own supervisor and bot.
 
-**Multiple supervisors:** one per `workspace_root` (flock on `control/daemon.lock`). Multiple workspaces on one host each get their own supervisor and bot.
+**Duplicate Discord replies:** almost always means multiple bot processes share the same token. Dedup:
+
+```bash
+pgrep -af 'template_creation.orchestration.discord_bot'
+pkill -f 'syndiff_pipeline.template_creation.orchestration.discord_bot' || true
+syndiff daemon stop --deployment config/deployment.yaml
+syndiff daemon start --deployment config/deployment.yaml
+pgrep -af 'template_creation.orchestration.discord_bot'   # expect exactly 1
+```
 
 ---
 
