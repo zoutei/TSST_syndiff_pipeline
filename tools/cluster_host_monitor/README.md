@@ -44,9 +44,13 @@ Copy `launch_monitors.sh` to your Mac (or run from a machine with SSH to science
 
 ```bash
 ./launch_monitors.sh start      # run ~/.syndiff/bin/host_sampler.sh on all hosts
+./launch_monitors.sh start science5            # one host only (also: plscience5, science5.stsci.edu)
+./launch_monitors.sh start --install --force plscience12
 ./launch_monitors.sh status
+./launch_monitors.sh status science5
 ./launch_monitors.sh debug science1.stsci.edu   # troubleshoot one host
 ./launch_monitors.sh stop
+./launch_monitors.sh stop science12
 ```
 
 No `scp` / install step unless you pass `--install` to push an updated sampler.
