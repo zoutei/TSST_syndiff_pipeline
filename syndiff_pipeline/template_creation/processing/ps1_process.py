@@ -98,7 +98,9 @@ def calculate_total_buffer_size(cell_buffer: dict) -> int:
 def load_gaia_catalog(data_root: str, sector: int, camera: int, ccd: int, catalog_path: Optional[str] = None) -> pd.DataFrame:
     """Load Gaia catalog for the specified sector/camera/ccd."""
     if catalog_path is None:
-        catalog_dir = os.path.join(data_root, "catalogs", f"sector_{sector:04d}", f"camera_{camera}", f"ccd_{ccd}")
+        from syndiff_pipeline.common.scc_paths import scc_catalogs_dir
+
+        catalog_dir = scc_catalogs_dir(data_root, sector, camera, ccd)
         catalog_path = f"{catalog_dir}/gaia_catalog_s{sector:04d}_{camera}_{ccd}.csv"
 
     if not os.path.exists(catalog_path):

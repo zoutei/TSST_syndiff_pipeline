@@ -11,8 +11,10 @@ Version: 2.0
 
 # Standard library imports
 import argparse
+import io
 import os
 import time
+import urllib.parse
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from copy import deepcopy
@@ -29,6 +31,7 @@ from astropy.io.fits.verify import VerifyWarning
 from astropy.wcs import WCS, FITSFixedWarning
 from mocpy import MOC
 from numba import jit
+from shapely import contains_xy
 from shapely.geometry import Polygon
 from tqdm import tqdm
 
@@ -1635,6 +1638,26 @@ def save_updated_skycell_csv(selected_skycells, output_path, sector, camera_id, 
 # GAIA CATALOG DOWNLOAD UTILITIES
 # ============================================================================
 
+GAIA_CATALOG_COLUMNS = (
+    "source_id",
+    "ra",
+    "ra_error",
+    "dec",
+    "dec_error",
+    "parallax",
+    "parallax_error",
+    "pm",
+    "pmra",
+    "pmra_error",
+    "pmdec",
+    "pmdec_error",
+    "phot_g_mean_mag",
+    "phot_bp_mean_mag",
+    "phot_rp_mean_mag",
+)
+
+DEFAULT_FLATHUB_ENDPOINT = "https://flathub.flatironinstitute.org/api"
+
 _gaia_logged_in = False
 _gaia_module = None
 
@@ -1729,6 +1752,148 @@ def _run_gaia_catalog_query_async(catalog_query, max_attempts=4, initial_delay_s
     raise last_exc
 
 
+def padded_ffi_sky_polygon(tess_wcs, data_shape, pixel_padding=50):
+    """Return padded FFI corner sky coordinates as (ra_deg, dec_deg) arrays."""
+    height, width = data_shape
+    padded_corners = np.array(
+        [
+            [-pixel_padding, -pixel_padding],
+            [width - 1 + pixel_padding, -pixel_padding],
+            [width - 1 + pixel_padding, height - 1 + pixel_padding],
+            [-pixel_padding, height - 1 + pixel_padding],
+        ]
+    )
+    sky_coords = tess_wcs.pixel_to_world(padded_corners[:, 0], padded_corners[:, 1])
+    return sky_coords.ra.deg, sky_coords.dec.deg
+
+
+def _gaia_polygon_from_corners(ra_coords, dec_coords):
+    return Polygon(list(zip(ra_coords, dec_coords)))
+
+
+def filter_gaia_dataframe_to_polygon(df, ra_coords, dec_coords):
+    """Keep rows whose ra/dec fall inside the padded FFI sky polygon."""
+    if df.empty:
+        return df
+    footprint = _gaia_polygon_from_corners(ra_coords, dec_coords)
+    mask = contains_xy(footprint, df["ra"].to_numpy(dtype=float), df["dec"].to_numpy(dtype=float))
+    return df.loc[mask].reset_index(drop=True)
+
+
+def build_gaia_adql_polygon_query(ra_coords, dec_coords, magnitude_limit, columns=GAIA_CATALOG_COLUMNS):
+    """Build ADQL for a padded FFI polygon query on ``gaiadr3.gaia_source``."""
+    footprint_coords = []
+    for ra, dec in zip(ra_coords, dec_coords):
+        footprint_coords.extend([ra, dec])
+    polygon_str = ",".join(map(str, footprint_coords))
+    column_list = ",\n        ".join(columns)
+    return f"""
+    SELECT
+        {column_list}
+    FROM
+        gaiadr3.gaia_source
+    WHERE 1=CONTAINS(
+        POINT('ICRS', ra, dec),
+        POLYGON('ICRS', {polygon_str})
+    )
+    AND phot_rp_mean_mag < {magnitude_limit}
+    """
+
+
+def _structured_array_to_gaia_dataframe(arr):
+    """Convert flathub ``Catalog.numpy`` structured array to a Gaia catalog DataFrame."""
+    df = pd.DataFrame(arr)
+    if "source_id" in df.columns:
+        df["source_id"] = pd.to_numeric(df["source_id"], errors="coerce").astype("Int64")
+    return df
+
+
+def _save_gaia_catalog_dataframe(df, catalog_path):
+    os.makedirs(os.path.dirname(catalog_path) or ".", exist_ok=True)
+    df.to_csv(catalog_path, index=False)
+    print(f"✅ Gaia catalog saved to: {catalog_path}")
+    print(f"📊 Downloaded {len(df)} stars in the padded FFI area.")
+
+
+def _download_gaia_catalog_tap(
+    ra_coords,
+    dec_coords,
+    magnitude_limit,
+    catalog_path,
+    gaia_credentials_file=None,
+):
+    ensure_gaia_login(gaia_credentials_file)
+    catalog_query = build_gaia_adql_polygon_query(ra_coords, dec_coords, magnitude_limit)
+    print("📚 Querying Gaia via ESA TAP (ADQL polygon)...")
+    print("Submitting job to Gaia... this may take a few minutes.")
+    adql_sidecar = os.path.splitext(catalog_path)[0] + "_manual_query.adql"
+    try:
+        gaia_catalog = _run_gaia_catalog_query_async(catalog_query)
+    except Exception as e:
+        print(f"❌ ERROR: Gaia catalog query failed. Error: {e}")
+        _emit_gaia_query_for_manual_fallback(catalog_query, adql_out_path=adql_sidecar)
+        raise
+    return gaia_catalog.to_pandas()
+
+
+def _fetch_flathub_numpy(catalog_name, fields, *, endpoint=DEFAULT_FLATHUB_ENDPOINT, **field_filters):
+    """Fetch a flathub catalog slice as a structured numpy array.
+
+    Uses direct HTTP fetch because upstream ``flathub.Catalog.numpy`` relies on
+    ``numpy.DataSource``, which was removed in NumPy 2.0.
+    """
+    try:
+        import flathub
+        import requests
+    except ImportError as exc:
+        raise ImportError(
+            "flathub and requests are required for the flathub Gaia backend. "
+            'Install with: pip install requests "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py"'
+        ) from exc
+
+    filters = flathub.Filters(**field_filters)
+    query = filters.query()
+    query["fields"] = ",".join(fields)
+    base = endpoint if endpoint.endswith("/") else endpoint + "/"
+    url = urllib.parse.urljoin(base, f"{catalog_name}/data/npy") + "?" + urllib.parse.urlencode(query)
+    response = requests.get(url, timeout=600)
+    response.raise_for_status()
+    return np.load(io.BytesIO(response.content))
+
+
+def _download_gaia_catalog_flathub(
+    ra_coords,
+    dec_coords,
+    magnitude_limit,
+    *,
+    flathub_endpoint=DEFAULT_FLATHUB_ENDPOINT,
+):
+    ra_min = float(np.min(ra_coords))
+    ra_max = float(np.max(ra_coords))
+    if (ra_max - ra_min) > 180.0:
+        raise ValueError(
+            f"RA span {ra_max - ra_min:.2f}° crosses the pole; use TAP polygon query instead."
+        )
+
+    print("📚 Querying Gaia via Flatiron flathub (bbox prefetch + polygon filter)...")
+    arr = _fetch_flathub_numpy(
+        "gaiadr3",
+        list(GAIA_CATALOG_COLUMNS),
+        endpoint=flathub_endpoint,
+        ra=(ra_min, ra_max),
+        dec=(float(np.min(dec_coords)), float(np.max(dec_coords))),
+        phot_rp_mean_mag=(0.0, float(magnitude_limit)),
+    )
+    df = _structured_array_to_gaia_dataframe(arr)
+    n_prefetch = len(df)
+    df = filter_gaia_dataframe_to_polygon(df, ra_coords, dec_coords)
+    print(
+        f"flathub bbox prefetch returned {n_prefetch} rows; "
+        f"{len(df)} remain after polygon filter."
+    )
+    return df
+
+
 def download_gaia_catalog(
     tess_wcs,
     data_shape,
@@ -1739,6 +1904,8 @@ def download_gaia_catalog(
     pixel_padding=50,
     magnitude_limit=18,
     gaia_credentials_file=None,
+    gaia_backend="auto",
+    flathub_endpoint=DEFAULT_FLATHUB_ENDPOINT,
 ):
     """
     Download Gaia catalog for the FFI footprint with padding.
@@ -1753,86 +1920,59 @@ def download_gaia_catalog(
         pixel_padding (int): Number of pixels to pad around FFI footprint (default: 50)
         magnitude_limit (float): Magnitude limit for Gaia RP band (default: 18)
         gaia_credentials_file (str, optional): Explicit credentials path; None uses env / default sibling file.
+        gaia_backend (str): ``auto`` (flathub then TAP fallback), ``flathub``, or ``tap``.
+        flathub_endpoint (str): flathub API base URL when using the flathub backend.
 
     Returns:
         str: Path to the saved catalog CSV file
     """
-    ensure_gaia_login(gaia_credentials_file)
-    print(f"📡 Downloading Gaia catalog for FFI with {pixel_padding} pixel padding...")
+    backend = str(gaia_backend or "auto").strip().lower()
+    if backend not in {"auto", "flathub", "tap"}:
+        raise ValueError(f"gaia_backend must be 'auto', 'flathub', or 'tap'; got {gaia_backend!r}")
 
-    # Create output directory structure
-    catalog_dir = os.path.join(output_path, f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
+    print(f"📡 Downloading Gaia catalog for FFI with {pixel_padding} pixel padding (backend={backend})...")
+
+    # output_path is the final target directory (SCC-scoped, e.g.
+    # scc_catalogs_dir(data_root, sector, camera, ccd)) -- do not append
+    # another sector/camera/ccd layer on top of it. Real bug fixed
+    # 2026-07-23: this used to always add sector_X/camera_Y/ccd_Z under
+    # output_path, which double-nested when the caller (dispatch.py's
+    # mapping stage) already passes an SCC-scoped directory, producing a
+    # path neither ps1_process's nor the diff stage's Gaia catalog lookup
+    # actually checks.
+    catalog_dir = output_path
     os.makedirs(catalog_dir, exist_ok=True)
 
     catalog_filename = f"gaia_catalog_s{sector:04d}_{camera_id}_{ccd_id}.csv"
     catalog_path = os.path.join(catalog_dir, catalog_filename)
 
-    # Get image dimensions for the footprint calculation
-    height, width = data_shape
-
-    # Create padded corners for footprint calculation
-    # Add padding to corners (expand outward)
-    padded_corners = np.array(
-        [
-            [-pixel_padding, -pixel_padding],  # bottom-left
-            [width - 1 + pixel_padding, -pixel_padding],  # bottom-right
-            [width - 1 + pixel_padding, height - 1 + pixel_padding],  # top-right
-            [-pixel_padding, height - 1 + pixel_padding],  # top-left
-        ]
-    )
-
-    # Convert padded pixel coordinates to world coordinates
-    sky_coords = tess_wcs.pixel_to_world(padded_corners[:, 0], padded_corners[:, 1])
-
+    ra_coords, dec_coords = padded_ffi_sky_polygon(tess_wcs, data_shape, pixel_padding)
     print(f"FFI footprint with {pixel_padding} pixel padding calculated")
 
-    # Extract RA and Dec coordinates
-    ra_coords = sky_coords.ra.deg
-    dec_coords = sky_coords.dec.deg
+    df = None
+    if backend in {"auto", "flathub"}:
+        try:
+            df = _download_gaia_catalog_flathub(
+                ra_coords,
+                dec_coords,
+                magnitude_limit,
+                flathub_endpoint=flathub_endpoint,
+            )
+        except Exception as exc:
+            if backend == "flathub":
+                raise
+            print(f"⚠️ flathub Gaia download failed ({exc}); falling back to TAP.")
 
-    # Format footprint for ADQL query - interleave RA and Dec coordinates
-    footprint_coords = []
-    for ra, dec in zip(ra_coords, dec_coords):
-        footprint_coords.extend([ra, dec])
+    if df is None:
+        df = _download_gaia_catalog_tap(
+            ra_coords,
+            dec_coords,
+            magnitude_limit,
+            catalog_path,
+            gaia_credentials_file=gaia_credentials_file,
+        )
 
-    polygon_str = ",".join(map(str, footprint_coords))
-
-    print("📚 Querying Gaia for catalog (positions, magnitudes, and errors)...")
-
-    # Single async query (avoids a separate COUNT job that doubled load and timeout risk).
-    catalog_query = f"""
-    SELECT
-        source_id, ra, ra_error, dec, dec_error,
-        parallax, parallax_error,
-        phot_g_mean_mag,
-        phot_bp_mean_mag,
-        phot_rp_mean_mag
-    FROM
-        gaiadr3.gaia_source
-    WHERE 1=CONTAINS(
-        POINT('ICRS', ra, dec),
-        POLYGON('ICRS', {polygon_str})
-    )
-    AND phot_rp_mean_mag < {magnitude_limit}
-    """
-
-    print("Submitting job to Gaia... this may take a few minutes.")
-
-    adql_sidecar = os.path.splitext(catalog_path)[0] + "_manual_query.adql"
-    try:
-        gaia_catalog = _run_gaia_catalog_query_async(catalog_query)
-    except Exception as e:
-        print(f"❌ ERROR: Gaia catalog query failed. Error: {e}")
-        _emit_gaia_query_for_manual_fallback(catalog_query, adql_out_path=adql_sidecar)
-        raise
-
-    # Convert to pandas DataFrame and save as CSV
-    df = gaia_catalog.to_pandas()
-    df.to_csv(catalog_path, index=False)
-
-    print(f"✅ Gaia catalog saved to: {catalog_path}")
-    print(f"📊 Downloaded {len(df)} stars in the padded FFI area.")
-
+    _save_gaia_catalog_dataframe(df, catalog_path)
     return catalog_path
 
 
@@ -1848,6 +1988,8 @@ def download_gaia_catalog_for_tess_file(
     magnitude_limit=18.0,
     force_download=False,
     gaia_credentials_file=None,
+    gaia_backend="auto",
+    flathub_endpoint=DEFAULT_FLATHUB_ENDPOINT,
 ):
     """
     Standalone function to download Gaia catalog for a TESS FITS file.
@@ -1862,6 +2004,8 @@ def download_gaia_catalog_for_tess_file(
         magnitude_limit (float): Magnitude limit for Gaia RP band (default: 18.0)
         force_download (bool): Force download even if catalog already exists (default: False)
         gaia_credentials_file (str, optional): Explicit Gaia credentials file path (see resolve_gaia_credentials_path).
+        gaia_backend (str): ``auto`` (flathub then TAP fallback), ``flathub``, or ``tap``.
+        flathub_endpoint (str): flathub API base URL when using the flathub backend.
 
     Returns:
         str: Path to the downloaded catalog CSV file
@@ -1872,8 +2016,10 @@ def download_gaia_catalog_for_tess_file(
     print("Loading TESS image data...")
     data_shape, tess_wcs, ra_center, dec_center, tess_header, sector, camera_id, ccd_id = load_tess_image(tess_file)
 
-    # Create output directory structure
-    catalog_dir = os.path.join(output_path, f"sector_{sector:04d}", f"camera_{camera_id}", f"ccd_{ccd_id}")
+    # output_path is the final target directory -- see the matching fix/note
+    # in download_gaia_catalog() below (this pre-existence check must agree
+    # with where the actual download saves, or it never finds a real cache hit).
+    catalog_dir = output_path
     catalog_filename = f"gaia_catalog_s{sector:04d}_{camera_id}_{ccd_id}.csv"
     catalog_path = os.path.join(catalog_dir, catalog_filename)
 
@@ -1895,6 +2041,8 @@ def download_gaia_catalog_for_tess_file(
             pixel_padding=pixel_padding,
             magnitude_limit=magnitude_limit,
             gaia_credentials_file=gaia_credentials_file,
+            gaia_backend=gaia_backend,
+            flathub_endpoint=flathub_endpoint,
         )
         print(f"✅ Gaia catalog download complete: {catalog_path}")
         return catalog_path
@@ -2183,6 +2331,17 @@ if __name__ == "__main__":
     parser.add_argument("--gaia_magnitude_limit", type=float, default=18.0, help="Magnitude limit for Gaia RP band")
     parser.add_argument("--force-gaia-download", action="store_true", help="Force Gaia catalog download even if it already exists")
     parser.add_argument(
+        "--gaia-backend",
+        choices=("auto", "flathub", "tap"),
+        default="auto",
+        help="Gaia catalog backend: flathub (Flatiron), tap (ESA ADQL), or auto (flathub with TAP fallback)",
+    )
+    parser.add_argument(
+        "--flathub-endpoint",
+        default=DEFAULT_FLATHUB_ENDPOINT,
+        help="flathub API endpoint when --gaia-backend is flathub or auto",
+    )
+    parser.add_argument(
         "--gaia-credentials-file",
         default=None,
         metavar="PATH",
@@ -2218,6 +2377,8 @@ if __name__ == "__main__":
                 magnitude_limit=args.gaia_magnitude_limit,
                 force_download=args.force_gaia_download,
                 gaia_credentials_file=args.gaia_credentials_file,
+                gaia_backend=args.gaia_backend,
+                flathub_endpoint=args.flathub_endpoint,
             )
         except Exception as e:
             print(f"❌ ERROR: Failed to download Gaia catalog: {e}")

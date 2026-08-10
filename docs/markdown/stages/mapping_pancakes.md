@@ -81,8 +81,9 @@ Before PanCAKES, the orchestrator (`dispatch.py`, unless `skip_download_catalog:
 
 1. Same reference FFI WCS; padded 4-corner sky polygon (`pixel_padding=50`).
 2. Async ADQL TAP query on `gaiadr3.gaia_source` with `phot_rp_mean_mag < limit`, with retries.
-3. Output: `{catalog_dir}/sector_{SSSS}/camera_{C}/ccd_{D}/gaia_catalog_s{SSSS}_{C}_{D}.csv` with columns `source_id`, `ra/dec` (+errors), `parallax` (+error), `phot_g/bp/rp_mean_mag`.
-4. Skipped if the file already exists (unless `force_download`).
+3. Output: `{catalog_dir}/gaia_catalog_s{SSSS}_{C}_{D}.csv` with columns `source_id`, `ra/dec` (+errors), `parallax` (+error), `pm`, `pmra/pmdec` (+errors), `phot_g/bp/rp_mean_mag`.
+4. Backend: **flathub** (Flatiron) bbox prefetch + exact padded polygon filter by default; falls back to ESA TAP ADQL polygon on failure. Override with `gaia_backend="tap"` or `"flathub"` in `download_gaia_catalog()`.
+5. Skipped if the file already exists (unless `force_download`).
 
 The catalog is consumed by `ps1_process` (saturation handling / star removal) and the diff stage, not by the mapping math itself. Download takes ~2–3 minutes on a cold cache.
 
