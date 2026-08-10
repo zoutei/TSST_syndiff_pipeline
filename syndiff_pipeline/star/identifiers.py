@@ -23,6 +23,11 @@ _GAIA_CATALOG_COLUMNS = (
     "dec_error",
     "parallax",
     "parallax_error",
+    "pm",
+    "pmra",
+    "pmra_error",
+    "pmdec",
+    "pmdec_error",
     "phot_g_mean_mag",
     "phot_bp_mean_mag",
     "phot_rp_mean_mag",
@@ -131,6 +136,7 @@ def _lookup_gaia_remote(gaia_source_id: int) -> pd.Series:
 
     job = Gaia.launch_job(
         f"SELECT source_id,ra,dec,ra_error,dec_error,parallax,parallax_error,"
+        f"pm,pmra,pmra_error,pmdec,pmdec_error,"
         f"phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag "
         f"FROM gaia_dr3.gaia_source WHERE source_id = {int(gaia_source_id)}"
     )
@@ -150,6 +156,15 @@ def _lookup_gaia_remote(gaia_source_id: int) -> pd.Series:
             "parallax": float(row["parallax"]) if row["parallax"] is not None else np.nan,
             "parallax_error": (
                 float(row["parallax_error"]) if row["parallax_error"] is not None else np.nan
+            ),
+            "pm": float(row["pm"]) if row["pm"] is not None else np.nan,
+            "pmra": float(row["pmra"]) if row["pmra"] is not None else np.nan,
+            "pmra_error": (
+                float(row["pmra_error"]) if row["pmra_error"] is not None else np.nan
+            ),
+            "pmdec": float(row["pmdec"]) if row["pmdec"] is not None else np.nan,
+            "pmdec_error": (
+                float(row["pmdec_error"]) if row["pmdec_error"] is not None else np.nan
             ),
             "phot_g_mean_mag": (
                 float(row["phot_g_mean_mag"]) if row["phot_g_mean_mag"] is not None else np.nan
@@ -375,6 +390,11 @@ def write_host_gaia_row_csv(host: ResolvedHost, path: str) -> None:
         "dec_error": "",
         "parallax": "",
         "parallax_error": "",
+        "pm": "",
+        "pmra": "",
+        "pmra_error": "",
+        "pmdec": "",
+        "pmdec_error": "",
         "phot_g_mean_mag": host.phot_g_mean_mag if host.phot_g_mean_mag is not None else "",
         "phot_bp_mean_mag": (
             host.phot_bp_mean_mag if host.phot_bp_mean_mag is not None else ""
