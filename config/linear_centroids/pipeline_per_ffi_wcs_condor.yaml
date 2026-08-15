@@ -1,0 +1,20 @@
+# Submit per-FFI WCS fit on Condor (SCC lane must already have centroids_r1 + hp_d).
+#
+#   syndiff diff submit \
+#     --config config/linear_centroids/pipeline_per_ffi_wcs_condor.yaml \
+#     --sector 22 --camera 3 --ccd 3 \
+#     --stages diff \
+#     --run-id per_ffi_wcs_s0022_c3k3
+deployment_file: ../deployment.yaml
+diff_config: diff_config_per_ffi_wcs_only.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  skip_artifact_verify: true

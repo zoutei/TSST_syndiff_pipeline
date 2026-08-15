@@ -156,8 +156,9 @@ class TestSiteConfigLoader(unittest.TestCase):
     def test_example_site_files_exist(self):
         example = SitePaths.from_site_dir(_ROOT / "config")
         self.assertTrue(example.template_config.is_file())
+        self.assertTrue(example.diff_config.is_file())
         self.assertTrue(example.deployment_example.is_file())
-        policy = load_diff_site_policy(_ROOT / "config" / "linear_centroids" / "diff_config.yaml")
+        policy = load_diff_site_policy(example.diff_config)
         self.assertTrue(policy.pipeline)
         self.assertEqual(policy.condor.request_memory, 100_000)
         targets = load_targets(_ROOT / "config" / "targets_example.csv")

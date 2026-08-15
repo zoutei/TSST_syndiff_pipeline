@@ -33,6 +33,7 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
         ffi = np.full((4, 4), 100.0, dtype=np.float64)
         convolved = np.full((4, 4), 40.0, dtype=np.float64)
         phot_bkg = np.full((4, 4), 0.5, dtype=np.float64)
+        tessreduce_bkg = np.full((4, 4), 0.25, dtype=np.float64)
         shared_mask = np.zeros((4, 4), dtype=bool)
         convolved_table = pd.DataFrame(
             [{"group_dx": 0.0, "group_dy": 0.0, "convolved_path": "/tmp/c.fits"}]
@@ -56,8 +57,15 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
             ), patch.object(
                 ks_mod, "photutils_background_masked", return_value=phot_bkg
             ) as mock_phot, patch.object(
+                ks_mod,
+                "estimate_tessreduce_residual_background",
+                return_value=(tessreduce_bkg, tessreduce_bkg, np.ones_like(tessreduce_bkg)),
+            ) as mock_tessreduce, patch.object(
                 ks_mod, "_write_image_fits"
-            ) as mock_write:
+            ) as mock_write, patch(
+                "syndiff_pipeline.difference_imaging.orchestration.diff_store.resolve_diff_write_path",
+                return_value=Path(tmp) / "output.fits.fz",
+            ):
                 ks_mod._kernel_subtract_loky_initializer(
                     {
                         "crop_bounds": crop_bounds,
@@ -70,6 +78,8 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
                         "bkg_label": "ks_b",
                         "output_dir": tmp,
                         "manifest": pd.DataFrame(),
+                        "data_root": tmp,
+                        "sck": (1, 1, 1),
                     }
                 )
                 result = ks_mod._process_one_frame((ffi_path,))
@@ -77,9 +87,15 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
             self.assertTrue(result["success"])
             mock_phot.assert_called_once()
             np.testing.assert_array_equal(mock_phot.call_args[0][0], ffi - convolved)
+            mock_tessreduce.assert_called_once()
+            np.testing.assert_array_equal(
+                mock_tessreduce.call_args[0][0], ffi - convolved - phot_bkg
+            )
             self.assertEqual(mock_write.call_count, 2)
             diff_data = mock_write.call_args_list[0][0][1]
             np.testing.assert_array_equal(diff_data, ffi - convolved)
+            bkg_data = mock_write.call_args_list[1][0][1]
+            np.testing.assert_array_equal(bkg_data, phot_bkg + tessreduce_bkg)
             meta = meta_workspace_dir_from_diffs_dir(diffs_dir)
             self.assertFalse(os.path.exists(meta))
 

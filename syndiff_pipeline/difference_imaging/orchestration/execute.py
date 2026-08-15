@@ -74,6 +74,7 @@ from syndiff_pipeline.difference_imaging.orchestration.validate import validate_
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     parse_background,
     parse_centroids,
+    parse_per_ffi_wcs,
     parse_epsf,
     parse_hotpants,
     parse_kernel_fit,
@@ -1288,6 +1289,7 @@ def run_config_pipeline(
                 params=kf_params,
                 artifact_dir=kernel_fit_ws,
                 debug_ws_dir=kernel_fit_ws,
+                skip_existing=not force_rerun,
                 field_ctx=field_ctx,
                 mask_catalog=mask_catalog,
                 sector=int(cfg.sector) if cfg.sector is not None else None,
@@ -1364,6 +1366,11 @@ def run_config_pipeline(
                 shared_mask=shared_mask,
                 convolved_table=convolved_table,
                 phot_box_size=ks_params.phot_box_size,
+                tessreduce_bkg_enabled=ks_params.tessreduce_bkg_enabled,
+                tessreduce_smooth_gauss=ks_params.tessreduce_smooth_gauss,
+                tessreduce_anomaly_gauss=ks_params.tessreduce_anomaly_gauss,
+                tessreduce_qe_spline_degree=ks_params.tessreduce_qe_spline_degree,
+                tessreduce_qe_spline_smooth_mult=ks_params.tessreduce_qe_spline_smooth_mult,
                 diffs_dir=diff_dir,
                 diffs_label=diffs_l,
                 bkg_dir=bkg_dir,
@@ -1457,20 +1464,28 @@ def run_config_pipeline(
             )
 
             if getattr(cfg, "pipeline_plots", False):
-                from syndiff_pipeline.difference_imaging.support.plot import (
-                    write_gridded_epsf_workspace_plots,
-                )
+                try:
+                    from syndiff_pipeline.difference_imaging.support.plot import (
+                        write_gridded_epsf_workspace_plots,
+                    )
 
-                dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
-                plot_dir = _resolve_scc_epsf_plots_dir(cfg, label_out)
-                write_gridded_epsf_workspace_plots(
-                    ws_out,
-                    plot_dir,
-                    epsf_label=label_out,
-                    dpi=dpi,
-                    max_frames=10,
-                    wcs_table=wcs_table,
-                )
+                    dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+                    plot_dir = _resolve_scc_epsf_plots_dir(cfg, label_out)
+                    write_gridded_epsf_workspace_plots(
+                        ws_out,
+                        plot_dir,
+                        epsf_label=label_out,
+                        dpi=dpi,
+                        max_frames=10,
+                        wcs_table=wcs_table,
+                    )
+                except Exception:
+                    log.warning(
+                        "pipeline_plots: failed to write ePSF debug plots for %s; "
+                        "continuing (ePSF fit itself already succeeded).",
+                        label_out,
+                        exc_info=True,
+                    )
 
         elif kind == "centroids":
             centroids_p = parse_centroids(stage, idx)
@@ -1523,32 +1538,71 @@ def run_config_pipeline(
             )
 
             if getattr(cfg, "pipeline_plots", False):
-                from syndiff_pipeline.difference_imaging.support.plot import (
-                    write_centroids_workspace_plots,
-                )
+                try:
+                    from syndiff_pipeline.difference_imaging.support.plot import (
+                        write_centroids_workspace_plots,
+                    )
 
-                plot_dir = _resolve_scc_pipeline_plots_dir(cfg, category=label_out)
-                epsf_label = str(inp["epsf"])
-                epsf_plot_dir = _resolve_scc_epsf_plots_dir(cfg, epsf_label)
-                diff_paths_by_stem = {
-                    gridded_epsf._diff_path_to_stem(p): p for p in diff_paths if p
-                }
-                write_centroids_workspace_plots(
-                    ws_out,
-                    plot_dir,
-                    centroids_label=label_out,
-                    diff_paths_by_stem=diff_paths_by_stem,
-                    gaia_df=gaia_df,
-                    epsf_catalog=epsf_catalog,
-                    params=centroids_p,
-                    ffi_list_df=ffi_list_df,
-                    science_bounds=crop_bounds,
-                    ffi_path_by_stem=ffi_path_by_stem,
-                    max_frames=10,
-                    wcs_table=wcs_table,
-                    reference_plot_dir=epsf_plot_dir,
-                    reference_label=epsf_label,
-                )
+                    plot_dir = _resolve_scc_pipeline_plots_dir(cfg, category=label_out)
+                    epsf_label = str(inp["epsf"])
+                    epsf_plot_dir = _resolve_scc_epsf_plots_dir(cfg, epsf_label)
+                    diff_paths_by_stem = {
+                        gridded_epsf._diff_path_to_stem(p): p for p in diff_paths if p
+                    }
+                    write_centroids_workspace_plots(
+                        ws_out,
+                        plot_dir,
+                        centroids_label=label_out,
+                        diff_paths_by_stem=diff_paths_by_stem,
+                        gaia_df=gaia_df,
+                        epsf_catalog=epsf_catalog,
+                        params=centroids_p,
+                        ffi_list_df=ffi_list_df,
+                        science_bounds=crop_bounds,
+                        ffi_path_by_stem=ffi_path_by_stem,
+                        max_frames=10,
+                        wcs_table=wcs_table,
+                        reference_plot_dir=epsf_plot_dir,
+                        reference_label=epsf_label,
+                    )
+                except Exception:
+                    log.warning(
+                        "pipeline_plots: failed to write centroids debug plots for %s; "
+                        "continuing (centroid fitting itself already succeeded).",
+                        label_out,
+                        exc_info=True,
+                    )
+
+        elif kind == "per_ffi_wcs":
+            wcs_p = parse_per_ffi_wcs(stage, idx)
+            inp = stage["inputs"]
+            label_out = stage["output"]
+            centroids_label = str(inp["centroids"])
+            hp_d_label = str(inp.get("diffs", "hp_d"))
+            lane_root = _diff_lane_root_dir(cfg, ctx)
+            ws_out = _diff_stage_dir(cfg, ctx, label_out)
+            if gaia_df is None:
+                gaia_df = _load_gaia_catalog(cfg)
+            if gaia_df is None:
+                raise RuntimeError("per_ffi_wcs requires gaia_catalog.")
+            from syndiff_pipeline.difference_imaging.stages import per_ffi_wcs
+
+            n_ok, n_total = per_ffi_wcs.run_per_ffi_wcs_all_frames(
+                lane_root,
+                gaia_df,
+                cfg,
+                wcs_p,
+                ws_out,
+                centroids_label=centroids_label,
+                hp_d_label=hp_d_label,
+                wcs_label=label_out,
+                diff_log_path=diff_log_path,
+                force_rerun=force_rerun,
+                sector=int(cfg.sector),
+                camera=int(cfg.camera),
+                ccd=int(cfg.ccd),
+            )
+            log.info("per_ffi_wcs: %d/%d frames ok -> %s", n_ok, n_total, ws_out)
 
         elif kind == "sat_template":
             sat_p = parse_sat_template(stage, idx)
@@ -1794,4 +1848,3 @@ def _load_removed_stars_in_crop(
         & (df["y"] < ny)
     )
     return df[in_crop].copy().reset_index(drop=True)
-

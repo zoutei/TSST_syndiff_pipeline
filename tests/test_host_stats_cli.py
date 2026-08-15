@@ -129,6 +129,97 @@ class TestSyndiffClusterMain:
         assert "Excluded:" in out
 
 
+class TestIncludeOkFormats:
+    """--include-ok must only affect --format hosts (a genuine "list everyone"
+    view); requirements/bad-machines are exclusion structures by definition,
+    so silently turning them into "every host" would be a real footgun given
+    both formats are documented as scripting-consumable and bad-machines'
+    schema matches condor.py's real exclusion-file format."""
+
+    def _setup(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("HOST_STATS_DIR", str(tmp_path))
+        _write_sample(
+            tmp_path,
+            "plscience1.stsci.edu",
+            mem_available_mb=200_000,
+            mem_total_mb=515_000,
+            load15=1.0,
+        )
+        _write_sample(
+            tmp_path,
+            "plscience2.stsci.edu",
+            mem_available_mb=10_000,
+            mem_total_mb=128_000,
+            load15=1.0,
+        )
+
+    def test_include_ok_lists_every_host_for_hosts_format(self, tmp_path, monkeypatch, capsys):
+        self._setup(tmp_path, monkeypatch)
+        assert (
+            main(
+                [
+                    "--format",
+                    "hosts",
+                    "--include-ok",
+                    "--preset",
+                    "128gb",
+                    "--no-stats-dir-line",
+                ]
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        for n in range(1, 16):
+            assert f"plscience{n}.stsci.edu" in out
+
+    def test_include_ok_is_ignored_with_warning_for_bad_machines(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._setup(tmp_path, monkeypatch)
+        assert (
+            main(
+                [
+                    "--format",
+                    "bad-machines",
+                    "--include-ok",
+                    "--preset",
+                    "128gb",
+                    "--no-stats-dir-line",
+                ]
+            )
+            == 0
+        )
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "--include-ok has no effect" in captured.err
+        hosts = json.loads(captured.out)["hosts"]
+        # plscience1 has plenty of free mem -> not excluded; must NOT appear.
+        assert "plscience1.stsci.edu" not in hosts
+        assert "plscience2.stsci.edu" in hosts
+
+    def test_include_ok_is_ignored_with_warning_for_requirements(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._setup(tmp_path, monkeypatch)
+        assert (
+            main(
+                [
+                    "--format",
+                    "requirements",
+                    "--include-ok",
+                    "--preset",
+                    "128gb",
+                    "--no-stats-dir-line",
+                ]
+            )
+            == 0
+        )
+        captured = capsys.readouterr()
+        assert "WARNING" in captured.err
+        assert "plscience1.stsci.edu" not in captured.out
+        assert "plscience2.stsci.edu" in captured.out
+
+
 class TestDiscordClusterTrigger:
     def test_cluster_status_trigger_substring(self):
         assert cluster_status_trigger("how is the cluster?")

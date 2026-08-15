@@ -7,6 +7,7 @@ import numpy as np
 from syndiff_pipeline.common.mapping_grid import MappingGrid, MappingGridError
 
 __all__ = [
+    "pad_mask_bottom",
     "prepare_science_template_pairing",
     "trim_padded_products",
     "zero_pad_science_bottom",
@@ -28,6 +29,31 @@ def zero_pad_science_bottom(
         raise MappingGridError(f"science array must be 2-D, got shape {sci.shape}")
     out = np.zeros((sci.shape[0] + pad, sci.shape[1]), dtype=sci.dtype)
     out[pad:, :] = sci
+    return out
+
+
+def pad_mask_bottom(mask_native: np.ndarray, pad_rows: int) -> np.ndarray:
+    """Bottom-pad a boolean Hotpants/phot mask, marking new rows as bad.
+
+    ``zero_pad_science_bottom`` is correct for flux/error arrays, where the
+    padded rows are legitimately zero-valued science. A mask's padded rows
+    are fabricated pad geometry with no real observation behind them --
+    filling them with the mask's own "good" value (0/False, per
+    ``difference_imaging.masking.bits``) would hand Hotpants' substamp and
+    kernel-fit selection a strip of data that looks like real, valid,
+    flat-zero sky. Pad with ``True`` (masked/excluded) instead -- same
+    "edge, not real sky" role as the ``EDGE`` static-mask bit.
+    """
+    pad = int(pad_rows)
+    if pad < 0:
+        raise MappingGridError(f"pad_rows must be >= 0, got {pad}")
+    if pad == 0:
+        return np.asarray(mask_native, dtype=bool)
+    mask = np.asarray(mask_native, dtype=bool)
+    if mask.ndim != 2:
+        raise MappingGridError(f"mask array must be 2-D, got shape {mask.shape}")
+    out = np.ones((mask.shape[0] + pad, mask.shape[1]), dtype=bool)
+    out[pad:, :] = mask
     return out
 
 

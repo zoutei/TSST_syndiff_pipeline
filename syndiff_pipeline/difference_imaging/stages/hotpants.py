@@ -1185,7 +1185,7 @@ def _process_one_frame(
             "mask_catalog is not aligned to crop_bounds/mapping_grid."
         )
     if row_diff > 0:
-        from syndiff_pipeline.common.grid_pairing import zero_pad_science_bottom
+        from syndiff_pipeline.common.grid_pairing import pad_mask_bottom
 
         if row_diff != pad_rows:
             log.warning(
@@ -1194,7 +1194,11 @@ def _process_one_frame(
                 "observed difference instead of the stale value.",
                 row_diff, sci_crop.shape, pad_rows,
             )
-        mask_array = zero_pad_science_bottom(mask_array, row_diff)
+        # pad_mask_bottom (not zero_pad_science_bottom) marks the new rows
+        # bad/excluded -- they're fabricated pad geometry, not real observed
+        # sky, so Hotpants' substamp/kernel-fit selection must not treat them
+        # as legitimate flat-zero data (see grid_pairing.pad_mask_bottom).
+        mask_array = pad_mask_bottom(mask_array, row_diff)
 
     result = run_hotpants_frame(
         sci_array=sci_crop,

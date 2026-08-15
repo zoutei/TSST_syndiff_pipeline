@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import json
 import logging
@@ -11,6 +12,7 @@ import signal
 import threading
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List
@@ -698,7 +700,7 @@ def reconcile_running_stages(
                             log_path, job.stage
                         )
                     ):
-                        tallies = condor.tally_execution_eviction_failures(
+                        tallies = condor.combined_eviction_tallies(
                             artifacts["log"].read_text(encoding="utf-8", errors="replace"),
                             cluster_id=int(native_id),
                         )
@@ -967,9 +969,30 @@ def _apply_verify_outcome(state: pstate.PipelineState, outcome: VerifyOutcome) -
             complete=True,
         )
         return 1
-    state.cache_external_check(
-        key.run_id, key.target_label, key.stage, complete=False
-    )
+    state.cache_external_check(key.run_id, key.target_label, key.stage, complete=False)
+    # An ``external`` stage is an upstream dependency that this run will not
+    # produce.  Once its verification completes with ``False``, no scheduler
+    # action can make it appear; repeatedly requeueing the same NFS scan leaves
+    # the dependent stage permanently displayed as ``sc_q``.  Fail visibly so
+    # the operator gets the missing prerequisite and can retry after repairing
+    # it.  Verification exceptions remain non-terminal above: they may be
+    # transient filesystem/DB failures rather than a missing artifact.
+    row = state.get_stage_run(key.run_id, key.target_label, key.stage)
+    if row is not None and row.status == pstate.STATUS_EXTERNAL:
+        reason = (
+            f"Required external artifact for stage {key.stage!r} was not found; "
+            "the selected run cannot produce this prerequisite."
+        )
+        log.error("%s (%s/%s)", reason, key.run_id, key.target_label)
+        state.update_stage_status(
+            key.run_id,
+            key.target_label,
+            key.stage,
+            pstate.STATUS_FAILED,
+            finished_at=pstate._utc_now(),
+            error_tail=reason,
+        )
+        state.block_downstream(key.run_id, key.target_label, key.stage)
     return 0
 
 
@@ -1101,6 +1124,205 @@ def _checkpoint_hit(
         ),
         None,
     )
+
+
+@dataclass(frozen=True)
+class _FastPathResult:
+    """Outcome of one candidate's checkpoint/manifest/absence-probe fast path.
+
+    Computed off the main thread by ``_run_fast_path_task`` (see
+    ``_fast_path_check_bounded``) since each of the three checks it wraps
+    reads from the shared NFS data root (provenance.db, manifests, skycell
+    CSVs) and can block indefinitely under NFS contention. Exactly one of
+    ``outcome`` / ``needs_full_verify`` is meaningful: ``outcome`` set means
+    the candidate is resolved for this tick; ``needs_full_verify`` True means
+    the caller should fall back to the background ``VerifyTask`` pool.
+    """
+
+    outcome: "VerifyOutcome | None" = None
+    needs_full_verify: bool = False
+    backfill: "BackfillTask | None" = None
+
+
+def _run_fast_path_task(
+    key: "VerifyTaskKey",
+    resolved,
+    manifest_path: str,
+    stable_path: str,
+    runner_cfg,
+    meta,
+    bookkeeping_trust_index: bool,
+) -> "_FastPathResult":
+    """Body of the checkpoint/manifest/absence-probe fast path (worker thread).
+
+    Mirrors the per-candidate logic that used to run inline in
+    ``_run_verify_pass``; moved here so it can be submitted to
+    ``_fast_path_executor`` instead of blocking the daemon's main thread.
+    """
+    from syndiff_pipeline.common.orchestration.verify_worker import (
+        BackfillTask,
+        VerifyOutcome,
+    )
+    from syndiff_pipeline.template_creation.orchestration.verify import (
+        AbsenceProbeResult,
+        check_manifests_only,
+        stage_absence_probe,
+    )
+
+    stage = key.stage
+    checkpoint_result = _checkpoint_hit(stage, key, resolved, stable_path)
+    checkpoint_outcome, miss_reason = (
+        checkpoint_result if checkpoint_result is not None else (None, None)
+    )
+    if checkpoint_outcome is not None:
+        return _FastPathResult(outcome=checkpoint_outcome)
+    if bookkeeping_trust_index and stage in CHECKPOINT_STAGES:
+        _log_trust_index_checkpoint_miss(
+            stage, key.run_id, key.target_label, miss_reason=miss_reason
+        )
+        if miss_reason != "store_unavailable":
+            return _FastPathResult(
+                outcome=VerifyOutcome(
+                    key=key, complete=False, stable_path=stable_path, resolved=resolved
+                )
+            )
+        # store_unavailable: fall through to the legacy manifest/absence-probe
+        # path below (see the identical comment previously inline here).
+
+    manifest_hit = check_manifests_only(
+        resolved,
+        stage,
+        manifest_path=manifest_path,
+        stable_manifest_path=stable_path,
+        runner_cfg=runner_cfg,
+        meta=meta,
+    )
+    if manifest_hit is True:
+        backfill = None
+        if (
+            check_manifests_only(
+                resolved,
+                stage,
+                stable_manifest_path=stable_path,
+                runner_cfg=runner_cfg,
+                meta=meta,
+            )
+            is not True
+        ):
+            backfill = BackfillTask(manifest_path=manifest_path, stable_path=stable_path)
+        return _FastPathResult(
+            outcome=VerifyOutcome(
+                key=key, complete=True, stable_path=stable_path, resolved=resolved
+            ),
+            backfill=backfill,
+        )
+
+    probe = stage_absence_probe(resolved, stage, runner_cfg=runner_cfg, meta=meta)
+    if probe is AbsenceProbeResult.ABSENT:
+        return _FastPathResult(
+            outcome=VerifyOutcome(
+                key=key, complete=False, stable_path=stable_path, resolved=resolved
+            )
+        )
+    return _FastPathResult(needs_full_verify=True)
+
+
+_FAST_PATH_MAX_WORKERS = 4
+_FAST_PATH_SAME_TICK_TIMEOUT_S = 0.5
+_FAST_PATH_BLOCK_POLL_S = 0.05
+_fast_path_executor: "concurrent.futures.ThreadPoolExecutor | None" = None
+_fast_path_lock = threading.Lock()
+_fast_path_in_flight: dict = {}
+
+
+def _get_fast_path_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _fast_path_executor
+    with _fast_path_lock:
+        if _fast_path_executor is None:
+            _fast_path_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=_FAST_PATH_MAX_WORKERS,
+                thread_name_prefix="verify-fast-path",
+            )
+        return _fast_path_executor
+
+
+def _fast_path_check_bounded(
+    key: "VerifyTaskKey",
+    resolved,
+    manifest_path: str,
+    stable_path: str,
+    runner_cfg,
+    meta,
+    bookkeeping_trust_index: bool,
+    *,
+    timeout_s: float = _FAST_PATH_SAME_TICK_TIMEOUT_S,
+) -> "_FastPathResult | None":
+    """Run the checkpoint/manifest/absence-probe fast path off the main thread.
+
+    Those checks read the provenance DB, manifests, and skycell CSVs from the
+    shared NFS data root; any one of them stalling under NFS contention
+    (D-state, uninterruptible -- see the nfs-contention-plscience-cluster
+    postmortem) previously froze the daemon's single main scheduling thread
+    entirely, blocking every run on every host, not just the one candidate
+    that hit the stall. Submitting to a small dedicated pool keeps the common
+    (fast) case unchanged -- the result is almost always ready well within
+    *timeout_s* -- while a genuine stall only ties up one of a few worker
+    slots instead of the whole daemon.
+
+    Returns ``None`` if the check hasn't finished yet: the first time a given
+    *key* is seen this waits up to *timeout_s*, but a *key* already in flight
+    (e.g. re-encountered on a later tick, or a later iteration of the same
+    verify pass) is polled with a zero timeout so a stuck candidate never
+    costs more than one bounded wait. Callers must treat ``None`` exactly
+    like "not resolved yet" -- leave state untouched and retry later.
+    """
+    executor = _get_fast_path_executor()
+    with _fast_path_lock:
+        fut = _fast_path_in_flight.get(key)
+        freshly_submitted = fut is None
+        if freshly_submitted:
+            fut = executor.submit(
+                _run_fast_path_task,
+                key,
+                resolved,
+                manifest_path,
+                stable_path,
+                runner_cfg,
+                meta,
+                bookkeeping_trust_index,
+            )
+            _fast_path_in_flight[key] = fut
+    try:
+        result = fut.result(timeout=timeout_s if freshly_submitted else 0.0)
+    except concurrent.futures.TimeoutError:
+        return None
+    with _fast_path_lock:
+        _fast_path_in_flight.pop(key, None)
+    return result
+
+
+def _fast_path_in_flight_count(run_id: str) -> int:
+    """Count fast-path candidates still in flight for *run_id*.
+
+    Needed so blocking callers (``block=True``) don't return prematurely:
+    the outer loop's "anything left to wait for?" check previously only
+    looked at the slow ``ArtifactVerifyWorker`` pool, so a run whose
+    candidates were all still pending in the fast-path pool (e.g. the very
+    first tick, before any of them have had a chance to resolve) would be
+    reported as fully drained when it wasn't.
+    """
+    with _fast_path_lock:
+        return sum(1 for key in _fast_path_in_flight if key.run_id == run_id)
+
+
+def reset_fast_path_pool_for_tests() -> None:
+    """Tear down the fast-path executor/dedup state between unit tests."""
+    global _fast_path_executor
+    with _fast_path_lock:
+        executor, _fast_path_executor = _fast_path_executor, None
+        _fast_path_in_flight.clear()
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _iter_verify_candidates(
@@ -1284,6 +1506,65 @@ def _collect_verify_status_by_run(
     return by_run
 
 
+def _promote_warmed_external_checkpoints(
+    state: pstate.PipelineState,
+    run_id: str,
+    ctx,
+) -> int:
+    """Promote EXTERNAL stages whose provenance checkpoint warmed since a fail-closed miss.
+
+    Note: this still calls ``_checkpoint_hit`` synchronously on the main
+    thread (unlike ``_run_verify_pass``, which routes it through
+    ``_fast_path_check_bounded``). It only opens provenance.db, not the
+    CSV/manifest reads that produced the observed daemon-wide freeze, so the
+    risk is smaller, but it is not zero on a fully NFS-stalled data root.
+    """
+    if not ctx.cfg.bookkeeping_trust_index:
+        return 0
+    from syndiff_pipeline.common.orchestration.verify_worker import VerifyTaskKey
+    from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
+
+    promoted = 0
+    active_stages = list(state.get_active_stages(run_id))
+    cfg = ctx.cfg
+    runs_root = cfg.runs_dir()
+    targets_by_label = {t.label(): t for t in ctx.targets}
+    for row in state.list_stage_runs(run_id):
+        if row.status != pstate.STATUS_EXTERNAL:
+            continue
+        if row.stage not in CHECKPOINT_STAGES:
+            continue
+        if state.external_verify_complete(run_id, row.target_label, row.stage):
+            continue
+        if not state.external_verify_attempted(run_id, row.target_label, row.stage):
+            continue
+        if not pstate.artifact_verify_needed(
+            state,
+            run_id,
+            row.target_label,
+            row.stage,
+            active_stages,
+            spec=state.pipeline_spec,
+        ):
+            continue
+        target = targets_by_label.get(row.target_label)
+        if target is None:
+            continue
+        resolved = resolve_config(target, cfg)
+        stable_path = str(
+            logs.stable_stage_manifest_path(runs_root, row.target_label, row.stage)
+        )
+        key = VerifyTaskKey(run_id, row.target_label, row.stage)
+        checkpoint_result = _checkpoint_hit(row.stage, key, resolved, stable_path)
+        if checkpoint_result is None:
+            continue
+        outcome, _miss_reason = checkpoint_result
+        if outcome is None or not outcome.complete:
+            continue
+        promoted += _apply_verify_outcome(state, outcome)
+    return promoted
+
+
 def _run_verify_pass(
     state: pstate.PipelineState,
     run_id: str,
@@ -1294,15 +1575,9 @@ def _run_verify_pass(
     block: bool,
     block_timeout_s: float = 0.0,
 ) -> int:
-    """Manifest fast path on main thread; full verify in background pool."""
-    from syndiff_pipeline.template_creation.orchestration.verify import (
-        AbsenceProbeResult,
-        check_manifests_only,
-        stage_absence_probe,
-    )
+    """Manifest fast path off the main thread (bounded wait); full verify in background pool."""
     from syndiff_pipeline.common.orchestration.verify_worker import (
         BackfillTask,
-        VerifyOutcome,
         VerifyTask,
         init_verify_worker,
     )
@@ -1322,79 +1597,25 @@ def _run_verify_pass(
         ):
             if budget_left <= 0:
                 break
-            checkpoint_result = _checkpoint_hit(
-                key.stage, key, resolved, stable_path
-            )
-            if checkpoint_result is None:
-                checkpoint_outcome, miss_reason = None, None
-            else:
-                checkpoint_outcome, miss_reason = checkpoint_result
-            if checkpoint_outcome is not None:
-                budget_left -= 1
-                total += apply(checkpoint_outcome)
-                continue
-            if ctx.cfg.bookkeeping_trust_index and key.stage in CHECKPOINT_STAGES:
-                _log_trust_index_checkpoint_miss(
-                    key.stage,
-                    key.run_id,
-                    key.target_label,
-                    miss_reason=miss_reason,
-                )
-                budget_left -= 1
-                outcome = VerifyOutcome(
-                    key=key,
-                    complete=False,
-                    stable_path=stable_path,
-                    resolved=resolved,
-                )
-                total += apply(outcome)
-                continue
-            manifest_hit = check_manifests_only(
+            fast_path = _fast_path_check_bounded(
+                key,
                 resolved,
-                key.stage,
-                manifest_path=manifest_path,
-                stable_manifest_path=stable_path,
-                runner_cfg=ctx.cfg,
-                meta=ctx.meta,
+                manifest_path,
+                stable_path,
+                ctx.cfg,
+                ctx.meta,
+                ctx.cfg.bookkeeping_trust_index,
             )
-            if manifest_hit is True:
-                budget_left -= 1
-                if check_manifests_only(
-                    resolved,
-                    key.stage,
-                    stable_manifest_path=stable_path,
-                    runner_cfg=ctx.cfg,
-                    meta=ctx.meta,
-                ) is not True:
-                    backfills.append(
-                        BackfillTask(
-                            manifest_path=manifest_path,
-                            stable_path=stable_path,
-                        )
-                    )
-                outcome = VerifyOutcome(
-                    key=key,
-                    complete=True,
-                    stable_path=stable_path,
-                    resolved=resolved,
-                )
-                total += apply(outcome)
+            if fast_path is None:
+                # Still running (or just stalled) in the fast-path pool; leave
+                # state untouched and pick it up again on a later tick rather
+                # than blocking the whole daemon on it.
                 continue
-            probe = stage_absence_probe(
-                resolved,
-                key.stage,
-                runner_cfg=ctx.cfg,
-                meta=ctx.meta,
-            )
-            if probe is AbsenceProbeResult.ABSENT:
+            if fast_path.outcome is not None:
                 budget_left -= 1
-                outcome = VerifyOutcome(
-                    key=key,
-                    complete=False,
-                    stable_path=stable_path,
-                    resolved=resolved,
-                )
-                total += apply(outcome)
+                total += apply(fast_path.outcome)
+                if fast_path.backfill is not None:
+                    backfills.append(fast_path.backfill)
                 continue
             if worker.is_in_flight(key):
                 continue
@@ -1413,16 +1634,25 @@ def _run_verify_pass(
             )
 
         if not tasks and not backfills:
-            if worker.in_flight_count(run_id) == 0:
+            slow_in_flight = worker.in_flight_count(run_id)
+            fast_in_flight = _fast_path_in_flight_count(run_id)
+            if slow_in_flight == 0 and fast_in_flight == 0:
                 break
             if not block:
                 break
-            total += worker.drain(
-                apply,
-                run_id=run_id,
-                block=True,
-                block_timeout_s=block_timeout_s,
-            )
+            if slow_in_flight > 0:
+                total += worker.drain(
+                    apply,
+                    run_id=run_id,
+                    block=True,
+                    block_timeout_s=block_timeout_s,
+                )
+            else:
+                # Only fast-path work is outstanding. An already-in-flight
+                # fast-path candidate polls with a zero timeout (see
+                # _fast_path_check_bounded), so a blocking caller would
+                # busy-spin here without a short sleep between retries.
+                time.sleep(_FAST_PATH_BLOCK_POLL_S)
             continue
 
         worker.schedule_backfill(backfills)
@@ -1452,6 +1682,13 @@ def _resolve_external_and_pending_skips(
     """Schedule artifact verification and optionally wait for it to finish."""
     if budget is None:
         budget = ctx.cfg.verify_budget_per_tick
+    warmed = _promote_warmed_external_checkpoints(state, run_id, ctx)
+    if warmed:
+        log.info(
+            "Promoted %d warmed external checkpoint stage(s) in run %s",
+            warmed,
+            run_id,
+        )
     return _run_verify_pass(
         state,
         run_id,
@@ -1473,6 +1710,13 @@ def _schedule_external_and_pending_skips(
     """Non-blocking verify scheduling for the supervisor main loop."""
     if budget is None:
         budget = ctx.cfg.verify_budget_per_tick
+    warmed = _promote_warmed_external_checkpoints(state, run_id, ctx)
+    if warmed:
+        log.info(
+            "Promoted %d warmed external checkpoint stage(s) in run %s",
+            warmed,
+            run_id,
+        )
     _run_verify_pass(
         state,
         run_id,
@@ -2313,41 +2557,50 @@ def run_supervisor_daemon(workspace_root: str) -> int:
 
         try:
             while not _shutdown:
-                _apply_commands(state)
-
-                provenance_data_roots: set[str] = set()
-                for run in state.list_active_runs():
-                    if _shutdown:
-                        break
-                    run_id = run["run_id"]
-                    try:
-                        ctx = _load_run_context(state, run_id)
-                        if ctx is None:
-                            continue
-                        data_root = getattr(ctx.cfg, "data_root", None)
-                        if data_root:
-                            provenance_data_roots.add(str(data_root))
-                        _tick_run(state, run_id, ctx)
-                        # Honor cancel/pause/stop intents promptly even when a
-                        # large active-run set makes a full pass slow.
-                        _apply_commands(state)
-                    except Exception:
-                        # Isolate per-run failures so one bad run cannot take
-                        # down scheduling for every other active run.
-                        log.exception("Error while processing run %s", run_id)
-
                 try:
-                    discord_bot = _maybe_respawn_discord_bot(
-                        workspace_root, discord_bot
-                    )
-                except Exception:
-                    log.warning("Discord bot watchdog failed", exc_info=True)
+                    _apply_commands(state)
 
-                worker = _verify_worker()
-                active_runs = state.list_active_runs()
-                by_run = _collect_verify_status_by_run(state, active_runs)
-                write_verify_in_flight(workspace_root, by_run)
-                _maybe_drain_provenance_spool(provenance_data_roots)
+                    provenance_data_roots: set[str] = set()
+                    for run in state.list_active_runs():
+                        if _shutdown:
+                            break
+                        run_id = run["run_id"]
+                        try:
+                            ctx = _load_run_context(state, run_id)
+                            if ctx is None:
+                                continue
+                            data_root = getattr(ctx.cfg, "data_root", None)
+                            if data_root:
+                                provenance_data_roots.add(str(data_root))
+                            _tick_run(state, run_id, ctx)
+                            # Honor cancel/pause/stop intents promptly even when a
+                            # large active-run set makes a full pass slow.
+                            _apply_commands(state)
+                        except Exception:
+                            # Isolate per-run failures so one bad run cannot take
+                            # down scheduling for every other active run.
+                            log.exception("Error while processing run %s", run_id)
+
+                    try:
+                        discord_bot = _maybe_respawn_discord_bot(
+                            workspace_root, discord_bot
+                        )
+                    except Exception:
+                        log.warning("Discord bot watchdog failed", exc_info=True)
+
+                    worker = _verify_worker()
+                    active_runs = state.list_active_runs()
+                    by_run = _collect_verify_status_by_run(state, active_runs)
+                    write_verify_in_flight(workspace_root, by_run)
+                    _maybe_drain_provenance_spool(provenance_data_roots)
+                except Exception:
+                    # Belt-and-braces around the whole tick: the per-run
+                    # try/except above doesn't cover _apply_commands or
+                    # state.list_active_runs() themselves (e.g. a
+                    # StateDBUnavailableError from a stalled NFS connection
+                    # open -- see state.py's _conn()). Losing one tick to a
+                    # logged exception beats crashing the supervisor process.
+                    log.exception("Error during supervisor tick")
 
                 # Interruptible idle: wake early on shutdown instead of sleeping
                 # through a SIGTERM.

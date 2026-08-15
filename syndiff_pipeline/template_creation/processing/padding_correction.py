@@ -45,6 +45,17 @@ log = logging.getLogger(__name__)
 PAD_SIZE = 480
 EDGE_EXCLUSION = 10
 
+# Bump whenever the correction *algorithm* changes shape/placement math (not
+# just spec contents) -- folded into padding_spec_fingerprint so stale cache
+# entries computed under an older, buggy version are automatically orphaned
+# (never looked up again) rather than silently reused. v2: fixed
+# _standalone_padding_wcs's corner-location patch sizing -- "top_right" etc.
+# used to match both the "top" and "right" substring checks and get resized
+# to the FULL cell in both axes instead of a small corner square, pasting a
+# large fraction of the diagonal neighbor's real image onto the recipient
+# (a real double-count of star flux, not just a wider seam blend).
+CORRECTION_ALGORITHM_VERSION = 2
+
 _PAD_COLUMNS = (
     "pad_skycell_top", "pad_skycell_right", "pad_skycell_top_right",
     "pad_skycell_bottom", "pad_skycell_left", "pad_skycell_bottom_left",
@@ -79,9 +90,17 @@ def cross_projection_padding_spec(skycell_row: pd.Series) -> list[dict[str, str]
 
 
 def padding_spec_fingerprint(spec: list[dict[str, str]]) -> str:
-    """Content-addressed key for a padding spec (order-independent)."""
+    """Content-addressed key for a padding spec (order-independent).
+
+    Includes ``CORRECTION_ALGORITHM_VERSION`` so a correction computed under
+    an older, buggy version of the placement math never gets reused just
+    because the spec (neighbor/location list) happens to match -- see that
+    constant's docstring.
+    """
     canon = sorted((d["neighbor"], d["location"]) for d in spec)
-    blob = json.dumps(canon, separators=(",", ":")).encode("utf-8")
+    blob = json.dumps(
+        {"v": CORRECTION_ALGORITHM_VERSION, "spec": canon}, separators=(",", ":")
+    ).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
@@ -140,16 +159,38 @@ def _standalone_padding_wcs(
     cell_x_left = -(PAD_SIZE - EDGE_EXCLUSION) / 2
     cell_x_right = cell_width + (PAD_SIZE - EDGE_EXCLUSION) / 2
 
+    # Corner locations ("top_right", "top_left", "bottom_right",
+    # "bottom_left") contain two of the four direction words as substrings,
+    # so a naive `"top" in location` / `"right" in location` pair of checks
+    # both fire and each overwrites width/height to the FULL cell dimension
+    # -- turning what should be a small ~500px square corner patch into a
+    # reprojection target the size of the whole cell, which then pastes a
+    # large fraction of the diagonal neighbor's real image on top of the
+    # recipient (a real double-count of star flux, not just a wider seam
+    # blend). Resolve direction membership explicitly first, and only widen
+    # width/height to the full cell dimension for pure edges (no "_" in
+    # location) -- corners keep the small default square patch in both axes.
+    is_corner = "_" in location
+    is_top = location in ("top", "top_left", "top_right")
+    is_bottom = location in ("bottom", "bottom_left", "bottom_right")
+    is_left = location in ("left", "top_left", "bottom_left")
+    is_right = location in ("right", "top_right", "bottom_right")
+
     padding_x_center, padding_y_center = cell_x_center, cell_y_center
     padding_width = padding_height = pad_size_adjusted
-    if "top" in location:
-        padding_y_center, padding_width = cell_y_top, cell_width
-    if "bottom" in location:
-        padding_y_center, padding_width = cell_y_bottom, cell_width
-    if "left" in location:
-        padding_x_center, padding_height = cell_x_left, cell_height
-    if "right" in location:
-        padding_x_center, padding_height = cell_x_right, cell_height
+    if is_top:
+        padding_y_center = cell_y_top
+    if is_bottom:
+        padding_y_center = cell_y_bottom
+    if is_left:
+        padding_x_center = cell_x_left
+    if is_right:
+        padding_x_center = cell_x_right
+    if not is_corner:
+        if is_top or is_bottom:
+            padding_width = cell_width
+        if is_left or is_right:
+            padding_height = cell_height
 
     padding_center_world = recipient_wcs.pixel_to_world(padding_x_center, padding_y_center)
     padding_wcs = WCS(naxis=2)

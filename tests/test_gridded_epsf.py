@@ -234,6 +234,33 @@ def test_centroids_defaults_and_mag_filter():
     assert list(out["phot_rp_mean_mag"]) == [7.6, 12.0]
 
 
+def test_centroids_attach_gaia_metadata():
+    from astropy.table import Table
+    from syndiff_pipeline.difference_imaging.stages import centroids
+
+    gaia = pd.DataFrame(
+        {
+            "source_id": [101, 102],
+            "ra": [10.0, 11.0],
+            "dec": [20.0, 21.0],
+            "x": [1.0, 2.0],
+            "y": [3.0, 4.0],
+            "phot_rp_mean_mag": [10.0, 11.0],
+        }
+    )
+    phot = Table(
+        {
+            "x_init": [1.0, 2.0],
+            "y_init": [3.0, 4.0],
+            "flux_fit": [0.1, 0.2],
+        }
+    )
+    out = centroids._attach_gaia_metadata(phot, gaia)
+    df = out.to_pandas()
+    assert list(df["source_id"]) == [101, 102]
+    assert "ra" in df.columns
+
+
 def test_fit_one_frame_skips_existing_npz(tmp_path, monkeypatch):
     output_dir = str(tmp_path)
     stem = "tess111"

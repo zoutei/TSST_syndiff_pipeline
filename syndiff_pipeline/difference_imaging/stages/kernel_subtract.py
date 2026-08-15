@@ -26,6 +26,9 @@ from syndiff_pipeline.difference_imaging.stages.hotpants import (
 from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
     photutils_background_masked,
 )
+from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
+    estimate_tessreduce_residual_background,
+)
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     ffi_frame_stem_from_path,
     resolve_pipeline_fits_path,
@@ -102,6 +105,7 @@ def _process_one_frame(task: tuple) -> dict:
     btjd_by_product_id = p.get("btjd_by_product_id") or {}
     convolved_table = p["convolved_table"]
     phot_box_size = p["phot_box_size"]
+    tessreduce_bkg_enabled = bool(p.get("tessreduce_bkg_enabled", True))
     diffs_dir = p["diffs_dir"]
     bkg_dir = p.get("bkg_dir")
     diffs_label = p["diffs_label"]
@@ -123,7 +127,14 @@ def _process_one_frame(task: tuple) -> dict:
     diff_stem = workspace_frame_stem(ffi_stem, diffs_label)
     ws_diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
     output_store_name = p.get("output_store_name")
-    ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
+    ks_params = KernelSubtractParams(
+        phot_box_size=int(phot_box_size),
+        tessreduce_bkg_enabled=bool(tessreduce_bkg_enabled),
+        tessreduce_smooth_gauss=float(p.get("tessreduce_smooth_gauss", 2.0)),
+        tessreduce_anomaly_gauss=float(p.get("tessreduce_anomaly_gauss", 2.0)),
+        tessreduce_qe_spline_degree=int(p.get("tessreduce_qe_spline_degree", 2)),
+        tessreduce_qe_spline_smooth_mult=float(p.get("tessreduce_qe_spline_smooth_mult", 10.0)),
+    )
 
     write_path: Optional[Path] = None
     if sck is not None and data_root:
@@ -235,24 +246,34 @@ def _process_one_frame(task: tuple) -> dict:
                 f"FFI shape {ffi.shape} != science grid {expected} from crop_bounds"
             )
 
-        if mask_catalog is not None:
-            frame_mask = full_mask_bool(
-                mask_catalog.mask_at(btjd_by_product_id.get(product_id), which="full")
-            )
-        else:
-            frame_mask = shared_mask
+        frame_mask_raw = (
+            mask_catalog.mask_at(btjd_by_product_id.get(product_id), which="full")
+            if mask_catalog is not None
+            else shared_mask
+        )
+        frame_mask = full_mask_bool(frame_mask_raw)
 
         diff_raw = ffi - convolved
         phot_bkg = photutils_background_masked(
             diff_raw, frame_mask, box_size=phot_box_size
         )
+        tessreduce_bkg = np.zeros_like(diff_raw)
+        if tessreduce_bkg_enabled:
+            tessreduce_bkg, _, _ = estimate_tessreduce_residual_background(
+                diff_raw - phot_bkg,
+                frame_mask_raw,
+                smooth_gauss=float(p.get("tessreduce_smooth_gauss", 2.0)),
+                anomaly_gauss=float(p.get("tessreduce_anomaly_gauss", 2.0)),
+                qe_spline_degree=int(p.get("tessreduce_qe_spline_degree", 2)),
+                qe_spline_smooth_mult=float(p.get("tessreduce_qe_spline_smooth_mult", 10.0)),
+            )
+        total_bkg = phot_bkg + tessreduce_bkg
 
         header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
         from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
             resolve_diff_write_path,
         )
 
-        ks_params = KernelSubtractParams(phot_box_size=int(phot_box_size))
         if data_root and sck is not None:
             write_path = resolve_diff_write_path(
                 data_root=data_root,
@@ -332,7 +353,7 @@ def _process_one_frame(task: tuple) -> dict:
                 )
             _write_image_fits(
                 str(bkg_write_path),
-                phot_bkg,
+                total_bkg,
                 header=header,
             )
             if sck is not None:
@@ -393,6 +414,11 @@ def kernel_subtract_loop(
     phot_box_size: int,
     diffs_dir: str,
     diffs_label: str,
+    tessreduce_bkg_enabled: bool = True,
+    tessreduce_smooth_gauss: float = 2.0,
+    tessreduce_anomaly_gauss: float = 2.0,
+    tessreduce_qe_spline_degree: int = 2,
+    tessreduce_qe_spline_smooth_mult: float = 10.0,
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
     n_jobs: int = 1,
@@ -464,6 +490,11 @@ def kernel_subtract_loop(
         "shared_mask": shared_mask,
         "convolved_table": convolved_table,
         "phot_box_size": int(phot_box_size),
+        "tessreduce_bkg_enabled": bool(tessreduce_bkg_enabled),
+        "tessreduce_smooth_gauss": float(tessreduce_smooth_gauss),
+        "tessreduce_anomaly_gauss": float(tessreduce_anomaly_gauss),
+        "tessreduce_qe_spline_degree": int(tessreduce_qe_spline_degree),
+        "tessreduce_qe_spline_smooth_mult": float(tessreduce_qe_spline_smooth_mult),
         "diffs_dir": diffs_dir,
         "bkg_dir": bkg_dir,
         "diffs_label": diffs_label,

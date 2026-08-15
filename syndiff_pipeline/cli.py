@@ -281,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
             "Monitoring & control:\n"
             "  syndiff status|progress|active|cluster|runs|show|logs|tail|retry|pause|resume|kill\n"
             "  syndiff verify|reconcile-manifests|daemon|notify\n\n"
+            "Mask export (SCC diff lane):\n"
+            "  syndiff mask export --scc s0022/c3/k3 --ffi tess2020050192921\n\n"
             "Run: syndiff <command> --help"
         )
         return 0
@@ -300,6 +302,11 @@ def main(argv: list[str] | None = None) -> int:
         from syndiff_pipeline.photometry.cli import main as photometry_main
 
         return photometry_main(argv[1:])
+
+    if noun == "mask":
+        from syndiff_pipeline.difference_imaging.masking.cli import main as mask_main
+
+        return mask_main(argv[1:])
 
     if noun in PRESET_NAMES:
         return _dispatch_execution(noun, argv[1:])

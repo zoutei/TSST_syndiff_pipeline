@@ -5,6 +5,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from syndiff_pipeline.common.orchestration import logs, stage_liveness
+from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+    CHECKPOINT_STAGES,
+)
 from syndiff_pipeline.template_creation.orchestration.stage_progress import (
     PROGRESS_CLI_MAX_TAIL_SCAN_BYTES,
     read_log_progress,
@@ -321,6 +324,25 @@ def _status_grid_rows(rows: list) -> list:
     return [by_canon.get(name) for name in names]
 
 
+def _load_run_trust_index(state: PipelineState, run_id: str) -> bool:
+    """Return ``bookkeeping.trust_index`` from the frozen run config, if available."""
+    from syndiff_pipeline.common.orchestration import logs
+    from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
+
+    run = state.get_run(run_id) or {}
+    config_path = run.get("config_path")
+    if not config_path:
+        runs_root = run.get("runs_root")
+        if runs_root:
+            config_path = logs.run_config_path(logs.run_dir(runs_root, run_id))
+    if not config_path:
+        return False
+    try:
+        return bool(load_runner_config(config_path).bookkeeping_trust_index)
+    except Exception:
+        return False
+
+
 def _format_status_grid_parts(
     state: PipelineState,
     run_id: str,
@@ -329,6 +351,7 @@ def _format_status_grid_parts(
     active_stages: list[str] | None,
     verifying_keys: set[tuple[str, str]] | None,
     display: RunDisplayContext | None,
+    trust_index: bool = False,
 ) -> list[str]:
     from syndiff_pipeline.pipeline_spec import stage_short_names, status_grid_stages
 
@@ -348,6 +371,7 @@ def _format_status_grid_parts(
                 active_stages=active_stages,
                 verifying_keys=verifying_keys,
                 display=display,
+                trust_index=trust_index,
             )
         )
     return parts
@@ -381,6 +405,8 @@ def format_status_grid(
 
         verifying_keys = set(read_verify_active_keys(workspace_root, run_id))
 
+    trust_index = _load_run_trust_index(state, run_id)
+
     lines: list[str] = []
     for label in sorted(by_target):
         rows_for_target = _status_grid_rows(by_target[label])
@@ -391,6 +417,7 @@ def format_status_grid(
             active_stages=display.active_stages,
             verifying_keys=verifying_keys,
             display=display,
+            trust_index=trust_index,
         )
         lines.append(f"  {label}: {' | '.join(parts)}")
     return lines
@@ -404,6 +431,7 @@ def _format_stage_status_short(
     active_stages: list[str] | None = None,
     verifying_keys: set[tuple[str, str]] | None = None,
     display: RunDisplayContext | None = None,
+    trust_index: bool = False,
 ) -> str:
     """Format stage status short.
     
@@ -455,6 +483,7 @@ def _format_stage_status_short(
             spec=state.pipeline_spec,
         )
         verify_complete = key in display.external_complete
+        verify_attempted = key in display.external_attempted
         deps_ok = deps_satisfied_from_map(
             display.status_by_key,
             row.target_label,
@@ -468,10 +497,15 @@ def _format_stage_status_short(
         verify_complete = state.external_verify_complete(
             run_id, row.target_label, row.stage
         )
+        verify_attempted = state.external_verify_attempted(
+            run_id, row.target_label, row.stage
+        )
         deps_ok = state.deps_satisfied(run_id, row.target_label, row.stage)
     if needs_verify and not verify_complete:
         if row.status == STATUS_PENDING and not deps_ok:
             return f"{short}:pend"
+        if trust_index and row.stage in CHECKPOINT_STAGES and verify_attempted:
+            return f"{short}:idx_ms"
         return f"{short}:sc_q"
     return f"{short}:{row.status[:4]}"
 
@@ -512,6 +546,7 @@ def format_target_status_line(
         active_stages=display.active_stages,
         verifying_keys=verifying_keys,
         display=display,
+        trust_index=_load_run_trust_index(state, run_id),
     )
     return f"  {target_label}: {' | '.join(parts)}"
 

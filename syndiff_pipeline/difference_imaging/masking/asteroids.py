@@ -18,6 +18,10 @@ log = logging.getLogger(__name__)
 PIXEL_INTERVALS_BASENAME = "pixel_intervals.parquet"
 ASTEROID_FFI_TIMES_BASENAME = "asteroid_ffi_times.parquet"
 
+# TESS BTJD = BJD - 2457000; some SCC parquets store absolute JD in ``btjd``.
+BTJD_EPOCH_OFFSET = 2457000.0
+_JD_SCALE_BTJD_THRESHOLD = 1e6
+
 # Woods et al. 2021 / tess-asteroids; also in packaged mask_geometry.yaml
 V_TO_T = 0.671
 
@@ -296,6 +300,29 @@ def resolve_cadence_from_btjd(
     return int(cads[i])
 
 
+def normalize_asteroid_times_btjd(times: pd.DataFrame | None) -> pd.DataFrame | None:
+    """
+    Ensure ``asteroid_ffi_times`` ``btjd`` column is BTJD (not absolute JD).
+
+    Older SCC products stored absolute JD (~2.458e6) in ``btjd``; pipeline
+    manifests use BTJD (~1800–2000). Idempotent when already BTJD-scaled.
+    """
+    if times is None or times.empty or "btjd" not in times.columns:
+        return times
+    out = times.copy()
+    btjd = pd.to_numeric(out["btjd"], errors="coerce")
+    if not btjd.notna().any():
+        return out
+    if float(btjd.median()) > _JD_SCALE_BTJD_THRESHOLD:
+        log.info(
+            "Converting asteroid_ffi_times btjd from absolute JD to BTJD "
+            "(subtract %.0f)",
+            BTJD_EPOCH_OFFSET,
+        )
+        out["btjd"] = btjd - BTJD_EPOCH_OFFSET
+    return out
+
+
 def load_asteroid_products(
     intervals_dir: str | Path,
 ) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
@@ -305,6 +332,7 @@ def load_asteroid_products(
     tm_path = root / ASTEROID_FFI_TIMES_BASENAME
     intervals = pd.read_parquet(iv_path) if iv_path.is_file() else None
     times = pd.read_parquet(tm_path) if tm_path.is_file() else None
+    times = normalize_asteroid_times_btjd(times)
     return intervals, times
 
 

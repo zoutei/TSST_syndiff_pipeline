@@ -38,6 +38,9 @@ from syndiff_pipeline.difference_imaging.stages.kernel import (
 from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
     photutils_background_masked,
 )
+from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
+    estimate_tessreduce_residual_background,
+)
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     workspace_frame_fits_path,
 )
@@ -323,16 +326,24 @@ def run_kernel_fit(
     hotpants_mask = np.asarray(
         _resolve_hotpants_mask_array(shared_mask, mask_catalog, btjd)
     )
-    if mask_catalog is not None:
-        phot_mask = full_mask_bool(mask_catalog.mask_at(btjd, which="full"))
-    else:
-        phot_mask = full_mask_bool(shared_mask)
+    residual_mask = (
+        mask_catalog.mask_at(btjd, which="full")
+        if mask_catalog is not None
+        else shared_mask
+    )
+    phot_mask = full_mask_bool(residual_mask)
 
     if mapping_grid is not None and pad_rows > 0:
-        from syndiff_pipeline.common.grid_pairing import zero_pad_science_bottom
+        # pad_mask_bottom (not zero_pad_science_bottom) marks the new pad
+        # rows bad/excluded -- they're fabricated pad geometry, not real
+        # observed sky; zero-filling a mask would read as "good, flat-zero"
+        # data to Hotpants' substamp/kernel-fit selection (see
+        # grid_pairing.pad_mask_bottom).
+        from syndiff_pipeline.common.grid_pairing import pad_mask_bottom
 
-        hotpants_mask = zero_pad_science_bottom(np.asarray(hotpants_mask), pad_rows)
-        phot_mask = zero_pad_science_bottom(np.asarray(phot_mask), pad_rows)
+        hotpants_mask = pad_mask_bottom(np.asarray(hotpants_mask), pad_rows)
+        phot_mask = pad_mask_bottom(np.asarray(phot_mask), pad_rows)
+        residual_mask = pad_mask_bottom(np.asarray(residual_mask), pad_rows)
 
     if ffi.shape != np.asarray(hotpants_mask).shape:
         raise ValueError(
@@ -363,6 +374,24 @@ def run_kernel_fit(
         )
         hp1_bkg = hp1["bkg"] if hp1.get("bkg") is not None else 0.0
         sci_clean = ffi - hp1_bkg - phot_bkg_hp1
+        tessreduce_bkg = np.zeros_like(sci_clean)
+        tessreduce_pre_qe = np.zeros_like(sci_clean)
+        tessreduce_qe = np.ones_like(sci_clean)
+        if params.tessreduce_bkg_enabled:
+            # TessReduce operates on the HP1 difference after the existing
+            # photutils removal, not on the raw science-frame reconstruction.
+            hp1_residual = hp1["diff"] - phot_bkg_hp1
+            tessreduce_bkg, tessreduce_pre_qe, tessreduce_qe = (
+                estimate_tessreduce_residual_background(
+                    hp1_residual,
+                    residual_mask,
+                    smooth_gauss=params.tessreduce_smooth_gauss,
+                    anomaly_gauss=params.tessreduce_anomaly_gauss,
+                    qe_spline_degree=params.tessreduce_qe_spline_degree,
+                    qe_spline_smooth_mult=params.tessreduce_qe_spline_smooth_mult,
+                )
+            )
+        sci_clean_final = sci_clean - tessreduce_bkg
 
         hp2_params = replace(hp, hp_bgo=0)
         hp2, hp2_config = _run_hotpants_round(
@@ -374,25 +403,41 @@ def run_kernel_fit(
             hp=hp2_params,
             work_dir=os.path.join(work_root, "hp2"),
             frame_stem=f"{product_id}_hp2",
-            collect_kernel_params=params.write_kernel_params,
+            collect_kernel_params=False,
         )
         if not hp2.get("success"):
             raise RuntimeError(
                 f"Kernel-fit Hotpants round 2 failed: {hp2.get('error_msg', '')}"
             )
 
-        kernel_params = hp2.get("kernel_params_arrays")
+        hp3, hp3_config = _run_hotpants_round(
+            sci=sci_clean_final,
+            err=err,
+            template=template,
+            mask=hotpants_mask,
+            ref_stars_xy=ref_stars_xy,
+            hp=hp2_params,
+            work_dir=os.path.join(work_root, "hp3"),
+            frame_stem=f"{product_id}_hp3",
+            collect_kernel_params=params.write_kernel_params,
+        )
+        if not hp3.get("success"):
+            raise RuntimeError(
+                f"Kernel-fit Hotpants round 3 failed: {hp3.get('error_msg', '')}"
+            )
+
+        kernel_params = hp3.get("kernel_params_arrays")
         kernel_image = kernel_from_hotpants_result(
-            kernel_params, hp2_config, ffi.shape
+            kernel_params, hp3_config, ffi.shape
         )
         if kernel_image is None or kernel_params is None:
-            raise RuntimeError("HP2 did not return kernel_solution")
+            raise RuntimeError("HP3 did not return kernel_solution")
         kernel_solution = np.asarray(
             kernel_params["kernel_solution"], dtype=np.float64
         ).ravel()
 
     reference_kernel_sum = kernel_sum_at_center(
-        kernel_solution, hp2_config, ffi.shape
+        kernel_solution, hp3_config, ffi.shape
     )
 
     np.savez(
@@ -412,6 +457,7 @@ def run_kernel_fit(
         "kernel_npz_path": os.path.abspath(npz_path),
         "weighting_factor": float(params.weighting_factor),
         "phot_box_size": int(params.phot_box_size),
+        "tessreduce_bkg_enabled": bool(params.tessreduce_bkg_enabled),
         "reference_kernel_sum": float(reference_kernel_sum),
     }
     with open(meta_path, "w", encoding="utf-8") as fh:
@@ -444,8 +490,33 @@ def run_kernel_fit(
             header=header,
         )
         _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "hp1_diff_phot_clean"),
+            hp1["diff"] - phot_bkg_hp1,
+            header=header,
+        )
+        _write_image_fits(
             workspace_frame_fits_path(debug_ws_dir, "sci1_clean"),
             sci_clean,
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg_pre_qe"),
+            tessreduce_pre_qe,
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_qe_factor"),
+            tessreduce_qe,
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg"),
+            tessreduce_bkg,
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "sci1_clean_tessreduce"),
+            sci_clean_final,
             header=header,
         )
         _write_image_fits(
@@ -457,6 +528,17 @@ def run_kernel_fit(
             _write_image_fits(
                 workspace_frame_fits_path(debug_ws_dir, "hp2_bkg"),
                 hp2["bkg"],
+                header=header,
+            )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "hp3_diff"),
+            hp3["diff"],
+            header=header,
+        )
+        if hp3.get("bkg") is not None:
+            _write_image_fits(
+                workspace_frame_fits_path(debug_ws_dir, "hp3_bkg"),
+                hp3["bkg"],
                 header=header,
             )
 
@@ -472,5 +554,5 @@ def run_kernel_fit(
         meta_path=meta_path,
         kernel_solution=kernel_solution,
         kernel_image=kernel_image,
-        hp_config=hp2_config,
+        hp_config=hp3_config,
     )

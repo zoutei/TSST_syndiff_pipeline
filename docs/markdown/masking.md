@@ -128,6 +128,22 @@ write_sector_sample_mask_fits(cat, manifest, "out_dir/")
 ```
 
 `ffi_id` may be a product id (`tess…`), bare digits, or an FFI path/basename.
+
+### CLI: `syndiff mask export`
+
+For an SCC with an existing diff lane (`shared_mask.fits.fz` + asteroid parquets), write one
+per-FFI **full** mask FITS (static + bit 128) under the lane's mask debug folder:
+
+```bash
+# --site optional when a single supervisor daemon is running
+syndiff mask export --scc s0022/c3/k3 --ffi tess2020050192921
+syndiff mask export --site config/ --scc s0022/c3/k3 --ffi tess2020050192921 --lane linear
+```
+
+Default output: `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/debug_plots/masks/mask_full_{product_id}.fits`.
+
+Flags: `--lane` (store name, e.g. `linear`), `--which` (`full`|`static`|`temporal`), `--out`, `--deployment`.
+
 ## Consumers
 
 | Stage | Predicate |

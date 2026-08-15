@@ -1847,8 +1847,7 @@ def _fetch_flathub_numpy(catalog_name, fields, *, endpoint=DEFAULT_FLATHUB_ENDPO
         import requests
     except ImportError as exc:
         raise ImportError(
-            "flathub and requests are required for the flathub Gaia backend. "
-            'Install with: pip install requests "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py"'
+            "flathub is not installed. Re-run: pip install -e ."
         ) from exc
 
     filters = flathub.Filters(**field_filters)

@@ -837,10 +837,37 @@ def _count_npz_files(cache_dir: Path) -> int:
 
     Schema-v3 Exact caches live in skycell / pair subfolders; flat root ``*.npz``
     alone is the legacy layout.
+
+    Uses ``os.scandir`` directly rather than ``Path.rglob`` + ``Path.is_file``:
+    a freshly constructed ``Path`` has no cached stat info, so ``is_file()``
+    always re-stats over NFS -- a second network round trip per file on top
+    of the readdir that already found it. ``os.DirEntry.is_file()`` reuses
+    the directory-entry type NFS already returned in the readdir response
+    (``d_type``) when available, avoiding that second stat. Verified against
+    a real 351k-file cache (s0020_c3_k3 remap L4a) where this call was the
+    dominant cost of an hours-long verify.
     """
     if not cache_dir.is_dir():
         return 0
-    return sum(1 for p in cache_dir.rglob("*.npz") if p.is_file())
+    count = 0
+    stack = [str(cache_dir)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.name.endswith(".npz") and entry.is_file(
+                            follow_symlinks=False
+                        ):
+                            count += 1
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return count
 
 
 def _has_flat_exact_npz(cache_dir: Path) -> bool:
@@ -968,7 +995,13 @@ def _verify_remap_exact_caches(
         )
 
     if require_intra_skycell:
-        if not l4a_dir.is_dir() or _count_npz_files(l4a_dir) == 0:
+        # _count_npz_files does a recursive NFS walk + per-file stat -- can be
+        # hundreds of thousands of files for a full SCC. Compute once and
+        # reuse for both checks below instead of re-walking the same
+        # directory twice (this used to double the wall-clock cost of an
+        # already-expensive check).
+        l4a_on_disk = _count_npz_files(l4a_dir) if l4a_dir.is_dir() else 0
+        if l4a_on_disk == 0:
             if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
                 return (
                     f"missing {EXACT_CACHE_L4A_DIRNAME}/ "
@@ -977,10 +1010,9 @@ def _verify_remap_exact_caches(
                 )
 
         if isinstance(n_l4a_manifest, int) and n_l4a_manifest > 0:
-            on_disk = _count_npz_files(l4a_dir)
-            if on_disk < n_l4a_manifest:
+            if l4a_on_disk < n_l4a_manifest:
                 return (
-                    f"intra-skycell cache incomplete: {on_disk}/{n_l4a_manifest} NPZ under "
+                    f"intra-skycell cache incomplete: {l4a_on_disk}/{n_l4a_manifest} NPZ under "
                     f"{EXACT_CACHE_L4A_DIRNAME}/; rebuild remap"
                 )
 
@@ -990,14 +1022,14 @@ def _verify_remap_exact_caches(
                 f"missing {EXACT_CACHE_L4B_DIRNAME}/; rebuild inter-skycell "
                 "(stages.remap.rebuild_inter_skycell_cache: true)"
             )
+        l4b_on_disk = _count_npz_files(l4b_dir)
         if isinstance(n_l4b_manifest, int) and n_l4b_manifest > 0:
-            on_disk = _count_npz_files(l4b_dir)
-            if on_disk < n_l4b_manifest:
+            if l4b_on_disk < n_l4b_manifest:
                 return (
-                    f"inter-skycell cache incomplete: {on_disk}/{n_l4b_manifest} NPZ under "
+                    f"inter-skycell cache incomplete: {l4b_on_disk}/{n_l4b_manifest} NPZ under "
                     f"{EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
                 )
-        elif _count_npz_files(l4b_dir) == 0:
+        elif l4b_on_disk == 0:
             return (
                 f"inter-skycell requires nonempty {EXACT_CACHE_L4B_DIRNAME}/; rebuild remap"
             )
@@ -1188,59 +1220,30 @@ def verify_downsample_field_mode(resolved: ResolvedTargetConfig) -> VerifyResult
     )
 
 
-def _shared_convolved_cell_root(shared_root: Path, full_skycell_name: str) -> Path | None:
-    from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
-
-    parsed = _projection_and_cell(full_skycell_name)
-    if parsed is None:
-        return None
-    projection, cell = parsed
-    return shared_root / projection / cell
-
-
-def _clear_shared_convolved_cells(
-    resolved: ResolvedTargetConfig,
-    shared_root: Path,
-) -> list[str]:
-    """Remove published shared-store cells for this SCC's expected skycells only."""
-    removed: list[str] = []
-    try:
-        expected = expected_ps1_process_skycells(resolved)
-    except Exception as exc:
-        log.warning(
-            "Force rerun: could not resolve expected skycells for shared convolved clear: %s",
-            exc,
-        )
-        return removed
-    for name in expected:
-        cell_root = _shared_convolved_cell_root(shared_root, name)
-        if cell_root is None:
-            log.warning(
-                "Force rerun: skipping unparseable skycell %r for shared convolved clear",
-                name,
-            )
-            continue
-        if cell_root.is_dir():
-            shutil.rmtree(cell_root)
-            removed.append(str(cell_root))
-            log.info("Force rerun: removed shared convolved cell %s", cell_root)
-    return removed
-
-
 def clear_ps1_process_artifacts(resolved: ResolvedTargetConfig) -> list[str]:
     """Clear ps1_process outputs so a force-rerun rebuilds from scratch.
 
     Legacy mode (``use_shared_convolved_store=False``): removes the per-SCC
-    ``convolved.zarr`` tree. Shared mode: scope-clears only the skycell cells
-    listed in this SCC's mapping CSV under the shared ``ps1_convolved.zarr``
-    store (never the whole store). The per-SCC removed-stars CSV is always
+    ``convolved.zarr`` tree. Shared mode: does NOT touch the shared
+    ``ps1_convolved.zarr`` store at all -- ``expected_ps1_process_skycells``
+    (this SCC's "expected" set) includes cross-projection padding neighbors,
+    which routinely belong to OTHER SCCs whose footprints overlap this one
+    (common for CVZ-style repeated-pointing campaigns). A prior version of
+    this function scope-cleared "only this SCC's own" cells before
+    reprocessing; because the store is keyed by sky position only (no
+    sector/camera/ccd in the path), that deleted neighboring SCCs' already-
+    published cells and never republished them (this SCC only publishes
+    cells it treats as its own primary/regular role, not pure padding
+    neighbors) -- confirmed by exact skycell-set-intersection arithmetic
+    against observed data loss across four separate CVZ SCC re-runs. The
+    store is content-addressed/fingerprinted (``convolved_store.py``), so
+    clearing was never required for correctness: a genuinely-changed cell
+    mints a new fingerprint automatically, and an unchanged one just
+    re-verifies as identical. The per-SCC removed-stars CSV is always
     removed when present.
     """
     removed: list[str] = []
-    if ps1_process_uses_shared_convolved_store(resolved):
-        shared_root = resolve_ps1_process_checkpoint_location(resolved)
-        removed.extend(_clear_shared_convolved_cells(resolved, shared_root))
-    else:
+    if not ps1_process_uses_shared_convolved_store(resolved):
         legacy_zarr = _convolved_zarr_path(resolved)
         if legacy_zarr.is_dir():
             shutil.rmtree(legacy_zarr)

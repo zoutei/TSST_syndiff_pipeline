@@ -256,3 +256,164 @@ def load_catalog_for_event(
         asteroid_times=tm,
         crop_bounds=crop_bounds,
     )
+
+
+def _find_mapping_master_fits(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """Locate mapping master_pixels2skycells FITS for crop bounds."""
+    from syndiff_pipeline.common.scc_paths import scc_mapping_dir
+
+    data_root = Path(data_root)
+    for factor in (1, 2, 4, 8):
+        base = scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=factor)
+        if not base.is_dir():
+            continue
+        stem = f"tess_s{int(sector):04d}_{int(camera)}_{int(ccd)}_master_pixels2skycells"
+        if factor > 1:
+            stem = f"{stem}_os{factor}"
+        for name in (f"{stem}.fits.fz", f"{stem}.fits.gz", f"{stem}.fits"):
+            path = base / name
+            if path.is_file():
+                return path
+    raise FileNotFoundError(
+        f"No mapping master_pixels2skycells FITS under "
+        f"{scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=1).parent}"
+    )
+
+
+def load_catalog_for_scc_lane(
+    lane_root: str | Path,
+    *,
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> MaskCatalog:
+    """
+    Load MaskCatalog from an SCC diff lane (static shared mask + asteroid sidecars).
+
+  *lane_root* is the diff lane directory (e.g. ``…/diff_linear``) containing
+    ``shared_mask.fits.fz``. Crop bounds come from the SCC mapping master FITS.
+    """
+    from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
+    from syndiff_pipeline.difference_imaging.masking.asteroids import load_asteroid_products
+    from syndiff_pipeline.difference_imaging.masking.settings import default_asteroid_intervals_dir
+    from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+        resolve_pipeline_artifact_path,
+    )
+    from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
+
+    lane_root = Path(lane_root)
+    sm_path = resolve_pipeline_artifact_path(str(lane_root), SHARED_MASK_FITS_BASENAME)
+    if not sm_path:
+        alt = lane_root / "shared_mask.fits"
+        if alt.is_file():
+            sm_path = str(alt)
+        else:
+            raise FileNotFoundError(
+                f"shared_mask not found under {lane_root} "
+                f"(expected {SHARED_MASK_FITS_BASENAME})"
+            )
+    static = np.asarray(fits.getdata(sm_path), dtype=np.int16)
+
+    master = _find_mapping_master_fits(data_root, sector, camera, ccd)
+    grid = load_mapping_grid_from_master(master)
+    crop_bounds = grid.science_ffi_bounds()
+
+    iv, tm = load_asteroid_products(
+        default_asteroid_intervals_dir(data_root, sector, camera, ccd)
+    )
+    return MaskCatalog.from_arrays(
+        static,
+        asteroid_intervals_ffi=iv,
+        asteroid_times=tm,
+        crop_bounds=crop_bounds,
+    )
+
+
+def load_ffi_times_table_for_lane(
+    lane_root: str | Path,
+    *,
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> pd.DataFrame:
+    """
+    Build an FFI timing table (``filename`` + ``btjd``) for one SCC diff lane.
+
+    Priority: lane ``syndiff_ffi_frames.csv`` → ``wcs/per_ffi_coeffs.csv`` →
+    FFI header ``DATE-OBS``.
+    """
+    from astropy.time import Time
+
+    from syndiff_pipeline.common.scc_paths import scc_ffi_dir
+    from syndiff_pipeline.difference_imaging.support.manifest import (
+        DEFAULT_MANIFEST_BASENAME,
+        load_frame_manifest,
+    )
+
+    lane_root = Path(lane_root)
+
+    manifest_path = lane_root / DEFAULT_MANIFEST_BASENAME
+    if manifest_path.is_file():
+        df = load_frame_manifest(str(lane_root))
+        if "btjd" in df.columns and pd.to_numeric(df["btjd"], errors="coerce").notna().any():
+            return _ensure_manifest_filename_column(df)
+
+    wcs_csv = lane_root / "wcs" / "per_ffi_coeffs.csv"
+    if wcs_csv.is_file():
+        df = pd.read_csv(wcs_csv)
+        if "stem" in df.columns and "btjd" in df.columns:
+            out = df.rename(columns={"stem": "filename"}).copy()
+            return _ensure_manifest_filename_column(out)
+
+    ffi_dir = scc_ffi_dir(data_root, sector, camera, ccd)
+    if not ffi_dir.is_dir():
+        raise FileNotFoundError(f"No FFI timing table and no FFI dir at {ffi_dir}")
+
+    rows: list[dict] = []
+    for path in sorted(ffi_dir.glob("tess*.fits*")):
+        hdr = fits.getheader(path, ext=1)
+        date_obs = hdr.get("DATE-OBS")
+        if not date_obs:
+            continue
+        t = Time(date_obs, format="isot", scale="utc")
+        try:
+            btjd = float(t.btjd)
+        except AttributeError:
+            btjd = float(t.jd) - 2457000.0
+        rows.append({"filename": path.name, "path": str(path), "btjd": btjd})
+    if not rows:
+        raise FileNotFoundError(f"No FFI files with DATE-OBS under {ffi_dir}")
+    return pd.DataFrame(rows).sort_values("btjd").reset_index(drop=True)
+
+
+def _ensure_manifest_filename_column(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "filename" not in out.columns:
+        if "path" in out.columns:
+            out["filename"] = out["path"].map(lambda p: Path(str(p)).name)
+        elif "product_id" in out.columns:
+            out["filename"] = out["product_id"].astype(str)
+        else:
+            raise ValueError("manifest needs filename, path, or product_id")
+    return out
+
+
+def mask_bit_summary(arr: np.ndarray) -> tuple[list[int], int]:
+    """Return (active bit flags, count of bit-128 pixels)."""
+    bits_present = sorted(
+        {
+            b
+            for v in np.unique(arr)
+            for b in (1, 2, 4, 8, 16, 32, 64, 128)
+            if int(v) & b
+        }
+    )
+    b128 = int((np.asarray(arr, dtype=np.int16) & 128).astype(bool).sum())
+    return bits_present, b128

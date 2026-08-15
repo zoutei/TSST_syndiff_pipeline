@@ -85,6 +85,12 @@ pipeline:
       diffs: hp_d
       epsf: epsf_r1
     output: centroids_r1
+  - kind: per_ffi_wcs
+    inputs:
+      centroids: centroids_r1
+      diffs: hp_d
+    output: wcs
+    sip_degree: 5
 
 condor:
   request_cpus: 64

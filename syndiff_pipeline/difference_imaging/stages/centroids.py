@@ -171,6 +171,24 @@ def _build_init_params(gaia_df: pd.DataFrame) -> Table:
     return init_params
 
 
+def _attach_gaia_metadata(phot_results: Table, gaia_df: pd.DataFrame) -> Table:
+    """Merge Gaia metadata from init positions onto photutils output rows."""
+    if phot_results is None or len(phot_results) == 0:
+        return phot_results
+    init = _build_init_params(gaia_df)
+    meta_cols = [
+        c
+        for c in _GAIA_META_COLUMNS
+        if c in init.colnames and c not in phot_results.colnames
+    ]
+    if not meta_cols:
+        return phot_results
+    df_p = phot_results.to_pandas()
+    df_i = init.to_pandas()[["x_init", "y_init", *meta_cols]]
+    merged = df_p.merge(df_i, on=["x_init", "y_init"], how="left")
+    return Table.from_pandas(merged)
+
+
 def _photometry_one_frame(
     diff_img: np.ndarray,
     gridded_model,
@@ -376,6 +394,8 @@ def _centroids_one_frame_task(
     if phot_results is None or len(phot_results) == 0:
         log.warning("  centroids: empty photometry result for %s", ffi_stem)
         return frame_idx, ffi_stem, False, False
+
+    phot_results = _attach_gaia_metadata(phot_results, gaia_frame)
 
     os.makedirs(output_dir, exist_ok=True)
     phot_results.write(out_path, format="ascii.ecsv", overwrite=True)

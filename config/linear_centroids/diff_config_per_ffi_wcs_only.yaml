@@ -1,0 +1,25 @@
+# SCC lane: per-FFI WCS fit only (requires centroids_r1 + hp_d on disk).
+deployment_file: ../deployment.yaml
+
+defaults:
+  n_jobs: 64
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - external_workspaces: [centroids_r1, hp_d]
+  - kind: per_ffi_wcs
+    inputs:
+      centroids: centroids_r1
+      diffs: hp_d
+    output: wcs
+    sip_degree: 5
+
+condor:
+  request_cpus: 64
+  request_memory: 100000
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0

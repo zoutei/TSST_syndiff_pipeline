@@ -304,6 +304,11 @@ def _scc_final_stage_complete(cfg: SynDiffConfig, lane_root: Path) -> bool:
             return bool(index)
         return any(centroids_dir.glob(f"*{PHOTRESULTS_ECSV_SUFFIX}"))
 
+    if kind == "per_ffi_wcs":
+        label = str(stage["output"]).strip()
+        wcs_dir = lane_root / label
+        return (wcs_dir / "per_ffi_coeffs.csv").is_file()
+
     if kind == "kernel_fit":
         from syndiff_pipeline.difference_imaging.stages.kernel import (
             KERNEL_FIT_META_BASENAME,

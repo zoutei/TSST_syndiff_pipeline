@@ -1,0 +1,19 @@
+# Run per-FFI WCS fit on an SCC lane that already has centroids_r1 + hp_d.
+#
+#   syndiff diff run \
+#     --config config/linear_centroids/pipeline_per_ffi_wcs_only.yaml \
+#     --sector 20 --camera 3 --ccd 3 \
+#     --stages diff --local
+deployment_file: ../deployment.yaml
+diff_config: diff_config_per_ffi_wcs_only.yaml
+
+stages:
+  diff:
+    executor: local
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  skip_artifact_verify: true

@@ -356,9 +356,17 @@ class TestSkipIntegration(unittest.TestCase):
                 )
             ps1_dl = state.get_stage_run(run_id, label, "ps1_download")
             self.assertEqual(ps1_dl.status, STATUS_SKIPPED)
-            self.assertEqual(
+            # Either reason is a correct terminal outcome: SUPERSEDED if
+            # apply_superseded_skips gets to this row first, ARTIFACTS if
+            # ps1_download's own fast-path check resolves first (the two
+            # now race across background threads instead of running in a
+            # fixed single-threaded order -- apply_superseded_skips
+            # deliberately leaves an already-ARTIFACTS-tagged row alone,
+            # see state.py). Both mean "this stage needs no further work";
+            # only the diagnostic label differs.
+            self.assertIn(
                 state.get_skip_reason(run_id, label, "ps1_download"),
-                SKIP_REASON_SUPERSEDED,
+                (SKIP_REASON_SUPERSEDED, SKIP_REASON_ARTIFACTS),
             )
             self.assertEqual(
                 state.get_stage_run(run_id, label, "downsample").status,

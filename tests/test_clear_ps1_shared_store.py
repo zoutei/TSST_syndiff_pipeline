@@ -1,4 +1,15 @@
-"""BK-7: force-rerun clears scoped shared convolved cells when flag is on."""
+"""BK-7 (revised): force-rerun must NOT touch the shared convolved store.
+
+Originally this scope-cleared "only this SCC's own expected cells" before
+reprocessing. That was wrong: ``expected_ps1_process_skycells`` includes
+cross-projection padding neighbors that routinely belong to OTHER SCCs
+whose footprints overlap this one (CVZ-style repeated-pointing campaigns).
+Since the store is keyed by sky position only (no sector/camera/ccd in the
+path), the old clear deleted neighboring SCCs' already-published cells and
+never republished them -- confirmed by exact skycell-set-intersection
+arithmetic against real data loss across four separate CVZ SCC re-runs.
+The store is content-addressed/fingerprinted, so clearing was never
+required for correctness."""
 
 from __future__ import annotations
 
@@ -118,7 +129,7 @@ class TestClearPs1SharedStore(unittest.TestCase):
             self.assertTrue(other_cell.is_dir())
             self.assertTrue((other_cell / "fp0001" / "arrays.npz").is_file())
 
-    def test_shared_mode_clears_only_expected_scc_cells(self):
+    def test_shared_mode_does_not_touch_shared_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp)
             resolved = _resolved(data_root, use_shared_convolved_store=True)
@@ -136,27 +147,27 @@ class TestClearPs1SharedStore(unittest.TestCase):
 
             removed = set(clear_ps1_process_artifacts(resolved))
 
-            self.assertEqual(removed, {str(cell_001), str(cell_002), str(csv_path)})
-            self.assertFalse(cell_001.exists())
-            self.assertFalse(cell_002.exists())
+            self.assertEqual(removed, {str(csv_path)})
+            self.assertTrue(cell_001.is_dir(), "shared mode must not remove this SCC's own cells")
+            self.assertTrue(cell_002.is_dir(), "shared mode must not remove this SCC's own cells")
             self.assertTrue(shared_root.is_dir())
-            self.assertTrue(other_cell.is_dir())
+            self.assertTrue(other_cell.is_dir(), "shared mode must not remove overlapping neighbor SCCs' cells")
             self.assertTrue(legacy.is_dir(), "shared mode must not remove legacy per-SCC zarr")
             self.assertFalse(csv_path.exists())
 
             result = verify_ps1_process(resolved)
-            self.assertFalse(result.ok)
-            self.assertIn("0/2", result.message)
+            self.assertTrue(result.ok, "already-published cells must remain verifiably complete")
 
-    def test_shared_clear_is_idempotent(self):
+    def test_shared_clear_is_idempotent_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_root = Path(tmp)
             resolved = _resolved(data_root, use_shared_convolved_store=True)
-            _publish_shared_cell(data_root, "skycell.1111.001")
+            cell = _publish_shared_cell(data_root, "skycell.1111.001")
 
             first = clear_ps1_process_artifacts(resolved)
-            self.assertEqual(len(first), 1)
+            self.assertEqual(first, [])
             self.assertEqual(clear_ps1_process_artifacts(resolved), [])
+            self.assertTrue(cell.is_dir())
 
 
 if __name__ == "__main__":
