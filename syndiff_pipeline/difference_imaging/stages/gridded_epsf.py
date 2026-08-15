@@ -130,6 +130,7 @@ def _filter_gaia_for_epsf(
     gaia_df: pd.DataFrame,
     *,
     mag_max_rp: float | None,
+    mag_min_rp: float | None = None,
 ) -> pd.DataFrame:
     """
     Brightness pre-filter for ePSF star catalogs.
@@ -138,12 +139,21 @@ def _filter_gaia_for_epsf(
 
         combined_filter = (df['phot_rp_mean_mag'] < 12.95) & in_crop
 
+    ``mag_min_rp`` additionally drops stars brighter than the given RP
+    magnitude (e.g. to skip saturated/non-linear stars and shrink the
+    per-tile star count for faster ePSF fitting).
+
     Expects ``ra``/``dec`` (science-array ``x``/``y`` are computed per frame).
     """
     df = gaia_df
-    if mag_max_rp is not None and "phot_rp_mean_mag" in df.columns:
+    if "phot_rp_mean_mag" in df.columns:
         rp = pd.to_numeric(df["phot_rp_mean_mag"], errors="coerce")
-        df = df.loc[rp < float(mag_max_rp)].copy()
+        keep = pd.Series(True, index=df.index)
+        if mag_max_rp is not None:
+            keep &= rp < float(mag_max_rp)
+        if mag_min_rp is not None:
+            keep &= rp > float(mag_min_rp)
+        df = df.loc[keep].copy()
     return df.reset_index(drop=True)
 
 
@@ -161,6 +171,14 @@ def _resolve_mag_max_rp(epsf_params) -> float:
     return float(mag_max)
 
 
+def _resolve_mag_min_rp(epsf_params) -> float | None:
+    """Faint-end cutoff for ePSF star selection; ``None`` means no lower bound."""
+    mag_min = getattr(epsf_params, "mag_min_rp", None)
+    if mag_min is None:
+        return None
+    return float(mag_min)
+
+
 def prepare_gaia_for_gridded_epsf(
     gaia_df: pd.DataFrame,
     epsf_params,
@@ -173,13 +191,15 @@ def prepare_gaia_for_gridded_epsf(
     pre-filtered table; section loops only apply spatial cuts.
     """
     mag_max = _resolve_mag_max_rp(epsf_params)
-    out = _filter_gaia_for_epsf(gaia_df, mag_max_rp=mag_max)
+    mag_min = _resolve_mag_min_rp(epsf_params)
+    out = _filter_gaia_for_epsf(gaia_df, mag_max_rp=mag_max, mag_min_rp=mag_min)
     if "ra" not in out.columns or "dec" not in out.columns:
         raise ValueError("Gaia catalog for ePSF requires ra, dec columns")
     n = len(out)
     log.info(
-        "ePSF Gaia catalog: %d stars after phot_rp_mean_mag < %s pre-filter",
+        "ePSF Gaia catalog: %d stars after %s < phot_rp_mean_mag < %s pre-filter",
         n,
+        mag_min,
         mag_max,
     )
     return out

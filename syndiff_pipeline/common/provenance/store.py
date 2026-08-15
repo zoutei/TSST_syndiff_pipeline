@@ -192,7 +192,14 @@ class ProvenanceStore:
 
     def _init_schema(self) -> None:
         with self._conn() as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+            # WAL mode relies on shared-memory (mmap) coordination between
+            # readers/writers that network filesystems don't properly
+            # support; this DB lives on NFS and is opened from multiple
+            # hosts (supervisor lease handover migrates between machines),
+            # which repeatedly corrupted it ("database disk image is
+            # malformed"). DELETE is SQLite's documented-safe rollback
+            # journal mode for network filesystems.
+            conn.execute("PRAGMA journal_mode=DELETE")
             conn.executescript(_SCHEMA_SQL)
             conn.execute(
                 "INSERT OR IGNORE INTO schema_meta(key, value) VALUES ('schema_version', ?)",

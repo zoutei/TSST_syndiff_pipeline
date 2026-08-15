@@ -47,6 +47,7 @@ Override selected stages with `--stages` where the noun supports it (template/di
 | **`syndiff photometry run`** | Foreground one event (`--target-name`). See [photometry.md](photometry.md). |
 | **`syndiff star submit`** | Supervised batch over `star_targets.csv`. |
 | **`syndiff star run`** | Foreground single-SCC star run. See [star_lightcurves.md](star_lightcurves.md). |
+| **`syndiff mask export`** | Write per-FFI full mask FITS (static + asteroids) from an SCC diff lane to `debug_plots/masks/`. `--site` optional when one daemon is running. |
 
 ### Field-mode v2 diff (SCC-only)
 
@@ -75,6 +76,14 @@ syndiff photometry submit \
 ```
 
 Common flags (`template`/`diff`/`photometry`): `--site DIR`, `--config` / `--photometry-config`, `--deployment`, `--run-id`, `--force-rerun`, `--local`.
+
+**`syndiff mask export`** (SCC diff lane; no pipeline rerun):
+
+```bash
+syndiff mask export --scc s0022/c3/k3 --ffi tess2020050192921 [--lane linear]
+```
+
+`--site` / `--deployment` optional when a single supervisor daemon is running (same discovery as `status`/`progress`). Requires `--scc` (or `--sector`/`--camera`/`--ccd`) and `--ffi`. Output defaults to `{lane}/debug_plots/masks/mask_full_{product_id}.fits`. See [masking.md](masking.md).
 
 **`syndiff star` flags** (`--site` required for both verbs):
 

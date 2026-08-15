@@ -12,6 +12,9 @@ license-files = []
 dependencies = [
   "hotpants>=0.1.1",
   "numba>=0.59",
+  "scikit-image",
+  "sep",
+  "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py",
 ]
 
 [project.optional-dependencies]
@@ -24,9 +27,6 @@ asteroids = [
   "tess-ephem>=0.6",
   "astroquery>=0.4",
   "sbident @ git+https://github.com/bengebre/sbident.git",
-]
-gaia = [
-  "flathub @ git+https://github.com/flatironinstitute/flathub.git@prod#subdirectory=py",
 ]
 docs = [
   "sphinx>=7.0",

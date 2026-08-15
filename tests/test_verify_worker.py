@@ -26,6 +26,7 @@ from syndiff_pipeline.common.orchestration.scheduler import (
 from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     STATUS_EXTERNAL,
+    STATUS_FAILED,
     STATUS_PENDING,
     STATUS_READY,
     STATUS_SKIPPED,
@@ -46,6 +47,8 @@ from syndiff_pipeline.common.orchestration.verify_status import (
     write_verify_in_flight,
 )
 from syndiff_pipeline.common.orchestration.verify_worker import (
+    VerifyOutcome,
+    VerifyTaskKey,
     get_verify_worker,
     reset_verify_worker_for_tests,
     shutdown_verify_worker,
@@ -390,6 +393,29 @@ class TestVerifyScheduling(unittest.TestCase):
 class TestVerifyCommandIntegration(unittest.TestCase):
     def tearDown(self):
         reset_verify_worker_for_tests()
+
+    def test_missing_external_artifact_fails_instead_of_requeueing_forever(self):
+        target = Target(22, 3, 3, 228.0, 52.0, "2020dgc")
+        with tempfile.TemporaryDirectory() as tmp:
+            state, ctx, run_id, _runs_root = _minimal_run_setup(
+                Path(tmp), [target], active_stages=["diff"]
+            )
+            label = target.label()
+            state.update_stage_status(run_id, label, "downsample", STATUS_EXTERNAL)
+
+            _apply_verify_outcome(
+                state,
+                VerifyOutcome(
+                    key=VerifyTaskKey(run_id, label, "downsample"),
+                    complete=False,
+                    stable_path="",
+                    resolved=resolve_config(target, ctx.cfg),
+                ),
+            )
+
+            row = state.get_stage_run(run_id, label, "downsample")
+            self.assertEqual(row.status, STATUS_FAILED)
+            self.assertIn("Required external artifact", row.error_tail)
 
     def test_force_rerun_command_cancels_entire_run_verify(self):
         import time

@@ -154,6 +154,7 @@ EPSF_ALLOWED = frozenset(
         "psf_size",
         "min_stars_per_tile",
         "mag_max_rp",
+        "mag_min_rp",
         "epsf_maxiters",
         "epsf_recentering_maxiters",
         "extract_size",
@@ -178,6 +179,19 @@ CENTROIDS_ALLOWED = frozenset(
         "aperture_radius",
         "psf_grouper_min_separation",
         "centroids_n_jobs",
+    }
+)
+
+PER_FFI_WCS_ALLOWED = frozenset(
+    {
+        "kind",
+        "inputs",
+        "output",
+        "sip_degree",
+        "clip_n_sigma",
+        "clip_max_iter",
+        "min_stars",
+        "per_ffi_wcs_n_jobs",
     }
 )
 
@@ -283,6 +297,11 @@ KERNEL_FIT_ALLOWED = frozenset(
         "weighting_factor",
         "phot_box_size",
         "write_debug_fits",
+        "tessreduce_bkg_enabled",
+        "tessreduce_smooth_gauss",
+        "tessreduce_anomaly_gauss",
+        "tessreduce_qe_spline_degree",
+        "tessreduce_qe_spline_smooth_mult",
     }
     | _KERNEL_HP_KEYS
 )
@@ -302,6 +321,11 @@ KERNEL_SUBTRACT_ALLOWED = frozenset(
         "output",
         "phot_box_size",
         "kernel_subtract_n_jobs",
+        "tessreduce_bkg_enabled",
+        "tessreduce_smooth_gauss",
+        "tessreduce_anomaly_gauss",
+        "tessreduce_qe_spline_degree",
+        "tessreduce_qe_spline_smooth_mult",
     }
 )
 
@@ -401,6 +425,7 @@ class EpsfParams:
     psf_size: int = 15
     min_stars_per_tile: int = 5
     mag_max_rp: Optional[float] = 12.95
+    mag_min_rp: Optional[float] = None
     epsf_maxiters: int = 15
     epsf_recentering_maxiters: int = 20
     extract_size: Optional[int] = 15
@@ -422,6 +447,16 @@ class CentroidsParams:
     aperture_radius: float = 4.0
     psf_grouper_min_separation: float = 10.0
     centroids_n_jobs: Optional[int] = None
+
+
+@dataclass
+class PerFfiWcsParams:
+    """Per-FFI Sci2Idl WCS fit parameters."""
+    sip_degree: int = 5
+    clip_n_sigma: float = 3.0
+    clip_max_iter: int = 3
+    min_stars: int = 50
+    per_ffi_wcs_n_jobs: Optional[int] = None
 
 
 @dataclass
@@ -613,6 +648,11 @@ class KernelFitParams:
     weighting_factor: float = 0.5
     phot_box_size: int = 4
     write_debug_fits: bool = True
+    tessreduce_bkg_enabled: bool = True
+    tessreduce_smooth_gauss: float = 2.0
+    tessreduce_anomaly_gauss: float = 2.0
+    tessreduce_qe_spline_degree: int = 2
+    tessreduce_qe_spline_smooth_mult: float = 10.0
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
@@ -643,6 +683,11 @@ class KernelSubtractParams:
     """KernelSubtractParams."""
     phot_box_size: int = 4
     kernel_subtract_n_jobs: Optional[int] = None
+    tessreduce_bkg_enabled: bool = True
+    tessreduce_smooth_gauss: float = 2.0
+    tessreduce_anomaly_gauss: float = 2.0
+    tessreduce_qe_spline_degree: int = 2
+    tessreduce_qe_spline_smooth_mult: float = 10.0
 
 
 def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
@@ -751,6 +796,16 @@ def parse_centroids(stage: dict, pipeline_idx: int) -> CentroidsParams:
     if "centroids_n_jobs" in stage:
         v = stage["centroids_n_jobs"]
         params.centroids_n_jobs = None if v is None else int(v)
+    return params
+
+
+def parse_per_ffi_wcs(stage: dict, pipeline_idx: int) -> PerFfiWcsParams:
+    """Parse per_ffi_wcs stage parameters."""
+    validate_stage_keys(stage, pipeline_idx, "per_ffi_wcs", PER_FFI_WCS_ALLOWED)
+    params = _merge_dataclass(PerFfiWcsParams, stage)
+    if "per_ffi_wcs_n_jobs" in stage:
+        v = stage["per_ffi_wcs_n_jobs"]
+        params.per_ffi_wcs_n_jobs = None if v is None else int(v)
     return params
 
 
@@ -1031,6 +1086,7 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "hotpants": lambda: parse_hotpants(stage, pipeline_idx),
         "epsf": lambda: parse_epsf(stage, pipeline_idx),
         "centroids": lambda: parse_centroids(stage, pipeline_idx),
+        "per_ffi_wcs": lambda: parse_per_ffi_wcs(stage, pipeline_idx),
         "sat_template": lambda: parse_sat_template(stage, pipeline_idx),
         "subtract": lambda: parse_subtract(stage, pipeline_idx),
         "background": lambda: parse_background(stage, pipeline_idx),

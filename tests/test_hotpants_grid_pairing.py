@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from syndiff_pipeline.common.grid_pairing import (
+    pad_mask_bottom,
     prepare_science_template_pairing,
     trim_padded_products,
     zero_pad_science_bottom,
@@ -72,6 +73,34 @@ class TestTrimPaddedProducts:
         product = sci_p * 2.0
         out = trim_padded_products(product, grid.conv_pad_native)
         np.testing.assert_allclose(out, sci * 2.0)
+
+
+class TestPadMaskBottom:
+    def test_pad_rows_are_marked_bad(self, grid: MappingGrid):
+        mask = np.zeros(grid.science_ffi_bounds()["shape"], dtype=bool)
+        padded = pad_mask_bottom(mask, grid.conv_pad_native)
+        assert padded.shape == grid.template_ffi_bounds()["shape"]
+        assert np.all(padded[: grid.conv_pad_native, :] == True)  # noqa: E712
+        np.testing.assert_array_equal(padded[grid.conv_pad_native :, :], mask)
+
+    def test_zero_pad_science_bottom_marks_pad_rows_good_by_contrast(
+        self, grid: MappingGrid
+    ):
+        """Documents why pad_mask_bottom exists: the science helper is wrong for masks."""
+        mask = np.zeros(grid.science_ffi_bounds()["shape"], dtype=bool)
+        wrongly_padded = zero_pad_science_bottom(mask, grid.conv_pad_native)
+        assert np.all(wrongly_padded[: grid.conv_pad_native, :] == False)  # noqa: E712
+
+    def test_no_pad_returns_bool_array(self, grid: MappingGrid):
+        mask = np.zeros(grid.science_ffi_bounds()["shape"], dtype=bool)
+        out = pad_mask_bottom(mask, 0)
+        assert out.shape == mask.shape
+        assert out.dtype == bool
+
+    def test_negative_pad_raises(self, grid: MappingGrid):
+        mask = np.zeros((4, 4), dtype=bool)
+        with pytest.raises(MappingGridError, match="pad_rows"):
+            pad_mask_bottom(mask, -1)
 
 
 class TestOversamplingPad:

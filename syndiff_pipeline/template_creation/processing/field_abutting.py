@@ -388,10 +388,15 @@ def write_l4b_rim_cache(
         "val_hi": val_hi,
         "id_lo": np.int32(id_lo),
         "id_hi": np.int32(id_hi),
-        "sx_lo": np.int16(sx_lo),
-        "sy_lo": np.int16(sy_lo),
-        "sx_hi": np.int16(sx_hi),
-        "sy_hi": np.int16(sy_hi),
+        # int16 overflows real shift magnitudes (observed as large as ~35000,
+        # well past int16's +-32767 range), raising and dropping the whole
+        # rim-cache entry. shift_schedule.py's schema for these same fields
+        # already declares int32, and field_remap.py's reader already
+        # upcasts to int32 on load -- int16 here was simply too narrow.
+        "sx_lo": np.int32(sx_lo),
+        "sy_lo": np.int32(sy_lo),
+        "sx_hi": np.int32(sx_hi),
+        "sy_hi": np.int32(sy_hi),
         "pair_epoch_id": np.int32(pair_epoch_id),
         "rep_frame_index": np.int32(rep_frame_index),
     }

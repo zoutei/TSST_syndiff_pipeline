@@ -209,6 +209,78 @@ def cmd_bookkeeping_verify(args: argparse.Namespace) -> int:
     return 0 if row is not None and row.state == "complete" else 1
 
 
+_CHECKPOINT_EMIT_STAGES = {
+    "tess_ffi_download": ("emit_ffi_set_checkpoint", "expected_ffi_set_fingerprint"),
+    "mapping": ("emit_mapping_checkpoint", "expected_mapping_fingerprint"),
+    "ps1_process": ("emit_scc_assembly_checkpoint", "expected_scc_assembly_fingerprint"),
+    "remap": ("emit_remap_store_checkpoint", "expected_remap_store_fingerprint"),
+    "downsample": ("emit_downsample_checkpoint", "expected_downsample_fingerprint"),
+}
+
+
+def cmd_bookkeeping_emit_checkpoint(args: argparse.Namespace) -> int:
+    """Emit a template-stage provenance checkpoint and drain the spool into provenance.db."""
+    from syndiff_pipeline.common.orchestration.targets import find_target, load_targets
+    from syndiff_pipeline.common.provenance.ingest import drain_spool
+    from syndiff_pipeline.common.scc_paths import provenance_spool_dir
+    from syndiff_pipeline.template_creation.orchestration import provenance_checkpoint
+    from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+        checkpoint_stage_indexed,
+    )
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+        resolve_config,
+    )
+
+    if not args.config:
+        raise SystemExit("syndiff bookkeeping emit-checkpoint requires --config")
+    if not args.targets or not args.scc:
+        raise SystemExit("syndiff bookkeeping emit-checkpoint requires --targets and --scc")
+
+    stage = args.stage
+    if stage not in _CHECKPOINT_EMIT_STAGES:
+        raise SystemExit(
+            f"stage must be one of {sorted(_CHECKPOINT_EMIT_STAGES)}, got {stage!r}"
+        )
+
+    cfg = load_runner_config(args.config)
+    data_root = cfg.data_root or _resolve_data_root(args)
+    targets = load_targets(args.targets)
+    target = find_target(targets, args.scc)
+    resolved = resolve_config(target, cfg, config_path=args.config)
+
+    emit_name, fp_name = _CHECKPOINT_EMIT_STAGES[stage]
+    emit_fn = getattr(provenance_checkpoint, emit_name)
+    expected_fp_fn = getattr(provenance_checkpoint, fp_name)
+    emit_fn(resolved)
+
+    store = _store_for_data_root(data_root)
+    drain_result = drain_spool(store, provenance_spool_dir(data_root))
+    expected_fp = expected_fp_fn(resolved)
+    indexed = checkpoint_stage_indexed(resolved, stage)
+    row = store.artifact(expected_fp)
+    print(
+        json.dumps(
+            {
+                "stage": stage,
+                "target": target.label(),
+                "fingerprint": expected_fp,
+                "in_store": row is not None,
+                "state": row.state if row is not None else None,
+                "checkpoint_indexed": indexed,
+                "drain": {
+                    "files_drained": drain_result.files_drained,
+                    "records_ingested": drain_result.records_ingested,
+                    "records_skipped": drain_result.records_skipped,
+                    "errors": drain_result.errors,
+                },
+            },
+            indent=2,
+        )
+    )
+    return 0 if indexed else 1
+
+
 def cmd_bookkeeping_gc(args: argparse.Namespace) -> int:
     from syndiff_pipeline.common.provenance.gc import gc_report
 
@@ -289,6 +361,21 @@ def register_bookkeeping_subparser(sub: "argparse._SubParsersAction") -> None:
         "--stage", default="mapping", help="mapping | remap_store | downsample"
     )
     sp_verify.set_defaults(func=cmd_bookkeeping_verify)
+
+    sp_emit = bk_sub.add_parser(
+        "emit-checkpoint",
+        help="Emit a template-stage provenance checkpoint and drain spool into provenance.db",
+    )
+    _add_data_root_args(sp_emit)
+    sp_emit.add_argument("--targets", required=True, help="Targets CSV")
+    sp_emit.add_argument("--scc", required=True, help="Target label or SCC key (e.g. 51/4/4)")
+    sp_emit.add_argument(
+        "--stage",
+        required=True,
+        choices=sorted(_CHECKPOINT_EMIT_STAGES),
+        help="Template stage checkpoint to emit",
+    )
+    sp_emit.set_defaults(func=cmd_bookkeeping_emit_checkpoint)
 
     sp_gc = bk_sub.add_parser("gc", help="Report-only GC: orphan dirs and missing files")
     _add_data_root_args(sp_gc)

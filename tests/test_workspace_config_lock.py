@@ -72,6 +72,11 @@ class TestWorkspaceConfigLock(unittest.TestCase):
                 "inputs": {"diffs": "hp_d", "epsf": "epsf_r1"},
                 "output": "centroids_r1",
             },
+            {
+                "kind": "per_ffi_wcs",
+                "inputs": {"centroids": "centroids_r1", "diffs": "hp_d"},
+                "output": "wcs",
+            },
         ]
         a = _minimal_cfg(pipeline=base)
         b = _minimal_cfg(pipeline=extended)

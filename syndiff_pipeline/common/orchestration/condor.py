@@ -36,6 +36,10 @@ _DISCONNECT_CYCLE_START_RE = re.compile(
 )
 _RECONNECT_TARGET_RE = re.compile(r"reconnect to\s+([^\s,<]+)", re.IGNORECASE)
 _NOT_FOUND_RE = re.compile(r"not found at execution machine", re.IGNORECASE)
+_JOB_EXECUTING_HOST_RE = re.compile(
+    r"Job executing on host.*?alias=([^&>\s]+)", re.IGNORECASE
+)
+_JOB_EVICTED_RE = re.compile(r"Job was evicted", re.IGNORECASE)
 
 _HOLD_MEMORY_HOST_RE = re.compile(r"Error from\s+\S+@([^\s:]+):")
 _HOLD_MEMORY_LIMIT_RE = re.compile(r"cgroup memory limit of\s+(\d+)\s+megabytes")
@@ -82,7 +86,6 @@ def parse_condor_policy_block(
     context: str,
     default_cpus: int,
     default_memory: int,
-    default_min_mem_mb: int | None = None,
 ) -> tuple[int, int, int, float]:
     """Parse a YAML ``condor:`` block; reject legacy requirements/rank keys."""
     block = dict(raw or {})
@@ -96,24 +99,22 @@ def parse_condor_policy_block(
     if unknown:
         raise ValueError(f"{context}: unknown condor keys {unknown}")
     request_memory = int(block.get("request_memory", default_memory))
-    min_mem = int(
-        block.get(
-            "host_stats_min_mem_mb",
-            default_min_mem_mb if default_min_mem_mb is not None else request_memory,
+    if "host_stats_min_mem_mb" not in block:
+        log.warning(
+            "%s: host_stats_min_mem_mb not set; defaulting the host-eligibility "
+            "memory floor to request_memory (%dMB). Set it explicitly -- aliasing "
+            "to the job's own memory request is often stricter than intended and "
+            "can silently exclude every host.",
+            context,
+            request_memory,
         )
-    )
+    min_mem = int(block.get("host_stats_min_mem_mb", request_memory))
     return (
         int(block.get("request_cpus", default_cpus)),
         request_memory,
         min_mem,
         float(block.get("host_stats_max_load15", 10.0)),
     )
-    """Wrapper path.
-    
-    Returns
-    -------
-    Path"""
-    return _WRAPPER
 
 
 def poll_grace_seconds() -> float:
@@ -505,6 +506,54 @@ def tally_execution_eviction_failures(
     return counts
 
 
+def tally_rapid_reeviction_failures(
+    log_text: str, cluster_id: int | None = None
+) -> dict[str, int]:
+    """Count clean execute -> evict cycles per host, no disconnect involved.
+
+    Complements ``tally_execution_eviction_failures``, which only recognizes
+    the disconnect/"not found at execution machine" pattern (an execute host
+    vanishing off the network). This catches a different, equally real
+    failure mode seen in production: a host's startd cleanly re-evicting the
+    same job over and over within seconds of each (re)match -- plain "004
+    Job was evicted" events with no disconnect/reconnect lines at all, e.g.
+    a broken PREEMPT/RANK policy fighting the negotiator on one machine.
+    Counts one failure per (``001`` executing-on-host, ``004`` evicted) pair
+    with no other event in between; a job that runs to completion never
+    increments anything. Both tallies feed the same host-exclusion path in
+    ``eviction_requeue_host``.
+    """
+    counts: dict[str, int] = {}
+    current_host: str | None = None
+    active_cluster: int | None = None
+    target_cluster = int(cluster_id) if cluster_id is not None else None
+    for line in log_text.splitlines():
+        header = _EVENT_HEADER_RE.match(line)
+        if header:
+            try:
+                active_cluster = int(header.group(1))
+            except ValueError:
+                active_cluster = None
+        if target_cluster is not None and active_cluster != target_cluster:
+            continue
+        exec_match = _JOB_EXECUTING_HOST_RE.search(line)
+        if exec_match:
+            current_host = normalize_condor_host(exec_match.group(1))
+            continue
+        if current_host and _JOB_EVICTED_RE.search(line):
+            counts[current_host] = counts.get(current_host, 0) + 1
+            current_host = None
+    return counts
+
+
+def combined_eviction_tallies(log_text: str, cluster_id: int | None = None) -> dict[str, int]:
+    """Merge both eviction-detection heuristics into one per-host tally."""
+    combined = tally_execution_eviction_failures(log_text, cluster_id=cluster_id)
+    for host, count in tally_rapid_reeviction_failures(log_text, cluster_id=cluster_id).items():
+        combined[host] = max(combined.get(host, 0), count)
+    return combined
+
+
 def _read_eviction_state(path: Path) -> dict:
     if not path.is_file():
         return {}
@@ -558,7 +607,7 @@ def eviction_requeue_host(
     path = Path(log_path)
     if not path.is_file():
         return None
-    tallies = tally_execution_eviction_failures(
+    tallies = combined_eviction_tallies(
         path.read_text(encoding="utf-8", errors="replace"), cluster_id=cluster_id
     )
     if not tallies:

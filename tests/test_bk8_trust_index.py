@@ -23,7 +23,11 @@ from syndiff_pipeline.template_creation.orchestration.runner_config import (
     _parse_bookkeeping_trust_index,
     resolve_config,
 )
+from syndiff_pipeline.template_creation.orchestration.run_report import (
+    _format_stage_status_short,
+)
 from syndiff_pipeline.template_creation.orchestration.verify import (
+    AbsenceProbeResult,
     collect_stage_artifacts,
     verify_ps1_process,
 )
@@ -163,7 +167,11 @@ class TestSchedulerTrustIndexOnly(unittest.TestCase):
             self.assertIn("syndiff bookkeeping reindex", warn_text)
             self.assertIn("bookkeeping.trust_index", warn_text)
 
-    def test_store_unavailable_logs_distinct_warning(self):
+    def test_store_unavailable_logs_distinct_warning_and_falls_open_to_legacy_scan(self):
+        """A corrupted/unreadable provenance.db is an infrastructure failure, not
+        a legitimate "not indexed yet" signal -- it must fall open to the legacy
+        manifest/absence-probe path instead of fail-closing, so one broken DB
+        can't cascade into every trust_index-enabled run stalling at once."""
         target = Target(20, 3, 3, 210.0, 81.0, "2020ut")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -179,13 +187,19 @@ class TestSchedulerTrustIndexOnly(unittest.TestCase):
                     "syndiff_pipeline.common.provenance.store.ProvenanceStore",
                     side_effect=OSError("provenance.db locked"),
                 ), mock.patch(
-                    "syndiff_pipeline.template_creation.orchestration.verify.check_manifests_only"
-                ) as mock_manifests:
+                    "syndiff_pipeline.template_creation.orchestration.verify.check_manifests_only",
+                    return_value=None,
+                ) as mock_manifests, mock.patch(
+                    "syndiff_pipeline.template_creation.orchestration.verify.stage_absence_probe",
+                    return_value=AbsenceProbeResult.ABSENT,
+                ) as mock_probe:
                     _run_verify_pass(
                         state, run_id, ctx, force_rerun=False, budget=8, block=True
                     )
 
-            mock_manifests.assert_not_called()
+            # Falls through to the legacy path -- both must actually run now.
+            mock_manifests.assert_called()
+            mock_probe.assert_called()
             warn_text = "\n".join(caplog.output)
             self.assertIn("Provenance store unavailable for checkpoint verify", warn_text)
             self.assertIn("ps1_process", warn_text)
@@ -216,6 +230,87 @@ class TestSchedulerTrustIndexOnly(unittest.TestCase):
             self.assertEqual(
                 state.get_stage_run(run_id, label, "ps1_process").status,
                 STATUS_SKIPPED,
+            )
+
+    def test_warmed_external_checkpoint_promoted_after_fail_closed_miss(self):
+        target = Target(20, 3, 3, 210.0, 81.0, "2020ut")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, label = _setup_run_with_ps1_process_external(
+                tmp_path, target
+            )
+            ctx.cfg.bookkeeping_trust_index = True
+            _run_verify_pass(
+                state, run_id, ctx, force_rerun=False, budget=8, block=True
+            )
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "ps1_process").status,
+                STATUS_EXTERNAL,
+            )
+
+            resolved = resolve_config(target, ctx.cfg)
+            _publish_and_ingest_checkpoint(resolved)
+
+            from syndiff_pipeline.common.orchestration.scheduler import (
+                _promote_warmed_external_checkpoints,
+            )
+
+            promoted = _promote_warmed_external_checkpoints(state, run_id, ctx)
+            self.assertEqual(promoted, 1)
+            self.assertEqual(
+                state.get_stage_run(run_id, label, "ps1_process").status,
+                STATUS_SKIPPED,
+            )
+
+
+class TestIdxMsStatusMarker(unittest.TestCase):
+    """_format_stage_status_short's `:idx_ms` marker must only appear for a
+    genuine checkpoint-stage fail-closed miss -- not for non-checkpoint
+    stages, and not before a verify attempt has actually happened (both were
+    previously unguarded, see the bug report)."""
+
+    def setUp(self):
+        reset_verify_worker_for_tests()
+
+    def tearDown(self):
+        shutdown_verify_worker(wait=False)
+        reset_verify_worker_for_tests()
+
+    def test_idx_ms_shown_after_checkpoint_stage_fails_closed(self):
+        target = Target(20, 3, 3, 210.0, 81.0, "2020ut")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, label = _setup_run_with_ps1_process_external(
+                tmp_path, target
+            )
+            ctx.cfg.bookkeeping_trust_index = True
+            _run_verify_pass(
+                state, run_id, ctx, force_rerun=False, budget=8, block=True
+            )
+            row = state.get_stage_run(run_id, label, "ps1_process")
+            self.assertEqual(
+                _format_stage_status_short(state, run_id, row, trust_index=True),
+                "ps1_pr:idx_ms",
+            )
+
+    def test_idx_ms_not_shown_before_verify_attempted(self):
+        """A freshly-external row that has never been verify-checked at all
+        must show the normal :sc_q marker, not :idx_ms -- trust_index alone
+        isn't evidence of a checkpoint miss."""
+        target = Target(20, 3, 3, 210.0, 81.0, "2020ut")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            state, ctx, run_id, label = _setup_run_with_ps1_process_external(
+                tmp_path, target
+            )
+            ctx.cfg.bookkeeping_trust_index = True
+            row = state.get_stage_run(run_id, label, "ps1_process")
+            self.assertFalse(
+                state.external_verify_attempted(run_id, label, "ps1_process")
+            )
+            self.assertEqual(
+                _format_stage_status_short(state, run_id, row, trust_index=True),
+                "ps1_pr:sc_q",
             )
 
 

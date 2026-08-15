@@ -1112,7 +1112,20 @@ def run_field_downsample_scc(
             if not alt:
                 zarr_path = scc_convolved_zarr(data_root, sector, camera, ccd)
                 if not zarr_path.exists():
-                    raise FileNotFoundError(f"convolved zarr not found: {zarr_path}")
+                    # ps1_process.py hardcodes writing here regardless of the
+                    # SCC-nested convention scc_convolved_zarr expects to
+                    # read from (a pre-existing write/read path mismatch,
+                    # not specific to any one SCC) -- check the flat legacy
+                    # location before giving up.
+                    legacy_flat = (
+                        Path(data_root)
+                        / "convolved_results"
+                        / f"sector_{sector:04d}_camera_{camera}_ccd_{ccd}.zarr"
+                    )
+                    if legacy_flat.exists():
+                        zarr_path = legacy_flat
+                    else:
+                        raise FileNotFoundError(f"convolved zarr not found: {zarr_path}")
             else:
                 zarr_path = alt[0]
         zarr.open(str(zarr_path), mode="r")

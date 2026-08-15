@@ -413,5 +413,15 @@ def shutdown_verify_worker(*, wait: bool = True) -> None:
 
 
 def reset_verify_worker_for_tests() -> None:
-    """Tear down the singleton between unit tests."""
+    """Tear down the singleton between unit tests.
+
+    Also resets the scheduler's fast-path pool (deferred import to avoid a
+    module cycle: scheduler.py already imports from this module at call
+    time). The two pools share the same VerifyTaskKey namespace, so a stale
+    fast-path future left over from a previous test can otherwise resolve a
+    later test's candidate with an unrelated mocked result.
+    """
     shutdown_verify_worker(wait=True)
+    from syndiff_pipeline.common.orchestration import scheduler
+
+    scheduler.reset_fast_path_pool_for_tests()

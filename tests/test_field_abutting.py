@@ -12,10 +12,12 @@ from syndiff_pipeline.template_creation.processing.field_abutting import (
     l4a_exact_path,
     l4b_rim_cache_basename,
     l4b_rim_path,
+    load_l4b_rim_side,
     pair_column_indices,
     pair_subdir_name,
     parse_l4b_rim_cache_basename,
     unique_pair_states,
+    write_l4b_rim_cache,
 )
 
 
@@ -186,6 +188,40 @@ def test_pair_column_indices_drops_pairs_missing_from_schedule():
     assert cols.shape == (1, 2)
     assert tuple(kept_ids[0]) == (0, 1)
     assert tuple(cols[0]) == (1, 0)
+
+
+def test_write_l4b_rim_cache_survives_shifts_beyond_int16_range(tmp_path):
+    """Regression: shift magnitudes beyond int16's +-32767 range used to
+    raise ("Python integer -34109 out of bounds for int16") and silently
+    drop the whole rim-cache entry -- observed in production on a real
+    remap backfill. sx/sy fields must be wide enough (int32, matching
+    shift_schedule.py's schema for the same fields) to hold real shifts.
+    """
+    path = tmp_path / "rim.npz"
+    exact_tid_lo = np.array([[1, -1], [-1, 2]], dtype=np.int32)
+    exact_tid_hi = np.array([[-1, 3], [4, -1]], dtype=np.int32)
+    write_l4b_rim_cache(
+        path,
+        exact_tid_lo=exact_tid_lo,
+        exact_tid_hi=exact_tid_hi,
+        id_lo=977,
+        id_hi=979,
+        sx_lo=10402,
+        sy_lo=-34109,
+        sx_hi=10415,
+        sy_hi=-35399,
+        pair_epoch_id=63,
+        rep_frame_index=0,
+    )
+    with np.load(path) as z:
+        assert int(z["sx_lo"]) == 10402
+        assert int(z["sy_lo"]) == -34109
+        assert int(z["sx_hi"]) == 10415
+        assert int(z["sy_hi"]) == -35399
+    idx_lo, val_lo = load_l4b_rim_side(path, skycell_id=977)
+    assert list(val_lo) == [1, 2]
+    idx_hi, val_hi = load_l4b_rim_side(path, skycell_id=979)
+    assert list(val_hi) == [3, 4]
 
 
 def test_l4a_l4b_epoch_paths():

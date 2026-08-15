@@ -23,6 +23,7 @@ STAGE_KINDS = frozenset(
         "kernel_subtract",
         "epsf",
         "centroids",
+        "per_ffi_wcs",
         "sat_template",
         "subtract",
         "background",
@@ -62,6 +63,7 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
     if kind in (
         "epsf",
         "centroids",
+        "per_ffi_wcs",
         "sat_template",
         "subtract",
         "background",
@@ -117,6 +119,11 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
             refs.append(str(d).strip())
     elif kind == "centroids":
         for key in ("diffs", "epsf"):
+            v = inp.get(key)
+            if v is not None and str(v).strip():
+                refs.append(str(v).strip())
+    elif kind == "per_ffi_wcs":
+        for key in ("centroids", "diffs"):
             v = inp.get(key)
             if v is not None and str(v).strip():
                 refs.append(str(v).strip())
@@ -292,6 +299,15 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                     raise ValueError(f"pipeline[{idx}] centroids: inputs.{req} required")
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] centroids: output label required")
+
+        if kind == "per_ffi_wcs":
+            inp = stage.get("inputs") or {}
+            if "centroids" not in inp:
+                raise ValueError(f"pipeline[{idx}] per_ffi_wcs: inputs.centroids required")
+            if "diffs" not in inp:
+                raise ValueError(f"pipeline[{idx}] per_ffi_wcs: inputs.diffs required")
+            if "output" not in stage or not str(stage["output"]).strip():
+                raise ValueError(f"pipeline[{idx}] per_ffi_wcs: output label required")
 
         if kind == "sat_template":
             inp = stage.get("inputs") or {}

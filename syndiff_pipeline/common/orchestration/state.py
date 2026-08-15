@@ -2,13 +2,20 @@
 
 The supervisor daemon is the sole writer of execution state. The CLI only
 inserts new run/stage rows (``INSERT OR IGNORE``) and command intents. The
-database is hardened for concurrent NFS access via WAL + busy_timeout.
+database is hardened for concurrent NFS access via the DELETE journal mode
+(SQLite's documented-safe rollback journal for network filesystems) +
+busy_timeout; WAL was tried first but repeatedly corrupted this file (see
+pipeline_state.sqlite.corrupt.* / .broken snapshots in workspace/control/)
+because its shared-memory (mmap) reader/writer coordination isn't properly
+supported by NFS.
 """
 
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
@@ -218,6 +225,7 @@ class RunDisplayContext:
     status_by_key: Dict[tuple[str, str], str]
     row_by_key: Dict[tuple[str, str], StageRunRow]
     external_complete: frozenset[tuple[str, str]]
+    external_attempted: frozenset[tuple[str, str]]
     skip_reasons: Dict[tuple[str, str], str]
 
 
@@ -355,6 +363,37 @@ def artifact_verify_needed(
     return True
 
 
+class StateDBUnavailableError(RuntimeError):
+    """Opening the state DB connection did not complete within the bound.
+
+    Raised instead of blocking indefinitely -- see ``_conn``'s docstring.
+    """
+
+
+_STATE_CONN_OPEN_TIMEOUT_S = 10.0
+_state_conn_executor: "concurrent.futures.ThreadPoolExecutor | None" = None
+_state_conn_executor_lock = threading.Lock()
+
+
+def _get_state_conn_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _state_conn_executor
+    with _state_conn_executor_lock:
+        if _state_conn_executor is None:
+            _state_conn_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=8, thread_name_prefix="state-conn-open"
+            )
+        return _state_conn_executor
+
+
+def reset_state_conn_executor_for_tests() -> None:
+    """Tear down the bounded-connection-open executor between unit tests."""
+    global _state_conn_executor
+    with _state_conn_executor_lock:
+        executor, _state_conn_executor = _state_conn_executor, None
+    if executor is not None:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 class PipelineState:
     """PipelineState."""
     def __init__(self, db_path: str | Path, *, pipeline_spec: PipelineSpec | None = None):
@@ -384,12 +423,35 @@ class PipelineState:
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
-        """Conn.
-        
-        Returns
-        -------
-        Iterator[sqlite3.Connection]"""
-        conn = sqlite3.connect(self.db_path, timeout=60)
+        """Open a connection, bounding the ``sqlite3.connect`` call itself.
+
+        ``db_path`` lives on NFS; opening a file there (stat/open/read the
+        header) can block in uninterruptible D-state under NFS contention
+        regardless of journal mode -- this has been observed hanging the
+        supervisor's single main scheduling thread indefinitely, freezing
+        every run on every host. Running the connect call in a background
+        thread and giving up after ``_STATE_CONN_OPEN_TIMEOUT_S`` turns an
+        indefinite freeze into a bounded, catchable ``StateDBUnavailableError``
+        (the background thread itself may still be blocked when this raises
+        -- Python cannot cancel a blocked syscall -- but the caller is free
+        to move on and retry on a later tick instead of waiting on it).
+        """
+        executor = _get_state_conn_executor()
+        # check_same_thread=False: the connection is opened on a background
+        # executor thread but used exclusively by the calling thread from
+        # here on (never concurrently by both) -- a safe, standard use of
+        # this flag, and required since sqlite3 otherwise refuses to hand a
+        # connection across the thread boundary this bound-wait relies on.
+        fut = executor.submit(
+            sqlite3.connect, self.db_path, timeout=60, check_same_thread=False
+        )
+        try:
+            conn = fut.result(timeout=_STATE_CONN_OPEN_TIMEOUT_S)
+        except concurrent.futures.TimeoutError as exc:
+            raise StateDBUnavailableError(
+                f"Opening state DB {self.db_path} did not complete within "
+                f"{_STATE_CONN_OPEN_TIMEOUT_S}s (possible NFS stall)"
+            ) from exc
         conn.row_factory = sqlite3.Row
         # journal_mode is persisted in the DB header (set once in _init_schema);
         # re-issuing it on every connect is redundant and, over NFS, expensive
@@ -406,9 +468,23 @@ class PipelineState:
     def _init_schema(self) -> None:
         """Init schema."""
         with self._conn() as conn:
-            # Set the durable journal mode exactly once. WAL persists in the
-            # header, so later connections inherit it without re-issuing.
-            conn.execute("PRAGMA journal_mode=WAL")
+            # Set the durable journal mode exactly once. Journal mode persists
+            # in the header, so later connections inherit it without
+            # re-issuing. WAL relies on shared-memory (mmap) coordination
+            # between readers/writers that network filesystems don't
+            # properly support; this DB lives on NFS, is opened from
+            # multiple hosts (supervisor lease handover migrates between
+            # machines), and is queried on every scheduler tick for every
+            # run -- WAL here repeatedly corrupted it (see
+            # pipeline_state.sqlite.corrupt.* / .broken snapshots in
+            # workspace/control/) and, independent of corruption, could
+            # leave the main scheduler thread blocked in NFS D-state
+            # (uninterruptible) opening a WAL connection, freezing every
+            # run's scheduling at once. DELETE is SQLite's documented-safe
+            # rollback journal mode for network filesystems (same fix
+            # already applied to provenance.db in
+            # common/provenance/store.py).
+            conn.execute("PRAGMA journal_mode=DELETE")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -1498,11 +1574,14 @@ class PipelineState:
             row_by_key[key] = row
 
         external_complete: set[tuple[str, str]] = set()
+        external_attempted: set[tuple[str, str]] = set()
         skip_reasons: Dict[tuple[str, str], str] = {}
         for art in art_rows:
             key = (art["target_label"], art["stage"])
-            if art["artifact_type"] == "external_check" and art["path"] == "1":
-                external_complete.add(key)
+            if art["artifact_type"] == "external_check":
+                external_attempted.add(key)
+                if art["path"] == "1":
+                    external_complete.add(key)
             elif art["artifact_type"] == "skip_reason" and art["path"]:
                 skip_reasons[key] = art["path"]
 
@@ -1512,6 +1591,7 @@ class PipelineState:
             status_by_key=status_by_key,
             row_by_key=row_by_key,
             external_complete=frozenset(external_complete),
+            external_attempted=frozenset(external_attempted),
             skip_reasons=skip_reasons,
         )
 

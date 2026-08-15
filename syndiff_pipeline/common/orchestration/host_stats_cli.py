@@ -350,7 +350,9 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-ok",
         action="store_true",
-        help="For requirements/bad-machines/hosts, include OK hosts",
+        help="For --format hosts only, list every host instead of just excluded "
+        "ones (no effect on requirements/bad-machines, which are exclusion "
+        "lists by definition)",
     )
     parser.add_argument(
         "--no-stats-dir-line",
@@ -423,12 +425,28 @@ def main(argv: list[str] | None = None, *, default_check: bool = False) -> int:
                 print(format_machine_exclusions(excluded))
         return 0
 
-    hosts_out = expected_hosts() if args.include_ok else excluded
-    if args.format == "requirements":
-        print(format_machine_exclusions(hosts_out if args.include_ok else excluded))
-    elif args.format == "bad-machines":
-        print(format_bad_machines(hosts_out if args.include_ok else excluded))
-    elif args.format == "hosts":
-        for host in hosts_out if args.include_ok else excluded:
+    if args.format == "hosts":
+        # "Include OK hosts" makes sense here -- it's a genuine "list everyone"
+        # listing, not an exclusion structure.
+        hosts_out = expected_hosts() if args.include_ok else excluded
+        for host in hosts_out:
             print(host)
+        return 0
+
+    # requirements/bad-machines are exclusion structures by definition -- both
+    # feed real Condor policy (format_bad_machines' schema matches what
+    # condor.py's read_bad_machines() consumes), so "including OK hosts"
+    # would silently turn "hosts to avoid" into "every host", which is not
+    # what the flag name suggests and would be a dangerous misuse if piped
+    # into an actual exclusion file. Warn instead of silently doing that.
+    if args.include_ok:
+        print(
+            f"WARNING: --include-ok has no effect on --format {args.format} "
+            "(an exclusion list can't sensibly include OK hosts); ignoring.",
+            file=sys.stderr,
+        )
+    if args.format == "requirements":
+        print(format_machine_exclusions(excluded))
+    elif args.format == "bad-machines":
+        print(format_bad_machines(excluded))
     return 0
