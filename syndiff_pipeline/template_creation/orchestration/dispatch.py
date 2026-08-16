@@ -648,6 +648,7 @@ def _execute_template_stage(
             ref_ffi_path=ref_ffi,
             progress_path=progress_path,
             mapping_grid=mapping_grid,
+            psf_sigma=float(getattr(resolved.stages.ps1_process, "psf_sigma", 60.0)),
         )
         field_result = dict(field_result)
         if mp.store_name == "tvwcs":

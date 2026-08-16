@@ -328,21 +328,26 @@ def _discover_shared_convolved_fp(
 
 
 def _try_load_shared_convolved_arrays(
-    data_root: str | Path, skycell: str
+    data_root: str | Path,
+    skycell: str,
+    *,
+    skycell_df: Any = None,
+    psf_sigma: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load ``(image, mask)`` from the shared convolved store, or ``None``.
 
     Uses ``convolved_store.try_load_convolved_cell`` after discovering a
-    published fingerprint. Same-projection canonical cells load successfully.
+    published fingerprint. Same-projection canonical cells load successfully
+    as-is.
 
-    TODO(BK-7/seam): Cross-projection seam correction is *not* applied here.
-    Canonical shared cells are ``same_projection_only``; the validated
-    patch-convolve-and-add seam math lives in ``ps1_process`` /
-    ``cross_projection_padding`` at assembly time, and there is no clear
-    standalone consumer helper to call at L5 load without inventing untested
-    math. Wire seam correction when a dedicated downsample/scc_assembly helper
-    lands; until then, cells that needed cross-projection padding may disagree
-    with legacy per-SCC ``convolved.zarr`` at seam edges.
+    When ``skycell_df``/``psf_sigma`` are given, the canonical (same-
+    projection-only) cell is additively seam-corrected for cross-projection
+    padding via ``padding_correction.load_padding_aware_convolved_cell`` (see
+    ``doc/shared_convolved_cross_projection_simple_fix_plan.md``) before it is
+    returned -- this is the same standalone, per-load correction used by
+    ``linear_downsample``, so both geometry modes see an identical corrected
+    array for a given skycell. If either argument is omitted, the cell is
+    returned uncorrected (legacy behavior).
     """
     from syndiff_pipeline.template_creation.processing.convolved_store import (
         try_load_convolved_cell,
@@ -355,6 +360,14 @@ def _try_load_shared_convolved_arrays(
     fp = _discover_shared_convolved_fp(data_root, projection, cell)
     if fp is None:
         return None
+    if skycell_df is not None and psf_sigma is not None:
+        from syndiff_pipeline.template_creation.processing.padding_correction import (
+            load_padding_aware_convolved_cell,
+        )
+
+        return load_padding_aware_convolved_cell(
+            data_root, skycell, skycell_df=skycell_df, psf_sigma=psf_sigma,
+        )
     loaded = try_load_convolved_cell(data_root, projection, cell, fp)
     if loaded is None:
         return None
@@ -480,7 +493,12 @@ def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | No
 
     data_root = _L5_WORKER.get("data_root")
     if bool(_L5_WORKER.get("shared_convolved_store")) and data_root:
-        shared = _try_load_shared_convolved_arrays(data_root, skycell)
+        shared = _try_load_shared_convolved_arrays(
+            data_root,
+            skycell,
+            skycell_df=_L5_WORKER.get("skycell_df"),
+            psf_sigma=_L5_WORKER.get("psf_sigma"),
+        )
         if shared is not None:
             return shared
 
@@ -1053,6 +1071,7 @@ def run_field_downsample_scc(
     apply_intra_skycell: bool = True,
     apply_inter_skycell: bool = True,
     mapping_grid=None,
+    psf_sigma: float | None = None,
 ) -> dict[str, Any]:
     """
     Bin sparse contribs into the SCC templates store (L5 only).
@@ -1068,6 +1087,14 @@ def run_field_downsample_scc(
 
     Parameters ``ffi_dir`` and ``ref_ffi_path`` are accepted for dispatch
     compatibility but ignored (remap must run separately).
+
+    ``psf_sigma`` (from ``stages.ps1_process.psf_sigma``), when given, is
+    threaded into the shared-convolved-store load path so cross-projection
+    padding skycells get the standalone additive seam correction (see
+    ``padding_correction.load_padding_aware_convolved_cell`` and
+    ``doc/shared_convolved_cross_projection_simple_fix_plan.md``) -- the same
+    correction applied by ``linear_downsample``, so both geometry modes see
+    an identical corrected array for a given skycell.
     """
     import os as _os
     import time as _time
@@ -1282,6 +1309,21 @@ def run_field_downsample_scc(
     )
     t_m = _time.perf_counter()
     master_map, name_to_id = _master_skycell_id_map(master_path)
+    skycell_df: pd.DataFrame | None = None
+    if shared_convolved_store and psf_sigma is not None:
+        from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+        master_csv_path = scc_mapping_master_skycells_csv(
+            data_root, sector, camera, ccd, oversampling_factor=oversampling_factor,
+        )
+        if master_csv_path.is_file():
+            skycell_df = pd.read_csv(master_csv_path).set_index("NAME", drop=False)
+        else:
+            log.warning(
+                "field downsample s%04d_%d_%d: master skycells CSV %s not found; "
+                "cross-projection padding correction cannot be applied for this SCC.",
+                sector, camera, ccd, master_csv_path,
+            )
     log.info(
         "Opened %s %s and master map %s (%d skycells) in %.1fs",
         "shared convolved store" if shared_convolved_store else "zarr",
@@ -1439,6 +1481,8 @@ def run_field_downsample_scc(
         "apply_intra_skycell": bool(apply_intra_skycell),
         "apply_inter_skycell": bool(apply_inter_skycell),
         "mapping_grid": mapping_grid,
+        "skycell_df": skycell_df,
+        "psf_sigma": psf_sigma,
     }
 
     # Validate the complete mapping identity set before any worker can write a
