@@ -195,6 +195,27 @@ PER_FFI_WCS_ALLOWED = frozenset(
     }
 )
 
+TEMPORAL_WCS_ALLOWED = frozenset(
+    {
+        "kind",
+        "inputs",
+        "output",
+        "version",
+        "spatial_basis",
+        "cheb_degree",
+        "temporal_basis",
+        "spline_degree",
+        "n_interior_knots",
+        "edge_densify_knots",
+        "edge_fraction",
+        "clip_n_sigma",
+        "clip_max_iter",
+        "min_stars",
+        "n_jobs",
+        "debug_plots",
+    }
+)
+
 SAT_TEMPLATE_ALLOWED = frozenset(
     {
         "kind",
@@ -457,6 +478,25 @@ class PerFfiWcsParams:
     clip_max_iter: int = 3
     min_stars: int = 50
     per_ffi_wcs_n_jobs: Optional[int] = None
+
+
+@dataclass
+class TemporalWcsParams:
+    """Production temporal Chebyshev WCS fit parameters."""
+
+    version: str = "temporal_cheb5_bspline_v1"
+    spatial_basis: str = "chebyshev"
+    cheb_degree: int = 5
+    temporal_basis: str = "bspline"
+    spline_degree: int = 3
+    n_interior_knots: int = 20
+    edge_densify_knots: bool = True
+    edge_fraction: float = 0.12
+    clip_n_sigma: float = 3.0
+    clip_max_iter: int = 3
+    min_stars: int = 50
+    n_jobs: Optional[int] = None
+    debug_plots: bool = True
 
 
 @dataclass
@@ -809,6 +849,38 @@ def parse_per_ffi_wcs(stage: dict, pipeline_idx: int) -> PerFfiWcsParams:
     return params
 
 
+def parse_temporal_wcs(stage: dict, pipeline_idx: int) -> TemporalWcsParams:
+    """Parse the production ``temporal_wcs`` stage parameters."""
+    validate_stage_keys(stage, pipeline_idx, "temporal_wcs", TEMPORAL_WCS_ALLOWED)
+    params = _merge_dataclass(TemporalWcsParams, stage)
+    if params.version != "temporal_cheb5_bspline_v1":
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] temporal_wcs: version must be "
+            f"'temporal_cheb5_bspline_v1', got {params.version!r}"
+        )
+    if str(params.spatial_basis).lower() != "chebyshev":
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] temporal_wcs: spatial_basis must be 'chebyshev'"
+        )
+    if int(params.cheb_degree) != 5:
+        raise ValueError(f"pipeline[{pipeline_idx}] temporal_wcs: cheb_degree must be 5")
+    if str(params.temporal_basis).lower() != "bspline":
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] temporal_wcs: temporal_basis must be 'bspline'"
+        )
+    if int(params.spline_degree) != 3:
+        raise ValueError(f"pipeline[{pipeline_idx}] temporal_wcs: spline_degree must be 3")
+    if int(params.n_interior_knots) < 0:
+        raise ValueError("temporal_wcs: n_interior_knots must be non-negative")
+    if not 0.0 <= float(params.edge_fraction) < 0.5:
+        raise ValueError("temporal_wcs: edge_fraction must be in [0, 0.5)")
+    if int(params.min_stars) < 1:
+        raise ValueError("temporal_wcs: min_stars must be positive")
+    if "n_jobs" in stage:
+        params.n_jobs = None if stage["n_jobs"] is None else int(stage["n_jobs"])
+    return params
+
+
 def parse_sat_template(stage: dict, pipeline_idx: int) -> SatTemplateParams:
     """Parse sat template.
     
@@ -1087,6 +1159,7 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "epsf": lambda: parse_epsf(stage, pipeline_idx),
         "centroids": lambda: parse_centroids(stage, pipeline_idx),
         "per_ffi_wcs": lambda: parse_per_ffi_wcs(stage, pipeline_idx),
+        "temporal_wcs": lambda: parse_temporal_wcs(stage, pipeline_idx),
         "sat_template": lambda: parse_sat_template(stage, pipeline_idx),
         "subtract": lambda: parse_subtract(stage, pipeline_idx),
         "background": lambda: parse_background(stage, pipeline_idx),

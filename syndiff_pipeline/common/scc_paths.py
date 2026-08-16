@@ -19,6 +19,7 @@ EVENTS_SUBDIR = "events"
 FFI_SUBDIR = "ffi"
 CATALOGS_SUBDIR = "catalogs"
 MAPPING_SUBDIR = "mapping"
+WCS_SUBDIR = "wcs"
 REMAP_SUBDIR = "remap"
 TEMPLATES_SUBDIR = "templates"
 DEBUG_PLOTS_SUBDIR = "debug_plots"
@@ -62,6 +63,7 @@ __all__ = [
     "FFI_SUBDIR",
     "LEGACY_SUBDIR",
     "MAPPING_SUBDIR",
+    "WCS_SUBDIR",
     "REMAP_SUBDIR",
     "PS1_SKYCELLS_ZARR_BASENAME",
     "PS1_SKYCELLS_ZARR_DIRNAME",
@@ -99,6 +101,10 @@ __all__ = [
     "scc_label",
     "scc_legacy_dir",
     "scc_mapping_dir",
+    "scc_wcs_dir",
+    "scc_per_ffi_wcs_dir",
+    "scc_temporal_wcs_dir",
+    "scc_wcs_debug_dir",
     "scc_mapping_master_pixels2skycells",
     "scc_mapping_master_skycells_csv",
     "scc_remap_dir",
@@ -275,12 +281,55 @@ def scc_mapping_dir(
     ccd: int,
     *,
     oversampling_factor: int,
+    store_name: str | None = None,
 ) -> Path:
-    """Directory for skycell pixel mapping at one oversampling factor."""
+    """Directory for skycell pixel mapping at one oversampling factor.
+
+    ``store_name`` partitions independent geometry lanes (for example the
+    ``tvwcs`` lane) without changing the historical ``mapping/`` location.
+    """
     return (
         scc_root(data_root, sector, camera, ccd)
-        / MAPPING_SUBDIR
+        / store_subdir(MAPPING_SUBDIR, store_name)
         / oversampling_dirname(oversampling_factor)
+    )
+
+
+def scc_wcs_dir(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    version: str | None = None,
+) -> Path:
+    """SCC WCS artifact directory, optionally below a validated model version."""
+    root = scc_root(data_root, sector, camera, ccd) / WCS_SUBDIR
+    if version is None or not str(version).strip():
+        return root
+    name = str(version).strip()
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name):
+        raise ValueError(f"Invalid WCS version {version!r}")
+    return root / name
+
+
+def scc_per_ffi_wcs_dir(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
+    """Directory containing per-FFI Chebyshev WCS fits."""
+    return scc_wcs_dir(data_root, sector, camera, ccd, version="per_ffi_cheb5")
+
+
+def scc_temporal_wcs_dir(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
+    """Directory containing the published temporal Chebyshev/B-spline model."""
+    return scc_wcs_dir(
+        data_root, sector, camera, ccd, version="temporal_cheb5_bspline_v1"
+    )
+
+
+def scc_wcs_debug_dir(data_root: str | Path, sector: int, camera: int, ccd: int) -> Path:
+    """Root for temporal WCS diagnostics (kept outside the WCS artifact tree)."""
+    return (
+        scc_debug_plots_dir(data_root, sector, camera, ccd)
+        / "wcs_temporal_cheb5_bspline_v1"
     )
 
 
@@ -331,9 +380,21 @@ def scc_debug_plots_dir(
     sector: int,
     camera: int,
     ccd: int,
+    category: str | None = None,
 ) -> Path:
-    """SCC-scoped template-pipeline diagnostics directory (``debug_plots/``)."""
-    return scc_root(data_root, sector, camera, ccd) / DEBUG_PLOTS_SUBDIR
+    """SCC-scoped template-pipeline diagnostics directory.
+
+    When supplied, ``category`` is a child directory below ``debug_plots``.
+    This is deliberately independent of artifact store names so a second
+    mapping/remap/downsample lane cannot overwrite first-lane diagnostics.
+    """
+    root = scc_root(data_root, sector, camera, ccd) / DEBUG_PLOTS_SUBDIR
+    if category is not None:
+        category = str(category).strip()
+        if not category or "/" in category or "\\" in category:
+            raise ValueError("debug plot category must be a single path component")
+        root /= category
+    return root
 
 
 def scc_diff_pipeline_plots_dir(
@@ -517,11 +578,12 @@ def scc_mapping_master_skycells_csv(
     ccd: int,
     *,
     oversampling_factor: int,
+    store_name: str | None = None,
 ) -> Path:
     """Path to mapping master skycells CSV under the SCC oversampling leaf."""
     suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
     return (
-        scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor)
+        scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor, store_name=store_name)
         / f"tess_s{int(sector):04d}_{int(camera)}_{int(ccd)}_master_skycells_list{suffix}.csv"
     )
 
@@ -533,11 +595,12 @@ def scc_mapping_master_pixels2skycells(
     ccd: int,
     *,
     oversampling_factor: int,
+    store_name: str | None = None,
 ) -> Path:
     """Path to mapping master pixels2skycells FITS under the SCC oversampling leaf."""
     suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
     return (
-        scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor)
+        scc_mapping_dir(data_root, sector, camera, ccd, oversampling_factor=oversampling_factor, store_name=store_name)
         / f"tess_s{int(sector):04d}_{int(camera)}_{int(ccd)}_master_pixels2skycells{suffix}.fits.fz"
     )
 

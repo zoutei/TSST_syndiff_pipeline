@@ -20,6 +20,7 @@ from syndiff_pipeline.common.scc_paths import (
     resolve_scc_diff_bookkeeping_dir,
     scc_diff_dir,
     scc_diff_label_dir,
+    scc_temporal_wcs_dir,
 )
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import (
@@ -308,6 +309,17 @@ def _scc_final_stage_complete(cfg: SynDiffConfig, lane_root: Path) -> bool:
         label = str(stage["output"]).strip()
         wcs_dir = lane_root / label
         return (wcs_dir / "per_ffi_coeffs.csv").is_file()
+
+    if kind == "temporal_wcs":
+        # Temporal WCS is intentionally published at the SCC root, outside the
+        # diff lane.  Keep this check independent of the stage's workspace label.
+        model_dir = scc_temporal_wcs_dir(
+            cfg.data_root, cfg.sector, cfg.camera, cfg.ccd
+        )
+        return (
+            (model_dir / "manifest.json").is_file()
+            and (model_dir / "frames.parquet").is_file()
+        )
 
     if kind == "kernel_fit":
         from syndiff_pipeline.difference_imaging.stages.kernel import (
