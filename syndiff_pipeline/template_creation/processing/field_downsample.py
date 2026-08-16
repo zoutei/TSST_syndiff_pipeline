@@ -8,6 +8,7 @@ migration) and writes ``contribs/`` under ``templates/oversampling_{N}/``.
 from __future__ import annotations
 
 import errno
+import hashlib
 import json
 import logging
 import shutil
@@ -48,6 +49,7 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
     contrib_basename,
     contrib_path,
     field_fits_path,
+    field_fits_basename,
     templates_root,
     write_contrib,
     write_field_group_fits,
@@ -86,6 +88,56 @@ def _load_remap_manifest(read_root: Path) -> dict[str, Any]:
     if path.is_file():
         return json.loads(path.read_text())
     return {}
+
+
+def _geometry_provenance(
+    *,
+    remap_read: Path,
+    remap_manifest: dict[str, Any],
+    schedule: ShiftSchedule,
+    mapping_root: Path,
+    mapping_grid: Any,
+    oversampling_factor: int,
+) -> dict[str, Any]:
+    """Build immutable geometry provenance for manifests and debug FITS.
+
+    The temporal model is published by the remap stage into the schedule
+    sidecar.  Mapping has no single required manifest filename across legacy
+    stores, so its fingerprint is based on the exact MappingGrid recipe used
+    to bin this store.  This is deterministic and remains available for
+    synthetic/test mapping roots.
+    """
+    schedule_meta = dict(getattr(schedule, "meta", {}) or {})
+    temporal_version = schedule_meta.get("temporal_wcs_version")
+    temporal_fp = schedule_meta.get("temporal_wcs_fingerprint")
+    if temporal_version is None:
+        temporal_version = remap_manifest.get("temporal_wcs_version")
+    if temporal_fp is None:
+        temporal_fp = remap_manifest.get("temporal_wcs_fingerprint")
+
+    mapping_payload: Any = None
+    if mapping_grid is not None and hasattr(mapping_grid, "to_mapping_dict"):
+        mapping_payload = mapping_grid.to_mapping_dict()
+    else:
+        mapping_payload = {"mapping_root": str(mapping_root)}
+    mapping_bytes = json.dumps(
+        mapping_payload, sort_keys=True, separators=(",", ":"), default=str
+    ).encode("utf-8")
+    mapping_fp = hashlib.sha256(mapping_bytes).hexdigest()
+    remap_path = remap_read / REMAP_MANIFEST_NAME
+    remap_fp = (
+        hashlib.sha256(remap_path.read_bytes()).hexdigest()
+        if remap_path.is_file()
+        else None
+    )
+    return {
+        "geometry_mode": "temporal_wcs" if temporal_fp else "field",
+        "oversampling_factor": int(oversampling_factor),
+        "temporal_wcs_version": temporal_version,
+        "temporal_wcs_fingerprint": temporal_fp,
+        "mapping_fingerprint": mapping_fp,
+        "remap_fingerprint": remap_fp,
+    }
 
 
 def _update_frames_group_ids(event_dir: Path, group_id_per_frame: np.ndarray) -> None:
@@ -227,27 +279,13 @@ def _projection_and_cell(skycell: str) -> tuple[str, str] | None:
 def _discover_shared_convolved_fp(
     data_root: str | Path, projection: str, cell: str
 ) -> str | None:
-    """Return a published fingerprint dirname under the shared store, or None.
+    """Return the explicitly selected canonical fingerprint, never an mtime guess."""
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        resolve_current_convolved_ref,
+    )
 
-    When multiple recipe epochs exist, prefer the newest complete payload by
-    mtime (same presence check as verify's ``_shared_convolved_cell_published``).
-    """
-    from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
-
-    cell_root = ps1_convolved_zarr_path(data_root) / str(projection) / str(cell)
-    if not cell_root.is_dir():
-        return None
-    candidates: list[Path] = []
-    try:
-        for fp_dir in cell_root.iterdir():
-            if fp_dir.is_dir() and (fp_dir / "arrays.npz").is_file():
-                candidates.append(fp_dir)
-    except OSError:
-        return None
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
-    return candidates[0].name
+    ref = resolve_current_convolved_ref(data_root, projection, cell)
+    return None if ref is None else ref.fingerprint
 
 
 def _try_load_shared_convolved_arrays(
@@ -1015,6 +1053,14 @@ def run_field_downsample_scc(
     t_m = _time.perf_counter()
     schedule = ShiftSchedule.load(schedule_path)
     log.info("Loaded shift schedule from %s in %.1fs", schedule_path, _time.perf_counter() - t_m)
+    geometry_provenance = _geometry_provenance(
+        remap_read=remap_read,
+        remap_manifest=remap_manifest,
+        schedule=schedule,
+        mapping_root=mapping_root,
+        mapping_grid=mapping_grid,
+        oversampling_factor=int(oversampling_factor),
+    )
     t_m = _time.perf_counter()
     shifts_df = load_remap_shifts_df(remap_read)
     log.info(
@@ -1412,6 +1458,7 @@ def run_field_downsample_scc(
             ccd=int(ccd),
             contribs_dir="contribs",
             groups=list(assignment.groups),
+            provenance=geometry_provenance,
         ),
     )
     sidecar = {
@@ -1441,6 +1488,7 @@ def run_field_downsample_scc(
         "perf": perf_meta,
         "mapping_grid": mapping_grid.to_mapping_dict(),
         "geometry_mode": "field",
+        "geometry_provenance": geometry_provenance,
     }
     if _skipped_convolved:
         sidecar["skipped_convolved_skycells"] = list(_skipped_convolved)
@@ -1472,6 +1520,7 @@ def run_field_downsample_scc(
         "exact_cache_l4a_dir": str(exact_cache_l4a_dir),
         "exact_cache_l4b_dir": str(exact_cache_l4b_dir),
         "remap_root": str(remap_store),
+        **geometry_provenance,
     }
     materialized_fits: dict[str, Any] | None = None
     if materialize_fits:
@@ -1674,6 +1723,8 @@ def materialize_field_fits_for_store(
     group_scoped_contribs: bool | None = None,
     provenance: dict[str, Any] | None = None,
     mapping_grid=None,
+    group_ids: list[int] | None = None,
+    fits_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     """Write per-group field template FITS from hybrid-binned sparse contribs.
 
@@ -1684,17 +1735,17 @@ def materialize_field_fits_for_store(
     if group_scoped_contribs is None:
         group_scoped_contribs = _store_uses_group_scoped_contribs(root)
     crop = _roi_bounds_to_assemble_crop(roi_bounds)
-    group_ids = sorted(int(g) for g in shifts_df["group_id"].unique())
-    if not group_ids:
+    selected_group_ids = sorted(int(g) for g in (group_ids if group_ids is not None else shifts_df["group_id"].unique()))
+    if not selected_group_ids:
         raise RuntimeError(f"no group_id values in template_group_shifts under {root}")
 
-    fits_dir = root / FITS_DIRNAME
+    fits_dir = Path(fits_dir) if fits_dir is not None else root / FITS_DIRNAME
     fits_dir.mkdir(parents=True, exist_ok=True)
     prov = dict(provenance or {})
     written: list[dict[str, Any]] = []
     skipped_groups: list[dict[str, Any]] = []
 
-    for gid in group_ids:
+    for gid in selected_group_ids:
         try:
             flux = assemble_field_group_flux(
                 root,
@@ -1722,13 +1773,11 @@ def materialize_field_fits_for_store(
             )
             skipped_groups.append({"group_id": int(gid), "reason": str(exc)})
             continue
-        out_path = field_fits_path(
-            root,
-            sector,
-            camera,
-            ccd,
-            gid,
-            oversampling_factor=oversampling_factor,
+        out_path = (
+            field_fits_path(root, sector, camera, ccd, gid, oversampling_factor=oversampling_factor)
+            if fits_dir == root / FITS_DIRNAME else fits_dir / field_fits_basename(
+                sector, camera, ccd, gid, oversampling_factor=oversampling_factor
+            )
         )
         header = build_field_fits_header(
             sector=sector,
@@ -1744,7 +1793,10 @@ def materialize_field_fits_for_store(
         written.append(
             {
                 "group_id": int(gid),
-                "path": str(Path(written_path).relative_to(root)),
+                "path": (
+                    str(Path(written_path).relative_to(root))
+                    if Path(written_path).is_relative_to(root) else str(Path(written_path))
+                ),
                 "shape": [int(flux.shape[0]), int(flux.shape[1])],
             }
         )
@@ -1756,12 +1808,33 @@ def materialize_field_fits_for_store(
             f"({len(skipped_groups)} group(s) had no on-disk contribs)"
         )
 
+    # Keep a small, inspectable FITS sample outside the production store for
+    # the distortion-aware lane.  The lane-specific directory prevents an
+    # OS4 temporal-WCS run from overwriting SPOC/linear debug products.
+    debug_fits: list[str] = []
+    if str(prov.get("geometry_mode", "")).lower() == "temporal_wcs":
+        debug_dir = root.parent.parent / "debug_plots" / "templates_tvwcs_os4" / "fits"
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        ordered = sorted(written, key=lambda row: int(row["group_id"]))
+        selected = ordered[:1]
+        if len(ordered) > 2:
+            selected += [ordered[len(ordered) // 2], ordered[-1]]
+        elif len(ordered) == 2:
+            selected += [ordered[-1]]
+        for row in selected:
+            src = root / str(row["path"])
+            dst = debug_dir / src.name
+            if src.resolve() != dst.resolve():
+                shutil.copy2(src, dst)
+            debug_fits.append(str(dst))
+
     payload = {
         "schema_version": 1,
         "fits_dir": FITS_DIRNAME,
         "n_groups": len(written),
         "groups": written,
         "provenance": prov,
+        "debug_fits": debug_fits,
     }
     if skipped_groups:
         payload["skipped_groups"] = skipped_groups

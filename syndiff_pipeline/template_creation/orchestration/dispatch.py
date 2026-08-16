@@ -231,6 +231,24 @@ def _execute_template_stage(
             resolved, force_rerun=force_rerun, write_debug_plot=False
         )
         mp = resolved.stages.mapping
+        temporal_store = None
+        temporal_fingerprint = None
+        tess_wcs_override = None
+        if str(mp.wcs_source) == "temporal_wcs":
+            from syndiff_pipeline.common.download import manifest_basename_from_local
+            from syndiff_pipeline.common.scc_paths import scc_wcs_dir
+            from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import (
+                TemporalChebWcsStore,
+            )
+
+            temporal_dir = scc_wcs_dir(
+                resolved.data_root, t.sector, t.camera, t.ccd,
+                version=mp.temporal_wcs_version,
+            )
+            temporal_store = TemporalChebWcsStore(temporal_dir)
+            model, ref_btjd = temporal_store.for_stem(manifest_basename_from_local(ref_ffi))
+            tess_wcs_override = model.at_time(ref_btjd)
+            temporal_fingerprint = temporal_store.fingerprint
 
         # Gaia catalog download and the TESS<->PS1 skycell geometric mapping
         # are independent: process_tess_image_optimized() takes no Gaia
@@ -241,15 +259,25 @@ def _execute_template_stage(
         # shared state -- safe to overlap.
         gaia_thread = None
         gaia_exc: list[BaseException] = []
-        if not mp.skip_download_catalog:
-            from syndiff_pipeline.common.scc_paths import scc_catalogs_dir
+        from syndiff_pipeline.common.scc_paths import scc_catalogs_dir
 
-            gaia_catalog_dir = str(
-                scc_catalogs_dir(resolved.data_root, t.sector, t.camera, t.ccd)
-            )
+        gaia_catalog_dir = scc_catalogs_dir(
+            resolved.data_root, t.sector, t.camera, t.ccd
+        )
+        gaia_catalog_path = gaia_catalog_dir / (
+            f"gaia_catalog_s{int(t.sector):04d}_{int(t.camera)}_{int(t.ccd)}.csv"
+        )
+        # The downloader itself also checks this path, but avoid starting a
+        # helper thread (and avoid reporting ``gaia_download`` progress) when
+        # the catalog is already complete. ``skip_download_catalog`` remains
+        # an explicit escape hatch for operators who intentionally want no
+        # catalog check at all.
+        if not mp.skip_download_catalog and not gaia_catalog_path.is_file():
+
+            gaia_catalog_dir_str = str(gaia_catalog_dir)
             log.info(
                 "Downloading Gaia catalog for %s → %s (concurrently with mapping)",
-                ref_ffi, gaia_catalog_dir,
+                ref_ffi, gaia_catalog_dir_str,
             )
 
             def _run_gaia_download() -> None:
@@ -257,7 +285,7 @@ def _execute_template_stage(
                     _download_gaia_catalog(
                         site_config_path=resolved.config_path or None,
                         tess_file=ref_ffi,
-                        output_path=gaia_catalog_dir,
+                        output_path=gaia_catalog_dir_str,
                         force_download=force_rerun,
                     )
                 except BaseException as exc:  # noqa: BLE001 -- re-raised on join below
@@ -288,6 +316,7 @@ def _execute_template_stage(
                 y_edge_strip=mp.y_edge_strip,
                 template_conv_pad_spare_px=mp.template_conv_pad_spare_px,
                 sci_fwhm=mp.sci_fwhm,
+                tess_wcs_override=tess_wcs_override,
             )
         finally:
             if gaia_thread is not None:
@@ -304,6 +333,21 @@ def _execute_template_stage(
             )
         except Exception as exc:
             log.warning("Mapping projection overlay skipped: %s", exc)
+        if temporal_store is not None:
+            from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
+                mapping_run_meta_path,
+                _read_run_meta,
+                _write_run_meta,
+            )
+
+            meta_path = mapping_run_meta_path(resolved)
+            meta = _read_run_meta(meta_path) or {}
+            meta.update({
+                "wcs_source": "temporal_wcs",
+                "temporal_wcs_version": mp.temporal_wcs_version,
+                "temporal_wcs_fingerprint": temporal_fingerprint,
+            })
+            _write_run_meta(meta_path, meta)
         return None
 
     if stage == "ps1_download":
@@ -326,6 +370,29 @@ def _execute_template_stage(
         return _manifest_from_result(result)
 
     if stage == "ps1_process":
+        # A completed external per-SCC convolved store can be supplied
+        # directly to downsample.  Keep the stage visible in the DAG for
+        # dependency accounting, but do not rerun PS1 processing or touch the
+        # shared convolved store in that mode.
+        external_convolved = getattr(resolved.stages.downsample, "convolved_dir", None)
+        if external_convolved:
+            from pathlib import Path
+
+            path = Path(str(external_convolved))
+            if not path.is_dir():
+                raise RuntimeError(
+                    f"Configured external convolved store does not exist: {path}"
+                )
+            n_data = sum(1 for entry in path.iterdir() if entry.name.endswith("_data"))
+            if n_data <= 0:
+                raise RuntimeError(f"Configured external convolved store is empty: {path}")
+            log.info(
+                "ps1_process: using completed external per-SCC convolved store "
+                "%s (%d data arrays); no PS1 processing scheduled",
+                path,
+                n_data,
+            )
+            return None
         from syndiff_pipeline.template_creation.processing import ps1_process
         from syndiff_pipeline.template_creation.orchestration.verify import clear_ps1_process_artifacts
 
@@ -379,7 +446,7 @@ def _execute_template_stage(
             master = hdul[1].data
             full_shape = (int(master.shape[0]), int(master.shape[1]))
         target_drift = None
-        if str(rm.drift_source) == "point":
+        if str(rm.drift_source) in ("point", "point_ffi_wcs"):
             from syndiff_pipeline.template_creation.processing.scc_reference_ffi import (
                 resolve_scc_point_drift_table,
                 write_scc_wcs_drift_debug_plot,
@@ -402,6 +469,14 @@ def _execute_template_stage(
         else:
             ref_ffi = resolve_scc_reference_ffi(
                 resolved, force_rerun=force_rerun, write_debug_plot=False
+            )
+        temporal_wcs_dir = None
+        if str(rm.drift_source) == "per_skycell_temporal_wcs":
+            from syndiff_pipeline.common.scc_paths import scc_wcs_dir
+
+            temporal_wcs_dir = scc_wcs_dir(
+                resolved.data_root, t.sector, t.camera, t.ccd,
+                version=mp.temporal_wcs_version,
             )
         field_result = run_field_remap_scc(
             sector=t.sector,
@@ -428,6 +503,7 @@ def _execute_template_stage(
             stage_regmaps_to_scratch=rm.stage_regmaps_to_scratch,
             drift_source=str(rm.drift_source),
             target_drift=target_drift,
+            temporal_wcs_dir=temporal_wcs_dir,
             apply_intra_skycell=bool(rm.apply_intra_skycell),
             apply_inter_skycell=bool(rm.apply_inter_skycell),
         )
@@ -558,6 +634,34 @@ def _execute_template_stage(
             mapping_grid=mapping_grid,
         )
         field_result = dict(field_result)
+        if mp.store_name == "tvwcs":
+            # Debug FITS are deliberately a small representative selection;
+            # NPZ/contrib artifacts remain the authoritative OS4 templates.
+            import json
+            from syndiff_pipeline.common.scc_paths import scc_debug_plots_dir
+            from syndiff_pipeline.template_creation.processing.field_downsample import (
+                materialize_field_fits_for_store,
+            )
+            from syndiff_pipeline.template_creation.processing.field_remap import load_remap_shifts_df
+
+            shifts = load_remap_shifts_df(remap_store_root)
+            groups = sorted(int(g) for g in shifts["group_id"].unique())
+            selected = sorted(set([groups[0], groups[len(groups) // 2], groups[-1]])) if groups else []
+            provenance = json.loads(
+                (Path(field_result["output_dir"]) / "template_manifest.json").read_text()
+            ).get("provenance", {})
+            debug_fits = scc_debug_plots_dir(
+                resolved.data_root, t.sector, t.camera, t.ccd,
+                f"templates_tvwcs_os{int(ds.oversampling_factor)}",
+            ) / "fits"
+            field_result["debug_fits"] = materialize_field_fits_for_store(
+                field_result["output_dir"], shifts, sector=t.sector, camera=t.camera, ccd=t.ccd,
+                base_tess_shape=base_shape, roi_bounds=tuple(int(v) for v in (
+                    mapping_grid.ffi_xmin, mapping_grid.ffi_ymin, mapping_grid.ffi_xmax, mapping_grid.ffi_ymax,
+                )), oversampling_factor=int(ds.oversampling_factor), mapping_grid=mapping_grid,
+                group_ids=selected, fits_dir=debug_fits,
+                provenance=provenance,
+            )
         field_result["template_dir_physical"] = str(field_result["output_dir"])
         return _manifest_from_result(field_result)
 

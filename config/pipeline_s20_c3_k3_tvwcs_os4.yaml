@@ -1,0 +1,53 @@
+# S0020/C3/K3 distortion-aware field-template lane.  The invocation must use
+# exactly `mapping,remap,downsample`; OS4 diff consumption is intentionally
+# out of scope.
+deployment_file: deployment.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+    channel_id: "1513744924133294171"
+
+stages:
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+    wcs_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    skip_download_catalog: false
+    n_threads: 64
+    condor_request_cpus: 64
+  remap:
+    store_name: tvwcs
+    drift_source: per_skycell_temporal_wcs
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    n_jobs: 64
+    # OS4 remap stages all mapping regmaps to execute-host scratch. The
+    # completed S20 lane is ~6.5 GB, so request ample local disk explicitly.
+    condor_request_disk: 16000
+    condor_request_cpus: 64
+  ps1_process:
+    # PS1 processing was completed previously.  The S20 product is the
+    # per-SCC convolved Zarr below; do not consume the shared convolved store
+    # and do not schedule a new ps1_process job.
+    ps1_source: stream
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+    convolved_dir: /astro/armin/koji/syndiff/data/convolved_results/sector_0020_camera_3_ccd_3.zarr
+    rebuild_field_store: true
+    # Dispatch writes only representative debug FITS under debug_plots/.
+    materialize_fits: false
+    n_jobs: 32
+
+resources:
+  mapping:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 1

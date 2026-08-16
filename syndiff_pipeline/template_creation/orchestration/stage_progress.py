@@ -46,6 +46,12 @@ _RE_TESS_TQDM_FRAC = re.compile(r"(\d+)/(\d+)\s*\[")
 _RE_TESS_TQDM_PCT = re.compile(r"(\d+)%\|")
 
 _RE_MAP_SKYCELLS = re.compile(r"Processing skycells:.*?(\d+)/(\d+)")
+_MAP_COMPUTE_MARKERS = (
+    "Starting optimized TESS image processing",
+    "Creating optimized TESS-to-skycell mapping",
+    "Converting ",
+    "Processing individual skycell mappings",
+)
 
 _RE_HOTPANTS_FRAMES = re.compile(
     r"hotpants \[(\w+)\] round \d+: (\d+)/(\d+) frames succeeded"
@@ -452,6 +458,11 @@ def _parse_mapping(text: str) -> StageProgress | None:
     match = _last_match(_RE_MAP_SKYCELLS, text)
     if match:
         return StageProgress(f"{match.group(1)}/{match.group(2)}", "fraction")
+    # Mapping starts a legacy-named Gaia helper concurrently.  Once the main
+    # coordinate/mapping work is visible, report the actual mapping phase
+    # rather than the stale ``gaia_download`` marker from that helper.
+    if any(marker in text for marker in _MAP_COMPUTE_MARKERS):
+        return StageProgress("mapping", "phase")
     return _phase_from_text(text)
 
 
