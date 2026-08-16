@@ -39,6 +39,86 @@ _CONTRIB_RE = re.compile(
 from syndiff_pipeline.common.scc_paths import scc_templates_dir
 
 
+def validate_frozen_field_geometry(
+    store_root: str | Path,
+    mapping_grid: Any,
+    *,
+    expected_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate the immutable geometry contract before field assembly.
+
+    The field sidecar is the handoff between L5 and diff/bootstrap.  Once a
+    ``MappingGrid`` is supplied, a missing or contradictory sidecar is a hard
+    error; callers must rebuild the store instead of silently assembling with
+    a different crop.  Temporal provenance is checked when requested by the
+    caller (typically against the remap manifest).
+    """
+    if mapping_grid is None:
+        raise ValueError("mapping_grid is required for frozen field geometry validation")
+    sidecar_path = Path(store_root) / "field_mode_assembly.json"
+    if not sidecar_path.is_file():
+        raise ValueError(f"missing frozen field geometry sidecar: {sidecar_path}")
+    side = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    if int(side.get("schema_version", 0)) < 3:
+        raise ValueError("field geometry sidecar must use schema_version >= 3")
+    saved = side.get("mapping_grid")
+    current = mapping_grid.to_mapping_dict()
+    if not isinstance(saved, Mapping):
+        raise ValueError("field geometry sidecar missing mapping_grid")
+    for key in ("geometry_fingerprint", "oversampling_factor", "conv_pad_native"):
+        if str(saved.get(key)) != str(current.get(key)):
+            raise ValueError(
+                f"field geometry mismatch for {key}: saved={saved.get(key)!r}, "
+                f"requested={current.get(key)!r}"
+            )
+    # MAPGRID=3 is the paired-padding contract.  A sidecar that merely
+    # contains a v3 MappingGrid is insufficient: the science pad is
+    # deliberately neutral/invalid and T must be explicit at the handoff.
+    if int(getattr(mapping_grid, "mapgrid_version", 0)) != 3:
+        raise ValueError("field template assembly requires MAPGRID=3 geometry")
+    if int(getattr(mapping_grid, "mapgrid_version", 0)) == 3:
+        if str(side.get("science_pad_policy", "")) != "neutral_invalid":
+            raise ValueError(
+                "MAPGRID=3 field sidecar must declare science_pad_policy=neutral_invalid"
+            )
+        support = side.get("template_support_bounds_ffi")
+        expected_support = {
+            "x_min": int(mapping_grid.template_xmin),
+            "x_max": int(mapping_grid.template_xmax),
+            "y_min": int(mapping_grid.template_ymin),
+            "y_max": int(mapping_grid.template_ymax),
+        }
+        if support != expected_support:
+            raise ValueError(
+                "MAPGRID=3 field sidecar template_support_bounds_ffi does not match T"
+            )
+        pads = side.get("pad_native")
+        expected_pads = {
+            "left": int(mapping_grid.pad_left),
+            "right": int(mapping_grid.pad_right),
+            "bottom": int(mapping_grid.pad_bottom),
+            "top": int(mapping_grid.pad_top),
+        }
+        if pads != expected_pads:
+            raise ValueError("MAPGRID=3 field sidecar pad_native does not match MappingGrid")
+    shape = tuple(int(v) for v in side.get("base_tess_shape", ()))
+    expected_shape = tuple(int(v) for v in mapping_grid.array_shape_os())
+    if shape and shape != expected_shape:
+        raise ValueError(
+            f"field geometry base_tess_shape {shape} != MappingGrid OS shape {expected_shape}"
+        )
+    saved_prov = dict(side.get("geometry_provenance") or {})
+    for key, value in (expected_provenance or {}).items():
+        if value is None:
+            continue
+        if str(saved_prov.get(key)) != str(value):
+            raise ValueError(
+                f"field temporal provenance mismatch for {key}: "
+                f"saved={saved_prov.get(key)!r}, requested={value!r}"
+            )
+    return side
+
+
 def templates_root(
     data_root: str | Path,
     sector: int,
@@ -157,11 +237,34 @@ def field_fits_path(
 
 def _roi_bounds_to_assemble_crop(
     roi_bounds: tuple[int, int, int, int] | None,
+    *,
+    oversampling_factor: int = 1,
+    mapping_grid: Any | None = None,
 ) -> tuple[int, int, int, int] | None:
     if roi_bounds is None:
         return None
+    oversampling_factor = int(oversampling_factor)
+    if oversampling_factor < 1:
+        raise ValueError(
+            f"oversampling_factor must be >= 1, got {oversampling_factor}"
+        )
     x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)
-    return (x_min, x_max, y_min, y_max)
+    if mapping_grid is not None:
+        # ``roi_bounds`` are native FFI coordinates, while assembled arrays
+        # are indexed in the local, oversampled MappingGrid coordinate frame.
+        # In particular, ffi_ymin may be negative because the grid includes
+        # convolution-pad rows; passing it directly to a NumPy slice turns it
+        # into a from-the-end index and can produce an empty image.
+        x_min -= int(mapping_grid.ffi_xmin)
+        x_max -= int(mapping_grid.ffi_xmin)
+        y_min -= int(mapping_grid.ffi_ymin)
+        y_max -= int(mapping_grid.ffi_ymin)
+    return (
+        x_min * oversampling_factor,
+        x_max * oversampling_factor,
+        y_min * oversampling_factor,
+        y_max * oversampling_factor,
+    )
 
 
 def build_field_fits_header(
@@ -190,7 +293,12 @@ def build_field_fits_header(
         hdr["OVERSAMP"] = (os_factor, "Oversampling factor")
     if mapping_grid is not None:
         for key, value in mapping_grid.to_fits_header_updates().items():
-            hdr[key] = (int(value), f"MappingGrid {key}")
+            # MappingGrid metadata is mostly integral geometry, but the
+            # coordinate-frame declaration is intentionally textual.
+            # Preserve FITS-compatible strings instead of coercing every
+            # value to int.
+            serialized = value if isinstance(value, (str, bool)) else int(value)
+            hdr[key] = (serialized, f"MappingGrid {key}")
     elif roi_bounds is not None:
         x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)
         hdr["XMIN"] = (x_min, "ROI xmin in base TESS pixels")

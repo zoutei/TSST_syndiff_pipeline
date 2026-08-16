@@ -286,6 +286,14 @@ def convolved_cell_dir(data_root: str | Path, projection: str, skycell: str, fp:
     return _ps1_convolved_zarr_root(data_root) / str(projection) / str(skycell) / str(fp)
 
 
+def _projection_and_cell(skycell_id: str) -> tuple[str, str] | None:
+    """Split a canonical ``skycell.<projection>.<cell>`` identity."""
+    parts = str(skycell_id).split(".")
+    if len(parts) < 3 or parts[0] != "skycell":
+        return None
+    return ".".join(parts[:2]), parts[2]
+
+
 def _payload_complete(cell_dir: Path) -> bool:
     if not cell_dir.is_dir():
         return False
@@ -450,3 +458,103 @@ def try_load_convolved_cell(
     except Exception:
         logger.warning("try_load_convolved_cell failed for %s (best-effort)", cell_dir, exc_info=True)
         return None
+
+
+def resolve_current_convolved_ref(
+    data_root: str | Path, projection: str, skycell: str
+):
+    """Return the validated selected immutable canonical artifact, if any."""
+    from syndiff_pipeline.template_creation.processing.artifact_pointer import read_current_pointer
+
+    return read_current_pointer(
+        _ps1_convolved_zarr_root(data_root) / str(projection) / str(skycell),
+        expected_kind=KIND,
+        projection=str(projection),
+        skycell=str(skycell),
+        required_members=(*_REQUIRED_MEMBERS, _PROVENANCE_SIDECAR_FILENAME),
+    )
+
+
+def convolved_store_inventory(
+    data_root: str | Path,
+    expected_skycells: Iterable[str],
+    *,
+    require_current_pointer: bool = False,
+) -> dict[str, Any]:
+    """Audit exact convolved-cell availability for a P2 master inventory.
+
+    A directory containing ``arrays.npz`` is not sufficient: the immutable
+    provenance sidecar and both payload members must be present, and the
+    sidecar identity must match the requested projection/cell.  The returned
+    partitions are intentionally JSON-serialisable so L5 can include them in
+    a hard-failure diagnostic without opening pixel arrays.
+    """
+    root = _ps1_convolved_zarr_root(data_root)
+    present: list[str] = []
+    missing: list[str] = []
+    invalid: list[str] = []
+    for full_name in sorted({str(v) for v in expected_skycells}):
+        parsed = _projection_and_cell(full_name)
+        if parsed is None:
+            invalid.append(full_name)
+            continue
+        projection, cell = parsed
+        cell_root = root / projection / cell
+        candidates: list[Path] = []
+        if require_current_pointer:
+            ref = resolve_current_convolved_ref(data_root, projection, cell)
+            if ref is not None:
+                candidates.append(Path(ref.path))
+        else:
+            try:
+                candidates = [p for p in cell_root.iterdir() if p.is_dir() and not p.name.startswith("_tmp_")]
+            except OSError:
+                candidates = []
+        good = False
+        for candidate in candidates:
+            sidecar = candidate / _PROVENANCE_SIDECAR_FILENAME
+            if not _payload_complete(candidate) or not sidecar.is_file():
+                continue
+            try:
+                record = json.loads(sidecar.read_text())
+                spatial = record.get("spatial_key", {})
+                if (str(record.get("kind")) != KIND or
+                        str(spatial.get("projection")) != projection or
+                        str(spatial.get("skycell")) != cell):
+                    continue
+            except Exception:
+                continue
+            good = True
+            break
+        (present if good else missing).append(full_name)
+    return {
+        "expected": sorted({str(v) for v in expected_skycells}),
+        "present": present,
+        "missing": missing,
+        "invalid_identity": invalid,
+        "count_expected": len({str(v) for v in expected_skycells}),
+        "count_present": len(present),
+    }
+
+
+def update_current_pointer(
+    data_root: str | Path, projection: str, skycell: str, fp: str
+) -> bool:
+    """Select an already-published canonical artifact. Never selects by mtime."""
+    from syndiff_pipeline.template_creation.processing.artifact_pointer import (
+        validate_artifact,
+        write_current_pointer,
+    )
+
+    root = _ps1_convolved_zarr_root(data_root) / str(projection) / str(skycell)
+    try:
+        ref = validate_artifact(
+            root, kind=KIND, projection=str(projection), skycell=str(skycell),
+            fingerprint=str(fp), recipe_id=None,
+            required_members=(*_REQUIRED_MEMBERS, _PROVENANCE_SIDECAR_FILENAME),
+        )
+        write_current_pointer(root, ref)
+        return True
+    except Exception:
+        logger.warning("failed to update convolved current pointer for %s/%s", projection, skycell, exc_info=True)
+        return False

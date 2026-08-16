@@ -123,7 +123,7 @@ def test_exact_regmap_requires_tpix_coord_input():
         )
 
 
-def test_verify_mapping_requires_mapgrid_v2(tmp_path):
+def test_verify_mapping_requires_mapgrid_v3(tmp_path):
     resolved = _resolved_for_mapping(tmp_path)
     scc = (
         tmp_path
@@ -146,8 +146,8 @@ def test_verify_mapping_requires_mapgrid_v2(tmp_path):
     assert not legacy.ok
     assert "MAPGRID" in legacy.message
 
-    grid = _write_mapgrid_master(master, mapgrid=2)
+    grid = _write_mapgrid_master(master, mapgrid=3)
     ok = verify_mapping(resolved)
     assert ok.ok
-    assert "MAPGRID v2" in ok.message
+    assert "MAPGRID=3" in ok.message
     assert str(grid.array_shape_os()) in ok.message or "shape=" in ok.message

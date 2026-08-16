@@ -495,10 +495,39 @@ def _field_mode_context_from_sidecar(
         raise MappingGridError(
             f"field template store {store_root} is v1/v2 field mode "
             f"(field_mode_assembly schema_version={schema_version}; need >=3 with mapping_grid). "
-            "Rebuild mapping (MAPGRID>=2) and field downsample before using field-mode templates."
+            "Rebuild mapping with MAPGRID=3 and field downsample before using field-mode templates."
         )
     os_factor = max(1, int(side.get("oversampling_factor", 1) or 1))
     mapping_grid = MappingGrid.from_sidecar(side)
+    from syndiff_pipeline.template_creation.processing.field_templates import (
+        validate_frozen_field_geometry,
+    )
+
+    # Validate the persisted L5 handoff before exposing an assembler to diff.
+    # This prevents a valid-looking store from being paired with a different
+    # MAPGRID/OS geometry after a remap rebuild.
+    validate_frozen_field_geometry(store_root, mapping_grid)
+    # The template store is a consumer of the remap handoff.  If a remap
+    # manifest is present, require the temporal/geometry fingerprints to
+    # agree before exposing an on-demand assembler to diff.
+    remap_root = side.get("remap_root")
+    remap_manifest = Path(str(remap_root)) / "remap_manifest.json" if remap_root else None
+    if remap_manifest is not None and remap_manifest.is_file():
+        remap_doc = json.loads(remap_manifest.read_text(encoding="utf-8"))
+        template_prov = dict(side.get("geometry_provenance") or {})
+        for key in (
+            "temporal_wcs_fingerprint",
+            "temporal_wcs_frame_contract_fingerprint",
+        ):
+            expected = remap_doc.get(key)
+            if expected is None:
+                continue
+            actual = template_prov.get(key)
+            if str(actual) != str(expected):
+                raise MappingGridError(
+                    f"template/remap provenance mismatch for {key}: "
+                    f"template={actual!r}, remap={expected!r}"
+                )
     if os_factor > 1:
         h, w = mapping_grid.array_shape_os()
     else:
@@ -627,4 +656,3 @@ def maybe_load_field_mode_template_context(
         log.warning("field mode context load failed: %s", exc)
         return None
     return _field_mode_context_from_sidecar(root, side, shifts_df=shifts_df)
-

@@ -25,9 +25,11 @@ from syndiff_pipeline.template_creation.processing.field_downsample import (
 )
 from syndiff_pipeline.template_creation.processing.field_templates import (
     FieldManifest,
+    _roi_bounds_to_assemble_crop,
     field_fits_basename,
     write_contrib,
     write_template_manifest,
+    validate_frozen_field_geometry,
 )
 
 NY, NX = 8, 10
@@ -64,6 +66,49 @@ class TestMaterializeFieldFits(unittest.TestCase):
 
     def tearDown(self):
         self._tmpdir.cleanup()
+
+    def test_frozen_geometry_validation_rejects_mismatched_grid(self):
+        grid = MappingGrid(
+            ffi_xmin=0, ffi_ymin=0, ffi_xmax=NX, ffi_ymax=NY,
+            oversampling=1, conv_pad_native=0,
+        )
+        (self.store / "field_mode_assembly.json").write_text(json.dumps({
+            "schema_version": 3,
+            "mapping_grid": grid.to_mapping_dict(),
+            "base_tess_shape": [NY, NX],
+            "geometry_provenance": {"temporal_wcs_frame_contract_fingerprint": "fp-a"},
+        }))
+        self.assertEqual(
+            validate_frozen_field_geometry(
+                self.store, grid,
+                expected_provenance={"temporal_wcs_frame_contract_fingerprint": "fp-a"},
+            )["schema_version"],
+            3,
+        )
+        other = MappingGrid(
+            ffi_xmin=0, ffi_ymin=0, ffi_xmax=NX - 1, ffi_ymax=NY,
+            oversampling=1, conv_pad_native=0,
+        )
+        with self.assertRaises(ValueError, msg="geometry mismatch"):
+            validate_frozen_field_geometry(self.store, other)
+
+    def test_oversampled_crop_uses_mapping_grid_local_coordinates(self):
+        grid = MappingGrid(
+            ffi_xmin=44,
+            ffi_ymin=-8,
+            ffi_xmax=2092,
+            ffi_ymax=2048,
+            oversampling=4,
+            conv_pad_native=8,
+        )
+        self.assertEqual(
+            _roi_bounds_to_assemble_crop(
+                (44, -8, 2092, 2048),
+                oversampling_factor=4,
+                mapping_grid=grid,
+            ),
+            (0, 8192, 0, 8224),
+        )
 
     def _shifts_legacy(self) -> pd.DataFrame:
         return pd.DataFrame(
@@ -231,6 +276,7 @@ class TestMaterializeFieldFits(unittest.TestCase):
             self.assertEqual(int(hdr["YMIN"]), 0)
             self.assertEqual(int(hdr["XMAX"]), NX)
             self.assertEqual(int(hdr["YMAX"]), NY)
+            self.assertEqual(str(hdr["COORDFRM"]).strip(), "full_ffi")
         cov = template_coverage_ffi_bounds(str(fits_path))
         self.assertEqual(cov["x_min"], 0)
         self.assertEqual(cov["y_min"], 0)

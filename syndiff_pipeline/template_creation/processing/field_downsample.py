@@ -55,6 +55,7 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
     write_field_group_fits,
     write_template_manifest,
     _roi_bounds_to_assemble_crop,
+    validate_frozen_field_geometry,
 )
 from syndiff_pipeline.template_creation.processing.shift_schedule import (
     ShiftSchedule,
@@ -64,8 +65,26 @@ from syndiff_pipeline.template_creation.processing.shift_schedule import (
 
 log = logging.getLogger(__name__)
 
+
+class L5CompletenessError(RuntimeError):
+    """Raised when L5 would have to fabricate a missing skycell."""
+
+    def __init__(self, diagnostics: dict[str, list[str]]) -> None:
+        self.diagnostics = diagnostics
+        missing = {
+            key: value
+            for key, value in diagnostics.items()
+            if value and key.startswith("absent_")
+        }
+        super().__init__(
+            "L5 convolved-store completeness validation failed: "
+            + json.dumps(missing or diagnostics, sort_keys=True)
+        )
+
 # Re-export mapping helpers for existing tests/callers.
 __all__ = [
+    "L5CompletenessError",
+    "_validate_l5_convolved_completeness",
     "_find_regmap",
     "_mapping_scc_dir",
     "_master_pixels2skycells_path",
@@ -110,6 +129,7 @@ def _geometry_provenance(
     schedule_meta = dict(getattr(schedule, "meta", {}) or {})
     temporal_version = schedule_meta.get("temporal_wcs_version")
     temporal_fp = schedule_meta.get("temporal_wcs_fingerprint")
+    temporal_frame_fp = schedule_meta.get("temporal_wcs_frame_contract_fingerprint")
     if temporal_version is None:
         temporal_version = remap_manifest.get("temporal_wcs_version")
     if temporal_fp is None:
@@ -136,7 +156,12 @@ def _geometry_provenance(
         "temporal_wcs_version": temporal_version,
         "temporal_wcs_fingerprint": temporal_fp,
         "mapping_fingerprint": mapping_fp,
+        "geometry_fingerprint": (
+            getattr(mapping_grid, "geometry_fingerprint", None)
+            if mapping_grid is not None else None
+        ),
         "remap_fingerprint": remap_fp,
+        "temporal_wcs_frame_contract_fingerprint": temporal_frame_fp,
     }
 
 
@@ -279,13 +304,27 @@ def _projection_and_cell(skycell: str) -> tuple[str, str] | None:
 def _discover_shared_convolved_fp(
     data_root: str | Path, projection: str, cell: str
 ) -> str | None:
-    """Return the explicitly selected canonical fingerprint, never an mtime guess."""
-    from syndiff_pipeline.template_creation.processing.convolved_store import (
-        resolve_current_convolved_ref,
-    )
+    """Return a published fingerprint dirname under the shared store, or None.
 
-    ref = resolve_current_convolved_ref(data_root, projection, cell)
-    return None if ref is None else ref.fingerprint
+    When multiple recipe epochs exist, prefer the newest complete payload by
+    mtime (same presence check as verify's ``_shared_convolved_cell_published``).
+    """
+    from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
+
+    cell_root = ps1_convolved_zarr_path(data_root) / str(projection) / str(cell)
+    if not cell_root.is_dir():
+        return None
+    candidates: list[Path] = []
+    try:
+        for fp_dir in cell_root.iterdir():
+            if fp_dir.is_dir() and (fp_dir / "arrays.npz").is_file():
+                candidates.append(fp_dir)
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
+    return candidates[0].name
 
 
 def _try_load_shared_convolved_arrays(
@@ -369,21 +408,64 @@ def _filter_skycell_batches_missing_convolved(
     list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]],
     list[str],
 ]:
-    """Drop skycell batches with no convolved store entry; warn once."""
-    kept: list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]] = []
-    skipped: list[str] = []
-    for skycell, buckets in skycell_batches:
-        if _convolved_skycell_available(payload, skycell):
-            kept.append((skycell, buckets))
-        else:
-            skipped.append(skycell)
-    if skipped:
-        log.warning(
-            "Skipped %d skycell batch(es) missing from convolved store (e.g. %s)",
-            len(skipped),
-            skipped[:5],
+    """Validate batches before L5; never silently turn a miss into zero flux."""
+    required = {str(skycell) for skycell, _ in skycell_batches}
+    return _validate_l5_convolved_completeness(
+        master_skycells=set(payload.get("master_skycells", required)),
+        payload=payload,
+        required_skycells=required,
+        skycell_batches=skycell_batches,
+    )
+
+
+def _validate_l5_convolved_completeness(
+    *,
+    master_skycells: set[str],
+    payload: dict[str, Any],
+    required_skycells: set[str] | None = None,
+    skycell_batches: list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]] | None = None,
+) -> tuple[
+    list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]],
+    list[str],
+]:
+    """Hard gate comparing remap/master identities with convolved availability.
+
+    The four partitions are intentionally emitted even when empty so a failed
+    lane has an actionable record of whether the identity disappeared at the
+    mapping, PS1 source, PS1 processing, or final-store boundary. Optional
+    ``source_skycells`` and ``processing_skycells`` payload entries are used by
+    callers that have those upstream inventories; otherwise the gate treats
+    them as unknown and attributes a miss to the final store only.
+    """
+    master = {str(v) for v in master_skycells}
+    required = master if required_skycells is None else {str(v) for v in required_skycells}
+    source = {str(v) for v in payload.get("source_skycells", master)}
+    processing = {str(v) for v in payload.get("processing_skycells", source)}
+    available = {name for name in required if _convolved_skycell_available(payload, name)}
+
+    diagnostics = {
+        "absent_from_master": sorted(required - master),
+        "absent_from_source": sorted((required & master) - source),
+        "absent_from_processing": sorted((required & master & source) - processing),
+        "absent_from_store": sorted(
+            (required & master & source & processing) - available
+        ),
+        "expected": sorted(required),
+        "present_in_store": sorted(available),
+    }
+    missing = any(
+        diagnostics[key]
+        for key in (
+            "absent_from_master",
+            "absent_from_source",
+            "absent_from_processing",
+            "absent_from_store",
         )
-    return kept, skipped
+    )
+    if missing:
+        log.error("L5 convolved completeness diagnostics: %s", diagnostics)
+        raise L5CompletenessError(diagnostics)
+    return list(skycell_batches or []), []
 
 
 def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | None:
@@ -759,22 +841,16 @@ def _l5_skycell_batch(
 
     loaded = _load_ps1_skycell_for_l5(skycell)
     if loaded is None:
-        log.warning(
-            "Convolved data missing for %s; skipping L5 batch (%d pending contrib key(s))",
-            skycell,
-            sum(len(v) for v in pending.values()),
+        raise L5CompletenessError(
+            {
+                "absent_from_master": [],
+                "absent_from_source": [],
+                "absent_from_processing": [],
+                "absent_from_store": [str(skycell)],
+                "expected": [str(skycell)],
+                "present_in_store": [],
+            }
         )
-        n_skips += sum(len(v) for v in pending.values())
-        return {
-            "skycell": skycell,
-            "n_composite_keys": len(buckets),
-            "n_compose": 0,
-            "n_writes": n_writes,
-            "n_skips": n_skips,
-            "n_nonempty": n_nonempty,
-            "n_regmap_opens": 0,
-            "n_zarr_loads": 0,
-        }
 
     assignment_map = _read_regmap_assignment_l5(skycell)
     n_regmap_opens = 1
@@ -1009,9 +1085,11 @@ def run_field_downsample_scc(
         from syndiff_pipeline.common.mapping_grid import MappingGridError
 
         raise MappingGridError(
-            "field downsample requires MappingGrid (MAPGRID>=2 / field_mode_assembly "
-            "schema_version>=3); rebuild mapping then re-run downsample"
+            "field downsample requires MAPGRID=3 MappingGrid and field_mode_assembly "
+            "schema_version>=3; rebuild mapping then re-run downsample"
         )
+    if int(getattr(mapping_grid, "mapgrid_version", 0)) != 3:
+        raise MappingGridError("field downsample requires MAPGRID=3 geometry")
     progress_file = Path(progress_path) if progress_path is not None else None
     t_run0 = _time.perf_counter()
     if progress_file is not None:
@@ -1061,6 +1139,25 @@ def run_field_downsample_scc(
         mapping_grid=mapping_grid,
         oversampling_factor=int(oversampling_factor),
     )
+    # The remap handoff is frozen.  Refuse to produce/reuse L5 artifacts when
+    # its geometry or temporal frame contract disagrees with this invocation.
+    remap_grid = remap_manifest.get("mapping_grid")
+    if remap_grid is not None:
+        from syndiff_pipeline.common.mapping_grid import MappingGrid
+
+        parsed_remap_grid = MappingGrid.from_mapping_dict(remap_grid)
+        if parsed_remap_grid.geometry_fingerprint != mapping_grid.geometry_fingerprint:
+            raise ValueError(
+                "remap/mapping geometry fingerprint mismatch; rebuild remap before L5"
+            )
+    for key in ("temporal_wcs_fingerprint", "temporal_wcs_frame_contract_fingerprint"):
+        expected = remap_manifest.get(key)
+        actual = geometry_provenance.get(key)
+        if expected is not None and actual is not None and str(expected) != str(actual):
+            raise ValueError(
+                f"remap temporal provenance mismatch for {key}: "
+                f"manifest={expected!r}, schedule={actual!r}"
+            )
     t_m = _time.perf_counter()
     shifts_df = load_remap_shifts_df(remap_read)
     log.info(
@@ -1326,6 +1423,7 @@ def run_field_downsample_scc(
         "shared_convolved_store": bool(shared_convolved_store),
         "legacy_zarr_path": str(legacy_zarr_path) if legacy_zarr_path else None,
         "name_to_id": dict(name_to_id),
+        "master_skycells": set(name_to_id),
         "id_to_name": dict(id_to_name),
         "master_map": master_map,
         "pair_ids": pair_ids,
@@ -1343,9 +1441,14 @@ def run_field_downsample_scc(
         "mapping_grid": mapping_grid,
     }
 
-    skycell_batches, _skipped_convolved = _filter_skycell_batches_missing_convolved(
-        skycell_batches,
-        worker_payload,
+    # Validate the complete mapping identity set before any worker can write a
+    # contrib.  The batch list may be a strict subset when a stale schedule
+    # omitted a master cell, so validation must use ``name_to_id`` explicitly.
+    skycell_batches, _skipped_convolved = _validate_l5_convolved_completeness(
+        master_skycells=set(name_to_id),
+        payload=worker_payload,
+        required_skycells=set(name_to_id),
+        skycell_batches=skycell_batches,
     )
     n_composite_keys = sum(len(buckets) for _, buckets in skycell_batches)
 
@@ -1461,8 +1564,11 @@ def run_field_downsample_scc(
             provenance=geometry_provenance,
         ),
     )
+    if int(getattr(mapping_grid, "mapgrid_version", 0)) != 3:
+        raise ValueError("field downsample requires MAPGRID=3 geometry")
+    is_mapgrid3 = True
     sidecar = {
-        "schema_version": 3,
+        "schema_version": 4 if is_mapgrid3 else 3,
         "store_root": str(store),
         "remap_root": str(remap_store),
         "output_store_name": None,
@@ -1490,6 +1596,33 @@ def run_field_downsample_scc(
         "geometry_mode": "field",
         "geometry_provenance": geometry_provenance,
     }
+    if is_mapgrid3:
+        sidecar.update(
+            {
+                "science_pad_policy": "neutral_invalid",
+                "template_support_bounds_ffi": {
+                    "x_min": int(mapping_grid.template_xmin),
+                    "x_max": int(mapping_grid.template_xmax),
+                    "y_min": int(mapping_grid.template_ymin),
+                    "y_max": int(mapping_grid.template_ymax),
+                },
+                "pad_native": {
+                    "left": int(mapping_grid.pad_left),
+                    "right": int(mapping_grid.pad_right),
+                    "bottom": int(mapping_grid.pad_bottom),
+                    "top": int(mapping_grid.pad_top),
+                },
+                "science_slice_native": [
+                    [mapping_grid.science_slice_native()[0].start, mapping_grid.science_slice_native()[0].stop],
+                    [mapping_grid.science_slice_native()[1].start, mapping_grid.science_slice_native()[1].stop],
+                ],
+                "science_slice_os": [
+                    [mapping_grid.science_slice_os()[0].start, mapping_grid.science_slice_os()[0].stop],
+                    [mapping_grid.science_slice_os()[1].start, mapping_grid.science_slice_os()[1].stop],
+                ],
+                "effective_support_pad_native": int(mapping_grid.conv_pad_native),
+            }
+        )
     if _skipped_convolved:
         sidecar["skipped_convolved_skycells"] = list(_skipped_convolved)
     # Infer lane names from path leaves for provenance / A/B bookkeeping.
@@ -1734,7 +1867,31 @@ def materialize_field_fits_for_store(
     root = Path(store_root)
     if group_scoped_contribs is None:
         group_scoped_contribs = _store_uses_group_scoped_contribs(root)
-    crop = _roi_bounds_to_assemble_crop(roi_bounds)
+    # MAPGRID=3 materialized templates must retain the full support plane T;
+    # the science slice is selected only by the paired-diff boundary.
+    materialize_roi_bounds = roi_bounds
+    if mapping_grid is not None and int(getattr(mapping_grid, "mapgrid_version", 0)) != 3:
+        raise ValueError("materialized field FITS requires MAPGRID=3 geometry")
+    if mapping_grid is not None and int(getattr(mapping_grid, "mapgrid_version", 0)) == 3:
+        materialize_roi_bounds = None
+        roi_bounds = (
+            int(mapping_grid.template_xmin), int(mapping_grid.template_ymin),
+            int(mapping_grid.template_xmax), int(mapping_grid.template_ymax),
+        )
+    crop = _roi_bounds_to_assemble_crop(
+        materialize_roi_bounds,
+        oversampling_factor=oversampling_factor,
+        mapping_grid=mapping_grid,
+    )
+    if crop is not None:
+        x0, x1, y0, y1 = crop
+        ny, nx = (int(v) for v in base_tess_shape)
+        if not (0 <= x0 < x1 <= nx and 0 <= y0 < y1 <= ny):
+            raise ValueError(
+                "field FITS crop is outside the assembled array: "
+                f"crop={crop}, shape={tuple(base_tess_shape)}, "
+                f"roi_bounds={roi_bounds}, oversampling_factor={oversampling_factor}"
+            )
     selected_group_ids = sorted(int(g) for g in (group_ids if group_ids is not None else shifts_df["group_id"].unique()))
     if not selected_group_ids:
         raise RuntimeError(f"no group_id values in template_group_shifts under {root}")
