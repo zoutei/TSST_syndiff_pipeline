@@ -41,7 +41,14 @@ class TemporalWcsAdapter:
         return self.model.pixel_to_world(x_local, y_local, self.btjd)
 
     def all_pix2world(self, x, y=None, origin=0):
-        if y is not None and np.ndim(y) == 0 and np.asarray(x).ndim >= 1 and np.asarray(x).shape[-1] == 2 and origin == 0:
+        # Astropy-WCS convenience form: all_pix2world(pixel_array_Nx2, origin).
+        # Detected when the caller passes only two positional args and the
+        # second one is a bare scalar "origin" rather than a real y array.
+        packed_call = (
+            y is not None and np.ndim(y) == 0 and np.asarray(x).ndim >= 1
+            and np.asarray(x).shape[-1] == 2 and origin == 0
+        )
+        if packed_call:
             x, y = np.asarray(x)[..., 0], np.asarray(x)[..., 1]
         if y is None:
             pixels = np.asarray(x)
@@ -50,7 +57,9 @@ class TemporalWcsAdapter:
             ra, dec = self.pixel_to_world(pixels[..., 0], pixels[..., 1])
             return np.stack((ra, dec), axis=-1)
         ra, dec = self.pixel_to_world(x, y)
-        return np.stack((ra, dec), axis=-1)
+        if packed_call:
+            return np.stack((ra, dec), axis=-1)
+        return ra, dec
 
     def pixel_to_world_values(self, x, y=None):
         if y is None:
