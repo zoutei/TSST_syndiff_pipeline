@@ -34,6 +34,10 @@ def reference_wcs_from_tesswcs(
     hdr.set("XMAX", int(crop_bounds["x_max"]), "Crop xmax (exclusive)")
     hdr.set("YMIN", y_min, "Crop ymin in full FFI pixels")
     hdr.set("YMAX", int(crop_bounds["y_max"]), "Crop ymax (exclusive)")
+    hdr.set("MODELFRM", "SCIENCE_LOCAL", "Temporal model pixel frame")
+    hdr.set("XORIG", x_min, "Temporal model origin in full FFI pixels")
+    hdr.set("YORIG", y_min, "Temporal model origin in full FFI pixels")
+    hdr.set("PIXORIG", 0, "Zero-based pixel origin for temporal model")
 
     wcs = WCS(hdr)
     wcs.array_shape = (int(ny), int(nx))

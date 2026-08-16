@@ -1899,10 +1899,21 @@ def run_astrometry_stage(
 
 
 def pipeline_needs_template_handoff(pipeline: list[dict[str, Any]]) -> bool:
-    """True when any stage after astrometry needs template handoff artifacts."""
+    """True when the pipeline needs template handoff artifacts.
+
+    The per-FFI and temporal WCS stages are intentionally runnable as a
+    standalone fitting/publication lane.  They consume their declared
+    centroid/difference workspaces and do not consume template geometry.  A
+    pipeline containing only those WCS stages (plus preamble entries) must
+    therefore not load the SCC template handoff.  Any mixed pipeline remains
+    handoff-bound so that template, mapping, and difference stages retain
+    their strict MAPGRID=3 validation.
+    """
     kinds = [s.get("kind") for s in pipeline if isinstance(s, dict) and s.get("kind")]
     if not kinds:
         return False
     if kinds == ["astrometry"]:
+        return False
+    if all(k in {"per_ffi_wcs", "temporal_wcs"} for k in kinds):
         return False
     return any(k != "astrometry" for k in kinds)
