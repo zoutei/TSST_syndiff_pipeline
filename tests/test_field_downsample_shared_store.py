@@ -205,9 +205,46 @@ def test_filter_skycell_batches_missing_convolved(tmp_path: Path):
         (skycell, {(0, 0, ()): [(0, 0, 0)]}),
         ("skycell.missing.001", {(0, 0, ()): [(0, 0, 0)]}),
     ]
-    kept, skipped = fd._filter_skycell_batches_missing_convolved(batches, payload)
-    assert [sc for sc, _ in kept] == [skycell]
-    assert skipped == ["skycell.missing.001"]
+    with pytest.raises(fd.L5CompletenessError) as exc:
+        fd._filter_skycell_batches_missing_convolved(batches, payload)
+    assert exc.value.diagnostics["absent_from_store"] == ["skycell.missing.001"]
+
+
+def test_l5_completeness_diagnostics_partition_upstream_gaps(monkeypatch):
+    required = {"skycell.1.1", "skycell.1.2", "skycell.1.3", "skycell.1.4"}
+    payload = {
+        "source_skycells": {"skycell.1.1", "skycell.1.2", "skycell.1.3"},
+        "processing_skycells": {"skycell.1.1", "skycell.1.2"},
+    }
+    monkeypatch.setattr(
+        fd,
+        "_convolved_skycell_available",
+        lambda _payload, skycell: skycell == "skycell.1.1",
+    )
+    with pytest.raises(fd.L5CompletenessError) as exc:
+        fd._validate_l5_convolved_completeness(
+            master_skycells=required,
+            required_skycells=required,
+            payload=payload,
+        )
+    diagnostics = exc.value.diagnostics
+    assert diagnostics["absent_from_source"] == ["skycell.1.4"]
+    assert diagnostics["absent_from_processing"] == ["skycell.1.3"]
+    assert diagnostics["absent_from_store"] == ["skycell.1.2"]
+
+
+def test_l5_completeness_accepts_exact_complete_set(monkeypatch):
+    required = {"skycell.1.1", "skycell.1.2"}
+    monkeypatch.setattr(fd, "_convolved_skycell_available", lambda *_: True)
+    batches = [(name, {}) for name in sorted(required)]
+    kept, skipped = fd._validate_l5_convolved_completeness(
+        master_skycells=required,
+        required_skycells=required,
+        payload={},
+        skycell_batches=batches,
+    )
+    assert kept == batches
+    assert skipped == []
 
 
 def test_shared_miss_without_legacy_returns_none(tmp_path: Path):

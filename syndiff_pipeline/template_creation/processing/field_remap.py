@@ -89,6 +89,69 @@ def _mapping_fingerprint(
     return h.hexdigest()
 
 
+def _mapping_geometry_provenance(
+    mapping_root: Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int,
+) -> dict[str, str]:
+    """Read the authoritative geometry declaration from the mapping master.
+
+    Remap must never infer the template support rectangle from ``base_tess_shape``
+    (or from an old schedule).  The master FITS is the P2 hand-off, and its
+    MAPGRID/GEOMFP fields are consequently included in every P4 provenance
+    token.  Missing/legacy masters return an empty mapping for compatibility
+    with non-field unit fixtures; an actual remap then fails in
+    ``_build_remap_tpix`` with the more useful MappingGrid error.
+    """
+    scc = _mapping_scc_dir(
+        Path(mapping_root), sector, camera, ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
+    stem = f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}"
+    master = try_resolve_fits_variant(scc / stem)
+    if master is None:
+        return {}
+    from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
+
+    grid = load_mapping_grid_from_master(master)
+    # P2 publishes GEOMFP on every skycell row and every regmap.  Refuse a
+    # mixed mapping lane before schedule construction; otherwise a stale CSV
+    # or regmap could silently assign a valid-looking but differently padded
+    # Exact cache.
+    csv = _skycell_csv_path(
+        mapping_root, sector, camera, ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    if int(grid.mapgrid_version) != 3:
+        raise ValueError("mapping master must use MAPGRID=3")
+    if csv.is_file():
+        table = pd.read_csv(csv, usecols=["GEOMFP"])
+        if len(table) and set(table["GEOMFP"].astype(str)) != {str(grid.geometry_fingerprint)}:
+            raise ValueError(f"mapping skycell CSV geometry fingerprint disagrees with master: {csv}")
+    for regmap in sorted(p for p in scc.rglob("*") if p.is_file() and "regmap" in p.name.lower()):
+        with fits.open(regmap, memmap=False) as hdul:
+            headers = [h.header for h in hdul]
+            values = [str(h.get("GEOMFP")).strip() for h in headers if h.get("GEOMFP") is not None]
+        if not values or any(v != str(grid.geometry_fingerprint) for v in values):
+            raise ValueError(f"mapping regmap geometry fingerprint disagrees with master: {regmap}")
+    return {
+        "mapping_grid_version": str(int(grid.mapgrid_version)),
+        "mapping_geometry_fingerprint": str(grid.geometry_fingerprint),
+        "mapping_template_bounds_ffi": json.dumps(
+            [grid.template_xmin, grid.template_ymin,
+             grid.template_xmax, grid.template_ymax], separators=(",", ":")
+        ),
+        "mapping_science_bounds_ffi": json.dumps(
+            [grid.science_xmin, grid.science_ymin,
+             grid.science_xmax, grid.science_ymax], separators=(",", ":")
+        ),
+    }
+
+
 def _temporal_provenance(
     *,
     temporal_wcs_dir: str | Path | None,
@@ -99,8 +162,12 @@ def _temporal_provenance(
     oversampling_factor: int,
 ) -> dict[str, str]:
     """Build provenance tokens that must match before reusing remap artifacts."""
+    geometry = _mapping_geometry_provenance(
+        mapping_root, sector, camera, ccd,
+        oversampling_factor=oversampling_factor,
+    )
     if temporal_wcs_dir is None:
-        return {}
+        return geometry
     from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
 
     store = TemporalChebWcsStore(temporal_wcs_dir)
@@ -108,10 +175,14 @@ def _temporal_provenance(
     return {
         "temporal_wcs_version": version,
         "temporal_wcs_fingerprint": str(store.fingerprint),
+        "temporal_wcs_frame_contract_fingerprint": str(
+            store.frame_contract["fingerprint"]
+        ),
         "mapping_fingerprint": _mapping_fingerprint(
             mapping_root, sector, camera, ccd,
             oversampling_factor=oversampling_factor,
         ),
+        **geometry,
     }
 
 def remap_root(
@@ -313,14 +384,16 @@ def _build_shift_schedule_for_scc(
     mode = str(drift_source or "per_skycell").strip().lower()
     mode = {"point": "point_ffi_wcs", "per_skycell": "per_skycell_temporal_wcs"}.get(mode, mode)
     temporal_store = None
+    temporal_support_validation: dict[str, float | int] | None = None
     if mode == "per_skycell_temporal_wcs":
         if temporal_wcs_dir is None:
             raise ValueError("per_skycell_temporal_wcs requires temporal_wcs_dir")
         from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
 
         temporal_store = TemporalChebWcsStore(temporal_wcs_dir)
-        ref_model, ref_btjd = temporal_store.for_stem(manifest_basename_from_local(str(ref_path)))
-        ref_wcs = ref_model.at_time(ref_btjd)
+        ref_wcs, ref_btjd = temporal_store.for_stem(
+            manifest_basename_from_local(str(ref_path))
+        )
     else:
         ref_wcs, _ = load_tess_wcs(ref_path)
 
@@ -331,6 +404,22 @@ def _build_shift_schedule_for_scc(
         raise FileNotFoundError(f"skycell catalog missing: {csv_path}")
     usecols = ["NAME", "RA", "DEC"] + RELEVANT_WCS_KEYS
     skycell_df = pd.read_csv(csv_path, usecols=usecols)
+
+    if temporal_store is not None:
+        # Validate T against the independent/reference detector WCS before
+        # persisting any L2 schedule.  The adapter remains the WCS passed to
+        # schedule construction; the external WCS is used only for this gate.
+        from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
+        from syndiff_pipeline.template_creation.processing.compute_ps1_skycell_shifts import load_tess_wcs
+        master_path = _master_pixels2skycells_path(
+            mapping_root, sector, camera, ccd,
+            oversampling_factor=oversampling_factor,
+        )
+        grid = load_mapping_grid_from_master(master_path)
+        external_ref_wcs, _ = load_tess_wcs(ref_path)
+        temporal_support_validation = _validate_temporal_support_extrapolation(
+            ref_wcs, grid, reference_wcs=external_ref_wcs, max_pad_native=8
+        )
 
     paths = sorted(list_local_ffis(str(ffi_dir), sector, camera, ccd))
     if not paths:
@@ -355,8 +444,7 @@ def _build_shift_schedule_for_scc(
         row = ffi_list_df.loc[logical] if logical in ffi_list_df.index else None
         if temporal_store is not None:
             try:
-                model, frame_btjd = temporal_store.for_stem(logical)
-                frame_wcs.append((logical, model.at_time(frame_btjd)))
+                frame_wcs.append((logical, temporal_store.for_stem(logical)[0]))
             except Exception as exc:
                 raise RuntimeError(f"temporal WCS unavailable for {logical}") from exc
         elif row is not None and bool(row.get("wcs_ok", False)):
@@ -405,6 +493,8 @@ def _build_shift_schedule_for_scc(
         schedule.meta["temporal_wcs_fingerprint"] = temporal_store.fingerprint
         if expected_provenance:
             schedule.meta.update(expected_provenance)
+        if temporal_support_validation is not None:
+            schedule.meta.update(temporal_support_validation)
     schedule.meta["frame_filenames"] = [manifest_basename_from_local(p) for p in paths]
     with field_store_lock(store_root):
         schedule.save(store_root / "shift_schedule.npz")
@@ -877,13 +967,74 @@ def _effective_parallel_jobs(n_jobs: int, n_tasks: int) -> int:
 _REMAP_WORKER: dict[str, Any] = {}
 
 
+def _validate_temporal_support_extrapolation(
+    adapter: Any,
+    grid: Any,
+    *,
+    reference_wcs: Any | None = None,
+    max_pad_native: int = 8,
+    reference_tolerance_px: float = 5.0,
+) -> dict[str, float | int]:
+    """Validate the temporal adapter over the complete mapped template support.
+
+    ``TemporalChebWcs`` is fitted on S, while P2's master and all P4 remap
+    coordinates are on T.  This gate permits only the declared bounded halo
+    (at most ``max_pad_native`` native pixels) and samples all four support
+    edges.  If an external/reference WCS is supplied, its world coordinates
+    are round-tripped through the adapter and the maximum pixel discrepancy is
+    reported/checked.  The check is deliberately at the WCS boundary: callers
+    continue to pass full-FFI coordinates and never apply a crop-origin shift.
+    """
+    if adapter is None:
+        raise ValueError("temporal support validation requires a TemporalWcsAdapter")
+    pad = max(int(grid.pad_left), int(grid.pad_right), int(grid.pad_bottom), int(grid.pad_top))
+    if pad > int(max_pad_native):
+        raise ValueError(
+            f"temporal WCS support extrapolation {pad} native pixels exceeds "
+            f"declared limit {int(max_pad_native)}"
+        )
+    # Pixel centers just inside/outside each edge, plus all four corners.  Keep
+    # the sample set tiny and deterministic; the model itself evaluates vector
+    # inputs, so this is cheap even in every worker's initialization.
+    xs = np.asarray([grid.template_xmin + 0.5, grid.science_xmin + 0.5,
+                     grid.science_xmax - 0.5, grid.template_xmax - 0.5], float)
+    ys = np.asarray([grid.template_ymin + 0.5, grid.science_ymin + 0.5,
+                     grid.science_ymax - 0.5, grid.template_ymax - 0.5], float)
+    points = np.concatenate([
+        np.stack([xs, np.full(xs.shape, y)], axis=1) for y in ys
+    ] + [
+        np.stack([np.full(ys.shape, x), ys], axis=1) for x in xs
+    ], axis=0)
+    world = np.asarray(adapter.all_pix2world(points, 0), dtype=float)
+    if world.shape[-1] != 2 or not np.all(np.isfinite(world)):
+        raise ValueError("temporal WCS adapter returned invalid template-support coordinates")
+    max_residual = 0.0
+    if reference_wcs is not None:
+        try:
+            ref_world = np.asarray(reference_wcs.all_pix2world(points, 0), dtype=float)
+            # Compare in detector pixels, avoiding an arbitrary angular
+            # threshold and making the check independent of plate scale.
+            ref_xy = np.asarray(reference_wcs.all_world2pix(world, 0), dtype=float)
+            max_residual = float(np.nanmax(np.hypot(*(ref_xy - points).T)))
+        except Exception as exc:
+            raise ValueError("could not compare temporal adapter with reference WCS") from exc
+        if not np.isfinite(max_residual) or max_residual > float(reference_tolerance_px):
+            raise ValueError(
+                f"temporal adapter/reference WCS support residual {max_residual:.3f} px "
+                f"> tolerance {float(reference_tolerance_px):.3f} px"
+            )
+    return {"temporal_support_extrapolation_native": int(pad),
+            "temporal_support_max_reference_residual_px": float(max_residual),
+            "temporal_support_sample_count": int(len(points))}
+
+
 def _build_remap_tpix(
     *,
     master_path: str | Path | None,
     base_tess_shape: tuple[int, int],
     oversampling_factor: int,
 ) -> np.ndarray:
-    """Build FFI-pixel ``tpix`` for remap workers (v2 grid-aware)."""
+    """Build FFI-pixel ``tpix`` for remap workers (MAPGRID=3)."""
     from syndiff_pipeline.common.coordinate_preflight import assert_wcs_uses_ffi_coords
     from syndiff_pipeline.common.mapping_grid import (
         MappingGridError,
@@ -894,7 +1045,7 @@ def _build_remap_tpix(
     os_factor = max(1, int(oversampling_factor))
     if not master_path:
         raise MappingGridError(
-            "remap requires master_path with MAPGRID>=2; legacy shrunk-chip coords are banned"
+            "remap requires master_path with MAPGRID=3; legacy coordinates are banned"
         )
     grid = load_mapping_grid_from_master(master_path)
     tpix, _ = create_coords_for_grid(grid, os_factor)
@@ -921,6 +1072,21 @@ def _init_remap_worker(payload: dict[str, Any]) -> None:
         oversampling_factor=int(_REMAP_WORKER["oversampling_factor"]),
     )
     _REMAP_WORKER["_tpix"] = tpix
+    # P4's temporal model is fitted on S but remap evaluates every T pixel.
+    # Validate the declared bounded extrapolation once per worker before any
+    # Exact cache can be read or written.
+    if _REMAP_WORKER.get("wcs_mode") == "temporal":
+        from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
+        from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
+
+        grid = load_mapping_grid_from_master(master_path)
+        filenames = _REMAP_WORKER.get("frame_filenames") or []
+        if filenames:
+            store = TemporalChebWcsStore(_REMAP_WORKER["temporal_wcs_dir"])
+            adapter, _ = store.for_stem(filenames[0])
+            _REMAP_WORKER["temporal_support_validation"] = _validate_temporal_support_extrapolation(
+                adapter, grid, max_pad_native=8
+            )
 
 
 def _ensure_remap_worker(payload: dict[str, Any]) -> None:
@@ -981,8 +1147,7 @@ def _worker_frame_wcs(frame_index: int) -> Any:
         if store is None:
             store = TemporalChebWcsStore(_REMAP_WORKER["temporal_wcs_dir"])
             _REMAP_WORKER["_temporal_wcs_store"] = store
-        model, btjd = store.for_stem(_REMAP_WORKER["frame_filenames"][int(frame_index)])
-        return model.at_time(btjd)
+        return store.for_stem(_REMAP_WORKER["frame_filenames"][int(frame_index)])[0]
     return _load_frame_wcs(_REMAP_WORKER["frames_df"], frame_index)
 
 
@@ -1672,6 +1837,7 @@ def _write_remap_manifest(
     n_pair_epochs: int = 0,
     rebuild_inter_skycell_cache: bool = False,
     shift_schedule_frame_origin_counts: dict[str, int] | None = None,
+    temporal_support_validation: Mapping[str, float | int] | None = None,
     provenance: Mapping[str, str] | None = None,
 ) -> None:
     payload = {
@@ -1698,6 +1864,8 @@ def _write_remap_manifest(
         payload["shift_schedule_frame_origin_counts"] = dict(
             shift_schedule_frame_origin_counts
         )
+    if temporal_support_validation is not None:
+        payload.update({str(k): v for k, v in temporal_support_validation.items()})
     if reference_ffi:
         payload["reference_ffi"] = str(reference_ffi)
     if provenance:
@@ -1904,8 +2072,7 @@ def run_field_remap_scc(
                 if temporal_wcs_dir is not None:
                     from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
                     store = TemporalChebWcsStore(temporal_wcs_dir)
-                    model, btjd = store.for_stem(frame_filenames[frame_index])
-                    return model.at_time(btjd)
+                    return store.for_stem(frame_filenames[frame_index])[0]
                 return _load_frame_wcs_from_cache(ffi_list_df, frame_filenames, frame_index)
         else:
             frames_path = Path(_frames_csv_path(event_dir))
@@ -2200,8 +2367,18 @@ def run_field_remap_scc(
     if schedule.meta:
         ref_ffi = schedule.meta.get("reference_ffi")
     origin_counts = None
+    temporal_support_validation = None
     if schedule.meta:
         origin_counts = schedule.meta.get("frame_origin_counts")
+        temporal_support_validation = {
+            k: schedule.meta[k]
+            for k in (
+                "temporal_support_extrapolation_native",
+                "temporal_support_max_reference_residual_px",
+                "temporal_support_sample_count",
+            )
+            if k in schedule.meta
+        } or None
     _write_remap_manifest(
         store,
         oversampling_factor=oversampling_factor,
@@ -2216,6 +2393,7 @@ def run_field_remap_scc(
         n_pair_epochs=n_inter_skycell_pair_states,
         rebuild_inter_skycell_cache=bool(rebuild_inter_skycell_cache),
         shift_schedule_frame_origin_counts=origin_counts,
+        temporal_support_validation=temporal_support_validation,
         provenance=expected_provenance,
     )
 

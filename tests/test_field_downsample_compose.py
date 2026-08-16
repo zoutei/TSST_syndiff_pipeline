@@ -546,7 +546,7 @@ def test_composite_key_index_skips_skycells_missing_from_master_map():
     assert list(index.keys()) == ["skycell.1.1"]
 
 
-def test_l5_skycell_batch_skips_missing_convolved_cell(monkeypatch, tmp_path: Path):
+def test_l5_skycell_batch_fails_missing_convolved_cell(monkeypatch, tmp_path: Path):
     import syndiff_pipeline.template_creation.processing.field_downsample as fd
     from syndiff_pipeline.template_creation.processing.field_abutting import (
         abutting_undirected_pairs,
@@ -596,14 +596,12 @@ def test_l5_skycell_batch_skips_missing_convolved_cell(monkeypatch, tmp_path: Pa
             "intra_skycell_R": 1,
         }
     )
-    result = fd._l5_skycell_batch("skycell.1.1", buckets)
+    with pytest.raises(fd.L5CompletenessError) as exc:
+        fd._l5_skycell_batch("skycell.1.1", buckets)
     fd._reset_l5_worker()
 
     assert regmap_calls == []
-    assert result["n_writes"] == 0
-    assert result["n_skips"] == 2
-    assert result["n_regmap_opens"] == 0
-    assert result["n_zarr_loads"] == 0
+    assert exc.value.diagnostics["absent_from_store"] == ["skycell.1.1"]
 
 
 def test_l5_skycell_batch_loads_regmap_and_zarr_once(monkeypatch, tmp_path: Path):

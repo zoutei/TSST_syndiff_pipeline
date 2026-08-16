@@ -22,6 +22,14 @@ from reproject import reproject_interp
 
 from syndiff_pipeline.template_creation.processing.band_utils import process_skycell_bands, remove_background
 from syndiff_pipeline.template_creation.processing.csv_utils import load_csv_data
+from syndiff_pipeline.template_creation.processing.cross_projection_geometry import (
+    cell_wcs_from_row,
+    cd_matrix_from_row,
+    padding_patch_geometry,
+    valid_reprojection_footprint,
+    projection_identity,
+    skycell_projection_identity,
+)
 from syndiff_pipeline.template_creation.processing.zarr_utils import load_skycell_bands_masks_and_headers
 
 logger = logging.getLogger(__name__)
@@ -62,6 +70,23 @@ class PaddingJob:
     targets: List[Tuple[np.ndarray, List[str]]] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class PaddingPlacement:
+    """One ordered source-to-recipient replacement operation.
+
+    Priority is part of the producer's scientific ownership contract.  A
+    valid later placement replaces an earlier one at multiply covered pixels;
+    it must therefore never be inferred from worker completion order.
+    """
+
+    source_skycell: str
+    source_projection: str
+    recipient_skycell: str
+    recipient_index: int
+    location: str
+    priority: int
+
+
 # --- Helper Functions (Ported from Notebook & modern_padding) ---
 
 
@@ -93,21 +118,7 @@ def analyze_cell_positions(row_cells: List[str]) -> Dict[str, str]:
 
 def _get_cd_matrix(row: pd.Series) -> List[List[float]]:
     """Helper to extract CD matrix from row, handling CD vs CDELT/PC."""
-    # Try explicit CD matrix first
-    if "CD1_1" in row:
-        return [[float(row.get(f"CD{i}_{j}", 0.0)) for j in [1, 2]] for i in [1, 2]]
-
-    # Try CDELT + PC
-    # Default PC is identity if missing, but usually present if CDELT is present
-    if "CDELT1" in row:
-        cdelt = [float(row.get(f"CDELT{i}", 1.0)) for i in [1, 2]]
-        pc = [[float(row.get(f"PC{i}_{j}", 0.0 if i != j else 1.0)) for j in [1, 2]] for i in [1, 2]]
-        # CD_ij = CDELT_i * PC_ij
-        cd = [[cdelt[i - 1] * pc[i - 1][j - 1] for j in [1, 2]] for i in [1, 2]]
-        return cd
-
-    # Fallback to default (approx 1 arcsec/pixel, flipped RA)
-    return [[-1.0 / 3600, 0.0], [0.0, 1.0 / 3600]]
+    return cd_matrix_from_row(row)
 
 
 def create_cell_wcs(cell_name: str, metadata: dict) -> WCS:
@@ -120,19 +131,7 @@ def create_cell_wcs(cell_name: str, metadata: dict) -> WCS:
 
     cell_data = cell_row.iloc[0]
 
-    # Extract WCS parameters
-    crval = [float(cell_data.get(f"CRVAL{i}", 0.0)) for i in [1, 2]]
-    crpix = [float(cell_data.get(f"CRPIX{i}", 0.0)) for i in [1, 2]]
-
-    cd = _get_cd_matrix(cell_data)
-
-    wcs = WCS(naxis=2)
-    wcs.wcs.crval = crval
-    wcs.wcs.crpix = crpix
-    wcs.wcs.cd = cd
-    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-    wcs.wcs.cunit = ["deg", "deg"]
-    return wcs
+    return cell_wcs_from_row(cell_data)
 
 
 def create_padding_wcs(master_wcs: WCS, config, location: str, cell_index: int) -> Tuple[WCS, Tuple[int, int], Tuple[float, float]]:
@@ -140,59 +139,19 @@ def create_padding_wcs(master_wcs: WCS, config, location: str, cell_index: int) 
     Create a localized WCS centered at the padding region for reprojection.
     Ported from notebook code for better accuracy than global master WCS.
     """
-    cell_width = config.cell_width
-    cell_height = config.cell_height
-
-    # Cell boundaries in master array (for top/bottom padding)
     cell_x_start = PAD_SIZE + cell_index * (config.cell_width - CELL_OVERLAP)
-    cell_x_center = cell_x_start + cell_width / 2
-
-    # Calculate key Y coordinates
-    cell_y_top = PAD_SIZE + cell_height + (PAD_SIZE - EDGE_EXCLUSION) / 2
-    cell_y_bottom = (PAD_SIZE + EDGE_EXCLUSION) / 2
-    cell_y_center = PAD_SIZE + cell_height / 2
-
-    # Calculate key X coordinates
-    cell_x_left = cell_x_start - (PAD_SIZE - EDGE_EXCLUSION) / 2
-    cell_x_right = cell_x_start + cell_width + (PAD_SIZE - EDGE_EXCLUSION) / 2
-
-    pad_size_adjusted = PAD_SIZE + EDGE_EXCLUSION
-
-    # Defaults
-    padding_x_center = cell_x_center
-    padding_y_center = cell_y_center
-    padding_width = pad_size_adjusted
-    padding_height = pad_size_adjusted
-
-    # Adjust based on location
-    if "top" in location:
-        padding_y_center = cell_y_top
-        padding_width = config.cell_width
-    if "bottom" in location:
-        padding_y_center = cell_y_bottom
-        padding_width = config.cell_width
-    if "left" in location:
-        padding_x_center = cell_x_left
-        padding_height = config.cell_height
-    if "right" in location:
-        padding_x_center = cell_x_right
-        padding_height = config.cell_height
-
-    # Convert padding center to world coordinates using master WCS
-    padding_center_world = master_wcs.pixel_to_world(padding_x_center, padding_y_center)
-
-    # Create new WCS centered at the padding region
-    padding_wcs = WCS(naxis=2)
-    padding_wcs.wcs.crpix = [padding_width / 2, padding_height / 2]
-    padding_wcs.wcs.crval = [padding_center_world.ra.degree, padding_center_world.dec.degree]
-    padding_wcs.wcs.ctype = master_wcs.wcs.ctype
-    if master_wcs.wcs.has_cd():
-        padding_wcs.wcs.cd = master_wcs.wcs.cd.copy()
-    else:
-        padding_wcs.wcs.pc = master_wcs.wcs.pc.copy()
-        padding_wcs.wcs.cdelt = master_wcs.wcs.cdelt.copy()
-
-    return padding_wcs, (int(padding_height), int(padding_width)), (padding_y_center, padding_x_center)
+    geometry = padding_patch_geometry(
+        master_wcs,
+        recipient_x0=cell_x_start,
+        recipient_y0=PAD_SIZE,
+        cell_width=config.cell_width,
+        cell_height=config.cell_height,
+        location=location,
+        pad_size=PAD_SIZE,
+        edge_exclusion=EDGE_EXCLUSION,
+    )
+    y_center, x_center = geometry.center
+    return geometry.wcs, geometry.shape, (y_center, x_center)
 
 
 def exclude_edge_pixels(data: np.ndarray, edge_width: int = 10) -> np.ndarray:
@@ -334,6 +293,170 @@ def _parse_row_padding_requirements_df(metadata: dict, df: pd.DataFrame, row_id:
                 requirements[p_cell].locations.append(location)
 
     return requirements
+
+
+def ordered_cross_projection_placements(
+    metadata: dict, df: pd.DataFrame, row_id: int, all_row_ids: List[int]
+) -> list[PaddingPlacement]:
+    """Normalize one row's active cross-projection operations in stable order.
+
+    Unlike the legacy source-keyed requirements map, this keeps the recipient
+    association.  One source can legitimately pad multiple recipient cells;
+    merging it under a single source key loses that information.  Locations
+    use the historic producer order and sources retain slash order from the
+    mapping table.  Duplicate ``(source, recipient, location)`` entries keep
+    their first occurrence.
+    """
+    if row_id not in metadata["rows"]:
+        return []
+    current_projection = projection_identity(metadata["projection"])
+    row_cells = sorted(metadata["rows"][row_id], key=lambda item: int(item[1]))
+    names = [str(item[0]) for item in row_cells]
+    row_position = determine_row_position(row_id, all_row_ids)
+    cell_positions = analyze_cell_positions(names)
+    row_df = df[
+        (df["projection"].map(projection_identity) == current_projection)
+        & (df["y"] == row_id)
+    ].sort_values("x")
+    columns = (
+        "pad_skycell_top", "pad_skycell_bottom", "pad_skycell_left", "pad_skycell_right",
+        "pad_skycell_top_left", "pad_skycell_top_right", "pad_skycell_bottom_left",
+        "pad_skycell_bottom_right",
+    )
+    placements: list[PaddingPlacement] = []
+    seen: set[tuple[str, str, str]] = set()
+    for _, row_data in row_df.iterrows():
+        recipient = str(row_data["NAME"])
+        if recipient not in cell_positions:
+            continue
+        cell_position = cell_positions[recipient]
+        for column in columns:
+            value = row_data.get(column)
+            if pd.isna(value) or not str(value).strip():
+                continue
+            location = column.replace("pad_skycell_", "")
+            if "top" in location and row_position != "top":
+                continue
+            if "bottom" in location and row_position != "bottom":
+                continue
+            if "left" in location and cell_position != "first":
+                continue
+            if "right" in location and cell_position != "last":
+                continue
+            for source in (item.strip() for item in str(value).split("/")):
+                source_projection = skycell_projection_identity(source)
+                if not source_projection or source_projection == current_projection:
+                    continue
+                key = (source, recipient, location)
+                if key in seen:
+                    continue
+                seen.add(key)
+                placements.append(PaddingPlacement(
+                    source_skycell=source,
+                    source_projection=source_projection,
+                    recipient_skycell=recipient,
+                    recipient_index=names.index(recipient),
+                    location=location,
+                    priority=len(placements),
+                ))
+    return placements
+
+
+def compose_ordered_reprojected_patches(
+    operations: list[tuple[int, np.ndarray, tuple[int, int, int, int], np.ndarray, np.ndarray]],
+) -> None:
+    """Apply prepared producer patches in explicit priority order.
+
+    Each item is ``(priority, target, (y0,y1,x0,x1), reprojected,
+    footprint)``.  Replacement (not addition) exactly matches the live
+    padding contract while removing timing dependence from concurrent patch
+    generation.
+    """
+    for _priority, target, (y0, y1, x0, x1), reprojected, footprint in sorted(
+        operations, key=lambda item: item[0]
+    ):
+        valid = valid_reprojection_footprint(reprojected, footprint)
+        if np.any(valid):
+            destination = target[y0:y1, x0:x1]
+            destination[valid] = reprojected[valid]
+
+
+def _load_padding_source_once(
+    placement: PaddingPlacement,
+    *,
+    band_cache: dict | None,
+    ingest_config: dict,
+    remove_saturated_stars: bool,
+    current_df: pd.DataFrame,
+) -> tuple[np.ndarray, WCS]:
+    """Load one source image/WCS exactly once for ordered composition."""
+    if band_cache is not None and placement.source_skycell in band_cache:
+        data = np.asarray(band_cache[placement.source_skycell]["combined_image"]).copy()
+    else:
+        # This mirrors the existing producer fallback exactly.  Failure is
+        # intentionally fatal to the row: silently omitting a required source
+        # produces a valid-looking but flux-deficient template.
+        from syndiff_pipeline.template_creation.processing.ps1_process import _load_skycell_raw_bands
+
+        bands, masks, weights, headers, headers_weight = _load_skycell_raw_bands(
+            placement.source_skycell, placement.source_projection, ingest_config
+        )
+        if not bands:
+            raise RuntimeError(f"no source data for required padding cell {placement.source_skycell}")
+        data, mask, uncert = process_skycell_bands(bands, masks, weights, headers, headers_weight)
+        data, _ = remove_background(
+            data, uncert, mask=mask, remove_saturated_stars=remove_saturated_stars
+        )
+    source_wcs = create_cell_wcs(placement.source_skycell, {"dataframe": current_df})
+    return exclude_edge_pixels(data, EDGE_EXCLUSION), source_wcs
+
+
+def prepare_ordered_padding_operations(
+    *,
+    placements: list[PaddingPlacement],
+    target_array: np.ndarray,
+    master_wcs: WCS,
+    config,
+    band_cache: dict | None,
+    ingest_config: dict,
+    remove_saturated_stars: bool,
+    current_df: pd.DataFrame,
+) -> list[tuple[int, np.ndarray, tuple[int, int, int, int], np.ndarray, np.ndarray]]:
+    """Reproject ordered placements without mutating the target array.
+
+    Preparation can later be parallelized safely.  Mutation is deliberately
+    deferred to :func:`compose_ordered_reprojected_patches`, where priority is
+    explicit and independent of worker scheduling.
+    """
+    loaded_sources: dict[str, tuple[np.ndarray, WCS]] = {}
+    operations = []
+    for placement in placements:
+        if placement.source_skycell not in loaded_sources:
+            loaded_sources[placement.source_skycell] = _load_padding_source_once(
+                placement,
+                band_cache=band_cache,
+                ingest_config=ingest_config,
+                remove_saturated_stars=remove_saturated_stars,
+                current_df=current_df,
+            )
+        data, source_wcs = loaded_sources[placement.source_skycell]
+        target_wcs, target_shape, (y_center, x_center) = create_padding_wcs(
+            master_wcs, config, placement.location, placement.recipient_index
+        )
+        reprojected, footprint = reproject_interp(
+            (data, source_wcs), target_wcs, shape_out=target_shape, order="bilinear"
+        )
+        height, width = target_shape
+        y0 = int(y_center - height / 2)
+        x0 = int(x_center - width / 2)
+        y1, x1 = y0 + height, x0 + width
+        if y0 < 0 or x0 < 0 or y1 > target_array.shape[0] or x1 > target_array.shape[1]:
+            raise RuntimeError(
+                f"required padding {placement.source_skycell} -> {placement.recipient_skycell} "
+                f"({placement.location}) lies outside the producer master array"
+            )
+        operations.append((placement.priority, target_array, (y0, y1, x0, x1), reprojected, footprint))
+    return operations
 
 
 def identify_all_padding_sources(
@@ -528,7 +651,7 @@ def _process_padding_job(job, state, config, metadata, master_wcs, master_wcs_ne
                     continue
 
                 # Stitch - thread safe write with lock
-                valid_mask = (~np.isnan(reprojected)) & (footprint > 0)
+                valid_mask = valid_reprojection_footprint(reprojected, footprint)
 
                 if np.any(valid_mask):
                     with write_lock:
@@ -557,54 +680,63 @@ def apply_cross_projection_padding(state, config, metadata: dict, current_row_id
         logger.warning(f"Failed to load CSV {csv_path}: {e}")
         return
 
-    proj_df = current_df[current_df["projection"].astype(str) == str(metadata["projection"])]
+    current_projection = projection_identity(metadata["projection"])
+    proj_df = current_df[current_df["projection"].map(projection_identity) == current_projection]
     all_row_ids = sorted(proj_df["y"].unique())
 
-    current_reqs = parse_row_padding_requirements(metadata, csv_path, current_row_id, all_row_ids)
-    next_reqs = {}
+    current_placements = ordered_cross_projection_placements(
+        metadata, current_df, current_row_id, all_row_ids
+    )
+    next_placements: list[PaddingPlacement] = []
     if next_row_id is not None:
-        next_reqs = parse_row_padding_requirements(metadata, csv_path, next_row_id, all_row_ids)
+        next_placements = ordered_cross_projection_placements(
+            metadata, current_df, next_row_id, all_row_ids
+        )
 
-    if not current_reqs and not next_reqs:
+    if not current_placements and not next_placements:
         return
 
-    logger.info(f"[CrossPadding] Found {len(current_reqs)} reqs for current, {len(next_reqs)} for next.")
+    logger.info(
+        "[CrossPadding] Preparing %d ordered current and %d ordered next placements.",
+        len(current_placements), len(next_placements),
+    )
 
-    # 2. Create Jobs (Deduplicated)
-    jobs = analyze_padding_jobs(current_reqs, next_reqs, state.current_array, state.next_array)
+    # Rebase next-row priorities after the current row.  They target a
+    # different array today, but this makes the order total and serialized in
+    # diagnostics/provenance rather than accidental.
+    next_placements = [
+        PaddingPlacement(
+            **{**placement.__dict__, "priority": placement.priority + len(current_placements)}
+        )
+        for placement in next_placements
+    ]
 
-    if not jobs:
-        return
-
-    # 3. Create Master WCS for Current Row (Used as reference base)
     master_wcs = create_master_array_wcs(metadata, config, current_row_id)
-
     master_wcs_next = None
     if next_row_id is not None:
         master_wcs_next = create_master_array_wcs(metadata, config, next_row_id)
-
-    # 4. Execute Jobs in Parallel
-    write_lock = Lock()
-    num_workers = min(len(jobs), 8)  # Limit parallelism sensibly
-
-    logger.info(f"[CrossPadding] Starting {len(jobs)} jobs with {num_workers} threads.")
-
-    successful_jobs = 0
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = []
-        for job in jobs:
-            future = executor.submit(
-                _process_padding_job, job, state, config, metadata,
-                master_wcs, master_wcs_next, ingest_config, current_df,
-                current_reqs, next_reqs, write_lock, band_cache, remove_saturated_stars,
-            )
-            futures.append(future)
-
-        for future in futures:
-            try:
-                if future.result():
-                    successful_jobs += 1
-            except Exception as e:
-                logger.error(f"Job future failed: {e}")
-
-    logger.info(f"[CrossPadding] Applied {successful_jobs}/{len(jobs)} padding jobs.")
+    operations = prepare_ordered_padding_operations(
+        placements=current_placements,
+        target_array=state.current_array,
+        master_wcs=master_wcs,
+        config=config,
+        band_cache=band_cache,
+        ingest_config=ingest_config,
+        remove_saturated_stars=remove_saturated_stars,
+        current_df=current_df,
+    )
+    if next_placements:
+        if master_wcs_next is None:
+            raise RuntimeError("next-row padding placements exist without a next-row WCS")
+        operations.extend(prepare_ordered_padding_operations(
+            placements=next_placements,
+            target_array=state.next_array,
+            master_wcs=master_wcs_next,
+            config=config,
+            band_cache=band_cache,
+            ingest_config=ingest_config,
+            remove_saturated_stars=remove_saturated_stars,
+            current_df=current_df,
+        ))
+    compose_ordered_reprojected_patches(operations)
+    logger.info("[CrossPadding] Applied %d ordered padding placements.", len(operations))

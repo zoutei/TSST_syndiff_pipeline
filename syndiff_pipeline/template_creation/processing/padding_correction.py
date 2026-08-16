@@ -1,4 +1,4 @@
-"""Cross-projection seam correction for the shared same-projection-only convolved store.
+"""Cross-projection seam-correction primitives for the shared canonical store.
 
 The shared ``convolved_skycell`` cache (``convolved_store.py``) holds a
 canonical cell convolved using only same-projection neighbors (see
@@ -7,14 +7,10 @@ requires cross-projection padding, that canonical cell is missing the
 neighbor's contribution near the seam -- up to ~50% flux deficit at the
 immediate edge (measured in ``tests/test_seam_correction_linearity.py``).
 
-Gaussian convolution is linear (also validated in that test), so the exact
-fix is additive: reproject the cross-projection neighbor patch alone (placed
-at its true position in an otherwise-zero canvas the size of the canonical
-cell), convolve that canvas with the same PSF, and add the result to the
-canonical cell. This module computes that small correction, caches it on
-disk (content-addressed by which neighbors/locations were used -- the actual
-"remembering what was padded" piece), and combines it with the canonical
-cell at consumption time.
+Gaussian convolution is linear, but the correction must preserve the full
+external halo through convolution and use the exact producer pre-padding
+state.  The public loader therefore fails closed for affected legacy shared
+artifacts until a context-backed correction artifact is present.
 
 Unlike the live ``ps1_process`` sliding-window loop (``cross_projection_padding.py``),
 this runs standalone at consumption time: the padding-region WCS is built
@@ -34,11 +30,21 @@ import json
 import logging
 import os
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import pandas as pd
 from astropy.wcs import WCS
+
+from syndiff_pipeline.template_creation.processing.cross_projection_geometry import (
+    cell_wcs_from_row,
+    cd_matrix_from_row,
+    padding_patch_geometry,
+    valid_reprojection_footprint,
+    projection_identity,
+    skycell_projection_identity,
+)
 
 log = logging.getLogger(__name__)
 
@@ -62,10 +68,381 @@ _PAD_COLUMNS = (
     "pad_skycell_bottom_right", "pad_skycell_top_left",
 )
 _LOCATION_BY_COLUMN = {c: c.replace("pad_skycell_", "") for c in _PAD_COLUMNS}
+_COMPOSITION_COLUMNS = (
+    "pad_skycell_top", "pad_skycell_bottom", "pad_skycell_left", "pad_skycell_right",
+    "pad_skycell_top_left", "pad_skycell_top_right", "pad_skycell_bottom_left",
+    "pad_skycell_bottom_right",
+)
 
 _SEAM_CORRECTION_DIRNAME = "ps1_seam_correction"
 _ARRAYS_FILENAME = "arrays.npz"
 _SIDECAR_FILENAME = "_provenance.json"
+
+
+class PaddingCorrectionError(RuntimeError):
+    """The exact cross-projection correction cannot be constructed safely."""
+
+
+@dataclass(frozen=True)
+class ResolvedConvolvedCell:
+    """One validated shared/legacy convolved input for either downsample mode."""
+
+    image: np.ndarray
+    mask: np.ndarray
+    source_mode: str
+    canonical_fingerprint: str | None
+    correction_required: bool
+    correction_complete: bool
+    correction_fingerprint: str | None
+
+
+def _correction_fingerprint(
+    *, canonical_fingerprint: str, source_fingerprints: list[str], spec: list[dict[str, str]],
+    psf_sigma: float, kernel_radius: int,
+) -> str:
+    """Identity for one ordered context-backed correction computation."""
+    payload = {
+        "algorithm": "context_delta_v1",
+        "canonical": canonical_fingerprint,
+        "sources": source_fingerprints,
+        "spec": [(item["neighbor"], item["location"]) for item in spec],
+        "pad_size": PAD_SIZE,
+        "edge_exclusion": EDGE_EXCLUSION,
+        "psf_sigma": float(psf_sigma),
+        "kernel_radius": int(kernel_radius),
+        "reprojection_order": "bilinear",
+        "ownership": "location_then_slash_source_v1",
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:24]
+
+
+def _correction_cache_dir(data_root: str | Path, projection: str, cell: str, fingerprint: str) -> Path:
+    from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
+
+    return ps1_convolved_zarr_path(data_root).parent / _SEAM_CORRECTION_DIRNAME / projection / cell / fingerprint
+
+
+def _correction_payload_digest(correction: np.ndarray) -> str:
+    values = np.ascontiguousarray(np.asarray(correction, dtype=np.float32))
+    return hashlib.sha256(values.tobytes()).hexdigest()
+
+
+def _load_validated_correction_cache(
+    cache_dir: Path,
+    *,
+    fingerprint: str,
+    canonical_fingerprint: str,
+    source_fingerprints: list[str],
+    spec: list[dict[str, str]],
+    shape: tuple[int, int],
+    psf_sigma: float,
+    kernel_radius: int,
+) -> np.ndarray | None:
+    arrays_path = cache_dir / _ARRAYS_FILENAME
+    sidecar_path = cache_dir / _SIDECAR_FILENAME
+    if not arrays_path.is_file() and not sidecar_path.is_file():
+        return None
+    if not arrays_path.is_file() or not sidecar_path.is_file():
+        raise PaddingCorrectionError(f"incomplete correction cache {cache_dir}")
+    try:
+        sidecar = json.loads(sidecar_path.read_text())
+        with np.load(arrays_path, allow_pickle=False) as arrays:
+            correction = np.asarray(arrays["correction"], dtype=np.float32)
+    except Exception as exc:
+        raise PaddingCorrectionError(f"unreadable correction cache {cache_dir}") from exc
+    expected_spec = [(item["neighbor"], item["location"]) for item in spec]
+    if (
+        sidecar.get("schema_version") != 1
+        or sidecar.get("correction_fingerprint") != fingerprint
+        or sidecar.get("canonical_fingerprint") != canonical_fingerprint
+        or sidecar.get("source_fingerprints") != source_fingerprints
+        or sidecar.get("ordered_spec") != [list(item) for item in expected_spec]
+        or tuple(sidecar.get("shape", ())) != tuple(shape)
+        or float(sidecar.get("psf_sigma")) != float(psf_sigma)
+        or int(sidecar.get("kernel_radius")) != int(kernel_radius)
+        or sidecar.get("pad_size") != PAD_SIZE
+        or sidecar.get("edge_exclusion") != EDGE_EXCLUSION
+        or sidecar.get("ownership") != "location_then_slash_source_v1"
+        or sidecar.get("payload_sha256") != _correction_payload_digest(correction)
+    ):
+        raise PaddingCorrectionError(f"correction cache provenance mismatch: {cache_dir}")
+    if correction.shape != tuple(shape):
+        raise PaddingCorrectionError(f"correction cache shape mismatch: {cache_dir}")
+    return correction
+
+
+def _publish_correction_cache(
+    cache_dir: Path,
+    *,
+    fingerprint: str,
+    correction: np.ndarray,
+    canonical_fingerprint: str,
+    source_fingerprints: list[str],
+    spec: list[dict[str, str]],
+    psf_sigma: float,
+    kernel_radius: int,
+) -> None:
+    """Atomically publish an immutable, self-validating correction cache."""
+    parent = cache_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    if cache_dir.is_dir():
+        return
+    temporary = parent / f"_tmp_{fingerprint}_{os.getpid()}"
+    temporary.mkdir(parents=False, exist_ok=False)
+    stored = np.asarray(correction, dtype=np.float32)
+    try:
+        np.savez_compressed(temporary / _ARRAYS_FILENAME, correction=stored)
+        sidecar = {
+            "schema_version": 1,
+            "algorithm": "context_delta_v1",
+            "correction_fingerprint": fingerprint,
+            "canonical_fingerprint": canonical_fingerprint,
+            "source_fingerprints": source_fingerprints,
+            "ordered_spec": [[item["neighbor"], item["location"]] for item in spec],
+            "shape": list(stored.shape),
+            "psf_sigma": float(psf_sigma),
+            "kernel_radius": int(kernel_radius),
+            "pad_size": PAD_SIZE,
+            "edge_exclusion": EDGE_EXCLUSION,
+            "reprojection_order": "bilinear",
+            "ownership": "location_then_slash_source_v1",
+            "payload_sha256": _correction_payload_digest(stored),
+        }
+        (temporary / _SIDECAR_FILENAME).write_text(json.dumps(sidecar, sort_keys=True))
+        try:
+            os.replace(temporary, cache_dir)
+        except FileExistsError:
+            # Another worker may have published the exact immutable identity.
+            if not cache_dir.is_dir():
+                raise
+    finally:
+        if temporary.exists():
+            for child in temporary.iterdir():
+                child.unlink(missing_ok=True)
+            temporary.rmdir()
+
+
+def convolve_local_padding_delta(
+    same_projection_input: np.ndarray,
+    fully_padded_input: np.ndarray,
+    *,
+    local_origin_xy: tuple[int, int],
+    canonical_shape: tuple[int, int],
+    psf_sigma: float,
+    kernel_radius: int = 470,
+) -> np.ndarray:
+    """Return the recipient crop of ``C(F - A)`` without pre-convolution clipping.
+
+    ``same_projection_input`` (``A``) and ``fully_padded_input`` (``F``)
+    must describe the *same finite local pixel domain*: it includes the
+    recipient pixels whose convolution may change and enough exterior halo
+    to contain every contributing cross-projection padding patch.  Their
+    origin is expressed in the recipient skycell's native ``(x, y)`` frame;
+    it may therefore be negative or extend beyond ``canonical_shape``.
+
+    This is deliberately a small, geometry-free primitive.  The caller is
+    responsible for constructing A with the exact same-projection ownership
+    rules used by ``ps1_process`` and F by applying the producer's
+    cross-projection replacement logic.  Keeping the whole local domain
+    through convolution is essential: clipping a patch to the recipient
+    image before convolution discards the exterior flux that must blur back
+    into the recipient edge.
+    """
+    from syndiff_pipeline.template_creation.processing import convolution_utils
+
+    a = np.asarray(same_projection_input, dtype=np.float64)
+    f = np.asarray(fully_padded_input, dtype=np.float64)
+    if a.ndim != 2 or f.ndim != 2 or a.shape != f.shape:
+        raise PaddingCorrectionError(
+            "same_projection_input and fully_padded_input must be same-shaped 2-D arrays; "
+            f"got {a.shape} and {f.shape}"
+        )
+    cell_height, cell_width = (int(canonical_shape[0]), int(canonical_shape[1]))
+    if cell_height <= 0 or cell_width <= 0:
+        raise PaddingCorrectionError(f"invalid canonical shape {canonical_shape}")
+
+    # ``ps1_process`` fills uncovered mosaic pixels with zero immediately
+    # before convolution.  Apply the same convention independently to A and
+    # F before forming D, so NaN represents absent flux rather than a NaN
+    # that contaminates the complete kernel support.
+    delta = np.nan_to_num(f, nan=0.0) - np.nan_to_num(a, nan=0.0)
+    convolved_delta = convolution_utils.apply_gaussian_convolution(
+        delta, sigma=psf_sigma, radius=kernel_radius, cval=0.0
+    )
+
+    x0, y0 = (int(local_origin_xy[0]), int(local_origin_xy[1]))
+    x1, y1 = x0 + delta.shape[1], y0 + delta.shape[0]
+    dst_x0, dst_x1 = max(0, x0), min(cell_width, x1)
+    dst_y0, dst_y1 = max(0, y0), min(cell_height, y1)
+    correction = np.zeros((cell_height, cell_width), dtype=np.float64)
+    if dst_x0 >= dst_x1 or dst_y0 >= dst_y1:
+        return correction
+    src_x0, src_x1 = dst_x0 - x0, dst_x1 - x0
+    src_y0, src_y1 = dst_y0 - y0, dst_y1 - y0
+    correction[dst_y0:dst_y1, dst_x0:dst_x1] = convolved_delta[
+        src_y0:src_y1, src_x0:src_x1
+    ]
+    return correction
+
+
+def resolve_shared_convolved_cell(
+    data_root: str | Path,
+    skycell: str,
+    *,
+    skycell_df: pd.DataFrame,
+    psf_sigma: float,
+    kernel_radius: int = 470,
+) -> ResolvedConvolvedCell:
+    """Resolve one shared canonical cell, correcting it exactly when required.
+
+    This is the only shared-cell science path: it validates current pointers,
+    requires a schema-v1 producer context for affected cells, composes all
+    cross-projection sources in declared order, convolves the full local
+    delta, and restores validity from the completed F input.  Missing or
+    ambiguous inputs raise rather than returning a biased compatibility image.
+    """
+    from reproject import reproject_interp
+
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        _projection_and_cell,
+        resolve_current_combined_ref,
+        try_load_combined_cell,
+    )
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        resolve_current_convolved_ref,
+        try_load_convolved_cell,
+    )
+
+    parsed = _projection_and_cell(skycell)
+    if parsed is None or skycell not in skycell_df.index:
+        raise PaddingCorrectionError(f"cannot resolve shared convolved cell {skycell}: missing identity/table row")
+    projection, cell = parsed
+    canonical_ref = resolve_current_convolved_ref(data_root, projection, cell)
+    if canonical_ref is None:
+        raise PaddingCorrectionError(f"missing current canonical pointer for required shared cell {skycell}")
+    canonical = try_load_convolved_cell(data_root, projection, cell, canonical_ref.fingerprint)
+    if canonical is None:
+        raise PaddingCorrectionError(f"cannot load selected canonical artifact {canonical_ref.fingerprint} for {skycell}")
+    image = np.asarray(canonical["convolved_image"])
+    mask = np.asarray(canonical["convolved_mask"])
+    spec = cross_projection_padding_spec(skycell_df.loc[skycell])
+    if not spec:
+        return ResolvedConvolvedCell(
+            image=image, mask=mask, source_mode="shared", canonical_fingerprint=canonical_ref.fingerprint,
+            correction_required=False, correction_complete=True, correction_fingerprint=None,
+        )
+
+    required_context = (
+        "pre_cross_context", "pre_cross_context_origin_xy", "unmasked_convolved_image",
+        "pre_cross_native_validity",
+    )
+    if any(key not in canonical for key in required_context):
+        raise PaddingCorrectionError(
+            f"selected canonical artifact {canonical_ref.fingerprint} for {skycell} lacks required "
+            "pre-cross-projection context payload"
+        )
+    context = np.asarray(canonical["pre_cross_context"], dtype=np.float64)
+    baseline = np.asarray(canonical["unmasked_convolved_image"], dtype=np.float64)
+    a_valid = np.asarray(canonical["pre_cross_native_validity"], dtype=bool)
+    height, width = image.shape
+    if context.shape != (height + 2 * PAD_SIZE, width + 2 * PAD_SIZE):
+        raise PaddingCorrectionError(
+            f"context shape {context.shape} does not match canonical {image.shape} with halo {PAD_SIZE}"
+        )
+    if baseline.shape != image.shape or a_valid.shape != image.shape:
+        raise PaddingCorrectionError(f"invalid baseline/validity shape in canonical artifact for {skycell}")
+
+    recipient_wcs = _cell_wcs(skycell_df.loc[skycell])
+    completed = context.copy()
+    source_fingerprints: list[str] = []
+    source_fingerprint_by_name: dict[str, str] = {}
+    source_cache: dict[str, tuple[np.ndarray, WCS]] = {}
+    coverage = np.zeros(context.shape, dtype=np.uint16)
+    for priority, item in enumerate(spec):
+        source_name, location = item["neighbor"], item["location"]
+        source_parsed = _projection_and_cell(source_name)
+        if source_parsed is None or source_name not in skycell_df.index:
+            raise PaddingCorrectionError(f"required source {source_name} for {skycell}/{location} is not resolvable")
+        source_projection, source_cell = source_parsed
+        if source_name not in source_cache:
+            source_ref = resolve_current_combined_ref(data_root, source_projection, source_cell)
+            if source_ref is None:
+                raise PaddingCorrectionError(f"missing current combined pointer for {source_name}")
+            loaded = try_load_combined_cell(data_root, source_projection, source_cell, source_ref.fingerprint)
+            if loaded is None:
+                raise PaddingCorrectionError(
+                    f"cannot load selected combined artifact {source_ref.fingerprint} for {source_name}"
+                )
+            source_cache[source_name] = (
+                _exclude_edge_pixels(np.asarray(loaded["combined_image"], dtype=np.float64)),
+                _cell_wcs(skycell_df.loc[source_name]),
+            )
+            source_fingerprint_by_name[source_name] = source_ref.fingerprint
+        source_image, source_wcs = source_cache[source_name]
+        source_fingerprints.append(source_fingerprint_by_name[source_name])
+        patch_wcs, patch_shape, _center = _standalone_padding_wcs(
+            recipient_wcs, width, height, location
+        )
+        reprojected, footprint = reproject_interp(
+            (source_image, source_wcs), patch_wcs, shape_out=patch_shape, order="bilinear"
+        )
+        geometry = padding_patch_geometry(
+            recipient_wcs, recipient_x0=0, recipient_y0=0, cell_width=width,
+            cell_height=height, location=location, pad_size=PAD_SIZE,
+            edge_exclusion=EDGE_EXCLUSION,
+        )
+        y0, y1, x0, x1 = geometry.bounds
+        # Context is defined in recipient-native coordinates [-P:W+P,
+        # -P:H+P), so conversion to array offsets is exact and independent of
+        # the row-master origin stored for provenance.
+        cy0, cy1 = y0 + PAD_SIZE, y1 + PAD_SIZE
+        cx0, cx1 = x0 + PAD_SIZE, x1 + PAD_SIZE
+        valid = valid_reprojection_footprint(reprojected, footprint)
+        target = completed[cy0:cy1, cx0:cx1]
+        target[valid] = reprojected[valid]
+        coverage[cy0:cy1, cx0:cx1][valid] = priority + 1
+
+    correction_fp = _correction_fingerprint(
+        canonical_fingerprint=canonical_ref.fingerprint, source_fingerprints=source_fingerprints,
+        spec=spec, psf_sigma=psf_sigma, kernel_radius=kernel_radius,
+    )
+    cache_dir = _correction_cache_dir(data_root, projection, cell, correction_fp)
+    correction = _load_validated_correction_cache(
+        cache_dir,
+        fingerprint=correction_fp,
+        canonical_fingerprint=canonical_ref.fingerprint,
+        source_fingerprints=source_fingerprints,
+        spec=spec,
+        shape=image.shape,
+        psf_sigma=psf_sigma,
+        kernel_radius=kernel_radius,
+    )
+    if correction is None:
+        correction = convolve_local_padding_delta(
+            context, completed, local_origin_xy=(-PAD_SIZE, -PAD_SIZE), canonical_shape=image.shape,
+            psf_sigma=psf_sigma, kernel_radius=kernel_radius,
+        )
+        _publish_correction_cache(
+            cache_dir,
+            fingerprint=correction_fp,
+            correction=correction,
+            canonical_fingerprint=canonical_ref.fingerprint,
+            source_fingerprints=source_fingerprints,
+            spec=spec,
+            psf_sigma=psf_sigma,
+            kernel_radius=kernel_radius,
+        )
+    corrected = baseline + correction
+    f_valid = np.isfinite(completed[PAD_SIZE:PAD_SIZE + height, PAD_SIZE:PAD_SIZE + width])
+    corrected[~f_valid] = np.nan
+    finite_expected = f_valid & np.isfinite(baseline)
+    if np.any(~np.isfinite(corrected[finite_expected])):
+        raise PaddingCorrectionError(f"non-finite corrected pixels for {skycell}")
+    return ResolvedConvolvedCell(
+        image=corrected.astype(image.dtype, copy=False), mask=mask, source_mode="shared",
+        canonical_fingerprint=canonical_ref.fingerprint, correction_required=True,
+        correction_complete=True, correction_fingerprint=correction_fp,
+    )
 
 
 def cross_projection_padding_spec(skycell_row: pd.Series) -> list[dict[str, str]]:
@@ -73,9 +450,10 @@ def cross_projection_padding_spec(skycell_row: pd.Series) -> list[dict[str, str]
     name, "location": loc}, ...]`` (empty if none needed). Same-projection
     padding entries (interior, handled by the live loop's same-projection
     logic already baked into the canonical cell) are excluded."""
-    proj = str(skycell_row.get("projection", ""))
+    proj = projection_identity(skycell_row.get("projection", ""))
     spec: list[dict[str, str]] = []
-    for col, location in _LOCATION_BY_COLUMN.items():
+    for col in _COMPOSITION_COLUMNS:
+        location = _LOCATION_BY_COLUMN[col]
         val = skycell_row.get(col)
         if pd.isna(val) or not str(val).strip():
             continue
@@ -83,21 +461,21 @@ def cross_projection_padding_spec(skycell_row: pd.Series) -> list[dict[str, str]
             cell = cell.strip()
             if not cell:
                 continue
-            parts = cell.split(".")
-            if len(parts) >= 2 and parts[1] != proj:
+            source_projection = skycell_projection_identity(cell)
+            if source_projection is not None and source_projection != proj:
                 spec.append({"neighbor": cell, "location": location})
     return spec
 
 
 def padding_spec_fingerprint(spec: list[dict[str, str]]) -> str:
-    """Content-addressed key for a padding spec (order-independent).
+    """Content-addressed key for a padding spec with preserved source priority.
 
     Includes ``CORRECTION_ALGORITHM_VERSION`` so a correction computed under
     an older, buggy version of the placement math never gets reused just
     because the spec (neighbor/location list) happens to match -- see that
     constant's docstring.
     """
-    canon = sorted((d["neighbor"], d["location"]) for d in spec)
+    canon = [(d["neighbor"], d["location"]) for d in spec]
     blob = json.dumps(
         {"v": CORRECTION_ALGORITHM_VERSION, "spec": canon}, separators=(",", ":")
     ).encode("utf-8")
@@ -105,13 +483,7 @@ def padding_spec_fingerprint(spec: list[dict[str, str]]) -> str:
 
 
 def _get_cd_matrix(row: pd.Series) -> list[list[float]]:
-    if "CD1_1" in row.index and pd.notna(row.get("CD1_1")):
-        return [[float(row.get(f"CD{i}_{j}", 0.0)) for j in (1, 2)] for i in (1, 2)]
-    if "CDELT1" in row.index and pd.notna(row.get("CDELT1")):
-        cdelt = [float(row.get(f"CDELT{i}", 1.0)) for i in (1, 2)]
-        pc = [[float(row.get(f"PC{i}_{j}", 0.0 if i != j else 1.0)) for j in (1, 2)] for i in (1, 2)]
-        return [[cdelt[i - 1] * pc[i - 1][j - 1] for j in (1, 2)] for i in (1, 2)]
-    return [[-1.0 / 3600, 0.0], [0.0, 1.0 / 3600]]
+    return cd_matrix_from_row(row)
 
 
 def _cell_wcs(row: pd.Series) -> WCS:
@@ -120,13 +492,7 @@ def _cell_wcs(row: pd.Series) -> WCS:
     Mirrors ``cross_projection_padding.create_cell_wcs`` exactly (same CRVAL/
     CRPIX/CD source columns) but takes a row directly instead of a name+lookup.
     """
-    wcs = WCS(naxis=2)
-    wcs.wcs.crval = [float(row.get("CRVAL1", 0.0)), float(row.get("CRVAL2", 0.0))]
-    wcs.wcs.crpix = [float(row.get("CRPIX1", 0.0)), float(row.get("CRPIX2", 0.0))]
-    wcs.wcs.cd = _get_cd_matrix(row)
-    wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
-    wcs.wcs.cunit = ["deg", "deg"]
-    return wcs
+    return cell_wcs_from_row(row)
 
 
 def _exclude_edge_pixels(data: np.ndarray, edge_width: int = EDGE_EXCLUSION) -> np.ndarray:
@@ -151,77 +517,27 @@ def _standalone_padding_wcs(
     coordinate PAD_SIZE pixels beyond the recipient cell's edge, evaluated via
     ``recipient_wcs.pixel_to_world``.
     """
-    pad_size_adjusted = PAD_SIZE + EDGE_EXCLUSION
-    cell_x_center = cell_width / 2
-    cell_y_center = cell_height / 2
-    cell_y_top = cell_height + (PAD_SIZE - EDGE_EXCLUSION) / 2
-    cell_y_bottom = -(PAD_SIZE - EDGE_EXCLUSION) / 2
-    cell_x_left = -(PAD_SIZE - EDGE_EXCLUSION) / 2
-    cell_x_right = cell_width + (PAD_SIZE - EDGE_EXCLUSION) / 2
-
-    # Corner locations ("top_right", "top_left", "bottom_right",
-    # "bottom_left") contain two of the four direction words as substrings,
-    # so a naive `"top" in location` / `"right" in location` pair of checks
-    # both fire and each overwrites width/height to the FULL cell dimension
-    # -- turning what should be a small ~500px square corner patch into a
-    # reprojection target the size of the whole cell, which then pastes a
-    # large fraction of the diagonal neighbor's real image on top of the
-    # recipient (a real double-count of star flux, not just a wider seam
-    # blend). Resolve direction membership explicitly first, and only widen
-    # width/height to the full cell dimension for pure edges (no "_" in
-    # location) -- corners keep the small default square patch in both axes.
-    is_corner = "_" in location
-    is_top = location in ("top", "top_left", "top_right")
-    is_bottom = location in ("bottom", "bottom_left", "bottom_right")
-    is_left = location in ("left", "top_left", "bottom_left")
-    is_right = location in ("right", "top_right", "bottom_right")
-
-    padding_x_center, padding_y_center = cell_x_center, cell_y_center
-    padding_width = padding_height = pad_size_adjusted
-    if is_top:
-        padding_y_center = cell_y_top
-    if is_bottom:
-        padding_y_center = cell_y_bottom
-    if is_left:
-        padding_x_center = cell_x_left
-    if is_right:
-        padding_x_center = cell_x_right
-    if not is_corner:
-        if is_top or is_bottom:
-            padding_width = cell_width
-        if is_left or is_right:
-            padding_height = cell_height
-
-    padding_center_world = recipient_wcs.pixel_to_world(padding_x_center, padding_y_center)
-    padding_wcs = WCS(naxis=2)
-    padding_wcs.wcs.crpix = [padding_width / 2, padding_height / 2]
-    padding_wcs.wcs.crval = [padding_center_world.ra.degree, padding_center_world.dec.degree]
-    padding_wcs.wcs.ctype = recipient_wcs.wcs.ctype
-    if recipient_wcs.wcs.has_cd():
-        padding_wcs.wcs.cd = recipient_wcs.wcs.cd.copy()
-    else:
-        padding_wcs.wcs.pc = recipient_wcs.wcs.pc.copy()
-        padding_wcs.wcs.cdelt = recipient_wcs.wcs.cdelt.copy()
-    return padding_wcs, (int(padding_height), int(padding_width)), (padding_y_center, padding_x_center)
+    geometry = padding_patch_geometry(
+        recipient_wcs,
+        recipient_x0=0,
+        recipient_y0=0,
+        cell_width=cell_width,
+        cell_height=cell_height,
+        location=location,
+        pad_size=PAD_SIZE,
+        edge_exclusion=EDGE_EXCLUSION,
+    )
+    y_center, x_center = geometry.center
+    return geometry.wcs, geometry.shape, (y_center, x_center)
 
 
 def _discover_shared_combined_fp(data_root: str | Path, projection: str, cell: str) -> str | None:
-    from syndiff_pipeline.common.scc_paths import ps1_combined_zarr_path
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        resolve_current_combined_ref,
+    )
 
-    cell_root = ps1_combined_zarr_path(data_root) / str(projection) / str(cell)
-    if not cell_root.is_dir():
-        return None
-    candidates = []
-    try:
-        for fp_dir in cell_root.iterdir():
-            if fp_dir.is_dir() and (fp_dir / "arrays.npz").is_file():
-                candidates.append(fp_dir)
-    except OSError:
-        return None
-    if not candidates:
-        return None
-    candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
-    return candidates[0].name
+    ref = resolve_current_combined_ref(data_root, projection, cell)
+    return None if ref is None else ref.fingerprint
 
 
 def _load_combined_image(data_root: str | Path, projection: str, cell: str) -> np.ndarray | None:
@@ -247,7 +563,7 @@ def _seam_correction_cache_dir(
     return root / str(projection) / str(skycell) / str(padding_fp)
 
 
-def compute_seam_correction(
+def _legacy_clipped_seam_correction(
     *,
     data_root: str | Path,
     skycell: str,
@@ -257,9 +573,11 @@ def compute_seam_correction(
     psf_sigma: float,
     skycell_df: pd.DataFrame,
 ) -> np.ndarray | None:
-    """Additive correction (same shape as the canonical cell), or ``None`` if
-    no neighbor patch could be placed (e.g. neighbor not yet processed
-    anywhere -- caller falls back to the uncorrected canonical cell)."""
+    """Retained only as a migration reference; never call for science output.
+
+    It clips projected data to the recipient canvas before convolution and is
+    mathematically incapable of carrying exterior flux inward.
+    """
     from reproject import reproject_interp
 
     from syndiff_pipeline.template_creation.processing import convolution_utils
@@ -310,7 +628,7 @@ def compute_seam_correction(
         py0, py1 = cy0 - y0, cy1 - y0
         px0, px1 = cx0 - x0, cx1 - x0
 
-        valid = (~np.isnan(reprojected)) & (footprint > 0)
+        valid = valid_reprojection_footprint(reprojected, footprint)
         patch = np.where(valid, reprojected, 0.0)
         canvas[cy0:cy1, cx0:cx1] += patch[py0:py1, px0:px1]
         placed_any = True
@@ -334,12 +652,14 @@ def load_padding_aware_convolved_cell(
     skycell_df: pd.DataFrame,
     psf_sigma: float,
 ) -> tuple[np.ndarray, np.ndarray] | None:
-    """Canonical shared convolved cell, additively seam-corrected for any
-    cross-projection padding this skycell's mapping requires. Falls back to
-    the uncorrected canonical cell (with a warning) if the correction can't
-    be computed (e.g. a neighbor hasn't been processed by any SCC yet).
+    """Load an unaffected canonical cell; fail closed for an affected one.
+
+    The reverted producer-context path is intentionally not used here.  The
+    future shared correction must be rebuilt wholly at the shared/downsample
+    layer using the approved padded-box design, without changing
+    ``ps1_process``.  Until that lands, returning the old clipped correction
+    would be scientifically worse than a hard failure.
     """
-    from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
     from syndiff_pipeline.template_creation.processing.field_downsample import (
         _try_load_shared_convolved_arrays,
     )
@@ -348,63 +668,9 @@ def load_padding_aware_convolved_cell(
     if canonical is None:
         return None
     image, mask = canonical
-
-    if skycell not in skycell_df.index:
+    if skycell not in skycell_df.index or not cross_projection_padding_spec(skycell_df.loc[skycell]):
         return image, mask
-    spec = cross_projection_padding_spec(skycell_df.loc[skycell])
-    if not spec:
-        return image, mask
-
-    parsed = _projection_and_cell(skycell)
-    if parsed is None:
-        return image, mask
-    projection, cell = parsed
-    padding_fp = padding_spec_fingerprint(spec)
-    cache_dir = _seam_correction_cache_dir(data_root, projection, cell, padding_fp)
-    cache_path = cache_dir / _ARRAYS_FILENAME
-
-    correction: np.ndarray | None = None
-    if cache_path.is_file():
-        try:
-            with np.load(cache_path) as z:
-                correction = np.asarray(z["correction"], dtype=np.float64)
-        except Exception:
-            log.warning("seam correction cache unreadable at %s; recomputing", cache_path, exc_info=True)
-            correction = None
-
-    if correction is None:
-        correction = compute_seam_correction(
-            data_root=data_root,
-            skycell=skycell,
-            skycell_row=skycell_df.loc[skycell],
-            spec=spec,
-            canonical_shape=image.shape,
-            psf_sigma=psf_sigma,
-            skycell_df=skycell_df,
-        )
-        if correction is not None:
-            _publish_seam_correction(cache_dir, correction, spec)
-
-    if correction is None:
-        log.warning(
-            "seam correction unavailable for %s (spec=%s); using uncorrected canonical cell "
-            "(may be biased low near the cross-projection seam).",
-            skycell, spec,
-        )
-        return image, mask
-
-    return (image + correction.astype(image.dtype, copy=False)), mask
-
-
-def _publish_seam_correction(cache_dir: Path, correction: np.ndarray, spec: list[dict[str, str]]) -> None:
-    try:
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        tmp = cache_dir / f"_tmp_{os.getpid()}"
-        tmp.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(tmp / _ARRAYS_FILENAME, correction=correction.astype(np.float32))
-        (tmp / _SIDECAR_FILENAME).write_text(json.dumps({"spec": spec}, indent=2))
-        for name in (_ARRAYS_FILENAME, _SIDECAR_FILENAME):
-            os.replace(tmp / name, cache_dir / name)
-        tmp.rmdir()
-    except Exception:
-        log.warning("Failed to publish seam correction cache to %s (non-fatal)", cache_dir, exc_info=True)
+    raise PaddingCorrectionError(
+        f"shared canonical cell {skycell} requires the not-yet-reimplemented "
+        "downsample-side cross-projection correction"
+    )

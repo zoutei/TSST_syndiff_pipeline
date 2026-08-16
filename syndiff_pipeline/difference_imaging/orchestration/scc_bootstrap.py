@@ -90,6 +90,7 @@ def bootstrap_scc_diff(
         oversampling_factor=os_factor,
         store_name=remap_store_name,
     )
+    _validate_template_remap_provenance(template_store, remap_store, mapping_grid)
     gid_path = remap_store / GROUP_ID_PER_FRAME_NPY
     if not gid_path.is_file():
         raise FileNotFoundError(f"Missing remap artifact: {gid_path}")
@@ -191,8 +192,50 @@ def _load_mapping_grid_from_template_store(template_store: Path) -> MappingGrid:
     raise MappingGridError(
         f"template store {template_store} is v1/v2 field mode "
         f"(field_mode_assembly schema_version={schema}; need >=3 with mapping_grid). "
-        "Rebuild mapping (MAPGRID>=2) and field downsample before scc_bootstrap."
+        "Rebuild mapping with MAPGRID=3 and field downsample before scc_bootstrap."
     )
+
+
+def _validate_template_remap_provenance(
+    template_store: Path, remap_store: Path, mapping_grid: MappingGrid
+) -> None:
+    """Fail closed when the L5 and remap temporal handoffs differ."""
+    sidecar = template_store / FIELD_MODE_ASSEMBLY_BASENAME
+    doc = json.loads(sidecar.read_text(encoding="utf-8"))
+    saved = doc.get("mapping_grid") or {}
+    if str(saved.get("geometry_fingerprint")) != str(mapping_grid.geometry_fingerprint):
+        raise ValueError("template sidecar geometry does not match MappingGrid")
+    if int(getattr(mapping_grid, "mapgrid_version", 0)) != 3:
+        raise ValueError("scc_bootstrap requires MAPGRID=3 geometry")
+    if int(getattr(mapping_grid, "mapgrid_version", 0)) == 3:
+        if str(doc.get("science_pad_policy", "")) != "neutral_invalid":
+            raise ValueError(
+                "MAPGRID=3 template sidecar must declare science_pad_policy=neutral_invalid"
+            )
+        expected_support = {
+            "x_min": int(mapping_grid.template_xmin),
+            "x_max": int(mapping_grid.template_xmax),
+            "y_min": int(mapping_grid.template_ymin),
+            "y_max": int(mapping_grid.template_ymax),
+        }
+        if doc.get("template_support_bounds_ffi") != expected_support:
+            raise ValueError("template sidecar template_support_bounds_ffi does not match MappingGrid")
+    remap_manifest = remap_store / "remap_manifest.json"
+    if not remap_manifest.is_file():
+        # Older non-temporal field fixtures may not have a remap manifest;
+        # temporal stores must always carry one for frame-contract checks.
+        if str(doc.get("geometry_mode", "field")) == "temporal_wcs":
+            raise FileNotFoundError(f"Missing remap provenance manifest: {remap_manifest}")
+        return
+    remap = json.loads(remap_manifest.read_text(encoding="utf-8"))
+    provenance = dict(doc.get("geometry_provenance") or {})
+    for key in ("temporal_wcs_fingerprint", "temporal_wcs_frame_contract_fingerprint"):
+        expected = remap.get(key)
+        if expected is not None and str(provenance.get(key)) != str(expected):
+            raise ValueError(
+                f"template/remap provenance mismatch for {key}: "
+                f"template={provenance.get(key)!r}, remap={expected!r}"
+            )
 
 
 def bootstrap_scc_diff_linear(

@@ -477,6 +477,47 @@ def try_load_combined_cell(
         return None
 
 
+def resolve_current_combined_ref(
+    data_root: str | Path, projection: str, skycell: str
+):
+    """Return the validated selected immutable combined artifact, if any."""
+    from syndiff_pipeline.template_creation.processing.artifact_pointer import read_current_pointer
+
+    return read_current_pointer(
+        _ps1_combined_zarr_root(data_root) / str(projection) / str(skycell),
+        expected_kind=KIND,
+        projection=str(projection),
+        skycell=str(skycell),
+        required_members=(*_REQUIRED_MEMBERS, _PROVENANCE_SIDECAR_FILENAME),
+    )
+
+
+def update_current_pointer(
+    data_root: str | Path, projection: str, skycell: str, fp: str
+) -> bool:
+    """Select an already-published combined artifact. Never selects by mtime."""
+    from syndiff_pipeline.template_creation.processing.artifact_pointer import (
+        validate_artifact,
+        write_current_pointer,
+    )
+
+    root = _ps1_combined_zarr_root(data_root) / str(projection) / str(skycell)
+    target = root / str(fp)
+    try:
+        # Validate the requested target using the same strict contract as a
+        # reader, without first changing the current pointer.
+        ref = validate_artifact(
+            root, kind=KIND, projection=str(projection), skycell=str(skycell),
+            fingerprint=str(fp), recipe_id=None,
+            required_members=(*_REQUIRED_MEMBERS, _PROVENANCE_SIDECAR_FILENAME),
+        )
+        write_current_pointer(root, ref)
+        return True
+    except Exception:
+        logger.warning("failed to update combined current pointer for %s/%s", projection, skycell, exc_info=True)
+        return False
+
+
 def gaia_version_stamp(catalog_path: str | None) -> str:
     """Cheap content-identity stamp for the Gaia catalog file, or ``"none"``."""
     if not catalog_path:
