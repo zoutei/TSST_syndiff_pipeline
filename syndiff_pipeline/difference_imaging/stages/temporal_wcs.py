@@ -35,6 +35,8 @@ from syndiff_pipeline.difference_imaging.wcs.sci2idl import (
     select_good_stars,
 )
 from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import (
+    temporal_frame_contract,
+    validate_temporal_frame_contract,
     TemporalChebWcs,
     canonical_temporal_wcs_stem,
     fit_per_ffi_chebyshev,
@@ -329,6 +331,12 @@ def _validate_published_artifacts(
     if frame_df["orbit_index"].isna().any() or (frame_df["orbit_index"] < 0).any():
         raise RuntimeError("temporal_wcs: one or more frames has no temporal model")
     manifest = json.loads((model_dir / "manifest.json").read_text(encoding="utf-8"))
+    contract = validate_temporal_frame_contract(manifest.get("frame_contract"))
+    domain = manifest.get("domain", {})
+    if [int(domain.get("x_min", -1)), int(domain.get("y_min", -1))] != [0, 0]:
+        raise RuntimeError("temporal_wcs: model domain must be science-local")
+    if [int(domain.get("y_max", -1)), int(domain.get("x_max", -1))] != contract["science_shape"]:
+        raise RuntimeError("temporal_wcs: frame contract shape disagrees with model domain")
     if int(manifest.get("n_frames", -1)) != len(expected_stems):
         raise RuntimeError("temporal_wcs: manifest n_frames does not match inputs")
     listed = {int(m["orbit_index"]): m for m in manifest.get("models", [])}
@@ -641,6 +649,12 @@ def run_temporal_wcs_all_frames(
         ),
         "models": models,
     }
+    # The temporal model is fitted in the cropped reference-WCS frame.  Keep
+    # the crop origin explicit so runtime callers cannot accidentally evaluate
+    # it with full-FFI coordinates.
+    manifest["frame_contract"] = temporal_frame_contract(
+        origin_ffi=(crop["x_min"], crop["y_min"]), shape=(ny, nx), pixel_origin=0
+    )
     _atomic_json(
         per_dir / "manifest.json",
         {

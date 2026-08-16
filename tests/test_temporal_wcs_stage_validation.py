@@ -12,7 +12,7 @@ from syndiff_pipeline.difference_imaging.stages.temporal_wcs import (
     MODEL_VERSION,
     _validate_published_artifacts,
 )
-from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcs
+from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcs, temporal_frame_contract
 
 
 def _wcs():
@@ -46,6 +46,8 @@ def _artifact(tmp_path, *, bad_model=False, bad_frames=False):
     })
     manifest = {
         "model_kind": "temporal_wcs", "version": MODEL_VERSION,
+        "frame_contract": temporal_frame_contract(origin_ffi=(44, 0), shape=(200, 200)),
+        "domain": {"x_min": 0, "x_max": 200, "y_min": 0, "y_max": 200},
         "n_frames": 2, "models": [{"orbit_index": 0, "start": 0, "end": 2,
         "path": "models/orbit_00.npz", "fingerprint": fp}],
     }

@@ -16,8 +16,52 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
+import hashlib
 
 import numpy as np
+
+
+FRAME_CONTRACT_VERSION = "temporal_wcs_frame_v1"
+
+
+def temporal_frame_contract(*, origin_ffi, shape, pixel_origin=0) -> dict:
+    """Return the explicit coordinate contract persisted with a temporal model."""
+    origin = [int(origin_ffi[0]), int(origin_ffi[1])]
+    shape = [int(shape[0]), int(shape[1])]
+    if len(origin) != 2 or len(shape) != 2 or any(v < 0 for v in origin) or any(v <= 0 for v in shape):
+        raise ValueError("invalid temporal WCS frame origin or science shape")
+    contract = {
+        "version": FRAME_CONTRACT_VERSION,
+        "model_pixel_frame": "science_local",
+        "model_origin_ffi": origin,
+        "science_shape": shape,
+        "pixel_origin": int(pixel_origin),
+        "pixel_center_convention": "zero_based_pixel_centers",
+    }
+    payload = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode()
+    contract["fingerprint"] = hashlib.sha256(payload).hexdigest()
+    return contract
+
+
+def validate_temporal_frame_contract(contract: dict) -> dict:
+    """Validate and return a normalized frame contract; never infer missing origin."""
+    if not isinstance(contract, dict):
+        raise ValueError("temporal WCS frame contract is missing")
+    required = {"version", "model_pixel_frame", "model_origin_ffi", "science_shape",
+                "pixel_origin", "pixel_center_convention", "fingerprint"}
+    missing = sorted(required.difference(contract))
+    if missing:
+        raise ValueError("temporal WCS frame contract missing: " + ", ".join(missing))
+    normalized = temporal_frame_contract(
+        origin_ffi=contract["model_origin_ffi"], shape=contract["science_shape"],
+        pixel_origin=contract["pixel_origin"])
+    if contract.get("version") != FRAME_CONTRACT_VERSION or contract.get("model_pixel_frame") != "science_local":
+        raise ValueError("unsupported temporal WCS frame contract")
+    if contract.get("pixel_center_convention") != normalized["pixel_center_convention"]:
+        raise ValueError("unsupported temporal WCS pixel-center convention")
+    if contract.get("fingerprint") != normalized["fingerprint"]:
+        raise ValueError("temporal WCS frame-contract fingerprint mismatch")
+    return normalized
 
 
 def _exponents(degree: int) -> tuple[tuple[int, int], ...]:
@@ -386,16 +430,16 @@ class TemporalChebWcsStore:
             raise ValueError(f"{self.root}: not a temporal_wcs artifact")
         if self.manifest.get("spatial_basis") != "chebyshev" or int(self.manifest.get("spatial_degree", -1)) != 5:
             raise ValueError(f"{self.root}: incompatible spatial WCS basis")
+        self.frame_contract = validate_temporal_frame_contract(self.manifest.get("frame_contract"))
         self.frames = pd.read_parquet(self.root / "frames.parquet").set_index("stem", drop=False)
         self._models = {}
 
     @property
     def fingerprint(self):
-        return __import__("hashlib").sha256(
-            (self.root / "manifest.json").read_bytes()
-        ).hexdigest()
+        return hashlib.sha256((self.root / "manifest.json").read_bytes()).hexdigest()
 
-    def for_stem(self, stem):
+    def raw_for_stem(self, stem):
+        """Return the crop-local model and cadence for fitting-scoped callers."""
         key = canonical_temporal_wcs_stem(stem)
         row = self.frames.loc[key]
         if getattr(row, "ndim", 1) != 1:
@@ -408,6 +452,14 @@ class TemporalChebWcsStore:
             self._models[orbit] = TemporalChebWcs.load(self.root / spec["path"])
         return self._models[orbit], float(row["btjd"])
 
+    def for_stem(self, stem):
+        """Return a full-FFI adapter and cadence for production callers."""
+        model, btjd = self.raw_for_stem(stem)
+        from .temporal_adapter import TemporalWcsAdapter
+
+        return TemporalWcsAdapter(model, btjd, tuple(self.frame_contract["model_origin_ffi"])), btjd
+
 
 __all__ = ["TemporalChebWcs", "canonical_temporal_wcs_stem", "chebyshev_design",
-           "fit_per_ffi_chebyshev", "fit_temporal_coefficients", "TemporalChebWcsStore"]
+           "fit_per_ffi_chebyshev", "fit_temporal_coefficients", "TemporalChebWcsStore",
+           "FRAME_CONTRACT_VERSION", "temporal_frame_contract", "validate_temporal_frame_contract"]

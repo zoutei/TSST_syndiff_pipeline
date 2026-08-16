@@ -1,0 +1,32 @@
+# S0020/C3/K3 only: publish SCC-level temporal Chebyshev WCS from already
+# completed linear centroid/diff products.  This intentionally performs no
+# subtraction, ePSF, or centroid extraction.
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 32
+
+# Inputs already live in the completed linear diff lane.  The temporal model
+# itself is still published one level up at SCC-root wcs/.
+paths:
+  output_store_name: linear
+
+pipeline:
+  - external_workspaces: [centroids_r1, hp_d]
+  - kind: temporal_wcs
+    inputs:
+      centroids: centroids_r1
+      diffs: hp_d
+    output: temporal_wcs
+    version: temporal_cheb5_bspline_v1
+    spatial_basis: chebyshev
+    cheb_degree: 5
+    temporal_basis: bspline
+    spline_degree: 3
+    n_interior_knots: 20
+    edge_densify_knots: true
+    edge_fraction: 0.12
+    clip_n_sigma: 3.0
+    clip_max_iter: 3
+    min_stars: 50
+    debug_plots: true
