@@ -28,9 +28,9 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
     Return FFI-coordinate bounds covered by a syndiff template FITS.
 
     Uses ``XMIN``/``XMAX``/``YMIN``/``YMAX`` header keywords when present.
-    Templates with ``MAPGRID>=2`` **require** those keywords (no silent origin
-    fallback). Legacy (non-v2) templates without them assume full-chip origin
-    ``(0, 0)`` with array shape divided by ``OVERSAMP`` when that keyword is set.
+    Templates with ``MAPGRID=3`` **require** those keywords (no silent origin
+    fallback). Templates without the schema keyword are rejected so stale
+    artifacts cannot enter a MAPGRID=3 lane.
 
     Coverage bounds and ``shape`` are always in **base (native) FFI pixels**.
     ``oversampling_factor`` is the template array oversampling relative to that
@@ -46,29 +46,48 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
             # Extension headers usually carry XMIN/OVERSAMP; primary-only
             # keywords (some hand-written / star mini templates) still count.
             hdr = hdul[1].header.copy()
-            for key in ("OVERSAMP", "XMIN", "XMAX", "YMIN", "YMAX"):
+            for key in ("MAPGRID", "OVERSAMP", "XMIN", "XMAX", "YMIN", "YMAX"):
                 if key not in hdr and key in primary.header:
                     hdr[key] = primary.header[key]
         ny, nx = data.shape
         os_factor = _oversampling_from_header(hdr)
 
-    if all(k in hdr for k in ("XMIN", "XMAX", "YMIN", "YMAX")):
+    # MAPGRID=3 is the only supported template geometry.  Check the schema
+    # before accepting bounds: otherwise a stale/legacy template containing
+    # coincidental XMIN/XMAX/YMIN/YMAX keywords could enter the new lane.
+    try:
+        mapgrid = int(hdr["MAPGRID"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(
+            f"Template {tmpl_path} is missing or has invalid MAPGRID metadata; "
+            "only MAPGRID=3 templates are supported"
+        )
+    if mapgrid != 3:
+        raise ValueError(
+            f"Template {tmpl_path} has MAPGRID={mapgrid}; only MAPGRID=3 "
+            "templates are supported"
+        )
+
+    required_bounds = ("XMIN", "XMAX", "YMIN", "YMAX")
+    if not all(key in hdr for key in required_bounds):
+        raise ValueError(
+            f"Template {tmpl_path} has MAPGRID=3 but is missing one or more "
+            "required XMIN/XMAX/YMIN/YMAX headers"
+        )
+
+    try:
         x_min = int(hdr["XMIN"])
         x_max = int(hdr["XMAX"])
         y_min = int(hdr["YMIN"])
         y_max = int(hdr["YMAX"])
-        return {
-            "x_min": x_min,
-            "x_max": x_max,
-            "y_min": y_min,
-            "y_max": y_max,
-            "shape": (y_max - y_min, x_max - x_min),
-            "oversampling_factor": os_factor,
-        }
-
-    if int(hdr.get("MAPGRID", 0) or 0) >= 2:
+    except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"Template {tmpl_path} has MAPGRID>=2 but missing XMIN/XMAX/YMIN/YMAX headers"
+            f"Template {tmpl_path} has non-integer XMIN/XMAX/YMIN/YMAX headers"
+        ) from exc
+    if x_max <= x_min or y_max <= y_min:
+        raise ValueError(
+            f"Template {tmpl_path} has invalid coverage bounds: "
+            f"X=({x_min}, {x_max}), Y=({y_min}, {y_max})"
         )
 
     if os_factor > 1:
@@ -82,10 +101,10 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
         native_ny, native_nx = ny, nx
 
     return {
-        "x_min": 0,
-        "x_max": native_nx,
-        "y_min": 0,
-        "y_max": native_ny,
+        "x_min": x_min,
+        "x_max": x_max,
+        "y_min": y_min,
+        "y_max": y_max,
         "shape": (native_ny, native_nx),
         "oversampling_factor": os_factor,
     }

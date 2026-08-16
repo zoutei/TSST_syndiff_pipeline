@@ -246,8 +246,13 @@ def _execute_template_stage(
                 version=mp.temporal_wcs_version,
             )
             temporal_store = TemporalChebWcsStore(temporal_dir)
-            model, ref_btjd = temporal_store.for_stem(manifest_basename_from_local(ref_ffi))
-            tess_wcs_override = model.at_time(ref_btjd)
+            # ``for_stem`` returns the production full-FFI adapter.  Keep the
+            # adapter at this boundary: create_coords_for_grid() emits full
+            # detector pixels and must never be paired with the crop-local raw
+            # Chebyshev model.
+            tess_wcs_override, ref_btjd = temporal_store.for_stem(
+                manifest_basename_from_local(ref_ffi)
+            )
             temporal_fingerprint = temporal_store.fingerprint
 
         # Gaia catalog download and the TESS<->PS1 skycell geometric mapping
@@ -297,7 +302,7 @@ def _execute_template_stage(
             gaia_thread.start()
 
         try:
-            pancakes.process_tess_image_optimized(
+            mapping_result = pancakes.process_tess_image_optimized(
                 tess_file=ref_ffi,
                 skycell_wcs_csv=resolved.skycell_wcs_csv,
                 output_path=resolved.mapping_root,
@@ -316,6 +321,7 @@ def _execute_template_stage(
                 y_edge_strip=mp.y_edge_strip,
                 template_conv_pad_spare_px=mp.template_conv_pad_spare_px,
                 sci_fwhm=mp.sci_fwhm,
+                mapgrid_version=int(getattr(mp, "mapgrid_version", 3)),
                 tess_wcs_override=tess_wcs_override,
             )
         finally:
@@ -346,7 +352,19 @@ def _execute_template_stage(
                 "wcs_source": "temporal_wcs",
                 "temporal_wcs_version": mp.temporal_wcs_version,
                 "temporal_wcs_fingerprint": temporal_fingerprint,
+                "temporal_wcs_frame_contract_fingerprint": temporal_store.frame_contract[
+                    "fingerprint"
+                ],
             })
+            # Mapping geometry and temporal support policy are one immutable
+            # handoff for downstream PS1/remap/L5 consumers.
+            if isinstance(mapping_result, dict):
+                if mapping_result.get("mapping_grid") is not None:
+                    meta["mapping_grid"] = mapping_result["mapping_grid"]
+                if mapping_result.get("template_support_extrapolation") is not None:
+                    meta["template_support_extrapolation"] = mapping_result[
+                        "template_support_extrapolation"
+                    ]
             _write_run_meta(meta_path, meta)
         return None
 
@@ -376,8 +394,6 @@ def _execute_template_stage(
         # shared convolved store in that mode.
         external_convolved = getattr(resolved.stages.downsample, "convolved_dir", None)
         if external_convolved:
-            from pathlib import Path
-
             path = Path(str(external_convolved))
             if not path.is_dir():
                 raise RuntimeError(

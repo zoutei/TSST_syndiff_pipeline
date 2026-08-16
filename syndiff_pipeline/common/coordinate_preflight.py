@@ -1,4 +1,4 @@
-"""Coordinate contract checks for MappingGrid v2 pipeline stages."""
+"""Coordinate contract checks for MappingGrid v2/v3 pipeline stages."""
 
 from __future__ import annotations
 
@@ -33,7 +33,8 @@ def assert_wcs_uses_ffi_coords(
     """
     Verify ``tpix`` rows are original FFI pixels, not mistaken local indices.
 
-    Checks pad rows (``ffi_y < 0``) and science bottom row ``(ffi_xmin, 0)``.
+    Checks all four physical edges (including the baseline bottom pad) and
+    rejects coordinates that look like local array indices.
     """
     if tpix.ndim != 2 or tpix.shape[1] != 2:
         raise CoordinatePreflightError(
@@ -41,36 +42,32 @@ def assert_wcs_uses_ffi_coords(
         )
     f = max(1, int(oversampling_factor))
     width = grid.width_native * f
-    pad_ly = grid.conv_pad_native * f - 1
-    if pad_ly < 0:
-        return
-    pad_idx = pad_ly * width
-    if pad_idx >= len(tpix):
-        raise CoordinatePreflightError("tpix too short for pad-row spot check")
-    ty_pad, tx_pad = float(tpix[pad_idx, 0]), float(tpix[pad_idx, 1])
-    if ty_pad >= 0:
+    height = grid.height_native * f
+    if len(tpix) != width * height:
         raise CoordinatePreflightError(
-            f"pad-row tpix must have ffi_y < 0, got ty={ty_pad} at index {pad_idx}"
+            f"tpix length {len(tpix)} != expected grid size {width * height}"
         )
 
-    science_bottom_ly = grid.conv_pad_native * f
-    science_idx = science_bottom_ly * width
-    if science_idx >= len(tpix):
-        raise CoordinatePreflightError("tpix too short for science-bottom spot check")
-    ty_sci, tx_sci = float(tpix[science_idx, 0]), float(tpix[science_idx, 1])
-    if int(round(ty_sci)) != 0:
-        raise CoordinatePreflightError(
-            f"science bottom row must have ffi_y=0, got ty={ty_sci}"
-        )
-    if int(round(tx_sci)) != grid.ffi_xmin:
-        raise CoordinatePreflightError(
-            f"science bottom-left must have ffi_x={grid.ffi_xmin}, got tx={tx_sci}"
-        )
+    # Every edge is sampled at both corners and the midpoint.  Expected
+    # values are derived from the serialized physical bounds, never from a
+    # local-index assumption or a hard-coded crop origin.
+    xs = (0, width // 2, width - 1)
+    ys = (0, height // 2, height - 1)
+    for ly in ys:
+        for lx in xs:
+            idx = ly * width + lx
+            expected_y = grid.ffi_ymin + (ly + 0.5) / f - 0.5
+            expected_x = grid.ffi_xmin + (lx + 0.5) / f - 0.5
+            got_y, got_x = map(float, tpix[idx])
+            if not (np.isclose(got_y, expected_y) and np.isclose(got_x, expected_x)):
+                raise CoordinatePreflightError(
+                    f"tpix edge sample ({lx},{ly})={got_y, got_x} != "
+                    f"physical FFI expectation {expected_y, expected_x}"
+                )
 
-    # Local-index mistake would put pad row at ty ~= conv_pad_native - 1 (non-negative).
-    mistaken_ty = float(grid.conv_pad_native - 1)
-    mistaken_tx = 0.0
-    if np.isclose(ty_pad, mistaken_ty) and np.isclose(tx_pad, mistaken_tx):
+    # A local-index implementation typically starts at (0, 0), whereas this
+    # baseline starts at the physical x crop origin and bottom pad y origin.
+    if np.isclose(float(tpix[0, 0]), 0.0) and np.isclose(float(tpix[0, 1]), 0.0):
         raise CoordinatePreflightError(
             "tpix appears to use local indices instead of FFI coordinates"
         )
@@ -98,6 +95,16 @@ def validate_coordinate_contract(
 
     if template_hdr is None:
         return
+    if "MAPGRID" not in template_hdr:
+        raise CoordinatePreflightError("template header missing MAPGRID=3")
+    if int(template_hdr["MAPGRID"]) != 3 or int(template_hdr["MAPGRID"]) != grid.mapgrid_version:
+        raise CoordinatePreflightError(
+            f"template MAPGRID={template_hdr['MAPGRID']} != grid MAPGRID={grid.mapgrid_version}"
+        )
+    if "COORDFRM" in template_hdr and str(template_hdr["COORDFRM"]).strip() != "full_ffi":
+        raise CoordinatePreflightError(
+            f"template coordinate frame must be full_ffi, got {template_hdr['COORDFRM']!r}"
+        )
     for key, attr in (
         ("XMIN", "ffi_xmin"),
         ("YMIN", "ffi_ymin"),
@@ -111,6 +118,15 @@ def validate_coordinate_contract(
     if "CONVPAD" in template_hdr and int(template_hdr["CONVPAD"]) != grid.conv_pad_native:
         raise CoordinatePreflightError(
             f"template CONVPAD={template_hdr['CONVPAD']} != grid.conv_pad_native"
+        )
+    for key, value in (("PADL", grid.pad_left), ("PADR", grid.pad_right),
+                       ("PADB", grid.pad_bottom), ("PADT", grid.pad_top)):
+        if key not in template_hdr or int(template_hdr[key]) != value:
+            raise CoordinatePreflightError(f"template {key} does not match MAPGRID=3 geometry")
+    expected_fp = grid.geometry_fingerprint
+    if "GEOMFP" in template_hdr and str(template_hdr["GEOMFP"]).strip() != expected_fp:
+        raise CoordinatePreflightError(
+            f"template GEOMFP={template_hdr['GEOMFP']!r} != grid geometry fingerprint {expected_fp}"
         )
 
 

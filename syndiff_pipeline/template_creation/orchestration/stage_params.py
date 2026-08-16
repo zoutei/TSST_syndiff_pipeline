@@ -62,6 +62,7 @@ MAPPING_ALLOWED = frozenset(
         "store_name",
         "wcs_source",
         "temporal_wcs_version",
+        "mapgrid_version",
     }
 )
 PS1_DOWNLOAD_ALLOWED = frozenset(
@@ -236,6 +237,8 @@ class MappingStageParams:
     # fall back to the SPOC header WCS for a distortion-aware lane.
     wcs_source: str = "spoc_ffi_wcs"
     temporal_wcs_version: str = "temporal_cheb5_bspline_v1"
+    # Mapping geometry schema. MAPGRID=3 is the only supported contract.
+    mapgrid_version: int = 3
 
     def __post_init__(self) -> None:
         from syndiff_pipeline.common.scc_paths import normalize_store_name
@@ -248,6 +251,10 @@ class MappingStageParams:
                 f"got {self.wcs_source!r}"
             )
         object.__setattr__(self, "wcs_source", source)
+        version = int(self.mapgrid_version)
+        if version != 3:
+            raise ValueError("stages.mapping.mapgrid_version must be exactly 3")
+        object.__setattr__(self, "mapgrid_version", version)
         version = str(self.temporal_wcs_version or "").strip()
         if not version:
             raise ValueError("stages.mapping.temporal_wcs_version must be non-empty")

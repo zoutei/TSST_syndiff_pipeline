@@ -83,7 +83,7 @@ def _write_master(
     sector: int = 22,
     camera: int = 3,
     ccd: int = 3,
-    mapgrid: int | None = 2,
+    mapgrid: int | None = 3,
     data_shape: tuple[int, int] | None = None,
 ) -> Path:
     mapping_leaf.mkdir(parents=True, exist_ok=True)
@@ -105,14 +105,14 @@ def _write_master(
     return path
 
 
-def test_verify_mapping_mapgrid_v2_ok(tmp_path: Path) -> None:
+def test_verify_mapping_mapgrid_v3_ok(tmp_path: Path) -> None:
     leaf = tmp_path / "mapping"
     grid = _tiny_grid()
     _write_csv(leaf)
     _write_master(leaf, grid)
     result = verify_mapping(_resolved(tmp_path, mapping_root=leaf))
     assert result.ok
-    assert "MAPGRID v2" in result.message
+    assert "MAPGRID=3" in result.message
 
 
 def test_verify_mapping_rejects_mapgrid_v1(tmp_path: Path) -> None:

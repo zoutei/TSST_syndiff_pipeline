@@ -295,13 +295,14 @@ def _mapping_grid_stage_fragment(
     oversampling_factor: int,
 ) -> dict:
     """Canonical mapping-grid recipe fields (matches template stage builders)."""
-    return {
+    payload = {
         "x_left_dead": int(x_left_dead),
         "x_right_dead": int(x_right_dead),
         "y_edge_strip": int(y_edge_strip),
         "conv_pad_native": int(conv_pad_native),
         "oversampling_factor": int(oversampling_factor),
     }
+    return payload
 
 
 def _mapping_grid_stage_fragment_from_ffi_block(block: Mapping[str, Any]) -> dict | None:
@@ -383,13 +384,19 @@ def _mapping_grid_fragment_from_mapping_stage(
     conv_pad = compute_conv_pad_native(
         rkernel, template_conv_pad_spare_px=int(mp.template_conv_pad_spare_px)
     )
-    return {
+    payload = {
         "x_left_dead": int(mp.x_left_dead),
         "x_right_dead": int(mp.x_right_dead),
         "y_edge_strip": int(mp.y_edge_strip),
         "conv_pad_native": int(conv_pad),
         "oversampling_factor": os_factor,
     }
+    version = int(getattr(mp, "mapgrid_version", 3))
+    if version != 3:
+        raise ValueError("mapping provenance requires MAPGRID=3")
+    if version != 2:
+        payload["mapgrid_version"] = version
+    return payload
 
 
 # ---------------------------------------------------------------------------
