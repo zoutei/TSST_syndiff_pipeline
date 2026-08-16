@@ -59,15 +59,13 @@ _PAD_COLUMNS = (
 def _skycells_needing_cross_projection_padding(skycell_df: pd.DataFrame) -> list[str]:
     """Skycell NAMEs whose mapping requires a *cross-projection* padding neighbor.
 
-    KNOWN LIMITATION (see doc/template_bookkeeping_plan.md SS13 and
-    ~/.claude/plans/greedy-forging-whistle.md "Track A"): the shared convolved
-    store's canonical cell is convolved using same-projection neighbors only.
-    The exact additive seam correction for cross-projection cases (validated
-    math in tests/test_seam_correction_linearity.py) is NOT yet wired into
-    consumption -- these skycells' convolved pixels near the cross-projection
-    seam edge may be biased low (up to ~50% flux deficit at the immediate
-    edge, tapering over ~1 truncation radius) until that lands. Tracked here
-    (not silently ignored) so results can be audited/revisited.
+    These are the skycells for which
+    ``padding_correction.load_padding_aware_convolved_cell`` applies the
+    standalone additive seam correction (see
+    ``doc/shared_convolved_cross_projection_simple_fix_plan.md``) before this
+    module bins the shared canonical convolved cell. Recorded here (not
+    silently dropped) purely for audit/telemetry -- e.g. to spot-check the
+    corrected cells against a legacy per-SCC ``convolved.zarr`` crop.
     """
     if not any(c in skycell_df.columns for c in _PAD_COLUMNS):
         return []
@@ -448,16 +446,15 @@ def run_linear_downsample_scc(
         "shared convolved store" if shared_convolved_store else str(zarr_path),
     )
 
-    cross_proj_unpadded: list[str] = []
+    cross_proj_corrected: list[str] = []
     if shared_convolved_store:
-        cross_proj_unpadded = _skycells_needing_cross_projection_padding(skycell_df)
-        if cross_proj_unpadded:
-            log.warning(
-                "linear downsample s%04d_%d_%d: %d/%d skycells need cross-projection "
-                "padding that the shared convolved store does not yet apply (KNOWN "
-                "LIMITATION -- see linear_downsample._skycells_needing_cross_projection_padding "
-                "docstring); recorded in %s.",
-                sector, camera, ccd, len(cross_proj_unpadded), len(skycell_names),
+        cross_proj_corrected = _skycells_needing_cross_projection_padding(skycell_df)
+        if cross_proj_corrected:
+            log.info(
+                "linear downsample s%04d_%d_%d: %d/%d skycells needed and received the "
+                "cross-projection seam correction (padding_correction.load_padding_aware_"
+                "convolved_cell); recorded in %s.",
+                sector, camera, ccd, len(cross_proj_corrected), len(skycell_names),
                 LINEAR_ASSEMBLY_BASENAME,
             )
 
@@ -583,7 +580,7 @@ def run_linear_downsample_scc(
         "groups": [{"group_id": gid, "group_dx": dx, "group_dy": dy} for gid, dx, dy in groups],
         "n_skycells": len(skycell_names),
         "artifacts": [Path(p).name for p in artifacts],
-        "cross_projection_padding_uncorrected": cross_proj_unpadded,
+        "cross_projection_padding_corrected": cross_proj_corrected,
     }
     assembly_path.write_text(json.dumps(assembly_payload, indent=2) + "\n")
 

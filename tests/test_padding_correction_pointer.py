@@ -1,10 +1,13 @@
-"""REV 2: padding_correction._discover_shared_combined_fp reads the
-combined_store current.json pointer, not newest-by-mtime directory listing.
+"""``padding_correction._discover_shared_combined_fp`` fingerprint discovery.
 
-No prior test file existed for padding_correction.py (validated against
-real data in a previous session, not via committed unit tests) -- this file
-covers just the fingerprint-discovery fix from
-~/.claude/plans/ps1-shared-convolution-implementation.md Step 4/3b.
+Prefers the ``combined_store`` "current" pointer selection when one has
+been published, but falls back to the newest complete payload by mtime --
+mirroring ``field_downsample._discover_shared_convolved_fp``'s discovery for
+the convolved store. This fallback is required in practice: nothing in
+production calls ``combined_store.update_current_pointer`` today (it exists
+but is never wired into ``ps1_process``), so a strict pointer-only
+requirement would make every published combined cell permanently
+undiscoverable and the cross-projection correction unusable on real data.
 """
 
 from __future__ import annotations
@@ -42,12 +45,12 @@ def test_discover_returns_none_when_never_published(tmp_path: Path):
     assert pc._discover_shared_combined_fp(tmp_path, "1234", "070") is None
 
 
-def test_discover_returns_none_when_published_but_pointer_never_set(tmp_path: Path):
-    """REV 2: publish_combined_cell no longer updates current.json itself --
-    a real published cell without a pointer update must not be discoverable
-    (matches the new caller-responsibility contract, same as convolved_store)."""
-    _publish(tmp_path)
-    assert pc._discover_shared_combined_fp(tmp_path, "1234", "070") is None
+def test_discover_falls_back_to_mtime_when_pointer_never_set(tmp_path: Path):
+    """A real published cell without a pointer update must still be
+    discoverable via the mtime fallback -- production never writes the
+    pointer, so requiring one would make the correction unusable."""
+    _image, _mask, info = _publish(tmp_path)
+    assert pc._discover_shared_combined_fp(tmp_path, "1234", "070") == info["fingerprint"]
 
 
 def test_discover_returns_current_pointer_fingerprint(tmp_path: Path):
@@ -89,6 +92,8 @@ def test_load_combined_image_uses_pointer(tmp_path: Path):
     np.testing.assert_array_equal(loaded, image.astype(np.float64))
 
 
-def test_load_combined_image_returns_none_without_pointer(tmp_path: Path):
-    _publish(tmp_path)
-    assert pc._load_combined_image(tmp_path, "1234", "070") is None
+def test_load_combined_image_falls_back_to_mtime_without_pointer(tmp_path: Path):
+    image, _mask, _info = _publish(tmp_path)
+    loaded = pc._load_combined_image(tmp_path, "1234", "070")
+    assert loaded is not None
+    np.testing.assert_array_equal(loaded, image.astype(np.float64))
