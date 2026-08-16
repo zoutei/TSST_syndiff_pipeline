@@ -292,16 +292,18 @@ def run_kernel_fit(
     )
     pad_rows = 0
     mapping_grid = getattr(field_ctx, "mapping_grid", None) if field_ctx is not None else None
+    if mapping_grid is None:
+        raise ValueError("kernel fitting requires MAPGRID=3 geometry")
     if mapping_grid is not None:
         from syndiff_pipeline.common.grid_pairing import (
             prepare_science_template_pairing,
-            zero_pad_science_bottom,
+            pad_science_array,
         )
 
         ffi, template = prepare_science_template_pairing(ffi, template, mapping_grid)
         pad_rows = int(mapping_grid.conv_pad_native)
         if err is not None:
-            err = zero_pad_science_bottom(err, pad_rows)
+            err = pad_science_array(err, mapping_grid)
     header = wcs_grouping.crop_ffi_header(min_bg_path, crop_bounds)
 
     btjd = None
@@ -333,21 +335,26 @@ def run_kernel_fit(
     )
     phot_mask = full_mask_bool(residual_mask)
 
-    if mapping_grid is not None and pad_rows > 0:
+    if mapping_grid is not None:
         # pad_mask_bottom (not zero_pad_science_bottom) marks the new pad
         # rows bad/excluded -- they're fabricated pad geometry, not real
         # observed sky; zero-filling a mask would read as "good, flat-zero"
         # data to Hotpants' substamp/kernel-fit selection (see
         # grid_pairing.pad_mask_bottom).
-        from syndiff_pipeline.common.grid_pairing import pad_mask_bottom
+        from syndiff_pipeline.common.grid_pairing import pad_mask_to_template
 
-        hotpants_mask = pad_mask_bottom(np.asarray(hotpants_mask), pad_rows)
-        phot_mask = pad_mask_bottom(np.asarray(phot_mask), pad_rows)
-        residual_mask = pad_mask_bottom(np.asarray(residual_mask), pad_rows)
+        hotpants_mask = pad_mask_to_template(np.asarray(hotpants_mask), mapping_grid)
+        phot_mask = pad_mask_to_template(np.asarray(phot_mask), mapping_grid)
+        residual_mask = pad_mask_to_template(np.asarray(residual_mask), mapping_grid)
 
     if ffi.shape != np.asarray(hotpants_mask).shape:
         raise ValueError(
             f"FFI shape {ffi.shape} != hotpants mask shape {np.asarray(hotpants_mask).shape}"
+        )
+    if template.shape != ffi.shape or err.shape != ffi.shape:
+        raise ValueError(
+            "kernel-fit paired inputs must have identical template-support geometry: "
+            f"science={ffi.shape}, template={template.shape}, error={err.shape}"
         )
 
 
