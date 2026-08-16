@@ -155,9 +155,11 @@ Two properties of the existing design matter for any fix: (1) the expensive mapp
 ### Linear-mode workarounds
 
 - **Field mode (recommended for full-chip science):** set `geometry_mode: field` in
-  `stages.wcs_grouping` and `stages.templates`. See [field_geometry.md](../field_geometry.md).
+  `stages.downsample` (and use the `remap` stage). See
+  [field geometry](../field_geometry.md) and
+  [coordinate frames and cropping](../coordinate_frames_and_cropping.md).
 - **Re-target workaround:** for an object away from the main target, re-run `wcs_grouping`
-  with that object's RA/Dec as the target (new event label), then re-run only `templates`
+  with that object's RA/Dec as the target (new event label), then re-run only `downsample`
   (and `diff`). `mapping`, `ps1_download`, and `ps1_process` outputs are SCC-wide and
   are reused as-is.
 

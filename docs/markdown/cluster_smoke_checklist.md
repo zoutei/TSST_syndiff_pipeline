@@ -41,13 +41,13 @@ Optional shortcuts for faster smoke:
 - [ ] `syndiff daemon status --site config` shows a live supervisor PID
 - [ ] `runs/latest` symlink points at `smoke_template_01`
 - [ ] `{data_root}/s0020/c1/k1/templates/oversampling_1/` populated after `downsample` succeeds
-- [ ] Master mapping FITS has `MAPGRID=2`; `field_mode_assembly.json` has `schema_version: 3`
+- [ ] Master mapping FITS has `MAPGRID=3`; `field_mode_assembly.json` has `schema_version: 3`
 
 ---
 
 ## 1b. Diff smoke (`syndiff diff submit --scc`)
 
-Use once **template artifacts already exist** on disk for the smoke SCC (FFIs, mapping with MAPGRID=2, remap, template store v3). This submits the single `diff` stage; `scc_bootstrap` runs inside execute.
+Use once **template artifacts already exist** on disk for the smoke SCC (FFIs, mapping with MAPGRID=3, remap, template store v3). This submits the single `diff` stage; `scc_bootstrap` runs inside execute. Missing or non-3 MAPGRID metadata fails closed and requires a mapping rebuild.
 
 ```bash
 mamba activate syndiff

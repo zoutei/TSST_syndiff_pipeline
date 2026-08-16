@@ -654,7 +654,7 @@ Log-derived progress (`stage_progress.py`) avoids importing science modules in t
 | `template_creation/.../stages.py` | Template stage registry (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample`) + execute/verify hooks |
 | `difference_imaging/.../stages.py` | Diff DAG registry (`diff`; `diff` depends on `downsample`) |
 | `difference_imaging/.../scc_bootstrap.py` | Field-mode diff handoff: `bookkeeping/diff/`, `diff_job.json` v2 |
-| `common/mapping_grid.py` | Canonical SCC grid (`MappingGrid`, MAPGRID=2) |
+| `common/mapping_grid.py` | Canonical SCC grid (`MappingGrid`, MAPGRID=3 only) |
 | `common/scc_paths.py` | SCC-scoped + event-scoped path helpers |
 | `template_creation/processing/scc_reference_ffi.py` | SCC-scoped mapping reference-FFI chooser + bookkeeping |
 | `verify.py` | On-disk verifiers, manifest read/write, `stage_complete` |

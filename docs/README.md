@@ -2,6 +2,7 @@
 
 - [Documentation index](markdown/README.md)
 - [Field templates (default geometry)](markdown/field_geometry.md) — L0–L5, L4a/L4b, storage, ops
+- [Coordinate frames and cropping](markdown/coordinate_frames_and_cropping.md) — full-FFI/crop-local temporal WCS boundary, MappingGrid, OS indexing, L5 completeness
 - [Storage layout](markdown/storage_layout.md) (`workspace_root`/`data_root`, SCC + nested-event layout)
 - **Published site:** https://zoutei.github.io/TSST_syndiff_pipeline/
 

@@ -1,6 +1,6 @@
 # SCC field-mode campaign (os4): mapping -> remap -> downsample -> diff for
 # s0020/c3/k3 + s0022/c3/k3, default template/remap/output lane, oversampling 1.
-# Both SCCs need a mapping rebuild (MAPGRID v2) before remap/downsample/diff.
+# Both SCCs need a mapping rebuild (MAPGRID=3) before remap/downsample/diff.
 # Usage:
 #   mamba activate syndiff
 #   syndiff diff submit \

@@ -1,6 +1,16 @@
 > **Package integration**: `syndiff` stage `ps1_process` · module `template_creation/processing/ps1_process.py` · legacy script `process_ps1.py`  
 > **Orchestration docs**: [template pipeline guide](../template_pipeline.md) · [HTCondor](../template_pipeline.md#htcondor-integration)
 
+> **Current-store note:** the current supervised field pipeline uses the shared
+> convolved-cell store rooted at `{data_root}/ps1_convolved.zarr` (with legacy
+> SCC `convolved.zarr` fallback where configured). Historical descriptions of
+> a top-level `convolved_results/` flat Zarr layout below are retained only to
+> explain legacy inputs; they are not the live field-template contract. L5
+> validates every required master skycell before assembly and fails rather than
+> silently skipping a missing convolved cell. See
+> [storage layout](../storage_layout.md), [field geometry](../field_geometry.md),
+> and [coordinate frames and cropping](../coordinate_frames_and_cropping.md).
+
 # PS1 Template Processing Pipeline — Detailed Technical Reference
 
 `process_ps1.py` builds a deep-sky reference template by reading Pan-STARRS 1 (PS1) skycell images from a Zarr store, combining multi-band exposures, removing backgrounds and saturated stars, stitching cells into large "master arrays" using a sliding window, applying padding at projection and cross-projection boundaries, convolving with a Gaussian PSF, and saving convolved results back to a Zarr store. This document explains every stage in detail.

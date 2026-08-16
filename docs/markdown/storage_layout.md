@@ -196,6 +196,12 @@ remap/oversampling_{N}/
   .lock
 ```
 
+For a temporal lane, mapping/remap/template metadata additionally carries the
+temporal frame-contract fingerprint. The MappingGrid serialization records
+the coordinate frame, explicit science/template bounds, pad geometry, and
+geometry fingerprint. Consumers reject a mismatch rather than silently reuse
+the store. See [coordinate frames and cropping](coordinate_frames_and_cropping.md).
+
 L5 sparse contribs and `template_manifest.json` live under
 `templates/oversampling_{N}/` (product path name; stage name is `downsample`).
 Code dual-reads legacy L2–L4 files colocated under `templates/` when

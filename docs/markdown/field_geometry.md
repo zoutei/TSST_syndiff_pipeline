@@ -19,6 +19,11 @@ for target-anchored single-offset templates — see
 Also see [oversampled templates](oversampled_templates.md) when combining field
 mode with `oversampling_factor F>1`.
 
+**Coordinate contract:** [Coordinate frames and cropping](coordinate_frames_and_cropping.md)
+defines the full-FFI/crop-local temporal-WCS boundary and the strict `MAPGRID=3`
+geometry, oversampling convention, and required rebuild gates. It is required
+reading before a temporal-WCS field lane is rebuilt.
+
 ---
 
 ## Quick start
@@ -31,7 +36,7 @@ syndiff template submit \
   --site config \
   --scc config/scc_example.csv
 
-# Field-mode diff (after template rebuild with MAPGRID=2 + sidecar v3):
+# Field-mode diff (after template rebuild with MAPGRID=3 + sidecar v3):
 syndiff diff submit \
   --site config \
   --config config/diff_config_single_kernel.yaml \
@@ -84,7 +89,7 @@ reference FFI path in `bookkeeping/mapping/run_meta.json`. Diff can target
 ## MappingGrid (canonical SCC grid)
 
 All field-mode coordinates flow through **`MappingGrid`**
-(`syndiff_pipeline/common/mapping_grid.py`). Mapping writes `MAPGRID=2` on the
+(`syndiff_pipeline/common/mapping_grid.py`). Mapping writes `MAPGRID=3` on the
 master FITS; remap and downsample sidecars embed the same grid; `scc_bootstrap`
 copies `crop_bounds` into `bookkeeping/diff/diff_job.json` for diff.
 
@@ -99,6 +104,14 @@ copies `crop_bounds` into `bookkeeping/diff/diff_job.json` for diff.
 WCS and `tesswcs` projections must use **FFI chip pixels** `(ffi_x, ffi_y)`;
 local grid indices `(lx, ly)` are for array indexing only. Pad rows use negative
 `ffi_y`. See `coordinate_preflight.py` checks in mapping, bootstrap, and execute.
+
+For a temporal-WCS lane, the serialized Chebyshev model itself is
+**science-crop-local**. Production mapping, L2 schedule, and L4 Exact callers
+must obtain the full-FFI `TemporalWcsAdapter` from
+`TemporalChebWcsStore.for_stem()`; they must not pass MappingGrid full-FFI
+coordinates to the raw model. The temporal frame-contract fingerprint is part
+of mapping/remap/L5 provenance, so caches made before this contract are not
+reusable. See [coordinate frames and cropping](coordinate_frames_and_cropping.md#4-temporal-wcs-boundary).
 
 Diff does **not** use `crop_mode` / `target_box` for geometry — the science
 grid is fully determined by the SCC `MappingGrid`.
@@ -463,6 +476,10 @@ Verify rejects:
 - Missing / empty `exact_cache_l4b/` when `apply_inter_skycell: true` (default);
   skipped when `apply_inter_skycell: false`
 - Contrib keys that are not group-qualified 4-tuples `(group_id, skycell, sx, sy)`
+- A field store, remap store, or temporal model whose frozen geometry or
+  temporal frame-contract provenance disagrees with the selected lane
+- A required master skycell absent from the convolved store; L5 fails with a
+  source/processing/store diagnostic rather than skipping the batch
 
 Intentional rebuild:
 

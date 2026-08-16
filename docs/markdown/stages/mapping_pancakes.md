@@ -9,6 +9,11 @@ PanCAKES generates precise pixel-level mappings between a TESS Full Frame Image 
 
 In the orchestrated pipeline, the `mapping` stage also **downloads the Gaia DR3 catalog** for the FFI footprint before running PanCAKES itself (see [Gaia catalog download](#gaia-catalog-download) below).
 
+> **Coordinate contract:** Mapping samples are always physical full-FFI
+> pixels, including at `oversampling_factor > 1`. For a temporal-WCS lane the
+> WCS override must be a full-FFI `TemporalWcsAdapter`, never the raw
+> crop-local Chebyshev model. See [coordinate frames and cropping](../coordinate_frames_and_cropping.md).
+
 ## Dependencies
 
 numpy, pandas, astropy, numba, shapely, tqdm, and a **modified mocpy**: the standard pip `mocpy` lacks `MOC.filter_points_in_polygons`, which this pipeline requires for high-performance point-in-polygon filtering. Use <https://github.com/zoutei/mocpy_syndiff/> and follow its build instructions.
@@ -58,6 +63,11 @@ Workers also check whether TESS coverage reaches the edges of a skycell; if so, 
 ## Oversampling
 
 `MappingStageParams.oversampling_factor` (default **1**) subdivides each TESS pixel into N×N sub-cells; coordinate count and master-map size scale by N². When N > 1, outputs gain an `_os{N}` filename suffix and live under an `oversampling_{N}/` subdirectory, and `downsample` must be run with the matching factor (it decodes linear indices with `os_width = t_x * N`).
+
+The generated coordinates remain in full-FFI units; `F` changes only their
+sampling density. `MAPGRID=3` records the science/template bounds and
+bottom convolution pad in the master header. Do not infer local coordinates
+from FITS CRPIX or multiply FFI coordinates by `F` before WCS evaluation.
 
 ## Output files
 
@@ -125,4 +135,4 @@ Key arguments:
 
 ## Orchestrator integration
 
-In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` (SCC-scoped; there is no combined `syndiff all` preset). It first resolves the SCC's reference FFI via the SCC-scoped chooser in `scc_reference_ffi.py` (median-CRVAL anchor + Earth/Moon-angle cuts), then runs PanCAKES (Condor pool `mapping`: 16 CPUs / 100 GB by default). Outputs land under `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`; the scheduler verifies only `tess_s{sector}_{camera}_{ccd}_master_skycells_list[_os{N}].csv` before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md).
+In the supervised pipeline, PanCAKES runs as the `mapping` stage via `syndiff template submit` (SCC-scoped; there is no combined `syndiff all` preset). It first resolves the SCC's reference FFI via the SCC-scoped chooser in `scc_reference_ffi.py` (median-CRVAL anchor + Earth/Moon-angle cuts), then runs PanCAKES (Condor pool `mapping`: 16 CPUs / 100 GB by default). Outputs land under `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`; verification requires the matching master skycell CSV **and** MAPGRID master FITS, including compatible shape/geometry metadata, before advancing to `ps1_download`. See the [template pipeline guide](../template_pipeline.md).
