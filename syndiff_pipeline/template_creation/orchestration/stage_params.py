@@ -59,6 +59,9 @@ MAPPING_ALLOWED = frozenset(
         "y_edge_strip",
         "template_conv_pad_spare_px",
         "sci_fwhm",
+        "store_name",
+        "wcs_source",
+        "temporal_wcs_version",
     }
 )
 PS1_DOWNLOAD_ALLOWED = frozenset(
@@ -227,6 +230,28 @@ class MappingStageParams:
     y_edge_strip: int = 30
     template_conv_pad_spare_px: int = 4
     sci_fwhm: float = 1.88
+    # Named mapping lane (for example ``tvwcs`` -> mapping_tvwcs/).
+    store_name: str | None = None
+    # Geometry source is explicit in frozen configs so mapping cannot silently
+    # fall back to the SPOC header WCS for a distortion-aware lane.
+    wcs_source: str = "spoc_ffi_wcs"
+    temporal_wcs_version: str = "temporal_cheb5_bspline_v1"
+
+    def __post_init__(self) -> None:
+        from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+        object.__setattr__(self, "store_name", normalize_store_name(self.store_name))
+        source = str(self.wcs_source or "spoc_ffi_wcs").strip().lower()
+        if source not in ("spoc_ffi_wcs", "temporal_wcs"):
+            raise ValueError(
+                "stages.mapping.wcs_source must be 'spoc_ffi_wcs' or 'temporal_wcs', "
+                f"got {self.wcs_source!r}"
+            )
+        object.__setattr__(self, "wcs_source", source)
+        version = str(self.temporal_wcs_version or "").strip()
+        if not version:
+            raise ValueError("stages.mapping.temporal_wcs_version must be non-empty")
+        object.__setattr__(self, "temporal_wcs_version", version)
 
 
 @dataclass
@@ -308,7 +333,7 @@ class RemapStageParams:
     host_stats_max_load15: float = 10.0
     # Named remap lane → remap_{store_name}/; None → remap/
     store_name: str | None = None
-    drift_source: str = "per_skycell"
+    drift_source: str = "per_skycell_temporal_wcs"
     apply_intra_skycell: bool = True
     apply_inter_skycell: bool = True
 
@@ -316,10 +341,18 @@ class RemapStageParams:
         from syndiff_pipeline.common.scc_paths import normalize_store_name
 
         object.__setattr__(self, "store_name", normalize_store_name(self.store_name))
-        ds = str(self.drift_source or "per_skycell").strip().lower()
-        if ds not in ("per_skycell", "point"):
+        ds = str(self.drift_source or "per_skycell_temporal_wcs").strip().lower()
+        # Keep old frozen YAML readable. New configs should use the explicit
+        # names; dispatch accepts both during migration of existing stores.
+        if ds not in (
+            "per_skycell_temporal_wcs",
+            "point_ffi_wcs",
+            "per_skycell",
+            "point",
+        ):
             raise ValueError(
-                "stages.remap.drift_source must be 'per_skycell' or 'point', "
+                "stages.remap.drift_source must be 'per_skycell_temporal_wcs' "
+                "or 'point_ffi_wcs' (legacy aliases: 'per_skycell', 'point'), "
                 f"got {self.drift_source!r}"
             )
         object.__setattr__(self, "drift_source", ds)

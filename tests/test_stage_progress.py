@@ -398,6 +398,18 @@ class TestReadLogProgress(unittest.TestCase):
         self.assertEqual(prog.text, "274/274")
         self.assertEqual(prog.kind, "fraction")
 
+    def test_mapping_main_work_overrides_cached_gaia_marker(self):
+        path = self._write_log(
+            "map.log",
+            "Starting Gaia catalog download workflow...\n"
+            "✅ Gaia catalog already exists at /data/gaia.csv\n"
+            "Creating optimized TESS-to-skycell mapping...\n"
+            "  Converting 67371008 coordinates to RA/Dec...\n",
+        )
+        prog = read_log_progress(path, "mapping")
+        self.assertEqual(prog.text, "mapping")
+        self.assertEqual(prog.kind, "phase")
+
     def test_wcs_grouping_elapsed_without_log(self):
         prog = read_log_progress(
             self.log_dir / "missing.log",

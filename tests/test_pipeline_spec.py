@@ -20,7 +20,7 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(len(TEMPLATE_STAGES), 6)
 
     def test_composed_stage_count_includes_diff(self):
-        self.assertEqual(len(STAGE_NAMES), 8)
+        self.assertEqual(len(STAGE_NAMES), 9)
         self.assertNotIn("bind", STAGE_NAMES)
         self.assertEqual(STAGE_NAMES[-1], "star")
 
@@ -99,6 +99,25 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(
             SYNDIFF_PIPELINE.effective_stage_deps("downsample", linear_stages),
             ["mapping", "ps1_process", "remap"],
+        )
+
+    def test_downsample_explicit_convolved_store_skips_ps1_process(self):
+        from syndiff_pipeline.template_creation.orchestration.stage_params import (
+            parse_stage_params,
+        )
+
+        stages = parse_stage_params(
+            {
+                "downsample": {
+                    "geometry_mode": "field",
+                    "convolved_dir": "/data/s0020/c3/k3/convolved.zarr",
+                },
+                "wcs_grouping": {"geometry_mode": "field"},
+            }
+        )
+        self.assertEqual(
+            SYNDIFF_PIPELINE.effective_stage_deps("downsample", stages),
+            ["mapping", "remap"],
         )
 
     def test_upstream_closure_for_partial_run(self):

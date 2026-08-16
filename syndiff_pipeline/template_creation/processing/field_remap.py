@@ -8,6 +8,7 @@ Downsample (L5) reads these artifacts and bins sparse contribs under
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import shutil
 import time
@@ -54,6 +55,64 @@ PAIR_EPOCHS_PARQUET = "pair_epochs.parquet"
 EPOCH_GROUP_MEMBERS_PARQUET = "epoch_group_members.parquet"
 GID_EPOCH_INDEX_NPZ = "gid_epoch_index.npz"
 GROUP_ID_PER_FRAME_NPY = "group_id_per_frame.npy"
+
+
+def _mapping_fingerprint(
+    mapping_root: Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int,
+) -> str:
+    """Return a stable identity for the mapping inputs used by Exact remap.
+
+    Mapping has no single manifest in older stores.  Include the master map,
+    skycell catalogue, and every regmap's relative name/size/mtime.  The
+    latter makes a remap cache unusable after a mapping rebuild without
+    reading the (potentially very large) FITS files into memory.
+    """
+    scc = _mapping_scc_dir(
+        Path(mapping_root), sector, camera, ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    suffix = f"_os{int(oversampling_factor)}" if int(oversampling_factor) > 1 else ""
+    stem = f"tess_s{int(sector):04d}_{camera}_{ccd}_master_pixels2skycells{suffix}"
+    sky = f"tess_s{int(sector):04d}_{camera}_{ccd}_master_skycells_list{suffix}.csv"
+    candidates = [p for p in (scc / stem, scc / sky) if p.is_file()]
+    candidates.extend(sorted(p for p in scc.rglob("*") if p.is_file() and "regmap" in p.name.lower()))
+    h = hashlib.sha256()
+    for path in sorted(set(candidates), key=lambda p: str(p)):
+        stat = path.stat()
+        h.update(str(path.relative_to(scc)).encode())
+        h.update(f"\0{stat.st_size}\0{stat.st_mtime_ns}".encode())
+    return h.hexdigest()
+
+
+def _temporal_provenance(
+    *,
+    temporal_wcs_dir: str | Path | None,
+    mapping_root: Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+    oversampling_factor: int,
+) -> dict[str, str]:
+    """Build provenance tokens that must match before reusing remap artifacts."""
+    if temporal_wcs_dir is None:
+        return {}
+    from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
+
+    store = TemporalChebWcsStore(temporal_wcs_dir)
+    version = str(store.manifest.get("version") or "unknown")
+    return {
+        "temporal_wcs_version": version,
+        "temporal_wcs_fingerprint": str(store.fingerprint),
+        "mapping_fingerprint": _mapping_fingerprint(
+            mapping_root, sector, camera, ccd,
+            oversampling_factor=oversampling_factor,
+        ),
+    }
 
 def remap_root(
     data_root: str | Path,
@@ -131,6 +190,8 @@ def exact_cache_dir_for_read_root(read_root: str | Path) -> Path:
 def _load_or_copy_shift_schedule(
     event_dir: Path,
     store_root: Path,
+    *,
+    expected_provenance: Mapping[str, str] | None = None,
 ) -> ShiftSchedule | None:
     """Prefer event ``shift_schedule.npz``; fall back to store copy. None if missing."""
     event_npz = event_dir / "shift_schedule.npz"
@@ -138,6 +199,15 @@ def _load_or_copy_shift_schedule(
     src = event_npz if event_npz.is_file() else store_npz
     if not src.is_file():
         return None
+    if expected_provenance:
+        meta_path = src.with_suffix(".json")
+        try:
+            saved = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
+        except Exception:
+            saved = {}
+        if any(str(saved.get(k)) != str(v) for k, v in expected_provenance.items()):
+            log.info("Ignoring stale shift schedule %s: temporal/mapping provenance changed", src)
+            return None
     if src != store_npz:
         with field_store_lock(store_root):
             shutil.copy2(src, store_npz)
@@ -214,6 +284,8 @@ def _build_shift_schedule_for_scc(
     raw_drift_outlier_sigma: float | None = 5.0,
     drift_source: str = "per_skycell",
     target_drift: np.ndarray | None = None,
+    temporal_wcs_dir: str | Path | None = None,
+    expected_provenance: Mapping[str, str] | None = None,
 ) -> ShiftSchedule:
     """Build ``shift_schedule.npz`` from all SCC FFIs (no event handoff)."""
     from syndiff_pipeline.common.download import list_local_ffis, manifest_basename_from_local
@@ -238,7 +310,19 @@ def _build_shift_schedule_for_scc(
     if resolved_ref is None:
         raise FileNotFoundError(f"reference_ffi_path missing: {ref_path}")
     ref_path = resolved_ref
-    ref_wcs, _ = load_tess_wcs(ref_path)
+    mode = str(drift_source or "per_skycell").strip().lower()
+    mode = {"point": "point_ffi_wcs", "per_skycell": "per_skycell_temporal_wcs"}.get(mode, mode)
+    temporal_store = None
+    if mode == "per_skycell_temporal_wcs":
+        if temporal_wcs_dir is None:
+            raise ValueError("per_skycell_temporal_wcs requires temporal_wcs_dir")
+        from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
+
+        temporal_store = TemporalChebWcsStore(temporal_wcs_dir)
+        ref_model, ref_btjd = temporal_store.for_stem(manifest_basename_from_local(str(ref_path)))
+        ref_wcs = ref_model.at_time(ref_btjd)
+    else:
+        ref_wcs, _ = load_tess_wcs(ref_path)
 
     csv_path = _skycell_csv_path(
         mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor
@@ -269,7 +353,13 @@ def _build_shift_schedule_for_scc(
     for p in paths:
         logical = manifest_basename_from_local(p)
         row = ffi_list_df.loc[logical] if logical in ffi_list_df.index else None
-        if row is not None and bool(row.get("wcs_ok", False)):
+        if temporal_store is not None:
+            try:
+                model, frame_btjd = temporal_store.for_stem(logical)
+                frame_wcs.append((logical, model.at_time(frame_btjd)))
+            except Exception as exc:
+                raise RuntimeError(f"temporal WCS unavailable for {logical}") from exc
+        elif row is not None and bool(row.get("wcs_ok", False)):
             try:
                 frame_wcs.append((logical, wcs_from_cached_row(row)))
             except Exception as exc:
@@ -303,17 +393,22 @@ def _build_shift_schedule_for_scc(
         frame_times=frame_times,
         sector=int(sector),
         raw_drift_outlier_sigma=raw_drift_outlier_sigma,
-        drift_source=drift_source,
+        drift_source=mode,
         target_drift=target_drift,
     )
     schedule.meta = dict(schedule.meta or {})
     schedule.meta["source"] = "built_from_scc_ffis"
     schedule.meta["reference_ffi"] = str(ref_path.resolve())
-    schedule.meta["drift_source"] = str(drift_source)
+    schedule.meta["drift_source"] = mode
+    if temporal_store is not None:
+        schedule.meta["temporal_wcs_version"] = temporal_store.manifest.get("version")
+        schedule.meta["temporal_wcs_fingerprint"] = temporal_store.fingerprint
+        if expected_provenance:
+            schedule.meta.update(expected_provenance)
     schedule.meta["frame_filenames"] = [manifest_basename_from_local(p) for p in paths]
     with field_store_lock(store_root):
         schedule.save(store_root / "shift_schedule.npz")
-        if str(drift_source or "per_skycell").strip().lower() != "point":
+        if mode != "point_ffi_wcs":
             _try_write_skycell_shift_debug_plots(
                 schedule,
                 store_root=store_root,
@@ -487,8 +582,19 @@ def _ensure_shift_schedule(
     raw_drift_outlier_sigma: float | None = 5.0,
     drift_source: str = "per_skycell",
     target_drift: np.ndarray | None = None,
+    temporal_wcs_dir: str | Path | None = None,
 ) -> ShiftSchedule:
-    existing = _load_or_copy_shift_schedule(event_dir, store_root)
+    expected_provenance = _temporal_provenance(
+        temporal_wcs_dir=temporal_wcs_dir,
+        mapping_root=Path(mapping_root),
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    existing = _load_or_copy_shift_schedule(
+        event_dir, store_root, expected_provenance=expected_provenance
+    )
     if existing is not None:
         return existing
     if scc_only or ref_ffi_path is not None:
@@ -507,6 +613,8 @@ def _ensure_shift_schedule(
             raw_drift_outlier_sigma=raw_drift_outlier_sigma,
             drift_source=drift_source,
             target_drift=target_drift,
+            temporal_wcs_dir=temporal_wcs_dir,
+            expected_provenance=expected_provenance,
         )
     return _build_shift_schedule_for_event(
         event_dir=event_dir,
@@ -560,7 +668,11 @@ def _try_write_skycell_shift_debug_plots(
                 name = None
 
         if data_root is not None:
-            out_dir = scc_debug_plots_dir(data_root, sector, camera, ccd)
+            category = (
+                f"remap_tvwcs_os{int(oversampling_factor)}"
+                if name == "tvwcs" else None
+            )
+            out_dir = scc_debug_plots_dir(data_root, sector, camera, ccd, category)
         else:
             # Fallback: sibling debug_plots next to remap/ under the SCC root.
             out_dir = Path(store_root).parent.parent / "debug_plots"
@@ -862,6 +974,15 @@ def _worker_frame_wcs(frame_index: int) -> Any:
             _REMAP_WORKER["frame_filenames"],
             frame_index,
         )
+    if mode == "temporal":
+        from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
+
+        store = _REMAP_WORKER.get("_temporal_wcs_store")
+        if store is None:
+            store = TemporalChebWcsStore(_REMAP_WORKER["temporal_wcs_dir"])
+            _REMAP_WORKER["_temporal_wcs_store"] = store
+        model, btjd = store.for_stem(_REMAP_WORKER["frame_filenames"][int(frame_index)])
+        return model.at_time(btjd)
     return _load_frame_wcs(_REMAP_WORKER["frames_df"], frame_index)
 
 
@@ -1205,6 +1326,7 @@ def _build_remap_worker_payload(
     master: np.ndarray | None = None,
     master_path: str | Path | None = None,
     idx_to_name: dict[int, str] | None = None,
+    temporal_wcs_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     # Prefer master_path over master ndarray so joblib initargs equality does
     # not compare large numpy arrays when spinning up the L4b pool after L4a.
@@ -1230,6 +1352,7 @@ def _build_remap_worker_payload(
         "master": None if master_path is not None else master,
         "master_path": str(master_path) if master_path is not None else None,
         "idx_to_name": idx_to_name or {},
+        "temporal_wcs_dir": str(temporal_wcs_dir) if temporal_wcs_dir is not None else None,
     }
     return payload
 
@@ -1400,6 +1523,23 @@ def _wipe_exact_cache_tree(cache_dir: Path) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
 
 
+def _temporal_remap_cache_is_current(
+    store: Path,
+    expected_provenance: Mapping[str, str],
+) -> bool:
+    """Check that an existing remap manifest belongs to this temporal lane."""
+    if not expected_provenance:
+        return True
+    path = store / REMAP_MANIFEST_NAME
+    if not path.is_file():
+        return False
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return False
+    return all(str(payload.get(k)) == str(v) for k, v in expected_provenance.items())
+
+
 def _write_gid_epoch_index(
     path: Path,
     *,
@@ -1532,6 +1672,7 @@ def _write_remap_manifest(
     n_pair_epochs: int = 0,
     rebuild_inter_skycell_cache: bool = False,
     shift_schedule_frame_origin_counts: dict[str, int] | None = None,
+    provenance: Mapping[str, str] | None = None,
 ) -> None:
     payload = {
         "schema_version": REMAP_SCHEMA_VERSION,
@@ -1559,6 +1700,8 @@ def _write_remap_manifest(
         )
     if reference_ffi:
         payload["reference_ffi"] = str(reference_ffi)
+    if provenance:
+        payload.update({str(k): str(v) for k, v in provenance.items()})
     (store / REMAP_MANIFEST_NAME).write_text(json.dumps(payload, indent=2) + "\n")
 
 
@@ -1588,6 +1731,7 @@ def run_field_remap_scc(
     stage_regmaps_to_scratch: bool | None = None,
     drift_source: str = "per_skycell",
     target_drift: np.ndarray | None = None,
+    temporal_wcs_dir: str | Path | None = None,
     apply_intra_skycell: bool = True,
     apply_inter_skycell: bool = True,
 ) -> dict[str, Any]:
@@ -1616,6 +1760,24 @@ def run_field_remap_scc(
         data_root, sector, camera, ccd, oversampling_factor=oversampling_factor
     )
     store.mkdir(parents=True, exist_ok=True)
+    expected_provenance = _temporal_provenance(
+        temporal_wcs_dir=temporal_wcs_dir,
+        mapping_root=mapping_root,
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        oversampling_factor=oversampling_factor,
+    )
+    # Cache filenames are intentionally compact and do not encode upstream
+    # identities.  A temporal or mapping change therefore invalidates both
+    # Exact trees before any worker is allowed to return ``skip``.
+    if expected_provenance and not _temporal_remap_cache_is_current(
+        store, expected_provenance
+    ):
+        _wipe_exact_cache_tree(store / EXACT_CACHE_L4A_DIRNAME)
+        _wipe_exact_cache_tree(store / EXACT_CACHE_L4B_DIRNAME)
+        rebuild_remap_cache = True
+        rebuild_inter_skycell_cache = True
     exact_l4a_dir = store / EXACT_CACHE_L4A_DIRNAME
     exact_l4a_dir.mkdir(exist_ok=True)
     exact_l4b_dir = store / EXACT_CACHE_L4B_DIRNAME
@@ -1636,6 +1798,7 @@ def run_field_remap_scc(
         raw_drift_outlier_sigma=raw_drift_outlier_sigma,
         drift_source=drift_source,
         target_drift=target_drift,
+        temporal_wcs_dir=temporal_wcs_dir,
     )
     if progress_file is not None:
         remap_progress.set_progress_phase(progress_file, "grouping")
@@ -1730,7 +1893,7 @@ def run_field_remap_scc(
             from syndiff_pipeline.common.wcs_header_cache import load_ffi_list
             from syndiff_pipeline.common.scc_paths import scc_ffi_list_parquet
 
-            wcs_mode = "scc"
+            wcs_mode = "temporal" if temporal_wcs_dir is not None else "scc"
             ffi_list_path = scc_ffi_list_parquet(data_root, sector, camera, ccd)
             if not ffi_list_path.is_file():
                 raise FileNotFoundError(f"Missing ffi_list at {ffi_list_path}")
@@ -1738,6 +1901,11 @@ def run_field_remap_scc(
             frame_filenames = _resolve_frame_filenames(schedule, ffi_list_df)
 
             def _frame_wcs_at(frame_index: int) -> Any:
+                if temporal_wcs_dir is not None:
+                    from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
+                    store = TemporalChebWcsStore(temporal_wcs_dir)
+                    model, btjd = store.for_stem(frame_filenames[frame_index])
+                    return model.at_time(btjd)
                 return _load_frame_wcs_from_cache(ffi_list_df, frame_filenames, frame_index)
         else:
             frames_path = Path(_frames_csv_path(event_dir))
@@ -1799,6 +1967,7 @@ def run_field_remap_scc(
             frames_df=frames_df,
             master_path=master_path,
             idx_to_name=idx_to_name,
+            temporal_wcs_dir=temporal_wcs_dir,
         )
         if progress_file is not None:
             import os as _os
@@ -1852,6 +2021,11 @@ def run_field_remap_scc(
                 on_result=_on_l4a_batch_done,
             )
             exact_statuses = [s for batch in batch_results for s in batch]
+        if wcs_mode == "temporal" and any(s == "fail" for s in exact_statuses):
+            raise RuntimeError(
+                "Temporal-WCS L4a Exact cache generation failed; refusing to "
+                "fall back to header WCS or integer data rolls"
+            )
         l4a_elapsed_s = time.perf_counter() - l4a_t0
         n_intra_skycell_written = sum(1 for s in exact_statuses if s == "write")
         l4a_rate = (
@@ -1915,6 +2089,7 @@ def run_field_remap_scc(
                 frames_df=frames_df,
                 master_path=master_path,
                 idx_to_name=idx_to_name,
+                temporal_wcs_dir=temporal_wcs_dir,
             )
             if progress_file is not None:
                 remap_progress.set_perf_metadata(
@@ -1965,6 +2140,11 @@ def run_field_remap_scc(
                     on_result=_on_l4b_batch_done,
                 )
                 l4b_statuses = [s for batch in batch_results for s in batch]
+            if wcs_mode == "temporal" and any(s == "fail" for s in l4b_statuses):
+                raise RuntimeError(
+                    "Temporal-WCS L4b Exact cache generation failed; refusing to "
+                    "fall back to header WCS or integer data rolls"
+                )
             l4b_elapsed_s = time.perf_counter() - l4b_t0
             n_inter_skycell_written = sum(1 for s in l4b_statuses if s == "write")
             l4b_rate = (
@@ -2036,6 +2216,7 @@ def run_field_remap_scc(
         n_pair_epochs=n_inter_skycell_pair_states,
         rebuild_inter_skycell_cache=bool(rebuild_inter_skycell_cache),
         shift_schedule_frame_origin_counts=origin_counts,
+        provenance=expected_provenance,
     )
 
     return {

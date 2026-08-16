@@ -200,6 +200,17 @@ def build_field_fits_header(
         hdr["ROIW"] = (x_max - x_min, "ROI width in base TESS pixels")
         hdr["ROIH"] = (y_max - y_min, "ROI height in base TESS pixels")
     if provenance:
+        # Keep compact geometry provenance in every materialized FITS.  The
+        # complete values are retained in the JSON manifest/sidecar.
+        for key, prov_key, comment in (
+            ("TVWCSVER", "temporal_wcs_version", "Temporal WCS model version"),
+            ("TVWCSFP", "temporal_wcs_fingerprint", "Temporal WCS fingerprint"),
+            ("MAPFP", "mapping_fingerprint", "Mapping fingerprint"),
+            ("REMAPFP", "remap_fingerprint", "Remap fingerprint"),
+        ):
+            value = provenance.get(prov_key)
+            if value not in (None, ""):
+                hdr[key] = (str(value), comment)
         if "intra_skycell_R" in provenance:
             hdr["INTRA_R"] = (int(provenance["intra_skycell_R"]), "Intra-skycell dilation R")
         elif "hybrid_R" in provenance:
@@ -332,6 +343,7 @@ class FieldManifest:
     contribs_dir: str
     groups: list[dict[str, Any]]
     schema_version: int = SCHEMA_VERSION
+    provenance: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -345,6 +357,7 @@ class FieldManifest:
             "ccd": int(self.ccd),
             "contribs_dir": self.contribs_dir,
             "groups": list(self.groups),
+            "provenance": dict(self.provenance or {}),
             "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 

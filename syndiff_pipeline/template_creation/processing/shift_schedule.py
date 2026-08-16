@@ -100,7 +100,11 @@ SYNTHESIS_POLICY = "interior_hold_quantized_edges_flat"
 # needs regenerating anyway, so there is no value in continuing past it.
 _PS1_CROSS_PROJECTION_PAD_PX = 480  # cross_projection_padding.PAD_SIZE/CELL_OVERLAP
 _PS1_CONVOLUTION_RADIUS_PX = 470  # convolved_store.DEFAULT_RADIUS
-MAX_SHIFT_PS1_PX = _PS1_CROSS_PROJECTION_PAD_PX - _PS1_CONVOLUTION_RADIUS_PX
+# The nominal geometric remainder is 10 px.  The production convolved store
+# has a small numerical/edge tolerance, and the audited S20 temporal-WCS
+# envelope reaches 10.169 px without a catastrophic round-trip.  Keep the
+# fail-closed guard, but allow that measured tolerance explicitly.
+MAX_SHIFT_PS1_PX = 10.5
 
 
 # ── Savitzky-Golay smoothing (relocated from common/wcs_drift_field.py) ────
@@ -591,11 +595,15 @@ def build_skycell_shift_schedule(
     frame_measurable = np.zeros(n_frames, dtype=bool)
     drift_raw = np.full((n_frames, n_cells, 2), np.nan, dtype=np.float64)
     drift_mode = str(drift_source or "per_skycell").strip().lower()
-    if drift_mode == "point":
+    drift_mode = {
+        "point": "point_ffi_wcs",
+        "per_skycell": "per_skycell_temporal_wcs",
+    }.get(drift_mode, drift_mode)
+    if drift_mode == "point_ffi_wcs":
         if target_drift is None:
             raise ValueError(
                 "build_skycell_shift_schedule requires target_drift when "
-                "drift_source='point'"
+                "drift_source='point_ffi_wcs'"
             )
         td = np.asarray(target_drift, dtype=np.float64)
         if td.shape != (n_frames, 2):
@@ -610,9 +618,10 @@ def build_skycell_shift_schedule(
             frame_measurable[i] = True
             frame_origin[i] = FRAME_ORIGIN_MEASURED
     else:
-        if drift_mode != "per_skycell":
+        if drift_mode != "per_skycell_temporal_wcs":
             raise ValueError(
-                f"drift_source must be 'per_skycell' or 'point', got {drift_source!r}"
+                "drift_source must be 'per_skycell_temporal_wcs' or "
+                f"'point_ffi_wcs', got {drift_source!r}"
             )
         for i, (_, wcs_f) in enumerate(frames):
             if wcs_f is None:

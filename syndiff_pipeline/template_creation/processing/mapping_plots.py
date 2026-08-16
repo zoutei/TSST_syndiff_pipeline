@@ -25,7 +25,12 @@ MAPPING_PROJECTION_OVERLAY_BASENAME = "mapping_projection_overlay.png"
 
 def mapping_projection_overlay_path(resolved: ResolvedTargetConfig) -> Path:
     t = resolved.target
-    return scc_debug_plots_dir(resolved.data_root, t.sector, t.camera, t.ccd) / (
+    mp = resolved.stages.mapping
+    category = (
+        f"mapping_tvwcs_os{int(mp.oversampling_factor)}"
+        if mp.store_name == "tvwcs" else None
+    )
+    return scc_debug_plots_dir(resolved.data_root, t.sector, t.camera, t.ccd, category) / (
         MAPPING_PROJECTION_OVERLAY_BASENAME
     )
 

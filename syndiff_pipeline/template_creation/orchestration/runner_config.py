@@ -627,7 +627,14 @@ def resolve_config(
     )
     ffi_dir = str(scc_ffi_dir(data_root, t.sector, t.camera, t.ccd))
     mapping_root = str(
-        scc_mapping_dir(data_root, t.sector, t.camera, t.ccd, oversampling_factor=mapping_os)
+        scc_mapping_dir(
+            data_root,
+            t.sector,
+            t.camera,
+            t.ccd,
+            oversampling_factor=mapping_os,
+            store_name=stages.mapping.store_name,
+        )
     )
     zarr_dir = str(ps1_skycells_zarr_dir(data_root))
     template_output_base = str(
