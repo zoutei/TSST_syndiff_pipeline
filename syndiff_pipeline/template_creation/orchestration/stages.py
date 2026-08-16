@@ -61,8 +61,11 @@ def _condor_resources_for_ps1_process(cfg):
 
 def _downsample_effective_deps(stages) -> tuple[str, ...]:
     """Downsample deps: field mode requires remap; linear omits it."""
-    base = ("mapping", "ps1_process")
     ds = getattr(stages, "downsample", None)
+    # An explicitly supplied convolved store is a completed external PS1
+    # product.  It must not force the scheduler to create/verify the legacy
+    # ps1_process stage (important for per-SCC Zarr production lanes).
+    base = ("mapping",) if getattr(ds, "convolved_dir", None) else ("mapping", "ps1_process")
     wg = getattr(stages, "wcs_grouping", None)
     mode = str(
         getattr(ds, "geometry_mode", None)
@@ -79,9 +82,12 @@ def _condor_resources_for_remap(cfg):
     from syndiff_pipeline.common.orchestration import condor
 
     params = cfg.stages.remap
+    disk_mb = getattr(params, "condor_request_disk", None)
+    request_disk_kb = None if disk_mb is None else int(disk_mb) * 1024
     return condor.CondorResourceRequest(
         request_cpus=params.condor_request_cpus,
         request_memory_mb=params.condor_request_memory,
+        request_disk_kb=request_disk_kb,
         host_stats_min_mem_mb=params.host_stats_min_mem_mb,
         host_stats_max_load15=params.host_stats_max_load15,
     )
