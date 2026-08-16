@@ -37,7 +37,7 @@ Three knobs that look similar and are **not** interchangeable:
 
 | Knob | Where | Meaning |
 |------|-------|---------|
-| **`oversampling_factor` (`F`)** | `pipeline.yaml` → `stages.mapping` / `stages.templates` (alias `downsample`); `star_config.yaml` → `defaults.oversampling_factor` | Build / consume templates and mapping on an `F×F` finer TESS grid under `oversampling_{F}/` |
+| **`oversampling_factor` (`F`)** | `pipeline.yaml` → `stages.mapping` / `stages.downsample`; `star_config.yaml` → `defaults.oversampling_factor` | Build / consume templates and mapping on an `F×F` finer TESS grid under `oversampling_{F}/` |
 | **`hotpants.oversample`** | `diff_config.yaml` → `pipeline: [{kind: hotpants, oversample: …}]` | Tell pyhotpants the template is HR relative to science. Usually **omit** — syndiff infers `F` from array shapes |
 | **`epsf_oversample`** | ePSF / photometry stages | Unrelated ePSF model oversampling (photutils). Do not set this to match template `F` |
 
@@ -137,7 +137,7 @@ In [`config/pipeline.yaml`](../../config/pipeline.yaml):
 stages:
   mapping:
     oversampling_factor: 1   # ← set F here
-  downsample:                 # legacy key; stages.templates also accepted
+  downsample:
     oversampling_factor: 1   # ← must match mapping
     geometry_mode: field      # or linear
 ```
@@ -145,8 +145,8 @@ stages:
 | Key | Stage | Default | Notes |
 |-----|-------|---------|-------|
 | `oversampling_factor` | `mapping` | `1` | Writes under `{data_root}/s{SSSS}/c{C}/k{K}/mapping/oversampling_{F}/` |
-| `oversampling_factor` | `templates` / `downsample` | `1` | Must equal mapping `F`. Writes under `…/templates/oversampling_{F}/` |
-| `geometry_mode` | `wcs_grouping` / `templates` | site-dependent | `field` or `linear`; independent of `F` |
+| `oversampling_factor` | `downsample` | `1` | Must equal mapping `F`. Writes under `…/templates/oversampling_{F}/` |
+| `geometry_mode` | `downsample` | `field` | `field` or `linear`; independent of `F` |
 
 `N` is **always** nested as `oversampling_{N}/`, including `N=1`
 ([storage layout](storage_layout.md)).

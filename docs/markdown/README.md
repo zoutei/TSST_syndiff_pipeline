@@ -12,6 +12,7 @@ Documentation for the unreleased **syndiff-pipeline** project.
 | [Storage layout](storage_layout.md) | All users | `workspace_root` + `data_root` filesystem reference |
 | [Bookkeeping (provenance graph)](bookkeeping.md) | All users / ops | Fingerprints, spool/ingest, skip/resume, CLI |
 | [Field (distortion-aware) templates](field_geometry.md) | Users / maintainers | Default `geometry_mode: field` — L0–L5, storage, verify, ops |
+| [Coordinate frames and cropping](coordinate_frames_and_cropping.md) | Users / maintainers | Full-FFI vs crop-local temporal WCS, `MappingGrid`, OS coordinates, L5 completeness, and rebuild gates |
 | [Event photometry](photometry.md) | All users | `syndiff photometry submit\|run`, prerequisites, outputs |
 | [Host-star light curves](star_lightcurves.md) | All users | `syndiff star submit\|run`, config, prerequisites |
 | [Oversampled templates + Hotpants stamp modes](oversampled_templates.md) | Users / maintainers | `oversampling_factor` (`F`), Hotpants `stamp_mode` |
@@ -33,6 +34,7 @@ docs/markdown/
 ├── storage_layout.md             ← SCC + nested-event on-disk layout
 ├── bookkeeping.md                ← provenance graph
 ├── field_geometry.md             ← default field templates (L0–L5)
+├── coordinate_frames_and_cropping.md ← canonical coordinate/crop contract
 ├── oversampled_templates.md      ← F>1 templates + Hotpants stamp modes
 ├── masking.md                    ← empirical/TNS/asteroid masks
 ├── photometry.md                 ← event photometry quick start

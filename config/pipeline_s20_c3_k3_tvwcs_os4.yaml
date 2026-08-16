@@ -28,6 +28,7 @@ stages:
     # completed S20 lane is ~6.5 GB, so request ample local disk explicitly.
     condor_request_disk: 16000
     condor_request_cpus: 64
+    condor_request_memory: 250_000
   ps1_process:
     # PS1 processing was completed previously.  The S20 product is the
     # per-SCC convolved Zarr below; do not consume the shared convolved store

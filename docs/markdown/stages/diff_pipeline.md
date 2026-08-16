@@ -31,6 +31,13 @@ When `data_root` is set and templates exist with `field_mode_assembly.json` **sc
 
 No separate scheduler stage. Field geometry does not use event `crop_mode` / `target_box` for the science grid.
 
+The bootstrap also validates frozen MappingGrid geometry and, for temporal-WCS
+lanes, the temporal frame-contract fingerprint before it permits on-demand
+assembly. This prevents a template/remap product built with a crop-local WCS
+being mixed with a full-FFI mapping lane. The science crop remains native;
+template-local/oversampled conversion is owned by `MappingGrid`. See
+[coordinate frames and cropping](../coordinate_frames_and_cropping.md).
+
 Per-FFI diff completeness and resume use `data_root/bookkeeping/provenance.db` when indexed (BK-5). Frame manifests for verify come from SCC handoff `bookkeeping/diff/frames.csv` only. See [storage layout](../storage_layout.md#provenance-bookkeeping-data_rootbookkeeping) and [`doc/template_bookkeeping_plan.md`](../../doc/template_bookkeeping_plan.md).
 
 ---

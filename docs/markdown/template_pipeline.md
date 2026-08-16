@@ -98,7 +98,7 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid**, o
 
 **Diff** (`syndiff diff submit`; `--scc` for SCC field subtract or `--targets` for event photometry):
 
-7. **`diff`** — run the config-driven difference-imaging pipeline. Depends on `downsample` in the DAG. When `data_root` is set, `scc_bootstrap` runs in-process: loads `field_mode_assembly.json` (schema v3 + `MappingGrid`; `MAPGRID=2` required) from the SCC template store, writes `bookkeeping/diff/{frames.csv,diff_job.json}`, then runs Hotpants → photometry. Diff products are SCC-primary under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`; event photometry workspaces remain under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/` when using `--targets`.
+7. **`diff`** — run the config-driven difference-imaging pipeline. Depends on `downsample` in the DAG. When `data_root` is set, `scc_bootstrap` runs in-process: loads `field_mode_assembly.json` (schema v3 + `MappingGrid`; `MAPGRID=3` required; missing or other values fail closed) from the SCC template store, writes `bookkeeping/diff/{frames.csv,diff_job.json}`, then runs Hotpants → photometry. Diff products are SCC-primary under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`; event photometry workspaces remain under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/` when using `--targets`.
 
 The separately submitted **star** branch verifies those completed artifacts,
 then writes host-star products under `{baseline_ws}/host_star/`; it does not
@@ -614,7 +614,7 @@ Reads PS1 Zarr + mapping CSV; runs the **modern sliding-window convolution pipel
 
 L5 flux binning into the SCC template product store. Deps: `mapping`, `ps1_process`, and `remap` in field mode (`effective_deps` omits `remap` in linear mode). Produces template FITS/store for SynDiff Hotpants. Stage names `templates` / `tmpl` are **rejected** by `resolve_stage_name`.
 
-- **`geometry_mode: field`** (default on `stages.downsample` and `stages.remap`): reads L2–L4 remap artifacts from `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/` (or `remap_{NAME}/` when `stages.remap.store_name` / `stages.downsample.remap_store_name` is set), then writes flux `contribs/` under `templates/oversampling_{N}/` (or `templates_{NAME}/` via `stages.downsample.output_store_name`) — see [field_geometry.md](field_geometry.md). Compose applies Exact layers selected by `apply_intra_skycell` / `apply_inter_skycell` (default both `true`). Writes `field_mode_assembly.json` (schema v3 + `mapping_grid`; `MAPGRID=2` required).
+- **`geometry_mode: field`** (default on `stages.downsample` and `stages.remap`): reads L2–L4 remap artifacts from `{data_root}/s{SSSS}/c{C}/k{K}/remap/oversampling_{N}/` (or `remap_{NAME}/` when `stages.remap.store_name` / `stages.downsample.remap_store_name` is set), then writes flux `contribs/` under `templates/oversampling_{N}/` (or `templates_{NAME}/` via `stages.downsample.output_store_name`) — see [field_geometry.md](field_geometry.md). Compose applies Exact layers selected by `apply_intra_skycell` / `apply_inter_skycell` (default both `true`). Writes `field_mode_assembly.json` (schema v3 + `mapping_grid`; `MAPGRID=3` required).
 - **`geometry_mode: linear`** (opt-out): builds whole-SCC offset-group templates via `linear_downsample.py`. Remap is pre-skipped (`linear_geometry`). Offset groups come from `resolve_scc_point_drift_table()` (ref-FFI-center anchor) under `remap_linear/oversampling_{N}/`; that path also writes `debug_plots/wcs_drift_linear_template.png` from the same point-drift table (group coloring matches templates / `scc_bootstrap` linear handoff). Downstream stages load the mapping reference FFI from `bookkeeping/mapping/run_meta.json` and must not reselect it on `--force-rerun`.
 
 **Algorithm summary** (field mode — see [field geometry](field_geometry.md)):
@@ -646,7 +646,7 @@ Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → backgr
 
 When `data_root` is set on the frozen diff config, `difference_imaging/orchestration/scc_bootstrap.py` runs before the Hotpants sub-pipeline:
 
-1. Load `field_mode_assembly.json` from the SCC template store (`schema_version >= 3`, `mapping_grid` with `MAPGRID=2`).
+1. Load `field_mode_assembly.json` from the SCC template store (`schema_version >= 3`, `mapping_grid` with `MAPGRID=3`).
 2. Load `group_id_per_frame.npy` from the remap store; align with sorted local FFIs.
 3. Write `{data_root}/s{SSSS}/c{C}/k{K}/bookkeeping/diff/frames.csv` and `diff_job.json` (schema v2).
 4. Resolve diff product root `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` (lane from `output_store_name`).
@@ -1895,7 +1895,7 @@ references are vendored under [`docs/markdown/stages/`](stages/README.md):
 | `template_creation/processing/scc_reference_ffi.py` | SCC-scoped mapping reference-FFI chooser + bookkeeping |
 | `difference_imaging/orchestration/stages.py` | Diff stage registry (`diff` only) |
 | `difference_imaging/orchestration/scc_bootstrap.py` | In-process SCC diff bookkeeping (`frames.csv`, `diff_job.json`) inside `diff` execute |
-| `common/mapping_grid.py` | `MappingGrid` — science FFI bounds, MAPGRID=2 contract |
+| `common/mapping_grid.py` | `MappingGrid` — four-sided science/template bounds, MAPGRID=3 contract |
 | `common/orchestration/run_stage.py` | Subprocess/Condor worker entry point |
 | `common/orchestration/launcher.py` | Local vs Condor launch |
 | `common/orchestration/condor.py` | Condor submit file + CLI polling |

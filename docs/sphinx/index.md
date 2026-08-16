@@ -18,6 +18,7 @@ markdown/bookkeeping
 :caption: Running pipelines
 
 markdown/field_geometry
+markdown/coordinate_frames_and_cropping
 markdown/oversampled_templates
 markdown/masking
 markdown/photometry
