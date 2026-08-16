@@ -1190,7 +1190,7 @@ def create_fits_header(tess_header, skycell_name=None):
     return fits.Header(dict_for_header)
 
 
-def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, output_path, sector, camera_id, ccd_id, overwrite=True, oversampling_factor=1):
+def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, output_path, sector, camera_id, ccd_id, overwrite=True, oversampling_factor=1, mapping_grid=None):
     """
     Save PS1-to-TESS pixel mapping as compressed FITS file.
 
@@ -1220,6 +1220,9 @@ def save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, o
     if oversampling_factor > 1:
         base_header["OVERSAMP"] = (oversampling_factor, "Oversampling factor (NxN sub-pixels per TESS pixel)")
         base_header["OSAMPRES"] = (f"{2048 * oversampling_factor}x{2048 * oversampling_factor}", "Effective oversampled resolution")
+    if mapping_grid is not None:
+        for key, value in mapping_grid.to_fits_header_updates().items():
+            base_header[key] = (value, "MappingGrid geometry")
 
     new_fits_header = fits.Header()
     new_fits_header["SIMPLE"] = "T"
@@ -1340,6 +1343,24 @@ def save_master_mapping(
         output_path, sector, camera_id, ccd_id, oversampling_factor
     )
     os.makedirs(os.path.dirname(partial_csv), exist_ok=True)
+    selected_skycells = selected_skycells.copy()
+    if mapping_grid is not None:
+        # CSV consumers need an explicit, row-local provenance handoff.  The
+        # columns are deliberately scalar so pandas/FITS/worker boundaries do
+        # not reinterpret a nested geometry object.
+        selected_skycells["MAPGRID"] = int(mapping_grid.mapgrid_version)
+        selected_skycells["GEOMFP"] = str(mapping_grid.geometry_fingerprint)
+        selected_skycells["COORDFRM"] = "full_ffi"
+        selected_skycells["TMPL_XMIN"] = int(mapping_grid.template_xmin)
+        selected_skycells["TMPL_XMAX"] = int(mapping_grid.template_xmax)
+        selected_skycells["TMPL_YMIN"] = int(mapping_grid.template_ymin)
+        selected_skycells["TMPL_YMAX"] = int(mapping_grid.template_ymax)
+        selected_skycells["PADL"] = int(mapping_grid.pad_left)
+        selected_skycells["PADR"] = int(mapping_grid.pad_right)
+        selected_skycells["PADB"] = int(mapping_grid.pad_bottom)
+        selected_skycells["PADT"] = int(mapping_grid.pad_top)
+        selected_skycells["SCIENCE_PAD_POLICY"] = "neutral_invalid"
+        selected_skycells["TEMPORAL_EXTRAP_POLICY"] = "bounded_support_pad"
     selected_skycells.to_csv(partial_csv)
 
     # Create header
@@ -1348,7 +1369,7 @@ def save_master_mapping(
 
     if mapping_grid is not None:
         for key, val in mapping_grid.to_fits_header_updates().items():
-            master_header[key] = (val, f"MappingGrid v2 ({key})")
+            master_header[key] = (val, f"MappingGrid v{mapping_grid.mapgrid_version} ({key})")
         map_shape = (
             mapping_grid.array_shape_os()
             if oversampling_factor > 1
@@ -1399,7 +1420,7 @@ def process_single_skycell(args):
         tuple: (success, skycell_name, padding_info, error_message)
     """
     try:
-        (skycell_row, tess_wcs, tpix_coord_input, tess_header, output_path, sector, camera_id, ccd_id, pad_distance, edge_exclusion, overwrite, all_skycells, oversampling_factor) = args
+        (skycell_row, tess_wcs, tpix_coord_input, tess_header, output_path, sector, camera_id, ccd_id, pad_distance, edge_exclusion, overwrite, all_skycells, oversampling_factor, mapping_grid) = args
 
         skycell_name = skycell_row["NAME"]
         tess_pix_in_skycell = skycell_row["pixel_indices"]
@@ -1417,7 +1438,7 @@ def process_single_skycell(args):
         padding_info = analyze_single_skycell_padding(skycell_name, mapping_array, ps1_wcs, skycell_row, all_skycells, pad_distance=pad_distance, edge_exclusion=edge_exclusion)
 
         # Save mapping
-        save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, output_path, sector, camera_id, ccd_id, overwrite, oversampling_factor)
+        save_skycell_mapping(mapping_array, skycell_name, tess_header, ps1_header, output_path, sector, camera_id, ccd_id, overwrite, oversampling_factor, mapping_grid=mapping_grid)
 
         return (True, skycell_name, padding_info, None)
 
@@ -2077,6 +2098,8 @@ def process_tess_image_optimized(
     template_conv_pad_spare_px=4,
     sci_fwhm=1.88,
     mapping_grid=None,
+    mapgrid_version=3,
+    tess_wcs_override=None,
 ):
     """
     Main optimized pipeline for processing TESS images with PanSTARRS1 skycells.
@@ -2120,6 +2143,14 @@ def process_tess_image_optimized(
     # Load data
     print("Loading TESS image and skycell database...")
     data_shape, tess_wcs, ra_center, dec_center, tess_header, sector, camera_id, ccd_id = load_tess_image(tess_file)
+    if tess_wcs_override is not None:
+        # The temporal model is bound to the selected reference FFI time by
+        # dispatch.  Keep the FITS header/data for metadata and dimensions,
+        # but use its distortion-aware geometry for every mapping operation.
+        tess_wcs = tess_wcs_override
+        ra_center, dec_center = tess_wcs.all_pix2world(
+            data_shape[1] / 2, data_shape[0] / 2, 0
+        )
     prepare_mapping_csv_workspace(
         output_path, sector, camera_id, ccd_id, overwrite, oversampling_factor
     )
@@ -2145,7 +2176,20 @@ def process_tess_image_optimized(
             y_edge_strip=y_edge_strip,
             conv_pad_native=conv_pad,
             oversampling=oversampling_factor,
+            mapgrid_version=int(mapgrid_version),
         )
+    elif int(mapping_grid.oversampling) != int(oversampling_factor):
+        raise ValueError(
+            "mapping_grid oversampling does not match process oversampling_factor"
+        )
+    if tess_wcs_override is not None and hasattr(tess_wcs_override, "model_origin_ffi"):
+        origin = tuple(float(v) for v in tess_wcs_override.model_origin_ffi)
+        expected = (float(mapping_grid.science_xmin), float(mapping_grid.science_ymin))
+        if origin != expected:
+            raise ValueError(
+                "temporal WCS model origin does not match MAPGRID science origin: "
+                f"origin={origin}, expected={expected}"
+            )
 
     if oversampling_factor > 1:
         map_shape = mapping_grid.array_shape_os()
@@ -2200,8 +2244,12 @@ def process_tess_image_optimized(
         n_threads=n_threads,
     )
 
-    if np.any(tess_pix_skycell_mapping == -1):
-        print("Warning: Some TESS pixels are not mapped to any skycell. This may affect the results.")
+    unmapped = int(np.count_nonzero(tess_pix_skycell_mapping == -1))
+    if unmapped:
+        raise RuntimeError(
+            f"MAPGRID={mapping_grid.mapgrid_version} template support T has "
+            f"{unmapped} unmapped coordinates; refusing incomplete mapping"
+        )
 
     # Save master mapping
     print("Saving master TESS-to-skycell mapping...")
@@ -2236,7 +2284,7 @@ def process_tess_image_optimized(
     # Prepare arguments for parallel processing
     task_args = []
     for _, skycell_row in selected_skycells.iterrows():
-        args = (skycell_row, tess_wcs, tpix_coord_input, tess_header, output_path, sector, camera_id, ccd_id, pad_distance, edge_exclusion, overwrite, selected_skycells, oversampling_factor)
+        args = (skycell_row, tess_wcs, tpix_coord_input, tess_header, output_path, sector, camera_id, ccd_id, pad_distance, edge_exclusion, overwrite, selected_skycells, oversampling_factor, mapping_grid)
         task_args.append(args)
 
     # Process skycells in parallel with progress bar
@@ -2289,6 +2337,19 @@ def process_tess_image_optimized(
         "ra_center": ra_center,
         "dec_center": dec_center,
         "oversampling_factor": oversampling_factor,
+        "mapping_grid": mapping_grid.to_mapping_dict(),
+        "template_support_extrapolation": {
+            "policy": "bounded_support_pad",
+            "max_native_pad": int(mapping_grid.conv_pad_native),
+            "support_bounds_ffi": {
+                "x_min": int(mapping_grid.template_xmin), "x_max": int(mapping_grid.template_xmax),
+                "y_min": int(mapping_grid.template_ymin), "y_max": int(mapping_grid.template_ymax),
+            },
+            "science_bounds_ffi": {
+                "x_min": int(mapping_grid.science_xmin), "x_max": int(mapping_grid.science_xmax),
+                "y_min": int(mapping_grid.science_ymin), "y_max": int(mapping_grid.science_ymax),
+            },
+        },
     }
 
     print("\nProcessing complete!")

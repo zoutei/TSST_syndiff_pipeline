@@ -47,6 +47,7 @@ class TestTemplateCoverage(unittest.TestCase):
         hdu.header["YMIN"] = ymin
         hdu.header["XMAX"] = xmin + native_nx
         hdu.header["YMAX"] = ymin + native_ny
+        hdu.header["MAPGRID"] = 3
         if oversamp > 1:
             hdu.header["OVERSAMP"] = oversamp
         hdu.writeto(path, overwrite=True)
@@ -145,18 +146,15 @@ class TestTemplateCoverage(unittest.TestCase):
             hdu.writeto(p, overwrite=True)
             with self.assertRaises(ValueError) as cm:
                 template_coverage_ffi_bounds(str(p))
-            self.assertIn("MAPGRID>=2", str(cm.exception))
-            self.assertIn("XMIN", str(cm.exception))
+            self.assertIn("MAPGRID=3", str(cm.exception))
 
-    def test_legacy_without_xmin_still_falls_back_to_origin(self):
+    def test_legacy_without_mapgrid_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "tmpl_legacy.fits"
             data = np.zeros((10, 12), dtype=np.float32)
             fits.PrimaryHDU(data=data).writeto(p, overwrite=True)
-            cov = template_coverage_ffi_bounds(str(p))
-            self.assertEqual(cov["x_min"], 0)
-            self.assertEqual(cov["y_min"], 0)
-            self.assertEqual(cov["shape"], (10, 12))
+            with self.assertRaises(ValueError):
+                template_coverage_ffi_bounds(str(p))
 
 
 class TestBlockSumOversampledCount(unittest.TestCase):
@@ -178,6 +176,7 @@ class TestBlockSumOversampledCount(unittest.TestCase):
             hdu0.header["YMIN"] = 0
             hdu0.header["XMAX"] = 4
             hdu0.header["YMAX"] = 4
+            hdu0.header["MAPGRID"] = 3
             hdu0.header["OVERSAMP"] = 2
             fits.HDUList(
                 [

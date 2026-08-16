@@ -532,13 +532,13 @@ def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
         return VerifyResult(
             "mapping",
             False,
-            f"Master FITS is not MAPGRID v2 (rebuild mapping): {exc}",
+            f"Master FITS is not MAPGRID=3 (rebuild mapping): {exc}",
             str(master_path),
         )
     return VerifyResult(
         "mapping",
         True,
-        f"MAPGRID v2 master OK (shape={grid.array_shape_os()})",
+        f"MAPGRID=3 master OK (shape={grid.array_shape_os()})",
         str(master_path),
     )
 

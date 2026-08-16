@@ -23,7 +23,7 @@ import queue as _thread_queue
 from multiprocessing import Process, Queue
 from multiprocessing.shared_memory import SharedMemory
 from queue import Empty, Full
-from typing import Optional
+from typing import Any, Optional
 import warnings
 
 faulthandler.enable()
@@ -305,22 +305,105 @@ def expected_convolved_skycells(
     ccd: int,
     *,
     projections_limit: Optional[int] = None,
+    oversampling_factor: int = 1,
+    mapping_csv_path: str | None = None,
 ) -> list[str]:
-    """Skycell names ``ps1_process`` should write for the given SCC/config."""
-    csv_path = find_csv_file(data_root, sector, camera, ccd)
+    """Skycell names ``ps1_process`` must write for the given SCC/config.
+
+    The mapping CSV is the authoritative inventory.  In particular, an OS4
+    MAPGRID=3 run must not fall back to the native (OS1) CSV: doing so silently
+    drops support cells at the template edges and lets L5 manufacture zeros.
+    ``mapping_csv_path`` is accepted for dispatchers that already resolved the
+    exact P2 artifact; otherwise the canonical SCC path is selected from
+    ``oversampling_factor``.
+    """
+    if mapping_csv_path is None:
+        from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+        mapping_csv_path = str(
+            scc_mapping_master_skycells_csv(
+                data_root, sector, camera, ccd,
+                oversampling_factor=int(oversampling_factor),
+            )
+        )
+    csv_path = str(mapping_csv_path)
+    if not os.path.isfile(csv_path):
+        raise FileNotFoundError(f"master skycell inventory missing: {csv_path}")
     projections = get_projections_from_csv(csv_path)
     if projections_limit:
         projections = projections[: int(projections_limit)]
     df = load_csv_data(csv_path)
-    skycells: set[str] = set()
-    for projection in projections:
-        _, task_list = create_master_task_list(df, projection)
-        for skycell_id, _projection, _row_id in task_list:
-            # ``skycell_id`` is a ``(name, index)`` tuple; the stored Zarr arrays
-            # are keyed by the name alone (e.g. ``skycell.1921.020_data``).
-            name = skycell_id[0] if isinstance(skycell_id, (tuple, list)) else skycell_id
-            skycells.add(name)
-    return sorted(skycells)
+    required = {"NAME", "projection"}
+    missing = required.difference(df.columns)
+    if missing:
+        raise ValueError(f"master skycell inventory missing columns: {sorted(missing)}")
+    # MAPGRID=3 carries the geometry contract on every CSV row.  Refuse mixed
+    # or partially annotated inventories before any PS1 work is dispatched.
+    if int(oversampling_factor) > 1:
+        for column in ("MAPGRID", "GEOMFP", "COORDFRM"):
+            if column not in df.columns:
+                raise ValueError(
+                    f"OS{int(oversampling_factor)} master inventory lacks {column}; "
+                    "rebuild P2 mapping with MAPGRID=3"
+                )
+        if set(df["MAPGRID"].astype(int)) != {3}:
+            raise ValueError("OS master inventory must be MAPGRID=3; refusing PS1 processing")
+        if set(df["COORDFRM"].astype(str)) != {"full_ffi"}:
+            raise ValueError("OS master inventory is not in the full_ffi coordinate frame")
+        if df["GEOMFP"].astype(str).nunique() != 1:
+            raise ValueError("OS master inventory has mixed geometry fingerprints")
+    # NAME is the published P2 identity column.  Do not reconstruct identities
+    # through row geometry here: MAPGRID=3 edge rows may intentionally have a
+    # different support shape, while their skycell names remain authoritative.
+    return sorted(
+        set(df.loc[df["projection"].astype(str).isin(set(projections)), "NAME"].astype(str))
+    )
+
+
+def master_skycell_inventory(
+    data_root: str,
+    sector: int,
+    camera: int,
+    ccd: int,
+    *,
+    oversampling_factor: int = 1,
+    mapping_csv_path: str | None = None,
+) -> dict[str, Any]:
+    """Return the immutable P2 skycell identity/provenance inventory.
+
+    This small, side-effect-free API is shared by PS1 processing and stage
+    verifiers.  ``names`` is the exact set that must be present in the
+    convolved store; ``geometry_fingerprint`` is the P2 contract that callers
+    must carry into their stage provenance.
+    """
+    if mapping_csv_path is None:
+        from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+        mapping_csv_path = str(
+            scc_mapping_master_skycells_csv(
+                data_root, sector, camera, ccd,
+                oversampling_factor=int(oversampling_factor),
+            )
+        )
+    df = load_csv_data(str(mapping_csv_path))
+    names = {str(v) for v in df["NAME"].dropna().astype(str)}
+    if not names:
+        raise ValueError(f"master skycell inventory is empty: {mapping_csv_path}")
+    result: dict[str, Any] = {
+        "names": sorted(names),
+        "count": len(names),
+        "mapping_csv": str(mapping_csv_path),
+    }
+    for column, key in (("MAPGRID", "mapgrid_version"), ("GEOMFP", "geometry_fingerprint"),
+                        ("COORDFRM", "coordinate_frame")):
+        if column in df.columns:
+            values = sorted({str(v) for v in df[column].dropna()})
+            if len(values) != 1:
+                raise ValueError(f"master inventory has mixed {column}: {values[:5]}")
+            result[key] = int(values[0]) if column == "MAPGRID" else values[0]
+    if int(oversampling_factor) > 1 and result.get("mapgrid_version") != 3:
+        raise ValueError("OS master inventory must be MAPGRID=3")
+    return result
 
 
 # --- NEW Pipeline Worker Functions ---
@@ -959,9 +1042,16 @@ def assemble_row_from_bundles(target_array: np.ndarray, cell_bundles: list[dict]
     target_array.fill(np.nan)
     cell_positions = {}
     cell_masks = {}
-    first_x_coord = config.starting_x
+    # A master array represents one row, not the whole projection.  A row
+    # near a tessellation edge may begin far to the right of the projection's
+    # global minimum x; anchoring to ``config.starting_x`` then drops or
+    # wrongly trims its first cell.  Sort also makes the producer's
+    # left-to-right overlap ownership deterministic even if queue arrival was
+    # not ordered.
+    ordered_bundles = sorted(cell_bundles, key=lambda bundle: int(bundle["x_coord"]))
+    first_x_coord = int(ordered_bundles[0]["x_coord"]) if ordered_bundles else 0
 
-    for bundle in cell_bundles:
+    for bundle in ordered_bundles:
         cell_name = bundle["skycell_id"]
         image = bundle["combined_image"]
         mask = bundle["combined_mask"]
