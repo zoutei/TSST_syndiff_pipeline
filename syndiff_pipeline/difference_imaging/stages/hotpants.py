@@ -923,18 +923,19 @@ def _pair_hotpants_arrays(
     mapping_grid,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     if mapping_grid is None:
-        return sci_crop, tmpl_crop, err_crop, 0
+        from syndiff_pipeline.common.mapping_grid import MappingGridError
+        raise MappingGridError("Hotpants requires MAPGRID=3 MappingGrid geometry")
     from syndiff_pipeline.common.grid_pairing import (
         prepare_science_template_pairing,
-        zero_pad_science_bottom,
     )
 
     sci_crop, tmpl_crop = prepare_science_template_pairing(
         sci_crop, tmpl_crop, mapping_grid
     )
-    pad_rows = int(mapping_grid.conv_pad_native)
-    err_crop = zero_pad_science_bottom(err_crop, pad_rows)
-    return sci_crop, tmpl_crop, err_crop, pad_rows
+    from syndiff_pipeline.common.grid_pairing import pad_science_array
+
+    err_crop = pad_science_array(err_crop, mapping_grid)
+    return sci_crop, tmpl_crop, err_crop, int(mapping_grid.conv_pad_native)
 
 
 def _process_one_frame(
@@ -1122,6 +1123,11 @@ def _process_one_frame(
     sci_crop, tmpl_crop, err_crop, pad_rows = _pair_hotpants_arrays(
         sci_crop, tmpl_crop, err_crop, mapping_grid
     )
+    if sci_crop.shape != tmpl_crop.shape or err_crop.shape != sci_crop.shape:
+        raise RuntimeError(
+            "paired Hotpants inputs must have identical T geometry: "
+            f"science={sci_crop.shape}, template={tmpl_crop.shape}, error={err_crop.shape}"
+        )
 
     try:
         crop_header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
@@ -1178,27 +1184,25 @@ def _process_one_frame(
     # stale/mismatched `pad_rows` would silently hand pyhotpants a wrongly
     # shaped i_mask (opaque "must have shape" failure with no indication why).
     row_diff = sci_crop.shape[0] - mask_array.shape[0]
-    if mask_array.shape[1] != sci_crop.shape[1] or row_diff < 0:
+    if mapping_grid is not None:
+        from syndiff_pipeline.common.grid_pairing import pad_mask_to_template
+        try:
+            mask_array = pad_mask_to_template(mask_array, mapping_grid)
+        except Exception as exc:
+            raise RuntimeError(
+                f"science mask cannot be placed on MAPGRID template support: {exc}"
+            ) from exc
+    elif mask_array.shape[1] != sci_crop.shape[1] or row_diff < 0:
         raise RuntimeError(
             f"hotpants mask shape {mask_array.shape} is incompatible with the "
             f"paired science shape {sci_crop.shape} (pad_rows={pad_rows}); "
             "mask_catalog is not aligned to crop_bounds/mapping_grid."
         )
-    if row_diff > 0:
-        from syndiff_pipeline.common.grid_pairing import pad_mask_bottom
-
-        if row_diff != pad_rows:
-            log.warning(
-                "hotpants mask needed %d pad rows to match sci_crop %s but "
-                "mapping_grid.conv_pad_native gave pad_rows=%s; padding by the "
-                "observed difference instead of the stale value.",
-                row_diff, sci_crop.shape, pad_rows,
-            )
-        # pad_mask_bottom (not zero_pad_science_bottom) marks the new rows
-        # bad/excluded -- they're fabricated pad geometry, not real observed
-        # sky, so Hotpants' substamp/kernel-fit selection must not treat them
-        # as legitimate flat-zero data (see grid_pairing.pad_mask_bottom).
-        mask_array = pad_mask_bottom(mask_array, row_diff)
+    elif row_diff > 0:
+        raise RuntimeError(
+            "mask did not arrive in MAPGRID=3 science geometry; "
+            "bottom-only padding is no longer supported"
+        )
 
     result = run_hotpants_frame(
         sci_array=sci_crop,
@@ -1213,14 +1217,12 @@ def _process_one_frame(
     )
 
     if result["success"]:
-        if pad_rows > 0:
+        if mapping_grid is not None:
             from syndiff_pipeline.common.grid_pairing import trim_padded_products
 
-            result["diff"] = trim_padded_products(result["diff"], pad_rows)
-            if result.get("convolved") is not None:
-                result["convolved"] = trim_padded_products(
-                    result["convolved"], pad_rows
-                )
+            for key in ("diff", "convolved", "noise", "mask"):
+                if result.get(key) is not None:
+                    result[key] = trim_padded_products(result[key], grid=mapping_grid)
         kernel_sum = None
         tess_zp = None
         try:

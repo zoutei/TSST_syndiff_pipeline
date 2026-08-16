@@ -143,7 +143,10 @@ def run_convolved_templates(
     )
     if mapping_grid is not None:
         sci_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
-        science_shape = tuple(mapping_grid.science_ffi_bounds()["shape"])
+        science_shape = (
+            int(mapping_grid.science_ymax - mapping_grid.science_ymin),
+            int(mapping_grid.science_xmax - mapping_grid.science_xmin),
+        )
     else:
         sci_shape = tuple(crop_bounds.get("shape") or ())
         science_shape = sci_shape
@@ -169,12 +172,18 @@ def run_convolved_templates(
         from syndiff_pipeline.common.grid_pairing import trim_padded_products
 
         tmpl = np.asarray(template_crop)
-        pad_rows = 0
+        if mapping_grid is None:
+            raise ValueError("convolved template output requires MAPGRID=3 geometry")
+        science_shape_local = tuple(mapping_grid.science_ffi_bounds()["shape"])
+        pad_rows = int(mapping_grid.conv_pad_native)
+
         if mapping_grid is not None:
-            pad_rows = int(mapping_grid.conv_pad_native)
-            science_shape_local = tuple(mapping_grid.science_ffi_bounds()["shape"])
-        else:
-            science_shape_local = science_shape
+            expected_template_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
+            if tuple(tmpl.shape) != expected_template_shape:
+                raise ValueError(
+                    "convolution template shape does not match MAPGRID template support: "
+                    f"{tmpl.shape} != {expected_template_shape}"
+                )
 
         factor = resolve_hotpants_oversample(
             sci_shape,
@@ -188,10 +197,8 @@ def run_convolved_templates(
             oversample=factor,
             science_shape=sci_shape if factor > 1 else None,
         )
-        if pad_rows > 0:
-            convolved = trim_padded_products(convolved, pad_rows)
-        elif factor > 1 and science_shape_local:
-            convolved = convolved[: science_shape_local[0], : science_shape_local[1]]
+        if mapping_grid is not None:
+            convolved = trim_padded_products(convolved, grid=mapping_grid)
         return convolved
 
     os.makedirs(convolved_ws_dir, exist_ok=True)
@@ -218,7 +225,7 @@ def run_convolved_templates(
         loader = build_field_mode_template_loader(
             field_ctx,
             crop_bounds,
-            crop_to_science=mapping_grid is None,
+            crop_to_science=False,
         )
         gids = sorted(
             {
