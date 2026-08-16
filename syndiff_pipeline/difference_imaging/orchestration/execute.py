@@ -75,6 +75,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     parse_background,
     parse_centroids,
     parse_per_ffi_wcs,
+    parse_temporal_wcs,
     parse_epsf,
     parse_hotpants,
     parse_kernel_fit,
@@ -1603,6 +1604,39 @@ def run_config_pipeline(
                 ccd=int(cfg.ccd),
             )
             log.info("per_ffi_wcs: %d/%d frames ok -> %s", n_ok, n_total, ws_out)
+
+        elif kind == "temporal_wcs":
+            temporal_p = parse_temporal_wcs(stage, idx)
+            inp = stage["inputs"]
+            # Keep a small lane-local completion marker for the declared output
+            # label; authoritative artifacts themselves remain SCC-rooted.
+            ws_out = _diff_stage_dir(cfg, ctx, str(stage["output"]))
+            if gaia_df is None:
+                gaia_df = _load_gaia_catalog(cfg)
+            if gaia_df is None:
+                raise RuntimeError("temporal_wcs requires gaia_catalog.")
+            from syndiff_pipeline.difference_imaging.stages import temporal_wcs
+
+            n_ok, n_total = temporal_wcs.run_temporal_wcs_all_frames(
+                _diff_lane_root_dir(cfg, ctx),
+                gaia_df,
+                temporal_p,
+                centroids_label=str(inp["centroids"]),
+                hp_d_label=str(inp.get("diffs", "hp_d")),
+                data_root=str(cfg.data_root),
+                sector=int(cfg.sector),
+                camera=int(cfg.camera),
+                ccd=int(cfg.ccd),
+            )
+            Path(ws_out, "temporal_wcs_artifact.json").write_text(
+                json.dumps({"n_fit": n_ok, "n_frames": n_total, "output": "scc_root/wcs"}) + "\n",
+                encoding="utf-8",
+            )
+            log.info(
+                "temporal_wcs: %d per-FFI fits; %d FFI rows in runtime index at SCC WCS root",
+                n_ok,
+                n_total,
+            )
 
         elif kind == "sat_template":
             sat_p = parse_sat_template(stage, idx)

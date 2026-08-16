@@ -24,6 +24,7 @@ STAGE_KINDS = frozenset(
         "epsf",
         "centroids",
         "per_ffi_wcs",
+        "temporal_wcs",
         "sat_template",
         "subtract",
         "background",
@@ -123,6 +124,11 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
             if v is not None and str(v).strip():
                 refs.append(str(v).strip())
     elif kind == "per_ffi_wcs":
+        for key in ("centroids", "diffs"):
+            v = inp.get(key)
+            if v is not None and str(v).strip():
+                refs.append(str(v).strip())
+    elif kind == "temporal_wcs":
         for key in ("centroids", "diffs"):
             v = inp.get(key)
             if v is not None and str(v).strip():
@@ -308,6 +314,16 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                 raise ValueError(f"pipeline[{idx}] per_ffi_wcs: inputs.diffs required")
             if "output" not in stage or not str(stage["output"]).strip():
                 raise ValueError(f"pipeline[{idx}] per_ffi_wcs: output label required")
+
+        if kind == "temporal_wcs":
+            inp = stage.get("inputs") or {}
+            for req in ("centroids", "diffs"):
+                if req not in inp:
+                    raise ValueError(
+                        f"pipeline[{idx}] temporal_wcs: inputs.{req} required"
+                    )
+            if "output" not in stage or not str(stage["output"]).strip():
+                raise ValueError(f"pipeline[{idx}] temporal_wcs: output label required")
 
         if kind == "sat_template":
             inp = stage.get("inputs") or {}

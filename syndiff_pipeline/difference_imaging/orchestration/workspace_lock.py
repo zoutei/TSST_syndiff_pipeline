@@ -29,7 +29,7 @@ _WORKSPACE_SNAPSHOT_MODE = 0o444
 # Downstream analysis stages have per-artifact recipe_ids; omitting them from the
 # workspace lock lets you append epsf/centroids without a new workspace_run_id.
 _WORKSPACE_FINGERPRINT_EXEMPT_STAGE_KINDS = frozenset(
-    {"epsf", "centroids", "per_ffi_wcs"}
+    {"epsf", "centroids", "per_ffi_wcs", "temporal_wcs"}
 )
 
 
