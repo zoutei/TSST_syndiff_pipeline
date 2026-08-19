@@ -410,16 +410,26 @@ def _execute_template_stage(
             )
             return None
         from syndiff_pipeline.template_creation.processing import ps1_process
-        from syndiff_pipeline.template_creation.orchestration.verify import clear_ps1_process_artifacts
+        from syndiff_pipeline.template_creation.orchestration.verify import (
+            _mapping_csv_path,
+            clear_ps1_process_artifacts,
+        )
 
         if force_rerun:
             clear_ps1_process_artifacts(resolved)
         pp = resolved.stages.ps1_process
         pd = resolved.stages.ps1_download
+        mp = resolved.stages.mapping
         use_shared_convolved_store = bool(pp.use_shared_convolved_store)
         write_per_scc_convolved_zarr = (
             False if use_shared_convolved_store else bool(pp.write_per_scc_convolved_zarr)
         )
+        # Must resolve the exact same mapping master skycells CSV that
+        # mapping/remap/downsample use (respecting oversampling_factor and
+        # store_name, e.g. OS4/tvwcs field geometry) -- passing this through
+        # explicitly instead of letting run_modern_sliding_window_pipeline
+        # fall back to the native OS1 CSV.
+        mapping_csv_path = str(_mapping_csv_path(resolved))
         result = ps1_process.run_modern_sliding_window_pipeline(
             sector=t.sector,
             camera=t.camera,
@@ -437,6 +447,8 @@ def _execute_template_stage(
             bright_star_mag_threshold=pp.bright_star_mag_threshold,
             use_shared_convolved_store=use_shared_convolved_store,
             write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
+            oversampling_factor=mp.oversampling_factor,
+            mapping_csv_path=mapping_csv_path,
         )
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(result["error"])

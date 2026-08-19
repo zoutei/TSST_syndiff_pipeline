@@ -911,6 +911,33 @@ class TestWriteSubmitFileEnvironment(unittest.TestCase):
             self.assertNotIn("SYNDIFF_CONDA_ENV=", text)
 
 
+class TestFormatCondorEnvironmentThreadLimits(unittest.TestCase):
+    """Multi-core stages (e.g. downsample's loky worker pool) must pin
+    BLAS/OMP thread pools to 1 per worker process, otherwise N worker
+    processes x default (often == visible core count) threads each causes
+    severe oversubscription (observed as high "system" CPU / context-switch
+    overhead with near-zero forward progress at high request_cpus)."""
+
+    def test_thread_limit_vars_present_when_request_cpus_set(self):
+        env = condor._format_condor_environment(request_cpus=64)
+        self.assertIsNotNone(env)
+        for var in (
+            "OMP_NUM_THREADS=1",
+            "OPENBLAS_NUM_THREADS=1",
+            "MKL_NUM_THREADS=1",
+            "NUMEXPR_NUM_THREADS=1",
+            "VECLIB_MAXIMUM_THREADS=1",
+        ):
+            self.assertIn(var, env)
+        self.assertIn("SYNDIFF_REQUEST_CPUS=64", env)
+
+    def test_thread_limit_vars_absent_when_request_cpus_unset(self):
+        env = condor._format_condor_environment(request_cpus=None)
+        if env is not None:
+            self.assertNotIn("OMP_NUM_THREADS=", env)
+            self.assertNotIn("OPENBLAS_NUM_THREADS=", env)
+
+
 class TestStageDeps(unittest.TestCase):
     def test_downsample_requires_mapping_ps1_and_remap(self):
         self.assertEqual(STAGE_DEPS["downsample"], ["mapping", "ps1_process", "remap"])

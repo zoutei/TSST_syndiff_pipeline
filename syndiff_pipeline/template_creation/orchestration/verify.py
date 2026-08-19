@@ -1289,6 +1289,7 @@ def expected_ps1_process_skycells(resolved: ResolvedTargetConfig) -> list[str]:
     from syndiff_pipeline.template_creation.processing.ps1_process import expected_convolved_skycells
 
     t = resolved.target
+    mapping_csv_path = str(_mapping_csv_path(resolved))
     try:
         names = expected_convolved_skycells(
             resolved.data_root,
@@ -1296,6 +1297,8 @@ def expected_ps1_process_skycells(resolved: ResolvedTargetConfig) -> list[str]:
             t.camera,
             t.ccd,
             projections_limit=resolved.stages.ps1_process.projections_limit,
+            oversampling_factor=resolved.stages.mapping.oversampling_factor,
+            mapping_csv_path=mapping_csv_path,
         )
         return sorted({_skycell_name(n) for n in names})
     except Exception as exc:

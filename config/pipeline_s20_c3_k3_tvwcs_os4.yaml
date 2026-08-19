@@ -43,7 +43,12 @@ stages:
     rebuild_field_store: true
     # Dispatch writes only representative debug FITS under debug_plots/.
     materialize_fits: false
-    n_jobs: 32
+    n_jobs: 64
+    condor_request_cpus: 64
+    # Thread oversubscription (64 procs x unbounded BLAS threads) is now
+    # fixed generically via condor.py env vars (OMP/OPENBLAS/MKL/NUMEXPR
+    # NUM_THREADS=1), so 64 is safe again.
+    condor_request_memory: 250000
 
 resources:
   mapping:
