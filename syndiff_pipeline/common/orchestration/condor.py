@@ -345,6 +345,21 @@ def _format_condor_environment(*, request_cpus: int | None = None) -> str | None
     if request_cpus is not None and int(request_cpus) > 0:
         parts.append(f"SYNDIFF_REQUEST_CPUS={int(request_cpus)}")
         parts.append(f"SYNDIFF_HYBRID_MAX_JOBS={int(request_cpus)}")
+        # Stages that request multiple cores do their own process-level
+        # parallelism (joblib/loky worker pools sized to request_cpus).
+        # Without pinning BLAS/OMP thread pools to 1, each worker process can
+        # independently spawn as many threads as visible cores, causing
+        # severe oversubscription (e.g. 64 processes x 64 threads on a
+        # 64-core box) that manifests as high "system" CPU / context-switch
+        # overhead with near-zero forward progress.
+        for _var in (
+            "OMP_NUM_THREADS",
+            "OPENBLAS_NUM_THREADS",
+            "MKL_NUM_THREADS",
+            "NUMEXPR_NUM_THREADS",
+            "VECLIB_MAXIMUM_THREADS",
+        ):
+            parts.append(f"{_var}=1")
     benchmark_tag = os.environ.get("SYNDIFF_REMAP_BENCHMARK_TAG")
     if benchmark_tag:
         parts.append(f"SYNDIFF_REMAP_BENCHMARK_TAG={shlex.quote(benchmark_tag)}")

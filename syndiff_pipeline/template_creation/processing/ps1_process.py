@@ -866,6 +866,24 @@ def process_coordinator(
                                         "removed_stars": result.get("removed_stars", []),
                                     }
                                     logger.info(f"[ProcessCoordinator] Cached padding source {result['skycell_id']}")
+                                    # Also publish to the shared combined store (best-effort,
+                                    # same as the "regular" branch below): a padding_source
+                                    # cell is either dual-role (its own "regular" task will
+                                    # arrive later and reuse this via regular_cache_hit) or
+                                    # genuinely padding-only (e.g. under projections_limit),
+                                    # in which case this combined-store record is the only
+                                    # thing padding_correction's cross-projection neighbor
+                                    # lookup needs -- never a convolved-store entry.
+                                    if _publish_combined is not None:
+                                        try:
+                                            _publish_combined(result)
+                                        except Exception:
+                                            logger.warning(
+                                                "[ProcessCoordinator] Combined-store publish "
+                                                "failed for padding source %s (non-fatal)",
+                                                result["skycell_id"],
+                                                exc_info=True,
+                                            )
                                 else:
                                     if _publish_combined is not None:
                                         try:
@@ -947,6 +965,27 @@ def process_coordinator(
                             "headers_data": cached["headers_data"],
                             "removed_stars": cached.get("removed_stars", []),
                         }
+                        # Dual-role cell: this "regular" task reuses a
+                        # padding_source fetch cached earlier this run. That
+                        # earlier fetch may not have published a combined-store
+                        # record for it (e.g. if this coordinator's
+                        # padding_source publish above failed, or in older
+                        # runs before that publish existed) -- publish it here
+                        # too so _publish_canonical_convolved_snapshot's own
+                        # fingerprint lookup (downstream, in the row-processing
+                        # thread) finds arrays.npz and doesn't skip this cell.
+                        # publish_combined_cell is idempotent, so this is safe
+                        # even if it was already published.
+                        if _publish_combined is not None:
+                            try:
+                                _publish_combined(result)
+                            except Exception:
+                                logger.warning(
+                                    "[ProcessCoordinator] Combined-store publish "
+                                    "failed for cache-hit %s (non-fatal)",
+                                    skycell_id,
+                                    exc_info=True,
+                                )
                         pending_results.append(result)
                         logger.info(f"[ProcessCoordinator] Cache hit fast-path for {skycell_id}")
                     else:
@@ -981,6 +1020,16 @@ def process_coordinator(
                             "headers_data": result["headers_data"],
                             "removed_stars": result.get("removed_stars", []),
                         }
+                        if _publish_combined is not None:
+                            try:
+                                _publish_combined(result)
+                            except Exception:
+                                logger.warning(
+                                    "[ProcessCoordinator] Combined-store publish "
+                                    "failed for padding source %s (non-fatal)",
+                                    result["skycell_id"],
+                                    exc_info=True,
+                                )
                     else:
                         if _publish_combined is not None:
                             try:
@@ -1597,6 +1646,7 @@ def process_row_step_from_queue(
     convolved_store_data_root: Optional[str] = None,
     combined_store_recipe=None,
     convolved_store_recipe=None,
+    write_per_scc_convolved_zarr: bool = True,
 ) -> tuple[dict, dict, list[dict]]:
     """
     Encapsulates the logic for processing a single row step in the sliding window.
@@ -1609,6 +1659,20 @@ def process_row_step_from_queue(
     -- see that function's docstring for exactly where/why. Best-effort only;
     never affects the return values below or the unchanged main convolution
     path (step 5).
+
+    ``write_per_scc_convolved_zarr=False`` skips step 5's (fully cross-
+    projection-padded) Gaussian convolution entirely: its only consumer is
+    ``saver_worker``, which -- when the legacy per-SCC ``convolved.zarr``
+    writer is disabled -- just drains ``results_queue`` and discards every
+    ``results_data``/``results_masks`` payload without ever reading its
+    content (see ``saver_worker(..., enabled=False)``). Step 5's own cost
+    (a full-row Gaussian convolution, independent of step 3b's shared-store
+    snapshot convolution and of any per-cell combined-store caching) is
+    therefore pure wasted compute whenever the per-SCC store is disabled
+    (e.g. ``use_shared_convolved_store: true`` site configs). Skipping it
+    changes no observable output: the placeholder ``results_data`` values are
+    never read by anything (only their *keys*, for ``produced_skycells``
+    bookkeeping/logging, are used).
 
     Returns:
         (results_data, results_masks, row_removed_stars) where row_removed_stars is
@@ -1777,16 +1841,28 @@ def process_row_step_from_queue(
             )
 
     # 5. Perform Convolution
-    nan_mask = np.isnan(state.current_array)
-    state.current_array[nan_mask] = 0.0
-    logger.info(f"[SequentialProcessor] Applying convolution for row ID {current_row_id}")
-    convolved_array = convolution_utils.apply_gaussian_convolution(state.current_array, sigma=psf_sigma)
-    # Restore NaNs on the result, not the state array which will be replaced
-    convolved_array[nan_mask] = np.nan
+    # Skipped entirely when the legacy per-SCC convolved.zarr writer is
+    # disabled -- its output is never consumed in that case (see docstring
+    # above and saver_worker(..., enabled=False)).
+    if write_per_scc_convolved_zarr:
+        nan_mask = np.isnan(state.current_array)
+        state.current_array[nan_mask] = 0.0
+        logger.info(f"[SequentialProcessor] Applying convolution for row ID {current_row_id}")
+        convolved_array = convolution_utils.apply_gaussian_convolution(state.current_array, sigma=psf_sigma)
+        # Restore NaNs on the result, not the state array which will be replaced
+        convolved_array[nan_mask] = np.nan
 
-    # 6. Extract and Return Results
-    results_data = extract_cell_results(convolved_array, state.cell_locations)
-    results_masks = {name: mask for name, mask in state.current_masks.items() if name in state.cell_locations}
+        # 6. Extract and Return Results
+        results_data = extract_cell_results(convolved_array, state.cell_locations)
+        results_masks = {name: mask for name, mask in state.current_masks.items() if name in state.cell_locations}
+    else:
+        logger.debug(
+            f"[SequentialProcessor] Skipping step-5 convolution for row ID "
+            f"{current_row_id} (per-SCC convolved.zarr writer disabled; "
+            f"shared-store publish already handled in step 3b)."
+        )
+        results_data = {name: None for name in state.cell_locations}
+        results_masks = {name: mask for name, mask in state.current_masks.items() if name in state.cell_locations}
 
     return results_data, results_masks, row_removed_stars
 
@@ -1811,6 +1887,7 @@ def sequential_processor(
     convolved_store_data_root: Optional[str] = None,
     combined_store_recipe=None,
     convolved_store_recipe=None,
+    write_per_scc_convolved_zarr: bool = True,
 ):
     """
     SPEC: This is Stage 3. It iterates through projections sequentially,
@@ -1885,6 +1962,7 @@ def sequential_processor(
                     convolved_store_data_root=convolved_store_data_root,
                     combined_store_recipe=combined_store_recipe,
                     convolved_store_recipe=convolved_store_recipe,
+                    write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
                 )
 
                 all_removed_stars.extend(row_removed_stars)
@@ -1946,8 +2024,21 @@ def run_modern_sliding_window_pipeline(
     bright_star_mag_threshold: float = 13.0,
     use_shared_convolved_store: bool = False,
     write_per_scc_convolved_zarr: bool = True,
+    oversampling_factor: int = 1,
+    mapping_csv_path: str | None = None,
 ):
-    """The top-level master orchestrator for the entire pipeline."""
+    """The top-level master orchestrator for the entire pipeline.
+
+    ``oversampling_factor``/``mapping_csv_path`` select which mapping master
+    skycells CSV to load. Callers running an OS4/MAPGRID=3 (e.g. tvwcs field
+    geometry) SCC MUST pass these through -- otherwise this function silently
+    falls back to the native OS1 CSV (via ``find_csv_file``), which drops the
+    OS4-only support/edge cells that ``downsample``'s shared convolved-store
+    completeness gate (``expected_convolved_skycells``) requires. See
+    ``docs/markdown/stages/ps1_process_technical.md`` and the mapping/remap/
+    downsample stages in ``dispatch.py``, which already resolve the correct
+    CSV via ``resolved.mapping_root`` -- this must match.
+    """
     global _child_processes
     _child_processes.clear()
     signal.signal(signal.SIGINT, shutdown_handler)
@@ -1969,13 +2060,28 @@ def run_modern_sliding_window_pipeline(
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
     try:
-        csv_path = find_csv_file(data_root, sector, camera, ccd)
+        if mapping_csv_path is not None:
+            csv_path = str(mapping_csv_path)
+        elif int(oversampling_factor) > 1:
+            from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+
+            csv_path = str(
+                scc_mapping_master_skycells_csv(
+                    data_root, sector, camera, ccd,
+                    oversampling_factor=int(oversampling_factor),
+                )
+            )
+        else:
+            csv_path = find_csv_file(data_root, sector, camera, ccd)
         projections = get_projections_from_csv(csv_path)
         if projections_limit:
             projections = projections[:projections_limit]
         df = load_csv_data(csv_path)
         expected_skycells = expected_convolved_skycells(
-            data_root, sector, camera, ccd, projections_limit=projections_limit
+            data_root, sector, camera, ccd,
+            projections_limit=projections_limit,
+            oversampling_factor=oversampling_factor,
+            mapping_csv_path=mapping_csv_path,
         )
         logger.info(f"[Pipeline] Processing {len(projections)} projections")
     except Exception as e:
@@ -2254,6 +2360,7 @@ def run_modern_sliding_window_pipeline(
                 convolved_store_data_root=data_root if use_shared_convolved_store else None,
                 combined_store_recipe=combined_store_recipe,
                 convolved_store_recipe=convolved_store_recipe,
+                write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
             )
 
             # --- Write Removed Stars CSV ---
@@ -2286,7 +2393,10 @@ def run_modern_sliding_window_pipeline(
         # re-deriving what the pipeline did.
         try:
             expected_skycells = expected_convolved_skycells(
-                data_root, sector, camera, ccd, projections_limit=projections_limit
+                data_root, sector, camera, ccd,
+                projections_limit=projections_limit,
+                oversampling_factor=oversampling_factor,
+                mapping_csv_path=mapping_csv_path,
             )
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("[Pipeline] Could not derive expected skycell inventory: %s", exc)
