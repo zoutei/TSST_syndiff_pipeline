@@ -26,29 +26,48 @@ stages:
     n_jobs: 64
     # OS4 remap stages all mapping regmaps to execute-host scratch. The
     # completed S20 lane is ~6.5 GB, so request ample local disk explicitly.
+    # (stage_regmaps_to_scratch now defaults to False globally; set true
+    # explicitly here since remap's condor_request_disk was sized for it.)
+    stage_regmaps_to_scratch: true
     condor_request_disk: 16000
     condor_request_cpus: 64
     condor_request_memory: 250_000
   ps1_process:
-    # PS1 processing was completed previously.  The S20 product is the
-    # per-SCC convolved Zarr below; do not consume the shared convolved store
-    # and do not schedule a new ps1_process job.
+    # PS1 processing was completed previously; reruns of this run's
+    # downsample stage consume the shared, cross-sector ps1_convolved.zarr /
+    # ps1_combined.zarr stores (use_shared_convolved_store must be true here
+    # to match how this SCC's ps1_process actually ran -- the dataclass
+    # default is false). This is safe as of the recipe-matched
+    # fingerprint-resolution fix in
+    # combined_store.py/convolved_store.py/field_downsample.py/
+    # padding_correction.py -- downsample always resolves the fingerprint
+    # matching *this* recipe (remove_saturated_stars=True,
+    # bright_star_mag_threshold=13.0, psf_sigma=40.0), never "whichever
+    # fingerprint has the newest mtime" from an unrelated sector/run sharing
+    # the same sky cell.
     ps1_source: stream
+    use_shared_convolved_store: true
+    write_per_scc_convolved_zarr: false
   downsample:
     geometry_mode: field
     oversampling_factor: 4
     remap_store_name: tvwcs
     output_store_name: tvwcs
-    convolved_dir: /astro/armin/koji/syndiff/data/convolved_results/sector_0020_camera_3_ccd_3.zarr
     rebuild_field_store: true
     # Dispatch writes only representative debug FITS under debug_plots/.
     materialize_fits: false
     n_jobs: 64
+    executor: condor
     condor_request_cpus: 64
     # Thread oversubscription (64 procs x unbounded BLAS threads) is now
     # fixed generically via condor.py env vars (OMP/OPENBLAS/MKL/NUMEXPR
     # NUM_THREADS=1), so 64 is safe again.
     condor_request_memory: 250000
+    # Auto-enabling under Condor tries to copy all 999 os4 regmap FITS to the
+    # execute host's local scratch disk, which can be too small (ENOSPC) and
+    # then falls back to NFS anyway, just wasting ~1 min of setup. Read
+    # regmaps from shared NFS directly, matching the original successful run.
+    stage_regmaps_to_scratch: false
 
 resources:
   mapping:
