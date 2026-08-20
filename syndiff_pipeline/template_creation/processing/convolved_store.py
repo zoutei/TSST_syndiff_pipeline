@@ -81,7 +81,7 @@ _PROVENANCE_SIDECAR_FILENAME = "_provenance.json"
 _REQUIRED_MEMBERS = (_ARRAYS_FILENAME, _HEADERS_FILENAME, _REMOVED_STARS_FILENAME)
 
 # convolution_utils.apply_gaussian_convolution production defaults.
-DEFAULT_PSF_SIGMA = 60.0
+DEFAULT_PSF_SIGMA = 40.0
 DEFAULT_RADIUS = 470
 DEFAULT_MODE = "constant"
 
@@ -298,6 +298,49 @@ def _payload_complete(cell_dir: Path) -> bool:
     if not cell_dir.is_dir():
         return False
     return all((cell_dir / name).is_file() for name in _REQUIRED_MEMBERS)
+
+
+def resolve_convolved_fingerprint_for_recipe(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    recipe: Mapping,
+    combined_fp: str,
+    *,
+    extra_input_fingerprints: Iterable[str] = (),
+    code_version: int = CONVOLVED_RECIPE_SCHEMA_VERSION,
+) -> str | None:
+    """Deterministically resolve the ``convolved_skycell`` fingerprint that
+    matches ``recipe`` (built on top of this exact upstream ``combined_fp``)
+    for ``(projection, skycell)``, or ``None`` if that exact recipe has not
+    been published.
+
+    Mirrors exactly how ``publish_convolved_cell`` derives its fingerprint.
+    Never inspects directory mtimes or "whichever fingerprint dir happens to
+    exist" -- the shared store is cross-sector/cross-run, so a different
+    recipe published later for the same cell (e.g. a different ``psf_sigma``
+    or an upstream ``combined_skycell`` built with a different star-removal
+    config) must never be picked over the one matching the caller's own
+    config. Mtime-based fallback should only ever be used, with a loud
+    warning, by callers that genuinely have no recipe context (see
+    ``field_downsample`` / ``padding_correction`` discovery helpers).
+    """
+    try:
+        input_fps = sorted({str(combined_fp), *extra_input_fingerprints})
+        rid = convolved_recipe_id(recipe, code_version)
+        fp = convolved_fingerprint(projection, skycell, rid, input_fps)
+    except Exception:
+        logger.warning(
+            "resolve_convolved_fingerprint_for_recipe failed for %s/%s (best-effort)",
+            projection,
+            skycell,
+            exc_info=True,
+        )
+        return None
+    cell_dir = convolved_cell_dir(data_root, projection, skycell, fp)
+    if not _payload_complete(cell_dir):
+        return None
+    return fp
 
 
 # ---------------------------------------------------------------------------
