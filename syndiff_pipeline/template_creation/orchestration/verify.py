@@ -1332,13 +1332,47 @@ def _count_convolved_data_arrays(zarr_path: Path, expected_names: list[str]) -> 
     return saved, missing
 
 
-def _shared_convolved_cell_published(shared_root: Path, full_skycell_name: str) -> bool:
+def _shared_convolved_cell_published(
+    shared_root: Path,
+    full_skycell_name: str,
+    *,
+    combined_recipe: dict | None = None,
+    psf_sigma: float | None = None,
+) -> bool:
     from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
 
     parsed = _projection_and_cell(full_skycell_name)
     if parsed is None:
         return False
     projection, cell = parsed
+
+    if combined_recipe is not None and psf_sigma is not None:
+        # Recipe-aware check (preferred): confirm *this run's own recipe* is
+        # actually published, not merely "some fingerprint exists" -- the
+        # shared store is cross-sector/cross-run, so an unrelated recipe can
+        # be published for the same cell without this run's recipe ever
+        # having been produced. See ``combined_store``/``convolved_store``
+        # recipe-matched resolvers and ``docs/markdown/storage_layout.md``.
+        from syndiff_pipeline.template_creation.processing.combined_store import (
+            resolve_combined_fingerprint_for_recipe,
+        )
+        from syndiff_pipeline.template_creation.processing.convolved_store import (
+            convolved_recipe as _convolved_recipe_fn,
+            resolve_convolved_fingerprint_for_recipe,
+        )
+
+        data_root = shared_root.parent.parent
+        combined_fp = resolve_combined_fingerprint_for_recipe(
+            data_root, projection, cell, combined_recipe
+        )
+        if combined_fp is None:
+            return False
+        recipe = _convolved_recipe_fn(psf_sigma=psf_sigma)
+        return (
+            resolve_convolved_fingerprint_for_recipe(data_root, projection, cell, recipe, combined_fp)
+            is not None
+        )
+
     cell_root = shared_root / projection / cell
     if not cell_root.is_dir():
         return False
@@ -1352,12 +1386,18 @@ def _shared_convolved_cell_published(shared_root: Path, full_skycell_name: str) 
 
 
 def _count_shared_convolved_cells(
-    shared_root: Path, expected_names: list[str]
+    shared_root: Path,
+    expected_names: list[str],
+    *,
+    combined_recipe: dict | None = None,
+    psf_sigma: float | None = None,
 ) -> tuple[int, list[str]]:
     missing: list[str] = []
     saved = 0
     for name in expected_names:
-        if _shared_convolved_cell_published(shared_root, name):
+        if _shared_convolved_cell_published(
+            shared_root, name, combined_recipe=combined_recipe, psf_sigma=psf_sigma,
+        ):
             saved += 1
         else:
             missing.append(name)
