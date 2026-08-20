@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -156,6 +156,7 @@ def _load_ps1_skycell(
     zstore_cache: dict[str, Any],
     skycell_df: pd.DataFrame | None = None,
     psf_sigma: float | None = None,
+    combined_recipe: Mapping | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load one skycell's convolved (image, mask); shared store first, legacy zarr fallback.
 
@@ -164,6 +165,10 @@ def _load_ps1_skycell(
     seam-corrected for cross-projection padding via
     ``padding_correction.load_padding_aware_convolved_cell`` -- see that
     module's docstring. Falls back to the legacy per-SCC zarr path unchanged.
+
+    ``combined_recipe`` is threaded through for deterministic recipe-matched
+    fingerprint discovery in the shared, cross-sector combined/convolved
+    stores (see ``field_downsample._discover_shared_convolved_fp``).
     """
     from syndiff_pipeline.template_creation.processing.field_downsample import (
         _load_zarr_skycell,
@@ -178,9 +183,12 @@ def _load_ps1_skycell(
 
             got = load_padding_aware_convolved_cell(
                 data_root, skycell, skycell_df=skycell_df, psf_sigma=psf_sigma,
+                combined_recipe=combined_recipe,
             )
         else:
-            got = _try_load_shared_convolved_arrays(data_root, skycell)
+            got = _try_load_shared_convolved_arrays(
+                data_root, skycell, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
+            )
         if got is not None:
             return got
         if legacy_zarr_path is None:
@@ -226,6 +234,7 @@ def _bin_one_skycell_all_groups(
     mapping_grid,
     skycell_df: pd.DataFrame | None = None,
     psf_sigma: float | None = None,
+    combined_recipe: Mapping | None = None,
 ) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """For one skycell, bin its contribution into every group. Returns
     ``{group_id: (tess_pixel_indices, sums, counts, mask_counts)}`` (groups
@@ -247,6 +256,7 @@ def _bin_one_skycell_all_groups(
         zstore_cache=zstore_cache,
         skycell_df=skycell_df,
         psf_sigma=psf_sigma,
+        combined_recipe=combined_recipe,
     )
     if loaded is None:
         return {}
@@ -341,6 +351,7 @@ def _linear_worker_process_skycell(skycell: str):
         base_tess_shape=p["base_tess_shape"], roi_bounds=p["roi_bounds"],
         ignore_mask=p["ignore_mask"], mapping_grid=p["mapping_grid"],
         skycell_df=p["skycell_df"], psf_sigma=p.get("psf_sigma"),
+        combined_recipe=p.get("combined_recipe"),
     )
 
 
@@ -481,7 +492,12 @@ def run_linear_downsample_scc(
 
         zstore_cache["primary"] = zarr.open(str(zarr_path), mode="r")
 
-    psf_sigma = float(getattr(resolved.stages.ps1_process, "psf_sigma", 60.0))
+    psf_sigma = float(getattr(resolved.stages.ps1_process, "psf_sigma", 40.0))
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        production_combined_recipe,
+    )
+
+    combined_recipe = production_combined_recipe(resolved.stages.ps1_process)
 
     def _process(skycell: str):
         return skycell, _bin_one_skycell_all_groups(
@@ -493,7 +509,7 @@ def run_linear_downsample_scc(
             legacy_zarr_path=legacy_zarr_path, zstore_cache=zstore_cache,
             base_tess_shape=base_tess_shape, roi_bounds=roi_bounds,
             ignore_mask=ignore_mask, mapping_grid=mapping_grid,
-            skycell_df=skycell_df, psf_sigma=psf_sigma,
+            skycell_df=skycell_df, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
         )
 
     if n_jobs_eff <= 1:
@@ -509,7 +525,7 @@ def run_linear_downsample_scc(
             "legacy_zarr_path": legacy_zarr_path, "zarr_path": zarr_path,
             "base_tess_shape": base_tess_shape, "roi_bounds": roi_bounds,
             "ignore_mask": ignore_mask, "mapping_grid": mapping_grid,
-            "psf_sigma": psf_sigma,
+            "psf_sigma": psf_sigma, "combined_recipe": combined_recipe,
         }
         results = Parallel(
             n_jobs=n_jobs_eff,

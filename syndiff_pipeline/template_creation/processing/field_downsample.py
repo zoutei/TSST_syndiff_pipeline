@@ -13,7 +13,7 @@ import json
 import logging
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
@@ -50,6 +50,8 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
     contrib_path,
     field_fits_path,
     field_fits_basename,
+    native_debug_fits_basename,
+    write_native_debug_fits,
     templates_root,
     write_contrib,
     write_field_group_fits,
@@ -302,14 +304,55 @@ def _projection_and_cell(skycell: str) -> tuple[str, str] | None:
 
 
 def _discover_shared_convolved_fp(
-    data_root: str | Path, projection: str, cell: str
+    data_root: str | Path,
+    projection: str,
+    cell: str,
+    *,
+    psf_sigma: float | None = None,
+    combined_recipe: Mapping | None = None,
 ) -> str | None:
     """Return a published fingerprint dirname under the shared store, or None.
 
-    When multiple recipe epochs exist, prefer the newest complete payload by
-    mtime (same presence check as verify's ``_shared_convolved_cell_published``).
+    Resolution order (never trust mtime when a recipe is known -- the store
+    is shared cross-sector/cross-run and a different, unrelated recipe may
+    have been published *later* for the exact same sky cell):
+
+    1. ``psf_sigma``/``combined_recipe`` both given: deterministically
+       recompute the exact fingerprint this run's own recipe maps to
+       (``convolved_store.resolve_convolved_fingerprint_for_recipe``, keyed
+       off the matching ``combined_store.resolve_combined_fingerprint_for_recipe``
+       upstream fingerprint).
+    2. An explicit "current" pointer selection
+       (``convolved_store.resolve_current_convolved_ref``), when one has
+       been published.
+    3. Newest-mtime fallback, with a loud warning -- only reached when the
+       caller has no recipe context at all.
     """
     from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        resolve_combined_fingerprint_for_recipe,
+    )
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        convolved_recipe as _convolved_recipe_fn,
+        resolve_convolved_fingerprint_for_recipe,
+        resolve_current_convolved_ref,
+    )
+
+    if psf_sigma is not None and combined_recipe is not None:
+        combined_fp = resolve_combined_fingerprint_for_recipe(
+            data_root, projection, cell, combined_recipe
+        )
+        if combined_fp is not None:
+            recipe = _convolved_recipe_fn(psf_sigma=psf_sigma)
+            fp = resolve_convolved_fingerprint_for_recipe(
+                data_root, projection, cell, recipe, combined_fp
+            )
+            if fp is not None:
+                return fp
+
+    ref = resolve_current_convolved_ref(data_root, projection, cell)
+    if ref is not None:
+        return ref.fingerprint
 
     cell_root = ps1_convolved_zarr_path(data_root) / str(projection) / str(cell)
     if not cell_root.is_dir():
@@ -323,6 +366,13 @@ def _discover_shared_convolved_fp(
         return None
     if not candidates:
         return None
+    if psf_sigma is not None or combined_recipe is not None:
+        log.warning(
+            "field_downsample: no recipe-matched or pointer-selected convolved "
+            "cell for %s/%s; falling back to newest-mtime among %d candidate(s) "
+            "-- this may not match the requested recipe",
+            projection, cell, len(candidates),
+        )
     candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
     return candidates[0].name
 
@@ -333,6 +383,7 @@ def _try_load_shared_convolved_arrays(
     *,
     skycell_df: Any = None,
     psf_sigma: float | None = None,
+    combined_recipe: Mapping | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load ``(image, mask)`` from the shared convolved store, or ``None``.
 
@@ -348,6 +399,12 @@ def _try_load_shared_convolved_arrays(
     ``linear_downsample``, so both geometry modes see an identical corrected
     array for a given skycell. If either argument is omitted, the cell is
     returned uncorrected (legacy behavior).
+
+    ``combined_recipe`` (the caller's own ``combined_store.combined_recipe``
+    dict, e.g. from ``combined_store.production_combined_recipe``), when
+    given together with ``psf_sigma``, is used for deterministic
+    recipe-matched fingerprint discovery instead of "whichever fingerprint
+    is newest" -- see ``_discover_shared_convolved_fp``.
     """
     from syndiff_pipeline.template_creation.processing.convolved_store import (
         try_load_convolved_cell,
@@ -357,7 +414,9 @@ def _try_load_shared_convolved_arrays(
     if parsed is None:
         return None
     projection, cell = parsed
-    fp = _discover_shared_convolved_fp(data_root, projection, cell)
+    fp = _discover_shared_convolved_fp(
+        data_root, projection, cell, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
+    )
     if fp is None:
         return None
     if skycell_df is not None and psf_sigma is not None:
@@ -367,6 +426,7 @@ def _try_load_shared_convolved_arrays(
 
         return load_padding_aware_convolved_cell(
             data_root, skycell, skycell_df=skycell_df, psf_sigma=psf_sigma,
+            combined_recipe=combined_recipe,
         )
     loaded = try_load_convolved_cell(data_root, projection, cell, fp)
     if loaded is None:
@@ -498,6 +558,7 @@ def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | No
             skycell,
             skycell_df=_L5_WORKER.get("skycell_df"),
             psf_sigma=_L5_WORKER.get("psf_sigma"),
+            combined_recipe=_L5_WORKER.get("combined_recipe"),
         )
         if shared is not None:
             return shared
@@ -1072,6 +1133,7 @@ def run_field_downsample_scc(
     apply_inter_skycell: bool = True,
     mapping_grid=None,
     psf_sigma: float | None = None,
+    combined_recipe: Mapping | None = None,
 ) -> dict[str, Any]:
     """
     Bin sparse contribs into the SCC templates store (L5 only).
@@ -1095,6 +1157,16 @@ def run_field_downsample_scc(
     ``doc/shared_convolved_cross_projection_simple_fix_plan.md``) -- the same
     correction applied by ``linear_downsample``, so both geometry modes see
     an identical corrected array for a given skycell.
+
+    ``combined_recipe`` (build with
+    ``combined_store.production_combined_recipe(stages.ps1_process)``), when
+    given together with ``psf_sigma``, is threaded through to the shared
+    convolved/combined store readers for deterministic recipe-matched
+    fingerprint discovery: the shared stores are cross-sector, so more than
+    one recipe (e.g. differing ``remove_saturated_stars``) may be published
+    for the same sky cell, and only a recipe-matched lookup guarantees this
+    run reads back the artifact matching its own config rather than
+    whichever fingerprint happens to have the newest mtime.
     """
     import os as _os
     import time as _time
@@ -1483,6 +1555,7 @@ def run_field_downsample_scc(
         "mapping_grid": mapping_grid,
         "skycell_df": skycell_df,
         "psf_sigma": psf_sigma,
+        "combined_recipe": combined_recipe,
     }
 
     # Validate the complete mapping identity set before any worker can write a
@@ -1849,11 +1922,10 @@ def assemble_field_group_flux(
         crop=crop,
         group_id=int(group_id) if group_scoped_contribs else None,
     )
-    flux = out["flux_sum"]
-    count = out["count"]
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mean = np.where(count > 0, flux / count, 0.0)
-    return mean.astype(np.float64)
+    # Return the raw accumulated flux sum (not the mean) -- this matches the
+    # linear-mode template convention (FLUX_SUM extension in
+    # linear_downsample.py), which never divides by COUNT.
+    return np.asarray(out["flux_sum"], dtype=np.float64)
 
 
 def assemble_field_group_count(
@@ -2013,6 +2085,7 @@ def materialize_field_fits_for_store(
     # the distortion-aware lane.  The lane-specific directory prevents an
     # OS4 temporal-WCS run from overwriting SPOC/linear debug products.
     debug_fits: list[str] = []
+    native_debug_fits: list[str] = []
     if str(prov.get("geometry_mode", "")).lower() == "temporal_wcs":
         debug_dir = root.parent.parent / "debug_plots" / "templates_tvwcs_os4" / "fits"
         debug_dir.mkdir(parents=True, exist_ok=True)
@@ -2028,6 +2101,18 @@ def materialize_field_fits_for_store(
             if src.resolve() != dst.resolve():
                 shutil.copy2(src, dst)
             debug_fits.append(str(dst))
+            try:
+                native_debug_fits.append(
+                    write_native_debug_fits(
+                        dst,
+                        output_path=debug_dir / native_debug_fits_basename(
+                            dst.name, oversampling_factor=oversampling_factor
+                        ),
+                        oversampling_factor=oversampling_factor,
+                    )
+                )
+            except ValueError as exc:
+                log.warning("Skipping native debug FITS for %s: %s", dst, exc)
 
     payload = {
         "schema_version": 1,
@@ -2036,6 +2121,7 @@ def materialize_field_fits_for_store(
         "groups": written,
         "provenance": prov,
         "debug_fits": debug_fits,
+        "native_debug_fits": native_debug_fits,
     }
     if skipped_groups:
         payload["skipped_groups"] = skipped_groups

@@ -39,6 +39,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
@@ -238,24 +239,41 @@ def _standalone_padding_wcs(
     return geometry.wcs, geometry.shape, (y_center, x_center)
 
 
-def _discover_shared_combined_fp(data_root: str | Path, projection: str, cell: str) -> str | None:
+def _discover_shared_combined_fp(
+    data_root: str | Path,
+    projection: str,
+    cell: str,
+    *,
+    combined_recipe: Mapping | None = None,
+) -> str | None:
     """Return a published combined-cell fingerprint dirname, or ``None``.
 
-    Prefers an explicit "current" pointer selection
-    (``combined_store.resolve_current_combined_ref``) when one has been
-    published, matching the shared convolved store's intended selection
-    contract. In production today nothing calls
-    ``combined_store.update_current_pointer`` yet, so this always falls back
-    to the newest complete payload by mtime -- the same discovery pattern
-    ``field_downsample._discover_shared_convolved_fp`` already uses for the
-    convolved store -- rather than silently treating every published combined
-    cell as unavailable.
+    Resolution order (never trust mtime when a recipe is known -- the store
+    is shared cross-sector/cross-run and a different, unrelated recipe may
+    have been published *later* for the exact same sky cell):
+
+    1. ``combined_recipe`` given: deterministically recompute the fingerprint
+       that recipe maps to (``combined_store.resolve_combined_fingerprint_for_recipe``).
+       This is the only way to guarantee we read back exactly what this run's
+       own config would have produced.
+    2. An explicit "current" pointer selection
+       (``combined_store.resolve_current_combined_ref``), when one has been
+       published.
+    3. Newest-mtime fallback, with a loud warning -- only reached when the
+       caller has no recipe context at all (e.g. no ``combined_recipe`` was
+       threaded in) and no pointer has been published either.
     """
     from syndiff_pipeline.template_creation.processing.combined_store import (
         _payload_complete,
         _ps1_combined_zarr_root,
+        resolve_combined_fingerprint_for_recipe,
         resolve_current_combined_ref,
     )
+
+    if combined_recipe is not None:
+        fp = resolve_combined_fingerprint_for_recipe(data_root, projection, cell, combined_recipe)
+        if fp is not None:
+            return fp
 
     ref = resolve_current_combined_ref(data_root, projection, cell)
     if ref is not None:
@@ -273,14 +291,27 @@ def _discover_shared_combined_fp(data_root: str | Path, projection: str, cell: s
         return None
     if not candidates:
         return None
+    if combined_recipe is not None:
+        log.warning(
+            "padding_correction: no recipe-matched or pointer-selected combined "
+            "cell for %s/%s; falling back to newest-mtime among %d candidate(s) "
+            "-- this may not match the requested recipe",
+            projection, cell, len(candidates),
+        )
     candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
     return candidates[0].name
 
 
-def _load_combined_image(data_root: str | Path, projection: str, cell: str) -> np.ndarray | None:
+def _load_combined_image(
+    data_root: str | Path,
+    projection: str,
+    cell: str,
+    *,
+    combined_recipe: Mapping | None = None,
+) -> np.ndarray | None:
     from syndiff_pipeline.template_creation.processing.combined_store import try_load_combined_cell
 
-    fp = _discover_shared_combined_fp(data_root, projection, cell)
+    fp = _discover_shared_combined_fp(data_root, projection, cell, combined_recipe=combined_recipe)
     if fp is None:
         return None
     loaded = try_load_combined_cell(data_root, projection, cell, fp)
@@ -309,6 +340,7 @@ def _location_correction(
     skycell_df: pd.DataFrame,
     psf_sigma: float,
     kernel_radius: int,
+    combined_recipe: Mapping | None = None,
 ) -> np.ndarray:
     """Return one location's convolved, recipient-cropped correction.
 
@@ -350,7 +382,9 @@ def _location_correction(
         if source_parsed is None:
             raise PaddingCorrectionError(f"cannot resolve identity of source {neighbor}")
         source_projection, source_cell = source_parsed
-        source_image = _load_combined_image(data_root, source_projection, source_cell)
+        source_image = _load_combined_image(
+            data_root, source_projection, source_cell, combined_recipe=combined_recipe,
+        )
         if source_image is None:
             raise PaddingCorrectionError(
                 f"required combined skycell {neighbor} for {skycell}/{location} is unavailable"
@@ -401,6 +435,7 @@ def load_padding_aware_convolved_cell(
     skycell_df: pd.DataFrame,
     psf_sigma: float,
     kernel_radius: int = 470,
+    combined_recipe: Mapping | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load one shared canonical convolved cell, additively seam-corrected.
 
@@ -411,6 +446,13 @@ def load_padding_aware_convolved_cell(
     cross-projection padding are returned unchanged. Both
     ``linear_downsample`` and ``field_downsample`` call this so the two
     modes consume an identical corrected array.
+
+    ``combined_recipe`` (the caller's own ``combined_store.combined_recipe``
+    dict, e.g. from ``combined_store.production_combined_recipe``) is
+    threaded into every own-cell and cross-projection-neighbor
+    ``combined_skycell`` lookup so this always resolves the recipe that
+    matches the caller's own config, never "whichever fingerprint is
+    newest" in the shared, cross-sector store.
     """
     from syndiff_pipeline.template_creation.processing.combined_store import (
         _projection_and_cell,
@@ -419,7 +461,9 @@ def load_padding_aware_convolved_cell(
         _try_load_shared_convolved_arrays,
     )
 
-    canonical = _try_load_shared_convolved_arrays(data_root, skycell)
+    canonical = _try_load_shared_convolved_arrays(
+        data_root, skycell, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
+    )
     if canonical is None:
         return None
     image, mask = canonical
@@ -433,7 +477,9 @@ def load_padding_aware_convolved_cell(
     if own_parsed is None:
         raise PaddingCorrectionError(f"cannot resolve projection/cell identity for {skycell}")
     own_projection, own_cell = own_parsed
-    own_combined = _load_combined_image(data_root, own_projection, own_cell)
+    own_combined = _load_combined_image(
+        data_root, own_projection, own_cell, combined_recipe=combined_recipe,
+    )
     if own_combined is None:
         raise PaddingCorrectionError(
             f"required combined skycell for {skycell} is unavailable; "
@@ -453,6 +499,7 @@ def load_padding_aware_convolved_cell(
             recipient_wcs=recipient_wcs, cell_shape=image.shape,
             own_combined=own_combined, data_root=data_root, skycell_df=skycell_df,
             psf_sigma=psf_sigma, kernel_radius=kernel_radius,
+            combined_recipe=combined_recipe,
         )
 
     corrected = np.asarray(image, dtype=np.float64).copy()

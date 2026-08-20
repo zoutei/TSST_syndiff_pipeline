@@ -544,6 +544,9 @@ def _execute_template_stage(
             mapping_master_pixels2skycells_path,
             resolve_downsample_convolved_dir,
         )
+        from syndiff_pipeline.template_creation.processing.combined_store import (
+            production_combined_recipe,
+        )
         from syndiff_pipeline.template_creation.processing.field_downsample import (
             run_field_downsample_scc,
         )
@@ -660,7 +663,8 @@ def _execute_template_stage(
             ref_ffi_path=ref_ffi,
             progress_path=progress_path,
             mapping_grid=mapping_grid,
-            psf_sigma=float(getattr(resolved.stages.ps1_process, "psf_sigma", 60.0)),
+            psf_sigma=float(getattr(resolved.stages.ps1_process, "psf_sigma", 40.0)),
+            combined_recipe=production_combined_recipe(resolved.stages.ps1_process),
         )
         field_result = dict(field_result)
         if mp.store_name == "tvwcs":
