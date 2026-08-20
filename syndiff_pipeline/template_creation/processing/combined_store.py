@@ -259,9 +259,9 @@ def combined_recipe(resolved_or_params: Any = None, **overrides: Any) -> dict:
     """
     recipe = {
         "enable_saturation_correction": bool(
-            _param(resolved_or_params, "enable_saturation_correction", True)
+            _param(resolved_or_params, "enable_saturation_correction", False)
         ),
-        "remove_saturated_stars": bool(_param(resolved_or_params, "remove_saturated_stars", False)),
+        "remove_saturated_stars": bool(_param(resolved_or_params, "remove_saturated_stars", True)),
         "bright_star_mag_threshold": float(
             _param(resolved_or_params, "bright_star_mag_threshold", 13.0)
         ),
@@ -529,6 +529,49 @@ def gaia_version_stamp(catalog_path: str | None) -> str:
         return f"{catalog_path}:unknown"
 
 
+def production_combined_recipe(ps1_process_config: Any) -> dict:
+    """Build the ``combined_skycell`` recipe from a resolved
+    ``stages.ps1_process`` config (attribute-style object, mapping, or
+    ``None``), exactly the way ``ps1_process.run_modern_sliding_window_pipeline``
+    builds it for ``seed_band_cache_from_combined_store`` /
+    ``publish_combined_cell``.
+
+    This is deliberately the single, shared place that maps a ps1_process
+    config to a recipe. Before this helper existed, the producer
+    (``ps1_process.py``) and any downstream reader that needed to recompute
+    "what recipe would this config produce" (e.g. ``downsample`` resolving
+    its own cross-projection padding correction) each built the recipe
+    dict/``gaia_version`` stamp independently -- exactly the kind of drift
+    that let a reader silently pick a wrong-recipe cell (see
+    ``field_downsample``/``padding_correction`` fingerprint discovery: they
+    used to fall back to "newest mtime" with no recipe check at all).
+    Producer and reader must always call this same function so they can
+    never disagree.
+
+    ``gaia_version`` is only stamped (rather than fixed at ``"none"``) when
+    saturation handling is actually enabled, mirroring ps1_process's own
+    logic: a catalog-independent config (both flags off) should not mint a
+    new fingerprint just because some unrelated catalog file's mtime moved.
+    """
+    enable_saturation_correction = bool(
+        _param(ps1_process_config, "enable_saturation_correction", False)
+    )
+    remove_saturated_stars = bool(_param(ps1_process_config, "remove_saturated_stars", True))
+    bright_star_mag_threshold = float(_param(ps1_process_config, "bright_star_mag_threshold", 13.0))
+    catalog_path = _param(ps1_process_config, "catalog_path", None)
+    gaia_version = (
+        gaia_version_stamp(catalog_path)
+        if (enable_saturation_correction or remove_saturated_stars)
+        else "none"
+    )
+    return combined_recipe(
+        enable_saturation_correction=enable_saturation_correction,
+        remove_saturated_stars=remove_saturated_stars,
+        bright_star_mag_threshold=bright_star_mag_threshold,
+        gaia_version=gaia_version,
+    )
+
+
 # ---------------------------------------------------------------------------
 # raw_skycell input fingerprint (bug fix: combined_skycell's Merkle
 # fingerprint must incorporate its upstream raw_skycell identity -- plan §6
@@ -613,6 +656,55 @@ def _raw_skycell_version_token(data_root: str | Path, projection: str, skycell: 
     }
 
 
+def resolve_combined_fingerprint_for_recipe(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    recipe: Mapping,
+    *,
+    raw_fp: str | None = None,
+) -> str | None:
+    """Deterministically resolve the ``combined_skycell`` fingerprint that
+    matches ``recipe`` for ``(projection, skycell)``, or ``None`` if a
+    payload for that exact recipe has not been published.
+
+    This recomputes the fingerprint exactly the way ``publish_combined_cell``
+    derives it for a given recipe -- it never inspects directory mtimes or
+    "whichever fingerprint dir happens to exist". This matters because the
+    store is shared cross-sector/cross-run: another sector or an unrelated
+    experiment may have published a *different* recipe (e.g.
+    ``remove_saturated_stars=False``) for the exact same sky cell, and that
+    publish's mtime says nothing about whether it matches the caller's own
+    config. Callers that know their own recipe (i.e. every production
+    caller) should always prefer this over mtime-based discovery; mtime
+    fallback should only ever be used, with a loud warning, when no recipe
+    context is available at all (see ``padding_correction`` /
+    ``field_downsample`` discovery helpers).
+
+    ``raw_fp`` lets a caller that already computed
+    ``raw_skycell_input_fingerprint`` reuse it (e.g. a hot loop over many
+    recipes for the same skycell); otherwise it is recomputed here.
+    """
+    try:
+        rid = combined_recipe_id(recipe)
+        resolved_raw_fp = (
+            raw_fp if raw_fp is not None else raw_skycell_input_fingerprint(data_root, projection, skycell)
+        )
+        fp = combined_fingerprint(projection, skycell, rid, [resolved_raw_fp])
+    except Exception:
+        logger.warning(
+            "resolve_combined_fingerprint_for_recipe failed for %s/%s (best-effort)",
+            projection,
+            skycell,
+            exc_info=True,
+        )
+        return None
+    cell_dir = combined_cell_dir(data_root, projection, skycell, fp)
+    if not _payload_complete(cell_dir):
+        return None
+    return fp
+
+
 def raw_skycell_input_fingerprint(data_root: str | Path, projection: str, skycell: str) -> str:
     """``raw_skycell``-kind Merkle fingerprint for one PS1 skycell, suitable
     as a ``combined_fingerprint(..., input_fingerprints=[...])`` entry.
@@ -643,18 +735,21 @@ def seed_band_cache_from_combined_store(
     skycell_names: Iterable[str],
     recipe: Mapping,
 ) -> dict[str, dict]:
-    """Load combined-store hits into a ``band_cache``-shaped dict. Never raises."""
+    """Load combined-store hits into a ``band_cache``-shaped dict. Never raises.
+
+    Uses ``resolve_combined_fingerprint_for_recipe`` (recipe-deterministic,
+    never mtime-based) so a seed hit is guaranteed to match ``recipe`` even
+    when other recipes have also been published for the same skycell.
+    """
     hits: dict[str, dict] = {}
-    rid = combined_recipe_id(recipe)
     for name in skycell_names:
         parsed = _projection_and_cell(name)
         if parsed is None:
             continue
         projection, cell = parsed
         try:
-            raw_fp = raw_skycell_input_fingerprint(data_root, projection, cell)
-            fp = combined_fingerprint(projection, cell, rid, [raw_fp])
-            loaded = try_load_combined_cell(data_root, projection, cell, fp)
+            fp = resolve_combined_fingerprint_for_recipe(data_root, projection, cell, recipe)
+            loaded = try_load_combined_cell(data_root, projection, cell, fp) if fp is not None else None
         except Exception:
             logger.warning(
                 "Combined-store seed lookup failed for %s (skipping)", name, exc_info=True
