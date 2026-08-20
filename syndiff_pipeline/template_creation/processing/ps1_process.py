@@ -507,7 +507,7 @@ def process_single_cell(bundle: dict) -> dict:
 
         logger = logging.getLogger(__name__)
         skycell_id = bundle["skycell_id"]
-        remove_saturated_stars = bundle.get("remove_saturated_stars", False)
+        remove_saturated_stars = bundle.get("remove_saturated_stars", True)
         bright_star_mag_threshold = bundle.get("bright_star_mag_threshold", 13.0)
 
         logger.info(f"[PreProcessor] Starting Source Extractor {skycell_id}")
@@ -580,7 +580,7 @@ def ingest_worker(
     zarr_store=None,
     use_local_files: bool = False,
     local_data_path: str | None = None,
-    remove_saturated_stars: bool = False,
+    remove_saturated_stars: bool = True,
     band_cache: dict | None = None,
 ):
     """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode)."""
@@ -646,7 +646,7 @@ def ingest_worker(
             logger.error(f"[{ingest_label}] Failed to load {skycell_id}: {e}", exc_info=True)
 
 
-def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_saturated_stars: bool = False, band_cache: dict = None):
+def reader_worker(task_queue: Queue, raw_cell_queue: Queue, zarr_store, remove_saturated_stars: bool = True, band_cache: dict = None):
     """Backward-compatible alias for zarr-mode ingest."""
     ingest_worker(
         task_queue,
@@ -728,7 +728,7 @@ def band_combiner_worker(raw_cell_queue: _thread_queue.Queue, combined_raw_queue
                 "combined_mask": combined_mask,
                 "combined_uncert": combined_uncert,
                 "headers_data": raw_bundle["headers_data"],
-                "remove_saturated_stars": raw_bundle.get("remove_saturated_stars", False),
+                "remove_saturated_stars": raw_bundle.get("remove_saturated_stars", True),
             }
 
             del raw_bundle
@@ -789,6 +789,7 @@ def process_coordinator(
     """
     _publish_combined = None
     if combined_store_data_root is not None and combined_store_recipe is not None:
+        from syndiff_pipeline.template_creation.processing import combined_store
         from syndiff_pipeline.template_creation.processing.combined_store import (
             _projection_and_cell,
             publish_combined_cell,
@@ -805,7 +806,7 @@ def process_coordinator(
             # two sides stay symmetric (a lookup only ever hits a fingerprint
             # this call site actually published under).
             raw_fp = raw_skycell_input_fingerprint(combined_store_data_root, projection, cell)
-            return publish_combined_cell(
+            info = publish_combined_cell(
                 combined_store_data_root,
                 projection,
                 cell,
@@ -817,6 +818,18 @@ def process_coordinator(
                 input_fingerprints=[raw_fp],
                 producer="ps1_process",
             )
+            if info is not None and info.get("fingerprint"):
+                # Defense-in-depth (plan Phase 1): select this run's own
+                # recipe as "current" for this cell. Readers that check the
+                # pointer (e.g. padding_correction, when no recipe context of
+                # their own is available) then never fall back to
+                # newest-mtime among possibly-unrelated published recipes.
+                # This never overrides recipe-matched resolution -- it is
+                # only ever a secondary/fallback selection mechanism.
+                combined_store.update_current_pointer(
+                    combined_store_data_root, projection, cell, info["fingerprint"],
+                )
+            return info
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
     if band_cache is None:
         band_cache = {}
@@ -1139,7 +1152,7 @@ def _manually_process_cell(
     skycell_name: str,
     projection: str,
     ingest_config: dict,
-    remove_saturated_stars: bool = False,
+    remove_saturated_stars: bool = True,
     gaia_catalog: Optional[pd.DataFrame] = None,
     bright_star_mag_threshold: float = 13.0,
 ) -> Optional[dict]:
@@ -1222,7 +1235,7 @@ def _gather_cells_for_row(
     combined_cell_queue: Queue,
     cell_buffer: dict,
     ingest_config: dict,
-    remove_saturated_stars: bool = False,
+    remove_saturated_stars: bool = True,
     gaia_catalog: Optional[pd.DataFrame] = None,
     bright_star_mag_threshold: float = 13.0,
 ) -> list[dict]:
@@ -1354,7 +1367,7 @@ def _wait_for_padding_cells(
     needed: set,
     band_cache: dict,
     ingest_config: dict,
-    remove_saturated_stars: bool = False,
+    remove_saturated_stars: bool = True,
     timeout: float = 180.0,
     combined_cell_queue: Queue = None,
     cell_buffer: dict = None,
@@ -1540,6 +1553,7 @@ def _publish_canonical_convolved_snapshot(
     from syndiff_pipeline.template_creation.processing.convolved_store import (
         publish_convolved_cell,
     )
+    from syndiff_pipeline.template_creation.processing import convolved_store
 
     try:
         snapshot = state.current_array.copy()
@@ -1603,7 +1617,7 @@ def _publish_canonical_convolved_snapshot(
                 continue
 
             meta = state.cell_metadata.get(cell_name, {})
-            publish_convolved_cell(
+            convolved_info = publish_convolved_cell(
                 convolved_store_data_root,
                 cell_projection,
                 cell,
@@ -1614,6 +1628,13 @@ def _publish_canonical_convolved_snapshot(
                 recipe=convolved_store_recipe,
                 combined_fingerprint=fp,
             )
+            if convolved_info is not None and convolved_info.get("fingerprint"):
+                # Defense-in-depth (plan Phase 1), mirroring the combined-store
+                # pointer update: see ``_publish_combined`` above.
+                convolved_store.update_current_pointer(
+                    convolved_store_data_root, cell_projection, cell,
+                    convolved_info["fingerprint"],
+                )
         except Exception:
             logger.warning(
                 "[SequentialProcessor] Shared convolved-store publish failed for "
@@ -1635,8 +1656,8 @@ def process_row_step_from_queue(
     ingest_config: dict,
     projection: str,
     catalog: Optional[pd.DataFrame] = None,
-    enable_saturation_correction: bool = True,
-    remove_saturated_stars: bool = False,
+    enable_saturation_correction: bool = False,
+    remove_saturated_stars: bool = True,
     csv_path: Optional[str] = None,
     pipeline_paused_event: threading.Event = None,
     band_cache: dict = None,
@@ -1876,8 +1897,8 @@ def sequential_processor(
     ingest_config: dict,
     cell_buffer: dict,
     catalog: Optional[pd.DataFrame] = None,
-    enable_saturation_correction: bool = True,
-    remove_saturated_stars: bool = False,
+    enable_saturation_correction: bool = False,
+    remove_saturated_stars: bool = True,
     csv_path: Optional[str] = None,
     pipeline_paused_event: threading.Event = None,
     band_cache: dict = None,
@@ -2013,13 +2034,13 @@ def run_modern_sliding_window_pipeline(
     ccd: int,
     data_root: str = "data",
     projections_limit: Optional[int] = None,
-    psf_sigma: float = 60.0,
+    psf_sigma: float = 40.0,
     ps1_source: str = "zarr",
     num_ingest_workers: int = 16,
     use_local_files: bool = False,
     local_data_path: str | None = None,
-    enable_saturation_correction: bool = True,
-    remove_saturated_stars: bool = False,
+    enable_saturation_correction: bool = False,
+    remove_saturated_stars: bool = True,
     catalog_path: Optional[str] = None,
     bright_star_mag_threshold: float = 13.0,
     use_shared_convolved_store: bool = False,
@@ -2186,21 +2207,17 @@ def run_modern_sliding_window_pipeline(
     combined_store_recipe = None
     try:
         from syndiff_pipeline.template_creation.processing.combined_store import (
-            combined_recipe,
-            gaia_version_stamp,
+            production_combined_recipe,
             seed_band_cache_from_combined_store,
         )
 
-        _gaia_version = (
-            gaia_version_stamp(catalog_path)
-            if (enable_saturation_correction or remove_saturated_stars)
-            else "none"
-        )
-        combined_store_recipe = combined_recipe(
-            enable_saturation_correction=enable_saturation_correction,
-            remove_saturated_stars=remove_saturated_stars,
-            bright_star_mag_threshold=bright_star_mag_threshold,
-            gaia_version=_gaia_version,
+        combined_store_recipe = production_combined_recipe(
+            {
+                "enable_saturation_correction": enable_saturation_correction,
+                "remove_saturated_stars": remove_saturated_stars,
+                "bright_star_mag_threshold": bright_star_mag_threshold,
+                "catalog_path": catalog_path,
+            }
         )
         _seed_names = set(all_regular_cell_names) - set(padding_sources.keys())
         _hits = seed_band_cache_from_combined_store(
