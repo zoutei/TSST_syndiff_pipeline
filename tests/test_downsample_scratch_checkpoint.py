@@ -141,12 +141,17 @@ class TestRegmapScratchStaging(unittest.TestCase):
             # Avoid unused-var lint for patched symbol in some runners
             self.assertTrue(callable(real_copy2))
 
-    def test_auto_detect_condor_scratch(self):
+    def test_explicit_opt_in_only(self):
+        """Staging is never auto-enabled; None/False always resolve to False,
+        even under Condor (see resolve_stage_regmaps_to_scratch docstring:
+        auto-enabling on any Condor host risked ENOSPC when local scratch
+        disk was smaller than the regmap set being staged)."""
         self.assertFalse(resolve_stage_regmaps_to_scratch(None))
         self.assertFalse(resolve_stage_regmaps_to_scratch(False))
         self.assertTrue(resolve_stage_regmaps_to_scratch(True))
         with mock.patch.dict(os.environ, {"_CONDOR_SCRATCH_DIR": "/var/condor/scratch"}):
-            self.assertTrue(resolve_stage_regmaps_to_scratch(None))
+            self.assertFalse(resolve_stage_regmaps_to_scratch(None))
+            self.assertTrue(resolve_stage_regmaps_to_scratch(True))
 
     def test_staging_summary_line(self):
         with tempfile.TemporaryDirectory() as tmpdir:

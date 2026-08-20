@@ -275,11 +275,11 @@ class Ps1DownloadStageParams:
 class Ps1ProcessStageParams:
     """Ps1ProcessStageParams."""
     projections_limit: int | None = None
-    psf_sigma: float = 60.0
+    psf_sigma: float = 40.0
     ps1_source: str = "zarr"
     num_ingest_workers: int = 16
-    enable_saturation_correction: bool = True
-    remove_saturated_stars: bool = False
+    enable_saturation_correction: bool = False
+    remove_saturated_stars: bool = True
     catalog_path: str | None = None
     bright_star_mag_threshold: float = 13.0
     use_shared_convolved_store: bool = False
@@ -329,8 +329,11 @@ class RemapStageParams:
     rebuild_remap_cache: bool = False
     rebuild_inter_skycell_cache: bool = False
     n_jobs: int = 16
-    # None → auto-enable under Condor (see resolve_stage_regmaps_to_scratch);
-    # set false when os4+ regmaps exceed the execute host's local scratch disk.
+    # Defaults to False (regmaps read directly from NFS). Set true explicitly
+    # to stage regmaps to the execute host's local scratch disk first, but
+    # only when that disk is known to be ample for the regmap set (os4+
+    # regmaps for large SCCs can exceed a default execute-host scratch disk
+    # and cause ENOSPC); see resolve_stage_regmaps_to_scratch.
     stage_regmaps_to_scratch: bool | None = None
     executor: str = "condor"
     condor_request_cpus: int = 32
@@ -378,6 +381,8 @@ class DownsampleStageParams:
     n_jobs: int = 16
     skycells_per_batch: int = 20
     log_level: str = "INFO"
+    # Defaults to False (regmaps read directly from NFS); set true explicitly
+    # to stage to local scratch disk when it's known to be ample.
     stage_regmaps_to_scratch: bool | None = None
     checkpoint_skycells: bool = False
     executor: str = "local"

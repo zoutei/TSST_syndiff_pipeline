@@ -247,10 +247,18 @@ def resolve_downsample_scratch_dir() -> Path:
 
 
 def resolve_stage_regmaps_to_scratch(stage_regmaps_to_scratch: bool | None) -> bool:
-    """Auto-enable staging on Condor when ``stage_regmaps_to_scratch`` is None."""
-    if stage_regmaps_to_scratch is not None:
-        return stage_regmaps_to_scratch
-    return "_CONDOR_SCRATCH_DIR" in os.environ or "CONDOR_JOB_AD" in os.environ
+    """Explicit opt-in only: never stage regmaps to local scratch unless
+    ``stage_regmaps_to_scratch`` is explicitly ``True``.
+
+    Previously this auto-enabled whenever ``_CONDOR_SCRATCH_DIR``/
+    ``CONDOR_JOB_AD`` was present (i.e. any Condor execute host), regardless of
+    whether that host's local scratch disk was large enough for the regmap
+    set being staged (os4+ regmaps for ~1000 skycells can exceed it, causing
+    an ``ENOSPC`` mid-staging that wastes a minute or more before falling back
+    to NFS anyway). Staging is a pure performance optimization when local
+    scratch disk is known to be ample; NFS reads always work correctly.
+    """
+    return bool(stage_regmaps_to_scratch)
 
 
 def stage_regmap_files_to_scratch(
