@@ -248,6 +248,22 @@ Shared PS1 stores (decision #14):
   ps1_convolved.zarr/    # canonical convolved cells (PR5, gated)
 ```
 
+`ps1_combined.zarr`/`ps1_convolved.zarr` are content-addressed by
+`{projection}/{cell}/{fingerprint}/` and shared **across every sector/run**
+that touches the same sky cell — publishing is append-only and immutable, so
+more than one recipe (e.g. differing `remove_saturated_stars`,
+`bright_star_mag_threshold`, `psf_sigma`) can legitimately accumulate
+side-by-side for the same cell. Readers must never select "whichever
+fingerprint has the newest mtime" — a newer, unrelated publish under a
+different recipe can silently reintroduce saturated stars. Always resolve
+via `combined_store.resolve_combined_fingerprint_for_recipe` /
+`convolved_store.resolve_convolved_fingerprint_for_recipe` (deterministically
+recomputed from the caller's own recipe), falling back to the `current.json`
+pointer (`resolve_current_combined_ref`/`resolve_current_convolved_ref`) and
+only then to mtime, with a loud warning, when no recipe context is available
+at all. `scripts/audit_shared_store_recipes.py` reports cells with genuinely
+conflicting recipes (read-only, does not mutate the store).
+
 SCC-scoped diff store (field mode v2 — SCC-primary write-through):
 
 ```text
