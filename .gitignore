@@ -8,7 +8,9 @@ deployment.yaml
 
 ##DO NOT COMMIT GITIGNORE BELOW THIS LINE
 config/example/
-scripts/
+scripts/*
+!scripts/
+!scripts/colab_job.py
 dev/
 doc/
 docs/_build/
