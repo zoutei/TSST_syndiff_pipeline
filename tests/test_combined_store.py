@@ -47,8 +47,8 @@ def _payload(seed: int = 0):
 
 def test_combined_recipe_defaults():
     recipe = cs.combined_recipe()
-    assert recipe["enable_saturation_correction"] is True
-    assert recipe["remove_saturated_stars"] is False
+    assert recipe["enable_saturation_correction"] is False
+    assert recipe["remove_saturated_stars"] is True
     assert recipe["bright_star_mag_threshold"] == 13.0
     assert recipe["band_weights"] == cs.DEFAULT_BAND_WEIGHTS
     assert recipe["gaia_version"] is None

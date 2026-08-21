@@ -184,6 +184,67 @@ Before any tasks are dispatched, `identify_all_padding_sources()` scans every pr
 - `band_cache_uses`: `{skycell_name → use_count}` — how many times each cell will be needed (for cache eviction)
 - `row_padding_map`: `{(projection, row_id) → set of skycell_names}` — which cells each step needs
 
+### Per-Projection Canonical Classification (tiered ingest, count-based cut)
+
+When `use_shared_convolved_store` is active (`combined_store_recipe` and
+`convolved_store_recipe` both resolved), every projection is classified
+**before** the interleaved task list is built — this decides whether the
+projection needs the sliding-row machinery at all. See
+`doc/ps1_process_tiered_ingest_architecture_plan.md` for the full design
+rationale; summary:
+
+1. For each projection, `convolved_store.classify_projection_missing_cells`
+   does a cheap, read-only, per-cell fingerprint check (no pixel loads,
+   reusing `skycell_already_canonical`) and returns the subset of cells
+   that are **not** already published for the caller's exact recipe.
+2. **Zero missing cells** → the projection is skipped entirely; its cells
+   are added to `already_canonical_cells` and never enter the task list.
+3. **`1 <= missing_count <= MISSING_CELL_THRESHOLD` (default 5)** →
+   `process_sparse_projection` handles it directly, in-process, with no
+   worker pipeline involvement at all (see below). If any required cell
+   (the missing cell itself or one of its up-to-8 neighbors) turns out to
+   be a genuine cold miss needing raw fetch + band-combine + SEP star
+   removal, `process_sparse_projection` returns `None` and the whole
+   projection falls back to the dense path instead — sparse publish is
+   all-or-nothing per projection, decided before any partial state is
+   written.
+4. **`missing_count > MISSING_CELL_THRESHOLD`** (or classification is
+   disabled/unavailable) → the projection is added to `dense_projections`
+   and goes through the **unchanged** sliding-row task-list/worker
+   pipeline described in the rest of this document. As of the initial
+   rollout, dense projections process their *entire* row range exactly as
+   before this change — the row-range-bounding refinement described in the
+   architecture plan (start one row before the first missing row, stop
+   after the last) is a documented future optimization, not yet
+   implemented.
+
+Only projections in `dense_projections` (not the full `projections` list)
+proceed to the interleaved-task-list and `sequential_processor` steps
+below. `produced_skycells` for the run is the union of
+`sequential_processor`'s own result, `already_canonical_cells`, and
+whatever `process_sparse_projection` published.
+
+#### The per-skycell path (`process_sparse_projection` / `convolve_single_skycell`)
+
+For each missing cell, `convolve_single_skycell` builds one small
+`(cell_height + 2*radius) x (cell_width + 2*radius)` array — **not** a
+full neighbor cell or a stitched multi-cell mosaic — with the cell's own
+full pixel data in the center and only a `radius`-wide border strip (or
+`radius × radius` corner block) from each of up to 8 same-row/adjacent-row
+neighbors filling the padded margin. Any side with no neighbor (true grid
+edge) stays `NaN`, matching `assemble_row_from_bundles`'s fill convention.
+Because the Gaussian kernel is truncated at `radius` pixels
+(`truncate = radius / sigma`), this reproduces byte-for-byte what the
+existing whole-row/local-window convolution would have produced for that
+cell. All required cells (center + neighbors, deduplicated across the
+projection's missing cells) are fetched once via the same tier-1/2/3 lazy
+lookup Part A uses, kept in a small dict bounded by roughly
+`missing_count × 9`, then convolved and published
+(`_publish_single_convolved_cell`, mirroring
+`_publish_canonical_convolved_snapshot`'s fingerprint-chain logic) — no
+`ingest_worker`/`band_combiner_worker`/`ProcessPoolExecutor`/`saver_worker`
+involvement.
+
 ### Interleaved Task List
 
 All tasks are placed into `task_queue` in a carefully computed order **before** the sequential processor starts. The order is designed so that padding source cells enter the pipeline immediately after the regular cells they accompany, giving the PPE workers maximum lead time before the main thread needs them.
@@ -218,11 +279,14 @@ After putting all tasks in `task_queue`, `None` signals are sent to terminate th
 
 For each task the ingest worker:
 
-1. **Checks `band_cache`** (regular tasks only): if already processed and cached, emits a lightweight `"regular_cache_hit"` bundle — no I/O.
-2. **Loads the four bands** — in the default `ps1_source: "zarr"` mode via `load_skycell_bands_masks_and_headers()` (r, i, z, y band arrays, mask arrays, variance arrays, FITS header strings); in `ps1_source: "stream"` mode by downloading the skycell FITS files directly (no shared Zarr store required).
-3. **Puts a `raw_bundle`** onto `raw_cell_queue` with all the loaded arrays plus task type metadata.
+1. **Checks `band_cache`** (regular tasks only, tier 1 — already loaded this run): if already processed and cached, emits a lightweight `"regular_cache_hit"` bundle — no I/O.
+2. **Tier 2 — shared combined-store lookup (regular tasks only)**: if `combined_store_data_root`/`combined_store_recipe` are set (shared-store campaigns), calls `seed_band_cache_from_combined_store()` for **just this one cell** (a single-item list). On a hit, the cell's `combined_image`/`combined_mask` are populated into `band_cache` and the same lightweight `regular_cache_hit` bundle is forwarded — no raw fetch, no band-combine, no SEP star removal for this cell.
+3. **Loads the four bands** (only on a tier-1 and tier-2 miss) — in the default `ps1_source: "zarr"` mode via `load_skycell_bands_masks_and_headers()` (r, i, z, y band arrays, mask arrays, variance arrays, FITS header strings); in `ps1_source: "stream"` mode by downloading the skycell FITS files directly (no shared Zarr store required).
+4. **Puts a `raw_bundle`** onto `raw_cell_queue` with all the loaded arrays plus task type metadata.
 
 `raw_cell_queue` has `maxsize = max(6, 2 × num_ingest_workers)` (32 at the default worker count). The many ingest threads exist to hide network/disk latency; the queue bound provides the memory backstop.
+
+**Tier 2 lookup is per-cell, not bulk.** An earlier version of this pipeline called `seed_band_cache_from_combined_store()` once, eagerly, for *every* regular cell in the SCC before any row processing began — for an SCC that shares most of its projections with already-processed neighboring sectors (high store-hit rate), this loaded hundreds of cells' full `combined_image`/`combined_mask` arrays (~248 MB/cell) into one unbounded dict at once, causing an OOM (measured: 865 cells × ~248 MB ≈ 214 GB, tripping a 300 GB Condor cgroup limit). The per-cell lookup above bounds tier-2 memory to at most `num_ingest_workers` cells in flight, matching the memory-safety envelope raw ingest already had. See §15 and `doc/ps1_process_tiered_ingest_architecture_plan.md` (Part A).
 
 ---
 
@@ -420,6 +484,20 @@ Places each cell's `combined_image` into the master array at the correct x-offse
 
 After step `i` is complete, `advance_sliding_window` moves `next_array` → `current_array`, resets `next_array` to NaN, and updates all position tracking. Step `i+1` does not re-gather row `i+1` (it becomes the new current row that was the previous next row).
 
+### Step 3b — Shared convolved-store canonical snapshot (per-cell skip)
+
+When the caller opts into the shared, content-addressed convolved store (`use_shared_convolved_store: true`, i.e. `convolved_store_recipe`/`convolved_store_data_root`/`combined_store_recipe` are all set), `process_row_step_from_queue` calls `_publish_canonical_convolved_snapshot` immediately after `apply_cross_row_padding` and *before* `apply_cross_projection_padding` — the one point in the row's lifecycle where `state.current_array` still holds the same-projection-only master array that the canonical cell definition requires. It operates on an independent copy and never mutates `state.current_array`, so the unchanged step 5 full convolution/save path is unaffected either way.
+
+This function is per-cell-skip-aware and unconditional (no config flag disables it):
+
+1. **Pass 1 (cheap, read-only)**: for every cell currently placed in the row, resolve its `combined_fingerprint` the same deterministic way `combined_store.py` does, and check `convolved_store.skycell_already_canonical` — this recomputes the resolved `convolved_fingerprint` on top of that `combined_fingerprint` and confirms an actually-published `convolved_skycell` payload exists for the caller's exact recipe chain (band weights, `apply_flux_conv`, saturated-star removal params, `gaia_version`, `psf_sigma`/`radius`/`mode` all baked in). No convolution happens in this pass.
+2. **If every cell in the row is already canonical**, the function returns immediately — zero convolution calls for that row.
+3. **Otherwise**, only the non-canonical cells are (re)published:
+   - If the missing fraction is below `ROW_FALLBACK_THRESHOLD = 0.2`, `_convolve_local_windows_for_missing_cells` convolves merged, `±radius`-padded local windows around just those cells (adjacent missing cells whose windows would overlap are merged into one convolution call — "contiguous-run batching"). Because the Gaussian kernel is truncated at `radius` pixels, this reproduces byte-for-byte what convolving the whole row and cropping would have produced.
+   - Otherwise (≥20% of the row missing), `_convolve_whole_row_snapshot` falls back to the pre-optimization behavior of convolving the entire row once — at that missing fraction, per-cell call/I-O overhead outweighs the FLOPs saved by skipping already-canonical cells.
+
+Cells with no actually-published `combined_skycell` record on disk (e.g. a dual-role cell only ever cached as a cross-projection padding source) are skipped for this publish rather than fabricating a fingerprint edge to nothing.
+
 ---
 
 ## 8. Cross-Row Padding
@@ -579,7 +657,11 @@ The coordinator polls `psutil.virtual_memory().available` every iteration. If av
 
 ### Layer 5: Process cleanup on exit
 
-`atexit.register(_cleanup_child_processes)` and a `try/finally` block in the pipeline orchestrator ensure that PPE worker processes are forcefully terminated if the main process exits for any reason (including an OOM kill of a subprocess), preventing orphaned worker processes from accumulating across restarts.
+`atexit.register(_cleanup_child_processes)` and a `try/finally` block in the pipeline orchestrator ensure that PPE worker processes are forcefully terminated if the main process exits for any reason (including an OOM kill of a subprocess), preventing orphaned worker processes from accumulating across restarts. `_cleanup_child_processes` reads `getattr(_active_executor, "_processes", None) or {}` — the executor's `_processes` attribute can be present but `None` post-shutdown, not merely absent, so a bare `getattr(..., {})` default is insufficient.
+
+### Layer 6: Per-cell (not bulk) shared combined-store lookup
+
+Fixed 2026-08-20: `seed_band_cache_from_combined_store()` used to be called once, eagerly, for every regular skycell in the SCC (shared-store campaigns only) before any row processing started — for a re-run sharing most projections with already-processed sectors, this loaded hundreds of cells' full arrays (~248 MB/cell) into one unbounded dict at once (865 cells × ~248 MB ≈ 214 GB in the incident that surfaced this, tripping a 300 GB Condor cgroup limit). It is now called per-cell, lazily, inside `ingest_worker` on a tier-1 (`band_cache`) miss (§4) — bounded by `num_ingest_workers` cells in flight, same envelope as raw ingest. See `doc/ps1_process_tiered_ingest_architecture_plan.md`.
 
 ---
 
@@ -631,6 +713,7 @@ All queues use `queue.Queue` (threading) rather than `multiprocessing.Queue`. Th
 | `num_band_combiners` | 4 | Band combiner thread count (fixed) |
 | `num_source_extractors` | dynamic | SEP subprocess count: `min(ncpus // 2, available_gb // 4)` |
 | `band weights` | r=0.238, i=0.344, z=0.283, y=0.135 | PS1 band combination weights |
+| `ROW_FALLBACK_THRESHOLD` | 0.2 | Fraction of non-canonical cells in a row at/above which step 3b falls back to whole-row convolution instead of local windows |
 
 ---
 

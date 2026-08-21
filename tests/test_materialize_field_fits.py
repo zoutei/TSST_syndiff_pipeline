@@ -77,6 +77,19 @@ class TestMaterializeFieldFits(unittest.TestCase):
             "mapping_grid": grid.to_mapping_dict(),
             "base_tess_shape": [NY, NX],
             "geometry_provenance": {"temporal_wcs_frame_contract_fingerprint": "fp-a"},
+            "science_pad_policy": "neutral_invalid",
+            "template_support_bounds_ffi": {
+                "x_min": grid.template_xmin,
+                "x_max": grid.template_xmax,
+                "y_min": grid.template_ymin,
+                "y_max": grid.template_ymax,
+            },
+            "pad_native": {
+                "left": grid.pad_left,
+                "right": grid.pad_right,
+                "bottom": grid.pad_bottom,
+                "top": grid.pad_top,
+            },
         }))
         self.assertEqual(
             validate_frozen_field_geometry(
@@ -307,8 +320,8 @@ class TestMaterializeFieldFits(unittest.TestCase):
         flux_g1 = assemble_field_group_flux(
             self.store, shifts_df, 1, shape=(NY, NX)
         )
-        self.assertAlmostEqual(float(flux_g0[2, 3]), 10.0)
-        self.assertAlmostEqual(float(flux_g1[2, 3]), 10.0)
+        self.assertAlmostEqual(float(flux_g0[2, 3]), 30.0)
+        self.assertAlmostEqual(float(flux_g1[2, 3]), 60.0)
 
         with fits.open(find_field_fits_by_group_id(self.store, 0)) as hdul:
             np.testing.assert_allclose(hdul[0].data, flux_g0)

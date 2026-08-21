@@ -343,6 +343,119 @@ def resolve_convolved_fingerprint_for_recipe(
     return fp
 
 
+def skycell_already_canonical(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    combined_recipe: Mapping,
+    convolved_recipe: Mapping,
+    *,
+    raw_fp: str | None = None,
+) -> bool:
+    """``True`` iff a *complete* ``convolved_skycell`` payload for
+    ``(projection, skycell)`` already exists under the exact recipe chain
+    ``combined_recipe -> convolved_recipe`` that a caller's own config would
+    produce -- i.e. this cell can be skipped entirely (no re-fetch, no
+    re-combine, no re-convolve) rather than reprocessed.
+
+    This is a per-cell, read-only, best-effort check (never raises; a
+    resolution failure conservatively returns ``False``, forcing normal
+    reprocessing) intended to run *before* any expensive PS1 fetch/combine/
+    convolution work is dispatched for a cell, not just before the store
+    write.
+
+    Correctness is anchored entirely in the fingerprint chain, not in any
+    parameter this function inspects directly: ``combined_recipe`` must be
+    built the same way ``combined_store.production_combined_recipe`` builds
+    it (baking in ``band_weights``, ``apply_flux_conv``,
+    ``remove_saturated_stars``, ``enable_saturation_correction``,
+    ``bright_star_mag_threshold``, ``gaia_version``), and
+    ``convolved_recipe`` the same way ``convolved_store.convolved_recipe``
+    builds it (``psf_sigma``, ``radius``, ``mode``). Two runs can only
+    resolve to the same convolved fingerprint here if *every one* of those
+    upstream combined-recipe parameters matches in addition to the
+    convolution parameters -- there is no way to get a false "already
+    canonical" positive on convolution params alone, because
+    ``convolved_fingerprint`` always Merkles in the resolved
+    ``combined_fingerprint`` as one of its inputs (mirrors exactly what
+    ``ps1_process._publish_canonical_convolved_snapshot`` already does per
+    cell, just checked *before* convolving instead of after).
+
+    ``raw_fp`` lets a caller that already computed
+    ``raw_skycell_input_fingerprint`` for this cell reuse it (e.g. a hot
+    loop resolving many cells per row); otherwise it is recomputed here.
+    """
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        raw_skycell_input_fingerprint,
+        resolve_combined_fingerprint_for_recipe,
+    )
+
+    try:
+        combined_fp = resolve_combined_fingerprint_for_recipe(
+            data_root, projection, skycell, combined_recipe, raw_fp=raw_fp,
+        )
+        if combined_fp is None:
+            # No published combined_skycell record under this exact recipe
+            # yet -- the convolved cell (keyed on this combined_fp) cannot
+            # exist either. Never fabricate an edge to a missing upstream.
+            return False
+        convolved_fp = resolve_convolved_fingerprint_for_recipe(
+            data_root, projection, skycell, convolved_recipe, combined_fp,
+        )
+    except Exception:
+        logger.warning(
+            "skycell_already_canonical failed for %s/%s (best-effort, treating "
+            "as not-canonical)",
+            projection,
+            skycell,
+            exc_info=True,
+        )
+        return False
+    return convolved_fp is not None
+
+
+def classify_projection_missing_cells(
+    data_root: str | Path,
+    projection: str,
+    cell_names: Iterable[str],
+    combined_recipe: Mapping,
+    convolved_recipe: Mapping,
+) -> set[str]:
+    """Cheap, upfront, per-projection classification for the tiered ingest
+    architecture (see ``doc/ps1_process_tiered_ingest_architecture_plan.md``,
+    Part B, step 1).
+
+    Returns the subset of ``cell_names`` (each a full ``skycell.<projection>.<cell>``
+    identity) that is NOT already canonical under the exact recipe chain
+    ``combined_recipe -> convolved_recipe`` -- i.e. the cells that actually
+    need (re)convolving. Built entirely from ``skycell_already_canonical``
+    (fingerprint/path checks only, no pixel array loads), so this is cheap
+    enough to run for every cell in a projection before any task dispatch.
+    """
+    missing: set[str] = set()
+    for cell_name in cell_names:
+        parsed = _projection_and_cell(cell_name)
+        if parsed is None:
+            missing.add(cell_name)
+            continue
+        cell_projection, cell = parsed
+        try:
+            already_canonical = skycell_already_canonical(
+                data_root, cell_projection, cell, combined_recipe, convolved_recipe,
+            )
+        except Exception:
+            logger.warning(
+                "classify_projection_missing_cells: canonical check failed for "
+                "%s (treating as missing/needs-conv)",
+                cell_name,
+                exc_info=True,
+            )
+            already_canonical = False
+        if not already_canonical:
+            missing.add(cell_name)
+    return missing
+
+
 # ---------------------------------------------------------------------------
 # Publish / load
 # ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ from syndiff_pipeline.template_creation.processing.field_downsample import (
 from syndiff_pipeline.template_creation.processing.field_templates import (
     FieldManifest,
     build_field_fits_header,
+    write_native_debug_fits,
     write_contrib,
 )
 
@@ -55,7 +56,7 @@ def test_temporal_materialization_writes_lane_specific_debug_fits(tmp_path: Path
     shifts = pd.DataFrame({"group_id": [0], "skycell": ["skycell.1.1"], "sx_int": [0], "sy_int": [0]})
     result = materialize_field_fits_for_store(
         store, shifts, sector=20, camera=3, ccd=3,
-        base_tess_shape=(2, 2), oversampling_factor=4,
+        base_tess_shape=(8, 8), oversampling_factor=4,
         provenance={"geometry_mode": "temporal_wcs", "temporal_wcs_version": "v1"},
         mapping_grid=_grid(),
     )
@@ -65,3 +66,38 @@ def test_temporal_materialization_writes_lane_specific_debug_fits(tmp_path: Path
     with fits.open(debug) as hdul:
         assert hdul[1].header["TVWCSVER"] == "v1"
         assert hdul[1].header["OVERSAMP"] == 4
+    native = Path(result["native_debug_fits"][0])
+    assert native == debug.with_name("syndiff_field_s0020_3_3_os4_gid0_native.fits.fz")
+
+
+def test_native_debug_fits_sums_flux_and_count(tmp_path: Path):
+    source = tmp_path / "source.fits"
+    flux = np.arange(16, dtype=np.float32).reshape(4, 4)
+    count = np.ones((4, 4), dtype=np.float32)
+    fits.HDUList([
+        fits.PrimaryHDU(),
+        fits.ImageHDU(flux, name="COMPRESSED_IMAGE"),
+        fits.ImageHDU(count, name="COUNT"),
+    ]).writeto(source)
+
+    output = write_native_debug_fits(source, oversampling_factor=2)
+    assert Path(output).name == "source_native.fits.fz"
+    with fits.open(output) as hdul:
+        np.testing.assert_allclose(hdul[1].data, [[10, 18], [42, 50]])
+        np.testing.assert_allclose(hdul[2].data, [[4, 4], [4, 4]])
+        assert hdul[1].header["OVERSAMP"] == 1
+        assert hdul[1].header["SRCOS"] == 2
+        assert hdul[1].header["BLKSUM"] == 2
+
+
+def test_native_debug_fits_rejects_non_divisible_shape(tmp_path: Path):
+    source = tmp_path / "source.fits"
+    fits.HDUList([
+        fits.PrimaryHDU(),
+        fits.ImageHDU(np.ones((3, 4), dtype=np.float32)),
+        fits.ImageHDU(np.ones((3, 4), dtype=np.float32), name="COUNT"),
+    ]).writeto(source)
+
+    import pytest
+    with pytest.raises(ValueError, match="not divisible"):
+        write_native_debug_fits(source, oversampling_factor=2)

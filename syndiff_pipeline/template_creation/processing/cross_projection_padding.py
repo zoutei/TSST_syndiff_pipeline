@@ -667,7 +667,7 @@ def _process_padding_job(job, state, config, metadata, master_wcs, master_wcs_ne
         return False
 
 
-def apply_cross_projection_padding(state, config, metadata: dict, current_row_id: int, next_row_id: Optional[int], ingest_config: dict, csv_path: str, band_cache: dict = None, remove_saturated_stars: bool = False):
+def apply_cross_projection_padding(state, config, metadata: dict, current_row_id: int, next_row_id: Optional[int], ingest_config: dict, csv_path: str, band_cache: dict = None, remove_saturated_stars: bool = True):
     """
     Main entry point for applying cross-projection padding.
     Parallelized version. Accepts optional band_cache to skip zarr load + band

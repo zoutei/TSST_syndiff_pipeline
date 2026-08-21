@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from syndiff_pipeline.template_creation.processing import combined_store as cs
 from syndiff_pipeline.template_creation.processing import convolved_store as vs
@@ -149,3 +150,55 @@ def test_convolved_discovery_without_recipe_falls_back_to_mtime_with_warning(
 
     fp = fd._discover_shared_convolved_fp(tmp_path, _PROJECTION, _CELL)
     assert fp == wrong["fingerprint"]
+
+
+def test_convolved_discovery_with_missing_recipe_never_uses_pointer_or_mtime(tmp_path: Path):
+    """A production L5 call must fail its audit, not borrow another recipe."""
+    wrong_combined = _publish_combined(tmp_path, remove_saturated_stars=False)
+    wrong = _publish_convolved(
+        tmp_path, combined_fp=wrong_combined["fingerprint"], psf_sigma=40.0,
+    )
+
+    requested = cs.combined_recipe(remove_saturated_stars=True)
+    assert fd._discover_shared_convolved_fp(
+        tmp_path, _PROJECTION, _CELL, psf_sigma=40.0, combined_recipe=requested,
+    ) is None
+
+    payload = {
+        "data_root": str(tmp_path),
+        "shared_convolved_store": True,
+        "psf_sigma": 40.0,
+        "combined_recipe": requested,
+        "legacy_zarr_path": None,
+    }
+    assert not fd._convolved_skycell_available(payload, _SKYCELL)
+    assert wrong["fingerprint"]
+
+
+def test_padding_combined_discovery_with_missing_recipe_never_uses_pointer_or_mtime(tmp_path: Path):
+    _publish_combined(tmp_path, remove_saturated_stars=False)
+    requested = cs.combined_recipe(remove_saturated_stars=True)
+    assert pc._discover_shared_combined_fp(
+        tmp_path, _PROJECTION, _CELL, combined_recipe=requested,
+    ) is None
+
+
+def test_l5_completeness_audit_requires_the_requested_shared_recipe(tmp_path: Path):
+    """The pre-worker audit rejects a complete-but-wrong shared artifact."""
+    wrong_combined = _publish_combined(tmp_path, remove_saturated_stars=False)
+    _publish_convolved(tmp_path, combined_fp=wrong_combined["fingerprint"], psf_sigma=40.0)
+    requested = cs.combined_recipe(remove_saturated_stars=True)
+    payload = {
+        "data_root": str(tmp_path),
+        "shared_convolved_store": True,
+        "psf_sigma": 40.0,
+        "combined_recipe": requested,
+    }
+
+    with pytest.raises(fd.L5CompletenessError) as excinfo:
+        fd._validate_l5_convolved_completeness(
+            master_skycells={_SKYCELL},
+            required_skycells={_SKYCELL},
+            payload=payload,
+        )
+    assert excinfo.value.diagnostics["absent_from_store"] == [_SKYCELL]
