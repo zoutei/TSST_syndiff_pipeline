@@ -1,7 +1,8 @@
 """
-Target-level kernel fit on the min-background FFI (HP1 → photutils → HP2).
+Target-level kernel fit on the min-background FFI: 3-round hotpants +
+robust TESSreduce background loop (HP1 -> bkg1 -> HP2 -> bkg2 -> HP3 final).
 
-Extracts ``kernel_solution`` from Hotpants round 2 (``hp_bgo=0``).
+Extracts ``kernel_solution`` from Hotpants round 3 (``hp_bgo=0``).
 """
 
 from __future__ import annotations
@@ -34,9 +35,6 @@ from syndiff_pipeline.difference_imaging.stages.kernel import (
     build_kernel_basis,
     kernel_arrays_to_npz_dict,
     kernel_from_hotpants_result,
-)
-from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
-    photutils_background_masked,
 )
 from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
     estimate_tessreduce_residual_background,
@@ -192,13 +190,18 @@ def run_kernel_fit(
     template_dir: Optional[str] = None,
 ) -> KernelFitResult:
     """
-    Fit PSF kernel on angle-ranked min-background FFI through HP1 + phot + HP2.
+    Fit PSF kernel on angle-ranked min-background FFI through a 3-round
+    hotpants + robust TESSreduce background loop (HP1 -> bkg1 -> HP2 -> bkg2
+    -> HP3 final).
 
     Kernel NPZ and metadata are written under *artifact_dir* (typically
     ``ws/kernel_fit/``), not the event root.
     """
-    from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
-    from syndiff_pipeline.difference_imaging.stages.hotpants import _resolve_hotpants_mask_array
+    from syndiff_pipeline.difference_imaging.stages.hotpants import (
+        _padded_crop_bounds,
+        _resolve_hotpants_mask_array,
+        _resolve_linear_template_pad,
+    )
 
     meta_root = artifact_dir or debug_ws_dir or output_dir
     os.makedirs(meta_root, exist_ok=True)
@@ -243,17 +246,19 @@ def run_kernel_fit(
         template_path = f"field:group_id={group_id_for_ffi(manifest, min_bg_path)}"
         mapping_grid = getattr(field_ctx, "mapping_grid", None)
         if mapping_grid is not None:
-            tmpl_bounds = mapping_grid.template_ffi_bounds()
+            # The field-store contrib canvas is already sized to (and local
+            # to) the MAPGRID template-support window -- ctx.base_tess_shape
+            # equals mapping_grid.array_shape_os()/array_shape_native()
+            # exactly. Passing absolute FFI pixel bounds (e.g.
+            # template_ffi_bounds(), which start at ffi_xmin/ffi_ymin, not 0)
+            # as a *local* array crop mis-indexes the canvas -- for negative
+            # ffi_ymin this silently wraps and returns an empty slice. Request
+            # the whole (already correctly sized) canvas instead.
             field_template = assemble_field_template_for_ffi(
                 field_ctx,
                 manifest,
                 min_bg_path,
-                crop=(
-                    int(tmpl_bounds["x_min"]),
-                    int(tmpl_bounds["x_max"]),
-                    int(tmpl_bounds["y_min"]),
-                    int(tmpl_bounds["y_max"]),
-                ),
+                crop=None,
             )
         else:
             os_factor = max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
@@ -285,25 +290,23 @@ def run_kernel_fit(
     )
 
     ffi, err = _load_ffi_cropped(min_bg_path, crop_bounds)
-    template = (
-        field_template
-        if field_template is not None
-        else _load_template_cropped(template_path, crop_bounds)
-    )
-    pad_rows = 0
     mapping_grid = getattr(field_ctx, "mapping_grid", None) if field_ctx is not None else None
-    if mapping_grid is None:
-        raise ValueError("kernel fitting requires MAPGRID=3 geometry")
-    if mapping_grid is not None:
-        from syndiff_pipeline.common.grid_pairing import (
-            prepare_science_template_pairing,
-            pad_science_array,
+    linear_pad = 0
+    if field_template is not None:
+        template = field_template
+    elif mapping_grid is None:
+        # Linear mode: validate the template's on-disk support covers
+        # crop_bounds with the standard convolution margin, then load exactly
+        # that padded rectangle as real pixels (see
+        # hotpants._resolve_linear_template_pad).
+        linear_pad = _resolve_linear_template_pad(template_path, crop_bounds) or 0
+        template = _load_template_cropped(
+            template_path, _padded_crop_bounds(crop_bounds, linear_pad)
         )
-
-        ffi, template = prepare_science_template_pairing(ffi, template, mapping_grid)
-        pad_rows = int(mapping_grid.conv_pad_native)
-        if err is not None:
-            err = pad_science_array(err, mapping_grid)
+    else:
+        template = _load_template_cropped(
+            template_path, crop_bounds, preserve_template_support=True
+        )
     header = wcs_grouping.crop_ffi_header(min_bg_path, crop_bounds)
 
     btjd = None
@@ -333,33 +336,85 @@ def run_kernel_fit(
         if mask_catalog is not None
         else shared_mask
     )
-    phot_mask = full_mask_bool(residual_mask)
 
-    if mapping_grid is not None:
-        # pad_mask_bottom (not zero_pad_science_bottom) marks the new pad
-        # rows bad/excluded -- they're fabricated pad geometry, not real
-        # observed sky; zero-filling a mask would read as "good, flat-zero"
-        # data to Hotpants' substamp/kernel-fit selection (see
-        # grid_pairing.pad_mask_bottom).
-        from syndiff_pipeline.common.grid_pairing import pad_mask_to_template
+    from syndiff_pipeline.difference_imaging.stages.hotpants import (
+        _pair_hotpants_inputs,
+    )
 
-        hotpants_mask = pad_mask_to_template(np.asarray(hotpants_mask), mapping_grid)
-        phot_mask = pad_mask_to_template(np.asarray(phot_mask), mapping_grid)
-        residual_mask = pad_mask_to_template(np.asarray(residual_mask), mapping_grid)
+    # Use the same science/template/error pairing contract as the ordinary
+    # Hotpants stage for every kernel-fit round. This pads science, error,
+    # and masks to the template support (field mode via MappingGrid, linear
+    # mode via the fixed convolution margin resolved above).
+    raw_ffi, raw_template, raw_err = ffi, template, err
+    ffi, template, err, hotpants_mask, _ = _pair_hotpants_inputs(
+        raw_ffi, raw_template, raw_err, hotpants_mask, mapping_grid, linear_pad
+    )
+    if mapping_grid is not None or linear_pad:
+        _, _, _, residual_mask, _ = _pair_hotpants_inputs(
+            raw_ffi, raw_template, raw_err, residual_mask, mapping_grid, linear_pad
+        )
 
     if ffi.shape != np.asarray(hotpants_mask).shape:
         raise ValueError(
             f"FFI shape {ffi.shape} != hotpants mask shape {np.asarray(hotpants_mask).shape}"
         )
-    if template.shape != ffi.shape or err.shape != ffi.shape:
+    if err.shape != ffi.shape:
         raise ValueError(
             "kernel-fit paired inputs must have identical template-support geometry: "
-            f"science={ffi.shape}, template={template.shape}, error={err.shape}"
+            f"science={ffi.shape}, error={err.shape}"
+        )
+    # Masks/error stay native; the field template is at the store's own
+    # oversampling (1x or Nx) and is paired against native science directly
+    # by Hotpants' own oversample handling -- it is not expected to match
+    # ffi.shape when oversampling_factor > 1.
+    field_os_factor = (
+        max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
+        if field_ctx is not None
+        else 1
+    )
+    expected_template_shape = (
+        tuple(s * field_os_factor for s in ffi.shape) if field_os_factor > 1 else ffi.shape
+    )
+    if template.shape != expected_template_shape:
+        raise ValueError(
+            "kernel-fit paired inputs must have consistent template-support geometry: "
+            f"science={ffi.shape}, template={template.shape}, "
+            f"expected_template={expected_template_shape} (oversampling_factor={field_os_factor})"
         )
 
 
+    def _tessreduce_bkg(diff: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return estimate_tessreduce_residual_background(
+            diff,
+            residual_mask,
+            smooth_gauss=params.tessreduce_smooth_gauss,
+            anomaly_gauss=params.tessreduce_anomaly_gauss,
+            qe_spline_degree=params.tessreduce_qe_spline_degree,
+            qe_spline_smooth_mult=params.tessreduce_qe_spline_smooth_mult,
+            boundary_k=params.tessreduce_boundary_k,
+            boundary_sigma=params.tessreduce_boundary_sigma,
+            boundary_rim_width=params.tessreduce_boundary_rim_width,
+        )
+
+    def _background_subtracted_convolved(hp_result: dict) -> np.ndarray:
+        """Return the Hotpants model with its fitted background removed."""
+        convolved = np.asarray(hp_result["convolved"], dtype=np.float64)
+        hotpants_bkg = hp_result.get("bkg")
+        if hotpants_bkg is None:
+            return convolved
+        background = np.asarray(hotpants_bkg, dtype=np.float64)
+        if background.shape != convolved.shape:
+            raise ValueError(
+                "Hotpants convolved image and background must have identical shapes: "
+                f"convolved={convolved.shape}, background={background.shape}"
+            )
+        return convolved - background
+
     basis = build_kernel_basis(hp)
+    hp2_params = replace(hp, hp_bgo=0)
     with tempfile.TemporaryDirectory(prefix="kernel_fit_") as work_root:
+        # Round 1: hotpants with the configured (e.g. 3rd order) background
+        # order, kernel discarded -- only its convolved template matters.
         hp1, _ = _run_hotpants_round(
             sci=ffi,
             err=err,
@@ -375,34 +430,16 @@ def run_kernel_fit(
             raise RuntimeError(
                 f"Kernel-fit Hotpants round 1 failed: {hp1.get('error_msg', '')}"
             )
+        conv1 = _background_subtracted_convolved(hp1)
+        diff1 = ffi - conv1
+        tessreduce_bkg1, tessreduce_pre_qe1, tessreduce_qe1 = _tessreduce_bkg(diff1)
+        cleaned_ffi1 = ffi - tessreduce_bkg1
 
-        phot_bkg_hp1 = photutils_background_masked(
-            hp1["diff"], phot_mask, box_size=params.phot_box_size
-        )
-        hp1_bkg = hp1["bkg"] if hp1.get("bkg") is not None else 0.0
-        sci_clean = ffi - hp1_bkg - phot_bkg_hp1
-        tessreduce_bkg = np.zeros_like(sci_clean)
-        tessreduce_pre_qe = np.zeros_like(sci_clean)
-        tessreduce_qe = np.ones_like(sci_clean)
-        if params.tessreduce_bkg_enabled:
-            # TessReduce operates on the HP1 difference after the existing
-            # photutils removal, not on the raw science-frame reconstruction.
-            hp1_residual = hp1["diff"] - phot_bkg_hp1
-            tessreduce_bkg, tessreduce_pre_qe, tessreduce_qe = (
-                estimate_tessreduce_residual_background(
-                    hp1_residual,
-                    residual_mask,
-                    smooth_gauss=params.tessreduce_smooth_gauss,
-                    anomaly_gauss=params.tessreduce_anomaly_gauss,
-                    qe_spline_degree=params.tessreduce_qe_spline_degree,
-                    qe_spline_smooth_mult=params.tessreduce_qe_spline_smooth_mult,
-                )
-            )
-        sci_clean_final = sci_clean - tessreduce_bkg
-
-        hp2_params = replace(hp, hp_bgo=0)
+        # Round 2: hotpants with bgo=0 on the round-1 cleaned FFI, kernel
+        # discarded -- its convolved template feeds the second background
+        # estimate.
         hp2, hp2_config = _run_hotpants_round(
-            sci=sci_clean,
+            sci=cleaned_ffi1,
             err=err,
             template=template,
             mask=hotpants_mask,
@@ -416,9 +453,15 @@ def run_kernel_fit(
             raise RuntimeError(
                 f"Kernel-fit Hotpants round 2 failed: {hp2.get('error_msg', '')}"
             )
+        conv2 = _background_subtracted_convolved(hp2)
+        diff2 = ffi - conv2
+        tessreduce_bkg2, tessreduce_pre_qe2, tessreduce_qe2 = _tessreduce_bkg(diff2)
+        cleaned_ffi2 = ffi - tessreduce_bkg2
 
+        # Round 3 (final): hotpants with bgo=0 on the round-2 cleaned FFI --
+        # this kernel and convolved template are the ones persisted.
         hp3, hp3_config = _run_hotpants_round(
-            sci=sci_clean_final,
+            sci=cleaned_ffi2,
             err=err,
             template=template,
             mask=hotpants_mask,
@@ -463,8 +506,9 @@ def run_kernel_fit(
         "template_path": os.path.abspath(template_path),
         "kernel_npz_path": os.path.abspath(npz_path),
         "weighting_factor": float(params.weighting_factor),
-        "phot_box_size": int(params.phot_box_size),
-        "tessreduce_bkg_enabled": bool(params.tessreduce_bkg_enabled),
+        "tessreduce_boundary_k": int(params.tessreduce_boundary_k),
+        "tessreduce_boundary_sigma": float(params.tessreduce_boundary_sigma),
+        "tessreduce_boundary_rim_width": int(params.tessreduce_boundary_rim_width),
         "reference_kernel_sum": float(reference_kernel_sum),
     }
     with open(meta_path, "w", encoding="utf-8") as fh:
@@ -472,80 +516,143 @@ def run_kernel_fit(
 
     if debug_ws_dir and params.write_debug_fits:
         os.makedirs(debug_ws_dir, exist_ok=True)
+        from syndiff_pipeline.common.grid_pairing import trim_padded_products
+        from syndiff_pipeline.difference_imaging.stages.hotpants import (
+            _trim_linear_pad,
+        )
+
+        # Field-mode arrays live on the padded MAPGRID=3 template-support
+        # canvas; linear-mode arrays live on the crop_bounds +/- linear_pad
+        # canvas (see _resolve_linear_template_pad). Both must be trimmed
+        # back to crop_bounds for science-facing diagnostics.
+        def _trim(arr: np.ndarray) -> np.ndarray:
+            if mapping_grid is not None:
+                return trim_padded_products(arr, grid=mapping_grid)
+            if linear_pad:
+                return _trim_linear_pad(arr, linear_pad)
+            return np.asarray(arr)
+
+        template_os_factor = (
+            max(1, int(getattr(field_ctx, "oversampling_factor", 1) or 1))
+            if field_ctx is not None
+            else 1
+        )
+        if template_os_factor > 1:
+            ys, xs = mapping_grid.science_slice_native()
+            os_ys = slice(ys.start * template_os_factor, ys.stop * template_os_factor)
+            os_xs = slice(xs.start * template_os_factor, xs.stop * template_os_factor)
+            template_trimmed = np.asarray(template)[os_ys, os_xs]
+        else:
+            template_trimmed = _trim(template)
+
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "ffi"), ffi, header=header
+            workspace_frame_fits_path(debug_ws_dir, "ffi"), _trim(ffi), header=header
         )
         _write_image_fits(
             workspace_frame_fits_path(debug_ws_dir, "template"),
-            template,
+            template_trimmed,
             header=header,
         )
+        # Round 1
         _write_image_fits(
             workspace_frame_fits_path(debug_ws_dir, "hp1_diff"),
-            hp1["diff"],
+            _trim(hp1["diff"]),
             header=header,
         )
         if hp1.get("bkg") is not None:
             _write_image_fits(
                 workspace_frame_fits_path(debug_ws_dir, "hp1_bkg"),
-                hp1["bkg"],
+                _trim(hp1["bkg"]),
                 header=header,
             )
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "phot_bkg_fine_on_hp1_diff"),
-            phot_bkg_hp1,
+            workspace_frame_fits_path(debug_ws_dir, "hp1_convolved"),
+            _trim(conv1),
             header=header,
         )
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "hp1_diff_phot_clean"),
-            hp1["diff"] - phot_bkg_hp1,
+            workspace_frame_fits_path(debug_ws_dir, "ffi_minus_conv1"),
+            _trim(diff1),
             header=header,
         )
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "sci1_clean"),
-            sci_clean,
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg1_pre_qe"),
+            _trim(tessreduce_pre_qe1),
             header=header,
         )
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg_pre_qe"),
-            tessreduce_pre_qe,
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg1_qe_factor"),
+            _trim(tessreduce_qe1),
             header=header,
         )
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "tessreduce_qe_factor"),
-            tessreduce_qe,
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg1"),
+            _trim(tessreduce_bkg1),
             header=header,
         )
         _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg"),
-            tessreduce_bkg,
+            workspace_frame_fits_path(debug_ws_dir, "cleaned_ffi1"),
+            _trim(cleaned_ffi1),
             header=header,
         )
-        _write_image_fits(
-            workspace_frame_fits_path(debug_ws_dir, "sci1_clean_tessreduce"),
-            sci_clean_final,
-            header=header,
-        )
+        # Round 2 (bgo=0)
         _write_image_fits(
             workspace_frame_fits_path(debug_ws_dir, "hp2_diff"),
-            hp2["diff"],
+            _trim(hp2["diff"]),
             header=header,
         )
         if hp2.get("bkg") is not None:
             _write_image_fits(
                 workspace_frame_fits_path(debug_ws_dir, "hp2_bkg"),
-                hp2["bkg"],
+                _trim(hp2["bkg"]),
                 header=header,
             )
         _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "hp2_convolved"),
+            _trim(conv2),
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "ffi_minus_conv2"),
+            _trim(diff2),
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg2_pre_qe"),
+            _trim(tessreduce_pre_qe2),
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg2_qe_factor"),
+            _trim(tessreduce_qe2),
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "tessreduce_bkg2"),
+            _trim(tessreduce_bkg2),
+            header=header,
+        )
+        _write_image_fits(
+            workspace_frame_fits_path(debug_ws_dir, "cleaned_ffi2"),
+            _trim(cleaned_ffi2),
+            header=header,
+        )
+        # Round 3 (final -- kernel + convolved template persisted)
+        _write_image_fits(
             workspace_frame_fits_path(debug_ws_dir, "hp3_diff"),
-            hp3["diff"],
+            _trim(hp3["diff"]),
             header=header,
         )
         if hp3.get("bkg") is not None:
             _write_image_fits(
                 workspace_frame_fits_path(debug_ws_dir, "hp3_bkg"),
-                hp3["bkg"],
+                _trim(hp3["bkg"]),
+                header=header,
+            )
+        if hp3.get("convolved") is not None:
+            _write_image_fits(
+                workspace_frame_fits_path(debug_ws_dir, "hp3_convolved"),
+                _trim(_background_subtracted_convolved(hp3)),
                 header=header,
             )
 

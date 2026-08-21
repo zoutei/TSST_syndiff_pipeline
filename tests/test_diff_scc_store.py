@@ -117,6 +117,7 @@ class TestDiffSccStore(unittest.TestCase):
         with (
             patch.object(hp_mod.wcs_grouping, "crop_ffi_header", return_value=fits.Header()),
             patch.object(hp_mod, "_load_template_cropped", return_value=tmpl),
+            patch.object(hp_mod, "_resolve_linear_template_pad", return_value=0),
             patch.object(hp_mod, "_load_ffi_cropped", return_value=(sci, np.ones(shape))),
             patch.object(hp_mod, "kernel_sum_at_center", return_value=0.02),
             patch.object(

@@ -1318,6 +1318,38 @@ def run_config_pipeline(
             conv_label = str(stage["output"]).strip()
             conv_ws = _diff_stage_dir(cfg, ctx, conv_label)
             convolved_ws = conv_ws
+            conv_manifest = wcs_table
+            if (
+                field_ctx is not None
+                and cfg.max_ffis is not None
+                and "path" in wcs_table.columns
+            ):
+                # Only build convolved templates for the group_ids actually needed by
+                # the max_ffis-capped FFI subset -- the full manifest may reference
+                # ~1000s of groups across the whole SCC, which would be extremely
+                # wasteful (and defeat the purpose) for a small smoke-test run.
+                selected_paths = _ffi_paths_for_processing(cfg, wcs_table)
+                from syndiff_pipeline.common.download import (
+                    manifest_basename_from_local,
+                )
+
+                selected_keys = {
+                    manifest_basename_from_local(p) for p in selected_paths
+                }
+                mask = wcs_table["path"].astype(str).map(
+                    lambda p: manifest_basename_from_local(p) in selected_keys
+                )
+                conv_manifest = wcs_table[mask].reset_index(drop=True)
+                log.info(
+                    "convolved_templates: restricting manifest to %d/%d FFI(s) "
+                    "(max_ffis=%s) -> %d distinct group_id(s)",
+                    len(conv_manifest),
+                    len(wcs_table),
+                    cfg.max_ffis,
+                    conv_manifest["group_id"].nunique()
+                    if "group_id" in conv_manifest.columns
+                    else -1,
+                )
             convolved_templates_runner.run_convolved_templates(
                 kernel_fit_dir=kernel_fit_ws,
                 crop_bounds=crop_bounds,
@@ -1325,7 +1357,7 @@ def run_config_pipeline(
                 hp=hp,
                 convolved_ws_dir=conv_ws,
                 field_ctx=field_ctx,
-                manifest=wcs_table,
+                manifest=conv_manifest,
             )
 
         elif kind == "kernel_subtract":
@@ -1366,12 +1398,13 @@ def run_config_pipeline(
                 crop_bounds=crop_bounds,
                 shared_mask=shared_mask,
                 convolved_table=convolved_table,
-                phot_box_size=ks_params.phot_box_size,
-                tessreduce_bkg_enabled=ks_params.tessreduce_bkg_enabled,
                 tessreduce_smooth_gauss=ks_params.tessreduce_smooth_gauss,
                 tessreduce_anomaly_gauss=ks_params.tessreduce_anomaly_gauss,
                 tessreduce_qe_spline_degree=ks_params.tessreduce_qe_spline_degree,
                 tessreduce_qe_spline_smooth_mult=ks_params.tessreduce_qe_spline_smooth_mult,
+                tessreduce_boundary_k=ks_params.tessreduce_boundary_k,
+                tessreduce_boundary_sigma=ks_params.tessreduce_boundary_sigma,
+                tessreduce_boundary_rim_width=ks_params.tessreduce_boundary_rim_width,
                 diffs_dir=diff_dir,
                 diffs_label=diffs_l,
                 bkg_dir=bkg_dir,

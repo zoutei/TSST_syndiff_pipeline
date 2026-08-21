@@ -50,7 +50,6 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
                     "crop_bounds": crop_bounds,
                     "shared_mask": shared_mask,
                     "convolved_table": convolved_table,
-                    "phot_box_size": 4,
                     "diffs_dir": diffs_dir,
                     "bkg_dir": None,
                     "diffs_label": "ks_d",
@@ -85,7 +84,9 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
             ), patch.object(
                 ks_mod.wcs_grouping, "crop_ffi_header", return_value=None
             ), patch.object(
-                ks_mod, "photutils_background_masked", return_value=phot_bkg
+                ks_mod,
+                "estimate_tessreduce_residual_background",
+                return_value=(phot_bkg, phot_bkg, np.ones_like(phot_bkg)),
             ), patch.object(
                 ks_mod, "_write_image_fits"
             ) as mock_write:
@@ -129,6 +130,8 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
                 hp_mod, "_load_ffi_cropped", return_value=(sci, err)
             ), patch.object(
                 hp_mod, "_load_template_cropped", return_value=tmpl
+            ), patch.object(
+                hp_mod, "_resolve_linear_template_pad", return_value=0
             ), patch.object(
                 hp_mod.wcs_grouping, "crop_ffi_header", return_value=MagicMock()
             ), patch.object(
@@ -196,7 +199,6 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
                     "crop_bounds": crop_bounds,
                     "shared_mask": shared_mask,
                     "convolved_table": convolved_table,
-                    "phot_box_size": 4,
                     "diffs_dir": diffs_dir,
                     "bkg_dir": bkg_dir,
                     "diffs_label": "ks_d",
@@ -222,7 +224,9 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
             ), patch.object(
                 ks_mod.wcs_grouping, "crop_ffi_header", return_value=None
             ), patch.object(
-                ks_mod, "photutils_background_masked", return_value=phot_bkg
+                ks_mod,
+                "estimate_tessreduce_residual_background",
+                return_value=(phot_bkg, phot_bkg, np.ones_like(phot_bkg)),
             ), patch.object(
                 ks_mod, "_write_image_fits"
             ), patch.object(
@@ -280,7 +284,6 @@ class TestKernelSubtractDownsampleFromCfg(unittest.TestCase):
                     crop_bounds={"shape": (2, 2)},
                     shared_mask=np.zeros((2, 2), dtype=bool),
                     convolved_table=pd.DataFrame(),
-                    phot_box_size=4,
                     diffs_dir=os.path.join(tmp, "ks_d"),
                     diffs_label="ks_d",
                     cfg=cfg,

@@ -77,8 +77,8 @@ def field_store(tmp_path):
 def test_assemble_group_flux_and_count(field_store):
     store, shifts_df = field_store
     flux = assemble_field_group_flux(store, shifts_df, 0, shape=(NY, NX))
-    assert flux[2, 3] == pytest.approx(100.0 / 2)   # mean flux
-    assert flux[5, 6] == pytest.approx(50.0 / 1)
+    assert flux[2, 3] == pytest.approx(100.0)   # flux sum (not mean)
+    assert flux[5, 6] == pytest.approx(50.0)
     count = assemble_field_group_count(store, shifts_df, 0, shape=(NY, NX))
     assert count[2, 3] == 2 and count[5, 6] == 1
 
@@ -97,7 +97,7 @@ def test_template_and_count_loaders_crop(field_store):
     flux_crop = build_field_mode_template_loader(ctx, crop)(0)
     assert flux_crop.shape == (6, 6)
     # (2,3) full -> (1,1) crop-local; (5,6) full -> (4,4) crop-local
-    assert flux_crop[1, 1] == pytest.approx(50.0)
+    assert flux_crop[1, 1] == pytest.approx(100.0)
     assert flux_crop[4, 4] == pytest.approx(50.0)
     count_crop = build_field_mode_count_loader(ctx, crop)(0)
     assert count_crop[1, 1] == 2 and count_crop[4, 4] == 1
@@ -116,7 +116,7 @@ def test_assemble_template_for_ffi_by_name(field_store):
     # by name (basename) and by full path must agree; full FFI shape
     big = assemble_field_template_for_ffi(ctx, manifest, "tess2020007-0001-1-1_ffic.fits.gz")
     assert big.shape == (NY, NX)
-    assert big[2, 3] == pytest.approx(50.0)
+    assert big[2, 3] == pytest.approx(100.0)
     big2 = assemble_field_template_for_ffi(ctx, manifest, manifest.loc[0, "path"])
     assert np.array_equal(big, big2)
 

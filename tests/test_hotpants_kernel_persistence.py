@@ -113,6 +113,7 @@ class TestProcessOneFrameKernelPersistence(unittest.TestCase):
         with (
             patch.object(hotpants.wcs_grouping, "crop_ffi_header", return_value=fits.Header()),
             patch.object(hotpants, "_load_template_cropped", return_value=tmpl),
+            patch.object(hotpants, "_resolve_linear_template_pad", return_value=0),
             patch.object(hotpants, "_load_ffi_cropped", return_value=(sci, np.ones(self.shape))),
             patch.object(hotpants, "write_diff_noise_mask_fits"),
             patch.object(

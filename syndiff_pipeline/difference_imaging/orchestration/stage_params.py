@@ -316,13 +316,14 @@ KERNEL_FIT_ALLOWED = frozenset(
         "kind",
         "output",
         "weighting_factor",
-        "phot_box_size",
         "write_debug_fits",
-        "tessreduce_bkg_enabled",
         "tessreduce_smooth_gauss",
         "tessreduce_anomaly_gauss",
         "tessreduce_qe_spline_degree",
         "tessreduce_qe_spline_smooth_mult",
+        "tessreduce_boundary_k",
+        "tessreduce_boundary_sigma",
+        "tessreduce_boundary_rim_width",
     }
     | _KERNEL_HP_KEYS
 )
@@ -340,13 +341,14 @@ KERNEL_SUBTRACT_ALLOWED = frozenset(
         "kind",
         "inputs",
         "output",
-        "phot_box_size",
         "kernel_subtract_n_jobs",
-        "tessreduce_bkg_enabled",
         "tessreduce_smooth_gauss",
         "tessreduce_anomaly_gauss",
         "tessreduce_qe_spline_degree",
         "tessreduce_qe_spline_smooth_mult",
+        "tessreduce_boundary_k",
+        "tessreduce_boundary_sigma",
+        "tessreduce_boundary_rim_width",
     }
 )
 
@@ -686,13 +688,14 @@ def _parse_aperture_method(
 class KernelFitParams:
     """KernelFitParams."""
     weighting_factor: float = 0.5
-    phot_box_size: int = 4
     write_debug_fits: bool = True
-    tessreduce_bkg_enabled: bool = True
     tessreduce_smooth_gauss: float = 2.0
     tessreduce_anomaly_gauss: float = 2.0
     tessreduce_qe_spline_degree: int = 2
     tessreduce_qe_spline_smooth_mult: float = 10.0
+    tessreduce_boundary_k: int = 15
+    tessreduce_boundary_sigma: float = 3.0
+    tessreduce_boundary_rim_width: int = 1
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
@@ -721,13 +724,14 @@ class ConvolvedTemplatesParams:
 @dataclass
 class KernelSubtractParams:
     """KernelSubtractParams."""
-    phot_box_size: int = 4
     kernel_subtract_n_jobs: Optional[int] = None
-    tessreduce_bkg_enabled: bool = True
     tessreduce_smooth_gauss: float = 2.0
     tessreduce_anomaly_gauss: float = 2.0
     tessreduce_qe_spline_degree: int = 2
     tessreduce_qe_spline_smooth_mult: float = 10.0
+    tessreduce_boundary_k: int = 15
+    tessreduce_boundary_sigma: float = 3.0
+    tessreduce_boundary_rim_width: int = 1
 
 
 def _merge_step_params(cls: Type[T], step_dict: dict) -> T:

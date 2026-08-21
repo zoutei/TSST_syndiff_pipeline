@@ -438,7 +438,7 @@ def assemble_field_template_for_ffi(
     crop : tuple, optional
         ``(x_min, x_max, y_min, y_max)`` half-open full-FFI window; ``None`` → full FFI.
     plane : str
-        ``"flux"`` (mean flux, default) or ``"count"`` (PS1 hit count).
+        ``"flux"`` (flux sum, default) or ``"count"`` (PS1 hit count).
 
     Returns
     -------

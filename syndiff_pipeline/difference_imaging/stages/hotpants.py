@@ -776,7 +776,9 @@ class TemplateCoverageError(Exception):
     """Diff crop extends outside syndiff template FITS coverage."""
 
 
-def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
+def _load_template_cropped(
+    tmpl_path: str, bounds: dict, *, preserve_template_support: bool = False
+) -> np.ndarray:
     """Load template cropped to *bounds* (native FFI coords).
 
     Oversampled templates (``OVERSAMP`` > 1) are sliced in high-res pixel space
@@ -798,8 +800,19 @@ def _load_template_cropped(tmpl_path: str, bounds: dict) -> np.ndarray:
     y_slice, x_slice = template_crop_slices(tmpl_path, bounds)
     with wcs_grouping.open_fits_memmap(tmpl_path) as hdul:
         if hdul[0].data is not None:
-            return hdul[0].data[y_slice, x_slice].astype(np.float64)
-        return hdul[1].data[y_slice, x_slice].astype(np.float64)
+            data = hdul[0].data
+        else:
+            data = hdul[1].data
+        crop_shape = (
+            int(bounds["y_max"]) - int(bounds["y_min"]),
+            int(bounds["x_max"]) - int(bounds["x_min"]),
+        )
+        use_support = preserve_template_support and all(
+            crop_shape[i] >= 0.9 * int(coverage["shape"][i]) for i in (0, 1)
+        )
+        if use_support and tuple(np.asarray(data).shape) == tuple(coverage["shape"]):
+            return np.asarray(data).astype(np.float64)
+        return data[y_slice, x_slice].astype(np.float64)
 
 
 def resolve_hotpants_oversample(
@@ -916,26 +929,173 @@ def _field_mode_mapping_grid(field_mode_context) -> Any | None:
     return getattr(field_mode_context, "mapping_grid", None) if field_mode_context else None
 
 
+def _resolve_linear_template_pad(template_path: str, crop_bounds: dict) -> Optional[int]:
+    """Validate a linear template's on-disk support against *crop_bounds*
+    and return the fixed convolution padding margin (pixels) to use.
+
+    Linear (``geometry_mode: linear``) templates carry no live MappingGrid
+    context object -- unlike field mode there is no per-run tracking of how
+    the template support relates to the requested crop, and no per-run
+    coordinate frame to anchor one to (a ``target_box`` crop can sit
+    anywhere inside the SCC, unlike field mode's single whole-SCC grid).
+    Instead we just read the template's own ``XMIN/XMAX/YMIN/YMAX`` header
+    (the padded rectangle it was built with) and check it covers
+    *crop_bounds* widened by the pipeline's standard convolution margin on
+    every side. If the array shape disagrees with the header, or the
+    template doesn't actually cover that padded region, we raise rather than
+    silently falling back to unpadded -- a template that doesn't cover the
+    requested padding is a correctness bug (invalid convolution near the
+    crop edges), not something to paper over.
+
+    Returns ``None`` when the template carries no support-plane header at
+    all (fully legacy/synthetic template) -- no padding contract is being
+    claimed, so there's nothing to check or pad.
+    """
+    from syndiff_pipeline.common.mapping_grid import (
+        DEFAULT_CONV_PAD_NATIVE,
+        MappingGridError,
+    )
+
+    with wcs_grouping.open_fits_memmap(template_path) as hdul:
+        hdr = hdul[0].header
+        data = hdul[0].data if hdul[0].data is not None else hdul[1].data
+        shape = tuple(np.asarray(data).shape)
+    required = ("XMIN", "XMAX", "YMIN", "YMAX")
+    if not all(key in hdr for key in required):
+        return None
+    xmin, xmax = int(hdr["XMIN"]), int(hdr["XMAX"])
+    ymin, ymax = int(hdr["YMIN"]), int(hdr["YMAX"])
+    support_shape = (ymax - ymin, xmax - xmin)
+    if shape != support_shape:
+        raise MappingGridError(
+            f"template {template_path} array shape {shape} disagrees with its "
+            f"own XMIN/XMAX/YMIN/YMAX header support bounds {support_shape}"
+        )
+    pad = int(DEFAULT_CONV_PAD_NATIVE)
+    crop_x0, crop_x1 = int(crop_bounds["x_min"]), int(crop_bounds["x_max"])
+    crop_y0, crop_y1 = int(crop_bounds["y_min"]), int(crop_bounds["y_max"])
+    if not (
+        xmin <= crop_x0 - pad
+        and crop_x1 + pad <= xmax
+        and ymin <= crop_y0 - pad
+        and crop_y1 + pad <= ymax
+    ):
+        raise MappingGridError(
+            f"template {template_path} does not cover crop_bounds "
+            f"x=[{crop_x0}:{crop_x1}) y=[{crop_y0}:{crop_y1}) with {pad}px padding "
+            f"on every side (template support x=[{xmin}:{xmax}) y=[{ymin}:{ymax}))"
+        )
+    return pad
+
+
+def _padded_crop_bounds(crop_bounds: dict, pad: int) -> dict:
+    """Widen *crop_bounds* by *pad* pixels on every side."""
+    return {
+        "x_min": int(crop_bounds["x_min"]) - pad,
+        "x_max": int(crop_bounds["x_max"]) + pad,
+        "y_min": int(crop_bounds["y_min"]) - pad,
+        "y_max": int(crop_bounds["y_max"]) + pad,
+    }
+
+
+def _trim_linear_pad(arr: np.ndarray, pad: int) -> np.ndarray:
+    """Undo :func:`_padded_crop_bounds`: trim a padded array back to S."""
+    if not pad:
+        return arr
+    a = np.asarray(arr)
+    return a[..., pad:-pad, pad:-pad]
+
+
 def _pair_hotpants_arrays(
     sci_crop: np.ndarray,
     tmpl_crop: np.ndarray,
     err_crop: np.ndarray,
     mapping_grid,
+    linear_pad: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
     if mapping_grid is None:
-        from syndiff_pipeline.common.mapping_grid import MappingGridError
-        raise MappingGridError("Hotpants requires MAPGRID=3 MappingGrid geometry")
+        # Linear mode: the template is already the padded crop (see
+        # _resolve_linear_template_pad / _padded_crop_bounds), loaded as
+        # real pixels since it's the side that gets convolved. Science and
+        # error are never convolved, only subtracted after the fact, so
+        # their padding margin can stay fabricated zeros -- paired with
+        # excluding it in the mask so it never gets selected as real sky
+        # (see _pair_hotpants_inputs).
+        if linear_pad:
+            sci_crop = np.pad(
+                np.asarray(sci_crop), linear_pad, mode="constant", constant_values=0.0
+            )
+            err_crop = np.pad(
+                np.asarray(err_crop), linear_pad, mode="constant", constant_values=0.0
+            )
+        return sci_crop, tmpl_crop, err_crop, int(linear_pad)
     from syndiff_pipeline.common.grid_pairing import (
+        pad_science_array,
         prepare_science_template_pairing,
     )
 
-    sci_crop, tmpl_crop = prepare_science_template_pairing(
-        sci_crop, tmpl_crop, mapping_grid
-    )
-    from syndiff_pipeline.common.grid_pairing import pad_science_array
+    native_tmpl_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
+    tmpl_shape = tuple(np.asarray(tmpl_crop).shape)
+    if tmpl_shape == native_tmpl_shape:
+        # Equal-resolution pairing: template already native, use the
+        # standard strict-shape pad/validate path unchanged.
+        sci_crop, tmpl_crop = prepare_science_template_pairing(
+            sci_crop, tmpl_crop, mapping_grid
+        )
+    else:
+        # Oversampled field template (Nx the native template-support shape):
+        # do NOT route through prepare_science_template_pairing -- it asserts
+        # template == native science-footprint shape, which is wrong for
+        # oversampling_factor > 1. Hotpants/pyhotpants pairs a native science
+        # array against an Nx template directly via its own oversample
+        # handling (see resolve_hotpants_oversample); only science/error need
+        # padding to the native template-support footprint here.
+        from syndiff_pipeline.common.mapping_grid import MappingGridError
+
+        ny, nx = native_tmpl_shape
+        if ny == 0 or nx == 0 or tmpl_shape[0] % ny or tmpl_shape[1] % nx:
+            raise MappingGridError(
+                f"template shape {tmpl_shape} is not native {native_tmpl_shape} "
+                "nor an integer oversampling thereof"
+            )
+        fy, fx = tmpl_shape[0] // ny, tmpl_shape[1] // nx
+        if fy != fx:
+            raise MappingGridError(
+                f"template shape {tmpl_shape} is not isotropic oversampling of "
+                f"native {native_tmpl_shape}"
+            )
+        sci_crop = pad_science_array(sci_crop, mapping_grid)
 
     err_crop = pad_science_array(err_crop, mapping_grid)
     return sci_crop, tmpl_crop, err_crop, int(mapping_grid.conv_pad_native)
+
+
+def _pair_hotpants_inputs(
+    sci_crop: np.ndarray,
+    tmpl_crop: np.ndarray,
+    err_crop: np.ndarray,
+    mask_crop: np.ndarray,
+    mapping_grid,
+    linear_pad: int = 0,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+    """Apply the shared Hotpants padding contract to all paired inputs."""
+    sci_crop, tmpl_crop, err_crop, pad_rows = _pair_hotpants_arrays(
+        sci_crop, tmpl_crop, err_crop, mapping_grid, linear_pad
+    )
+    mask_crop = np.asarray(mask_crop)
+    if mapping_grid is not None:
+        from syndiff_pipeline.common.grid_pairing import pad_mask_to_template
+
+        mask_crop = pad_mask_to_template(mask_crop, mapping_grid)
+    elif linear_pad:
+        # Fabricated pad pixels are not real observed sky -- exclude them
+        # (True = masked) so Hotpants' substamp/kernel-fit selection can't
+        # read them as good, flat-zero data (mirrors pad_mask_to_template's
+        # field-mode contract above).
+        mask_crop = np.pad(
+            mask_crop, linear_pad, mode="constant", constant_values=True
+        )
+    return sci_crop, tmpl_crop, err_crop, mask_crop, pad_rows
 
 
 def _process_one_frame(
@@ -1099,8 +1259,11 @@ def _process_one_frame(
             "error_msg": "missing template",
         }
 
+    linear_pad = 0
     if template_cache is not None and group_id in template_cache:
         tmpl_crop = template_cache[group_id]
+        if mapping_grid is None and tmpl_path:
+            linear_pad = _resolve_linear_template_pad(tmpl_path, crop_bounds) or 0
     elif template_loader is not None:
         try:
             tmpl_crop = template_loader(int(group_id))
@@ -1115,18 +1278,42 @@ def _process_one_frame(
             }
         if template_cache is not None:
             template_cache[group_id] = tmpl_crop
+    elif mapping_grid is None:
+        # Linear mode: validate the template's on-disk support covers
+        # crop_bounds with the standard convolution margin, then load
+        # exactly that padded rectangle as real pixels (see
+        # _resolve_linear_template_pad).
+        linear_pad = _resolve_linear_template_pad(tmpl_path, crop_bounds) or 0
+        tmpl_crop = _load_template_cropped(
+            tmpl_path, _padded_crop_bounds(crop_bounds, linear_pad)
+        )
+        if template_cache is not None:
+            template_cache[group_id] = tmpl_crop
     else:
-        tmpl_crop = _load_template_cropped(tmpl_path, crop_bounds)
+        tmpl_crop = _load_template_cropped(
+            tmpl_path, crop_bounds, preserve_template_support=True
+        )
         if template_cache is not None:
             template_cache[group_id] = tmpl_crop
 
-    sci_crop, tmpl_crop, err_crop, pad_rows = _pair_hotpants_arrays(
-        sci_crop, tmpl_crop, err_crop, mapping_grid
+    mask_array = np.asarray(_resolve_hotpants_mask_array(mask, mask_catalog, btjd))
+    sci_crop, tmpl_crop, err_crop, mask_array, pad_rows = _pair_hotpants_inputs(
+        sci_crop, tmpl_crop, err_crop, mask_array, mapping_grid, linear_pad
     )
-    if sci_crop.shape != tmpl_crop.shape or err_crop.shape != sci_crop.shape:
+    if err_crop.shape != sci_crop.shape:
         raise RuntimeError(
             "paired Hotpants inputs must have identical T geometry: "
-            f"science={sci_crop.shape}, template={tmpl_crop.shape}, error={err_crop.shape}"
+            f"science={sci_crop.shape}, error={err_crop.shape}"
+        )
+    sci_ny, sci_nx = sci_crop.shape
+    tmpl_ny, tmpl_nx = tmpl_crop.shape
+    if (tmpl_ny, tmpl_nx) != (sci_ny, sci_nx) and (
+        tmpl_ny % sci_ny or tmpl_nx % sci_nx or tmpl_ny // sci_ny != tmpl_nx // sci_nx
+    ):
+        raise RuntimeError(
+            "paired Hotpants template must be native or an isotropic "
+            f"oversampling of science: science={sci_crop.shape}, "
+            f"template={tmpl_crop.shape}"
         )
 
     try:
@@ -1175,30 +1362,17 @@ def _process_one_frame(
         sci_shape=sci_crop.shape,
     )
 
-    mask_array = np.asarray(_resolve_hotpants_mask_array(mask, mask_catalog, btjd))
-    # Mask must end up at sci_crop's final (post-pairing) shape. Derive the
-    # needed pad directly from the actual observed shapes rather than trusting
-    # `pad_rows` alone: mask_catalog.mask_at() sources its base shape from
-    # crop_bounds independently of the sci/tmpl pairing above, so if that ever
-    # drifts out of sync with mapping_grid's pad convention, padding by a
-    # stale/mismatched `pad_rows` would silently hand pyhotpants a wrongly
-    # shaped i_mask (opaque "must have shape" failure with no indication why).
+    # Mask must end up at sci_crop's final (post-pairing) shape.
     row_diff = sci_crop.shape[0] - mask_array.shape[0]
-    if mapping_grid is not None:
-        from syndiff_pipeline.common.grid_pairing import pad_mask_to_template
-        try:
-            mask_array = pad_mask_to_template(mask_array, mapping_grid)
-        except Exception as exc:
-            raise RuntimeError(
-                f"science mask cannot be placed on MAPGRID template support: {exc}"
-            ) from exc
-    elif mask_array.shape[1] != sci_crop.shape[1] or row_diff < 0:
+    if mapping_grid is None and (
+        mask_array.shape[1] != sci_crop.shape[1] or row_diff < 0
+    ):
         raise RuntimeError(
             f"hotpants mask shape {mask_array.shape} is incompatible with the "
             f"paired science shape {sci_crop.shape} (pad_rows={pad_rows}); "
             "mask_catalog is not aligned to crop_bounds/mapping_grid."
         )
-    elif row_diff > 0:
+    elif mapping_grid is None and row_diff > 0:
         raise RuntimeError(
             "mask did not arrive in MAPGRID=3 science geometry; "
             "bottom-only padding is no longer supported"
@@ -1223,6 +1397,10 @@ def _process_one_frame(
             for key in ("diff", "convolved", "noise", "mask"):
                 if result.get(key) is not None:
                     result[key] = trim_padded_products(result[key], grid=mapping_grid)
+        elif pad_rows:
+            for key in ("diff", "convolved", "noise", "mask"):
+                if result.get(key) is not None:
+                    result[key] = _trim_linear_pad(result[key], pad_rows)
         kernel_sum = None
         tess_zp = None
         try:

@@ -133,11 +133,11 @@ def cross_projection_fixture(monkeypatch):
     canonical_image = np.zeros((size, size), dtype=np.float32)
     canonical_mask = np.zeros((size, size), dtype=np.int32)
 
-    def fake_shared(data_root, skycell):
+    def fake_shared(data_root, skycell, **_):
         assert skycell == recipient
         return canonical_image.copy(), canonical_mask.copy()
 
-    def fake_combined(data_root, projection, cell):
+    def fake_combined(data_root, projection, cell, **_):
         if projection == "skycell.1111":
             return own_combined.copy()
         if projection == "skycell.2222":
@@ -214,11 +214,11 @@ def test_overlap_strip_replacement_does_not_double_count(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_downsample."
         "_try_load_shared_convolved_arrays",
-        lambda data_root, skycell: (canonical_image.copy(), canonical_mask.copy()),
+        lambda data_root, skycell, **_: (canonical_image.copy(), canonical_mask.copy()),
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.padding_correction._load_combined_image",
-        lambda data_root, projection, cell: (
+        lambda data_root, projection, cell, **_: (
             own_combined.copy() if projection == "skycell.1111" else neighbor_combined.copy()
         ),
     )
@@ -246,11 +246,11 @@ def test_missing_neighbor_combined_cell_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_downsample."
         "_try_load_shared_convolved_arrays",
-        lambda data_root, skycell: (canonical_image.copy(), canonical_mask.copy()),
+        lambda data_root, skycell, **_: (canonical_image.copy(), canonical_mask.copy()),
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.padding_correction._load_combined_image",
-        lambda data_root, projection, cell: None,
+        lambda data_root, projection, cell, **_: None,
     )
 
     with pytest.raises(PaddingCorrectionError, match="is unavailable"):
@@ -283,7 +283,7 @@ def test_multi_source_replacement_follows_mapping_table_slash_order(tmp_path, mo
     canonical_image = np.zeros((size, size), dtype=np.float32)
     canonical_mask = np.zeros((size, size), dtype=np.int32)
 
-    def fake_combined(data_root, projection, cell):
+    def fake_combined(data_root, projection, cell, **_):
         if projection == "skycell.1111":
             return own_combined.copy()
         if projection == "skycell.2222":
@@ -295,7 +295,7 @@ def test_multi_source_replacement_follows_mapping_table_slash_order(tmp_path, mo
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_downsample."
         "_try_load_shared_convolved_arrays",
-        lambda data_root, skycell: (canonical_image.copy(), canonical_mask.copy()),
+        lambda data_root, skycell, **_: (canonical_image.copy(), canonical_mask.copy()),
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.padding_correction._load_combined_image",
@@ -349,7 +349,7 @@ def test_linear_and_field_receive_identical_corrected_array(tmp_path, monkeypatc
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.field_downsample."
         "_discover_shared_convolved_fp",
-        lambda data_root, projection, cell: "fake-fp",
+        lambda data_root, projection, cell, **_: "fake-fp",
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.convolved_store."
@@ -361,7 +361,7 @@ def test_linear_and_field_receive_identical_corrected_array(tmp_path, monkeypatc
     )
     monkeypatch.setattr(
         "syndiff_pipeline.template_creation.processing.padding_correction._load_combined_image",
-        lambda data_root, projection, cell: (
+        lambda data_root, projection, cell, **_: (
             own_combined.copy() if projection == "skycell.1111" else neighbor_combined.copy()
         ),
     )

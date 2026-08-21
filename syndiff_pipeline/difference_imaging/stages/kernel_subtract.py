@@ -1,4 +1,4 @@
-"""Per-FFI algebraic difference with photutils background (no Hotpants)."""
+"""Per-FFI algebraic difference with robust TESSreduce background (no Hotpants)."""
 
 from __future__ import annotations
 
@@ -22,9 +22,6 @@ from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
 from syndiff_pipeline.difference_imaging.stages.hotpants import (
     _load_ffi_cropped,
     _write_image_fits,
-)
-from syndiff_pipeline.difference_imaging.stages.kernel_photutils import (
-    photutils_background_masked,
 )
 from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
     estimate_tessreduce_residual_background,
@@ -104,8 +101,6 @@ def _process_one_frame(task: tuple) -> dict:
     mask_catalog = p.get("mask_catalog")
     btjd_by_product_id = p.get("btjd_by_product_id") or {}
     convolved_table = p["convolved_table"]
-    phot_box_size = p["phot_box_size"]
-    tessreduce_bkg_enabled = bool(p.get("tessreduce_bkg_enabled", True))
     diffs_dir = p["diffs_dir"]
     bkg_dir = p.get("bkg_dir")
     diffs_label = p["diffs_label"]
@@ -128,12 +123,13 @@ def _process_one_frame(task: tuple) -> dict:
     ws_diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
     output_store_name = p.get("output_store_name")
     ks_params = KernelSubtractParams(
-        phot_box_size=int(phot_box_size),
-        tessreduce_bkg_enabled=bool(tessreduce_bkg_enabled),
         tessreduce_smooth_gauss=float(p.get("tessreduce_smooth_gauss", 2.0)),
         tessreduce_anomaly_gauss=float(p.get("tessreduce_anomaly_gauss", 2.0)),
         tessreduce_qe_spline_degree=int(p.get("tessreduce_qe_spline_degree", 2)),
         tessreduce_qe_spline_smooth_mult=float(p.get("tessreduce_qe_spline_smooth_mult", 10.0)),
+        tessreduce_boundary_k=int(p.get("tessreduce_boundary_k", 15)),
+        tessreduce_boundary_sigma=float(p.get("tessreduce_boundary_sigma", 3.0)),
+        tessreduce_boundary_rim_width=int(p.get("tessreduce_boundary_rim_width", 1)),
     )
 
     write_path: Optional[Path] = None
@@ -212,8 +208,6 @@ def _process_one_frame(task: tuple) -> dict:
         }
 
     try:
-        from syndiff_pipeline.difference_imaging.masking.bits import full_mask_bool
-
         template_path = None
         if bool(p.get("field_mode", False)):
             from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
@@ -251,23 +245,21 @@ def _process_one_frame(task: tuple) -> dict:
             if mask_catalog is not None
             else shared_mask
         )
-        frame_mask = full_mask_bool(frame_mask_raw)
 
         diff_raw = ffi - convolved
-        phot_bkg = photutils_background_masked(
-            diff_raw, frame_mask, box_size=phot_box_size
+        tessreduce_bkg, _, _ = estimate_tessreduce_residual_background(
+            diff_raw,
+            frame_mask_raw,
+            smooth_gauss=float(p.get("tessreduce_smooth_gauss", 2.0)),
+            anomaly_gauss=float(p.get("tessreduce_anomaly_gauss", 2.0)),
+            qe_spline_degree=int(p.get("tessreduce_qe_spline_degree", 2)),
+            qe_spline_smooth_mult=float(p.get("tessreduce_qe_spline_smooth_mult", 10.0)),
+            boundary_k=int(p.get("tessreduce_boundary_k", 15)),
+            boundary_sigma=float(p.get("tessreduce_boundary_sigma", 3.0)),
+            boundary_rim_width=int(p.get("tessreduce_boundary_rim_width", 1)),
         )
-        tessreduce_bkg = np.zeros_like(diff_raw)
-        if tessreduce_bkg_enabled:
-            tessreduce_bkg, _, _ = estimate_tessreduce_residual_background(
-                diff_raw - phot_bkg,
-                frame_mask_raw,
-                smooth_gauss=float(p.get("tessreduce_smooth_gauss", 2.0)),
-                anomaly_gauss=float(p.get("tessreduce_anomaly_gauss", 2.0)),
-                qe_spline_degree=int(p.get("tessreduce_qe_spline_degree", 2)),
-                qe_spline_smooth_mult=float(p.get("tessreduce_qe_spline_smooth_mult", 10.0)),
-            )
-        total_bkg = phot_bkg + tessreduce_bkg
+        total_bkg = tessreduce_bkg
+        diff_final = diff_raw - total_bkg
 
         header = wcs_grouping.crop_ffi_header(str(ffi_path), crop_bounds)
         from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
@@ -290,7 +282,7 @@ def _process_one_frame(task: tuple) -> dict:
             raise RuntimeError(
                 "SCC-only kernel_subtract requires data_root and sector/camera/ccd"
             )
-        _write_image_fits(str(write_path), diff_raw, header=header)
+        _write_image_fits(str(write_path), diff_final, header=header)
         if sck is not None:
             try:
                 if downsample_fp is None and cfg is not None:
@@ -411,14 +403,15 @@ def kernel_subtract_loop(
     crop_bounds: dict,
     shared_mask: np.ndarray,
     convolved_table,
-    phot_box_size: int,
     diffs_dir: str,
     diffs_label: str,
-    tessreduce_bkg_enabled: bool = True,
     tessreduce_smooth_gauss: float = 2.0,
     tessreduce_anomaly_gauss: float = 2.0,
     tessreduce_qe_spline_degree: int = 2,
     tessreduce_qe_spline_smooth_mult: float = 10.0,
+    tessreduce_boundary_k: int = 15,
+    tessreduce_boundary_sigma: float = 3.0,
+    tessreduce_boundary_rim_width: int = 1,
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
     n_jobs: int = 1,
@@ -426,7 +419,7 @@ def kernel_subtract_loop(
     cfg: Optional[Any] = None,
     mask_catalog=None,
 ) -> list[dict]:
-    """Run algebraic diff + photutils background for each FFI.
+    """Run algebraic diff + robust TESSreduce background for each FFI.
 
     ``field_mode`` keys the convolved-template lookup by ``group_id`` (field
     geometry) instead of the linear ``(group_dx, group_dy)`` offsets.
@@ -489,12 +482,13 @@ def kernel_subtract_loop(
         "crop_bounds": crop_bounds,
         "shared_mask": shared_mask,
         "convolved_table": convolved_table,
-        "phot_box_size": int(phot_box_size),
-        "tessreduce_bkg_enabled": bool(tessreduce_bkg_enabled),
         "tessreduce_smooth_gauss": float(tessreduce_smooth_gauss),
         "tessreduce_anomaly_gauss": float(tessreduce_anomaly_gauss),
         "tessreduce_qe_spline_degree": int(tessreduce_qe_spline_degree),
         "tessreduce_qe_spline_smooth_mult": float(tessreduce_qe_spline_smooth_mult),
+        "tessreduce_boundary_k": int(tessreduce_boundary_k),
+        "tessreduce_boundary_sigma": float(tessreduce_boundary_sigma),
+        "tessreduce_boundary_rim_width": int(tessreduce_boundary_rim_width),
         "diffs_dir": diffs_dir,
         "bkg_dir": bkg_dir,
         "diffs_label": diffs_label,
