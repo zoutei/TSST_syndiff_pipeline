@@ -119,18 +119,20 @@ Workspace labels use a **prefix by stage family**:
 
 | Prefix | Stage | Meaning |
 |--------|-------|---------|
-| `ks_` | `kernel_subtract` | Kernel-subtract family: algebraic diff + photutils bkg |
+| `ks_` | `kernel_subtract` | Kernel-subtract family: algebraic diff + robust-TESSreduce bkg |
 | `hp_` | `hotpants` | Hotpants difference imaging products |
 
 The smooth stage runs **after** `kernel_subtract` but **before** Hotpants. It still operates on kernel-subtract products, so outputs use the `ks_` family with an **`_s` suffix** (smoothed):
 
 | Label | Description |
 |-------|-------------|
-| `ks_b` | Raw photutils background per epoch (input) |
-| `ks_d` | Raw algebraic diff `ffi − convolved` per epoch (input); bkg **not** subtracted from this FITS |
+| `ks_b` | Robust-TESSreduce background per epoch (input) |
+| `ks_d` | Algebraic diff `ffi − convolved` per epoch, **already background-subtracted** by `kernel_subtract` (input) |
 | `ks_b_s` | Temporally smoothed background per epoch (full crop) |
 | `ks_d_s` | Resubtracted diff per epoch (full crop) |
 | `ks_bkg_smooth_meta/` | Optional diagnostics (not consumed by downstream stages) |
+
+> **Caveat:** `ks_d` used to be the raw, unsubtracted diff (`ffi − convolved`), with this stage's own spatial photutils step doing the first real background subtraction. `kernel_subtract` now subtracts its own robust-TESSreduce background before writing `ks_d`, so this stage's `spatial` step (if enabled) now runs on an already-cleaned diff. Review `steps.spatial.enabled` in configs that chain both stages (`diff_config_single_kernel.yaml`, `diff_config_multi_kernel.yaml`) if double background handling is undesired.
 
 Do **not** label pre-Hotpants smoothed products `hp_*`; that collides with Hotpants outputs (`hp_d`, `hp_b`, `hp_c`).
 
@@ -142,10 +144,10 @@ For each FFI in the manifest, `kernel_subtract`:
 
 1. Loads the cropped science FFI and the matching convolved template.
 2. Forms `diff_raw = ffi − convolved`.
-3. Runs `photutils_background_masked(diff_raw, shared_mask, box_size=phot_box_size)`.
+3. Estimates `tessreduce_bkg = estimate_tessreduce_residual_background(diff_raw, mask, ...)` (biharmonic inpainting + KNN boundary sigma-clip; see [multi_kernel_diff.md](multi_kernel_diff.md)).
 4. Writes:
-   - `ks_d`: `diff_raw` (background **not** subtracted from the diff image),
-   - `ks_b`: the photutils 2D background map.
+   - `ks_d`: `diff_raw − tessreduce_bkg` (background **subtracted** from the diff image),
+   - `ks_b`: the robust-TESSreduce background map.
 
 Both are full-crop FITS with WCS headers from the template handoff. The smooth stage reads **all epochs** in BTJD order (same ordering as Hotpants background stages: `btjd_for_hotpants_order` on manifest + product IDs).
 

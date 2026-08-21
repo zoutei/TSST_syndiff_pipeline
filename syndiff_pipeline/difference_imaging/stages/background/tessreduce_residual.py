@@ -3,6 +3,17 @@
 Keep this module algorithmically aligned with that notebook.  In particular,
 the anomaly repair and residual-surface routines intentionally do not reuse the
 older pipeline strap helper, which implements a different algorithm.
+
+The gap-fill step additionally ports the "robust" boundary sigma-clip from
+``dev/background/tessreduce_smooth_bkg_steps_s50_robust.ipynb``
+(``sanitize_boundary_outliers`` + ``robust_trend_residual_gap_fill``,
+``fill_method="robust"``, ``interpolate=False`` / "biharmonic_robust"
+variant): before biharmonic inpainting fills the masked region, pixels on the
+valid side of the mask boundary that are KNN-sigma-clip outliers relative to
+their local neighborhood are folded into the fit mask, so an anomalous rim
+pixel can't bias the smooth trend. This is the sole background-removal method
+used by ``kernel_fit`` and ``kernel_subtract`` (see
+``estimate_tessreduce_residual_background`` below, which both stages call).
 """
 
 from __future__ import annotations
@@ -14,10 +25,16 @@ from astropy.stats import SigmaClip, sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import binary_dilation, gaussian_filter, label as ndi_label, laplace
+from scipy.spatial import cKDTree
 from skimage import restoration as inpaint
 
 FAINT_CAT = 32
 STRAP_BIT = 4
+
+# Notebook defaults for the boundary KNN sigma-clip (s50_robust variant).
+BOUNDARY_CLIP_K = 15
+BOUNDARY_CLIP_SIGMA = 3.0
+BOUNDARY_CLIP_RIM_WIDTH = 1
 
 
 def _fit_mask(mask: np.ndarray) -> np.ndarray:
@@ -28,15 +45,88 @@ def _fit_mask(mask: np.ndarray) -> np.ndarray:
     return (m == 0) | (m == FAINT_CAT)
 
 
-def smooth_bkg_decomposed(data: np.ndarray, *, gauss_smooth: float = 0.0) -> np.ndarray:
-    """Notebook ``smooth_bkg_decomposed(..., interpolate=False)`` exactly."""
+def sanitize_boundary_outliers(
+    data: np.ndarray,
+    mask: np.ndarray,
+    *,
+    k: int = BOUNDARY_CLIP_K,
+    sigma_thresh: float = BOUNDARY_CLIP_SIGMA,
+    rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
+) -> np.ndarray:
+    """Notebook ``sanitize_boundary_outliers`` exactly.
+
+    Fold anomalous valid pixels bordering a masked region into the mask,
+    using a KNN local median/MAD sigma-clip computed from nearby valid
+    pixels (excluding the rim itself).
+    """
+    sanitized_mask = np.asarray(mask, dtype=bool).copy()
+    dilated = binary_dilation(sanitized_mask, iterations=rim_width)
+    rim = dilated & ~sanitized_mask
+    rim_coords = np.argwhere(rim)
+    valid_pool = ~sanitized_mask & ~rim
+    valid_coords = np.argwhere(valid_pool)
+
+    if len(valid_coords) < k or rim_coords.size == 0:
+        return sanitized_mask
+
+    tree = cKDTree(valid_coords)
+    _, indices = tree.query(rim_coords, k=k)
+    neighbor_coords = valid_coords[indices]
+    neighbor_vals = data[neighbor_coords[..., 0], neighbor_coords[..., 1]]
+    local_median = np.nanmedian(neighbor_vals, axis=1)
+    local_mad = 1.4826 * np.nanmedian(
+        np.abs(neighbor_vals - local_median[:, np.newaxis]), axis=1
+    )
+    rim_values = data[rim_coords[:, 0], rim_coords[:, 1]]
+    is_outlier = (
+        np.isfinite(rim_values)
+        & np.isfinite(local_median)
+        & (
+            np.abs(rim_values - local_median)
+            > sigma_thresh * np.maximum(local_mad, 1e-5)
+        )
+    )
+    outlier_coords = rim_coords[is_outlier]
+    if outlier_coords.size:
+        sanitized_mask[outlier_coords[:, 0], outlier_coords[:, 1]] = True
+    return sanitized_mask
+
+
+def smooth_bkg_decomposed(
+    data: np.ndarray,
+    *,
+    gauss_smooth: float = 0.0,
+    boundary_k: int = BOUNDARY_CLIP_K,
+    boundary_sigma: float = BOUNDARY_CLIP_SIGMA,
+    boundary_rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
+) -> np.ndarray:
+    """Notebook ``robust_trend_residual_gap_fill(interpolate=False,
+    fill_method="robust")`` biharmonic branch: KNN-sigma-clip the mask
+    boundary (``sanitize_boundary_outliers``) before biharmonic inpainting,
+    then optional Gaussian smoothing (unchanged from the legacy variant).
+    """
     data = np.asarray(data, dtype=np.float64)
     if not (~np.isnan(data)).any():
         return np.zeros_like(data)
     arr = np.ma.masked_invalid(deepcopy(data))
     if arr.count() <= 10:
         return np.zeros_like(data)
-    filled = np.asarray(inpaint.inpaint_biharmonic(data, arr.mask.astype(bool)), dtype=np.float64)
+    invalid_mask = arr.mask.astype(bool)
+    safe_invalid_mask = sanitize_boundary_outliers(
+        np.nan_to_num(data, nan=0.0),
+        invalid_mask,
+        k=boundary_k,
+        sigma_thresh=boundary_sigma,
+        rim_width=boundary_rim_width,
+    )
+    fill_input = data.copy()
+    fill_input[safe_invalid_mask] = np.nan
+    filled = np.asarray(
+        inpaint.inpaint_biharmonic(
+            np.nan_to_num(fill_input, nan=0.0), safe_invalid_mask
+        ),
+        dtype=np.float64,
+    )
     gs = float(gauss_smooth)
     if gs > 0:
         if np.nanmedian(filled) < 150 and np.nanstd(filled) < 3:
@@ -140,8 +230,69 @@ def _qe_spline_map(flux: np.ndarray, background: np.ndarray, mask: np.ndarray, *
     return qe_map
 
 
-def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: np.ndarray, mask: np.ndarray, *, gauss_smooth: float = 2.0, n_sigma: float = 5.0) -> np.ndarray:
-    """Exact notebook ``fix_bkg_frame_decomposed`` production path."""
+# Growth-curve search uses r in range(2, 20); keep a stamp that contains those rings
+# plus the r=3 SEP ellipse. Full-CCD arrays are not required per detection.
+_SEP_RING_RMAX = 19
+_SEP_ELLIPSE_R = 3.0
+
+
+def _sep_object_stamp_slices(x: float, y: float, a: float, b: float, ny: int, nx: int) -> tuple[int, int, int, int]:
+    pad = max(_SEP_RING_RMAX + 1, int(np.ceil(_SEP_ELLIPSE_R * max(a, b, 0.0) + 2)))
+    x0 = max(0, int(np.floor(x - pad)))
+    y0 = max(0, int(np.floor(y - pad)))
+    x1 = min(nx, int(np.ceil(x + pad)) + 1)
+    y1 = min(ny, int(np.ceil(y + pad)) + 1)
+    return y0, y1, x0, x1
+
+
+def _accumulate_sep_object_mask(
+    sep_mask: np.ndarray,
+    obj,
+    lap_sub: np.ndarray,
+    lap_err: np.ndarray,
+    noise: float,
+) -> None:
+    """Same growth-curve mask as the full-frame loop, on a small stamp around ``obj``."""
+    import sep
+
+    ny, nx = lap_sub.shape
+    x = float(obj["x"])
+    y = float(obj["y"])
+    a = float(obj["a"])
+    b = float(obj["b"])
+    theta = float(obj["theta"])
+    y0, y1, x0, x1 = _sep_object_stamp_slices(x, y, a, b, ny, nx)
+    if y1 <= y0 or x1 <= x0:
+        return
+    ap = np.zeros((y1 - y0, x1 - x0), dtype=bool)
+    sep.mask_ellipse(ap, x - x0, y - y0, a, b, theta, r=_SEP_ELLIPSE_R)
+    if not ap.sum():
+        return
+    lap_c = lap_sub[y0:y1, x0:x1]
+    err_c = lap_err[y0:y1, x0:x1]
+    if (lap_c / (err_c + 1e-10))[ap].mean() <= 2.0:
+        return
+    yy, xx = np.mgrid[y0:y1, x0:x1]
+    dist = np.sqrt((xx - x) ** 2 + (yy - y) ** 2)
+    true_r = next(
+        (
+            r - 1
+            for r in range(2, 20)
+            if (dist >= r - 0.5).any()
+            and lap_c[(dist >= r - 0.5) & (dist < r + 0.5)].mean() < noise
+        ),
+        None,
+    )
+    if true_r is not None and 2 <= true_r <= 5:
+        sep_mask[y0:y1, x0:x1] |= dist <= true_r
+
+
+def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: np.ndarray, mask: np.ndarray, *, gauss_smooth: float = 2.0, n_sigma: float = 5.0, force_anomaly_repair: bool = False) -> np.ndarray:
+    """Notebook ``fix_bkg_frame_decomposed`` production path.
+
+    Background2D / inpaint still run on the full CCD. SEP detections only
+    allocate a small stamp (growth-curve r<=19 plus the r=3 ellipse).
+    """
     import sep
 
     mask2d = np.asarray(mask)
@@ -159,8 +310,9 @@ def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: n
     masked_ref = flux_i * (~src_mask).astype(float)
     masked_ref[masked_ref == 0] = np.nan
     is_high_bkg = bool(np.nanmedian(masked_ref) > 200.0)
+    if force_anomaly_repair:
+        is_high_bkg = False
     eff_box = max(4, min(16, min(ny, nx) // 2))
-    yy, xx = np.mgrid[:ny, :nx]
     disk_y, disk_x = np.ogrid[-2:3, -2:3]
     disk = disk_x**2 + disk_y**2 <= 4
     frame = bkg_i.copy()
@@ -185,14 +337,7 @@ def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: n
         sep_mask = np.zeros((ny, nx), dtype=bool)
         noise = np.nanmedian(lap_err)
         for obj in objects:
-            ap = np.zeros((ny, nx), dtype=bool)
-            sep.mask_ellipse(ap, obj['x'], obj['y'], obj['a'], obj['b'], obj['theta'], r=3.0)
-            if not ap.sum() or (lap_sub / (lap_err + 1e-10))[ap].mean() <= 2.0:
-                continue
-            dist = np.sqrt((xx - obj['x'])**2 + (yy - obj['y'])**2)
-            true_r = next((r - 1 for r in range(2, 20) if (dist >= r - .5).astype(bool).any() and lap_sub[(dist >= r - .5) & (dist < r + .5)].mean() < noise), None)
-            if true_r is not None and 2 <= true_r <= 5:
-                sep_mask |= dist <= true_r
+            _accumulate_sep_object_mask(sep_mask, obj, lap_sub, lap_err, noise)
         lap_med, lap_mad = np.nanmedian(lap_abs), np.nanmedian(np.abs(lap_abs - np.nanmedian(lap_abs)))
         is_sharp = lap_abs > lap_med + 3 * 1.4826 * lap_mad
         edge = np.zeros((ny, nx), dtype=bool); edge[[0, -1], :] = True; edge[:, [0, -1]] = True
@@ -218,8 +363,27 @@ def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: n
     return gaussian + _fit_residual_bkg(flux_i - gaussian, np.isnan(bkgmask_i), max(4, min(20, min(ny, nx)//2)), n_sigma)
 
 
-def estimate_tessreduce_residual_background(residual: np.ndarray, mask: np.ndarray, *, smooth_gauss: float = 2.0, anomaly_gauss: float = 2.0, qe_spline_degree: int = 2, qe_spline_smooth_mult: float = 10.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Notebook ``run_tessreduce_variant`` arithmetic for one input frame."""
+def estimate_tessreduce_residual_background(
+    residual: np.ndarray,
+    mask: np.ndarray,
+    *,
+    smooth_gauss: float = 2.0,
+    anomaly_gauss: float = 2.0,
+    qe_spline_degree: int = 2,
+    qe_spline_smooth_mult: float = 10.0,
+    force_anomaly_repair: bool = False,
+    boundary_k: int = BOUNDARY_CLIP_K,
+    boundary_sigma: float = BOUNDARY_CLIP_SIGMA,
+    boundary_rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Notebook ``run_tessreduce_variant`` (``biharmonic_robust``) arithmetic
+    for one input frame.
+
+    This is the single shared background estimator used by both
+    ``kernel_fit`` and ``kernel_subtract``; ``boundary_k``/``boundary_sigma``/
+    ``boundary_rim_width`` control the KNN sigma-clip applied to the mask
+    boundary before biharmonic gap-filling (see ``sanitize_boundary_outliers``).
+    """
     flux = np.asarray(residual, dtype=np.float64)
     if flux.ndim != 2:
         raise ValueError(f"residual background expects 2-D image, got {flux.shape}")
@@ -227,7 +391,16 @@ def estimate_tessreduce_residual_background(residual: np.ndarray, mask: np.ndarr
     if fit.shape != flux.shape:
         raise ValueError(f"mask shape {fit.shape} != residual shape {flux.shape}")
     bkgmask = np.where(fit, 1.0, np.nan)
-    smooth = smooth_bkg_decomposed(flux * bkgmask, gauss_smooth=smooth_gauss)
-    pre_qe = fix_bkg_frame_decomposed(smooth, flux, bkgmask, mask, gauss_smooth=anomaly_gauss)
+    smooth = smooth_bkg_decomposed(
+        flux * bkgmask,
+        gauss_smooth=smooth_gauss,
+        boundary_k=boundary_k,
+        boundary_sigma=boundary_sigma,
+        boundary_rim_width=boundary_rim_width,
+    )
+    pre_qe = fix_bkg_frame_decomposed(
+        smooth, flux, bkgmask, mask, gauss_smooth=anomaly_gauss,
+        force_anomaly_repair=force_anomaly_repair,
+    )
     qe = _qe_spline_map(flux, pre_qe, mask, degree=qe_spline_degree, smooth_mult=qe_spline_smooth_mult)
     return pre_qe * qe, pre_qe, qe

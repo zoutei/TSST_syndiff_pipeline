@@ -70,7 +70,6 @@ def test_parse_kernel_fit_and_hotpants_bridge():
         "kind": "kernel_fit",
         "output": "kernel_fit",
         "weighting_factor": 0.5,
-        "phot_box_size": 4,
         "hp_bgo": 3,
     }
     kf = parse_kernel_fit(stage, 0)
@@ -87,7 +86,6 @@ def test_validate_single_kernel_pipeline():
             {
                 "kind": "kernel_fit",
                 "output": "kernel_fit",
-                "phot_box_size": 4,
             },
             {
                 "kind": "convolved_templates",

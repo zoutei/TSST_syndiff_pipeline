@@ -406,11 +406,11 @@ class TestDiffRecipeParamsBuilders(unittest.TestCase):
         )
 
         fit = KernelFitParams(weighting_factor=0.7)
-        sub = KernelSubtractParams(phot_box_size=6)
+        sub = KernelSubtractParams(tessreduce_boundary_k=6)
         params = model.diff_image_recipe_params(fit, sub)
         self.assertEqual(set(params.keys()), {"KernelFitParams", "KernelSubtractParams"})
         self.assertEqual(params["KernelFitParams"]["weighting_factor"], 0.7)
-        self.assertEqual(params["KernelSubtractParams"]["phot_box_size"], 6)
+        self.assertEqual(params["KernelSubtractParams"]["tessreduce_boundary_k"], 6)
 
     def test_diff_image_recipe_params_requires_at_least_one(self):
         with self.assertRaises(ValueError):

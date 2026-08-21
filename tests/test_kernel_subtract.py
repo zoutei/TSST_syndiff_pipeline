@@ -1,4 +1,4 @@
-"""Tests for kernel_subtract (uncalibrated algebraic diff + photutils bkg)."""
+"""Tests for kernel_subtract (algebraic diff + robust-TESSreduce bkg, subtracted)."""
 from __future__ import annotations
 
 import os
@@ -22,7 +22,7 @@ from syndiff_pipeline.difference_imaging.support.paths import (
 
 
 class TestKernelSubtractUncalibrated(unittest.TestCase):
-    def test_writes_raw_diff_and_bkg_without_meta_dir(self):
+    def test_writes_bkg_subtracted_diff_and_bkg_without_meta_dir(self):
         crop_bounds = {
             "x_min": 0,
             "y_min": 0,
@@ -32,7 +32,6 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
         }
         ffi = np.full((4, 4), 100.0, dtype=np.float64)
         convolved = np.full((4, 4), 40.0, dtype=np.float64)
-        phot_bkg = np.full((4, 4), 0.5, dtype=np.float64)
         tessreduce_bkg = np.full((4, 4), 0.25, dtype=np.float64)
         shared_mask = np.zeros((4, 4), dtype=bool)
         convolved_table = pd.DataFrame(
@@ -55,8 +54,6 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
             ), patch.object(
                 ks_mod.wcs_grouping, "crop_ffi_header", return_value=None
             ), patch.object(
-                ks_mod, "photutils_background_masked", return_value=phot_bkg
-            ) as mock_phot, patch.object(
                 ks_mod,
                 "estimate_tessreduce_residual_background",
                 return_value=(tessreduce_bkg, tessreduce_bkg, np.ones_like(tessreduce_bkg)),
@@ -71,7 +68,6 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
                         "crop_bounds": crop_bounds,
                         "shared_mask": shared_mask,
                         "convolved_table": convolved_table,
-                        "phot_box_size": 4,
                         "diffs_dir": diffs_dir,
                         "bkg_dir": bkg_dir,
                         "diffs_label": "ks_d",
@@ -85,17 +81,15 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
                 result = ks_mod._process_one_frame((ffi_path,))
 
             self.assertTrue(result["success"])
-            mock_phot.assert_called_once()
-            np.testing.assert_array_equal(mock_phot.call_args[0][0], ffi - convolved)
             mock_tessreduce.assert_called_once()
             np.testing.assert_array_equal(
-                mock_tessreduce.call_args[0][0], ffi - convolved - phot_bkg
+                mock_tessreduce.call_args[0][0], ffi - convolved
             )
             self.assertEqual(mock_write.call_count, 2)
             diff_data = mock_write.call_args_list[0][0][1]
-            np.testing.assert_array_equal(diff_data, ffi - convolved)
+            np.testing.assert_array_equal(diff_data, ffi - convolved - tessreduce_bkg)
             bkg_data = mock_write.call_args_list[1][0][1]
-            np.testing.assert_array_equal(bkg_data, phot_bkg + tessreduce_bkg)
+            np.testing.assert_array_equal(bkg_data, tessreduce_bkg)
             meta = meta_workspace_dir_from_diffs_dir(diffs_dir)
             self.assertFalse(os.path.exists(meta))
 
@@ -112,7 +106,6 @@ class TestKernelSubtractUncalibrated(unittest.TestCase):
                     crop_bounds={"shape": (2, 2)},
                     shared_mask=np.zeros((2, 2), dtype=bool),
                     convolved_table=pd.DataFrame(),
-                    phot_box_size=4,
                     diffs_dir=diffs_dir,
                     diffs_label="ks_d",
                 )

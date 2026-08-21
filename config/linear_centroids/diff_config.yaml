@@ -20,7 +20,6 @@ pipeline:
   - kind: shared_mask
   - kind: kernel_fit
     weighting_factor: 0.5
-    phot_box_size: 4
     write_debug_fits: true
     output: kernel_fit
     hp_sigma_gauss: [0.752, 1.88, 3.76]
@@ -46,7 +45,6 @@ pipeline:
   - kind: kernel_subtract
     inputs:
       convolved: tmpl_conv
-    phot_box_size: 4
     output:
       diffs: ks_d
       phot_bkg: ks_b

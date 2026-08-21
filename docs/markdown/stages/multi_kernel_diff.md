@@ -3,7 +3,7 @@
 
 # Multi-kernel difference imaging (`kernel_fit` → `convolved_templates` → `kernel_subtract`)
 
-Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a carefully chosen science frame, convolve each WCS-group template with that fixed kernel, then form per-epoch difference images by **algebraic subtraction** plus a photutils background estimate. Downstream stages (`background`, `subtract`, `hotpants` round 2, `forced_photometry`) consume the `ks_*` / `hp_*` labels this path produces.
+Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a carefully chosen science frame, convolve each WCS-group template with that fixed kernel, then form per-epoch difference images by **algebraic subtraction** plus a shared robust-TESSreduce background estimate (biharmonic inpainting with KNN boundary sigma-clip; see [background stage](background.md) for the *separate*, optional downstream Savitzky–Golay smoothing stage). Downstream stages (`background`, `subtract`, `hotpants` round 2, `forced_photometry`) consume the `ks_*` / `hp_*` labels this path produces.
 
 ---
 
@@ -12,7 +12,7 @@ Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a ca
 | Aspect | Kernel-fit path | Default Hotpants (`hotpants`) |
 |--------|-----------------|--------------------------------|
 | Kernel | One `kernel_r2.npz` per target (min-background FFI) | Per-FFI kernel fit (discarded unless `write_kernel_solutions: true`) |
-| Per-frame work | Cheap subtract + photutils bkg | Full Hotpants each FFI |
+| Per-frame work | Cheap subtract + robust-TESSreduce bkg | Full Hotpants each FFI |
 | Template swap | Re-run `convolved_templates` + `kernel_subtract` with same `kernel_r2.npz` | Must re-run Hotpants |
 | PSF variability | Single kernel for all epochs | Adapts per frame |
 | Typical configs | `diff_config_single_kernel.yaml`, `diff_config_multi_kernel.yaml`, linear-centroids phase 1b | `diff_config.yaml` (production default) |
@@ -25,10 +25,13 @@ Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a ca
 
 ```text
 shared_mask
-  → kernel_fit          # HP1 (bgo=3) → photutils bkg on diff → HP2 (bgo=0) → kernel_r2.npz
+  → kernel_fit          # HP1(bgo) → bkg1 (robust tessreduce) → HP2(bgo=0) → bkg2 → HP3(bgo=0, final) → kernel_r2.npz
   → convolved_templates # each unique template × kernel_r2
-  → kernel_subtract     # ffi − convolved_template → ks_d; photutils bkg on diff → ks_b
-  → background          # optional: ks_b → ks_b_s (temporal Savitzky–Golay)
+  → kernel_subtract     # ffi − convolved_template → diff_raw; robust-tessreduce bkg → ks_d (bkg-subtracted), ks_b (bkg)
+  → background          # optional: further spatial/temporal/strap refinement -- NOTE: since ks_d is now
+                         # already background-subtracted, chaining this stage after kernel_subtract will
+                         # re-run its own spatial photutils estimate on an already-cleaned diff; verify it's
+                         # still wanted before enabling both (see caveat in Stage 3 below).
   → subtract            # optional: ks_d + ks_b − ks_b_s → ks_d_s
   → hotpants            # optional round 2 (multi-kernel configs)
   → forced_photometry
@@ -42,18 +45,22 @@ Example YAML: [`config/diff_config_single_kernel.yaml`](../../../config/diff_con
 
 Fits the shared kernel on the **minimum Earth/Moon angle** FFI (`pick_best_angle_ffi` with configurable `weighting_factor`).
 
-**Hotpants two-pass recipe** (on the chosen frame only):
+**Three-round hotpants + robust-TESSreduce recipe** (on the chosen frame only; see
+[`background/tessreduce_residual.py`](../../../syndiff_pipeline/difference_imaging/stages/background/tessreduce_residual.py)
+for the shared estimator both `kernel_fit` and `kernel_subtract` call):
 
-1. **HP1** — `hp_bgo=3` (background order 3); kernel params not collected.
-2. **Photutils** — `photutils_background_masked` on HP1 diff (`phot_box_size`, shared mask).
-3. **HP2** — science cleaned: `ffi − hp1_bkg − phot_bkg`; `hp_bgo=0`; extract `kernel_solution`.
+1. **HP1** — `hp_bgo` at the stage-configured order (default 3); kernel params not collected. `conv1` = its convolved template.
+2. `diff1 = ffi − conv1`; `bkg1 = estimate_tessreduce_residual_background(diff1, ...)` (biharmonic inpainting + KNN boundary sigma-clip); `cleaned_ffi1 = ffi − bkg1`.
+3. **HP2** — `sci=cleaned_ffi1`, `hp_bgo=0`; kernel params not collected. `conv2` = its convolved template.
+4. `diff2 = ffi − conv2`; `bkg2 = estimate_tessreduce_residual_background(diff2, ...)`; `cleaned_ffi2 = ffi − bkg2`.
+5. **HP3 (final)** — `sci=cleaned_ffi2`, `hp_bgo=0`; extract `kernel_solution` and convolved template -- these are what get persisted.
 
 **Outputs** (under the stage `output` label, e.g. `kernel_fit/`):
 
 | Artifact | Contents |
 |----------|----------|
-| `kernel_r2.npz` | `kernel_solution`, `kernel_image`, `basis`, Hotpants scalar arrays |
-| `kernel_fit_meta.json` | `min_bg_ffi_path`, `product_id`, `group_dx`/`group_dy` or field `group_id`, `reference_kernel_sum`, fit params |
+| `kernel_r2.npz` | `kernel_solution`, `kernel_image`, `basis`, Hotpants scalar arrays (from HP3) |
+| `kernel_fit_meta.json` | `min_bg_ffi_path`, `product_id`, `group_dx`/`group_dy` or field `group_id`, `reference_kernel_sum`, fit params (including `tessreduce_boundary_k`/`tessreduce_boundary_sigma`/`tessreduce_boundary_rim_width`) |
 
 `skip_existing: true` (default) reloads both files when present.
 
@@ -89,11 +96,14 @@ Per-FFI loop (joblib `loky`, `n_jobs` from config):
 
 ```text
 diff_raw = ffi_crop − convolved_template
-phot_bkg = photutils_background_masked(diff_raw, mask, phot_box_size)
+tessreduce_bkg = estimate_tessreduce_residual_background(diff_raw, mask, ...)  # same shared estimator as kernel_fit
+diff_final = diff_raw − tessreduce_bkg
 ```
 
-- **Diff FITS** (`output.diffs`, e.g. `ks_d`) — **not** background-subtracted.
-- **Background FITS** (`output.phot_bkg`, e.g. `ks_b`) — separate plane when configured.
+- **Diff FITS** (`output.diffs`, e.g. `ks_d`) — **background-subtracted** (`diff_final`), science-ready.
+- **Background FITS** (`output.phot_bkg`, e.g. `ks_b`) — the robust-TESSreduce background plane, still saved separately for diagnostics/the star branch.
+
+> **Caveat:** because `ks_d` is now already background-subtracted, chaining an optional downstream `background` stage (spatial photutils + temporal Savitzky–Golay + strap, see [background stage](background.md)) after `kernel_subtract` will re-estimate/re-subtract background from an already-cleaned diff. Configs that enable both (`diff_config_single_kernel.yaml`, `diff_config_multi_kernel.yaml`) should be reviewed/re-tuned before relying on this combination; configs that only use `kernel_fit` → `kernel_subtract` are unaffected and now receive a properly background-subtracted diff where previously they did not.
 
 Template lookup:
 
@@ -110,7 +120,7 @@ The star branch expects `ks_b` (or smoothed `ks_b_s`) for host stamps — see [d
 
 | Location | Contents | Granularity |
 |----------|----------|-------------|
-| `kernel_fit/kernel_r2.npz` | Target-level kernel from HP2 | One per target |
+| `kernel_fit/kernel_r2.npz` | Target-level kernel from HP3 (final round) | One per target |
 | `convolved_templates/` | Pre-convolved template FITS + CSV | One per offset group or `group_id` |
 | `{diffs}_kernels/*.npz` | Per-frame Hotpants kernels | Only when `write_kernel_solutions: true` on a `hotpants` stage |
 
@@ -126,7 +136,7 @@ From the [linear centroids campaign](../linear_centroids_pipeline.md):
 |-------|------|
 | `kernel_fit/` | `kernel_r2.npz`, `kernel_fit_meta.json` |
 | `tmpl_conv/` | Convolved templates + `convolved_templates.csv` |
-| `ks_d/`, `ks_b/` | Per-FFI diffs and photutils backgrounds |
+| `ks_d/`, `ks_b/` | Per-FFI background-subtracted diffs and robust-TESSreduce backgrounds |
 | `hp_d/`, `hp_b/` | Optional second Hotpants leg |
 
 Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC field-mode v2 handoff.
@@ -140,9 +150,15 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | Key | Default | Notes |
 |-----|---------|-------|
 | `weighting_factor` | 0.5 | Earth/Moon angle ranking |
-| `phot_box_size` | 4 | Photutils mesh on HP1 diff |
+| `tessreduce_smooth_gauss` | 2.0 | Gaussian smoothing after biharmonic gap-fill |
+| `tessreduce_anomaly_gauss` | 2.0 | Anomaly-repair smoothing (`fix_bkg_frame_decomposed`) |
+| `tessreduce_qe_spline_degree` | 2 | Strap QE B-spline degree |
+| `tessreduce_qe_spline_smooth_mult` | 10.0 | Strap QE B-spline smoothing multiplier |
+| `tessreduce_boundary_k` | 15 | KNN neighbors for boundary sigma-clip |
+| `tessreduce_boundary_sigma` | 3.0 | Boundary sigma-clip threshold |
+| `tessreduce_boundary_rim_width` | 1 | Dilation width defining the mask boundary rim |
 | `output` | `kernel_fit` | Artifact directory label |
-| `hp_*` | HotpantsParams | Round 1 uses stage `hp_bgo`; round 2 forces `bgo=0` internally |
+| `hp_*` | HotpantsParams | Round 1 uses stage `hp_bgo`; rounds 2 and 3 force `bgo=0` internally |
 
 ### `convolved_templates`
 
@@ -157,8 +173,9 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | Key | Role |
 |-----|------|
 | `inputs.convolved` | Convolved-templates label |
-| `phot_box_size` | Photutils background on algebraic diff |
-| `output.diffs` / `output.phot_bkg` | e.g. `ks_d`, `ks_b` |
+| `tessreduce_smooth_gauss` / `tessreduce_anomaly_gauss` / `tessreduce_qe_spline_degree` / `tessreduce_qe_spline_smooth_mult` | Same robust-TESSreduce knobs as `kernel_fit` (shared estimator) |
+| `tessreduce_boundary_k` / `tessreduce_boundary_sigma` / `tessreduce_boundary_rim_width` | Boundary sigma-clip knobs (same defaults as `kernel_fit`) |
+| `output.diffs` / `output.phot_bkg` | e.g. `ks_d` (background-subtracted), `ks_b` (background plane) |
 
 ---
 

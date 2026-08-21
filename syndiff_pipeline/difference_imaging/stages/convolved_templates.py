@@ -141,6 +141,28 @@ def run_convolved_templates(
     mapping_grid = (
         getattr(field_ctx, "mapping_grid", None) if field_ctx is not None else None
     )
+    linear_pad = 0
+    if mapping_grid is None and field_ctx is None:
+        # Linear mode has no live field-context grid, but its templates carry
+        # their own frozen support-plane header (see linear_downsample.py) --
+        # validate it the same way kernel_fit/hotpants do, from whichever
+        # template we have on hand (every group_dx/dy template for one SCC
+        # shares the identical support geometry). Raises if a template
+        # doesn't actually cover crop_bounds with padding; see
+        # hotpants._resolve_linear_template_pad.
+        probe_entries = _unique_template_entries(template_paths) if template_paths else []
+        if probe_entries:
+            from syndiff_pipeline.difference_imaging.stages.hotpants import (
+                _resolve_linear_template_pad,
+            )
+
+            linear_pad = (
+                _resolve_linear_template_pad(
+                    probe_entries[0]["template_path"], crop_bounds
+                )
+                or 0
+            )
+
     if mapping_grid is not None:
         sci_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
         science_shape = (
@@ -148,14 +170,17 @@ def run_convolved_templates(
             int(mapping_grid.science_xmax - mapping_grid.science_xmin),
         )
     else:
-        sci_shape = tuple(crop_bounds.get("shape") or ())
-        science_shape = sci_shape
-    if len(sci_shape) != 2:
+        science_shape = tuple(crop_bounds.get("shape") or ())
+        if len(science_shape) != 2:
+            science_shape = (
+                int(crop_bounds["y_max"]) - int(crop_bounds["y_min"]),
+                int(crop_bounds["x_max"]) - int(crop_bounds["x_min"]),
+            )
         sci_shape = (
-            int(crop_bounds["y_max"]) - int(crop_bounds["y_min"]),
-            int(crop_bounds["x_max"]) - int(crop_bounds["x_min"]),
+            (science_shape[0] + 2 * linear_pad, science_shape[1] + 2 * linear_pad)
+            if linear_pad
+            else science_shape
         )
-        science_shape = sci_shape
     hp_config = build_hotpants_config(
         hp_fit,
         work,
@@ -167,23 +192,46 @@ def run_convolved_templates(
 
     def _convolve_crop(template_crop: np.ndarray) -> np.ndarray:
         from syndiff_pipeline.difference_imaging.stages.hotpants import (
+            _trim_linear_pad,
             resolve_hotpants_oversample,
         )
         from syndiff_pipeline.common.grid_pairing import trim_padded_products
 
         tmpl = np.asarray(template_crop)
-        if mapping_grid is None:
-            raise ValueError("convolved template output requires MAPGRID=3 geometry")
-        science_shape_local = tuple(mapping_grid.science_ffi_bounds()["shape"])
-        pad_rows = int(mapping_grid.conv_pad_native)
-
         if mapping_grid is not None:
-            expected_template_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
-            if tuple(tmpl.shape) != expected_template_shape:
+            science_shape_local = tuple(mapping_grid.science_ffi_bounds()["shape"])
+            pad_rows = int(mapping_grid.conv_pad_native)
+            # The template is assembled at the field store's own oversampling
+            # (1x or Nx), not always native -- template_ffi_bounds() only
+            # returns the native-resolution support shape. Accept either the
+            # native shape or the Nx-oversampled shape; resolve_hotpants_oversample
+            # below re-derives the actual factor from the sci/tmpl ratio.
+            native_template_shape = tuple(mapping_grid.template_ffi_bounds()["shape"])
+            os_template_shape = tuple(mapping_grid.array_shape_os())
+            if tuple(tmpl.shape) not in (native_template_shape, os_template_shape):
                 raise ValueError(
                     "convolution template shape does not match MAPGRID template support: "
-                    f"{tmpl.shape} != {expected_template_shape}"
+                    f"{tmpl.shape} not in {{{native_template_shape}, {os_template_shape}}}"
                 )
+        elif linear_pad:
+            science_shape_local = science_shape
+            pad_rows = linear_pad
+            expected_template_shape = (
+                science_shape[0] + 2 * linear_pad,
+                science_shape[1] + 2 * linear_pad,
+            )
+            if tuple(tmpl.shape) != expected_template_shape:
+                raise ValueError(
+                    "convolution template shape does not match crop_bounds "
+                    f"+/- linear padding: {tmpl.shape} != {expected_template_shape}"
+                )
+        else:
+            # No support-plane header on this template at all (fully
+            # legacy/synthetic template, or run_convolved_templates was
+            # called with an empty template_paths) -- no padding contract is
+            # being claimed, so pass the crop through unpadded.
+            science_shape_local = sci_shape
+            pad_rows = 0
 
         factor = resolve_hotpants_oversample(
             sci_shape,
@@ -199,6 +247,8 @@ def run_convolved_templates(
         )
         if mapping_grid is not None:
             convolved = trim_padded_products(convolved, grid=mapping_grid)
+        elif linear_pad:
+            convolved = _trim_linear_pad(convolved, linear_pad)
         return convolved
 
     os.makedirs(convolved_ws_dir, exist_ok=True)
@@ -266,7 +316,16 @@ def run_convolved_templates(
                 rows.append({**entry, "convolved_path": existing})
                 continue
 
-            template_crop = _load_template_cropped(tmpl_path, crop_bounds)
+            if linear_pad:
+                from syndiff_pipeline.difference_imaging.stages.hotpants import (
+                    _padded_crop_bounds,
+                )
+
+                template_crop = _load_template_cropped(
+                    tmpl_path, _padded_crop_bounds(crop_bounds, linear_pad)
+                )
+            else:
+                template_crop = _load_template_cropped(tmpl_path, crop_bounds)
             convolved = _convolve_crop(template_crop)
             _write_image_fits(out_path, convolved, header=ref_header)
             rows.append({**entry, "convolved_path": out_path})
