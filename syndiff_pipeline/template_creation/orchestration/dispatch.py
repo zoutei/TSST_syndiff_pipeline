@@ -664,7 +664,13 @@ def _execute_template_stage(
             progress_path=progress_path,
             mapping_grid=mapping_grid,
             psf_sigma=float(getattr(resolved.stages.ps1_process, "psf_sigma", 40.0)),
-            combined_recipe=production_combined_recipe(resolved.stages.ps1_process),
+            combined_recipe=production_combined_recipe(
+                resolved.stages.ps1_process,
+                data_root=resolved.data_root,
+                sector=t.sector,
+                camera=t.camera,
+                ccd=t.ccd,
+            ),
         )
         field_result = dict(field_result)
         if mp.store_name == "tvwcs":

@@ -231,6 +231,25 @@ def scc_catalogs_dir(
     return scc_root(data_root, sector, camera, ccd) / CATALOGS_SUBDIR
 
 
+def default_gaia_catalog_path(
+    data_root: str | Path,
+    sector: int,
+    camera: int,
+    ccd: int,
+) -> Path:
+    """The implicit per-SCC Gaia catalog path used when no explicit
+    ``catalog_path`` override is configured.
+
+    The single place this filename pattern is defined -- both the producer
+    (``ps1_process.load_gaia_catalog``) and the shared-store recipe/
+    fingerprint resolver (``combined_store.production_combined_recipe``)
+    must resolve the exact same path so a catalog-load failure can never
+    stamp a fingerprint indistinguishable from a successful load using the
+    implicit default.
+    """
+    return scc_catalogs_dir(data_root, sector, camera, ccd) / f"gaia_catalog_s{sector:04d}_{camera}_{ccd}.csv"
+
+
 def scc_convolved_zarr(
     data_root: str | Path,
     sector: int,

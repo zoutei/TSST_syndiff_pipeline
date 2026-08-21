@@ -497,7 +497,13 @@ def run_linear_downsample_scc(
         production_combined_recipe,
     )
 
-    combined_recipe = production_combined_recipe(resolved.stages.ps1_process)
+    combined_recipe = production_combined_recipe(
+        resolved.stages.ps1_process,
+        data_root=resolved.data_root,
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+    )
 
     def _process(skycell: str):
         return skycell, _bin_one_skycell_all_groups(

@@ -110,10 +110,9 @@ def calculate_total_buffer_size(cell_buffer: dict) -> int:
 def load_gaia_catalog(data_root: str, sector: int, camera: int, ccd: int, catalog_path: Optional[str] = None) -> pd.DataFrame:
     """Load Gaia catalog for the specified sector/camera/ccd."""
     if catalog_path is None:
-        from syndiff_pipeline.common.scc_paths import scc_catalogs_dir
+        from syndiff_pipeline.common.scc_paths import default_gaia_catalog_path
 
-        catalog_dir = scc_catalogs_dir(data_root, sector, camera, ccd)
-        catalog_path = f"{catalog_dir}/gaia_catalog_s{sector:04d}_{camera}_{ccd}.csv"
+        catalog_path = str(default_gaia_catalog_path(data_root, sector, camera, ccd))
 
     if not os.path.exists(catalog_path):
         raise FileNotFoundError(f"Catalog not found: {catalog_path}")
@@ -2371,6 +2370,8 @@ def process_row_step_from_queue(
                 state, config, metadata, current_row_id, next_row_id, ingest_config, csv_path,
                 band_cache=band_cache,
                 remove_saturated_stars=remove_saturated_stars,
+                gaia_catalog=catalog,
+                bright_star_mag_threshold=bright_star_mag_threshold,
             )
         finally:
             if pipeline_paused_event is not None:
@@ -2637,14 +2638,26 @@ def run_modern_sliding_window_pipeline(
     # Load Gaia catalog.  Used for:
     #   - apply_saturation_to_row (when enable_saturation_correction and not remove_saturated_stars)
     #   - catalog-based segment removal in remove_background (when remove_saturated_stars)
+    #
+    # A failure here must abort the run rather than silently degrade to
+    # catalog=None: remove_background()'s primary (TESS-mag) removal pass is
+    # a no-op without a catalog, so a swallowed failure here means every
+    # skycell this run publishes only gets the magnitude-blind PS1-mask
+    # fallback pass -- and because the combined-skycell store is a shared,
+    # content-addressed, cross-sector cache keyed by recipe (not by which
+    # run produced it or whether its catalog load actually succeeded), that
+    # catalog-less build then gets silently reused by every other SCC that
+    # ever resolves the same nominal recipe. See docs/markdown/bookkeeping.md
+    # and storage_layout.md for the shared-store fingerprint contract.
     catalog = None
     if enable_saturation_correction or remove_saturated_stars:
         try:
             catalog = load_gaia_catalog(data_root, sector, camera, ccd, catalog_path)
             logger.info(f"[Pipeline] Loaded {len(catalog)} stars from catalog")
         except Exception as e:
-            logger.warning(f"[Pipeline] Failed to load catalog: {e}")
-            catalog = None
+            logger.error(f"[Pipeline] Failed to load Gaia catalog (required for "
+                         f"remove_saturated_stars/enable_saturation_correction): {e}")
+            return {"error": f"Gaia catalog load failed: {e}"}
 
     # --- Setup ---
     zarr_store = None
@@ -2744,7 +2757,11 @@ def run_modern_sliding_window_pipeline(
                 "remove_saturated_stars": remove_saturated_stars,
                 "bright_star_mag_threshold": bright_star_mag_threshold,
                 "catalog_path": catalog_path,
-            }
+            },
+            data_root=data_root,
+            sector=sector,
+            camera=camera,
+            ccd=ccd,
         )
     except Exception as e:
         logger.warning(

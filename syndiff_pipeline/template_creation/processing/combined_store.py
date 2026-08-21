@@ -529,7 +529,14 @@ def gaia_version_stamp(catalog_path: str | None) -> str:
         return f"{catalog_path}:unknown"
 
 
-def production_combined_recipe(ps1_process_config: Any) -> dict:
+def production_combined_recipe(
+    ps1_process_config: Any,
+    *,
+    data_root: str | Path | None = None,
+    sector: int | None = None,
+    camera: int | None = None,
+    ccd: int | None = None,
+) -> dict:
     """Build the ``combined_skycell`` recipe from a resolved
     ``stages.ps1_process`` config (attribute-style object, mapping, or
     ``None``), exactly the way ``ps1_process.run_modern_sliding_window_pipeline``
@@ -552,6 +559,19 @@ def production_combined_recipe(ps1_process_config: Any) -> dict:
     saturation handling is actually enabled, mirroring ps1_process's own
     logic: a catalog-independent config (both flags off) should not mint a
     new fingerprint just because some unrelated catalog file's mtime moved.
+
+    ``catalog_path`` is almost never set explicitly in production configs --
+    every real caller relies on ``ps1_process.load_gaia_catalog``'s implicit
+    per-SCC default path. Stamping ``gaia_version="none"`` whenever
+    ``catalog_path`` is merely unset (the historical behavior) made every
+    such build indistinguishable from a genuine catalog-load failure, so a
+    single run whose catalog load silently failed could permanently poison
+    the shared, cross-sector/cross-run store for every other SCC requesting
+    the same nominal recipe. When ``data_root``/``sector``/``camera``/``ccd``
+    are supplied (every current caller has them available), an unset
+    ``catalog_path`` resolves to that same implicit default via
+    ``scc_paths.default_gaia_catalog_path`` before stamping, so the
+    fingerprint reflects the catalog that will actually be loaded.
     """
     enable_saturation_correction = bool(
         _param(ps1_process_config, "enable_saturation_correction", False)
@@ -559,6 +579,10 @@ def production_combined_recipe(ps1_process_config: Any) -> dict:
     remove_saturated_stars = bool(_param(ps1_process_config, "remove_saturated_stars", True))
     bright_star_mag_threshold = float(_param(ps1_process_config, "bright_star_mag_threshold", 13.0))
     catalog_path = _param(ps1_process_config, "catalog_path", None)
+    if catalog_path is None and None not in (data_root, sector, camera, ccd):
+        from syndiff_pipeline.common.scc_paths import default_gaia_catalog_path
+
+        catalog_path = str(default_gaia_catalog_path(data_root, sector, camera, ccd))
     gaia_version = (
         gaia_version_stamp(catalog_path)
         if (enable_saturation_correction or remove_saturated_stars)
