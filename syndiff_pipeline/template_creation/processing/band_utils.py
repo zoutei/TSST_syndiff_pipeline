@@ -382,7 +382,7 @@ def remove_background(
     sigma: float = 2.5,
     sigma_mask: float = 50,
     mask: np.ndarray = None,
-    remove_saturated_stars: bool = False,
+    remove_saturated_stars: bool = True,
     gaia_catalog_pixels=None,
     bright_star_mag_threshold: float = 13.0,
 ) -> tuple[np.ndarray, list[dict]]:

@@ -353,7 +353,7 @@ def write_field_group_fits(
     *,
     header: Any | None = None,
 ) -> str:
-    """Write one group's mean-flux template FITS (+ COUNT extension) as ``.fits.fz``."""
+    """Write one group's flux-sum template FITS (+ COUNT extension) as ``.fits.fz``."""
     from astropy.io import fits
 
     from syndiff_pipeline.common.fits_io import write_hdul_fits
@@ -370,6 +370,72 @@ def write_field_group_fits(
         ]
     )
     return write_hdul_fits(out_path, hdul)
+
+
+def native_debug_fits_basename(source_name: str, *, oversampling_factor: int) -> str:
+    """Name a native debug FITS derived from an oversampled FITS."""
+    factor = int(oversampling_factor)
+    if factor < 2:
+        raise ValueError(f"native debug conversion requires oversampling >= 2, got {factor}")
+    source = Path(source_name).name
+    suffix = ".fits.fz" if source.endswith(".fits.fz") else ".fits"
+    stem = source[: -len(suffix)] if source.endswith(suffix) else Path(source).stem
+    return f"{stem}_native{suffix}"
+
+
+def _sum_native_blocks(array: np.ndarray, *, oversampling_factor: int) -> np.ndarray:
+    factor = int(oversampling_factor)
+    values = np.asarray(array)
+    if values.ndim != 2:
+        raise ValueError(f"native debug conversion requires 2-D arrays, got shape {values.shape}")
+    height, width = values.shape
+    if height % factor or width % factor:
+        raise ValueError(
+            f"array shape {values.shape} is not divisible by oversampling factor {factor}"
+        )
+    return values.reshape(height // factor, factor, width // factor, factor).sum(axis=(1, 3))
+
+
+def write_native_debug_fits(
+    source_path: str | Path,
+    *,
+    output_path: str | Path | None = None,
+    oversampling_factor: int,
+) -> str:
+    """Write a native-scale debug FITS by summing each oversampled block."""
+    from astropy.io import fits
+
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
+
+    source = Path(source_path)
+    factor = int(oversampling_factor)
+    if factor < 2:
+        raise ValueError(f"native debug conversion requires oversampling >= 2, got {factor}")
+    with fits.open(source, memmap=False) as hdul:
+        if len(hdul) < 2 or hdul[1].data is None:
+            raise ValueError(f"source FITS has no flux image extension: {source}")
+        flux = _sum_native_blocks(hdul[1].data, oversampling_factor=factor)
+        if len(hdul) < 3 or hdul[2].data is None:
+            raise ValueError(f"source FITS has no COUNT image extension: {source}")
+        count = _sum_native_blocks(hdul[2].data, oversampling_factor=factor)
+        header = hdul[1].header.copy()
+
+    header["OVERSAMP"] = (1, "Native pixel scale")
+    header["SRCOS"] = (factor, "Source oversampling factor")
+    header["BLKSUM"] = (factor, f"{factor}x{factor} block sum")
+    count_header = header.copy()
+    count_header["EXTNAME"] = "COUNT"
+    destination = Path(output_path) if output_path is not None else source.with_name(
+        native_debug_fits_basename(source.name, oversampling_factor=factor)
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    native_hdul = fits.HDUList(
+        [
+            fits.PrimaryHDU(flux.astype(np.float32), header=header),
+            fits.ImageHDU(count.astype(np.float32), header=count_header, name="COUNT"),
+        ]
+    )
+    return write_hdul_fits(destination, native_hdul)
 
 
 def parse_contrib_basename(

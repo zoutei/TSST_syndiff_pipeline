@@ -60,7 +60,7 @@ def _cleanup_child_processes():
         except Exception:
             pass
         # Forcefully terminate worker processes via the executor's internal list
-        for proc in getattr(_active_executor, "_processes", {}).values():
+        for proc in (getattr(_active_executor, "_processes", None) or {}).values():
             try:
                 if proc.is_alive():
                     proc.kill()
@@ -89,6 +89,18 @@ GATHER_TIMEOUT_SECONDS = 180
 MAX_ACTIVE_TASKS = 35  # Maximum concurrent preprocessing tasks
 MAX_TOTAL_PENDING_WORK = 30  # Maximum total pending work (queue + buffer + active tasks)
 MIN_AVAILABLE_MEMORY_FRACTION = 0.15  # Pause task submission when available RAM drops below this fraction of total
+
+# Per-cell shared convolved-store canonical-skip (see
+# ``ps1_process_percell_skip_plan.md``). Below this fraction of a row's
+# cells actually needing (re)convolution, prefer local ±radius windowed
+# Gaussian convolution per contiguous run of missing cells over falling back
+# to the old whole-row convolution. Not a config knob -- the skip itself is
+# unconditional/always-on; this constant only controls the crossover point
+# between "many small local windows" and "one full-row pass", chosen from
+# the FLOP-vs-call-overhead analysis in the plan doc (local windows stay
+# FLOP-cheaper than a full row up to ~85-90% missing; below that, the
+# dominant cost at low missing-fractions is call/I-O overhead, not FLOPs).
+ROW_FALLBACK_THRESHOLD = 0.2
 
 def calculate_total_buffer_size(cell_buffer: dict) -> int:
     """Calculate total number of cells in the buffer across all projection/row combinations."""
@@ -339,19 +351,27 @@ def expected_convolved_skycells(
         raise ValueError(f"master skycell inventory missing columns: {sorted(missing)}")
     # MAPGRID=3 carries the geometry contract on every CSV row.  Refuse mixed
     # or partially annotated inventories before any PS1 work is dispatched.
-    if int(oversampling_factor) > 1:
-        for column in ("MAPGRID", "GEOMFP", "COORDFRM"):
-            if column not in df.columns:
-                raise ValueError(
-                    f"OS{int(oversampling_factor)} master inventory lacks {column}; "
-                    "rebuild P2 mapping with MAPGRID=3"
-                )
+    # pancakes.py now writes MAPGRID/GEOMFP/COORDFRM unconditionally (not just
+    # for OS>1), so enforce this check whenever the columns are present,
+    # regardless of oversampling_factor.  OS>1 still hard-requires the
+    # columns to exist at all; OS1 stays permissive on missing columns only
+    # for backward compatibility with pre-MAPGRID3 OS1 inventories elsewhere
+    # in the data root that predate this contract.
+    geometry_columns = ("MAPGRID", "GEOMFP", "COORDFRM")
+    has_geometry_columns = all(column in df.columns for column in geometry_columns)
+    if int(oversampling_factor) > 1 and not has_geometry_columns:
+        missing_columns = [column for column in geometry_columns if column not in df.columns]
+        raise ValueError(
+            f"OS{int(oversampling_factor)} master inventory lacks {missing_columns}; "
+            "rebuild P2 mapping with MAPGRID=3"
+        )
+    if has_geometry_columns:
         if set(df["MAPGRID"].astype(int)) != {3}:
-            raise ValueError("OS master inventory must be MAPGRID=3; refusing PS1 processing")
+            raise ValueError("master inventory must be MAPGRID=3; refusing PS1 processing")
         if set(df["COORDFRM"].astype(str)) != {"full_ffi"}:
-            raise ValueError("OS master inventory is not in the full_ffi coordinate frame")
+            raise ValueError("master inventory is not in the full_ffi coordinate frame")
         if df["GEOMFP"].astype(str).nunique() != 1:
-            raise ValueError("OS master inventory has mixed geometry fingerprints")
+            raise ValueError("master inventory has mixed geometry fingerprints")
     # NAME is the published P2 identity column.  Do not reconstruct identities
     # through row geometry here: MAPGRID=3 edge rows may intentionally have a
     # different support shape, while their skycell names remain authoritative.
@@ -582,6 +602,8 @@ def ingest_worker(
     local_data_path: str | None = None,
     remove_saturated_stars: bool = True,
     band_cache: dict | None = None,
+    combined_store_data_root: str | None = None,
+    combined_store_recipe: Any = None,
 ):
     """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode)."""
     from pathlib import Path
@@ -611,6 +633,46 @@ def ingest_worker(
             raw_cell_queue.put(raw_bundle)
             logger.info(f"[{ingest_label}] Cache hit for {skycell_id}, skipping load")
             continue
+
+        # Tier-2: lazy, single-cell combined-store lookup (replaces the old
+        # eager bulk preload of all regular cells -- see
+        # doc/ps1_process_tiered_ingest_architecture_plan.md Part A). Only
+        # called for the one cell currently being ingested, so it's bounded
+        # by the worker pool size instead of the whole SCC's cell count.
+        if (
+            task_type == "regular"
+            and combined_store_data_root is not None
+            and combined_store_recipe is not None
+        ):
+            from syndiff_pipeline.template_creation.processing.combined_store import (
+                seed_band_cache_from_combined_store,
+            )
+
+            try:
+                hits = seed_band_cache_from_combined_store(
+                    combined_store_data_root, [skycell_id], combined_store_recipe
+                )
+            except Exception:
+                hits = {}
+                logger.warning(
+                    "[%s] Combined-store lookup failed for %s (falling back to raw fetch)",
+                    ingest_label,
+                    skycell_id,
+                    exc_info=True,
+                )
+            if skycell_id in hits:
+                if band_cache is not None:
+                    band_cache[skycell_id] = hits[skycell_id]
+                raw_bundle = {
+                    "skycell_id": skycell_id,
+                    "projection": projection,
+                    "row_id": row_id,
+                    "x_coord": x_coord,
+                    "task_type": "regular_cache_hit",
+                }
+                raw_cell_queue.put(raw_bundle)
+                logger.info(f"[{ingest_label}] Combined-store hit for {skycell_id}, skipping raw fetch")
+                continue
 
         try:
             if ps1_source == "stream":
@@ -1503,6 +1565,391 @@ def _evict_band_cache_for_step(
                 logger.debug(f"[BandCache] Evicted {name}")
 
 
+def _convolve_whole_row_snapshot(
+    state: ProcessingState, psf_sigma: float, projection: str, radius: int
+) -> Optional[dict[str, np.ndarray]]:
+    """Old (pre-percell-skip) behavior: convolve the entire same-projection
+    master row array once and extract every cell. Used as the fallback path
+    when >= ``ROW_FALLBACK_THRESHOLD`` of this row's cells actually need
+    (re)convolution -- at that point call/I-O overhead from many small
+    local-window convolutions outweighs the FLOPs saved by not touching
+    already-canonical cells.
+    """
+    try:
+        snapshot = state.current_array.copy()
+        nan_mask = np.isnan(snapshot)
+        snapshot[nan_mask] = 0.0
+        convolved_snapshot = convolution_utils.apply_gaussian_convolution(snapshot, sigma=psf_sigma, radius=radius)
+        convolved_snapshot[nan_mask] = np.nan
+        return extract_cell_results(convolved_snapshot, state.cell_locations)
+    except Exception:
+        logger.warning(
+            "[SequentialProcessor] Canonical same-projection convolution snapshot "
+            "failed for projection %s (shared convolved-store publish skipped for "
+            "this row, non-fatal)",
+            projection,
+            exc_info=True,
+        )
+        return None
+
+
+def _convolve_local_windows_for_missing_cells(
+    state: ProcessingState, missing_entries: list[dict], psf_sigma: float, radius: int
+) -> dict[str, np.ndarray]:
+    """Convolve only the cells in ``missing_entries``, in merged contiguous
+    windows rather than one call per cell (plan doc "contiguous-run
+    batching").
+
+    Each window is the union of one or more adjacent-in-x missing cells'
+    bounding boxes, expanded by ``radius`` on every side and clipped to
+    ``state.current_array``'s own bounds. Because the kernel is truncated at
+    ``radius`` (``truncate = radius / sigma`` in
+    ``convolution_utils.apply_gaussian_convolution``), every output pixel
+    inside a cell's own bounds depends only on input pixels within
+    ``radius`` of that cell -- all of which lie inside this window by
+    construction -- so cropping the window's cell region after convolving
+    reproduces exactly what convolving the full row array and cropping would
+    have produced. The only place this could differ is where the window
+    clips at the *true* array edge; that clip coincides exactly with the
+    same true edge the whole-row path would also clip at, using the same
+    ``mode="constant"`` boundary convention, so the two paths still agree
+    there too.
+    """
+    array = state.current_array
+    array_h, array_w = array.shape
+
+    ordered = sorted(missing_entries, key=lambda e: e["x_start"])
+    runs: list[list[dict]] = []
+    for entry in ordered:
+        if runs and entry["x_start"] <= runs[-1][-1]["x_end"] + 2 * radius:
+            # Windows for these two cells would overlap (or nearly so)
+            # anyway -- merge into a single convolution call instead of two
+            # redundant overlapping ones.
+            runs[-1].append(entry)
+        else:
+            runs.append([entry])
+
+    results: dict[str, np.ndarray] = {}
+    for run in runs:
+        x_start = min(e["x_start"] for e in run)
+        x_end = max(e["x_end"] for e in run)
+        y_start = min(e["y_start"] for e in run)
+        y_end = max(e["y_end"] for e in run)
+
+        win_x0, win_x1 = max(0, x_start - radius), min(array_w, x_end + radius)
+        win_y0, win_y1 = max(0, y_start - radius), min(array_h, y_end + radius)
+
+        window = array[win_y0:win_y1, win_x0:win_x1].copy()
+        nan_mask = np.isnan(window)
+        window[nan_mask] = 0.0
+        convolved_window = convolution_utils.apply_gaussian_convolution(window, sigma=psf_sigma, radius=radius)
+        convolved_window[nan_mask] = np.nan
+
+        for entry in run:
+            cx0, cx1 = entry["x_start"] - win_x0, entry["x_end"] - win_x0
+            cy0, cy1 = entry["y_start"] - win_y0, entry["y_end"] - win_y0
+            results[entry["cell_name"]] = convolved_window[cy0:cy1, cx0:cx1].copy()
+    return results
+
+
+def _lazy_fetch_combined_cell(
+    cell_name: str,
+    band_cache: Optional[dict],
+    combined_store_data_root: Optional[str],
+    combined_store_recipe: Any,
+) -> Optional[dict]:
+    """Tier-1 (``band_cache``) then tier-2 (combined store) lookup for a
+    single cell, synchronous, no worker/queue involvement -- used by the
+    per-skycell path (Part B step 3a). Never raw-fetches or combines; a
+    miss here means the caller should fall back to the dense/full-loop path
+    for the enclosing projection.
+    """
+    if band_cache is not None and cell_name in band_cache:
+        return band_cache[cell_name]
+    if combined_store_data_root is None or combined_store_recipe is None:
+        return None
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        seed_band_cache_from_combined_store,
+    )
+
+    hits = seed_band_cache_from_combined_store(
+        combined_store_data_root, [cell_name], combined_store_recipe
+    )
+    if cell_name in hits:
+        if band_cache is not None:
+            band_cache[cell_name] = hits[cell_name]
+        return hits[cell_name]
+    return None
+
+
+def _find_projection_neighbors(
+    metadata: dict, cell_name: str, row_id: int, x_coord: int
+) -> list[tuple[str, int, int]]:
+    """Up to 8 neighbors of ``cell_name`` in the same projection: same-row
+    left/right (edges) and the up-to-3 cells in each of row-1/row+1 whose
+    grid-column index (``x_coord``) is within 1 of this cell's (edges +
+    corners). ``x_coord`` is the same grid-column index
+    ``assemble_row_from_bundles`` uses (``cell_index = x_coord -
+    first_x_coord``), not a physical pixel offset, so exact-index proximity
+    is the correct adjacency test, not a pixel-range overlap.
+
+    A projection/grid edge (no row above/below, or no cell at that column in
+    a neighbor row) simply yields fewer neighbors on that side -- the
+    missing border stays NaN in the padded array, matching how
+    ``assemble_row_from_bundles``/cross-row padding already treat true grid
+    edges. True cross-projection edges are a separate mechanism entirely
+    (``identify_all_padding_sources``) and are not handled here.
+    """
+    neighbors: list[tuple[str, int, int]] = []
+    for row_offset in (-1, 0, 1):
+        row_cells = metadata["rows"].get(row_id + row_offset)
+        if not row_cells:
+            continue
+        for name, x in row_cells:
+            x_offset = x - x_coord
+            if row_offset == 0 and x_offset == 0:
+                continue
+            if abs(x_offset) <= 1:
+                neighbors.append((name, row_offset, x_offset))
+    return neighbors
+
+
+def convolve_single_skycell(
+    cell_name: str,
+    row_id: int,
+    x_coord: int,
+    projection: str,
+    metadata: dict,
+    fetch_cell,
+    psf_sigma: float,
+    radius: int,
+) -> Optional[dict]:
+    """Convolve exactly one skycell using only the ``radius``-wide border
+    strips of its up-to-8 same-projection neighbors -- never full neighbor
+    cells, never a multi-cell mosaic (see
+    doc/ps1_process_tiered_ingest_architecture_plan.md, Part B step 3a).
+
+    ``fetch_cell(name) -> Optional[dict]`` resolves a cell to a pre-combined,
+    star-removed bundle (``combined_image``/``combined_mask``/...) via the
+    existing tier-1/tier-2 lookup -- never raw-fetches. Returns ``None`` if
+    the center cell or any neighbor isn't already available this way, so
+    the caller can fall back to the dense/full-loop path for the whole
+    projection rather than reimplementing raw-fetch+combine+star-removal
+    here.
+
+    Because the Gaussian kernel is truncated at ``radius`` (``truncate =
+    radius / sigma``), every output pixel inside the center cell's own
+    bounds depends only on input pixels within ``radius`` -- exactly what
+    this small ``(cell_height + 2*radius) x (cell_width + 2*radius)`` array
+    contains, so this reproduces exactly what the whole-row convolution
+    would have produced for this one cell.
+    """
+    center = fetch_cell(cell_name)
+    if center is None:
+        return None
+
+    image = center["combined_image"]
+    cell_h, cell_w = image.shape[:2]
+
+    padded_h, padded_w = cell_h + 2 * radius, cell_w + 2 * radius
+    padded = np.full((padded_h, padded_w), np.nan, dtype=np.float32)
+    padded[radius:radius + cell_h, radius:radius + cell_w] = image
+
+    for name, row_offset, x_offset in _find_projection_neighbors(metadata, cell_name, row_id, x_coord):
+        neighbor = fetch_cell(name)
+        if neighbor is None:
+            # No border context from this side -- stays NaN, same convention
+            # as a true grid edge (assemble_row_from_bundles/cross-row
+            # padding already do this).
+            continue
+        n_image = neighbor["combined_image"]
+        n_h, n_w = n_image.shape[:2]
+
+        if x_offset < 0:
+            src_x = slice(max(0, n_w - radius), n_w)
+        elif x_offset > 0:
+            src_x = slice(0, min(radius, n_w))
+        else:
+            src_x = slice(0, n_w)
+
+        if row_offset < 0:
+            src_y = slice(max(0, n_h - radius), n_h)
+        elif row_offset > 0:
+            src_y = slice(0, min(radius, n_h))
+        else:
+            src_y = slice(0, n_h)
+
+        strip = n_image[src_y, src_x]
+        strip_h, strip_w = strip.shape
+
+        dst_x_start = 0 if x_offset < 0 else (radius + cell_w if x_offset > 0 else radius)
+        dst_y_start = 0 if row_offset < 0 else (radius + cell_h if row_offset > 0 else radius)
+        dst_x_end = min(padded_w, dst_x_start + strip_w)
+        dst_y_end = min(padded_h, dst_y_start + strip_h)
+        if dst_x_end <= dst_x_start or dst_y_end <= dst_y_start:
+            continue
+        padded[dst_y_start:dst_y_end, dst_x_start:dst_x_end] = strip[
+            : dst_y_end - dst_y_start, : dst_x_end - dst_x_start
+        ]
+
+    nan_mask = np.isnan(padded)
+    padded[nan_mask] = 0.0
+    convolved = convolution_utils.apply_gaussian_convolution(padded, sigma=psf_sigma, radius=radius)
+    convolved[nan_mask] = np.nan
+    result_image = convolved[radius:radius + cell_h, radius:radius + cell_w].copy()
+
+    return {
+        "skycell_id": cell_name,
+        "projection": projection,
+        "combined_image": result_image,
+        "combined_mask": center.get("combined_mask"),
+        "headers_data": center.get("headers_data") or {},
+        "removed_stars": center.get("removed_stars", []),
+    }
+
+
+def _publish_single_convolved_cell(
+    data_root: str,
+    cell_projection: str,
+    cell: str,
+    convolved_image: np.ndarray,
+    convolved_mask,
+    headers_data: dict,
+    removed_stars: list,
+    combined_store_recipe,
+    convolved_store_recipe,
+) -> bool:
+    """Publish one cell to the shared convolved store, mirroring exactly how
+    ``_publish_canonical_convolved_snapshot`` publishes each cell -- same
+    fingerprint chain, same idempotent publish + pointer update. Returns
+    ``True`` on success (never raises past its own boundary)."""
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        combined_fingerprint as _combined_fingerprint,
+        combined_recipe_id,
+        raw_skycell_input_fingerprint,
+    )
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        publish_convolved_cell,
+        update_current_pointer,
+    )
+
+    if convolved_mask is None:
+        logger.debug(
+            "[SparseProjection] No mask available for %s; skipping shared "
+            "convolved-store publish.",
+            cell,
+        )
+        return False
+    try:
+        rid = combined_recipe_id(combined_store_recipe)
+        raw_fp = raw_skycell_input_fingerprint(data_root, cell_projection, cell)
+        fp = _combined_fingerprint(cell_projection, cell, rid, [raw_fp])
+        convolved_info = publish_convolved_cell(
+            data_root,
+            cell_projection,
+            cell,
+            convolved_image=convolved_image,
+            convolved_mask=convolved_mask,
+            headers_data=headers_data or {},
+            removed_stars=removed_stars or [],
+            recipe=convolved_store_recipe,
+            combined_fingerprint=fp,
+        )
+        if convolved_info is not None and convolved_info.get("fingerprint"):
+            update_current_pointer(data_root, cell_projection, cell, convolved_info["fingerprint"])
+        return True
+    except Exception:
+        logger.warning(
+            "[SparseProjection] Shared convolved-store publish failed for %s (non-fatal)",
+            cell,
+            exc_info=True,
+        )
+        return False
+
+
+def process_sparse_projection(
+    projection: str,
+    metadata: dict,
+    missing_cells: set,
+    band_cache: Optional[dict],
+    data_root: str,
+    combined_store_recipe,
+    convolved_store_recipe,
+    psf_sigma: float,
+) -> Optional[set]:
+    """Per-skycell path for a projection with few (``<= MISSING_CELL_THRESHOLD``)
+    missing cells (Part B step 3a) -- bypasses the sliding-row worker
+    pipeline entirely. All-or-nothing per projection: if any required cell
+    (a missing cell or one of its neighbors) isn't already combined
+    (tier-1/tier-2), returns ``None`` so the caller falls back to dispatching
+    this projection through the dense/full-loop path (Part B step 3b, which
+    can do a real raw-fetch+combine+star-removal via the worker pipeline).
+
+    Returns the set of cell names successfully published on success.
+    """
+    from syndiff_pipeline.template_creation.processing.convolved_store import (
+        _projection_and_cell,
+    )
+
+    try:
+        radius = int((convolved_store_recipe or {}).get("radius", 470))
+    except Exception:
+        radius = 470
+
+    cell_to_rowx: dict[str, tuple[int, int]] = {}
+    for row_id, cells in metadata["rows"].items():
+        for name, x in cells:
+            cell_to_rowx[name] = (row_id, x)
+
+    def fetch_cell(name: str) -> Optional[dict]:
+        return _lazy_fetch_combined_cell(name, band_cache, data_root, combined_store_recipe)
+
+    computed: dict[str, dict] = {}
+    for cell_name in missing_cells:
+        if cell_name not in cell_to_rowx:
+            logger.warning(
+                "[SparseProjection] %s not found in projection %s metadata; "
+                "falling back to dense/full-loop path.",
+                cell_name,
+                projection,
+            )
+            return None
+        row_id, x_coord = cell_to_rowx[cell_name]
+        out = convolve_single_skycell(
+            cell_name, row_id, x_coord, projection, metadata, fetch_cell, psf_sigma, radius,
+        )
+        if out is None:
+            logger.info(
+                "[SparseProjection] %s (or a neighbor) requires a cold raw "
+                "fetch; falling back to dense/full-loop path for projection %s.",
+                cell_name,
+                projection,
+            )
+            return None
+        computed[cell_name] = out
+
+    published: set = set()
+    for cell_name, out in computed.items():
+        parsed = _projection_and_cell(cell_name)
+        if parsed is None:
+            continue
+        cell_projection, cell = parsed
+        ok = _publish_single_convolved_cell(
+            data_root,
+            cell_projection,
+            cell,
+            out["combined_image"],
+            out["combined_mask"],
+            out["headers_data"],
+            out["removed_stars"],
+            combined_store_recipe,
+            convolved_store_recipe,
+        )
+        if ok:
+            published.add(cell_name)
+    return published
+
+
 def _publish_canonical_convolved_snapshot(
     state: ProcessingState,
     projection: str,
@@ -1512,30 +1959,49 @@ def _publish_canonical_convolved_snapshot(
     convolved_store_recipe,
 ) -> None:
     """Publish the same-projection-only canonical convolved cell for every
-    cell currently placed in ``state.current_array`` (plan §13, decision #3).
+    cell currently placed in ``state.current_array`` that isn't already
+    canonical under the caller's exact recipe chain (plan §13, decision #3;
+    per-cell skip per ``ps1_process_percell_skip_plan.md``).
 
     MUST be called by the caller exactly between ``apply_cross_row_padding``
     and ``apply_cross_projection_padding`` -- see the call site in
     ``process_row_step_from_queue`` for why that's the only correct point.
 
-    Takes an independent COPY of ``state.current_array``; the live array used
-    by the unchanged main convolution path (``process_row_step_from_queue``
-    step 5) is never touched here, and this function never raises past its
-    own boundary (best-effort, mirrors every other shared-store publish call
-    site in this module).
+    Never mutates ``state.current_array``; the live array used by the
+    unchanged main convolution path (``process_row_step_from_queue`` step 5)
+    is untouched, and this function never raises past its own boundary
+    (best-effort, mirrors every other shared-store publish call site in this
+    module).
 
-    For each cell, the upstream ``combined_skycell`` fingerprint is
-    *recomputed* the same deterministic way ``combined_store.py``'s own
-    seed-lookup path does (``raw_skycell_input_fingerprint`` +
-    ``combined_fingerprint``), then checked against what is *actually
-    published on disk* -- never trusted blindly. This works uniformly
-    whether the cell was freshly SEP-processed-and-published this run, or
-    came from a combined-store cache hit (regular or dual-role-via-padding),
-    without needing to thread a fingerprint value across the
-    process_coordinator/sequential_processor thread boundary. Cells whose
-    combined-store record isn't actually present on disk (e.g. a dual-role
-    cell that was only ever cached as a padding source and never published
-    this run) are skipped for this publish -- never fabricated.
+    **Per-cell canonical skip (unconditional, no opt-out):** for every cell
+    in this row, ``convolved_store.skycell_already_canonical`` is checked
+    *before* any convolution happens. That check recomputes the upstream
+    ``combined_skycell`` fingerprint the same deterministic way
+    ``combined_store.py``'s own seed-lookup path does
+    (``raw_skycell_input_fingerprint`` + ``combined_fingerprint``) from the
+    caller's own ``combined_store_recipe``, then resolves whether a
+    ``convolved_skycell`` payload already exists for that exact fingerprint
+    chain under the caller's own ``convolved_store_recipe`` -- never trusted
+    blindly, never inspecting mtimes. Two cells can only both resolve
+    "canonical" here if *every* combined-recipe parameter (band weights,
+    ``apply_flux_conv``, saturated-star removal params, ``gaia_version``)
+    *and* every convolution parameter (``psf_sigma``, ``radius``, ``mode``)
+    match, because ``convolved_fingerprint`` always Merkles in the resolved
+    ``combined_fingerprint`` as one of its inputs.
+
+    - If every cell in the row is already canonical: no convolution runs at
+      all for this row.
+    - If the fraction of non-canonical cells is below
+      ``ROW_FALLBACK_THRESHOLD``: only those cells are (re)convolved, in
+      merged local ±radius windows (see
+      ``_convolve_local_windows_for_missing_cells``).
+    - Otherwise: falls back to convolving the whole row once (see
+      ``_convolve_whole_row_snapshot``), same as before this change, but
+      still only *publishes* the non-canonical cells.
+
+    Cells whose combined-store record isn't actually present on disk (e.g. a
+    dual-role cell that was only ever cached as a padding source and never
+    published this run) are skipped for this publish -- never fabricated.
 
     headers_data/removed_stars come from ``state.cell_metadata`` (populated
     in lockstep with ``state.cell_locations``/``state.current_masks`` at row
@@ -1552,25 +2018,9 @@ def _publish_canonical_convolved_snapshot(
     )
     from syndiff_pipeline.template_creation.processing.convolved_store import (
         publish_convolved_cell,
+        resolve_convolved_fingerprint_for_recipe,
     )
     from syndiff_pipeline.template_creation.processing import convolved_store
-
-    try:
-        snapshot = state.current_array.copy()
-        nan_mask = np.isnan(snapshot)
-        snapshot[nan_mask] = 0.0
-        convolved_snapshot = convolution_utils.apply_gaussian_convolution(snapshot, sigma=psf_sigma)
-        convolved_snapshot[nan_mask] = np.nan
-        canonical_results = extract_cell_results(convolved_snapshot, state.cell_locations)
-    except Exception:
-        logger.warning(
-            "[SequentialProcessor] Canonical same-projection convolution snapshot "
-            "failed for projection %s (shared convolved-store publish skipped for "
-            "this row, non-fatal)",
-            projection,
-            exc_info=True,
-        )
-        return
 
     try:
         rid = combined_recipe_id(combined_store_recipe)
@@ -1582,31 +2032,103 @@ def _publish_canonical_convolved_snapshot(
         )
         return
 
-    for cell_name, convolved_image in canonical_results.items():
-        try:
-            parsed = _projection_and_cell(cell_name)
-            if parsed is None:
-                continue
-            cell_projection, cell = parsed
+    try:
+        radius = int((convolved_store_recipe or {}).get("radius", 470))
+    except Exception:
+        radius = 470
 
+    # Pass 1 (cheap, read-only): resolve each cell's combined_fingerprint and
+    # its canonical status, without convolving anything yet.
+    cell_entries: list[dict] = []
+    for cell_name, (x_start, x_end, y_start, y_end) in state.cell_locations.items():
+        parsed = _projection_and_cell(cell_name)
+        if parsed is None:
+            continue
+        cell_projection, cell = parsed
+        try:
             raw_fp = raw_skycell_input_fingerprint(convolved_store_data_root, cell_projection, cell)
             fp = _combined_fingerprint(cell_projection, cell, rid, [raw_fp])
-
             cell_dir = combined_cell_dir(convolved_store_data_root, cell_projection, cell, fp)
-            if not (cell_dir / "arrays.npz").is_file():
-                # No actually-published combined_skycell record under this
-                # fingerprint (e.g. a dual-role cell reused from band_cache
-                # this run without ever going through _publish_combined).
-                # Never fabricate a combined_fingerprint edge to nothing.
-                logger.debug(
-                    "[SequentialProcessor] No published combined_skycell record "
-                    "for %s (fp=%s); skipping shared convolved-store publish for "
-                    "this cell.",
-                    cell_name,
-                    fp,
-                )
-                continue
+            has_combined_record = (cell_dir / "arrays.npz").is_file()
+        except Exception:
+            logger.warning(
+                "[SequentialProcessor] Could not resolve combined_fingerprint for "
+                "%s (skipping shared convolved-store publish for this cell, "
+                "non-fatal)",
+                cell_name,
+                exc_info=True,
+            )
+            continue
+        if not has_combined_record:
+            # No actually-published combined_skycell record under this
+            # fingerprint (e.g. a dual-role cell that was only ever cached
+            # as a padding source and never published this run). Never
+            # fabricate a combined_fingerprint edge to nothing.
+            logger.debug(
+                "[SequentialProcessor] No published combined_skycell record "
+                "for %s (fp=%s); skipping shared convolved-store publish for "
+                "this cell.",
+                cell_name,
+                fp,
+            )
+            continue
 
+        already_canonical = (
+            resolve_convolved_fingerprint_for_recipe(
+                convolved_store_data_root, cell_projection, cell, convolved_store_recipe, fp,
+            )
+            is not None
+        )
+        cell_entries.append(
+            {
+                "cell_name": cell_name,
+                "cell_projection": cell_projection,
+                "cell": cell,
+                "x_start": x_start,
+                "x_end": x_end,
+                "y_start": y_start,
+                "y_end": y_end,
+                "combined_fp": fp,
+                "already_canonical": already_canonical,
+            }
+        )
+
+    if not cell_entries:
+        return
+
+    missing_entries = [entry for entry in cell_entries if not entry["already_canonical"]]
+    if not missing_entries:
+        logger.debug(
+            "[SequentialProcessor] Row for projection %s already fully canonical "
+            "in the shared convolved store; skipping convolution entirely.",
+            projection,
+        )
+        return
+
+    missing_fraction = len(missing_entries) / len(cell_entries)
+    if missing_fraction >= ROW_FALLBACK_THRESHOLD:
+        canonical_results = _convolve_whole_row_snapshot(state, psf_sigma, projection, radius)
+        if canonical_results is None:
+            return
+        targets = [
+            (entry, canonical_results[entry["cell_name"]])
+            for entry in missing_entries
+            if entry["cell_name"] in canonical_results
+        ]
+    else:
+        local_results = _convolve_local_windows_for_missing_cells(state, missing_entries, psf_sigma, radius)
+        targets = [
+            (entry, local_results[entry["cell_name"]])
+            for entry in missing_entries
+            if entry["cell_name"] in local_results
+        ]
+
+    for entry, convolved_image in targets:
+        cell_name = entry["cell_name"]
+        cell_projection = entry["cell_projection"]
+        cell = entry["cell"]
+        fp = entry["combined_fp"]
+        try:
             mask = state.current_masks.get(cell_name)
             if mask is None:
                 logger.debug(
@@ -2203,12 +2725,17 @@ def run_modern_sliding_window_pipeline(
         except Exception as e:
             logger.warning(f"[Pipeline] Failed to identify padding sources: {e}. Continuing without cache.")
 
-    # Shared combined-skycell store (Phase 1): seed band_cache for regular cells.
+    # Shared combined-skycell store: compute this run's recipe once. The
+    # actual per-cell lookup happens lazily inside ingest_worker (tier-2
+    # check) instead of an eager bulk preload here -- see
+    # doc/ps1_process_tiered_ingest_architecture_plan.md Part A. The eager
+    # preload used to np.load() every regular cell's combined arrays into
+    # ``band_cache`` upfront, unconditionally, which OOM'd on SCCs with
+    # hundreds of already-combined cells (measured ~248MB/cell).
     combined_store_recipe = None
     try:
         from syndiff_pipeline.template_creation.processing.combined_store import (
             production_combined_recipe,
-            seed_band_cache_from_combined_store,
         )
 
         combined_store_recipe = production_combined_recipe(
@@ -2219,22 +2746,10 @@ def run_modern_sliding_window_pipeline(
                 "catalog_path": catalog_path,
             }
         )
-        _seed_names = set(all_regular_cell_names) - set(padding_sources.keys())
-        _hits = seed_band_cache_from_combined_store(
-            data_root, _seed_names, combined_store_recipe
-        )
-        band_cache.update(_hits)
-        if _hits:
-            logger.info(
-                "[Pipeline] Combined-store seed: %d/%d regular skycells reused "
-                "from the shared cross-sector store.",
-                len(_hits),
-                len(_seed_names),
-            )
     except Exception as e:
         logger.warning(
-            "[Pipeline] Combined-store seeding failed (continuing without shared-store "
-            "cache): %s",
+            "[Pipeline] Failed to compute combined-store recipe (continuing without "
+            "shared-store cache): %s",
             e,
             exc_info=True,
         )
@@ -2303,16 +2818,102 @@ def run_modern_sliding_window_pipeline(
                     local_data_path=local_data_path,
                     remove_saturated_stars=remove_saturated_stars,
                     band_cache=band_cache,
+                    combined_store_data_root=data_root,
+                    combined_store_recipe=combined_store_recipe,
                 )
 
+            # --- Part B: per-projection classification (tiered ingest plan) ---
+            # Cheap upfront classification (fingerprint checks only, no pixel
+            # loads) partitions projections into:
+            #   - already fully canonical: nothing to do at all
+            #   - sparse (<= MISSING_CELL_THRESHOLD missing): per-skycell path,
+            #     bypasses the worker pipeline entirely (falls back to dense
+            #     if any required cell needs a cold raw fetch)
+            #   - dense (> MISSING_CELL_THRESHOLD missing, or classification
+            #     unavailable/disabled): unchanged sliding-row worker pipeline
+            # See doc/ps1_process_tiered_ingest_architecture_plan.md, Part B.
+            MISSING_CELL_THRESHOLD = 5
+            dense_projections: list = []
+            already_canonical_cells: set = set()
+            sparse_published: set = set()
+
+            classify_enabled = (
+                use_shared_convolved_store
+                and combined_store_recipe is not None
+                and convolved_store_recipe is not None
+            )
+            if not classify_enabled:
+                dense_projections = list(projections)
+            else:
+                from syndiff_pipeline.template_creation.processing.convolved_store import (
+                    classify_projection_missing_cells,
+                )
+
+                for projection in projections:
+                    try:
+                        metadata = extract_projection_metadata(df, projection)
+                    except Exception as e:
+                        logger.error(
+                            f"[Pipeline] Failed to load metadata for projection "
+                            f"{projection} during classification: {e}. Routing to "
+                            f"dense/full-loop path."
+                        )
+                        dense_projections.append(projection)
+                        continue
+
+                    all_cells_in_proj = [
+                        name for cells in metadata["rows"].values() for name, _ in cells
+                    ]
+                    missing_cells = classify_projection_missing_cells(
+                        data_root, projection, all_cells_in_proj,
+                        combined_store_recipe, convolved_store_recipe,
+                    )
+                    canonical_cells = set(all_cells_in_proj) - missing_cells
+
+                    if not missing_cells:
+                        logger.info(
+                            f"[Pipeline] Projection {projection} already fully canonical "
+                            f"({len(canonical_cells)} cells) -- nothing to do."
+                        )
+                        already_canonical_cells.update(canonical_cells)
+                        continue
+
+                    if len(missing_cells) <= MISSING_CELL_THRESHOLD:
+                        logger.info(
+                            f"[Pipeline] Projection {projection}: {len(missing_cells)} "
+                            f"missing cell(s) -- trying per-skycell path."
+                        )
+                        published = process_sparse_projection(
+                            projection, metadata, missing_cells, band_cache,
+                            data_root, combined_store_recipe, convolved_store_recipe,
+                            psf_sigma,
+                        )
+                        if published is None:
+                            logger.info(
+                                f"[Pipeline] Projection {projection}: per-skycell path "
+                                f"declined (cold cell present) -- falling back to "
+                                f"dense/full-loop path."
+                            )
+                            dense_projections.append(projection)
+                        else:
+                            already_canonical_cells.update(canonical_cells)
+                            sparse_published.update(published)
+                    else:
+                        logger.info(
+                            f"[Pipeline] Projection {projection}: {len(missing_cells)} "
+                            f"missing cells (> {MISSING_CELL_THRESHOLD}) -- dense/"
+                            f"full-loop path."
+                        )
+                        dense_projections.append(projection)
+
             # --- Build Interleaved Task List ---
-            logger.info(f"[Pipeline] Building interleaved task list for {len(projections)} projections.")
+            logger.info(f"[Pipeline] Building interleaved task list for {len(dense_projections)} projections.")
 
             master_task_list = []
             num_regular_tasks = 0
             num_padding_tasks = 0
 
-            for projection in projections:
+            for projection in dense_projections:
                 try:
                     metadata = extract_projection_metadata(df, projection)
                     row_ids = sorted(metadata["rows"].keys())
@@ -2357,8 +2958,8 @@ def run_modern_sliding_window_pipeline(
                 task_queue.put(None)
 
             # --- Run Sequential Processor (Stage 3) in Main Thread ---
-            all_removed_stars, produced_skycells = sequential_processor(
-                projections,
+            all_removed_stars, produced_skycells_list = sequential_processor(
+                dense_projections,
                 df,
                 combined_cell_queue,
                 results_queue,
@@ -2378,6 +2979,17 @@ def run_modern_sliding_window_pipeline(
                 combined_store_recipe=combined_store_recipe,
                 convolved_store_recipe=convolved_store_recipe,
                 write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
+            )
+            # Fast-path manifest accounting: union in cells that were never
+            # touched this run because they were already canonical (whole
+            # projections skipped entirely, or canonical neighbors within a
+            # sparse projection), plus cells freshly published by the
+            # per-skycell path. Not a correctness requirement -- verify_ps1_process
+            # independently rescans the shared convolved store regardless
+            # (see doc/ps1_process_tiered_ingest_architecture_plan.md) -- but
+            # keeps the scheduler's fast-path manifest check accurate too.
+            produced_skycells = sorted(
+                set(produced_skycells_list) | already_canonical_cells | sparse_published
             )
 
             # --- Write Removed Stars CSV ---

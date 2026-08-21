@@ -159,6 +159,8 @@ Registered in `syndiff_pipeline/common/provenance/model.py`:
 
 Template recipes use the same field lists as `verify.config_fingerprint`. Diff recipes come from dataclasses in `difference_imaging/orchestration/stage_params.py`.
 
+Reuse of an existing `convolved_skycell` payload is decided **per cell**, not per projection/SCC: `ps1_process` resolves each cell's `combined_fingerprint` → `convolved_fingerprint` chain before convolving anything and skips cells that already resolve to a published payload under the caller's exact recipe. Cells that do need (re)convolution are done via local `±radius` windows, falling back to a whole-row convolution only when ≥20% of a row's cells are missing. See `docs/markdown/stages/ps1_process_technical.md` §"Step 3b" for details.
+
 `shared_mask` hashes **mask_settings contents**, not the path string.
 
 ---

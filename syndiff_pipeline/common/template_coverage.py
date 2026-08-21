@@ -29,8 +29,10 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
 
     Uses ``XMIN``/``XMAX``/``YMIN``/``YMAX`` header keywords when present.
     Templates with ``MAPGRID=3`` **require** those keywords (no silent origin
-    fallback). Templates without the schema keyword are rejected so stale
-    artifacts cannot enter a MAPGRID=3 lane.
+    fallback); a MAPGRID=3 template missing them is rejected so stale
+    artifacts cannot enter the field-mode lane. Templates with no ``MAPGRID``
+    keyword at all are the "linear" geometry mode (no support-plane padding
+    contract) and fall back to a full-chip origin ``(0, 0)``.
 
     Coverage bounds and ``shape`` are always in **base (native) FFI pixels**.
     ``oversampling_factor`` is the template array oversampling relative to that
@@ -52,44 +54,73 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
         ny, nx = data.shape
         os_factor = _oversampling_from_header(hdr)
 
-    # MAPGRID=3 is the only supported template geometry.  Check the schema
-    # before accepting bounds: otherwise a stale/legacy template containing
-    # coincidental XMIN/XMAX/YMIN/YMAX keywords could enter the new lane.
-    try:
-        mapgrid = int(hdr["MAPGRID"])
-    except (KeyError, TypeError, ValueError):
-        raise ValueError(
-            f"Template {tmpl_path} is missing or has invalid MAPGRID metadata; "
-            "only MAPGRID=3 templates are supported"
-        )
-    if mapgrid != 3:
-        raise ValueError(
-            f"Template {tmpl_path} has MAPGRID={mapgrid}; only MAPGRID=3 "
-            "templates are supported"
-        )
+    # MAPGRID=3 (field mode) requires XMIN/XMAX/YMIN/YMAX -- no silent origin
+    # fallback, since a stale/legacy template with coincidental bounds keywords
+    # must not enter a MAPGRID=3 lane. Templates with no MAPGRID at all are the
+    # "linear" geometry mode, which never carries a support-plane padding
+    # contract; those fall back to the legacy full-chip origin (0, 0).
+    mapgrid_raw = hdr.get("MAPGRID")
+    has_mapgrid = mapgrid_raw is not None
+    if has_mapgrid:
+        try:
+            mapgrid = int(mapgrid_raw)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Template {tmpl_path} has invalid MAPGRID metadata "
+                f"{mapgrid_raw!r}; only MAPGRID=3 or no MAPGRID (linear mode) "
+                "is supported"
+            )
+        if mapgrid != 3:
+            raise ValueError(
+                f"Template {tmpl_path} has MAPGRID={mapgrid}; only MAPGRID=3 "
+                "templates are supported"
+            )
 
-    required_bounds = ("XMIN", "XMAX", "YMIN", "YMAX")
-    if not all(key in hdr for key in required_bounds):
-        raise ValueError(
-            f"Template {tmpl_path} has MAPGRID=3 but is missing one or more "
-            "required XMIN/XMAX/YMIN/YMAX headers"
-        )
+        if os_factor > 1:
+            if ny % os_factor != 0 or nx % os_factor != 0:
+                raise ValueError(
+                    f"Template {tmpl_path} shape {(ny, nx)} is not divisible by "
+                    f"OVERSAMP={os_factor}"
+                )
+            native_ny, native_nx = ny // os_factor, nx // os_factor
+        else:
+            native_ny, native_nx = ny, nx
 
-    try:
-        x_min = int(hdr["XMIN"])
-        x_max = int(hdr["XMAX"])
-        y_min = int(hdr["YMIN"])
-        y_max = int(hdr["YMAX"])
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"Template {tmpl_path} has non-integer XMIN/XMAX/YMIN/YMAX headers"
-        ) from exc
-    if x_max <= x_min or y_max <= y_min:
-        raise ValueError(
-            f"Template {tmpl_path} has invalid coverage bounds: "
-            f"X=({x_min}, {x_max}), Y=({y_min}, {y_max})"
-        )
+        required_bounds = ("XMIN", "XMAX", "YMIN", "YMAX")
+        if not all(key in hdr for key in required_bounds):
+            raise ValueError(
+                f"Template {tmpl_path} has MAPGRID=3 but is missing one or more "
+                "required XMIN/XMAX/YMIN/YMAX headers"
+            )
 
+        try:
+            x_min = int(hdr["XMIN"])
+            x_max = int(hdr["XMAX"])
+            y_min = int(hdr["YMIN"])
+            y_max = int(hdr["YMAX"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Template {tmpl_path} has non-integer XMIN/XMAX/YMIN/YMAX headers"
+            ) from exc
+        if x_max <= x_min or y_max <= y_min:
+            raise ValueError(
+                f"Template {tmpl_path} has invalid coverage bounds: "
+                f"X=({x_min}, {x_max}), Y=({y_min}, {y_max})"
+            )
+
+        return {
+            "x_min": x_min,
+            "x_max": x_max,
+            "y_min": y_min,
+            "y_max": y_max,
+            "shape": (native_ny, native_nx),
+            "oversampling_factor": os_factor,
+        }
+
+    # Linear mode (no MAPGRID keyword): honor legacy explicit bounds when
+    # available. Older linear templates commonly have XMIN/XMAX/YMIN/YMAX
+    # without the newer MAPGRID keyword. Only truly headerless templates use
+    # the array-shape/full-chip fallback.
     if os_factor > 1:
         if ny % os_factor != 0 or nx % os_factor != 0:
             raise ValueError(
@@ -99,6 +130,26 @@ def template_coverage_ffi_bounds(tmpl_path: str) -> dict:
         native_ny, native_nx = ny // os_factor, nx // os_factor
     else:
         native_ny, native_nx = ny, nx
+
+    required_bounds = ("XMIN", "XMAX", "YMIN", "YMAX")
+    if all(key in hdr for key in required_bounds):
+        try:
+            x_min = int(hdr["XMIN"])
+            x_max = int(hdr["XMAX"])
+            y_min = int(hdr["YMIN"])
+            y_max = int(hdr["YMAX"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Template {tmpl_path} has non-integer XMIN/XMAX/YMIN/YMAX headers"
+            ) from exc
+        if x_max <= x_min or y_max <= y_min:
+            raise ValueError(
+                f"Template {tmpl_path} has invalid coverage bounds: "
+                f"X=({x_min}, {x_max}), Y=({y_min}, {y_max})"
+            )
+    else:
+        x_min, y_min = 0, 0
+        x_max, y_max = native_nx, native_ny
 
     return {
         "x_min": x_min,

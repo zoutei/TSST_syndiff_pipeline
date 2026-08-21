@@ -148,11 +148,30 @@ class TestTemplateCoverage(unittest.TestCase):
                 template_coverage_ffi_bounds(str(p))
             self.assertIn("MAPGRID=3", str(cm.exception))
 
-    def test_legacy_without_mapgrid_is_rejected(self):
+    def test_legacy_without_mapgrid_falls_back_to_full_chip_origin(self):
+        # No MAPGRID keyword at all = "linear" geometry mode, which carries no
+        # support-plane padding contract; this must fall back to a full-chip
+        # origin (0, 0), not be rejected.
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "tmpl_legacy.fits"
             data = np.zeros((10, 12), dtype=np.float32)
             fits.PrimaryHDU(data=data).writeto(p, overwrite=True)
+            coverage = template_coverage_ffi_bounds(str(p))
+            self.assertEqual(coverage["x_min"], 0)
+            self.assertEqual(coverage["y_min"], 0)
+            self.assertEqual(coverage["x_max"], 12)
+            self.assertEqual(coverage["y_max"], 10)
+            self.assertEqual(coverage["shape"], (10, 12))
+
+    def test_mapgrid3_without_bounds_is_rejected(self):
+        # MAPGRID=3 (field mode) still requires explicit XMIN/XMAX/YMIN/YMAX;
+        # no silent origin fallback for the strict lane.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "tmpl_mapgrid3_no_bounds.fits"
+            data = np.zeros((10, 12), dtype=np.float32)
+            hdr = fits.Header()
+            hdr["MAPGRID"] = 3
+            fits.PrimaryHDU(data=data, header=hdr).writeto(p, overwrite=True)
             with self.assertRaises(ValueError):
                 template_coverage_ffi_bounds(str(p))
 

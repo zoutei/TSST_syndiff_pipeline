@@ -256,12 +256,10 @@ def _discover_shared_combined_fp(
        that recipe maps to (``combined_store.resolve_combined_fingerprint_for_recipe``).
        This is the only way to guarantee we read back exactly what this run's
        own config would have produced.
-    2. An explicit "current" pointer selection
-       (``combined_store.resolve_current_combined_ref``), when one has been
-       published.
-    3. Newest-mtime fallback, with a loud warning -- only reached when the
-       caller has no recipe context at all (e.g. no ``combined_recipe`` was
-       threaded in) and no pointer has been published either.
+    Recipe-qualified calls are deliberately fail-closed: a ``current``
+    pointer and directory mtime are not provenance, and must never select a
+    different star-removal/saturation recipe.  The compatibility fallback is
+    retained only for callers that genuinely provide no recipe context.
     """
     from syndiff_pipeline.template_creation.processing.combined_store import (
         _payload_complete,
@@ -274,6 +272,13 @@ def _discover_shared_combined_fp(
         fp = resolve_combined_fingerprint_for_recipe(data_root, projection, cell, combined_recipe)
         if fp is not None:
             return fp
+        log.error(
+            "padding_correction: exact shared combined artifact missing for %s/%s; "
+            "refusing current-pointer or mtime fallback",
+            projection,
+            cell,
+        )
+        return None
 
     ref = resolve_current_combined_ref(data_root, projection, cell)
     if ref is not None:
@@ -291,13 +296,6 @@ def _discover_shared_combined_fp(
         return None
     if not candidates:
         return None
-    if combined_recipe is not None:
-        log.warning(
-            "padding_correction: no recipe-matched or pointer-selected combined "
-            "cell for %s/%s; falling back to newest-mtime among %d candidate(s) "
-            "-- this may not match the requested recipe",
-            projection, cell, len(candidates),
-        )
     candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
     return candidates[0].name
 

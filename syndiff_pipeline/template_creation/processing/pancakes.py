@@ -1273,6 +1273,27 @@ def master_skycells_csv_paths(output_path, sector, camera_id, ccd_id, oversampli
     )
 
 
+def _add_mapping_grid_csv_metadata(selected_skycells, mapping_grid):
+    """Add scalar MappingGrid provenance columns to a skycell table."""
+    selected_skycells = selected_skycells.copy()
+    if mapping_grid is None:
+        return selected_skycells
+    selected_skycells["MAPGRID"] = int(mapping_grid.mapgrid_version)
+    selected_skycells["GEOMFP"] = str(mapping_grid.geometry_fingerprint)
+    selected_skycells["COORDFRM"] = "full_ffi"
+    selected_skycells["TMPL_XMIN"] = int(mapping_grid.template_xmin)
+    selected_skycells["TMPL_XMAX"] = int(mapping_grid.template_xmax)
+    selected_skycells["TMPL_YMIN"] = int(mapping_grid.template_ymin)
+    selected_skycells["TMPL_YMAX"] = int(mapping_grid.template_ymax)
+    selected_skycells["PADL"] = int(mapping_grid.pad_left)
+    selected_skycells["PADR"] = int(mapping_grid.pad_right)
+    selected_skycells["PADB"] = int(mapping_grid.pad_bottom)
+    selected_skycells["PADT"] = int(mapping_grid.pad_top)
+    selected_skycells["SCIENCE_PAD_POLICY"] = "neutral_invalid"
+    selected_skycells["TEMPORAL_EXTRAP_POLICY"] = "bounded_support_pad"
+    return selected_skycells
+
+
 def prepare_mapping_csv_workspace(
     output_path, sector, camera_id, ccd_id, overwrite=True, oversampling_factor=1
 ):
@@ -1343,24 +1364,12 @@ def save_master_mapping(
         output_path, sector, camera_id, ccd_id, oversampling_factor
     )
     os.makedirs(os.path.dirname(partial_csv), exist_ok=True)
-    selected_skycells = selected_skycells.copy()
-    if mapping_grid is not None:
-        # CSV consumers need an explicit, row-local provenance handoff.  The
-        # columns are deliberately scalar so pandas/FITS/worker boundaries do
-        # not reinterpret a nested geometry object.
-        selected_skycells["MAPGRID"] = int(mapping_grid.mapgrid_version)
-        selected_skycells["GEOMFP"] = str(mapping_grid.geometry_fingerprint)
-        selected_skycells["COORDFRM"] = "full_ffi"
-        selected_skycells["TMPL_XMIN"] = int(mapping_grid.template_xmin)
-        selected_skycells["TMPL_XMAX"] = int(mapping_grid.template_xmax)
-        selected_skycells["TMPL_YMIN"] = int(mapping_grid.template_ymin)
-        selected_skycells["TMPL_YMAX"] = int(mapping_grid.template_ymax)
-        selected_skycells["PADL"] = int(mapping_grid.pad_left)
-        selected_skycells["PADR"] = int(mapping_grid.pad_right)
-        selected_skycells["PADB"] = int(mapping_grid.pad_bottom)
-        selected_skycells["PADT"] = int(mapping_grid.pad_top)
-        selected_skycells["SCIENCE_PAD_POLICY"] = "neutral_invalid"
-        selected_skycells["TEMPORAL_EXTRAP_POLICY"] = "bounded_support_pad"
+    # CSV consumers need an explicit, row-local provenance handoff. The
+    # columns are deliberately scalar so pandas/FITS/worker boundaries do not
+    # reinterpret a nested geometry object.
+    selected_skycells = _add_mapping_grid_csv_metadata(
+        selected_skycells, mapping_grid
+    )
     selected_skycells.to_csv(partial_csv)
 
     # Create header
@@ -1634,7 +1643,15 @@ def update_skycells_with_padding_info(selected_skycells, padding_results):
     return selected_skycells
 
 
-def save_updated_skycell_csv(selected_skycells, output_path, sector, camera_id, ccd_id, oversampling_factor=1):
+def save_updated_skycell_csv(
+    selected_skycells,
+    output_path,
+    sector,
+    camera_id,
+    ccd_id,
+    oversampling_factor=1,
+    mapping_grid=None,
+):
     """
     Save updated CSV file with padding information for processed skycells.
 
@@ -1651,7 +1668,9 @@ def save_updated_skycell_csv(selected_skycells, output_path, sector, camera_id, 
         output_path, sector, camera_id, ccd_id, oversampling_factor
     )
     os.makedirs(os.path.dirname(partial_csv), exist_ok=True)
-    selected_skycells.to_csv(partial_csv, index=False)
+    _add_mapping_grid_csv_metadata(selected_skycells, mapping_grid).to_csv(
+        partial_csv, index=False
+    )
     print(f"Updated partial skycell CSV saved to: {partial_csv}")
 
 
@@ -2317,7 +2336,15 @@ def process_tess_image_optimized(
         selected_skycells = update_skycells_with_padding_info(selected_skycells, padding_results)
 
         # Save updated CSV with padding information
-        save_updated_skycell_csv(selected_skycells, output_path, sector, camera_id, ccd_id, oversampling_factor)
+        save_updated_skycell_csv(
+            selected_skycells,
+            output_path,
+            sector,
+            camera_id,
+            ccd_id,
+            oversampling_factor,
+            mapping_grid=mapping_grid,
+        )
 
     finalize_master_skycells_csv(
         output_path, sector, camera_id, ccd_id, oversampling_factor

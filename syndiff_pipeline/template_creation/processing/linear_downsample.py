@@ -512,8 +512,16 @@ def run_linear_downsample_scc(
             skycell_df=skycell_df, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
         )
 
+    from syndiff_pipeline.template_creation.processing import downsample_progress
+
+    if progress_path is not None:
+        downsample_progress.init_progress(
+            progress_path, total_skycells=len(skycell_names),
+            batch_sizes=[len(skycell_names)], oversampling_factor=oversampling_factor,
+        )
+
     if n_jobs_eff <= 1:
-        results = [_process(sc) for sc in skycell_names]
+        results_iter = (_process(sc) for sc in skycell_names)
     else:
         from joblib import Parallel, delayed
 
@@ -527,14 +535,20 @@ def run_linear_downsample_scc(
             "ignore_mask": ignore_mask, "mapping_grid": mapping_grid,
             "psf_sigma": psf_sigma, "combined_recipe": combined_recipe,
         }
-        results = Parallel(
+        # ``return_as="generator"`` (joblib >= 1.3) streams each skycell's
+        # result back to the parent as soon as it completes, instead of
+        # blocking until the entire batch finishes -- this is what lets the
+        # loop below drain results (and update the progress sidecar/log)
+        # incrementally rather than going silent for the whole run.
+        results_iter = Parallel(
             n_jobs=n_jobs_eff,
             backend="loky",
+            return_as="generator",
             initializer=_init_linear_worker,
             initargs=(worker_payload,),
         )(delayed(_linear_worker_process_skycell)(sc) for sc in skycell_names)
 
-    for skycell, per_group in results:
+    for skycell, per_group in results_iter:
         n_done += 1
         for gid, (idx, sums, counts, mask_counts) in per_group.items():
             flat_sums = accum_sums[gid].reshape(-1)
@@ -548,12 +562,17 @@ def run_linear_downsample_scc(
             flat_sums[idx] += sums.reshape(-1)
             flat_counts[idx] += counts.reshape(-1).astype(np.int32)
             flat_mask[idx] += mask_counts.reshape(-1).astype(np.int32)
+        if progress_path is not None:
+            downsample_progress.mark_skycell_done(progress_path, 0)
         if n_done % 100 == 0 or n_done == len(skycell_names):
             log.info(
                 "linear downsample s%04d_%d_%d: %d/%d skycells binned (%.1fs)",
                 sector, camera, ccd, n_done, len(skycell_names),
                 time.perf_counter() - t0,
             )
+
+    if progress_path is not None:
+        downsample_progress.set_progress_phase(progress_path, "writing_outputs")
 
     with fits.open(ref_ffi_path) as hdul:
         tess_header = hdul[1].header
@@ -566,6 +585,16 @@ def run_linear_downsample_scc(
         tess_header, roi_bounds=roi_bounds, oversampling_factor=oversampling_factor,
         sector=sector,
     )
+    # linear-mode templates share the same MAPGRID=3 paired-padding contract
+    # as field-mode templates (mapping_grid is already computed above and
+    # written into the assembly sidecar) -- stamp the same geometry keys
+    # into every per-group FITS header so downstream MAPGRID=3 consumers
+    # (template_coverage.py, hotpants.py) can resolve template bounds
+    # directly from the FITS file instead of falling back to a full-chip
+    # guess.
+    for key, value in mapping_grid.to_fits_header_updates().items():
+        serialized = value if isinstance(value, (str, bool)) else int(value)
+        syndiff_header[key] = (serialized, f"MappingGrid {key}")
 
     artifacts: list[str] = []
     for gid, dx, dy in groups:
@@ -599,6 +628,11 @@ def run_linear_downsample_scc(
         "cross_projection_padding_corrected": cross_proj_corrected,
     }
     assembly_path.write_text(json.dumps(assembly_payload, indent=2) + "\n")
+
+    if progress_path is not None:
+        downsample_progress.set_progress_phase(
+            progress_path, "complete", total_skycells=len(skycell_names),
+        )
 
     return {
         "output_dir": str(store),

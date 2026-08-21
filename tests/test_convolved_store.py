@@ -44,7 +44,7 @@ _UPSTREAM_COMBINED_FP = "combined_fp_abcdef0123456789"
 
 def test_convolved_recipe_defaults():
     recipe = vs.convolved_recipe()
-    assert recipe["psf_sigma"] == vs.DEFAULT_PSF_SIGMA == 60.0
+    assert recipe["psf_sigma"] == vs.DEFAULT_PSF_SIGMA == 40.0
     assert recipe["radius"] == vs.DEFAULT_RADIUS == 470
     assert recipe["mode"] == "constant"
     assert recipe["padding"] == "same_projection_only"

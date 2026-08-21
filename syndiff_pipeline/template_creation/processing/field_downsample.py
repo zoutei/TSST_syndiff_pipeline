@@ -322,11 +322,10 @@ def _discover_shared_convolved_fp(
        (``convolved_store.resolve_convolved_fingerprint_for_recipe``, keyed
        off the matching ``combined_store.resolve_combined_fingerprint_for_recipe``
        upstream fingerprint).
-    2. An explicit "current" pointer selection
-       (``convolved_store.resolve_current_convolved_ref``), when one has
-       been published.
-    3. Newest-mtime fallback, with a loud warning -- only reached when the
-       caller has no recipe context at all.
+    Recipe-qualified calls are deliberately fail-closed: a ``current``
+    pointer and directory mtime are not provenance, and must never select a
+    different star-removal/saturation recipe.  The compatibility fallback is
+    retained only for callers that genuinely provide no recipe context.
     """
     from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
     from syndiff_pipeline.template_creation.processing.combined_store import (
@@ -350,6 +349,23 @@ def _discover_shared_convolved_fp(
             if fp is not None:
                 return fp
 
+        log.error(
+            "field_downsample: exact shared convolved artifact missing for %s/%s; "
+            "refusing current-pointer or mtime fallback",
+            projection,
+            cell,
+        )
+        return None
+
+    if psf_sigma is not None or combined_recipe is not None:
+        log.error(
+            "field_downsample: incomplete shared-store recipe context for %s/%s; "
+            "refusing current-pointer or mtime fallback",
+            projection,
+            cell,
+        )
+        return None
+
     ref = resolve_current_convolved_ref(data_root, projection, cell)
     if ref is not None:
         return ref.fingerprint
@@ -366,13 +382,6 @@ def _discover_shared_convolved_fp(
         return None
     if not candidates:
         return None
-    if psf_sigma is not None or combined_recipe is not None:
-        log.warning(
-            "field_downsample: no recipe-matched or pointer-selected convolved "
-            "cell for %s/%s; falling back to newest-mtime among %d candidate(s) "
-            "-- this may not match the requested recipe",
-            projection, cell, len(candidates),
-        )
     candidates.sort(key=lambda p: p.stat().st_mtime_ns, reverse=True)
     return candidates[0].name
 
@@ -462,8 +471,17 @@ def _convolved_skycell_available(payload: dict[str, Any], skycell: str) -> bool:
         parsed = _projection_and_cell(skycell)
         if parsed is not None:
             projection, cell = parsed
-            if _discover_shared_convolved_fp(data_root, projection, cell) is not None:
+            if _discover_shared_convolved_fp(
+                data_root,
+                projection,
+                cell,
+                psf_sigma=payload.get("psf_sigma"),
+                combined_recipe=payload.get("combined_recipe"),
+            ) is not None:
                 return True
+        # A shared-store L5 run is provenance-qualified.  Do not accept an
+        # old per-SCC zarr merely because the exact shared artifact is absent.
+        return False
     legacy_path = payload.get("legacy_zarr_path") or (
         None
         if bool(payload.get("shared_convolved_store"))
@@ -562,6 +580,7 @@ def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | No
         )
         if shared is not None:
             return shared
+        return None
 
     zstore = _L5_WORKER.get("zstore")
     if zstore is None:
