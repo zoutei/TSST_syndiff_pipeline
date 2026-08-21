@@ -120,7 +120,12 @@ def test_l5_loader_shared_first_then_legacy_fallback(tmp_path: Path):
     fd._reset_l5_worker()
 
 
-def test_l5_loader_falls_back_to_legacy_when_shared_cell_missing(tmp_path: Path):
+def test_l5_loader_returns_none_on_shared_cell_missing_no_legacy_fallback(tmp_path: Path):
+    """A shared-store miss must fail closed, not silently fall through to an
+    unrelated legacy zarr -- see the recipe-fail-closed fix in
+    _try_load_shared_convolved_arrays/_load_ps1_skycell_for_l5: the store is
+    cross-sector/cross-run, so a legacy cache hit for the same skycell name
+    says nothing about whether it matches the caller's own recipe."""
     skycell = "skycell.5555.002"
     image = np.arange(9, dtype=np.float32).reshape(3, 3)
     mask = np.zeros((3, 3), dtype=np.int32)
@@ -139,9 +144,7 @@ def test_l5_loader_falls_back_to_legacy_when_shared_cell_missing(tmp_path: Path)
             "legacy_zarr_path": str(legacy),
         }
     )
-    data, m = fd._load_ps1_skycell_for_l5(skycell)
-    np.testing.assert_array_equal(data, image)
-    np.testing.assert_array_equal(m, mask)
+    assert fd._load_ps1_skycell_for_l5(skycell) is None
     fd._reset_l5_worker()
 
 
