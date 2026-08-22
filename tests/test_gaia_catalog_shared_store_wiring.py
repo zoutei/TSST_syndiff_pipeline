@@ -90,16 +90,26 @@ class TestGaiaVersionStampResolution(unittest.TestCase):
         recipe = cs.production_combined_recipe({"remove_saturated_stars": True})
         self.assertEqual(recipe["gaia_version"], "none")
 
-    def test_resolved_default_catalog_path_stamps_real_identity_with_scc_identity(self):
+    def test_resolved_default_catalog_path_stamps_loaded_with_scc_identity(self):
         self._write_catalog()
         recipe = cs.production_combined_recipe(
             {"remove_saturated_stars": True},
             data_root=self.data_root, sector=20, camera=3, ccd=3,
         )
-        self.assertNotEqual(recipe["gaia_version"], "none")
-        self.assertIn(str(default_gaia_catalog_path(self.data_root, 20, 3, 3)), recipe["gaia_version"])
+        self.assertEqual(recipe["gaia_version"], "loaded")
 
-    def test_stamp_changes_when_catalog_content_changes(self):
+    def test_stamp_stable_across_catalog_content_and_scc_identity(self):
+        """
+        Per-SCC Gaia catalog CSVs are just per-SCC cropped views of the same
+        underlying Gaia DR3 data -- content differences between them (or a
+        catalog re-download with a new mtime) must NOT mint a new
+        fingerprint, or every SCC/sector pull of essentially the same sky
+        loses shared-store cache sharing for no correctness benefit (see
+        gaia_version_stamp's docstring). A missing/unreadable catalog still
+        stamps differently ("none") -- see the fail-loud tests above, which
+        guarantee this function is only ever reached with a real, already
+        successfully-loaded file.
+        """
         p = self._write_catalog()
         recipe_a = cs.production_combined_recipe(
             {"remove_saturated_stars": True},
@@ -114,17 +124,41 @@ class TestGaiaVersionStampResolution(unittest.TestCase):
             {"remove_saturated_stars": True},
             data_root=self.data_root, sector=20, camera=3, ccd=3,
         )
-        self.assertNotEqual(recipe_a["gaia_version"], recipe_b["gaia_version"])
-        self.assertNotEqual(recipe_a, recipe_b)
+        self.assertEqual(recipe_a["gaia_version"], recipe_b["gaia_version"])
+        self.assertEqual(recipe_a, recipe_b)
+
+        # A different SCC's own catalog file resolves to the same "loaded"
+        # identity too -- this is the cross-SCC/cross-sector cache-sharing
+        # this stamp exists to enable.
+        p2 = default_gaia_catalog_path(self.data_root, 51, 4, 4)
+        p2.parent.mkdir(parents=True, exist_ok=True)
+        p2.write_text("ra,dec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag\n5.0,6.0,9,9,9\n")
+        recipe_c = cs.production_combined_recipe(
+            {"remove_saturated_stars": True},
+            data_root=self.data_root, sector=51, camera=4, ccd=4,
+        )
+        self.assertEqual(recipe_a["gaia_version"], recipe_c["gaia_version"])
 
     def test_explicit_catalog_path_override_still_wins(self):
+        """catalog_path resolution (default vs. explicit override) still
+        matters even though the stamped value no longer embeds the path:
+        an explicit path to a *missing* file stamps "none" even when the
+        SCC's own default catalog exists and would otherwise resolve."""
+        self._write_catalog()  # a resolvable default exists for s20/c3/k3
+        missing_explicit = Path(self.data_root) / "does_not_exist.csv"
+        recipe = cs.production_combined_recipe(
+            {"remove_saturated_stars": True, "catalog_path": str(missing_explicit)},
+            data_root=self.data_root, sector=20, camera=3, ccd=3,
+        )
+        self.assertEqual(recipe["gaia_version"], "none")
+
         explicit = Path(self.data_root) / "custom.csv"
         explicit.write_text("ra,dec,phot_g_mean_mag,phot_bp_mean_mag,phot_rp_mean_mag\n1.0,2.0,10,10,10\n")
-        recipe = cs.production_combined_recipe(
+        recipe2 = cs.production_combined_recipe(
             {"remove_saturated_stars": True, "catalog_path": str(explicit)},
             data_root=self.data_root, sector=20, camera=3, ccd=3,
         )
-        self.assertIn(str(explicit), recipe["gaia_version"])
+        self.assertEqual(recipe2["gaia_version"], "loaded")
 
 
 class TestCrossProjectionPaddingCatalogThreading(unittest.TestCase):
