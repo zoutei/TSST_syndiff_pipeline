@@ -1,0 +1,117 @@
+# S20/C3/K3 field-mode diff (tvwcs/OS4), full chain through epsf+centroids:
+# kernel_fit -> convolved_templates -> kernel_subtract -> hotpants (hp_d) ->
+# epsf (orbit_binned) -> centroids. Reads templates_tvwcs/oversampling_4
+# (distortion-aware temporal-WCS field templates, rebuilt under the
+# Gaia-catalog-wiring fix -- see run s20_c3_k3_tvwcs_catalog_fix_phase3_*).
+#
+# shared_mask is intentionally omitted: this run reuses the existing
+# diff_linear/{shared_mask.fits.fz,hotpants_substamp_stars.csv}, staged into
+# diff_tvwcs/ before running (native science crop shape matches: 2048x2048).
+#
+# Use:
+#   syndiff diff submit --config config/diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml \
+#     --scc config/scc_s20_c3_k3.csv --stages diff \
+#     --run-id s20_c3_k3_tvwcs_epsf_centroids_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 64
+  workspace_run_id: s20_c3_k3_tvwcs_os4_epsf_centroids
+  pipeline_plots: true
+  oversampling_factor: 4
+
+paths:
+  template_store_name: tvwcs
+  output_store_name: tvwcs
+  remap_store_name: tvwcs
+
+pipeline:
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: kernel_subtract
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    # Serial: the OS4 field template (8256x8256) is memory-heavy per worker.
+    hotpants_n_jobs: 1
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_kernel_solutions: true
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    epsf_mode: orbit_binned
+    tile_nx: 5
+    tile_ny: 5
+    epsf_oversample: 4
+    psf_size: 15
+    extract_size: 15
+    min_stars_per_tile: 5
+    mag_max_rp: 12.95
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 64
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    mag_max_rp: 10.0
+    fit_shape: 11
+    aperture_radius: 2
+    psf_grouper_min_separation: 4
+    centroids_n_jobs: 64
+
+condor:
+  request_cpus: 1
+  request_memory: 80000
+  host_stats_min_mem_mb: 80000
+  host_stats_max_load15: 10.0
