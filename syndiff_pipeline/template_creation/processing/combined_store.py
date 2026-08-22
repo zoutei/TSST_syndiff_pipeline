@@ -519,14 +519,30 @@ def update_current_pointer(
 
 
 def gaia_version_stamp(catalog_path: str | None) -> str:
-    """Cheap content-identity stamp for the Gaia catalog file, or ``"none"``."""
+    """
+    Gaia catalog identity for the shared-store recipe fingerprint.
+
+    Any successfully-resolved catalog file stamps as one canonical
+    ``"loaded"`` value -- not embedded path/size/mtime -- so cells built
+    from different SCCs' own per-sector catalog files (e.g. adjacent CVZ
+    sectors imaging much of the same sky, each with its own
+    ``gaia_catalog_s{sector}_{camera}_{ccd}.csv``) can still share the
+    shared PS1 store: Gaia is a static astrometric catalog, so its content
+    does not meaningfully differ sector-to-sector for the same sky
+    position, and per-file identity was defeating cross-sector cache
+    sharing for no real correctness benefit. Only "no usable catalog"
+    (unset or unreadable path) gets a different stamp -- paired with
+    ps1_process's fail-loud catalog-load-failure path, an SCC only ever
+    reaches this function with `catalog_path` pointing at a real, already
+    successfully-loaded file, never a silently-failed one.
+    """
     if not catalog_path:
         return "none"
     try:
-        st = os.stat(catalog_path)
-        return f"{catalog_path}:{st.st_size}:{st.st_mtime_ns}"
+        os.stat(catalog_path)
+        return "loaded"
     except OSError:
-        return f"{catalog_path}:unknown"
+        return "none"
 
 
 def production_combined_recipe(
