@@ -406,6 +406,158 @@ def test_fit_epsf_section_multi_pools_across_frames():
     assert np.isfinite(stamp).all()
 
 
+# ── BTJD fallback for manifests with no btjd column (linear/CVZ lane bug) ──
+
+
+def _make_ffi_list_df(rows: dict[str, str]) -> pd.DataFrame:
+    from astropy.io import fits
+
+    from syndiff_pipeline.common.wcs_header_cache import _header_cards_bytes
+
+    records = []
+    for filename, date_obs in rows.items():
+        hdr = fits.Header()
+        if date_obs is not None:
+            hdr["DATE-OBS"] = date_obs
+        records.append({"filename": filename, "header_cards": _header_cards_bytes(hdr)})
+    return pd.DataFrame(records).set_index("filename")
+
+
+def test_resolve_btjd_by_stem_fills_from_date_obs_when_manifest_has_no_btjd():
+    """Regression: linear-mode frame manifests carry no btjd column at all,
+    so btjd_by_stem_from_manifest returns {} -- must not silently leave
+    every frame's BTJD as NaN (which makes select_anchor_frames return zero
+    anchors for every orbit, observed on a real s0050/c4/k4 smoke run)."""
+    ffi_list_df = _make_ffi_list_df(
+        {"a.fits": "2020-01-01T00:00:00.000", "b.fits": "2020-01-02T00:00:00.000"}
+    )
+    ffi_path_by_stem = {"pidA": "a.fits", "pidB": "b.fits"}
+    resolved = geo._resolve_btjd_by_stem(["pidA", "pidB"], {}, ffi_list_df, ffi_path_by_stem)
+    assert set(resolved) == {"pidA", "pidB"}
+    assert all(np.isfinite(v) for v in resolved.values())
+    assert resolved["pidB"] > resolved["pidA"]
+
+
+def test_resolve_btjd_by_stem_keeps_existing_finite_values():
+    ffi_list_df = _make_ffi_list_df({"a.fits": "2020-01-01T00:00:00.000"})
+    resolved = geo._resolve_btjd_by_stem(
+        ["pidA"], {"pidA": 123.456}, ffi_list_df, {"pidA": "a.fits"}
+    )
+    assert resolved["pidA"] == 123.456
+
+
+def test_resolve_btjd_by_stem_overrides_nan_placeholder():
+    ffi_list_df = _make_ffi_list_df({"a.fits": "2020-01-01T00:00:00.000"})
+    resolved = geo._resolve_btjd_by_stem(
+        ["pidA"], {"pidA": float("nan")}, ffi_list_df, {"pidA": "a.fits"}
+    )
+    assert np.isfinite(resolved["pidA"])
+
+
+def test_resolve_btjd_by_stem_missing_date_obs_stays_absent():
+    ffi_list_df = _make_ffi_list_df({"a.fits": None})
+    resolved = geo._resolve_btjd_by_stem(["pidA"], {}, ffi_list_df, {"pidA": "a.fits"})
+    assert "pidA" not in resolved
+
+
+# ── TESS-mag star selection + isolation filter (dev/forward_epsf_wcs parity) ─
+
+
+def test_epsf_mag_source_default_and_validation():
+    assert EpsfParams().epsf_mag_source == "phot_rp_mean_mag"
+    assert parse_epsf({"kind": "epsf", "epsf_mag_source": "tess_mag"}, 0).epsf_mag_source == "tess_mag"
+    with pytest.raises(ValueError):
+        parse_epsf({"kind": "epsf", "epsf_mag_source": "bogus"}, 0)
+    with pytest.raises(ValueError):
+        parse_epsf({"kind": "epsf", "epsf_isolation_min_sep_px": -1.0}, 0)
+
+
+def test_prepare_gaia_for_gridded_epsf_tess_mag_source():
+    df = pd.DataFrame(
+        {
+            "ra": [10.0, 20.0],
+            "dec": [1.0, 2.0],
+            "phot_g_mean_mag": [8.0, 15.0],
+            "phot_bp_mean_mag": [8.1, 15.2],
+            "phot_rp_mean_mag": [7.9, 14.8],
+        }
+    )
+    params = EpsfParams(epsf_mag_source="tess_mag", mag_min_rp=None, mag_max_rp=11.0)
+    out = gridded_epsf.prepare_gaia_for_gridded_epsf(df, params)
+    assert len(out) == 1
+    assert "tess_mag" in out.columns
+
+
+def test_prepare_gaia_for_gridded_epsf_defers_filter_when_isolation_enabled():
+    """Isolation needs the FULL candidate+neighbor pool -- the parent-process
+    prefilter must not narrow to the mag window when isolation is on."""
+    df = pd.DataFrame(
+        {
+            "ra": [10.0, 20.0],
+            "dec": [1.0, 2.0],
+            "phot_g_mean_mag": [8.0, 15.0],
+            "phot_bp_mean_mag": [8.1, 15.2],
+            "phot_rp_mean_mag": [7.9, 14.8],
+        }
+    )
+    params = EpsfParams(
+        epsf_mag_source="tess_mag", mag_min_rp=7.0, mag_max_rp=11.0,
+        epsf_isolation_min_sep_px=6.0,
+    )
+    out = gridded_epsf.prepare_gaia_for_gridded_epsf(df, params)
+    assert len(out) == 2  # unfiltered -- both rows still present
+    assert "tess_mag" in out.columns
+
+
+def test_apply_epsf_isolation_filter_matches_forward_epsf_wcs_rule():
+    df = pd.DataFrame(
+        {
+            "phot_g_mean_mag": [8.0, 8.0, 8.0, 8.0, 12.9],
+            "phot_bp_mean_mag": [8.1, 8.1, 8.1, 8.1, 13.0],
+            "phot_rp_mean_mag": [7.9, 7.9, 7.9, 7.9, 12.8],
+            "x": [10.0, 100.0, 103.0, 200.0, 106.0],
+            "y": [10.0, 100.0, 100.0, 200.0, 100.0],
+        }
+    )
+    df = gridded_epsf._ensure_tess_mag_column(df)
+    out = gridded_epsf.apply_epsf_isolation_filter(
+        df, mag_min=7.0, mag_max=11.0, min_sep_px=6.0, neighbor_mag_max=13.0,
+        mag_col="tess_mag",
+    )
+    # Isolated candidates (0, far from everything) and (3, far from everything)
+    # survive; the close pair (1, 2, 3px apart, well under the 6px radius)
+    # and the faint neighbor's contaminated candidate are dropped.
+    assert sorted(out["x"].tolist()) == [10.0, 200.0]
+
+
+def test_apply_epsf_isolation_filter_neighbor_pool_includes_faint_end():
+    """A star just outside the primary mag window (e.g. 11-13) must still
+    count as a disqualifying neighbor -- this is the bug a naive
+    'filter to mag window first, then check isolation' ordering would cause."""
+    df = pd.DataFrame(
+        {
+            "phot_g_mean_mag": [8.0, 12.5],
+            "phot_bp_mean_mag": [8.1, 12.6],
+            "phot_rp_mean_mag": [7.9, 12.4],
+            "x": [100.0, 102.0],
+            "y": [100.0, 100.0],
+        }
+    )
+    df = gridded_epsf._ensure_tess_mag_column(df)
+    out = gridded_epsf.apply_epsf_isolation_filter(
+        df, mag_min=7.0, mag_max=11.0, min_sep_px=6.0, neighbor_mag_max=13.0,
+        mag_col="tess_mag",
+    )
+    assert len(out) == 0  # the bright candidate is disqualified by its faint neighbor
+
+
+def test_apply_epsf_isolation_filter_empty_when_no_x_column():
+    df = pd.DataFrame({"tess_mag": [8.0]})
+    assert len(gridded_epsf.apply_epsf_isolation_filter(
+        df, mag_min=7.0, mag_max=11.0, min_sep_px=6.0, neighbor_mag_max=13.0,
+    )) == 0
+
+
 def test_fit_epsf_section_multi_empty_frames_returns_none():
     stars_tbl = Table()
     stars_tbl["x"] = []

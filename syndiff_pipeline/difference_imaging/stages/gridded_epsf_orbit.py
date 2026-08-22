@@ -239,6 +239,55 @@ def _date_obs_and_dquality(
     return (str(date_obs) if date_obs else None), dq
 
 
+def _resolve_btjd_by_stem(
+    product_ids: list[str],
+    btjd_by_stem: dict,
+    ffi_list_df: pd.DataFrame,
+    ffi_path_by_stem: dict[str, str],
+) -> dict[str, float]:
+    """
+    ``btjd_by_stem`` filled in with a DATE-OBS-derived BTJD for any
+    product id missing (or non-finite).
+
+    Linear-mode frame manifests (``bookkeeping/diff_linear/.../frames.csv``)
+    carry no ``btjd``/``BTJD``/... column at all (unlike field-mode/
+    temporal-WCS runs), so ``btjd_by_stem_from_manifest`` can return an
+    entirely empty dict -- orbit segmentation and anchor placement need a
+    real BTJD for every frame regardless of manifest shape. Uses the same
+    conversion as ``temporal_wcs.py::_btjd_from_date_obs``.
+    """
+    from astropy.time import Time
+
+    resolved = dict(btjd_by_stem or {})
+    n_filled = 0
+    for pid in product_ids:
+        existing = resolved.get(pid)
+        if existing is not None and np.isfinite(existing):
+            continue
+        date_obs, _dq = _date_obs_and_dquality(ffi_list_df, ffi_path_by_stem, pid)
+        if not date_obs:
+            continue
+        try:
+            resolved[pid] = float(
+                Time(str(date_obs), format="isot", scale="utc").jd - 2457000.0
+            )
+            n_filled += 1
+        except Exception:
+            log.debug(
+                "epsf orbit-binned: BTJD conversion failed for %s (DATE-OBS=%r)",
+                pid,
+                date_obs,
+            )
+    if n_filled:
+        log.info(
+            "epsf orbit-binned: derived BTJD from DATE-OBS for %d/%d frames "
+            "(manifest had no btjd column)",
+            n_filled,
+            len(product_ids),
+        )
+    return resolved
+
+
 def _orbit_segments(
     diff_paths: list[str],
     sector: int,
@@ -664,6 +713,9 @@ def fit_gridded_epsf_orbit_binned(
         _diff_path_to_stem(p) if p else f"frame_{i}" for i, p in enumerate(diff_paths)
     ]
     product_ids = [tess_product_id_from_ffi_path(s) or s for s in stems]
+    btjd_by_stem = _resolve_btjd_by_stem(
+        product_ids, btjd_by_stem, ffi_list_df, ffi_path_by_stem
+    )
 
     segment_bounds, _pids = _orbit_segments(
         diff_paths, sector, ffi_list_df, ffi_path_by_stem
