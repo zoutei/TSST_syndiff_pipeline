@@ -307,9 +307,8 @@ def _filter_stars_geometric_mask(
     return stars_tbl[valid]
 
 
-def fit_epsf_section(
-    section_data: np.ndarray,
-    stars_tbl: Table,
+def fit_epsf_section_multi(
+    frames: list[tuple[np.ndarray, Table, np.ndarray | None]],
     *,
     extract_size: int,
     oversampling: int,
@@ -318,35 +317,50 @@ def fit_epsf_section(
     smoothing_kernel: str = "quadratic",
     builder_fit_shape: int = 5,
     recentering_boxsize: int = 3,
-    section_mask: np.ndarray | None = None,
     use_mask: bool = False,
     star_box_radius: int = 7,
 ) -> np.ndarray | None:
     """
-    Fit one grid-section ePSF stamp with photutils.
+    Fit one grid-section ePSF stamp, pooling stars from one or more frames.
+
+    *frames* is a list of ``(section_data, stars_tbl, section_mask)`` tuples
+    (one per input frame); ``photutils.psf.extract_stars`` natively accepts
+    matched lists of ``NDData``/star tables and pools the extracted stars
+    into a single fit. :func:`fit_epsf_section` is a thin single-frame
+    wrapper (list of length 1) kept for existing per-frame call sites.
 
     Returns oversampled 2D stamp array or None on failure.
     """
-    if len(stars_tbl) == 0:
+    nddatas: list[NDData] = []
+    tables: list[Table] = []
+    for section_data, stars_tbl, section_mask in frames:
+        frame_stars = stars_tbl
+        if len(frame_stars) == 0:
+            continue
+        if section_mask is not None and star_box_radius > 0:
+            frame_stars = _filter_stars_geometric_mask(
+                frame_stars, section_mask, int(star_box_radius)
+            )
+        if len(frame_stars) == 0:
+            continue
+        data = np.asarray(section_data, dtype=np.float64)
+        mask = None
+        if use_mask and section_mask is not None:
+            mask = np.asarray(section_mask, dtype=bool)
+            if mask.shape != data.shape:
+                mask = None
+        nddatas.append(NDData(data=data, mask=mask))
+        tables.append(frame_stars)
+    if not nddatas:
         return None
-    if section_mask is not None and star_box_radius > 0:
-        stars_tbl = _filter_stars_geometric_mask(
-            stars_tbl, section_mask, int(star_box_radius)
-        )
-    if len(stars_tbl) == 0:
-        return None
-    data = np.asarray(section_data, dtype=np.float64)
-    mask = None
-    if use_mask and section_mask is not None:
-        mask = np.asarray(section_mask, dtype=bool)
-        if mask.shape != data.shape:
-            mask = None
-    nddata = NDData(data=data, mask=mask)
     try:
         _suppress_photutils_epsf_noise()
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            extracted = extract_stars(nddata, stars_tbl, size=int(extract_size))
+            if len(nddatas) == 1:
+                extracted = extract_stars(nddatas[0], tables[0], size=int(extract_size))
+            else:
+                extracted = extract_stars(nddatas, tables, size=int(extract_size))
             if extracted is None or len(extracted) == 0:
                 return None
             builder = EPSFBuilder(
@@ -364,8 +378,44 @@ def fit_epsf_section(
             return None
         return stamp
     except Exception as exc:
-        log.debug("fit_epsf_section failed: %s", exc)
+        log.debug("fit_epsf_section_multi failed: %s", exc)
         return None
+
+
+def fit_epsf_section(
+    section_data: np.ndarray,
+    stars_tbl: Table,
+    *,
+    extract_size: int,
+    oversampling: int,
+    maxiters: int,
+    recentering_maxiters: int = 20,
+    smoothing_kernel: str = "quadratic",
+    builder_fit_shape: int = 5,
+    recentering_boxsize: int = 3,
+    section_mask: np.ndarray | None = None,
+    use_mask: bool = False,
+    star_box_radius: int = 7,
+) -> np.ndarray | None:
+    """
+    Fit one grid-section ePSF stamp with photutils (single frame).
+
+    Returns oversampled 2D stamp array or None on failure.
+    """
+    if len(stars_tbl) == 0:
+        return None
+    return fit_epsf_section_multi(
+        [(section_data, stars_tbl, section_mask)],
+        extract_size=extract_size,
+        oversampling=oversampling,
+        maxiters=maxiters,
+        recentering_maxiters=recentering_maxiters,
+        smoothing_kernel=smoothing_kernel,
+        builder_fit_shape=builder_fit_shape,
+        recentering_boxsize=recentering_boxsize,
+        use_mask=use_mask,
+        star_box_radius=star_box_radius,
+    )
 
 
 def _tile_centers_from_shape(

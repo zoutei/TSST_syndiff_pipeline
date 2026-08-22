@@ -66,6 +66,19 @@ class StarEpsfConfig:
     epsf_maxiters: int = 15
     epsf_recentering_maxiters: int = 20
     epsf_n_jobs: int | None = 8
+    # Orbit-binned ePSF (see difference_imaging/stages/gridded_epsf_orbit.py
+    # and EpsfParams) -- same knobs, star-branch default matches the diff
+    # stage's default so a star epsf block behaves like the production epsf
+    # stage unless explicitly overridden.
+    epsf_mode: str = "orbit_binned"
+    epsf_per_orbit: int = 5
+    epsf_frames_per_anchor: int = 20
+    epsf_stack_before_fit: bool = True
+    epsf_anchor_edge_fraction: float = 0.12
+    epsf_anchor_edge_boost: float = 3.0
+    epsf_anchor_window_max_expand: int = 80
+    epsf_quality_bitmask: int = 583
+    epsf_debug_plots: bool = True
 
 
 @dataclass
@@ -256,6 +269,15 @@ def _parse_star_epsf(raw: dict | None) -> StarEpsfConfig | None:
         epsf_maxiters=int(raw.get("epsf_maxiters", 15)),
         epsf_recentering_maxiters=int(raw.get("epsf_recentering_maxiters", 20)),
         epsf_n_jobs=int(raw["epsf_n_jobs"]) if raw.get("epsf_n_jobs") not in (None, "") else None,
+        epsf_mode=str(raw.get("epsf_mode", "orbit_binned")).strip() or "orbit_binned",
+        epsf_per_orbit=int(raw.get("epsf_per_orbit", 5)),
+        epsf_frames_per_anchor=int(raw.get("epsf_frames_per_anchor", 20)),
+        epsf_stack_before_fit=bool(raw.get("epsf_stack_before_fit", True)),
+        epsf_anchor_edge_fraction=float(raw.get("epsf_anchor_edge_fraction", 0.12)),
+        epsf_anchor_edge_boost=float(raw.get("epsf_anchor_edge_boost", 3.0)),
+        epsf_anchor_window_max_expand=int(raw.get("epsf_anchor_window_max_expand", 80)),
+        epsf_quality_bitmask=int(raw.get("epsf_quality_bitmask", 583)),
+        epsf_debug_plots=bool(raw.get("epsf_debug_plots", True)),
     )
 
 
