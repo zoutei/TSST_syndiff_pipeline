@@ -62,26 +62,28 @@ def test_anchor_target_phases_zero_anchors():
     assert geo.anchor_target_phases(0, 0.12, 3.0).size == 0
 
 
-def test_anchor_target_phases_denser_near_edges():
-    """With edge_boost>1, quantile spacing near the edges must be tighter
-    than the corresponding uniform spacing (denser sampling)."""
+def test_anchor_target_phases_canonical_five_places_per_orbit():
+    """Production default (epsf_per_orbit=5): one in the middle, two at the
+    very ends, two at edge_fraction in from each end."""
+    phases = geo.anchor_target_phases(5, edge_fraction=0.12, edge_boost=3.0)
+    assert phases.tolist() == pytest.approx([0.0, 0.12, 0.5, 0.88, 1.0])
+
+
+def test_anchor_target_phases_two_anchors_are_both_endpoints():
+    phases = geo.anchor_target_phases(2, edge_fraction=0.12, edge_boost=3.0)
+    assert phases.tolist() == [0.0, 1.0]
+
+
+def test_anchor_target_phases_general_odd_n_keeps_endpoints_and_midpoint():
     n = 7
-    phases = geo.anchor_target_phases(n, edge_fraction=0.15, edge_boost=4.0)
+    phases = geo.anchor_target_phases(n, edge_fraction=0.12, edge_boost=3.0)
     assert phases.shape == (n,)
     assert np.all(np.diff(phases) > 0)
-    assert phases.min() >= 0.0 and phases.max() <= 1.0
-    uniform_gap = 1.0 / n
-    edge_gap = phases[1] - phases[0]
-    middle_gap = phases[n // 2 + 1] - phases[n // 2]
-    assert edge_gap < uniform_gap
-    assert middle_gap > edge_gap
-
-
-def test_anchor_target_phases_no_edge_boost_is_uniform_quantiles():
-    n = 5
-    phases = geo.anchor_target_phases(n, edge_fraction=0.12, edge_boost=1.0)
-    expected = (np.arange(n) + 0.5) / n
-    assert np.allclose(phases, expected, atol=1e-3)
+    assert phases[0] == pytest.approx(0.0)
+    assert phases[-1] == pytest.approx(1.0)
+    assert phases[n // 2] == pytest.approx(0.5)
+    # Symmetric about the midpoint.
+    assert np.allclose(phases, 1.0 - phases[::-1])
 
 
 # ── Anchor frame selection ───────────────────────────────────────────────────

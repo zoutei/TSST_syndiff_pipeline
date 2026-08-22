@@ -69,6 +69,79 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
 log = logging.getLogger(__name__)
 
 
+# Per-process state for loky workers (initialized once per worker, not per
+# task -- see fit_gridded_epsf_orbit_binned's parallel dispatch for why).
+_ORBIT_WORKER_CTX: dict[str, Any] = {}
+
+
+def _init_orbit_epsf_worker(
+    gaia_base: pd.DataFrame,
+    epsf_params,
+    mask_catalog,
+    mask_2d: Optional[np.ndarray],
+    ffi_list_df: pd.DataFrame,
+    science_bounds: dict,
+    ffi_path_by_stem: dict[str, str],
+) -> None:
+    """Load shared anchor-fitting inputs once per loky worker."""
+    _ORBIT_WORKER_CTX.clear()
+    _ORBIT_WORKER_CTX.update(
+        {
+            "gaia_base": gaia_base,
+            "epsf_params": epsf_params,
+            "mask_catalog": mask_catalog,
+            "mask_2d": mask_2d,
+            "ffi_list_df": ffi_list_df,
+            "science_bounds": science_bounds,
+            "ffi_path_by_stem": dict(ffi_path_by_stem or {}),
+        }
+    )
+
+
+def _run_anchor_fit_task(payload: dict) -> tuple[Optional[list], Optional[np.ndarray]]:
+    """Worker: fit one anchor. Reads shared state from _ORBIT_WORKER_CTX
+    (set by _init_orbit_epsf_worker), not from closure capture."""
+    ctx = _ORBIT_WORKER_CTX
+    gaia_base = ctx["gaia_base"]
+    epsf_params = ctx["epsf_params"]
+    mask_catalog = ctx["mask_catalog"]
+    mask_2d = ctx["mask_2d"]
+    ffi_list_df = ctx["ffi_list_df"]
+    science_bounds = ctx["science_bounds"]
+    ffi_path_by_stem = ctx["ffi_path_by_stem"]
+
+    stack_before_fit = bool(epsf_params.epsf_stack_before_fit)
+    window_masks = [
+        _frame_reject_mask(mask_catalog=mask_catalog, mask_2d=mask_2d, btjd=bt)
+        for bt in payload["window_btjds"]
+    ]
+    if stack_before_fit:
+        return fit_anchor_stacked(
+            window_diff_paths=payload["window_diff_paths"],
+            window_masks=window_masks,
+            anchor_ffi_path=payload["anchor_ffi_path"],
+            gaia_base=gaia_base,
+            epsf_params=epsf_params,
+            ffi_list_df=ffi_list_df,
+            science_bounds=science_bounds,
+            frame_label=payload["stem"],
+        )
+    window_ffi_paths = [
+        ffi_path_by_stem.get(s) or payload["anchor_ffi_path"]
+        for s in payload["window_stems"]
+    ]
+    return fit_anchor_pooled(
+        window_diff_paths=payload["window_diff_paths"],
+        window_masks=window_masks,
+        window_ffi_paths=window_ffi_paths,
+        gaia_base=gaia_base,
+        epsf_params=epsf_params,
+        ffi_list_df=ffi_list_df,
+        science_bounds=science_bounds,
+        frame_label=payload["stem"],
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # ── Anchor placement (pure, unit-testable) ──────────────────────────────────
 # ═══════════════════════════════════════════════════════════════════════════
@@ -82,31 +155,42 @@ def anchor_target_phases(
     n_grid: int = 4001,
 ) -> np.ndarray:
     """
-    ``n_anchors`` target phases in ``[0, 1]`` over one orbit, denser near the
-    edges (``phase`` within ``edge_fraction`` of 0 or 1) by a factor of
-    ``edge_boost``.
+    ``n_anchors`` explicit target phases in ``[0, 1]`` over one orbit.
 
-    Builds a symmetric density weight over normalized orbit phase, integrates
-    to a CDF, and inverts at ``n_anchors`` evenly spaced quantiles. This is
-    the density idea ``TemporalWcsParams.edge_densify_knots``/``edge_fraction``
-    names but leaves unconsumed (see module docstring) -- actually implemented
-    here, independently of that dead field.
+    Canonical 5-anchor placement (the production default,
+    ``epsf_per_orbit=5``): the two orbit endpoints, the midpoint, and two
+    more at ``edge_fraction`` in from each end -- e.g. ``edge_fraction=0.12``
+    gives ``[0.0, 0.12, 0.5, 0.88, 1.0]``. Generalizes to other odd
+    ``n_anchors`` by keeping both endpoints and the midpoint fixed and
+    filling the remaining anchors as symmetric pairs spaced between
+    ``edge_fraction`` and the midpoint. ``edge_boost`` is accepted for
+    backward config compatibility but unused by this explicit-endpoint
+    scheme (kept from an earlier smooth-density design; see git history).
     """
+    del edge_boost, n_grid
     if n_anchors <= 0:
         return np.array([], dtype=float)
     if n_anchors == 1:
         return np.array([0.5], dtype=float)
-    phase_grid = np.linspace(0.0, 1.0, int(n_grid))
-    if edge_fraction <= 0:
-        weight = np.ones_like(phase_grid)
-    else:
-        dist_from_edge = np.minimum(phase_grid, 1.0 - phase_grid)
-        frac = np.clip(dist_from_edge / float(edge_fraction), 0.0, 1.0)
-        weight = float(edge_boost) - (float(edge_boost) - 1.0) * frac
-    cdf = np.cumsum(weight)
-    cdf = (cdf - cdf[0]) / (cdf[-1] - cdf[0])
-    quantiles = (np.arange(n_anchors) + 0.5) / n_anchors
-    return np.interp(quantiles, cdf, phase_grid)
+    if n_anchors == 2:
+        return np.array([0.0, 1.0], dtype=float)
+
+    phases = [0.0, 1.0]
+    remaining = n_anchors - 2
+    if remaining % 2 == 1:
+        phases.append(0.5)
+        remaining -= 1
+    n_pairs = remaining // 2
+    edge_fraction = float(edge_fraction)
+    for k in range(n_pairs):
+        depth = (
+            edge_fraction
+            if n_pairs == 1
+            else edge_fraction + k * (0.5 - edge_fraction) / n_pairs
+        )
+        phases.append(depth)
+        phases.append(1.0 - depth)
+    return np.array(sorted(phases), dtype=float)
 
 
 @dataclass(frozen=True)
@@ -887,48 +971,37 @@ def fit_gridded_epsf_orbit_binned(
                 )
             )
 
-    def _run_anchor_fit(payload: dict) -> tuple[Optional[list], Optional[np.ndarray]]:
-        stack_before_fit = bool(epsf_params.epsf_stack_before_fit)
-        window_masks = [
-            _frame_reject_mask(mask_catalog=mask_catalog, mask_2d=mask_2d, btjd=bt)
-            for bt in payload["window_btjds"]
-        ]
-        if stack_before_fit:
-            return fit_anchor_stacked(
-                window_diff_paths=payload["window_diff_paths"],
-                window_masks=window_masks,
-                anchor_ffi_path=payload["anchor_ffi_path"],
-                gaia_base=gaia_base,
-                epsf_params=epsf_params,
-                ffi_list_df=ffi_list_df,
-                science_bounds=science_bounds,
-                frame_label=payload["stem"],
-            )
-        window_ffi_paths = [
-            ffi_path_by_stem.get(s) or payload["anchor_ffi_path"]
-            for s in payload["window_stems"]
-        ]
-        return fit_anchor_pooled(
-            window_diff_paths=payload["window_diff_paths"],
-            window_masks=window_masks,
-            window_ffi_paths=window_ffi_paths,
-            gaia_base=gaia_base,
-            epsf_params=epsf_params,
-            ffi_list_df=ffi_list_df,
-            science_bounds=science_bounds,
-            frame_label=payload["stem"],
-        )
-
     if fit_tasks:
+        worker_initargs = (
+            gaia_base,
+            epsf_params,
+            mask_catalog,
+            mask_2d,
+            ffi_list_df,
+            science_bounds,
+            ffi_path_by_stem,
+        )
         if n_workers <= 1 or len(fit_tasks) <= 1:
-            fit_results = [_run_anchor_fit(payload) for _key, payload in fit_tasks]
+            _init_orbit_epsf_worker(*worker_initargs)
+            fit_results = [_run_anchor_fit_task(payload) for _key, payload in fit_tasks]
         else:
-            calls = [delayed(_run_anchor_fit)(payload) for _key, payload in fit_tasks]
+            # Shared per-worker state (gaia_base, mask_catalog, ...) goes
+            # through the loky initializer, not per-task closure capture:
+            # a nested closure gets re-pickled on every task, and joblib's
+            # automatic memmapping of the large repeatedly-pickled arrays
+            # (MaskCatalog._buf/.static in particular) makes them read-only
+            # in the worker -- MaskCatalog.mask_at's buffer-reuse write then
+            # raises "assignment destination is read-only" (see
+            # gridded_epsf.py's _init_gridded_epsf_worker/_WORKER_CTX for
+            # the same pattern already solving this for per_frame mode).
+            calls = [delayed(_run_anchor_fit_task)(payload) for _key, payload in fit_tasks]
             fit_results = parallel_map_with_optional_tqdm(
                 calls,
                 n_tasks=len(calls),
                 desc=f"epsf {epsf_label_str} (anchors)",
                 n_jobs_eff=n_workers,
+                initializer=_init_orbit_epsf_worker,
+                initargs=worker_initargs,
             )
         for (key, payload), (grid_xypos, stack) in zip(fit_tasks, fit_results):
             anchor_stack[key] = stack
