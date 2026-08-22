@@ -357,12 +357,8 @@ def fit_epsf_all_frames(diff_paths: list,
     if output_dir is None:
         raise ValueError("fit_epsf_all_frames requires output_dir for gridded ePSF")
 
-    result = gridded_epsf.fit_gridded_epsf_all_frames(
-        diff_paths,
-        gaia_df,
-        cfg,
-        epsf,
-        output_dir,
+    epsf_mode = str(getattr(epsf, "epsf_mode", "orbit_binned") or "orbit_binned")
+    common_kwargs = dict(
         mask_2d=mask_2d,
         mask_catalog=mask_catalog,
         btjd_by_stem=btjd_by_stem,
@@ -376,6 +372,23 @@ def fit_epsf_all_frames(diff_paths: list,
         ffi_path_by_stem=ffi_path_by_stem,
         wcs_table=wcs_table,
     )
+    if epsf_mode == "orbit_binned":
+        # Single dispatch point shared by execute.py's `kind == "epsf"`
+        # branch and star/epsf_runner.py -- both call fit_epsf_all_frames,
+        # so both get orbit-binned support here without their own branching
+        # (F2). Same (n_frames, n_tiles, n_pix)/tile_centers/ffi_stems/
+        # epsf_ok return contract as the per_frame path, so
+        # save_epsf_stack_bundle below (F7: legacy epsf_stack_r{N}.npz for
+        # sat_template) and every downstream consumer work unchanged.
+        from syndiff_pipeline.difference_imaging.stages import gridded_epsf_orbit
+
+        result = gridded_epsf_orbit.fit_gridded_epsf_orbit_binned(
+            diff_paths, gaia_df, cfg, epsf, output_dir, **common_kwargs
+        )
+    else:
+        result = gridded_epsf.fit_gridded_epsf_all_frames(
+            diff_paths, gaia_df, cfg, epsf, output_dir, **common_kwargs
+        )
     epsf_stack, tile_centers, ffi_stems, epsf_ok = result
     save_epsf_stack_bundle(epsf_stack, ffi_stems, output_dir, round_id)
     return epsf_stack, tile_centers, ffi_stems, epsf_ok

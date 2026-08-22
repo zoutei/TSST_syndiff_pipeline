@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, fields
-from typing import Any, FrozenSet, List, Optional, Type, TypeVar, Union
+from typing import Any, FrozenSet, List, Literal, Optional, Type, TypeVar, Union
 
 
 T = TypeVar("T")
@@ -165,6 +165,15 @@ EPSF_ALLOWED = frozenset(
         "epsf_star_box_radius",
         "epsf_use_section_mask",
         "epsf_stamp_border_crop",
+        "epsf_mode",
+        "epsf_per_orbit",
+        "epsf_frames_per_anchor",
+        "epsf_stack_before_fit",
+        "epsf_anchor_edge_fraction",
+        "epsf_anchor_edge_boost",
+        "epsf_anchor_window_max_expand",
+        "epsf_quality_bitmask",
+        "epsf_debug_plots",
     }
 )
 
@@ -459,6 +468,24 @@ class EpsfParams:
     epsf_star_box_radius: int = 7
     epsf_use_section_mask: bool = True
     epsf_stamp_border_crop: int = 8
+    # Orbit-binned ePSF (default): fit only epsf_per_orbit anchor models per
+    # orbit from batches of epsf_frames_per_anchor representative FFIs, and
+    # have every other frame in that orbit resolve to a BTJD-interpolated
+    # blend of the two bracketing anchors via gridded_epsf_index.json — see
+    # difference_imaging/stages/gridded_epsf_orbit.py. "per_frame" reproduces
+    # today's one-model-per-FFI behavior unchanged.
+    epsf_mode: Literal["orbit_binned", "per_frame"] = "orbit_binned"
+    epsf_per_orbit: int = 5
+    epsf_frames_per_anchor: int = 20
+    epsf_stack_before_fit: bool = True
+    epsf_anchor_edge_fraction: float = 0.12
+    epsf_anchor_edge_boost: float = 3.0
+    epsf_anchor_window_max_expand: int = 80
+    # Default TESS DQUALITY bits that disqualify a frame from anchor
+    # building: attitude tweak(1) | safe mode(2) | coarse point(4) |
+    # manual exclude(64) | Earth/Moon in FFI(512) = 583. Config-overridable.
+    epsf_quality_bitmask: int = 583
+    epsf_debug_plots: bool = True
 
 
 @dataclass
@@ -828,6 +855,22 @@ def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
     params = _merge_dataclass(EpsfParams, stage)
     if params.mag_max_rp is None:
         params = EpsfParams(**{**params.__dict__, "mag_max_rp": 12.95})
+    if params.epsf_mode not in ("orbit_binned", "per_frame"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] epsf: epsf_mode must be 'orbit_binned' "
+            f"or 'per_frame', got {params.epsf_mode!r}"
+        )
+    if params.epsf_mode == "orbit_binned":
+        if int(params.epsf_per_orbit) < 1:
+            raise ValueError("epsf: epsf_per_orbit must be positive")
+        if int(params.epsf_frames_per_anchor) < 1:
+            raise ValueError("epsf: epsf_frames_per_anchor must be positive")
+        if not 0.0 <= float(params.epsf_anchor_edge_fraction) < 0.5:
+            raise ValueError("epsf: epsf_anchor_edge_fraction must be in [0, 0.5)")
+        if float(params.epsf_anchor_edge_boost) <= 0:
+            raise ValueError("epsf: epsf_anchor_edge_boost must be positive")
+        if int(params.epsf_anchor_window_max_expand) < 1:
+            raise ValueError("epsf: epsf_anchor_window_max_expand must be positive")
     return params
 
 

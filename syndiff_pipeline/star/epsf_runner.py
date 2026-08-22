@@ -158,6 +158,15 @@ def ensure_star_epsf_catalog(
         epsf_maxiters=build_cfg.epsf_maxiters,
         epsf_recentering_maxiters=build_cfg.epsf_recentering_maxiters,
         epsf_n_jobs=build_cfg.epsf_n_jobs,
+        epsf_mode=build_cfg.epsf_mode,
+        epsf_per_orbit=build_cfg.epsf_per_orbit,
+        epsf_frames_per_anchor=build_cfg.epsf_frames_per_anchor,
+        epsf_stack_before_fit=build_cfg.epsf_stack_before_fit,
+        epsf_anchor_edge_fraction=build_cfg.epsf_anchor_edge_fraction,
+        epsf_anchor_edge_boost=build_cfg.epsf_anchor_edge_boost,
+        epsf_anchor_window_max_expand=build_cfg.epsf_anchor_window_max_expand,
+        epsf_quality_bitmask=build_cfg.epsf_quality_bitmask,
+        epsf_debug_plots=build_cfg.epsf_debug_plots,
     )
     cfg = SimpleNamespace(n_jobs=build_cfg.epsf_n_jobs or 8)
     lane_root = _scc_lane_root(ctx)

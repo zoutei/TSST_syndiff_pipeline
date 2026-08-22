@@ -525,6 +525,15 @@ def _indexed_input_fingerprints(
         return _prov.diff_background_input_fingerprints(ffi_fp)
 
     if kind == "epsf":
+        # Orbit-binned mode (see gridded_epsf_orbit.py, F1): an interpolated
+        # frame's real input is its two bracketing anchors' own epsf
+        # fingerprints, not this frame's own diff image -- replaying that
+        # scheme here would require re-deriving orbit segmentation/anchor
+        # placement for every product_id. Fall open (None) rather than
+        # reconstruct a fingerprint that would be simply wrong for those
+        # frames; callers fall back to the legacy marker check on None.
+        if str(stage.get("epsf_mode", "orbit_binned")).strip() == "orbit_binned":
+            return None
         diff_stage = _upstream_diff_image_stage(cfg, stage)
         if diff_stage is None:
             return None

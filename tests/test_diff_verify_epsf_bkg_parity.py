@@ -192,9 +192,13 @@ class _ParityBase(unittest.TestCase):
 @unittest.skipUnless(pg.PROVENANCE_AVAILABLE, "common.provenance not importable")
 class TestEpsfIndexedParity(_ParityBase):
     def test_emit_indexed_verify_parity(self):
+        # Per-frame fingerprint scheme (own diff image only) -- explicit
+        # epsf_mode="per_frame" since orbit_binned (the new default) uses a
+        # different scheme (see gridded_epsf_orbit.py F1) that this indexed
+        # fast-path deliberately falls open on.
         downsample_fp = self._seed_downsample()
         diff_fps = self._emit_diff_images(downsample_fp)
-        epsf_params = EpsfParams()
+        epsf_params = EpsfParams(epsf_mode="per_frame")
         store = ProvenanceStore(str(provenance_db_path(self.cfg.data_root)))
         for pid, diff_fp in diff_fps.items():
             inputs = pg.epsf_input_fingerprints(diff_fp)
@@ -220,6 +224,7 @@ class TestEpsfIndexedParity(_ParityBase):
             "kind": "epsf",
             "inputs": {"diffs": "hp_d"},
             "output": "epsf_r1",
+            "epsf_mode": "per_frame",
         }
         self.assertTrue(dv.diff_stage_complete_indexed(self.cfg, self.event_dir, stage))
 
