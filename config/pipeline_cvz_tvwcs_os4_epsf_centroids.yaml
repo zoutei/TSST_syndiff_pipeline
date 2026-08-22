@@ -1,0 +1,30 @@
+# Orchestrator wrapper for `syndiff diff submit` -- references the diff
+# sub-pipeline policy in diff_config_cvz_tvwcs_os4_epsf_centroids.yaml.
+# mapping/remap/ps1_process/downsample are handled separately via
+# pipeline_cvz_tvwcs_os4.yaml (itself gated on pipeline_cvz_temporal_wcs.yaml
+# having published that SCC's temporal WCS model); this only ever runs
+# --stages diff.
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_tvwcs_os4_epsf_centroids.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

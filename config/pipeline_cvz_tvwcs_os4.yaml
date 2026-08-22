@@ -1,0 +1,75 @@
+# CVZ SCCs: distortion-aware (temporal-WCS) OS4 field-template lane, mirroring
+# pipeline_s20_c3_k3_tvwcs_os4.yaml. Must run exactly `mapping,remap,downsample`
+# (OS4 diff consumption is separate, see diff_config_cvz_tvwcs_os4_epsf_centroids.yaml).
+#
+# Prerequisite per SCC: diff_config_cvz_temporal_wcs.yaml must have already
+# published that SCC's SCC-root wcs/ temporal Chebyshev/B-spline model
+# (version temporal_cheb5_bspline_v1) from its completed linear-lane
+# centroids -- mapping's wcs_source: temporal_wcs reads that model.
+#
+# Use:
+#   syndiff template submit --config config/pipeline_cvz_tvwcs_os4.yaml \
+#     --scc config/scc_cvz_s50_only.csv --stages mapping,remap,downsample \
+#     --run-id cvz_s50_tvwcs_os4_<date>
+deployment_file: deployment.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+
+stages:
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+    wcs_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    skip_download_catalog: false
+    n_threads: 64
+    condor_request_cpus: 64
+  remap:
+    store_name: tvwcs
+    drift_source: per_skycell_temporal_wcs
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    n_jobs: 64
+    stage_regmaps_to_scratch: true
+    condor_request_disk: 16000
+    condor_request_cpus: 64
+    condor_request_memory: 250_000
+  ps1_process:
+    # Shared, cross-sector store -- must match how the linear lane's own
+    # ps1_process ran (use_shared_convolved_store: true) so this reuses the
+    # same combined/convolved cells rather than diverging.
+    ps1_source: stream
+    use_shared_convolved_store: true
+    write_per_scc_convolved_zarr: false
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+    rebuild_field_store: true
+    materialize_fits: false
+    n_jobs: 64
+    executor: condor
+    condor_request_cpus: 64
+    condor_request_memory: 250000
+    stage_regmaps_to_scratch: false
+
+resources:
+  mapping:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 1
+  # CVZ SCCs share sky (adjacent sectors near the northern CVZ) -- serialize
+  # ps1_process across SCCs so later ones cache-hit off earlier ones instead
+  # of redundantly recomputing/overwriting the same shared combined/convolved
+  # cells (see pipeline_cvz_bk_shared_os1.yaml's identical constraint on the
+  # linear lane).
+  ps1_process:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 1

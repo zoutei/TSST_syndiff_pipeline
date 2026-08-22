@@ -1,0 +1,16 @@
+# Run only the temporal WCS diff sub-pipeline on completed CVZ linear-lane
+# data (hp_d + centroids_r1 already published). Local executor -- cheap,
+# no per-frame processing, just a per-SCC fit.
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_temporal_wcs.yaml
+
+stages:
+  diff:
+    executor: local
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  skip_artifact_verify: false
