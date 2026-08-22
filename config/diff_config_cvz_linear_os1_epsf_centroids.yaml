@@ -102,6 +102,8 @@ pipeline:
     epsf_mag_source: tess_mag
     mag_min_rp: 8.0
     mag_max_rp: 13.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
     epsf_n_jobs: 32
   - kind: centroids
     inputs:
