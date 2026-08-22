@@ -174,6 +174,9 @@ EPSF_ALLOWED = frozenset(
         "epsf_anchor_window_max_expand",
         "epsf_quality_bitmask",
         "epsf_debug_plots",
+        "epsf_mag_source",
+        "epsf_isolation_min_sep_px",
+        "epsf_isolation_neighbor_mag_max",
     }
 )
 
@@ -486,6 +489,18 @@ class EpsfParams:
     # manual exclude(64) | Earth/Moon in FFI(512) = 583. Config-overridable.
     epsf_quality_bitmask: int = 583
     epsf_debug_plots: bool = True
+    # Star-selection criteria ported from dev/forward_epsf_wcs (a separate,
+    # non-production GPU fitter) for parity, applied within the existing
+    # tile-grid EPSFBuilder pipeline (not that fitter's own irregular-stamp
+    # architecture). "tess_mag" reinterprets mag_min_rp/mag_max_rp as bounds
+    # on a per-star TESS magnitude derived from Gaia G/BP/RP (see
+    # tess_mag_from_gaia_phot) instead of raw phot_rp_mean_mag.
+    epsf_mag_source: Literal["phot_rp_mean_mag", "tess_mag"] = "phot_rp_mean_mag"
+    # Minimum pixel separation from any Gaia neighbor brighter than
+    # epsf_isolation_neighbor_mag_max (TESS mag); None disables isolation
+    # filtering (default, matches pre-existing behavior).
+    epsf_isolation_min_sep_px: Optional[float] = None
+    epsf_isolation_neighbor_mag_max: float = 13.0
 
 
 @dataclass
@@ -860,6 +875,13 @@ def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
             f"pipeline[{pipeline_idx}] epsf: epsf_mode must be 'orbit_binned' "
             f"or 'per_frame', got {params.epsf_mode!r}"
         )
+    if params.epsf_mag_source not in ("phot_rp_mean_mag", "tess_mag"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] epsf: epsf_mag_source must be "
+            f"'phot_rp_mean_mag' or 'tess_mag', got {params.epsf_mag_source!r}"
+        )
+    if params.epsf_isolation_min_sep_px is not None and float(params.epsf_isolation_min_sep_px) <= 0:
+        raise ValueError("epsf: epsf_isolation_min_sep_px must be positive when set")
     if params.epsf_mode == "orbit_binned":
         if int(params.epsf_per_orbit) < 1:
             raise ValueError("epsf: epsf_per_orbit must be positive")

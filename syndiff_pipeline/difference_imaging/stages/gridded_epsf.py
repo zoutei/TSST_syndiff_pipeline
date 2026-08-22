@@ -126,11 +126,26 @@ def gridded_epsf_npz_path(output_dir: str, ffi_stem: str) -> str:
     return os.path.join(output_dir, f"{ffi_stem}{GRIDDED_EPSF_NPZ_SUFFIX}")
 
 
+def _ensure_tess_mag_column(gaia_df: pd.DataFrame) -> pd.DataFrame:
+    """Add/refresh a ``tess_mag`` column via ``epsf.tess_mag_from_gaia_phot``."""
+    from syndiff_pipeline.difference_imaging.stages.epsf import (
+        tess_mag_from_gaia_phot,
+    )
+
+    df = gaia_df.copy()
+    g = pd.to_numeric(df.get("phot_g_mean_mag"), errors="coerce").to_numpy(dtype=float)
+    bp = pd.to_numeric(df.get("phot_bp_mean_mag"), errors="coerce").to_numpy(dtype=float)
+    rp = pd.to_numeric(df.get("phot_rp_mean_mag"), errors="coerce").to_numpy(dtype=float)
+    df["tess_mag"] = tess_mag_from_gaia_phot(g, bp, rp)
+    return df
+
+
 def _filter_gaia_for_epsf(
     gaia_df: pd.DataFrame,
     *,
     mag_max_rp: float | None,
     mag_min_rp: float | None = None,
+    mag_source: str = "phot_rp_mean_mag",
 ) -> pd.DataFrame:
     """
     Brightness pre-filter for ePSF star catalogs.
@@ -139,22 +154,79 @@ def _filter_gaia_for_epsf(
 
         combined_filter = (df['phot_rp_mean_mag'] < 12.95) & in_crop
 
-    ``mag_min_rp`` additionally drops stars brighter than the given RP
+    ``mag_min_rp`` additionally drops stars brighter than the given
     magnitude (e.g. to skip saturated/non-linear stars and shrink the
-    per-tile star count for faster ePSF fitting).
+    per-tile star count for faster ePSF fitting). ``mag_source ==
+    "tess_mag"`` filters on a derived per-star TESS magnitude (see
+    ``_ensure_tess_mag_column``) instead of raw ``phot_rp_mean_mag`` --
+    ``mag_min_rp``/``mag_max_rp`` are then interpreted as TESS-mag bounds
+    (see ``EpsfParams.epsf_mag_source``).
 
     Expects ``ra``/``dec`` (science-array ``x``/``y`` are computed per frame).
     """
     df = gaia_df
-    if "phot_rp_mean_mag" in df.columns:
-        rp = pd.to_numeric(df["phot_rp_mean_mag"], errors="coerce")
+    if mag_source == "tess_mag":
+        df = _ensure_tess_mag_column(df)
+    mag_col = "tess_mag" if mag_source == "tess_mag" else "phot_rp_mean_mag"
+    if mag_col in df.columns:
+        mag = pd.to_numeric(df[mag_col], errors="coerce")
         keep = pd.Series(True, index=df.index)
         if mag_max_rp is not None:
-            keep &= rp < float(mag_max_rp)
+            keep &= mag < float(mag_max_rp)
         if mag_min_rp is not None:
-            keep &= rp > float(mag_min_rp)
+            keep &= mag > float(mag_min_rp)
         df = df.loc[keep].copy()
     return df.reset_index(drop=True)
+
+
+def apply_epsf_isolation_filter(
+    gaia_df: pd.DataFrame,
+    *,
+    mag_min: float | None,
+    mag_max: float | None,
+    min_sep_px: float,
+    neighbor_mag_max: float,
+    mag_col: str = "tess_mag",
+) -> pd.DataFrame:
+    """
+    Keep ``mag_col`` window rows isolated by >= ``min_sep_px`` from any
+    ``mag_col`` neighbor brighter than ``neighbor_mag_max``.
+
+    Direct port of ``dev/forward_epsf_wcs.isolated_forced_phot.
+    select_isolated_stars``'s isolation rule (a separate, non-production GPU
+    fitter): the candidate window and the neighbor pool are both drawn from
+    the SAME full, unfiltered ``gaia_df`` -- a star between ``mag_max`` and
+    ``neighbor_mag_max`` isn't itself a candidate but still counts as a
+    contaminating neighbor. ``gaia_df`` must already carry per-frame ``x``/
+    ``y`` (call after :func:`~syndiff_pipeline.common.wcs_grouping.
+    gaia_science_xy_for_frame`, before the tile-section loop -- isolation is
+    evaluated globally, not per-tile).
+    """
+    if len(gaia_df) == 0 or "x" not in gaia_df.columns or mag_col not in gaia_df.columns:
+        return gaia_df.iloc[0:0]
+    mag = pd.to_numeric(gaia_df[mag_col], errors="coerce").to_numpy(dtype=float)
+    x = gaia_df["x"].to_numpy(dtype=float)
+    y = gaia_df["y"].to_numpy(dtype=float)
+    finite = np.isfinite(mag) & np.isfinite(x) & np.isfinite(y)
+    cand = finite.copy()
+    if mag_max is not None:
+        cand &= mag < float(mag_max)
+    if mag_min is not None:
+        cand &= mag > float(mag_min)
+    neigh = finite & (mag < float(neighbor_mag_max))
+
+    from scipy.spatial import cKDTree
+
+    xy_n = np.column_stack([x[neigh], y[neigh]])
+    xy_c = np.column_stack([x[cand], y[cand]])
+    if xy_n.shape[0] < 2 or xy_c.shape[0] == 0:
+        return gaia_df.iloc[0:0]
+    tree = cKDTree(xy_n)
+    dist, _ = tree.query(xy_c, k=2)
+    nn = dist[:, 1] if dist.ndim == 2 else np.full(int(cand.sum()), np.inf)
+    keep_local = nn >= float(min_sep_px)
+    cand_idx = np.flatnonzero(cand)[keep_local]
+    return gaia_df.iloc[cand_idx].reset_index(drop=True)
 
 
 def _resolve_mag_max_rp(epsf_params) -> float:
@@ -190,16 +262,42 @@ def prepare_gaia_for_gridded_epsf(
     ``starpositioningscript.py`` main block). Per-frame workers receive this
     pre-filtered table; section loops only apply spatial cuts.
     """
+    mag_source = str(getattr(epsf_params, "epsf_mag_source", "phot_rp_mean_mag"))
+    isolation_sep = getattr(epsf_params, "epsf_isolation_min_sep_px", None)
+    if isolation_sep is not None:
+        # Defer the magnitude-window cut to build_gridded_psf_for_frame's
+        # apply_epsf_isolation_filter, which needs the FULL (unfiltered)
+        # candidate+neighbor pool together with per-frame x/y to replicate
+        # dev/forward_epsf_wcs's select_isolated_stars exactly -- narrowing
+        # to the mag window here would silently drop the fainter
+        # (mag_max..neighbor_mag_max) neighbors the isolation check needs.
+        out = _ensure_tess_mag_column(gaia_df)
+        if "ra" not in out.columns or "dec" not in out.columns:
+            raise ValueError("Gaia catalog for ePSF requires ra, dec columns")
+        log.info(
+            "ePSF Gaia catalog: %d stars loaded (isolation filter deferred to "
+            "per-frame: tess_mag window (%s, %s), min_sep_px=%s, "
+            "neighbor_mag_max=%s)",
+            len(out),
+            _resolve_mag_min_rp(epsf_params),
+            _resolve_mag_max_rp(epsf_params),
+            isolation_sep,
+            getattr(epsf_params, "epsf_isolation_neighbor_mag_max", 13.0),
+        )
+        return out
     mag_max = _resolve_mag_max_rp(epsf_params)
     mag_min = _resolve_mag_min_rp(epsf_params)
-    out = _filter_gaia_for_epsf(gaia_df, mag_max_rp=mag_max, mag_min_rp=mag_min)
+    out = _filter_gaia_for_epsf(
+        gaia_df, mag_max_rp=mag_max, mag_min_rp=mag_min, mag_source=mag_source
+    )
     if "ra" not in out.columns or "dec" not in out.columns:
         raise ValueError("Gaia catalog for ePSF requires ra, dec columns")
     n = len(out)
     log.info(
-        "ePSF Gaia catalog: %d stars after %s < phot_rp_mean_mag < %s pre-filter",
+        "ePSF Gaia catalog: %d stars after %s < %s < %s pre-filter",
         n,
         mag_min,
+        mag_source,
         mag_max,
     )
     return out
@@ -449,6 +547,33 @@ def build_gridded_psf_for_frame(
     *gaia_df* must already be prepared via :func:`prepare_gaia_for_gridded_epsf`.
     """
     ny, nx = diff_image.shape
+    isolation_sep = getattr(epsf_params, "epsf_isolation_min_sep_px", None)
+    if isolation_sep is not None:
+        # Global (whole-frame) isolation pass, not per-tile -- mirrors
+        # dev/forward_epsf_wcs.isolated_forced_phot.select_isolated_stars.
+        # gaia_df here still carries the FULL candidate+neighbor pool
+        # (prepare_gaia_for_gridded_epsf deferred the mag-window cut for
+        # exactly this reason).
+        n_before = len(gaia_df)
+        gaia_df = apply_epsf_isolation_filter(
+            gaia_df,
+            mag_min=_resolve_mag_min_rp(epsf_params),
+            mag_max=_resolve_mag_max_rp(epsf_params),
+            min_sep_px=float(isolation_sep),
+            neighbor_mag_max=float(
+                getattr(epsf_params, "epsf_isolation_neighbor_mag_max", 13.0)
+            ),
+            mag_col="tess_mag",
+        )
+        log.debug(
+            "ePSF isolation filter (%s): %d -> %d candidate stars "
+            "(min_sep_px=%s, neighbor_mag_max=%s)",
+            frame_label or "frame",
+            n_before,
+            len(gaia_df),
+            isolation_sep,
+            getattr(epsf_params, "epsf_isolation_neighbor_mag_max", 13.0),
+        )
     tile_ny = int(epsf_params.tile_ny)
     tile_nx = int(epsf_params.tile_nx)
     oversampling = int(epsf_params.epsf_oversample)

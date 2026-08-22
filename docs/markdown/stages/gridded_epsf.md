@@ -102,6 +102,9 @@ oversampling  # int, from epsf_oversample (default 2)
 | `epsf_anchor_window_max_expand` | 80 | Cap on window-expansion radius before falling back to best-available frame count |
 | `epsf_quality_bitmask` | 583 | `DQUALITY` bits that disqualify a frame from anchor building (default: attitude tweak\|safe mode\|coarse point\|manual exclude\|Earth/Moon in FFI — see table below) |
 | `epsf_debug_plots` | true | Write per-orbit anchor/window diagnostic plots (orbit-binned only) |
+| `epsf_mag_source` | `phot_rp_mean_mag` | `phot_rp_mean_mag` or `tess_mag` — see [§ Star-selection parity with dev/forward_epsf_wcs](#star-selection-parity-with-devforward_epsf_wcs) |
+| `epsf_isolation_min_sep_px` | null (disabled) | Minimum pixel separation from any `tess_mag < epsf_isolation_neighbor_mag_max` neighbor |
+| `epsf_isolation_neighbor_mag_max` | 13.0 | TESS-mag threshold for isolation-check neighbors |
 
 Stage wiring example:
 
@@ -215,6 +218,45 @@ Best-effort (a missing/broken matplotlib never invalidates science output).
 **Star branch**: `star_config.yaml`'s `epsf:` block (`StarEpsfConfig`) takes
 the same `epsf_mode`/anchor/quality-bitmask keys, defaulting to
 `orbit_binned` like the diff stage.
+
+---
+
+## Star-selection parity with dev/forward_epsf_wcs
+
+`dev/forward_epsf_wcs` is a separate, non-production GPU-based per-epoch
+WCS+ePSF fitter (not in the diff DAG — see `CLAUDE.md`); its star-selection
+criteria can optionally be ported into the production `epsf` stage, applied
+within the existing tile-grid `EPSFBuilder` pipeline (not that fitter's own
+irregular-stamp/packed-support architecture):
+
+- **`epsf_mag_source: tess_mag`** — `mag_min_rp`/`mag_max_rp` are
+  reinterpreted as bounds on a per-star TESS magnitude derived from Gaia
+  G/BP/RP (`epsf.tess_mag_from_gaia_phot`, the TGLC polynomial) instead of
+  raw `phot_rp_mean_mag`. Default remains `phot_rp_mean_mag` (unchanged
+  legacy behavior).
+- **`epsf_isolation_min_sep_px`** — when set, adds a global (whole-frame,
+  not per-tile) isolation filter: a candidate star is dropped unless its
+  nearest Gaia neighbor brighter than `epsf_isolation_neighbor_mag_max`
+  (TESS mag, default 13.0) is at least this many pixels away. Direct port
+  of `dev/forward_epsf_wcs.isolated_forced_phot.select_isolated_stars`'s
+  rule (`gridded_epsf.apply_epsf_isolation_filter`) — the candidate window
+  and the neighbor pool are drawn from the *same* full, unfiltered Gaia
+  catalog (a star between `mag_max_rp` and `neighbor_mag_max` isn't itself a
+  candidate but still counts as a contaminating neighbor), evaluated after
+  per-frame `x`/`y` projection, before the tile-section loop. `None`
+  (default) disables isolation filtering entirely.
+- forward_epsf_wcs's own defaults: `--tess-mag 7,11`, `--min-sep-px 6.0`,
+  neighbor threshold 13.0, `--epsf-grid 2x2` over a small central `--region`
+  crop. Production `epsf` always tiles the *whole* science array (no
+  `--region`-equivalent restriction exists), so matching "2x2 over the
+  middle" is a straight `tile_nx`/`tile_ny` bump (e.g. to 4x4) with no other
+  change needed.
+
+When `epsf_isolation_min_sep_px` is set, `prepare_gaia_for_gridded_epsf`
+deliberately **skips** its magnitude-window prefilter (deferring it to the
+per-frame isolation pass) — narrowing to the mag window before computing
+isolation would silently drop the fainter neighbors the isolation check
+needs to see.
 
 ---
 

@@ -89,13 +89,22 @@ pipeline:
       diffs: hp_d
     output: epsf_r1
     epsf_mode: orbit_binned
-    tile_nx: 5
-    tile_ny: 5
+    tile_nx: 4
+    tile_ny: 4
     epsf_oversample: 4
     psf_size: 15
     extract_size: 15
     min_stars_per_tile: 5
-    mag_max_rp: 12.95
+    # Star-selection matched to dev/forward_epsf_wcs's defaults (a separate,
+    # non-production GPU fitter): tess_mag window (7,11), isolation radius
+    # 6px from any tess_mag<13 neighbor -- applied here on the whole
+    # science array (tile_nx/ny 4x4), not that fitter's own 2x2-over-a-
+    # central-crop --region restriction.
+    epsf_mag_source: tess_mag
+    mag_min_rp: 7.0
+    mag_max_rp: 11.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
     epsf_maxiters: 15
     epsf_recentering_maxiters: 20
     epsf_n_jobs: 64
