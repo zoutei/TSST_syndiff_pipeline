@@ -58,6 +58,11 @@ from syndiff_pipeline.template_creation.processing.field_templates import (
     write_template_manifest,
     _roi_bounds_to_assemble_crop,
     validate_frozen_field_geometry,
+    compute_seam_delta,
+    interior_contrib_path,
+    seam_delta_contrib_path,
+    write_interior_contrib,
+    write_seam_delta_contrib,
 )
 from syndiff_pipeline.template_creation.processing.shift_schedule import (
     ShiftSchedule,
@@ -862,6 +867,7 @@ def _l5_skycell_batch(
     """Load regmap+zarr once; compose+bin once per composite key; fan-out writes."""
     from syndiff_pipeline.template_creation.processing.field_hybrid_exact import (
         compose_group_hybrid_assignment,
+        compose_group_hybrid_assignment_with_interior,
         shared_abutting_border_tess_ids,
     )
 
@@ -884,6 +890,7 @@ def _l5_skycell_batch(
     intra_skycell_R = int(_L5_WORKER["intra_skycell_R"])
     apply_intra_skycell = bool(_L5_WORKER.get("apply_intra_skycell", True))
     apply_inter_skycell = bool(_L5_WORKER.get("apply_inter_skycell", True))
+    write_split_contribs = bool(_L5_WORKER.get("write_split_contribs", False))
 
     skycell_id = int(name_to_id[str(skycell)])
     neighbour_ids = list(neighbours_by_id.get(skycell_id, []))
@@ -900,16 +907,28 @@ def _l5_skycell_batch(
     n_zarr_loads = 0
 
     # Skip-only short circuit: if every fan-out target exists, avoid IO.
+    # When write_split_contribs is set (H.1 backfill onto an already-complete
+    # store), a key only counts as fully done once its interior contrib AND
+    # every gid's seam-delta contrib also exist -- not just the plain
+    # contribs/ file -- so a prior complete plain-contrib store correctly
+    # gets revisited to backfill the new split artifacts.
     pending: dict[tuple[Any, ...], list[tuple[int, int, int]]] = {}
     for ckey, gid_list in buckets.items():
         need: list[tuple[int, int, int]] = []
         for gid, sx_i, sy_i in gid_list:
             out = contrib_path(store, skycell, sx_i, sy_i, group_id=int(gid))
-            if out.is_file() and not rebuild:
+            old_exists = out.is_file()
+            if old_exists and rebuild:
+                out.unlink()
+                old_exists = False
+            split_done = True
+            if write_split_contribs:
+                interior_out = interior_contrib_path(store, skycell, sx_i, sy_i)
+                delta_out = seam_delta_contrib_path(store, skycell, sx_i, sy_i, int(gid))
+                split_done = interior_out.is_file() and delta_out.is_file()
+            if old_exists and split_done and not rebuild:
                 n_skips += 1
                 continue
-            if out.is_file() and rebuild:
-                out.unlink()
             need.append((int(gid), int(sx_i), int(sy_i)))
         if need:
             pending[ckey] = need
@@ -1000,6 +1019,13 @@ def _l5_skycell_batch(
             _rim_payloads[key] = hit
         return hit
 
+    # (sx_int, sy_int) -> (idx, flux_sum, count, mask_count) for the
+    # group-independent interior contrib already written this batch call --
+    # distinct composite keys can share this skycell's own shift while
+    # differing in a neighbour's, so this avoids redundant interior
+    # recompute+rewrite across those keys.
+    _interior_written_this_batch: dict[tuple[int, int], tuple] = {}
+
     for ckey, gid_list in pending.items():
         # Representative group for compose (any member shares the composite key).
         rep_gid, sx_i, sy_i = gid_list[0]
@@ -1042,36 +1068,64 @@ def _l5_skycell_batch(
                     int(sy_i),
                     max(abs(int(sx_i)), abs(int(sy_i))) + int(intra_skycell_R) + 1,
                 )
-        hybrid_map, _meta = compose_group_hybrid_assignment(
-            assignment_map,
-            skycell=str(skycell),
-            skycell_id=skycell_id,
-            sx_int=int(sx_i),
-            sy_int=int(sy_i),
-            master=master_map,
-            group_shifts=group_shifts,
-            name_to_id=name_to_id,
-            l4a_cache_path=l4a_cache_path,
-            l4b_cache_dir=exact_cache_l4b_dir,
-            group_id=int(rep_gid),
-            epoch_index=epoch_index,
-            hybrid_R=intra_skycell_R,
-            apply_intra_skycell=bool(apply_intra_skycell),
-            apply_inter_skycell=bool(apply_inter_skycell),
-            require_intra_skycell_cache=require_intra,
-            # Remap already tolerates individual L4b rim-cache write failures
-            # (e.g. extreme early-sector drift overflowing the on-disk dtype)
-            # by logging and skipping; downsample must tolerate the resulting
-            # missing file the same way rather than aborting the whole stage.
-            require_inter_skycell_cache=False,
-            pair_ids=pair_ids,
-            id_to_name=id_to_name,
-            neighbour_ids=neighbour_ids,
-            border_ids_by_neighbour=border_ids_by_neighbour,
-            seam_mask_base=seam_mask_base,
-            rim_mask_base_by_neighbour=rim_mask_base,
-            rim_cache_loader=_cached_rim_loader,
-        )
+        if write_split_contribs:
+            hybrid_map, interior_map, _meta = compose_group_hybrid_assignment_with_interior(
+                assignment_map,
+                skycell=str(skycell),
+                skycell_id=skycell_id,
+                sx_int=int(sx_i),
+                sy_int=int(sy_i),
+                master=master_map,
+                group_shifts=group_shifts,
+                name_to_id=name_to_id,
+                l4a_cache_path=l4a_cache_path,
+                l4b_cache_dir=exact_cache_l4b_dir,
+                group_id=int(rep_gid),
+                epoch_index=epoch_index,
+                hybrid_R=intra_skycell_R,
+                apply_intra_skycell=bool(apply_intra_skycell),
+                require_intra_skycell_cache=require_intra,
+                require_inter_skycell_cache=False,
+                pair_ids=pair_ids,
+                id_to_name=id_to_name,
+                neighbour_ids=neighbour_ids,
+                border_ids_by_neighbour=border_ids_by_neighbour,
+                seam_mask_base=seam_mask_base,
+                rim_mask_base_by_neighbour=rim_mask_base,
+                rim_cache_loader=_cached_rim_loader,
+            )
+        else:
+            hybrid_map, _meta = compose_group_hybrid_assignment(
+                assignment_map,
+                skycell=str(skycell),
+                skycell_id=skycell_id,
+                sx_int=int(sx_i),
+                sy_int=int(sy_i),
+                master=master_map,
+                group_shifts=group_shifts,
+                name_to_id=name_to_id,
+                l4a_cache_path=l4a_cache_path,
+                l4b_cache_dir=exact_cache_l4b_dir,
+                group_id=int(rep_gid),
+                epoch_index=epoch_index,
+                hybrid_R=intra_skycell_R,
+                apply_intra_skycell=bool(apply_intra_skycell),
+                apply_inter_skycell=bool(apply_inter_skycell),
+                require_intra_skycell_cache=require_intra,
+                # Remap already tolerates individual L4b rim-cache write failures
+                # (e.g. extreme early-sector drift overflowing the on-disk dtype)
+                # by logging and skipping; downsample must tolerate the resulting
+                # missing file the same way rather than aborting the whole stage.
+                require_inter_skycell_cache=False,
+                pair_ids=pair_ids,
+                id_to_name=id_to_name,
+                neighbour_ids=neighbour_ids,
+                border_ids_by_neighbour=border_ids_by_neighbour,
+                seam_mask_base=seam_mask_base,
+                rim_mask_base_by_neighbour=rim_mask_base,
+                rim_cache_loader=_cached_rim_loader,
+            )
+            interior_map = None
         n_compose += 1
         binned = _bin_skycell_contrib(
             assignment=hybrid_map,
@@ -1094,6 +1148,64 @@ def _l5_skycell_batch(
             idx, sums, counts, mcounts = binned
             if len(idx) > 0:
                 n_nonempty += len(gid_list)
+
+        if write_split_contribs and interior_map is not None:
+            shift_key = (int(sx_i), int(sy_i))
+            if shift_key not in _interior_written_this_batch:
+                interior_binned = _bin_skycell_contrib(
+                    assignment=interior_map,
+                    ps1_data=ps1_data,
+                    ps1_mask=ps1_mask,
+                    sx_int=0,
+                    sy_int=0,
+                    base_tess_shape=base_tess_shape,
+                    roi_bounds=roi_bounds,
+                    ignore_mask=ignore_mask,
+                    mapping_grid=_L5_WORKER.get("mapping_grid"),
+                )
+                if interior_binned is None:
+                    i_idx = np.array([], dtype=np.int64)
+                    i_sums = np.array([], dtype=np.float64)
+                    i_counts = np.array([], dtype=np.float64)
+                    i_mcounts = np.array([], dtype=np.float64)
+                else:
+                    i_idx, i_sums, i_counts, i_mcounts = interior_binned
+                write_interior_contrib(
+                    store,
+                    skycell,
+                    sx_i,
+                    sy_i,
+                    indices=i_idx,
+                    flux_sum=i_sums,
+                    count=i_counts,
+                    mask_count=i_mcounts,
+                )
+                _interior_written_this_batch[shift_key] = (i_idx, i_sums, i_counts, i_mcounts)
+            else:
+                i_idx, i_sums, i_counts, i_mcounts = _interior_written_this_batch[shift_key]
+
+            for gid, sx_g, sy_g in gid_list:
+                d_idx, d_flux, d_count, d_mcount = compute_seam_delta(
+                    idx_full=idx,
+                    flux_full=sums,
+                    count_full=counts,
+                    mcount_full=mcounts,
+                    idx_interior=i_idx,
+                    flux_interior=i_sums,
+                    count_interior=i_counts,
+                    mcount_interior=i_mcounts,
+                )
+                write_seam_delta_contrib(
+                    store,
+                    skycell,
+                    sx_g,
+                    sy_g,
+                    indices=d_idx,
+                    flux_sum=d_flux,
+                    count=d_count,
+                    mask_count=d_mcount,
+                    group_id=int(gid),
+                )
 
         for gid, sx_g, sy_g in gid_list:
             write_contrib(
@@ -1150,6 +1262,7 @@ def run_field_downsample_scc(
     progress_path: str | Path | None = None,
     apply_intra_skycell: bool = True,
     apply_inter_skycell: bool = True,
+    write_split_contribs: bool = False,
     mapping_grid=None,
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
@@ -1571,6 +1684,7 @@ def run_field_downsample_scc(
         "intra_skycell_R": int(intra_skycell_R),
         "apply_intra_skycell": bool(apply_intra_skycell),
         "apply_inter_skycell": bool(apply_inter_skycell),
+        "write_split_contribs": bool(write_split_contribs),
         "mapping_grid": mapping_grid,
         "skycell_df": skycell_df,
         "psf_sigma": psf_sigma,
@@ -1716,6 +1830,7 @@ def run_field_downsample_scc(
         "intra_skycell_R": int(intra_skycell_R),
         "apply_intra_skycell": bool(apply_intra_skycell),
         "apply_inter_skycell": bool(apply_inter_skycell),
+        "write_split_contribs": bool(write_split_contribs),
         "group_scoped_contribs": True,
         "materialize_fits": bool(materialize_fits),
         "architecture_note": (
@@ -1940,6 +2055,8 @@ def assemble_field_group_flux(
         shape=shape,
         crop=crop,
         group_id=int(group_id) if group_scoped_contribs else None,
+        need_count=False,
+        need_mask=False,
     )
     # Return the raw accumulated flux sum (not the mean) -- this matches the
     # linear-mode template convention (FLUX_SUM extension in
