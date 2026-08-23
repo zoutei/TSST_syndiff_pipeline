@@ -144,6 +144,100 @@ def test_publish_is_idempotent_on_identical_fingerprint(tmp_path: Path):
     assert info2["already_published"] is True
 
 
+def test_republish_rekeys_when_upstream_combined_fp_changes(tmp_path: Path):
+    """Mirrors the real gaia_version_stamp migration: an old convolved cell
+    chained on a since-superseded combined_fingerprint should be
+    republished under the new one, once the two combined cells' pixel
+    content is confirmed identical."""
+    from syndiff_pipeline.template_creation.processing import combined_store as cs
+
+    combined_image, combined_mask, chd, crs = (
+        np.random.default_rng(1).random((16, 16)).astype(np.float32),
+        np.random.default_rng(2).integers(0, 4, size=(16, 16)).astype(np.uint16),
+        {"r": "R"}, [],
+    )
+    old_recipe = cs.combined_recipe(gaia_version="/some/path/catalog.csv:1:2")
+    new_recipe = cs.combined_recipe(gaia_version="loaded")
+    old_info = cs.publish_combined_cell(
+        tmp_path, "skycell.1234", "000",
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=chd, removed_stars=crs, recipe=old_recipe,
+    )
+    new_info = cs.publish_combined_cell(
+        tmp_path, "skycell.1234", "000",
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=chd, removed_stars=crs, recipe=new_recipe,
+    )
+    assert old_info["fingerprint"] != new_info["fingerprint"]
+
+    convolved_image, convolved_mask, headers_data, removed_stars = _payload()
+    conv_recipe = vs.convolved_recipe()
+    old_conv_info = vs.publish_convolved_cell(
+        tmp_path, "skycell.1234", "000",
+        convolved_image=convolved_image, convolved_mask=convolved_mask,
+        headers_data=headers_data, removed_stars=removed_stars,
+        recipe=conv_recipe, combined_fingerprint=old_info["fingerprint"],
+    )
+    assert old_conv_info is not None
+
+    assert vs.resolve_convolved_fingerprint_for_recipe(
+        tmp_path, "skycell.1234", "000", conv_recipe, new_info["fingerprint"]
+    ) is None
+
+    result = vs.republish_convolved_cell_for_recipe(
+        tmp_path, "skycell.1234", "000", conv_recipe, new_info["fingerprint"]
+    )
+    assert result is not None
+    assert result["fingerprint"] != old_conv_info["fingerprint"]
+
+    resolved_fp = vs.resolve_convolved_fingerprint_for_recipe(
+        tmp_path, "skycell.1234", "000", conv_recipe, new_info["fingerprint"]
+    )
+    assert resolved_fp == result["fingerprint"]
+    loaded = vs.try_load_convolved_cell(tmp_path, "skycell.1234", "000", resolved_fp)
+    assert loaded is not None
+    np.testing.assert_array_equal(loaded["convolved_image"], convolved_image)
+
+
+def test_republish_skips_when_upstream_combined_content_actually_differs(tmp_path: Path):
+    from syndiff_pipeline.template_creation.processing import combined_store as cs
+
+    old_image = np.random.default_rng(1).random((16, 16)).astype(np.float32)
+    new_image = np.random.default_rng(3).random((16, 16)).astype(np.float32)
+    chd, crs = {"r": "R"}, []
+    old_combined = cs.publish_combined_cell(
+        tmp_path, "skycell.1234", "000",
+        combined_image=old_image, combined_mask=np.zeros((16, 16), dtype=np.uint16),
+        headers_data=chd, removed_stars=crs, recipe=cs.combined_recipe(gaia_version="a"),
+    )
+    new_combined = cs.publish_combined_cell(
+        tmp_path, "skycell.1234", "000",
+        combined_image=new_image, combined_mask=np.zeros((16, 16), dtype=np.uint16),
+        headers_data=chd, removed_stars=crs, recipe=cs.combined_recipe(gaia_version="b"),
+    )
+
+    convolved_image, convolved_mask, headers_data, removed_stars = _payload()
+    conv_recipe = vs.convolved_recipe()
+    vs.publish_convolved_cell(
+        tmp_path, "skycell.1234", "000",
+        convolved_image=convolved_image, convolved_mask=convolved_mask,
+        headers_data=headers_data, removed_stars=removed_stars,
+        recipe=conv_recipe, combined_fingerprint=old_combined["fingerprint"],
+    )
+
+    result = vs.republish_convolved_cell_for_recipe(
+        tmp_path, "skycell.1234", "000", conv_recipe, new_combined["fingerprint"]
+    )
+    assert result is None
+
+
+def test_republish_convolved_returns_none_when_no_payload_exists(tmp_path: Path):
+    result = vs.republish_convolved_cell_for_recipe(
+        tmp_path, "skycell.1234", "000", vs.convolved_recipe(), "some_new_combined_fp"
+    )
+    assert result is None
+
+
 def test_try_load_returns_none_when_never_published(tmp_path: Path):
     assert vs.try_load_convolved_cell(tmp_path, "skycell.1234", "000", "deadbeef") is None
 
