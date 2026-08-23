@@ -276,6 +276,91 @@ def test_seed_band_cache_from_combined_store_threads_raw_skycell_fingerprint(tmp
 
 
 # ---------------------------------------------------------------------------
+# republish_combined_cell_for_recipe (gaia_version_stamp scheme migration:
+# per-file path/mtime -> canonical "loaded")
+# ---------------------------------------------------------------------------
+
+
+def test_republish_rekeys_matching_old_scheme_payload(tmp_path: Path):
+    combined_image, combined_mask, headers_data, removed_stars = _payload()
+    projection, cell = "skycell.1234", "000"
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+    raw_fp = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+
+    old_recipe = cs.combined_recipe(gaia_version="/some/path/catalog.csv:123:456")
+    old_info = cs.publish_combined_cell(
+        tmp_path, projection, cell,
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=headers_data, removed_stars=removed_stars,
+        recipe=old_recipe, input_fingerprints=[raw_fp],
+    )
+    assert old_info is not None
+
+    new_recipe = cs.combined_recipe(gaia_version="loaded")
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, projection, cell, new_recipe) is None
+
+    result = cs.republish_combined_cell_for_recipe(tmp_path, projection, cell, new_recipe)
+    assert result is not None
+    assert result["fingerprint"] != old_info["fingerprint"]
+
+    resolved_fp = cs.resolve_combined_fingerprint_for_recipe(tmp_path, projection, cell, new_recipe)
+    assert resolved_fp == result["fingerprint"]
+    loaded = cs.try_load_combined_cell(tmp_path, projection, cell, resolved_fp)
+    assert loaded is not None
+    np.testing.assert_array_equal(loaded["combined_image"], combined_image.astype(np.float32))
+    assert loaded["removed_stars"] == removed_stars
+
+
+def test_republish_skips_when_raw_skycell_has_moved(tmp_path: Path):
+    combined_image, combined_mask, headers_data, removed_stars = _payload()
+    projection, cell = "skycell.1234", "000"
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+    raw_fp_v1 = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+
+    old_recipe = cs.combined_recipe(gaia_version="/some/path/catalog.csv:123:456")
+    cs.publish_combined_cell(
+        tmp_path, projection, cell,
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=headers_data, removed_stars=removed_stars,
+        recipe=old_recipe, input_fingerprints=[raw_fp_v1],
+    )
+
+    # Raw skycell re-downloaded (different content) since the old payload
+    # was built -- must not rekey stale-raw content forward.
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v2-different-length")
+
+    new_recipe = cs.combined_recipe(gaia_version="loaded")
+    result = cs.republish_combined_cell_for_recipe(tmp_path, projection, cell, new_recipe)
+    assert result is None
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, projection, cell, new_recipe) is None
+
+
+def test_republish_never_rekeys_a_no_catalog_build(tmp_path: Path):
+    combined_image, combined_mask, headers_data, removed_stars = _payload()
+    projection, cell = "skycell.1234", "000"
+    _write_raw_skycell(tmp_path, projection, cell, b"raw-bytes-v1")
+    raw_fp = cs.raw_skycell_input_fingerprint(tmp_path, projection, cell)
+
+    none_recipe = cs.combined_recipe(gaia_version="none")
+    cs.publish_combined_cell(
+        tmp_path, projection, cell,
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=headers_data, removed_stars=removed_stars,
+        recipe=none_recipe, input_fingerprints=[raw_fp],
+    )
+
+    new_recipe = cs.combined_recipe(gaia_version="loaded")
+    result = cs.republish_combined_cell_for_recipe(tmp_path, projection, cell, new_recipe)
+    assert result is None
+
+
+def test_republish_returns_none_when_no_payload_exists(tmp_path: Path):
+    new_recipe = cs.combined_recipe(gaia_version="loaded")
+    result = cs.republish_combined_cell_for_recipe(tmp_path, "skycell.1234", "000", new_recipe)
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
 # Publish / load round-trip
 # ---------------------------------------------------------------------------
 
