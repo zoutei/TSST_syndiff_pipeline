@@ -285,6 +285,27 @@ key `(skycell,sx,sy)` (~48% of keys on s0020/c3/k3). L5 therefore always writes
 contribs/{skycell}_sx{±}_sy{±}_gid{N}.npz
 ```
 
+### Optional interior/seam-delta split (`write_split_contribs`)
+
+`stages.downsample.write_split_contribs: true` (default `false`) additionally
+writes each skycell's contribution decomposed into a **group-independent
+interior** part and a small **group-dependent seam delta**, purely as a
+caching optimization for `convolved_templates`' `use_patch_cache` mode (see
+[multi_kernel_diff.md](stages/multi_kernel_diff.md)) — it does not change,
+replace, or gate the plain group-qualified `contribs/` above, which are
+always written regardless of this flag.
+
+```text
+interior_contribs/{skycell}_sx{±}_sy{±}.npz              # no gid: shared across every group with this shift
+seam_delta_contribs/{skycell}_sx{±}_sy{±}_gid{N}.npz      # sparse; a present-but-empty file means "no correction needed", not "not yet computed"
+```
+
+- **Interior** = `compose_group_hybrid_assignment(..., apply_inter_skycell=False)` binned — the intra-skycell-only result, a pure function of `(skycell, sx_int, sy_int)`. Cacheable across every `group_id` that shares that shift (measured ~69x duplication on s0020/c3/k3: 16,260 distinct `(skycell,sx,sy)` behind 1.1M group-scoped contrib files).
+- **Seam delta** = `full − interior` (sparse, restricted to touched pixels via `field_templates.compute_seam_delta`) — the neighbour-shift-dependent inter-skycell rim correction, confined to a thin border band.
+- Exact by construction: `interior + seam_delta == full` for every pixel, since seam_delta literally *is* that arithmetic difference — `field_templates.assemble_group_from_split_contribs` must reproduce `assemble_group_from_contribs`'s output bit-for-bit; this is the regression test to run after touching this path.
+- **Verification pitfall (discovered the hard way):** comparing the plain `contribs/` store against a fresh interior/delta rebuild by globbing `contribs/*.npz` and parsing `(sx,sy,gid)` from the *filename* will find false mismatches whenever `mapping`/`remap` has been refit since some of those files were written — orphaned pre-refit files stay on disk under their old shift-keyed name and are never looked up again by production code (which always resolves the filename from the *current* `template_group_shifts.parquet`), but a naive glob-based comparison still picks them up. Always resolve both sides' paths from the shift table, and treat any residual mismatch as suspect only if the plain and split files' mtimes are close together (same build).
+- A debug-only `SYNDIFF_DOWNSAMPLE_ONLY_SKYCELLS` env var (comma-separated skycell names, threaded through `dispatch.py` → `run_field_downsample_scc(only_skycells=...)`) restricts L5 processing/validation to a curated subset — useful for partial real-data validation without a full SCC rebuild. Deliberately not a YAML key. Reaching a Condor job requires adding it to `condor.py::_format_condor_environment`'s fixed env-var whitelist first (see the run-ops skill's Condor environment note) — and because `syndiff *submit*` hands the actual `condor_submit` call to an already-running daemon process, a shell-exported env var only reaches new submissions if the **daemon itself** is restarted with that var set.
+
 ### Skycell-major dispatch + composite-key fan-out
 
 L5 parallelizes over **skycells**, not flat `(group_id, skycell, sx, sy)` rows.
@@ -391,6 +412,10 @@ requires `geometry_mode: linear` on the same key.
   field_mode_assembly.json              # includes store_root, remap_root, lane names
   downsample.progress.json              # field L5 ckeys / skycell batches
   contribs/…_gid{N}.npz
+  interior_contribs/…npz                # only when write_split_contribs: true
+  seam_delta_contribs/…_gid{N}.npz      # only when write_split_contribs: true
+  basis_conv/interior/…npz              # convolved_templates use_patch_cache cache (H.2)
+  basis_conv/seam_delta/…_gid{N}.npz    # convolved_templates use_patch_cache cache (H.2)
   fits/syndiff_field_s{SSSS}_{C}_{K}[_os{N}]_gid{N}.fits.fz  # optional
   materialized_fits.json
   .lock
