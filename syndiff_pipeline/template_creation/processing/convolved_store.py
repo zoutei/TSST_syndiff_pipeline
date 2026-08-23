@@ -422,7 +422,9 @@ def republish_convolved_cell_for_recipe(
             new_combined_payload = try_load_combined_cell(data_root, projection, skycell, target_combined_fp)
             if new_combined_payload is None:
                 return None
-        if not np.array_equal(old_combined["combined_image"], new_combined_payload["combined_image"]):
+        if not np.array_equal(
+            old_combined["combined_image"], new_combined_payload["combined_image"], equal_nan=True
+        ):
             continue
         payload = try_load_convolved_cell(data_root, projection, skycell, fp_dir.name)
         if payload is None:

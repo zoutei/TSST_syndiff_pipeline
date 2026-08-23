@@ -199,6 +199,44 @@ def test_republish_rekeys_when_upstream_combined_fp_changes(tmp_path: Path):
     np.testing.assert_array_equal(loaded["convolved_image"], convolved_image)
 
 
+def test_republish_rekeys_when_upstream_combined_content_has_matching_nans(tmp_path: Path):
+    """Regression test: a real s0020/c3/k3 skycell had a single masked NaN
+    pixel in its combined image, and a naive ``np.array_equal`` (without
+    ``equal_nan=True``) reported the identical-content old/new combined
+    cells as "different" purely because NaN != NaN, silently skipping an
+    otherwise-safe rekey."""
+    from syndiff_pipeline.template_creation.processing import combined_store as cs
+
+    combined_image = np.random.default_rng(1).random((16, 16)).astype(np.float32)
+    combined_image[3, 5] = np.nan
+    combined_mask = np.zeros((16, 16), dtype=np.uint16)
+    chd, crs = {"r": "R"}, []
+    old_info = cs.publish_combined_cell(
+        tmp_path, "skycell.1234", "000",
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=chd, removed_stars=crs, recipe=cs.combined_recipe(gaia_version="a"),
+    )
+    new_info = cs.publish_combined_cell(
+        tmp_path, "skycell.1234", "000",
+        combined_image=combined_image, combined_mask=combined_mask,
+        headers_data=chd, removed_stars=crs, recipe=cs.combined_recipe(gaia_version="loaded"),
+    )
+
+    convolved_image, convolved_mask, headers_data, removed_stars = _payload()
+    conv_recipe = vs.convolved_recipe()
+    vs.publish_convolved_cell(
+        tmp_path, "skycell.1234", "000",
+        convolved_image=convolved_image, convolved_mask=convolved_mask,
+        headers_data=headers_data, removed_stars=removed_stars,
+        recipe=conv_recipe, combined_fingerprint=old_info["fingerprint"],
+    )
+
+    result = vs.republish_convolved_cell_for_recipe(
+        tmp_path, "skycell.1234", "000", conv_recipe, new_info["fingerprint"]
+    )
+    assert result is not None
+
+
 def test_republish_skips_when_upstream_combined_content_actually_differs(tmp_path: Path):
     from syndiff_pipeline.template_creation.processing import combined_store as cs
 
