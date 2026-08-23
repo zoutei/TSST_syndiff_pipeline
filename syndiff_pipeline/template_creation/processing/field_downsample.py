@@ -1263,6 +1263,7 @@ def run_field_downsample_scc(
     apply_intra_skycell: bool = True,
     apply_inter_skycell: bool = True,
     write_split_contribs: bool = False,
+    only_skycells: set[str] | frozenset[str] | None = None,
     mapping_grid=None,
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
@@ -1643,6 +1644,18 @@ def run_field_downsample_scc(
         apply_inter_skycell=bool(apply_inter_skycell),
     )
     skycell_batches = sorted(composite_index.items())
+    if only_skycells is not None:
+        # Debug/backfill-only restriction: process (and validate
+        # completeness for) just this subset instead of the whole SCC.
+        # Never used by any production caller today -- default None
+        # preserves the full-SCC behavior exactly.
+        wanted = {str(s) for s in only_skycells}
+        skycell_batches = [(sc, buckets) for sc, buckets in skycell_batches if sc in wanted]
+        log.info(
+            "only_skycells restriction active: %d/%d skycells selected",
+            len(skycell_batches),
+            len(composite_index),
+        )
     n_composite_keys = sum(len(buckets) for _, buckets in skycell_batches)
     log.info(
         "Built composite-key index: %d skycells, %d composite keys, %d contrib keys "
@@ -1694,10 +1707,16 @@ def run_field_downsample_scc(
     # Validate the complete mapping identity set before any worker can write a
     # contrib.  The batch list may be a strict subset when a stale schedule
     # omitted a master cell, so validation must use ``name_to_id`` explicitly.
+    # When only_skycells restricts processing, completeness is only required
+    # for that same subset -- the gate must not demand availability for
+    # skycells this call was never going to touch.
+    required_skycells = (
+        {str(s) for s in only_skycells} if only_skycells is not None else set(name_to_id)
+    )
     skycell_batches, _skipped_convolved = _validate_l5_convolved_completeness(
         master_skycells=set(name_to_id),
         payload=worker_payload,
-        required_skycells=set(name_to_id),
+        required_skycells=required_skycells,
         skycell_batches=skycell_batches,
     )
     n_composite_keys = sum(len(buckets) for _, buckets in skycell_batches)
