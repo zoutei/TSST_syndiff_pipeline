@@ -32,6 +32,7 @@ import os
 import re
 import sys
 import warnings
+from collections import OrderedDict
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Optional
@@ -81,6 +82,36 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
 warnings.filterwarnings("ignore", category=FITSFixedWarning)
 
 log = logging.getLogger(__name__)
+
+
+class _BoundedTemplateCache:
+    """Dict-like LRU cache capped at *maxsize* entries.
+
+    Field-mode ``group_id`` (and thus the assembled template array it maps
+    to) can change nearly every frame under drift tracking, so an unbounded
+    per-process cache retains one large array per distinct group ever seen
+    and can exhaust host memory (observed: ~100GB+ for a 10-frame/9-group
+    OS4 smoke test). A small LRU still reuses consecutive same-group frames
+    cheaply without unbounded growth.
+    """
+
+    def __init__(self, maxsize: int = 2) -> None:
+        self._maxsize = max(1, int(maxsize))
+        self._data: "OrderedDict[Any, Any]" = OrderedDict()
+
+    def __contains__(self, key) -> bool:
+        return key in self._data
+
+    def __getitem__(self, key):
+        value = self._data[key]
+        self._data.move_to_end(key)
+        return value
+
+    def __setitem__(self, key, value) -> None:
+        self._data[key] = value
+        self._data.move_to_end(key)
+        while len(self._data) > self._maxsize:
+            self._data.popitem(last=False)
 
 
 def write_diff_noise_mask_fits(
@@ -164,9 +195,23 @@ def _hotpants_loky_initializer(
     btjd_by_product_id: Optional[dict] = None,
     output_store_name: Optional[str] = None,
     downsample_fp: Optional[str] = None,
+    hotpants_os_n_jobs: Optional[int] = None,
 ) -> None:
-    """Hotpants loky initializer (MaskCatalog + cadence lookup + field-mode loader)."""
+    """Hotpants loky initializer (MaskCatalog + cadence lookup + field-mode loader).
+
+    ``hotpants_os_n_jobs``, when given, caps ``pyhotpants``'s own internal
+    ``precompute_basis_lr_maps`` thread pool (env var ``HOTPANTS_OS_N_JOBS``,
+    read fresh per call -- unset otherwise, it defaults to ``os.cpu_count()``).
+    Without this cap, every one of N concurrent frame workers independently
+    tries to grab up to the full Condor core allocation for that one
+    internal step, oversubscribing the node instead of dividing it. Only
+    meaningful when this initializer runs in a multi-worker (``n_workers >
+    1``) loky pool; the single-worker serial path never sets it, matching
+    prior behavior.
+    """
     global _HOTPANTS_LOKY_PAYLOAD
+    if hotpants_os_n_jobs is not None:
+        os.environ["HOTPANTS_OS_N_JOBS"] = str(max(1, int(hotpants_os_n_jobs)))
     template_loader = None
     if field_mode_context is not None:
         from syndiff_pipeline.difference_imaging.support.template_resolution import (
@@ -190,7 +235,9 @@ def _hotpants_loky_initializer(
         "sci_workspace_dir": sci_workspace_dir,
         "sci_bkg_ws": sci_bkg_ws,
         "force_rerun": force_rerun,
-        "template_cache": {},
+        "template_cache": _BoundedTemplateCache(
+            getattr(hp, "template_cache_max_groups", 2)
+        ),
         "template_loader": template_loader,
         "sck": sck,
         "data_root": data_root,
@@ -890,23 +937,26 @@ def _load_sci_bkg_crop(
     frame_stem: str,
     expected_shape: tuple[int, int],
 ) -> np.ndarray:
-    """Load one frame's per-FFI background map from a workspace directory."""
+    """Load one frame's per-FFI background map from a workspace directory.
+
+    Raises ``FileNotFoundError``/``ValueError`` rather than defaulting to
+    zeros: a caller wiring ``bkg`` (round 2+) expects real background
+    subtraction, and silently falling back to an un-subtracted science crop
+    produced contaminated ``hp_d`` output that looked like a success (see
+    production incident 2026-08-23, S20/C3/K3 tvwcs: 485/495 frames had no
+    background removed because kernel_subtract had failed for them upstream).
+    """
     ny, nx = expected_shape
     label = workspace_label_from_dir(sci_bkg_ws)
     stem = workspace_frame_stem(frame_stem, label)
     bp = resolve_pipeline_fits_path(sci_bkg_ws, stem)
     if bp is None:
-        log.warning("sci_bkg missing for %s under %s", frame_stem, sci_bkg_ws)
-        return np.zeros((ny, nx), dtype=np.float64)
+        raise FileNotFoundError(f"sci_bkg missing for {frame_stem} under {sci_bkg_ws}")
     bkg = fits.getdata(bp).astype(np.float64)
     if bkg.shape != (ny, nx):
-        log.warning(
-            "sci_bkg shape %s != %s for %s; using zeros",
-            bkg.shape,
-            expected_shape,
-            frame_stem,
+        raise ValueError(
+            f"sci_bkg shape {bkg.shape} != {expected_shape} for {frame_stem}"
         )
-        return np.zeros((ny, nx), dtype=np.float64)
     return bkg
 
 
@@ -1245,7 +1295,17 @@ def _process_one_frame(
         sci_crop, err_crop = _load_ffi_cropped(ffi_path, crop_bounds)
 
     if round_id > 1 and sci_bkg_ws:
-        sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, ffi_stem, sci_crop.shape)
+        try:
+            sci_bkg = _load_sci_bkg_crop(sci_bkg_ws, ffi_stem, sci_crop.shape)
+        except (FileNotFoundError, ValueError) as exc:
+            log.error("sci_bkg unavailable for %s: %s", product_id, exc)
+            return {
+                "stem": diff_stem,
+                "ffi_product_id": product_id,
+                "group_id": group_id,
+                "success": False,
+                "error_msg": f"sci_bkg unavailable: {exc}",
+            }
         sci_crop = sci_crop - sci_bkg
 
     tmpl_path = template_path_map.get(group_id) if template_path_map else None
@@ -1587,6 +1647,42 @@ def _process_one_frame(
     return result
 
 
+def _resolve_hotpants_os_n_jobs(hp: HotpantsParams, n_workers: int) -> Optional[int]:
+    """Per-worker cap for pyhotpants's internal ``HOTPANTS_OS_N_JOBS`` thread pool.
+
+    An explicit ``hp.hotpants_os_n_jobs`` config override always wins,
+    including in the single-worker (serial) case -- ``precompute_basis_lr_maps``
+    launches up to ``n_ker`` (e.g. 49 for hp_ngauss=3/hp_deg_fixe=[6,4,2])
+    concurrent threads *per frame* regardless of ``hotpants_n_jobs``, each
+    holding several full-frame-sized FFT buffers live at once; today's
+    default (uncapped -> ``os.cpu_count()``) already carries real, currently
+    unmeasured-precisely peak memory even for today's serial-only configs.
+    An explicit override lets a config bound that without changing anyone
+    else's default. Without an override: ``None`` (uncapped, matching prior
+    behavior) for the single-worker case, since that one process already
+    owns the whole Condor allocation and there is nothing to divide; for
+    ``n_workers > 1``, the Condor allocation (``SYNDIFF_REQUEST_CPUS``,
+    falling back to ``os.cpu_count()``) is divided evenly across workers so
+    concurrent frames don't each try to grab the full allocation for this
+    one internal step.
+    """
+    override = getattr(hp, "hotpants_os_n_jobs", None)
+    if override is not None:
+        return max(1, int(override))
+    if n_workers <= 1:
+        return None
+    env_raw = os.environ.get("SYNDIFF_REQUEST_CPUS", "").strip()
+    total_cpus: Optional[int] = None
+    if env_raw:
+        try:
+            total_cpus = int(env_raw)
+        except ValueError:
+            total_cpus = None
+    if total_cpus is None:
+        total_cpus = os.cpu_count() or n_workers
+    return max(1, total_cpus // n_workers)
+
+
 def hotpants_loop(
     ffi_paths: list,
     wcs_table: pd.DataFrame,
@@ -1707,6 +1803,7 @@ def hotpants_loop(
         stage_n_jobs=hp.hotpants_n_jobs,
     )
     n_workers = max(1, min(n_workers, len(tasks)))
+    hotpants_os_n_jobs = _resolve_hotpants_os_n_jobs(hp, n_workers)
 
     cli_progress_path = (
         str(progress_path_for_diff_log(diff_log_path))
@@ -1724,11 +1821,12 @@ def hotpants_loop(
     )
     tqdm_desc = f"hotpants {diffs_label}"
     log.info(
-        "hotpants [%s] round %s: starting %d frames (n_jobs=%s)",
+        "hotpants [%s] round %s: starting %d frames (n_jobs=%s, hotpants_os_n_jobs=%s)",
         diffs_label,
         round_id,
         len(tasks),
         n_workers,
+        hotpants_os_n_jobs,
     )
 
     def _record_progress(result: dict) -> None:
@@ -1744,7 +1842,17 @@ def hotpants_loop(
         )
 
     if n_workers == 1:
-        template_cache: dict = {}
+        # Serial path never goes through _hotpants_loky_initializer, so an
+        # explicit hotpants_os_n_jobs override (the only case
+        # _resolve_hotpants_os_n_jobs returns non-None here) must be applied
+        # directly -- bounds precompute_basis_lr_maps's own internal thread
+        # pool (up to n_ker threads, each holding full-frame FFT buffers)
+        # even though there is only one frame worker.
+        if hotpants_os_n_jobs is not None:
+            os.environ["HOTPANTS_OS_N_JOBS"] = str(hotpants_os_n_jobs)
+        template_cache = _BoundedTemplateCache(
+            getattr(hp, "template_cache_max_groups", 2)
+        )
         template_loader = None
         if field_mode_context is not None:
             from syndiff_pipeline.difference_imaging.support.template_resolution import (
@@ -1831,6 +1939,7 @@ def hotpants_loop(
                 btjd_by_product_id,
                 prov_output_store_name,
                 prov_downsample_fp,
+                hotpants_os_n_jobs,
             ),
             on_result=_record_progress,
         )
