@@ -343,6 +343,106 @@ def resolve_convolved_fingerprint_for_recipe(
     return fp
 
 
+def republish_convolved_cell_for_recipe(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    target_recipe: Mapping,
+    target_combined_fp: str,
+    *,
+    code_version: int = CONVOLVED_RECIPE_SCHEMA_VERSION,
+) -> dict | None:
+    """Republish an already-published convolved cell under a new
+    ``combined_fingerprint`` chain, when its upstream content is provably
+    identical -- not a reprocess.
+
+    A ``convolved_skycell`` fingerprint is chained on top of its upstream
+    ``combined_skycell`` fingerprint (see :func:`resolve_convolved_fingerprint_for_recipe`).
+    Any event that re-mints the *combined* fingerprint for unchanged
+    content -- e.g. the ``gaia_version_stamp`` scheme migration handled by
+    :func:`combined_store.republish_combined_cell_for_recipe` -- therefore
+    also orphans every convolved cell chained on the old combined
+    fingerprint, even though the convolution recipe (``psf_sigma``,
+    ``radius``, ``mode``) never changed and the pixels are identical.
+
+    Unlike the combined-store rekey, this does not need to reason about
+    individual recipe fields: it only requires an exact
+    ``convolved_recipe_id`` match (the convolution recipe has no
+    ``gaia_version``-like field of its own), plus a **direct pixel
+    equality check** between the old cell's recorded upstream combined
+    image and ``target_combined_fp``'s combined image -- stronger than
+    trusting fingerprint equality alone, and cheap since combined images
+    are only a few MB. Only single-input cells are handled (production
+    ``publish_convolved_cell`` calls never pass
+    ``extra_input_fingerprints`` today); a multi-input cell is skipped,
+    not guessed at.
+
+    Returns ``None`` if no eligible candidate exists or republish fails;
+    otherwise the same info dict :func:`publish_convolved_cell` returns.
+    """
+    cell_root = convolved_cell_dir(data_root, projection, skycell, "x").parent
+    if not cell_root.is_dir():
+        return None
+    target_rid = convolved_recipe_id(target_recipe, code_version)
+    try:
+        candidates = sorted(p for p in cell_root.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    new_combined_payload = None
+    for fp_dir in candidates:
+        prov_path = fp_dir / _PROVENANCE_SIDECAR_FILENAME
+        if not prov_path.is_file():
+            continue
+        try:
+            prov = json.loads(prov_path.read_text())
+        except Exception:
+            continue
+        rp = dict(prov.get("recipe_params", {}))
+        try:
+            if convolved_recipe_id(rp, code_version) != target_rid:
+                continue
+        except Exception:
+            continue
+        inputs = prov.get("inputs", [])
+        if len(inputs) != 1:
+            continue
+        old_combined_fp = str(inputs[0])
+        if old_combined_fp == str(target_combined_fp):
+            continue
+        if not _payload_complete(fp_dir):
+            continue
+        from syndiff_pipeline.template_creation.processing.combined_store import (
+            try_load_combined_cell,
+        )
+
+        old_combined = try_load_combined_cell(data_root, projection, skycell, old_combined_fp)
+        if old_combined is None:
+            continue
+        if new_combined_payload is None:
+            new_combined_payload = try_load_combined_cell(data_root, projection, skycell, target_combined_fp)
+            if new_combined_payload is None:
+                return None
+        if not np.array_equal(old_combined["combined_image"], new_combined_payload["combined_image"]):
+            continue
+        payload = try_load_convolved_cell(data_root, projection, skycell, fp_dir.name)
+        if payload is None:
+            continue
+        return publish_convolved_cell(
+            data_root,
+            projection,
+            skycell,
+            convolved_image=payload["convolved_image"],
+            convolved_mask=payload["convolved_mask"],
+            headers_data=payload["headers_data"],
+            removed_stars=payload["removed_stars"],
+            recipe=target_recipe,
+            combined_fingerprint=target_combined_fp,
+            code_version=code_version,
+            producer="template_creation.processing.convolved_store.republish_convolved_cell_for_recipe",
+        )
+    return None
+
+
 def skycell_already_canonical(
     data_root: str | Path,
     projection: str,
