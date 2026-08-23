@@ -423,8 +423,6 @@ def _ffi_paths_for_processing(
     import math
 
     all_sorted = _sorted_local_ffis(cfg)
-    if cfg.max_ffis is None:
-        return all_sorted
 
     ra, dec = cfg.target_ra, cfg.target_dec
     target_missing = (
@@ -434,9 +432,18 @@ def _ffi_paths_for_processing(
         or (isinstance(dec, float) and math.isnan(dec))
     )
     if target_missing:
+        # SCC field lane: always filter by manifest wcs_ok, capped or not.
+        # Previously this only happened when max_ffis was set (smoke tests),
+        # so an uncapped/full production run silently processed every FFI
+        # on disk including ones flagged wcs_ok=False (e.g. group_id=-1,
+        # NaN group_dx/dy) and crashed downstream instead of skipping them.
+        max_ffis = int(cfg.max_ffis) if cfg.max_ffis is not None else None
         return _select_ffis_for_field_lane(
-            all_sorted, wcs_table, max_ffis=int(cfg.max_ffis)
+            all_sorted, wcs_table, max_ffis=max_ffis
         )
+
+    if cfg.max_ffis is None:
+        return all_sorted
     return wcs_grouping.select_ffis_with_valid_target_wcs(
         all_sorted,
         cfg.target_ra,
@@ -449,14 +456,14 @@ def _select_ffis_for_field_lane(
     sorted_paths: list[str],
     wcs_table: Optional[pd.DataFrame],
     *,
-    max_ffis: int,
+    max_ffis: Optional[int] = None,
 ) -> list[str]:
-    """Pick up to *max_ffis* paths using manifest ``wcs_ok`` (SCC field lane)."""
+    """Pick paths using manifest ``wcs_ok`` (SCC field lane), capped at *max_ffis* if given."""
     from syndiff_pipeline.common.download import manifest_basename_from_local
 
-    cap = int(max_ffis)
+    cap = int(max_ffis) if max_ffis is not None else None
     if wcs_table is None or "path" not in wcs_table.columns:
-        selected = list(sorted_paths[:cap])
+        selected = list(sorted_paths[:cap]) if cap is not None else list(sorted_paths)
     else:
         by_key = {manifest_basename_from_local(p): p for p in sorted_paths}
         selected = []
@@ -472,18 +479,18 @@ def _select_ffis_for_field_lane(
             if path is None:
                 continue
             selected.append(path)
-            if len(selected) >= cap:
+            if cap is not None and len(selected) >= cap:
                 break
-    if len(selected) < cap:
+    if cap is not None and len(selected) < cap:
         raise RuntimeError(
             f"Only {len(selected)} FFI(s) with wcs_ok in manifest among "
             f"{len(sorted_paths)} on disk (need {cap} for max_ffis={cap}). "
             "Check frames.csv or lower max_ffis."
         )
     log.info(
-        "  Using %d FFI(s) from manifest wcs_ok (max_ffis=%d; SCC field lane).",
+        "  Using %d FFI(s) from manifest wcs_ok%s (SCC field lane).",
         len(selected),
-        cap,
+        f" (max_ffis={cap})" if cap is not None else "",
     )
     return selected
 
@@ -1301,7 +1308,7 @@ def run_config_pipeline(
             )
 
         elif kind == "convolved_templates":
-            parse_convolved_templates(stage, idx)
+            ct_params = parse_convolved_templates(stage, idx)
             if wcs_table is None or crop_bounds is None:
                 raise RuntimeError(
                     "convolved_templates requires wcs_table and crop_bounds from template handoff."
@@ -1358,6 +1365,8 @@ def run_config_pipeline(
                 convolved_ws_dir=conv_ws,
                 field_ctx=field_ctx,
                 manifest=conv_manifest,
+                diff_log_path=diff_log_path,
+                use_patch_cache=bool(ct_params.use_patch_cache),
             )
 
         elif kind == "kernel_subtract":
@@ -1413,6 +1422,7 @@ def run_config_pipeline(
                 field_mode=field_ctx is not None,
                 cfg=cfg,
                 mask_catalog=mask_catalog,
+                diff_log_path=diff_log_path,
             )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l
@@ -1453,6 +1463,11 @@ def run_config_pipeline(
             )
             ws_out = _diff_stage_dir(cfg, ctx, label_out)
             os.makedirs(ws_out, exist_ok=True)
+            epsf_debug_plot_dir = (
+                _resolve_scc_epsf_plots_dir(cfg, label_out)
+                if getattr(cfg, "pipeline_plots", False)
+                else None
+            )
             epsf_stack, tile_centers_new, ffi_stems, epsf_ok = (
                 epsf_fitting.fit_epsf_all_frames(
                     diff_paths,
@@ -1475,6 +1490,7 @@ def run_config_pipeline(
                     ffi_list_df=ffi_list_df,
                     science_bounds=crop_bounds,
                     ffi_path_by_stem=ffi_path_by_stem,
+                    debug_plot_dir=epsf_debug_plot_dir,
                 )
             )
             if tile_centers_new is not None:
@@ -1553,6 +1569,43 @@ def run_config_pipeline(
             os.makedirs(ws_out, exist_ok=True)
             from syndiff_pipeline.difference_imaging.stages import centroids
 
+            # Debug-residual FITS (pipeline_plots) are written *inline* by
+            # the main fit below for a small representative set of frames --
+            # no separate re-fit pass (previously ~4x centroids wall time on
+            # the debug frames; see write_frame_residual_fits's docstring).
+            debug_stems: set[str] = set()
+            debug_plot_dir: str | None = None
+            epsf_plot_dir: str | None = None
+            epsf_label: str | None = None
+            if getattr(cfg, "pipeline_plots", False):
+                try:
+                    from syndiff_pipeline.difference_imaging.support.plot import (
+                        select_pipeline_debug_stems,
+                    )
+
+                    debug_plot_dir = _resolve_scc_pipeline_plots_dir(cfg, category=label_out)
+                    epsf_label = str(inp["epsf"])
+                    epsf_plot_dir = _resolve_scc_epsf_plots_dir(cfg, epsf_label)
+                    diff_paths_by_stem = {
+                        gridded_epsf._diff_path_to_stem(p): p for p in diff_paths if p
+                    }
+                    debug_stems = set(
+                        select_pipeline_debug_stems(
+                            sorted(diff_paths_by_stem),
+                            reference_plot_dir=epsf_plot_dir,
+                            reference_label=epsf_label,
+                            wcs_table=wcs_table,
+                            max_frames=10,
+                        )
+                    )
+                except Exception:
+                    log.warning(
+                        "pipeline_plots: failed to select centroids debug frames for %s; "
+                        "continuing without inline debug residuals.",
+                        label_out,
+                        exc_info=True,
+                    )
+
             centroids.run_centroids_all_frames(
                 diff_paths,
                 gaia_df,
@@ -1569,43 +1622,11 @@ def run_config_pipeline(
                 science_bounds=crop_bounds,
                 ffi_path_by_stem=ffi_path_by_stem,
                 wcs_table=wcs_table,
+                debug_stems=debug_stems,
+                debug_plot_dir=debug_plot_dir,
+                debug_reference_plot_dir=epsf_plot_dir,
+                debug_reference_label=epsf_label,
             )
-
-            if getattr(cfg, "pipeline_plots", False):
-                try:
-                    from syndiff_pipeline.difference_imaging.support.plot import (
-                        write_centroids_workspace_plots,
-                    )
-
-                    plot_dir = _resolve_scc_pipeline_plots_dir(cfg, category=label_out)
-                    epsf_label = str(inp["epsf"])
-                    epsf_plot_dir = _resolve_scc_epsf_plots_dir(cfg, epsf_label)
-                    diff_paths_by_stem = {
-                        gridded_epsf._diff_path_to_stem(p): p for p in diff_paths if p
-                    }
-                    write_centroids_workspace_plots(
-                        ws_out,
-                        plot_dir,
-                        centroids_label=label_out,
-                        diff_paths_by_stem=diff_paths_by_stem,
-                        gaia_df=gaia_df,
-                        epsf_catalog=epsf_catalog,
-                        params=centroids_p,
-                        ffi_list_df=ffi_list_df,
-                        science_bounds=crop_bounds,
-                        ffi_path_by_stem=ffi_path_by_stem,
-                        max_frames=10,
-                        wcs_table=wcs_table,
-                        reference_plot_dir=epsf_plot_dir,
-                        reference_label=epsf_label,
-                    )
-                except Exception:
-                    log.warning(
-                        "pipeline_plots: failed to write centroids debug plots for %s; "
-                        "continuing (centroid fitting itself already succeeded).",
-                        label_out,
-                        exc_info=True,
-                    )
 
         elif kind == "per_ffi_wcs":
             wcs_p = parse_per_ffi_wcs(stage, idx)

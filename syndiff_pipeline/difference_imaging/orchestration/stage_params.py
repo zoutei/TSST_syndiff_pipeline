@@ -138,8 +138,10 @@ HOTPANTS_ALLOWED = frozenset(
         "region_max_area",
         "region_connectivity",
         "region_rss",
+        "template_cache_max_groups",
         "region_max_bisects",
         "region_weight_cap",
+        "hotpants_os_n_jobs",
     }
 )
 
@@ -153,8 +155,8 @@ EPSF_ALLOWED = frozenset(
         "epsf_oversample",
         "psf_size",
         "min_stars_per_tile",
-        "mag_max_rp",
-        "mag_min_rp",
+        "tess_mag_max",
+        "tess_mag_min",
         "epsf_maxiters",
         "epsf_recentering_maxiters",
         "extract_size",
@@ -174,7 +176,6 @@ EPSF_ALLOWED = frozenset(
         "epsf_anchor_window_max_expand",
         "epsf_quality_bitmask",
         "epsf_debug_plots",
-        "epsf_mag_source",
         "epsf_isolation_min_sep_px",
         "epsf_isolation_neighbor_mag_max",
     }
@@ -185,11 +186,12 @@ CENTROIDS_ALLOWED = frozenset(
         "kind",
         "inputs",
         "output",
-        "mag_max_rp",
-        "mag_min_rp",
+        "tess_mag_max",
+        "tess_mag_min",
         "fit_shape",
         "aperture_radius",
         "psf_grouper_min_separation",
+        "centroids_max_group_size",
         "centroids_n_jobs",
     }
 )
@@ -345,6 +347,7 @@ CONVOLVED_TEMPLATES_ALLOWED = frozenset(
         "kind",
         "inputs",
         "output",
+        "use_patch_cache",
     }
 )
 
@@ -449,6 +452,23 @@ class HotpantsParams:
     region_rss: Optional[int] = None
     region_max_bisects: int = 100
     region_weight_cap: Optional[tuple] = None
+    # Bounds the per-process assembled-template cache in hotpants_loop's
+    # per-frame worker(s). Field-mode (e.g. tvwcs/OS4) group_id changes
+    # nearly every frame with drift tracking, so an unbounded cache retains
+    # one large assembled array per distinct group ever seen and OOMs; a
+    # small LRU is enough to reuse consecutive same-group frames cheaply
+    # without unbounded growth. Linear-mode templates are small enough that
+    # this rarely matters either way.
+    template_cache_max_groups: int = 2
+    # Caps pyhotpants's own internal precompute_basis_lr_maps thread pool
+    # (env HOTPANTS_OS_N_JOBS) per frame worker. Without this, each of N
+    # concurrent hotpants_n_jobs workers independently tries to grab up to
+    # the full Condor core allocation for that one internal step --
+    # oversubscribing the node instead of dividing it. None (default):
+    # when hotpants_n_jobs > 1, auto-computed as the Condor allocation
+    # divided evenly across workers; the single-worker serial path never
+    # sets it (matches prior, pre-this-field behavior).
+    hotpants_os_n_jobs: Optional[int] = None
 
 
 @dataclass
@@ -459,8 +479,8 @@ class EpsfParams:
     epsf_oversample: int = 4
     psf_size: int = 15
     min_stars_per_tile: int = 5
-    mag_max_rp: Optional[float] = 12.95
-    mag_min_rp: Optional[float] = None
+    tess_mag_max: Optional[float] = 12.95
+    tess_mag_min: Optional[float] = None
     epsf_maxiters: int = 15
     epsf_recentering_maxiters: int = 20
     extract_size: Optional[int] = 15
@@ -492,10 +512,10 @@ class EpsfParams:
     # Star-selection criteria ported from dev/forward_epsf_wcs (a separate,
     # non-production GPU fitter) for parity, applied within the existing
     # tile-grid EPSFBuilder pipeline (not that fitter's own irregular-stamp
-    # architecture). "tess_mag" reinterprets mag_min_rp/mag_max_rp as bounds
-    # on a per-star TESS magnitude derived from Gaia G/BP/RP (see
-    # tess_mag_from_gaia_phot) instead of raw phot_rp_mean_mag.
-    epsf_mag_source: Literal["phot_rp_mean_mag", "tess_mag"] = "phot_rp_mean_mag"
+    # architecture). tess_mag_min/tess_mag_max bound a per-star TESS
+    # magnitude derived from Gaia G/BP/RP (see tess_mag_from_gaia_phot) --
+    # raw phot_rp_mean_mag is never used for star selection (standing
+    # policy, 2026-08-22).
     # Minimum pixel separation from any Gaia neighbor brighter than
     # epsf_isolation_neighbor_mag_max (TESS mag); None disables isolation
     # filtering (default, matches pre-existing behavior).
@@ -506,11 +526,19 @@ class EpsfParams:
 @dataclass
 class CentroidsParams:
     """CentroidsParams."""
-    mag_max_rp: Optional[float] = 12.95
-    mag_min_rp: float = 7.5
+    tess_mag_max: Optional[float] = 12.95
+    tess_mag_min: float = 7.5
     fit_shape: int = 11
     aperture_radius: float = 4.0
     psf_grouper_min_separation: float = 10.0
+    # Cap on joint-fit group size: SourceGrouper's min_separation clustering
+    # has no native size limit, so a dense field can produce a group with
+    # dozens of stars whose joint least-squares fit becomes impractically
+    # slow. Groups larger than this are recursively re-clustered with a
+    # tighter threshold until every sub-group fits (see
+    # centroids.py::_capped_source_grouper) -- stars are split apart by
+    # proximity, never dropped.
+    centroids_max_group_size: int = 5
     centroids_n_jobs: Optional[int] = None
 
 
@@ -760,7 +788,12 @@ class KernelFitParams:
 @dataclass
 class ConvolvedTemplatesParams:
     """ConvolvedTemplatesParams."""
-    pass
+    # H.2 (2026-08-23): use the disk-cached per-skycell precomputed-basis
+    # convolution path instead of the default per-group full convolution.
+    # Field-mode (mapping_grid) oversample>1 only; see
+    # convolved_templates_patch_cache.py and spicy-squishing-ritchie.md
+    # Part H. Default False -- opt-in until validated in production.
+    use_patch_cache: bool = False
 
 
 @dataclass
@@ -831,6 +864,9 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
     if "hotpants_n_jobs" in stage:
         v = stage["hotpants_n_jobs"]
         hp.hotpants_n_jobs = None if v is None else int(v)
+    if "hotpants_os_n_jobs" in stage:
+        v = stage["hotpants_os_n_jobs"]
+        hp.hotpants_os_n_jobs = None if v is None else int(v)
     if "oversample" in stage:
         v = stage["oversample"]
         hp.oversample = None if v is None else int(v)
@@ -868,17 +904,12 @@ def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
     EpsfParams"""
     validate_stage_keys(stage, pipeline_idx, "epsf", EPSF_ALLOWED)
     params = _merge_dataclass(EpsfParams, stage)
-    if params.mag_max_rp is None:
-        params = EpsfParams(**{**params.__dict__, "mag_max_rp": 12.95})
+    if params.tess_mag_max is None:
+        params = EpsfParams(**{**params.__dict__, "tess_mag_max": 12.95})
     if params.epsf_mode not in ("orbit_binned", "per_frame"):
         raise ValueError(
             f"pipeline[{pipeline_idx}] epsf: epsf_mode must be 'orbit_binned' "
             f"or 'per_frame', got {params.epsf_mode!r}"
-        )
-    if params.epsf_mag_source not in ("phot_rp_mean_mag", "tess_mag"):
-        raise ValueError(
-            f"pipeline[{pipeline_idx}] epsf: epsf_mag_source must be "
-            f"'phot_rp_mean_mag' or 'tess_mag', got {params.epsf_mag_source!r}"
         )
     if params.epsf_isolation_min_sep_px is not None and float(params.epsf_isolation_min_sep_px) <= 0:
         raise ValueError("epsf: epsf_isolation_min_sep_px must be positive when set")
@@ -900,8 +931,13 @@ def parse_centroids(stage: dict, pipeline_idx: int) -> CentroidsParams:
     """Parse centroids stage parameters."""
     validate_stage_keys(stage, pipeline_idx, "centroids", CENTROIDS_ALLOWED)
     params = _merge_dataclass(CentroidsParams, stage)
-    if params.mag_max_rp is None:
-        params = CentroidsParams(**{**params.__dict__, "mag_max_rp": 12.95})
+    if params.tess_mag_max is None:
+        params = CentroidsParams(**{**params.__dict__, "tess_mag_max": 12.95})
+    if int(params.centroids_max_group_size) < 1:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] centroids: centroids_max_group_size "
+            f"must be positive, got {params.centroids_max_group_size!r}"
+        )
     if "centroids_n_jobs" in stage:
         v = stage["centroids_n_jobs"]
         params.centroids_n_jobs = None if v is None else int(v)

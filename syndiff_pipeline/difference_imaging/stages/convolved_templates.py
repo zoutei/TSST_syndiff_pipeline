@@ -33,8 +33,29 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     convolved_template_basename,
 )
+from syndiff_pipeline.difference_imaging.stages.convolved_templates_progress import (
+    init_progress_pair as _init_progress_pair,
+    progress_path_for_convolved_workspace as _progress_path_for_convolved_workspace,
+    progress_path_for_diff_log as _progress_path_for_diff_log,
+    record_group_progress as _record_group_progress,
+    set_progress_phase_pair as _set_progress_phase_pair,
+)
 
 log = logging.getLogger(__name__)
+
+
+def _progress_paths(convolved_ws_dir: str, diff_log_path: str | None):
+    """Return (workspace_sidecar, cli_mirror_or_none) progress paths."""
+    ws_path = str(_progress_path_for_convolved_workspace(convolved_ws_dir))
+    cli_path = str(_progress_path_for_diff_log(diff_log_path)) if diff_log_path else None
+    return ws_path, cli_path
+
+
+def _mark_progress_complete(convolved_ws_dir: str, diff_log_path: str | None, *, total: int) -> None:
+    """Best-effort: stamp the progress sidecar complete on a cache-hit return."""
+    ws_path, cli_path = _progress_paths(convolved_ws_dir, diff_log_path)
+    _init_progress_pair(ws_path, cli_path, groups_total=total)
+    _set_progress_phase_pair(ws_path, cli_path, "complete")
 
 
 def convolved_templates_csv_path(ws_dir: str) -> str:
@@ -108,6 +129,8 @@ def run_convolved_templates(
     skip_existing: bool = True,
     field_ctx=None,
     manifest=None,
+    diff_log_path: str | None = None,
+    use_patch_cache: bool = False,
 ) -> pd.DataFrame:
     """
     Convolve each unique WCS-group template with the kernel from ``kernel_r2.npz``.
@@ -118,13 +141,43 @@ def run_convolved_templates(
     """
     os.makedirs(convolved_ws_dir, exist_ok=True)
     csv_path = convolved_templates_csv_path(convolved_ws_dir)
+
+    # Field mode's manifest is keyed by group_id, and group_id coverage grows
+    # as more of the SCC's frame list is included (e.g. a smoke-test-scale
+    # run's cached manifest only lists a handful of groups). A per-file
+    # existence check alone can't detect that the cache predates the current
+    # (larger) run's required group set, so compute it up front and require
+    # the cache to be a superset before trusting it -- otherwise a stale,
+    # partial manifest silently short-circuits the whole build loop below
+    # and every frame outside its groups fails downstream with "No
+    # convolved template" forever (found in production, 2026-08-23: a
+    # 9-group manifest from an old 10-frame smoke test capped a live
+    # 1183-frame S20/C3/K3 run at 453 completed hotpants frames).
+    required_gids: set[int] | None = None
+    if field_ctx is not None:
+        if manifest is None or "group_id" not in getattr(manifest, "columns", []):
+            raise RuntimeError(
+                "convolved_templates field mode requires a manifest with group_id"
+            )
+        required_gids = {
+            int(g) for g in manifest["group_id"].tolist() if pd.notna(g) and int(g) >= 0
+        }
+
     if skip_existing and os.path.isfile(csv_path):
         existing = pd.read_csv(csv_path)
-        if len(existing) and all(
-            os.path.isfile(str(p))
-            for p in existing["convolved_path"].astype(str)
+        covers_required = required_gids is None or set(
+            existing["group_id"].astype(int)
+        ) >= required_gids
+        if (
+            len(existing)
+            and covers_required
+            and all(
+                os.path.isfile(str(p))
+                for p in existing["convolved_path"].astype(str)
+            )
         ):
             log.info("Using cached convolved templates manifest %s", csv_path)
+            _mark_progress_complete(convolved_ws_dir, diff_log_path, total=len(existing))
             return existing
 
     meta = load_kernel_fit_meta(kernel_fit_dir)
@@ -251,6 +304,78 @@ def run_convolved_templates(
             convolved = _trim_linear_pad(convolved, linear_pad)
         return convolved
 
+    def _convolve_group_via_patch_cache(gid: int) -> np.ndarray:
+        """H.2: convolve one field-mode group entirely from cached
+        per-skycell basis convolutions, never materializing the dense
+        group template. Mirrors ``_convolve_crop``'s field-mode
+        (mapping_grid) branch exactly (same basis/kc_step/oversample
+        derivation, same post-convolution trim) -- only the convolution
+        itself is replaced.
+        """
+        from hotpants.pure.kernel import calculate_kernel_basis
+        from hotpants.pure.utils import downsample_image
+        from syndiff_pipeline.common.grid_pairing import trim_padded_products
+        from syndiff_pipeline.difference_imaging.stages.convolved_templates_patch_cache import (
+            build_group_convolved_template,
+        )
+        from syndiff_pipeline.difference_imaging.stages.hotpants import (
+            resolve_hotpants_oversample,
+        )
+
+        if mapping_grid is None:
+            raise RuntimeError("use_patch_cache requires field mode with a mapping_grid")
+        os_template_shape = tuple(mapping_grid.array_shape_os())
+        factor = resolve_hotpants_oversample(
+            sci_shape, os_template_shape, getattr(hp, "oversample", None)
+        )
+        if factor <= 1:
+            raise RuntimeError(
+                "use_patch_cache currently targets the oversample>1 field-mode "
+                f"path only (resolved factor={factor})"
+            )
+        hr_rkernel = int(getattr(hp_config, "rkernel", 2)) * factor
+        k_size = 2 * hr_rkernel + 1
+        scaled_sigmas = [
+            float(s) / (factor ** 2)
+            for s in getattr(hp_config, "sigma_gauss", [0.7, 1.5, 3.0])
+        ]
+        basis_funcs = np.asarray(
+            calculate_kernel_basis(
+                (k_size, k_size), scaled_sigmas, list(getattr(hp_config, "deg_fixe", [6, 4, 2]))
+            ),
+            dtype=np.float64,
+        )
+        n_comp_ker = basis_funcs.shape[0]
+        ker_order = int(getattr(hp_config, "ko"))
+        fw_kernel_lr = 2 * int(getattr(hp_config, "rkernel", 2)) + 1
+        kc_step_lr = int(getattr(hp_config, "kc_step", fw_kernel_lr) or fw_kernel_lr)
+        kc_step_hr = kc_step_lr * factor
+
+        from syndiff_pipeline.template_creation.processing.field_downsample import (
+            _group_shifts_present,
+        )
+
+        shifts = _group_shifts_present(
+            field_ctx.store_root, field_ctx.shifts_df, int(gid), present_only=True
+        )
+        crop_hr = tuple(int(v) for v in field_ctx.template_roi_bounds)
+        conv_hr = build_group_convolved_template(
+            field_ctx.store_root,
+            shifts,
+            group_id=int(gid),
+            base_tess_shape=tuple(field_ctx.base_tess_shape),
+            crop_hr=crop_hr,
+            basis_funcs=basis_funcs,
+            kernel_solution=kernel_solution,
+            hw_kernel=hr_rkernel,
+            kc_step=kc_step_hr,
+            n_comp_ker=n_comp_ker,
+            ker_order=ker_order,
+            oversample=factor,
+        )
+        conv_lr = downsample_image(conv_hr, factor)
+        return trim_padded_products(conv_lr, grid=mapping_grid)
+
     os.makedirs(convolved_ws_dir, exist_ok=True)
 
     ref_header = None
@@ -286,6 +411,8 @@ def run_convolved_templates(
         )
         if not gids:
             raise RuntimeError("No valid group_id in manifest for convolved_templates")
+        ws_prog, cli_prog = _progress_paths(convolved_ws_dir, diff_log_path)
+        _init_progress_pair(ws_prog, cli_prog, groups_total=len(gids))
         for gid in gids:
             out_name = f"convolved_template_gid{gid}{PIPELINE_FITS_EXT}"
             out_path = os.path.join(convolved_ws_dir, out_name)
@@ -295,16 +422,24 @@ def run_convolved_templates(
             entry = {"group_id": int(gid), "group_dx": float("nan"), "group_dy": float("nan")}
             if skip_existing and existing is not None:
                 rows.append({**entry, "convolved_path": existing})
+                _record_group_progress(ws_prog, cli_prog, built=False)
                 continue
-            template_crop = loader(int(gid))
-            convolved = _convolve_crop(template_crop)
+            if use_patch_cache:
+                convolved = _convolve_group_via_patch_cache(int(gid))
+            else:
+                template_crop = loader(int(gid))
+                convolved = _convolve_crop(template_crop)
             _write_image_fits(out_path, convolved, header=ref_header)
             rows.append({**entry, "convolved_path": out_path})
+            _record_group_progress(ws_prog, cli_prog, built=True)
             log.info("Convolved field template group_id=%d -> %s", gid, out_path)
+        _set_progress_phase_pair(ws_prog, cli_prog, "complete")
     else:
         entries = _unique_template_entries(template_paths)
         if not entries:
             raise RuntimeError("No syndiff templates found to convolve")
+        ws_prog, cli_prog = _progress_paths(convolved_ws_dir, diff_log_path)
+        _init_progress_pair(ws_prog, cli_prog, groups_total=len(entries))
         for entry in entries:
             tmpl_path = entry["template_path"]
             out_name = convolved_template_basename(tmpl_path)
@@ -314,6 +449,7 @@ def run_convolved_templates(
             )
             if skip_existing and existing is not None:
                 rows.append({**entry, "convolved_path": existing})
+                _record_group_progress(ws_prog, cli_prog, built=False)
                 continue
 
             if linear_pad:
@@ -329,12 +465,14 @@ def run_convolved_templates(
             convolved = _convolve_crop(template_crop)
             _write_image_fits(out_path, convolved, header=ref_header)
             rows.append({**entry, "convolved_path": out_path})
+            _record_group_progress(ws_prog, cli_prog, built=True)
             log.info(
                 "Convolved template dx=%.3f dy=%.3f -> %s",
                 entry["group_dx"],
                 entry["group_dy"],
                 out_path,
             )
+        _set_progress_phase_pair(ws_prog, cli_prog, "complete")
 
     table = pd.DataFrame(rows)
     table.to_csv(csv_path, index=False)
