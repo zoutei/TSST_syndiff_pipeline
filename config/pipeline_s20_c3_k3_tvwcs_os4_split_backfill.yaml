@@ -1,0 +1,55 @@
+# H.1 backfill (2026-08-23): additively write interior_contribs/ +
+# seam_delta_contribs/ onto the ALREADY-COMPLETE S20/C3/K3 templates_tvwcs
+# store, alongside the existing plain contribs/ (untouched, not rebuilt).
+# rebuild_field_store MUST stay false here -- pipeline_s20_c3_k3_tvwcs_os4.yaml
+# (the original build) used rebuild_field_store: true, which would delete
+# and redo every existing contrib if reused verbatim for this backfill.
+#
+# Invocation: --stages downsample only (mapping/remap outputs are unchanged
+# and already complete; verify should see them as done and skip).
+#
+#   syndiff template submit --config config/pipeline_s20_c3_k3_tvwcs_os4_split_backfill.yaml \
+#     --scc config/scc_s20_c3_k3.csv --stages downsample \
+#     --run-id s20_c3_k3_tvwcs_split_backfill_<date>
+deployment_file: deployment.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+    channel_id: "1513744924133294171"
+
+stages:
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+    wcs_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+  remap:
+    store_name: tvwcs
+    drift_source: per_skycell_temporal_wcs
+  ps1_process:
+    ps1_source: stream
+    use_shared_convolved_store: true
+    write_per_scc_convolved_zarr: false
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+    rebuild_field_store: false
+    write_split_contribs: true
+    materialize_fits: false
+    n_jobs: 64
+    executor: condor
+    condor_request_cpus: 64
+    condor_request_memory: 250000
+    stage_regmaps_to_scratch: false
+
+resources:
+  mapping:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 1

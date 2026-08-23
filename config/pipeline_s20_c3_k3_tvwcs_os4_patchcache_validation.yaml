@@ -1,0 +1,49 @@
+# Orchestrator wrapper for `syndiff diff submit` -- H.3 patch-cache
+# validation run (2026-08-23). References
+# diff_config_s20_c3_k3_tvwcs_os4_patchcache_validation.yaml
+# (use_patch_cache: true, output_store_name: tvwcs_patchcache, distinct
+# from the concurrently-running plain-path run's diff_tvwcs/).
+#
+# Use:
+#   syndiff diff submit \
+#     --config config/pipeline_s20_c3_k3_tvwcs_os4_patchcache_validation.yaml \
+#     --scc config/scc_s20_c3_k3.csv --stages diff \
+#     --run-id s20_c3_k3_tvwcs_patchcache_validation_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+diff_config: diff_config_s20_c3_k3_tvwcs_os4_patchcache_validation.yaml
+
+stages:
+  # Not run by this wrapper (diff-only submission) -- declared so the
+  # scheduler's external-stage verify (upstream "downsample" completeness
+  # check before launching diff) resolves the right on-disk store, matching
+  # pipeline_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml's own convention.
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+  remap:
+    store_name: tvwcs
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 10
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true
