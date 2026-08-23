@@ -363,6 +363,12 @@ def _format_condor_environment(*, request_cpus: int | None = None) -> str | None
     benchmark_tag = os.environ.get("SYNDIFF_REMAP_BENCHMARK_TAG")
     if benchmark_tag:
         parts.append(f"SYNDIFF_REMAP_BENCHMARK_TAG={shlex.quote(benchmark_tag)}")
+    # Debug/backfill-only downsample skycell restriction (2026-08-23), see
+    # dispatch.py's own only_skycells hookup -- unset in every real
+    # deployment, never a normal part of a submitted run's environment.
+    only_skycells = os.environ.get("SYNDIFF_DOWNSAMPLE_ONLY_SKYCELLS")
+    if only_skycells:
+        parts.append(f"SYNDIFF_DOWNSAMPLE_ONLY_SKYCELLS={shlex.quote(only_skycells)}")
     if not parts:
         return None
     return " ".join(parts)
@@ -733,9 +739,30 @@ def submit_job(
     stage: str,
     resources: CondorResourceRequest | None = None,
 ) -> tuple[int, float]:
-    """Submit one stage command to Condor; return (cluster id, wall-clock submit epoch)."""
+    """Submit one stage command to Condor; return (cluster id, wall-clock submit epoch).
+
+    Before writing a fresh submit file, rotates the previous attempt's
+    ``stdout``/``stderr``/``log``/``submit`` artifacts aside into
+    ``attempts/{prior_launch_token}/`` (see
+    :func:`syndiff_pipeline.common.orchestration.logs.
+    read_previous_launch_token`, :func:`...rotate_attempt_artifact`). Safe
+    to self-determine here: this runs on the submit side, before the
+    execute-side process's own status write (the thing that would
+    otherwise overwrite the very status.json this reads) has happened.
+    ``clusters``/``hold``/``poll_misses``/``bad_machines``/
+    ``eviction_state`` are durable, cumulative-by-design state across
+    resubmissions and are deliberately left alone.
+    """
     resources = resources or CondorResourceRequest()
     artifacts = condor_artifact_paths(runs_root, run_id, target_label, stage)
+    from syndiff_pipeline.common.orchestration.logs import (
+        read_previous_launch_token,
+        rotate_attempt_artifact,
+    )
+
+    prior_launch_token = read_previous_launch_token(runs_root, run_id, target_label, stage)
+    for key in ("stdout", "stderr", "log", "submit"):
+        rotate_attempt_artifact(artifacts[key], prior_launch_token)
     from syndiff_pipeline.common.orchestration.host_stats import apply_host_stats_policy
 
     resources = apply_host_stats_policy(resources)

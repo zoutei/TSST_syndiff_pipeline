@@ -628,6 +628,21 @@ def _execute_template_stage(
             linear_result["template_dir_physical"] = str(linear_result["output_dir"])
             return _manifest_from_result(linear_result)
 
+        # Debug/backfill-only skycell restriction, env-var gated so it can
+        # never be left set in a real production config file (see
+        # field_downsample.run_field_downsample_scc's only_skycells
+        # parameter docstring). Unset in every real deployment; used
+        # 2026-08-23 to validate H.1/H.2's patch-cache path on the subset of
+        # S20/C3/K3 skycells available under the shared combined-store's
+        # current recipe fingerprint, without waiting on the separate
+        # cross-sector publishing gap blocking a full-SCC backfill.
+        _only_skycells_env = os.environ.get("SYNDIFF_DOWNSAMPLE_ONLY_SKYCELLS")
+        only_skycells = (
+            {s.strip() for s in _only_skycells_env.split(",") if s.strip()}
+            if _only_skycells_env
+            else None
+        )
+
         field_result = run_field_downsample_scc(
             sector=t.sector,
             camera=t.camera,
@@ -636,6 +651,7 @@ def _execute_template_stage(
             event_dir=resolved.event_dir,
             mapping_root=ds.mapping_dir or resolved.mapping_root,
             convolved_dir=convolved,
+            only_skycells=only_skycells,
             roi_bounds=tuple(
                 int(v)
                 for v in (
