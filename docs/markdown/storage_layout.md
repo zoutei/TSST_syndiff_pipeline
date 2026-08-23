@@ -136,7 +136,9 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
     remap_{NAME}/                  # optional named remap lane (stages.remap.store_name)
       oversampling_{N}/
     templates/
-      oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode)
+      oversampling_{N}/            # L5 sparse contribs + template_manifest (field mode); see field_geometry.md for
+                                    # the optional interior/seam-delta split store and convolved_templates'
+                                    # use_patch_cache basis_conv/ cache, both under this same directory
     templates_{NAME}/              # optional named templates lane (downsample.output_store_name)
       oversampling_{N}/
     diff_{NAME}/                   # named diff lane (paths.output_store_name)

@@ -88,6 +88,33 @@ Manifest: `convolved_templates.csv` with columns `group_id`, `group_dx`, `group_
 
 At `F>1`, basis sigmas scale as `σ/F²` and output maps are **native resolution** (see [oversampled templates](../oversampled_templates.md)).
 
+### Patch-cache convolution (`use_patch_cache`, field mode + `F>1` only)
+
+`stages.convolved_templates.use_patch_cache: true` (default `false`) replaces
+the default "convolve the whole assembled group template fresh, per group"
+path with a precomputed per-basis-function convolution cache
+(`convolved_templates_patch_cache.py`), motivated by heavy per-skycell reuse
+across the ~1000+ distinct `group_id`s in one real SCC (~7h serial bottleneck
+observed on s0020/c3/k3 at ~23s/group).
+
+The math: convolution is linear over the DIA kernel's basis-function
+decomposition, `conv(image, Σc_i·basis_i) = Σc_i·conv(image, basis_i)`, and
+Lane A fits exactly **one** global `kernel_solution` per SCC run (`kernel_fit`
+runs `run_hotpants_frame` once, reused unchanged by every group) — so each
+skycell patch's basis convolutions can be computed once and reused across
+every group sharing that skycell, instead of re-convolving the whole
+assembled group template per group.
+
+Mechanics:
+
+- Requires the [interior/seam-delta split store](../field_geometry.md#optional-interior-seam-delta-split-write_split_contribs) (`write_split_contribs: true` on `downsample`) to already be **complete for every skycell touched by every group in the run** — `assemble_group_from_split_contribs`-style assembly raises if even one skycell's interior contrib is missing, so a partial/scoped split-contrib backfill cannot back a real production `use_patch_cache` run; it only supports single-skycell or fully-covered-subset validation.
+- Per `(skycell, sx_int, sy_int)`, materializes the interior contrib densely over `footprint ⊕ 2×hw_kernel` (dilated by **twice** the kernel half-width, not once — "valid"-mode convolution itself consumes one `hw_kernel` of padding, and the desired output margin is a *second*, additional `hw_kernel`; getting this factor wrong was caught by `test_patch_scatter_add_matches_whole_image_convolution` during development) and convolves it against each basis function via `hotpants/pure/os_precompute.py::precompute_basis_lr_maps`. Same construction for each skycell's seam delta, restricted to the thin rim band.
+- Caches results under the **same** field template store as `basis_conv/interior/{skycell}_sx{±}_sy{±}.npz` and `basis_conv/seam_delta/{skycell}_sx{±}_sy{±}_gid{N}.npz` — see [field_geometry.md storage layout](../field_geometry.md#storage-layout).
+- Group assembly scatter-adds each constituent skycell's `(n_basis, ny, nx)` interior + seam-delta maps, then recombines with per-block kernel coefficients (`recombine_basis_maps_full`, a pixel-for-pixel port of `hotpants.pure.convolution.jit_spatial_convolve`'s blocking contract) — this is the one genuinely new numerical code path and is float64 throughout (today's default path runs in float32, so results will not match to float32's own machine epsilon, only somewhat below it).
+- Falls back to the default per-group convolution path when `use_patch_cache` is unset/`false`; both paths coexist in `convolved_templates.py` and can be A/B compared on the same SCC.
+
+Status as of 2026-08-23: implemented and verified on synthetic data (halo-exactness, block-recombination-vs-`jit_spatial_convolve`, and a full crop-aware H.1+H.2 integration test) and on real s0020/c3/k3 data restricted to a same-batch split-contrib subset (0 mismatches once compared against a *fresh* plain-contrib snapshot rather than pre-refit orphaned files — see the field_geometry.md verification pitfall note). Not yet validated end-to-end on a full real SCC production run; blocked, independent of this code, on backfilling a subset of that SCC's shared `ps1_combined.zarr` cells to the current recipe fingerprint (see the pipeline-map skill's combined-store fingerprint migration note) before a full-coverage split-contrib store can be built.
+
 ---
 
 ## Stage 3: `kernel_subtract` (`kernel_subtract.py`)
@@ -167,6 +194,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `inputs.kernel_fit` | Directory with `kernel_r2.npz` |
 | `output` | Convolved template workspace label |
 | `skip_existing` | Reuse valid FITS + manifest |
+| `use_patch_cache` | `false` by default; field mode + `F>1` only — see [patch-cache convolution](#patch-cache-convolution-use_patch_cache-field-mode--f1-only) above. Requires a complete `write_split_contribs` store. |
 
 ### `kernel_subtract`
 
