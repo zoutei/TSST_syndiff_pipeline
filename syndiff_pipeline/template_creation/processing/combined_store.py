@@ -545,6 +545,97 @@ def gaia_version_stamp(catalog_path: str | None) -> str:
         return "none"
 
 
+def republish_combined_cell_for_recipe(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    target_recipe: Mapping,
+    *,
+    code_version: int = COMBINED_RECIPE_SCHEMA_VERSION,
+) -> dict | None:
+    """Republish an already-published cell under a new recipe's fingerprint,
+    when its content is provably identical -- not a reprocess.
+
+    Migration helper for the ``gaia_version_stamp`` scheme change (per-file
+    path/mtime -> canonical ``"loaded"``, see that function's docstring):
+    cells published under the old scheme are semantically identical to what
+    the new scheme would produce (same pixels, same star removal, same raw
+    input), just filed under a different fingerprint name. Reprocessing
+    hundreds of cross-sector-shared cells from scratch to pick up a pure
+    fingerprint-naming change would be wasteful and risks introducing new
+    numerical drift for no reason; this instead loads the existing payload
+    and re-publishes it verbatim under the new fingerprint.
+
+    Only rekeys when **both** hold, checked against every published
+    fingerprint dir for this cell:
+      1. That dir's own ``recipe_params``, with ``gaia_version`` replaced by
+         ``target_recipe["gaia_version"]``, hashes to exactly
+         ``target_recipe``'s ``recipe_id`` -- every other recipe field
+         (star-removal thresholds, band weights, ...) must already match.
+         A ``"none"`` (no-catalog) source build is never rekeyed to
+         ``"loaded"`` -- those are genuinely different recipes.
+      2. Its recorded input fingerprint (the raw PS1 skycell version token)
+         equals :func:`raw_skycell_input_fingerprint` computed *now* -- i.e.
+         the raw data this cell was built from has not since been
+         superseded (re-downloaded). A stale-raw candidate is skipped, not
+         rekeyed, so this can never resurrect content built from
+         since-replaced pixels.
+
+    Returns ``None`` if no eligible candidate exists (including when a
+    payload for ``target_recipe`` is already published) or if the
+    republish itself fails; otherwise the same info dict
+    :func:`publish_combined_cell` returns.
+    """
+    current_raw_fp = raw_skycell_input_fingerprint(data_root, projection, skycell)
+    target_rid = combined_recipe_id(target_recipe, code_version)
+    cell_root = combined_cell_dir(data_root, projection, skycell, "x").parent
+    if not cell_root.is_dir():
+        return None
+    try:
+        candidates = sorted(p for p in cell_root.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    for fp_dir in candidates:
+        prov_path = fp_dir / _PROVENANCE_SIDECAR_FILENAME
+        if not prov_path.is_file():
+            continue
+        try:
+            prov = json.loads(prov_path.read_text())
+        except Exception:
+            continue
+        rp = dict(prov.get("recipe_params", {}))
+        if rp.get("gaia_version", "none") == "none":
+            continue
+        rp["gaia_version"] = target_recipe.get("gaia_version")
+        try:
+            if combined_recipe_id(rp, code_version) != target_rid:
+                continue
+        except Exception:
+            continue
+        inputs = prov.get("inputs", [])
+        if not inputs or inputs[0] != current_raw_fp:
+            continue
+        if not _payload_complete(fp_dir):
+            continue
+        payload = try_load_combined_cell(data_root, projection, skycell, fp_dir.name)
+        if payload is None:
+            continue
+        return publish_combined_cell(
+            data_root,
+            projection,
+            skycell,
+            combined_image=payload["combined_image"],
+            combined_mask=payload["combined_mask"],
+            headers_data=payload["headers_data"],
+            removed_stars=payload["removed_stars"],
+            recipe=target_recipe,
+            input_fingerprints=inputs,
+            code_version=code_version,
+            producer="template_creation.processing.combined_store.republish_combined_cell_for_recipe",
+        )
+    return None
+
+
 def production_combined_recipe(
     ps1_process_config: Any,
     *,
