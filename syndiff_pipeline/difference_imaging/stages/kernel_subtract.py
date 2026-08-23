@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
-from joblib import Parallel, delayed
+from joblib import delayed
 
 from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
@@ -36,6 +36,14 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     resolve_template_for_ffi,
 )
+from syndiff_pipeline.difference_imaging.stages.kernel_subtract_progress import (
+    init_progress_pair,
+    progress_path_for_diff_log,
+    progress_path_for_diffs_workspace,
+    record_frame_progress,
+    set_progress_phase_pair,
+)
+from syndiff_pipeline.common.joblib_progress import parallel_map_with_optional_tqdm
 
 log = logging.getLogger(__name__)
 
@@ -418,6 +426,7 @@ def kernel_subtract_loop(
     field_mode: bool = False,
     cfg: Optional[Any] = None,
     mask_catalog=None,
+    diff_log_path: Optional[str] = None,
 ) -> list[dict]:
     """Run algebraic diff + robust TESSreduce background for each FFI.
 
@@ -509,17 +518,43 @@ def kernel_subtract_loop(
 
     tasks = [(ffi_path,) for ffi_path in ffi_paths]
 
+    cli_progress_path = (
+        str(progress_path_for_diff_log(diff_log_path)) if diff_log_path is not None else None
+    )
+    workspace_progress_path = str(progress_path_for_diffs_workspace(diffs_dir))
+    init_progress_pair(
+        workspace_progress_path,
+        cli_progress_path,
+        frames_total=len(tasks),
+    )
+
+    def _record_progress(result: dict) -> None:
+        record_frame_progress(
+            workspace_progress_path,
+            cli_progress_path,
+            success=bool(result.get("success")),
+        )
+
     n_workers = max(1, min(int(n_jobs), len(tasks), multiprocessing.cpu_count()))
     if n_workers == 1:
         _kernel_subtract_loky_initializer(payload)
-        results = [_process_one_frame(t) for t in tasks]
+        results = []
+        for t in tasks:
+            result = _process_one_frame(t)
+            _record_progress(result)
+            results.append(result)
     else:
-        results = Parallel(
-            n_jobs=n_workers,
-            backend="loky",
+        results = parallel_map_with_optional_tqdm(
+            (delayed(_process_one_frame)(t) for t in tasks),
+            n_tasks=len(tasks),
+            desc="kernel_subtract",
+            n_jobs_eff=n_workers,
             initializer=_kernel_subtract_loky_initializer,
             initargs=(payload,),
-        )(delayed(_process_one_frame)(t) for t in tasks)
+            on_result=_record_progress,
+        )
+
+    set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
 
     ok = sum(1 for r in results if r.get("success"))
     log.info(

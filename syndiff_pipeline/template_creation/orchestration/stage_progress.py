@@ -496,6 +496,16 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
         progress_path_for_diff_log as centroids_sidecar_path,
         read_progress_merged as read_centroids_progress_merged,
     )
+    from syndiff_pipeline.difference_imaging.stages.convolved_templates_progress import (
+        format_progress_text as format_convolved_templates_progress,
+        progress_path_for_diff_log as convolved_templates_sidecar_path,
+        read_progress as read_convolved_templates_progress,
+    )
+    from syndiff_pipeline.difference_imaging.stages.kernel_subtract_progress import (
+        format_progress_text as format_kernel_subtract_progress,
+        progress_path_for_diff_log as kernel_subtract_sidecar_path,
+        read_progress as read_kernel_subtract_progress,
+    )
     from syndiff_pipeline.difference_imaging.stages.epsf_progress import (
         format_progress_text as format_epsf_progress,
         progress_path_for_diff_log as epsf_sidecar_path,
@@ -513,6 +523,16 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
 
     best: tuple[str, str, str] | None = None
     for sidecar_path, format_fn, read_fn in (
+        (
+            convolved_templates_sidecar_path(log_path),
+            format_convolved_templates_progress,
+            read_convolved_templates_progress,
+        ),
+        (
+            kernel_subtract_sidecar_path(log_path),
+            format_kernel_subtract_progress,
+            read_kernel_subtract_progress,
+        ),
         (hotpants_sidecar_path(log_path), format_hotpants_progress, read_progress),
         (epsf_sidecar_path(log_path), format_epsf_progress, read_progress_merged),
         (centroids_sidecar_path(log_path), format_centroids_progress, read_centroids_progress_merged),
