@@ -25,6 +25,8 @@ from filelock import FileLock
 SCHEMA_VERSION = 1
 MANIFEST_NAME = "template_manifest.json"
 CONTRIBS_DIRNAME = "contribs"
+INTERIOR_CONTRIBS_DIRNAME = "interior_contribs"
+SEAM_DELTA_CONTRIBS_DIRNAME = "seam_delta_contribs"
 FITS_DIRNAME = "fits"
 MATERIALIZED_FITS_SIDECAR = "materialized_fits.json"
 LOCK_NAME = ".lock"
@@ -500,9 +502,203 @@ def write_contrib(
     return out
 
 
-def load_contrib(path: str | Path) -> dict[str, np.ndarray]:
+def load_contrib(path: str | Path, keys: Iterable[str] | None = None) -> dict[str, np.ndarray]:
+    """Load a contrib NPZ.
+
+    ``keys`` restricts which members are decompressed (NpzFile access is
+    lazy per-member); omit to load everything, as before.
+    """
     with np.load(path, allow_pickle=False) as z:
-        return {k: z[k] for k in z.files}
+        wanted = z.files if keys is None else [k for k in keys if k in z.files]
+        return {k: z[k] for k in wanted}
+
+
+# ---------------------------------------------------------------------------
+# Interior/seam-delta contrib split (H.1, 2026-08-23).
+#
+# The plain ``contribs/`` files above are group-qualified because a thin
+# neighbor-shift-dependent border correction is baked into every write --
+# see ``field_hybrid_exact.py::compose_group_hybrid_assignment``'s
+# ``apply_inter_skycell`` patch. Everywhere except that thin border, a
+# skycell's contrib at a given ``(sx_int, sy_int)`` is byte-identical no
+# matter which ``group_id`` it's written under (many groups share it). The
+# functions below split that fully-corrected write into two pieces so the
+# group-independent majority can be written/read once and reused, instead
+# of duplicated under every group that shares it:
+#
+# - "interior": the intra-skycell-only result (``apply_inter_skycell=False``
+#   at compose time), keyed by ``(skycell, sx_int, sy_int)`` -- no group_id.
+# - "seam delta": the sparse difference the inter-skycell rim patch made,
+#   keyed by ``(skycell, sx_int, sy_int, group_id)`` -- small, group-specific.
+#
+# ``interior + seam_delta`` reconstructs the plain ``contribs/`` value
+# exactly, by construction (it *is* that difference) -- see
+# ``assemble_group_from_split_contribs`` below and its regression test
+# against ``assemble_group_from_contribs``.
+
+
+def interior_contrib_basename(skycell: str, sx_int: int, sy_int: int) -> str:
+    """Filename for one group-independent interior contrib (no ``_gid``)."""
+    return contrib_basename(skycell, sx_int, sy_int, group_id=None)
+
+
+def interior_contrib_path(store_root: str | Path, skycell: str, sx_int: int, sy_int: int) -> Path:
+    return Path(store_root) / INTERIOR_CONTRIBS_DIRNAME / interior_contrib_basename(
+        skycell, sx_int, sy_int
+    )
+
+
+def seam_delta_contrib_path(
+    store_root: str | Path, skycell: str, sx_int: int, sy_int: int, group_id: int
+) -> Path:
+    return Path(store_root) / SEAM_DELTA_CONTRIBS_DIRNAME / contrib_basename(
+        skycell, sx_int, sy_int, group_id=group_id
+    )
+
+
+def write_interior_contrib(
+    store_root: str | Path,
+    skycell: str,
+    sx_int: int,
+    sy_int: int,
+    *,
+    indices: np.ndarray,
+    flux_sum: np.ndarray,
+    count: np.ndarray,
+    mask_count: np.ndarray | None = None,
+) -> Path:
+    """Write the group-independent interior contrib (atomic temp+replace)."""
+    import os
+    import tempfile
+
+    root = Path(store_root)
+    out = interior_contrib_path(root, skycell, sx_int, sy_int)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "indices": np.asarray(indices, dtype=np.int64),
+        "flux_sum": np.asarray(flux_sum, dtype=np.float64),
+        "count": np.asarray(count, dtype=np.float64),
+        "skycell": np.asarray(str(skycell)),
+        "sx_int": np.asarray(int(sx_int), dtype=np.int32),
+        "sy_int": np.asarray(int(sy_int), dtype=np.int32),
+    }
+    if mask_count is not None:
+        payload["mask_count"] = np.asarray(mask_count, dtype=np.float64)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.", suffix=".tmp.npz", dir=str(out.parent)
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        np.savez_compressed(tmp_path, **payload)
+        tmp_path.replace(out)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return out
+
+
+def write_seam_delta_contrib(
+    store_root: str | Path,
+    skycell: str,
+    sx_int: int,
+    sy_int: int,
+    *,
+    indices: np.ndarray,
+    flux_sum: np.ndarray,
+    count: np.ndarray,
+    mask_count: np.ndarray | None,
+    group_id: int,
+) -> Path:
+    """Write the small, group-specific seam-delta contrib (atomic temp+replace).
+
+    ``indices``/``flux_sum``/``count``/``mask_count`` should already be the
+    sparse *difference* (full - interior), e.g. from
+    :func:`compute_seam_delta`; an empty (zero-length) delta is still
+    written (as an empty array), so its presence on disk means "this
+    skycell/shift/group combination was checked and found to need no
+    correction" rather than "not yet computed".
+    """
+    import os
+    import tempfile
+
+    root = Path(store_root)
+    out = seam_delta_contrib_path(root, skycell, sx_int, sy_int, group_id)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "indices": np.asarray(indices, dtype=np.int64),
+        "flux_sum": np.asarray(flux_sum, dtype=np.float64),
+        "count": np.asarray(count, dtype=np.float64),
+        "skycell": np.asarray(str(skycell)),
+        "sx_int": np.asarray(int(sx_int), dtype=np.int32),
+        "sy_int": np.asarray(int(sy_int), dtype=np.int32),
+    }
+    if mask_count is not None:
+        payload["mask_count"] = np.asarray(mask_count, dtype=np.float64)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{out.name}.", suffix=".tmp.npz", dir=str(out.parent)
+    )
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        np.savez_compressed(tmp_path, **payload)
+        tmp_path.replace(out)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    return out
+
+
+def compute_seam_delta(
+    *,
+    idx_full: np.ndarray,
+    flux_full: np.ndarray,
+    count_full: np.ndarray,
+    mcount_full: np.ndarray | None,
+    idx_interior: np.ndarray,
+    flux_interior: np.ndarray,
+    count_interior: np.ndarray,
+    mcount_interior: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None]:
+    """Sparse ``full - interior`` difference, restricted to nonzero entries.
+
+    Both inputs are one skycell's own (indices, flux_sum, count, mask_count)
+    tuples -- ``full`` from binning the fully-corrected (intra+inter)
+    assignment, ``interior`` from binning the intra-only assignment. Uses
+    each side's OWN index set (not the whole SCC grid), so cost scales with
+    this one skycell's footprint, not the full array. Exact by construction:
+    ``interior + seam_delta == full`` for every touched pixel, since
+    ``seam_delta`` *is* that arithmetic difference.
+    """
+    idx_full = np.asarray(idx_full, dtype=np.int64)
+    idx_interior = np.asarray(idx_interior, dtype=np.int64)
+    union_idx = np.union1d(idx_full, idx_interior)
+
+    def _scatter(idx: np.ndarray, val: np.ndarray) -> np.ndarray:
+        out = np.zeros(union_idx.shape, dtype=np.float64)
+        if idx.size:
+            pos = np.searchsorted(union_idx, idx)
+            np.add.at(out, pos, np.asarray(val, dtype=np.float64))
+        return out
+
+    flux_delta = _scatter(idx_full, flux_full) - _scatter(idx_interior, flux_interior)
+    count_delta = _scatter(idx_full, count_full) - _scatter(idx_interior, count_interior)
+    if mcount_full is not None and mcount_interior is not None:
+        mcount_delta = _scatter(idx_full, mcount_full) - _scatter(idx_interior, mcount_interior)
+    else:
+        mcount_delta = None
+
+    keep = flux_delta != 0.0
+    if mcount_delta is not None:
+        keep = keep | (count_delta != 0.0) | (mcount_delta != 0.0)
+    else:
+        keep = keep | (count_delta != 0.0)
+
+    out_idx = union_idx[keep]
+    out_flux = flux_delta[keep]
+    out_count = count_delta[keep]
+    out_mcount = mcount_delta[keep] if mcount_delta is not None else None
+    return out_idx, out_flux, out_count, out_mcount
 
 
 @dataclass(frozen=True)
@@ -560,6 +756,8 @@ def assemble_group_from_contribs(
     shape: tuple[int, int],
     crop: tuple[int, int, int, int] | None = None,
     group_id: int | None = None,
+    need_count: bool = True,
+    need_mask: bool = True,
 ) -> dict[str, np.ndarray]:
     """
     Sum sparse contribs for one signature group.
@@ -572,32 +770,120 @@ def assemble_group_from_contribs(
         Full-chip ``(ny, nx)`` TESS shape.
     crop
         Optional ``(x_min, x_max, y_min, y_max)`` half-open crop in full-FFI pixels.
+    need_count, need_mask
+        When ``False``, skip allocating/accumulating that plane entirely
+        (returned as a zero-size placeholder) and skip decompressing its
+        NPZ member. Callers that only want ``flux_sum`` (e.g. the hotpants
+        field-mode template loader, which is on a per-frame hot path) can
+        cut out roughly two-thirds of this function's array work by passing
+        both as ``False``.
     """
     ny, nx = int(shape[0]), int(shape[1])
     flux = np.zeros(ny * nx, dtype=np.float64)
-    count = np.zeros(ny * nx, dtype=np.float64)
-    mask_count = np.zeros(ny * nx, dtype=np.float64)
+    count = np.zeros(ny * nx, dtype=np.float64) if need_count else None
+    mask_count = np.zeros(ny * nx, dtype=np.float64) if need_mask else None
+    load_keys = ["indices", "flux_sum"]
+    if need_count:
+        load_keys.append("count")
+    if need_mask:
+        load_keys.append("mask_count")
     root = Path(store_root)
     n_loaded = 0
     for skycell, sx_i, sy_i in shifts:
         path = contrib_path(root, skycell, sx_i, sy_i, group_id=group_id)
         if not path.is_file():
             raise FileNotFoundError(f"missing field contrib: {path}")
-        data = load_contrib(path)
+        data = load_contrib(path, keys=load_keys)
         idx = np.asarray(data["indices"], dtype=np.int64)
         flux[idx] += np.asarray(data["flux_sum"], dtype=np.float64)
-        count[idx] += np.asarray(data["count"], dtype=np.float64)
-        if "mask_count" in data:
+        if count is not None:
+            count[idx] += np.asarray(data["count"], dtype=np.float64)
+        if mask_count is not None and "mask_count" in data:
             mask_count[idx] += np.asarray(data["mask_count"], dtype=np.float64)
         n_loaded += 1
     flux_2d = flux.reshape(ny, nx)
-    count_2d = count.reshape(ny, nx)
-    mask_2d = mask_count.reshape(ny, nx)
+    count_2d = count.reshape(ny, nx) if count is not None else np.zeros((0, 0), dtype=np.float64)
+    mask_2d = mask_count.reshape(ny, nx) if mask_count is not None else np.zeros((0, 0), dtype=np.float64)
     if crop is not None:
         x0, x1, y0, y1 = (int(v) for v in crop)
         flux_2d = flux_2d[y0:y1, x0:x1]
-        count_2d = count_2d[y0:y1, x0:x1]
-        mask_2d = mask_2d[y0:y1, x0:x1]
+        if count is not None:
+            count_2d = count_2d[y0:y1, x0:x1]
+        if mask_count is not None:
+            mask_2d = mask_2d[y0:y1, x0:x1]
+    return {
+        "flux_sum": flux_2d,
+        "count": count_2d,
+        "mask_count": mask_2d,
+        "n_contribs": np.asarray(n_loaded, dtype=np.int32),
+    }
+
+
+def assemble_group_from_split_contribs(
+    store_root: str | Path,
+    shifts: Sequence[tuple[str, int, int]],
+    *,
+    shape: tuple[int, int],
+    crop: tuple[int, int, int, int] | None = None,
+    group_id: int | None = None,
+    need_count: bool = True,
+    need_mask: bool = True,
+) -> dict[str, np.ndarray]:
+    """Sum interior + seam-delta contribs for one group -- must reproduce
+    :func:`assemble_group_from_contribs`'s output exactly.
+
+    Same signature/return shape as :func:`assemble_group_from_contribs`;
+    for each ``(skycell, sx_int, sy_int)`` in *shifts*, sums the
+    group-independent interior contrib plus (if present) this group's
+    sparse seam-delta contrib. A missing seam-delta file means "no
+    correction was needed for this skycell in this group" (see
+    :func:`write_seam_delta_contrib`), not an error.
+    """
+    ny, nx = int(shape[0]), int(shape[1])
+    flux = np.zeros(ny * nx, dtype=np.float64)
+    count = np.zeros(ny * nx, dtype=np.float64) if need_count else None
+    mask_count = np.zeros(ny * nx, dtype=np.float64) if need_mask else None
+    load_keys = ["indices", "flux_sum"]
+    if need_count:
+        load_keys.append("count")
+    if need_mask:
+        load_keys.append("mask_count")
+    root = Path(store_root)
+    n_loaded = 0
+    for skycell, sx_i, sy_i in shifts:
+        interior_path = interior_contrib_path(root, skycell, sx_i, sy_i)
+        if not interior_path.is_file():
+            raise FileNotFoundError(f"missing interior contrib: {interior_path}")
+        data = load_contrib(interior_path, keys=load_keys)
+        idx = np.asarray(data["indices"], dtype=np.int64)
+        flux[idx] += np.asarray(data["flux_sum"], dtype=np.float64)
+        if count is not None:
+            count[idx] += np.asarray(data["count"], dtype=np.float64)
+        if mask_count is not None and "mask_count" in data:
+            mask_count[idx] += np.asarray(data["mask_count"], dtype=np.float64)
+
+        if group_id is not None:
+            delta_path = seam_delta_contrib_path(root, skycell, sx_i, sy_i, group_id)
+            if delta_path.is_file():
+                ddata = load_contrib(delta_path, keys=load_keys)
+                didx = np.asarray(ddata["indices"], dtype=np.int64)
+                if didx.size:
+                    flux[didx] += np.asarray(ddata["flux_sum"], dtype=np.float64)
+                    if count is not None and "count" in ddata:
+                        count[didx] += np.asarray(ddata["count"], dtype=np.float64)
+                    if mask_count is not None and "mask_count" in ddata:
+                        mask_count[didx] += np.asarray(ddata["mask_count"], dtype=np.float64)
+        n_loaded += 1
+    flux_2d = flux.reshape(ny, nx)
+    count_2d = count.reshape(ny, nx) if count is not None else np.zeros((0, 0), dtype=np.float64)
+    mask_2d = mask_count.reshape(ny, nx) if mask_count is not None else np.zeros((0, 0), dtype=np.float64)
+    if crop is not None:
+        x0, x1, y0, y1 = (int(v) for v in crop)
+        flux_2d = flux_2d[y0:y1, x0:x1]
+        if count is not None:
+            count_2d = count_2d[y0:y1, x0:x1]
+        if mask_count is not None:
+            mask_2d = mask_2d[y0:y1, x0:x1]
     return {
         "flux_sum": flux_2d,
         "count": count_2d,

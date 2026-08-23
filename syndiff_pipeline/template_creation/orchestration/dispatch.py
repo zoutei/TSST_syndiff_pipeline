@@ -654,6 +654,7 @@ def _execute_template_stage(
             rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
             apply_intra_skycell=bool(getattr(ds, "apply_intra_skycell", True)),
             apply_inter_skycell=bool(getattr(ds, "apply_inter_skycell", True)),
+            write_split_contribs=bool(getattr(ds, "write_split_contribs", False)),
             stage_regmaps_to_scratch=ds.stage_regmaps_to_scratch,
             update_frames_csv=False,
             store_root=ds.output_base or resolved.template_output_base,

@@ -565,3 +565,97 @@ def compose_group_hybrid_assignment(
         meta["n_inter_skycell_patches"] = int(meta["n_inter_skycell_patches"]) + 1
 
     return hybrid, meta
+
+
+def compose_group_hybrid_assignment_with_interior(
+    frozen_tid: np.ndarray,
+    *,
+    skycell: str,
+    skycell_id: int,
+    sx_int: int,
+    sy_int: int,
+    master: np.ndarray,
+    group_shifts: Mapping[str, tuple[int, int]],
+    name_to_id: Mapping[str, int],
+    l4a_cache_path: str | Path,
+    l4b_cache_dir: str | Path,
+    group_id: int | None = None,
+    epoch_index: Mapping[str, Any] | None = None,
+    hybrid_R: int = 1,
+    apply_intra_skycell: bool = True,
+    require_intra_skycell_cache: bool = True,
+    require_inter_skycell_cache: bool = True,
+    pair_ids: Sequence[tuple[int, int]] | np.ndarray | None = None,
+    id_to_name: Mapping[int, str] | None = None,
+    neighbour_ids: Sequence[int] | None = None,
+    border_ids_by_neighbour: Mapping[int, np.ndarray] | None = None,
+    seam_mask_base: np.ndarray | None = None,
+    rim_mask_base_by_neighbour: Mapping[int, np.ndarray] | None = None,
+    rim_cache_loader: Any | None = None,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Return ``(full_hybrid, interior_hybrid, meta)`` for the H.1 write-side split.
+
+    Calls the existing, unchanged :func:`compose_group_hybrid_assignment`
+    twice -- once with ``apply_inter_skycell=True`` (the real, group-dependent
+    result, identical to today's single call) and once with
+    ``apply_inter_skycell=False`` (the intra-skycell-only "interior" result,
+    which that function already computes as an early-return path). No
+    blending math is duplicated or reimplemented here; this only combines
+    two calls to code that is already tested and in production. The extra
+    cost is a second (cheap) load of the already-small L4a exact-cache NPZ
+    for the interior call -- the interior branch never reaches the
+    inter-skycell rim loop at all.
+    """
+    full, meta = compose_group_hybrid_assignment(
+        frozen_tid,
+        skycell=skycell,
+        skycell_id=skycell_id,
+        sx_int=sx_int,
+        sy_int=sy_int,
+        master=master,
+        group_shifts=group_shifts,
+        name_to_id=name_to_id,
+        l4a_cache_path=l4a_cache_path,
+        l4b_cache_dir=l4b_cache_dir,
+        group_id=group_id,
+        epoch_index=epoch_index,
+        hybrid_R=hybrid_R,
+        apply_intra_skycell=apply_intra_skycell,
+        apply_inter_skycell=True,
+        require_intra_skycell_cache=require_intra_skycell_cache,
+        require_inter_skycell_cache=require_inter_skycell_cache,
+        pair_ids=pair_ids,
+        id_to_name=id_to_name,
+        neighbour_ids=neighbour_ids,
+        border_ids_by_neighbour=border_ids_by_neighbour,
+        seam_mask_base=seam_mask_base,
+        rim_mask_base_by_neighbour=rim_mask_base_by_neighbour,
+        rim_cache_loader=rim_cache_loader,
+    )
+    interior, _interior_meta = compose_group_hybrid_assignment(
+        frozen_tid,
+        skycell=skycell,
+        skycell_id=skycell_id,
+        sx_int=sx_int,
+        sy_int=sy_int,
+        master=master,
+        group_shifts=group_shifts,
+        name_to_id=name_to_id,
+        l4a_cache_path=l4a_cache_path,
+        l4b_cache_dir=l4b_cache_dir,
+        group_id=group_id,
+        epoch_index=epoch_index,
+        hybrid_R=hybrid_R,
+        apply_intra_skycell=apply_intra_skycell,
+        apply_inter_skycell=False,
+        require_intra_skycell_cache=require_intra_skycell_cache,
+        require_inter_skycell_cache=require_inter_skycell_cache,
+        pair_ids=pair_ids,
+        id_to_name=id_to_name,
+        neighbour_ids=neighbour_ids,
+        border_ids_by_neighbour=border_ids_by_neighbour,
+        seam_mask_base=seam_mask_base,
+        rim_mask_base_by_neighbour=rim_mask_base_by_neighbour,
+        rim_cache_loader=rim_cache_loader,
+    )
+    return full, interior, meta

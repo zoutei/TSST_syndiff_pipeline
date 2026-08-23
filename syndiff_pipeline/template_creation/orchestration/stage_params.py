@@ -138,6 +138,7 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "prematerialize_top_n",
         "apply_intra_skycell",
         "apply_inter_skycell",
+        "write_split_contribs",
         "remap_store_name",
         "output_store_name",
     }
@@ -397,6 +398,14 @@ class DownsampleStageParams:
     prematerialize_top_n: int | None = None
     apply_intra_skycell: bool = True
     apply_inter_skycell: bool = True
+    # H.1 (2026-08-23): also write the group-independent interior +
+    # per-group seam-delta contrib split (interior_contribs/,
+    # seam_delta_contribs/), alongside the existing plain contribs/ --
+    # additive, does not touch/replace existing contribs/. Set true to
+    # backfill an already-complete store for the H.2 patch-cache
+    # convolution path; see convolved_templates_patch_cache.py and
+    # spicy-squishing-ritchie.md Part H.
+    write_split_contribs: bool = False
     # INPUT: which remap lane to read; None → inherit stages.remap.store_name
     remap_store_name: str | None = None
     # OUTPUT: which templates lane to write; None → templates/
