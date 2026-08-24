@@ -5,12 +5,28 @@ deployment_file: deployment.yaml
 diff_config: diff_config_cvz_temporal_wcs.yaml
 
 stages:
+  # Declared so the scheduler's external-stage verify (upstream "downsample"
+  # completeness check before launching diff) resolves the right on-disk
+  # store. Without this, DownsampleStageParams defaults (geometry_mode:
+  # field, output_store_name: templates/) make verify look in the wrong
+  # place and the run stalls with "Required external artifact for stage
+  # 'downsample' was not found" even though the real templates_linear/
+  # store is complete (hit live 2026-08-23 on cvz_s50_s51_temporal_wcs;
+  # same fix already applied in pipeline_cvz_linear_os1_epsf_centroids.yaml
+  # and pipeline_cvz_tvwcs_os4_epsf_centroids.yaml).
+  downsample:
+    geometry_mode: linear
+    output_store_name: linear
   diff:
     executor: local
 
 resources:
   diff:
-    max_concurrent: 1
+    # Global cap is enforced across ALL runs sharing this daemon, not just
+    # this one (scheduler._global_pool_running counts every run) -- leaving
+    # this at 1 risks stalling behind another "diff" stage job already
+    # running (e.g. the S20/C3/K3 tvwcs lane holds a slot as of 2026-08-23).
+    max_concurrent: 10
 
 scheduler:
   skip_artifact_verify: false
