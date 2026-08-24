@@ -51,8 +51,54 @@ Optional first stage. Params mirror the former diff-side astrometry block (`sigm
 | `inputs.diffs` / `inputs.epsf` | May override site `paths.inputs` for this stage |
 | `output` | Light-curve subdirectory label under `phot_{run_id}/` |
 | `methods` | List of aperture / PSF method dicts — see [forced_photometry.md](forced_photometry.md) |
+| `position_source` | `native_wcs` (default) or `temporal_wcs` — see below. Stage-level default; each method may override it. |
+| `temporal_wcs_version` | Required when `position_source: temporal_wcs` (stage-level or per-method); must match the diff_config `temporal_wcs` stage's `version` |
 
 Every `psf_type: epsf` method needs a resolvable gridded ePSF catalog (`gridded_epsf_index.json`) under the named ePSF label on the SCC diff lane.
+
+#### `position_source`
+
+By default every `sky`-mode forced target (the primary target, and any
+`additional_forced_targets`/`per_event_force_targets` entry with
+`position_mode: sky`) is placed on each frame by projecting its RA/Dec
+through that frame's own native archive FITS WCS (`native_wcs`).
+
+`position_source: temporal_wcs` instead resolves the position through the
+self-calibrated per-orbit WCS model built by the diff-side `temporal_wcs`
+stage (Gaia-matched centroids, Chebyshev spatial + B-spline temporal
+correction) — generally more accurate than the archive WCS, since it's fit
+directly from stars observed in the same diff images. It requires that
+stage to have already completed for the SCC (`{data_root}/s{S}/c{C}/k{K}/wcs/{temporal_wcs_version}/manifest.json`
+must exist); `scripts/submit_photometry_when_ready.py` checks for this
+automatically when a config sets `position_source: temporal_wcs` (stage-level
+or per-method). Frames not covered by the temporal_wcs fit (a small number
+per sector — orbit edges / rejected fits) fall back to `native_wcs`
+automatically for those frames only. `offset`/`fixed`-mode extra targets are
+unaffected either way.
+
+`position_source`/`temporal_wcs_version` may also be set on an individual
+`methods[]` entry, overriding the stage default for just that method. This
+is how one stage compares several position sources (e.g. a free-fit
+diagnostic plus `native_wcs` and `temporal_wcs` forced methods) on the same
+target without duplicating `astrometry`/`inputs`: every `psf_type: epsf`
+method using the default `fitter: photutils`, regardless of its own
+`position_source`, is still batched through one shared read of each diff
+FITS (`run_forced_photometry_gridded_multi_method`) — the number of such
+methods in a stage does not multiply I/O.
+
+When `pipeline_plots: true` and any method resolves to `position_source:
+temporal_wcs`, a debug plot `temporal_wcs_offset_{output}.png` (or
+`temporal_wcs_offset_{output}_{version}.png` when methods in the stage use
+more than one `temporal_wcs_version`) is written under the pipeline-plots
+dir: BTJD vs dx (left y-axis) and dy (right y-axis, `twinx`) on one panel,
+plus two separate histograms — one for dx, one for dy, each on their own
+axes — so their scales don't compress each other. Both WCS solutions are
+read from the SCC's cached `ffi_list.parquet` (header already extracted at
+download time), so this never opens FFI FITS files; frames with
+`wcs_ok=False` in that cache, and frames the temporal_wcs fit itself
+doesn't cover, are excluded entirely rather than plotted with a degenerate
+placeholder WCS. Built by `write_temporal_wcs_offset_debug_plot` in
+`stages/photometry.py`.
 
 ## Forced-target extras
 

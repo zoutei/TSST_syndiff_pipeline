@@ -11,7 +11,7 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     SHARED_MASK_ALLOWED,
-    parse_background,
+    parse_background_temporal_smoothing,
     parse_forced_photometry,
     parse_hotpants,
     validate_stage_keys,
@@ -102,9 +102,9 @@ class TestStageParams(unittest.TestCase):
         self.assertFalse(hp.write_stamps)
 
     def test_background_steps_parse(self):
-        bp = parse_background(
+        bp = parse_background_temporal_smoothing(
             {
-                "kind": "background",
+                "kind": "background_temporal_smoothing",
                 "inputs": {"diffs": "d", "bkg": "h"},
                 "output": "out",
                 "steps": {
@@ -184,6 +184,61 @@ class TestStageParams(unittest.TestCase):
                         {"name": "prf", "type": "psf", "psf_type": "prf"},
                         {"name": "prf", "type": "aperture"},
                     ],
+                },
+                0,
+            )
+
+    def test_forced_photometry_position_source_defaults_native_wcs(self):
+        p = parse_forced_photometry(
+            {
+                "kind": "forced_photometry",
+                "inputs": {"diffs": "x"},
+                "output": "y",
+                "methods": [{"name": "ap3", "type": "aperture", "tar_ap": 3}],
+            },
+            0,
+        )
+        self.assertEqual(p.position_source, "native_wcs")
+        self.assertIsNone(p.temporal_wcs_version)
+
+    def test_forced_photometry_position_source_temporal_wcs_requires_version(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_forced_photometry(
+                {
+                    "kind": "forced_photometry",
+                    "inputs": {"diffs": "x"},
+                    "output": "y",
+                    "position_source": "temporal_wcs",
+                    "methods": [{"name": "ap3", "type": "aperture", "tar_ap": 3}],
+                },
+                0,
+            )
+        self.assertIn("temporal_wcs_version", str(ctx.exception))
+
+    def test_forced_photometry_position_source_temporal_wcs_ok(self):
+        p = parse_forced_photometry(
+            {
+                "kind": "forced_photometry",
+                "inputs": {"diffs": "x"},
+                "output": "y",
+                "position_source": "temporal_wcs",
+                "temporal_wcs_version": "temporal_cheb5_bspline_v1",
+                "methods": [{"name": "ap3", "type": "aperture", "tar_ap": 3}],
+            },
+            0,
+        )
+        self.assertEqual(p.position_source, "temporal_wcs")
+        self.assertEqual(p.temporal_wcs_version, "temporal_cheb5_bspline_v1")
+
+    def test_forced_photometry_position_source_invalid_rejected(self):
+        with self.assertRaises(ValueError):
+            parse_forced_photometry(
+                {
+                    "kind": "forced_photometry",
+                    "inputs": {"diffs": "x"},
+                    "output": "y",
+                    "position_source": "bogus",
+                    "methods": [{"name": "ap3", "type": "aperture", "tar_ap": 3}],
                 },
                 0,
             )

@@ -118,11 +118,28 @@ def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[n
 
     Looks for extension ``NOISE``; if not found but a second HDU exists, uses HDU 1.
     Shape mismatch returns ``None`` for the error array.
+
+    fpack (``.fits.fz``) files write a header-only PRIMARY (``hdul[0].data``
+    is ``None``/0-d) with the real image in a named extension (e.g.
+    ``CAMERA.CCD {cam}.{ccd} cal`` for hp_d) -- fall back to the first
+    non-NOISE/MASK 2D image extension when PRIMARY itself has no usable data.
     """
     from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
 
     with open_fits_memmap(path) as hdul:
-        data = np.asarray(hdul[0].data, dtype=np.float64)
+        primary_data = hdul[0].data
+        if primary_data is None or np.ndim(primary_data) < 2:
+            science_hdu = None
+            for hdu in hdul[1:]:
+                if hdu.data is None or np.ndim(hdu.data) < 2:
+                    continue
+                name = str(hdu.header.get("EXTNAME", "")).strip().upper()
+                if name in ("NOISE", "MASK"):
+                    continue
+                science_hdu = hdu
+                break
+            primary_data = science_hdu.data if science_hdu is not None else primary_data
+        data = np.asarray(primary_data, dtype=np.float64)
         noise: Optional[np.ndarray] = None
         if len(hdul) > 1:
             for hdu in hdul[1:]:
@@ -143,6 +160,27 @@ def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[n
             )
             noise = None
     return data, noise
+
+
+def read_diff_btjd(path: str) -> float:
+    """BTJD (TSTART/TSTOP midpoint) from a diff FITS's header.
+
+    ``frames.csv``/``wcs_table`` (``scc_bootstrap.ensure_scc_diff_handoff``)
+    carries no ``btjd`` column at all -- it's ``path, ffi_basename, group_id,
+    group_dx, group_dy, wcs_ok`` only. hp_d/ks_d copy the source FFI's
+    ``TSTART``/``TSTOP`` (BJDREFI/BJDREFF-relative, i.e. already BTJD for
+    TESS products) into the science extension header (not PRIMARY, which is
+    header-only for fpack files -- see ``read_diff_primary_and_noise_sigma``).
+    Returns NaN if neither keyword is found on any HDU.
+    """
+    from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+    with open_fits_memmap(path) as hdul:
+        for hdu in hdul:
+            h = hdu.header
+            if "TSTART" in h and "TSTOP" in h:
+                return (float(h["TSTART"]) + float(h["TSTOP"])) / 2.0
+    return float("nan")
 
 
 def _same_sky_position(
@@ -245,6 +283,82 @@ def per_frame_target_crop_xy(
     return out
 
 
+def per_frame_target_crop_xy_temporal_wcs(
+    wcs_table: pd.DataFrame,
+    ra: float,
+    dec: float,
+    crop_bounds: dict,
+    temporal_wcs_dir: str,
+    *,
+    manifest_science_ra_dec: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """
+    For each manifest row, map (ra, dec) to **crop-local** (x, y) using the
+    self-calibrated ``temporal_wcs`` model (Gaia-fit per-orbit Chebyshev +
+    B-spline correction) instead of each frame's native archive FITS WCS.
+
+    Frames whose FFI stem isn't covered by the temporal_wcs fit (missing
+    from ``frames.parquet`` or with ``orbit_index < 0``) fall back to
+    :func:`per_frame_target_crop_xy` for that frame only.
+    """
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+    from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcsStore
+
+    store = TemporalChebWcsStore(temporal_wcs_dir)
+    origin = tuple(int(v) for v in store.frame_contract["model_origin_ffi"])
+    crop_origin = (int(crop_bounds["x_min"]), int(crop_bounds["y_min"]))
+    if origin != crop_origin:
+        raise ValueError(
+            f"temporal_wcs model_origin_ffi {origin} != crop_bounds origin "
+            f"{crop_origin} in {temporal_wcs_dir!r}: the model's crop-local frame "
+            "does not match this SCC's diff crop; refusing to use it silently."
+        )
+
+    path_col = "path" if "path" in wcs_table.columns else "filename"
+    n = len(wcs_table)
+    out = np.full((n, 2), np.nan, dtype=np.float64)
+    missing_rows: list[int] = []
+    for i in range(n):
+        p = wcs_table.iloc[i].get(path_col)
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            missing_rows.append(i)
+            continue
+        ps = str(p).strip()
+        if not ps:
+            missing_rows.append(i)
+            continue
+        try:
+            stem = manifest_basename_from_local(ps)
+            model, btjd = store.raw_for_stem(stem)
+            x, y = model.world_to_pixel_values(float(ra), float(dec), float(btjd))
+            out[i, 0] = float(x)
+            out[i, 1] = float(y)
+        except (KeyError, ValueError) as exc:
+            log.debug(
+                "  per_frame_target_crop_xy_temporal_wcs row %s (%s): %s", i, p, exc
+            )
+            missing_rows.append(i)
+
+    if missing_rows:
+        fallback_rows = wcs_table.iloc[missing_rows]
+        fb = per_frame_target_crop_xy(
+            fallback_rows,
+            ra,
+            dec,
+            crop_bounds,
+            manifest_science_ra_dec=manifest_science_ra_dec,
+        )
+        for j, i in enumerate(missing_rows):
+            out[i] = fb[j]
+        log.info(
+            "per_frame_target_crop_xy_temporal_wcs: %d/%d frames fell back to "
+            "native WCS (not covered by the temporal_wcs fit)",
+            len(missing_rows),
+            n,
+        )
+    return out
+
+
 def resolve_forced_target_xy(
     spec: dict,
     primary_xy: np.ndarray,
@@ -252,16 +366,31 @@ def resolve_forced_target_xy(
     crop_bounds: dict,
     *,
     manifest_science_ra_dec: tuple[float, float] | None = None,
+    temporal_wcs_dir: str | None = None,
 ) -> np.ndarray:
     """
     Build per-epoch crop-local (x, y) for one normalized forced-target spec.
 
     ``spec`` must include ``position_mode`` (``sky``, ``offset``, or ``fixed``)
     from :func:`~syndiff_pipeline.difference_imaging.orchestration.config.normalize_additional_forced_targets`.
+
+    When *temporal_wcs_dir* is given, ``sky``-mode targets are resolved with
+    :func:`per_frame_target_crop_xy_temporal_wcs` instead of the native FFI
+    WCS; ``offset``/``fixed`` targets are unaffected (they derive from
+    *primary_xy* or a literal pixel position).
     """
     mode = str(spec.get("position_mode", "sky"))
     n_epochs = len(wcs_table)
     if mode == "sky":
+        if temporal_wcs_dir:
+            return per_frame_target_crop_xy_temporal_wcs(
+                wcs_table,
+                float(spec["ra"]),
+                float(spec["dec"]),
+                crop_bounds,
+                temporal_wcs_dir,
+                manifest_science_ra_dec=manifest_science_ra_dec,
+            )
         return per_frame_target_crop_xy(
             wcs_table,
             float(spec["ra"]),
@@ -762,7 +891,7 @@ def _is_real_provenance_fp(fp: Optional[str]) -> bool:
 
 
 def _photometry_upstream_diff_stage(cfg, diffs_label: Optional[str]) -> Optional[dict]:
-    """Hotpants/kernel_subtract stage that produced diffs under *diffs_label*."""
+    """Hotpants/background_estimate stage that produced diffs under *diffs_label*."""
     from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
         split_pipeline,
     )
@@ -771,13 +900,13 @@ def _photometry_upstream_diff_stage(cfg, diffs_label: Optional[str]) -> Optional
     label = str(diffs_label or "").strip()
     if label:
         for _, st in stages:
-            if st.get("kind") not in ("hotpants", "kernel_subtract"):
+            if st.get("kind") not in ("hotpants", "background_estimate"):
                 continue
             o = st.get("output") or {}
             if str(o.get("diffs", "")).strip() == label:
                 return st
     for _, st in stages:
-        if st.get("kind") in ("hotpants", "kernel_subtract"):
+        if st.get("kind") in ("hotpants", "background_estimate"):
             return st
     return None
 
@@ -801,15 +930,15 @@ def _photometry_stage_params(stage: dict):
     from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
         parse_epsf,
         parse_hotpants,
-        parse_kernel_subtract,
+        parse_background_estimate,
     )
 
     kind = stage.get("kind")
     try:
         if kind == "hotpants":
             return parse_hotpants(stage, 0)
-        if kind == "kernel_subtract":
-            return parse_kernel_subtract(stage, 0)
+        if kind == "background_estimate":
+            return parse_background_estimate(stage, 0)
         if kind == "epsf":
             return parse_epsf(stage, 0)
     except Exception:
@@ -1113,6 +1242,21 @@ def forced_phot_gridded_epoch(
     if not np.isfinite(x) or not np.isfinite(y):
         return np.nan, np.nan, np.nan, np.nan
 
+    # phot.fixed_position (default True): pin x_0/y_0 so only flux is fit.
+    # photutils PSFPhotometry otherwise treats init_params x_init/y_init as
+    # free starting guesses (refit each call), which lets the centroid drift
+    # several pixels off the forced position on a low-S/N target -- set
+    # fixed_position: false only for a deliberate diagnostic free-position
+    # fit (2026-08-24).
+    # Explicit both ways (not just when True): callers sharing one loaded
+    # GriddedPSFModel instance across several methods within the same epoch
+    # (see run_forced_photometry_gridded_multi_method) must not inherit a
+    # `.fixed` flag left over from a different method's forced_phot_gridded_epoch
+    # call on the same object.
+    fixed = bool(getattr(phot, "fixed_position", True))
+    gridded_model.x_0.fixed = fixed
+    gridded_model.y_0.fixed = fixed
+
     init_params = Table()
     init_params["x_init"] = [float(x)]
     init_params["y_init"] = [float(y)]
@@ -1167,6 +1311,195 @@ def forced_phot_gridded_epoch(
         return np.nan, np.nan, np.nan, np.nan
 
 
+def _forced_phot_gridded_multi_flux_worker(
+    task: Tuple[int, Optional[str], tuple, str],
+) -> Tuple[int, List[Tuple[float, float, float, float]]]:
+    """
+    One epoch: read the diff FITS once; run forced gridded-PSF photometry for
+    every (workspace, x, y, method_params) combination sharing this epoch.
+
+    ``per_item`` entries are ``(workspace_dir, catalog, tx_i, ty_i,
+    method_params)``. Several entries may share the same ``workspace_dir``
+    (e.g. xy_free/ffi_wcs/temporal_wcs methods all reading ``epsf_r1``) --
+    the per-frame model is loaded once per workspace and reused across those,
+    with :func:`forced_phot_gridded_epoch` resetting ``.fixed`` explicitly
+    each call so a shared model can't leak one method's fixed_position into
+    another's.
+
+    Returns (flux, eflux, x_fit, y_fit) per item, same order as ``per_item``.
+    """
+    i, path, per_item, path_str = task
+    nan4 = (np.nan, np.nan, np.nan, np.nan)
+    if path is None or not os.path.exists(path):
+        return i, [nan4] * len(per_item)
+
+    try:
+        data, sigma_full = read_diff_primary_and_noise_sigma(path)
+    except Exception as exc:
+        log.warning("  Cannot read %s: %s", path, exc)
+        return i, [nan4] * len(per_item)
+
+    stem = _ffi_stem_from_diff_path(path)
+    model_cache: dict[str, Any] = {}
+    out: List[Tuple[float, float, float, float]] = []
+    for workspace_dir, catalog, tx, ty, method_params in per_item:
+        if workspace_dir not in model_cache:
+            model_cache[workspace_dir] = catalog.load_model(stem)
+        model = model_cache[workspace_dir]
+        if model is None or not (np.isfinite(tx) and np.isfinite(ty)):
+            out.append(nan4)
+            continue
+        out.append(
+            forced_phot_gridded_epoch(
+                data, model, float(tx), float(ty), method_params, error=sigma_full
+            )
+        )
+    return i, out
+
+
+def run_forced_photometry_gridded_multi_method(
+    diff_paths: list,
+    entries: list,
+    wcs_table: pd.DataFrame,
+    cfg,
+    output_dir: str,
+    *,
+    plot_title_suffix: Optional[str] = None,
+    output_label: Optional[str] = None,
+    diffs_dir: Optional[str] = None,
+) -> List[pd.DataFrame]:
+    """
+    Forced photometry for many (method, target) combinations that all use a
+    per-frame ``GriddedPSFModel`` (``psf_type: epsf``, ``fitter: photutils``),
+    reading each diff FITS from disk **once per epoch** and sharing it across
+    every combination -- instead of the naive N reads (one per method) that
+    running :func:`_run_forced_photometry_gridded_single` separately per
+    method would do. This is what lets one ``forced_photometry`` stage carry
+    several position-source methods (e.g. xy_free / ffi_wcs / temporal_wcs)
+    without multiplying I/O by the number of methods. Also, unlike
+    :func:`_run_forced_photometry_gridded_single`, this runs epochs in
+    parallel via joblib (``cfg.n_jobs``), same as the PRF/aperture paths.
+
+    ``entries`` are ``(method_params, catalog, target_xy, csv_basename,
+    plot_png_path, plot_source_label)``; ``target_xy`` may differ per entry
+    (different methods may resolve position differently), but all must have
+    ``len(diff_paths)`` rows. Returns one light-curve DataFrame per entry,
+    same order as ``entries``.
+    """
+    if not entries:
+        return []
+
+    n_epochs = len(diff_paths)
+    for method, _catalog, txy, _csv, _plot, _label in entries:
+        txy_arr = np.asarray(txy, dtype=np.float64)
+        if txy_arr.shape != (n_epochs, 2):
+            raise ValueError(
+                f"run_forced_photometry_gridded_multi_method: target_xy shape "
+                f"{txy_arr.shape} != ({n_epochs}, 2) for method {method.name!r}"
+            )
+
+    btjd_col = (
+        wcs_table["btjd"].values
+        if "btjd" in wcs_table.columns
+        else np.full(n_epochs, np.nan)
+    )
+    gid_col = (
+        wcs_table["group_id"].values
+        if "group_id" in wcs_table.columns
+        else np.zeros(n_epochs, int)
+    )
+    btjd_col = np.asarray(btjd_col, dtype=np.float64).copy()
+    for i, path in enumerate(diff_paths):
+        if not np.isfinite(btjd_col[i]) and path is not None and os.path.exists(path):
+            try:
+                btjd_col[i] = read_diff_btjd(path)
+            except Exception as exc:
+                log.debug("read_diff_btjd failed for %s: %s", path, exc)
+
+    n_jobs = int(getattr(cfg, "n_jobs", 1) or 1)
+    parallel = n_jobs != 1 and n_epochs > 1
+    tqdm_base = f"photometry {output_label}" if output_label else "photometry"
+
+    flux_tasks = []
+    for i, path in enumerate(diff_paths):
+        per_item = tuple(
+            (
+                catalog.workspace_dir,
+                catalog,
+                float(np.asarray(txy, dtype=np.float64)[i, 0]),
+                float(np.asarray(txy, dtype=np.float64)[i, 1]),
+                method,
+            )
+            for method, catalog, txy, _csv, _plot, _label in entries
+        )
+        flux_tasks.append((i, path, per_item, str(path) if path else ""))
+
+    n_entries = len(entries)
+    results_per_epoch: List[Optional[list]] = [None] * n_epochs
+
+    if not parallel:
+        for t in tqdm_iter(flux_tasks, desc=tqdm_base):
+            i, out = _forced_phot_gridded_multi_flux_worker(t)
+            results_per_epoch[i] = out
+    else:
+        log.info(
+            "  forced_photometry: gridded multi-method flux n_jobs=%s (loky), "
+            "%d epochs, %d (method,target) combinations",
+            n_jobs,
+            n_epochs,
+            n_entries,
+        )
+        flux_results = parallel_map_with_optional_tqdm(
+            (delayed(_forced_phot_gridded_multi_flux_worker)(t) for t in flux_tasks),
+            n_tasks=n_epochs,
+            desc=tqdm_base,
+            n_jobs_eff=n_jobs,
+        )
+        for i, out in flux_results:
+            results_per_epoch[i] = out
+
+    filenames = [os.path.basename(p) if p else "" for p in diff_paths]
+    plot_on = getattr(cfg, "pipeline_plots", False)
+    dpi = int(getattr(cfg, "pipeline_plot_dpi", 150) or 150)
+
+    out_dfs: List[pd.DataFrame] = []
+    for e, (method, _catalog, _txy, csv_name, plot_png_path, plot_label) in enumerate(entries):
+        records = []
+        for i in range(n_epochs):
+            flux, eflux, xf, yf = results_per_epoch[i][e]
+            records.append(
+                {
+                    "btjd": float(btjd_col[i]),
+                    "group_id": int(gid_col[i]) if i < len(gid_col) else 0,
+                    "filename": filenames[i],
+                    "flux": flux,
+                    "eflux": eflux,
+                    "x_fit": xf,
+                    "y_fit": yf,
+                }
+            )
+        lc_df = pd.DataFrame(records)
+        if diffs_dir:
+            lc_df = apply_zp_calibration_if_available(lc_df, diffs_dir)
+        out_path = os.path.join(output_dir, csv_name)
+        lc_df.to_csv(out_path, index=False)
+        log.info("  gridded ePSF light curve saved to %s (%d epochs)", out_path, len(lc_df))
+
+        if plot_on and plot_png_path:
+            title = plot_title_suffix or output_label or "gridded ePSF"
+            if plot_label:
+                title = f"{title} · {plot_label}"
+            write_lightcurve_diagnostic_plot(
+                lc_df,
+                output_dir,
+                dpi=dpi,
+                title_line=title,
+                png_path=plot_png_path,
+            )
+        out_dfs.append(lc_df)
+    return out_dfs
+
+
 def _run_forced_photometry_gridded_single(
     diff_paths: list,
     target_xy: np.ndarray,
@@ -1207,8 +1540,14 @@ def _run_forced_photometry_gridded_single(
     records = []
     for i, path in enumerate(diff_paths):
         tx_i, ty_i = float(txy[i, 0]), float(txy[i, 1])
+        btjd_i = btjd_col[i] if i < len(btjd_col) else np.nan
+        if not np.isfinite(btjd_i) and path is not None and os.path.exists(path):
+            try:
+                btjd_i = read_diff_btjd(path)
+            except Exception as exc:
+                log.debug("read_diff_btjd failed for %s: %s", path, exc)
         rec = {
-            "btjd": btjd_col[i] if i < len(btjd_col) else np.nan,
+            "btjd": btjd_i,
             "group_id": gid_col[i] if i < len(gid_col) else 0,
             "filename": os.path.basename(path) if path else "",
             "flux": np.nan,
@@ -2288,6 +2627,160 @@ def _binned_sigma_clip_btjd(
     return mask, b_avg_t, b_avg_f
 
 
+def write_temporal_wcs_offset_debug_plot(
+    wcs_table: pd.DataFrame,
+    ra: float,
+    dec: float,
+    crop_bounds: dict,
+    temporal_wcs_dir: str,
+    ffi_list_df: pd.DataFrame,
+    *,
+    dpi: int = 150,
+    title_line: str = "",
+    png_path: Optional[str] = None,
+) -> Optional[str]:
+    """
+    Debug plot: per-frame crop-local position offset between the temporal_wcs
+    model and each frame's native archive FITS WCS, for one sky target.
+
+    Both WCS solutions are read from the SCC's cached ``ffi_list`` (one row
+    per FFI, header already extracted at download time) -- no FITS files are
+    opened here. Frames with ``wcs_ok=False`` in that cache are excluded
+    entirely: a header missing CRVAL/CRPIX/CD keywords still constructs an
+    astropy ``WCS`` object (defaulting the missing terms), which would silently
+    inject spurious large offsets into this comparison, so those rows are
+    dropped rather than compared against a degenerate WCS. Frames the
+    temporal_wcs fit itself doesn't cover are excluded the same way.
+
+    Top panel: dx vs BTJD on the left y-axis, dy vs BTJD on the right y-axis
+    (``twinx``) -- dx/dy get their own scale rather than sharing one, since
+    their magnitudes can differ.
+    Bottom: dx and dy each get their own histogram (not overlaid on a shared
+    x-range), so one offset's spread doesn't compress the other's axis.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.warning(
+            "pipeline_plots: matplotlib is not installed; skipping temporal_wcs "
+            "offset debug plot."
+        )
+        return None
+
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+    from syndiff_pipeline.common.wcs_header_cache import wcs_from_cached_row
+    from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import (
+        TemporalChebWcsStore,
+        canonical_temporal_wcs_stem,
+    )
+
+    store = TemporalChebWcsStore(temporal_wcs_dir)
+    path_col = "path" if "path" in wcs_table.columns else "filename"
+    x_min = float(crop_bounds["x_min"])
+    y_min = float(crop_bounds["y_min"])
+
+    btjd_list: list[float] = []
+    dx_list: list[float] = []
+    dy_list: list[float] = []
+    n_skipped_bad_wcs = 0
+    for p in wcs_table[path_col]:
+        if p is None or (isinstance(p, float) and np.isnan(p)):
+            continue
+        ps = str(p).strip()
+        if not ps:
+            continue
+        key = manifest_basename_from_local(ps)
+        if key not in ffi_list_df.index:
+            continue
+        row = ffi_list_df.loc[key]
+        if getattr(row, "ndim", 1) != 1:
+            continue
+        if not bool(row.get("wcs_ok", False)):
+            n_skipped_bad_wcs += 1
+            continue
+
+        stem = canonical_temporal_wcs_stem(key)
+        try:
+            model, btjd_val = store.raw_for_stem(stem)
+        except (KeyError, ValueError):
+            continue
+
+        try:
+            native_wcs = wcs_from_cached_row(row)
+            nx, ny = world_ra_dec_to_pixel(native_wcs, float(ra), float(dec))
+        except Exception as exc:
+            log.debug("temporal_wcs offset plot: bad cached WCS for %s: %s", key, exc)
+            continue
+        tx, ty = model.world_to_pixel_values(float(ra), float(dec), float(btjd_val))
+
+        dx_list.append(float(tx) - (float(nx) - x_min))
+        dy_list.append(float(ty) - (float(ny) - y_min))
+        btjd_list.append(float(btjd_val))
+
+    n = len(btjd_list)
+    if n == 0:
+        log.warning(
+            "pipeline_plots: no frames with both a proper (wcs_ok) native WCS "
+            "and temporal_wcs coverage for offset debug plot; skipping."
+        )
+        return None
+    if n_skipped_bad_wcs:
+        log.info(
+            "temporal_wcs offset plot: excluded %d frame(s) with wcs_ok=False",
+            n_skipped_bad_wcs,
+        )
+
+    order = np.argsort(btjd_list)
+    t = np.asarray(btjd_list)[order]
+    dxs = np.asarray(dx_list)[order]
+    dys = np.asarray(dy_list)[order]
+
+    fig = plt.figure(figsize=(9, 8), layout="constrained")
+    gs = fig.add_gridspec(2, 2, height_ratios=[1.1, 1.0])
+    ax_ts = fig.add_subplot(gs[0, :])
+    ax_hx = fig.add_subplot(gs[1, 0])
+    ax_hy = fig.add_subplot(gs[1, 1])
+
+    color_x, color_y = "tab:blue", "tab:orange"
+    ax_ts.plot(t, dxs, ".", ms=3, alpha=0.5, color=color_x)
+    ax_ts.set_xlabel("BTJD")
+    ax_ts.set_ylabel("dx [px]", color=color_x)
+    ax_ts.tick_params(axis="y", labelcolor=color_x)
+    ax_ts.grid(True, alpha=0.3)
+
+    ax_ts2 = ax_ts.twinx()
+    ax_ts2.plot(t, dys, ".", ms=3, alpha=0.5, color=color_y)
+    ax_ts2.set_ylabel("dy [px]", color=color_y)
+    ax_ts2.tick_params(axis="y", labelcolor=color_y)
+
+    subtitle = f"{n} frames (proper WCS + temporal_wcs coverage)"
+    if title_line:
+        ax_ts.set_title(f"{title_line}\n{subtitle}")
+    else:
+        ax_ts.set_title(f"temporal_wcs − native WCS position offset\n{subtitle}")
+
+    ax_hx.hist(dxs, bins=60, color=color_x, alpha=0.85)
+    ax_hx.set_xlabel("dx [px]")
+    ax_hx.set_ylabel("count")
+    ax_hx.set_title(f"dx: mean={np.mean(dxs):.4f}  std={np.std(dxs):.4f}", fontsize=9)
+    ax_hx.grid(True, alpha=0.3)
+
+    ax_hy.hist(dys, bins=60, color=color_y, alpha=0.85)
+    ax_hy.set_xlabel("dy [px]")
+    ax_hy.set_ylabel("count")
+    ax_hy.set_title(f"dy: mean={np.mean(dys):.4f}  std={np.std(dys):.4f}", fontsize=9)
+    ax_hy.grid(True, alpha=0.3)
+
+    if png_path is None:
+        plt.close(fig)
+        return None
+    os.makedirs(os.path.dirname(png_path) or ".", exist_ok=True)
+    fig.savefig(png_path, dpi=dpi)
+    plt.close(fig)
+    return png_path
+
+
 def write_lightcurve_diagnostic_plot(
     lc_df: pd.DataFrame,
     output_dir: str,
@@ -3245,7 +3738,7 @@ def run_forced_photometry(
 
 def run_forced_photometry_stage(
     diff_paths: list,
-    target_specs: list[tuple[np.ndarray, Optional[str], str, dict]],
+    target_specs_by_method: dict[str, list[tuple[np.ndarray, Optional[str], str, dict]]],
     phot_stage: ForcedPhotometryParams,
     epsf_by_workspace: dict[str, np.ndarray],
     stage_epsf_workspace: Optional[str],
@@ -3268,17 +3761,26 @@ def run_forced_photometry_stage(
     """
     Run every configured forced-photometry method (PSF and/or aperture).
 
-    ``target_specs`` entries are ``(target_xy, extra_name, tag, pt_dict)`` where
-    ``extra_name`` is ``None`` for the primary target.
+    ``target_specs_by_method[method.name]`` entries are ``(target_xy,
+    extra_name, tag, pt_dict)`` where ``extra_name`` is ``None`` for the
+    primary target. Each method resolves its own ``position_source`` (see
+    ``PsfPhotometryMethodParams``/``AperturePhotometryMethodParams``), so
+    different methods in one stage may carry different per-epoch positions.
 
     For ``psf_type: epsf`` a per-frame gridded ePSF catalog is required
     (``gridded_epsf_index.json``); the legacy tile-smooth stack is not used.
+    Every such method using the default ``fitter: photutils`` is batched
+    through :func:`run_forced_photometry_gridded_multi_method` so each diff
+    FITS is read from disk once total, not once per method; PRF, ``fitter:
+    tessreduce``, and aperture methods keep their own per-method read (each
+    already shared across that one method's own targets).
     """
     results: dict[str, List[pd.DataFrame]] = {}
     gridded_epsf_by_workspace = gridded_epsf_by_workspace or {}
-    for method in phot_stage.methods:
-        phot_targets: list[ForcedPhotTargetSpec] = []
-        for target_xy, extra_name, tag, pt in target_specs:
+
+    def _phot_targets_for(method: PhotometryMethodSpec) -> list[ForcedPhotTargetSpec]:
+        out: list[ForcedPhotTargetSpec] = []
+        for target_xy, extra_name, tag, _pt in target_specs_by_method[method.name]:
             csv_fname = lightcurve_csv_basename(
                 method.name,
                 extra_name,
@@ -3288,7 +3790,7 @@ def run_forced_photometry_stage(
             lc_plot_path = None
             if getattr(cfg, "pipeline_plots", False) and plot_path_fn is not None:
                 lc_plot_path = plot_path_fn(method.name, extra_name)
-            phot_targets.append(
+            out.append(
                 ForcedPhotTargetSpec(
                     target_xy=target_xy,
                     csv_basename=csv_fname,
@@ -3297,10 +3799,87 @@ def run_forced_photometry_stage(
                     tag=tag,
                 )
             )
+        return out
+
+    def _is_gridded_photutils(method: PhotometryMethodSpec) -> bool:
+        return (
+            isinstance(method, PsfPhotometryMethodParams)
+            and method.psf_type == "epsf"
+            and (method.fitter or "photutils").strip().lower() == "photutils"
+        )
+
+    gridded_methods = [m for m in phot_stage.methods if _is_gridded_photutils(m)]
+    other_methods = [m for m in phot_stage.methods if not _is_gridded_photutils(m)]
+
+    if gridded_methods:
+        combined_entries: list[tuple] = []
+        combined_owner: list[tuple[PsfPhotometryMethodParams, list[ForcedPhotTargetSpec]]] = []
+        for method in gridded_methods:
+            epsf_ws = method.epsf_workspace or stage_epsf_workspace
+            if not epsf_ws:
+                raise ValueError(
+                    f"forced_photometry method {method.name!r}: psf_type 'epsf' "
+                    "requires inputs.epsf or per-method inputs.epsf"
+                )
+            if epsf_ws not in gridded_epsf_by_workspace:
+                raise ValueError(
+                    f"forced_photometry method {method.name!r}: psf_type 'epsf' "
+                    f"requires a gridded ePSF catalog under workspace {epsf_ws!r} "
+                    "(gridded_epsf_index.json). Rebuild the ePSF stage; the legacy "
+                    "tile-smooth stack is no longer used for forced photometry."
+                )
+            catalog = gridded_epsf_by_workspace[epsf_ws]
+            phot_targets = _phot_targets_for(method)
+            for spec in phot_targets:
+                combined_entries.append(
+                    (
+                        method,
+                        catalog,
+                        spec.target_xy,
+                        spec.csv_basename,
+                        spec.plot_png_path,
+                        spec.plot_source_label,
+                    )
+                )
+            combined_owner.append((method, phot_targets))
+
+        dfs_flat = run_forced_photometry_gridded_multi_method(
+            diff_paths=diff_paths,
+            entries=combined_entries,
+            wcs_table=wcs_table,
+            cfg=cfg,
+            output_dir=output_dir,
+            plot_title_suffix=plot_title_suffix,
+            output_label=output_label,
+            diffs_dir=diffs_dir,
+        )
+
+        idx = 0
+        for method, phot_targets in combined_owner:
+            n = len(phot_targets)
+            results[method.name] = dfs_flat[idx : idx + n]
+            idx += n
+            _try_emit_photometry_provenance(
+                cfg=cfg,
+                method=method,
+                diff_paths=diff_paths,
+                phot_targets=phot_targets,
+                output_dir=output_dir,
+                output_label=output_label,
+                diffs_input=diffs_input,
+                stage_epsf_workspace=stage_epsf_workspace,
+                gridded_epsf_by_workspace=gridded_epsf_by_workspace,
+            )
+
+    for method in other_methods:
+        target_specs = target_specs_by_method[method.name]
+        phot_targets = _phot_targets_for(method)
 
         if isinstance(method, PsfPhotometryMethodParams):
             epsf_ws = method.epsf_workspace or stage_epsf_workspace
             if method.psf_type == "epsf":
+                # fitter: photutils already handled above; only tessreduce
+                # reaches this branch.
                 if not epsf_ws:
                     raise ValueError(
                         f"forced_photometry method {method.name!r}: psf_type 'epsf' "
@@ -3315,7 +3894,7 @@ def run_forced_photometry_stage(
                     )
                 catalog = gridded_epsf_by_workspace[epsf_ws]
                 fitter = (method.fitter or "photutils").strip().lower()
-                if fitter not in ("photutils", "tessreduce"):
+                if fitter != "tessreduce":
                     raise ValueError(
                         f"forced_photometry method {method.name!r}: "
                         f"fitter must be 'photutils' or 'tessreduce', got {method.fitter!r}"
@@ -3330,45 +3909,24 @@ def run_forced_photometry_stage(
                     lc_plot_path = None
                     if getattr(cfg, "pipeline_plots", False) and plot_path_fn is not None:
                         lc_plot_path = plot_path_fn(method.name, extra_name)
-                    if fitter == "tessreduce":
-                        dfs.append(
-                            _run_forced_photometry_gridded_tessreduce_single(
-                                diff_paths=diff_paths,
-                                target_xy=target_xy,
-                                gridded_catalog=catalog,
-                                wcs_table=wcs_table,
-                                cfg=cfg,
-                                phot=method,
-                                output_dir=output_dir,
-                                ref_frame_index=ref_frame_index,
-                                lightcurve_csv_filename=csv_fname,
-                                lightcurve_plot_path=lc_plot_path,
-                                plot_title_suffix=plot_title_suffix,
-                                plot_source_label=extra_name or "primary",
-                                output_label=output_label,
-                                diffs_dir=diffs_dir,
-                            )
+                    dfs.append(
+                        _run_forced_photometry_gridded_tessreduce_single(
+                            diff_paths=diff_paths,
+                            target_xy=target_xy,
+                            gridded_catalog=catalog,
+                            wcs_table=wcs_table,
+                            cfg=cfg,
+                            phot=method,
+                            output_dir=output_dir,
+                            ref_frame_index=ref_frame_index,
+                            lightcurve_csv_filename=csv_fname,
+                            lightcurve_plot_path=lc_plot_path,
+                            plot_title_suffix=plot_title_suffix,
+                            plot_source_label=extra_name or "primary",
+                            output_label=output_label,
+                            diffs_dir=diffs_dir,
                         )
-                    else:
-                        dfs.append(
-                            _run_forced_photometry_gridded_single(
-                                diff_paths=diff_paths,
-                                target_xy=target_xy,
-                                gridded_catalog=catalog,
-                                wcs_table=wcs_table,
-                                cfg=cfg,
-                                phot=method,
-                                output_dir=output_dir,
-                                lightcurve_csv_filename=csv_fname,
-                                lightcurve_plot_path=lc_plot_path,
-                                plot_title_suffix=plot_title_suffix,
-                                plot_source_label=extra_name or "primary",
-                                output_label=output_label,
-                                diffs_input=diffs_input,
-                                diff_log_path=diff_log_path,
-                                diffs_dir=diffs_dir,
-                            )
-                        )
+                    )
             else:
                 # PRF: official TESS_PRF + create_psf (no ePSF workspace).
                 over_size = 2 * method.psf_size + 1

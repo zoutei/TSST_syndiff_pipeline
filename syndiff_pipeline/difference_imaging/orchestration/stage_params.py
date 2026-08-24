@@ -274,8 +274,11 @@ _METHOD_PSF_KEYS = frozenset(
         "fit_shape",
         "aperture_radius",
         "psf_grouper_min_separation",
+        "fixed_position",
         "inputs",
         "csv_basename",
+        "position_source",
+        "temporal_wcs_version",
     }
 )
 
@@ -290,6 +293,8 @@ _METHOD_APERTURE_KEYS = frozenset(
         "subtract_sky",
         "mask_sky_with_shared_mask",
         "csv_basename",
+        "position_source",
+        "temporal_wcs_version",
     }
 )
 
@@ -301,6 +306,8 @@ FORCED_PHOTOMETRY_ALLOWED = frozenset(
         "methods",
         "tile_nx",
         "tile_ny",
+        "position_source",
+        "temporal_wcs_version",
     }
 )
 
@@ -352,12 +359,12 @@ CONVOLVED_TEMPLATES_ALLOWED = frozenset(
     }
 )
 
-KERNEL_SUBTRACT_ALLOWED = frozenset(
+BACKGROUND_ESTIMATE_ALLOWED = frozenset(
     {
         "kind",
         "inputs",
         "output",
-        "kernel_subtract_n_jobs",
+        "background_estimate_n_jobs",
         "tessreduce_smooth_gauss",
         "tessreduce_anomaly_gauss",
         "tessreduce_qe_spline_degree",
@@ -608,6 +615,19 @@ class PsfPhotometryMethodParams:
     aperture_radius: float = 2.0
     # None → grouper=None for single-target forced photometry
     psf_grouper_min_separation: Optional[float] = None
+    # psf_type: epsf (photutils) only: pin x_0/y_0 so only flux is fit at the
+    # forced init position. True by default (that's the point of "forced"
+    # photometry); set false for a diagnostic free-position fit.
+    fixed_position: bool = True
+    # None (default) -> inherit the stage-level position_source/temporal_wcs_version.
+    # Resolved to a concrete value by _resolve_method_position() at parse time,
+    # so by the time a PsfPhotometryMethodParams reaches runner.py/photometry.py
+    # this is always "native_wcs" or "temporal_wcs", never None -- letting several
+    # methods in one forced_photometry stage use different position sources
+    # while still sharing one read of each diff FITS (see
+    # run_forced_photometry_gridded_multi_method).
+    position_source: Optional[str] = None
+    temporal_wcs_version: Optional[str] = None
 
 
 @dataclass
@@ -621,6 +641,9 @@ class AperturePhotometryMethodParams:
     subtract_sky: bool = True
     mask_sky_with_shared_mask: bool = False
     csv_basename: Optional[str] = None
+    # See PsfPhotometryMethodParams.position_source.
+    position_source: Optional[str] = None
+    temporal_wcs_version: Optional[str] = None
 
 
 PhotometryMethodSpec = Union[PsfPhotometryMethodParams, AperturePhotometryMethodParams]
@@ -632,6 +655,12 @@ class ForcedPhotometryParams:
     methods: List[PhotometryMethodSpec] = field(default_factory=list)
     tile_nx: int = 4
     tile_ny: int = 4
+    # native_wcs (default): each frame's own archive FITS WCS.
+    # temporal_wcs: the self-calibrated, Gaia-fit per-orbit WCS model from the
+    # `temporal_wcs` diff stage (requires temporal_wcs_version); frames not
+    # covered by that fit fall back to native_wcs automatically.
+    position_source: str = "native_wcs"
+    temporal_wcs_version: Optional[str] = None
 
 
 _METHOD_NAME_RE = re.compile(r"^[a-z0-9_]+$")
@@ -656,6 +685,42 @@ def _parse_method_name(raw: object, pipeline_idx: int, method_idx: int) -> str:
             f"'name' must match [a-z0-9_]+, got {raw!r}"
         )
     return name
+
+
+def _resolve_method_position(
+    p: PhotometryMethodSpec,
+    pipeline_idx: int,
+    method_idx: int,
+    stage_defaults: "ForcedPhotometryParams",
+) -> None:
+    """Fill in / validate one method's position_source and temporal_wcs_version.
+
+    ``stage_defaults.position_source``/``temporal_wcs_version`` must already
+    be validated (see parse_forced_photometry) before this is called. A
+    method without its own ``position_source`` inherits the stage default
+    unchanged; one with an explicit override is validated the same way the
+    stage-level value is.
+    """
+    if p.position_source is None:
+        p.position_source = stage_defaults.position_source
+        if p.temporal_wcs_version is None:
+            p.temporal_wcs_version = stage_defaults.temporal_wcs_version
+        return
+    src = str(p.position_source).strip().lower()
+    if src not in ("native_wcs", "temporal_wcs"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            f"position_source must be 'native_wcs' or 'temporal_wcs', got {p.position_source!r}"
+        )
+    p.position_source = src
+    if p.temporal_wcs_version is None:
+        p.temporal_wcs_version = stage_defaults.temporal_wcs_version
+    if src == "temporal_wcs" and not str(p.temporal_wcs_version or "").strip():
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry methods[{method_idx}]: "
+            "position_source: temporal_wcs requires temporal_wcs_version (per-method "
+            "or inherited from the stage default)"
+        )
 
 
 def _parse_psf_method(
@@ -725,6 +790,7 @@ def _parse_psf_method(
         p.epsf_workspace = str(inp["epsf"]).strip()
     if entry.get("csv_basename") is not None:
         p.csv_basename = str(entry["csv_basename"]).strip()
+    _resolve_method_position(p, pipeline_idx, method_idx, stage_defaults)
     return p
 
 
@@ -732,15 +798,17 @@ def _parse_aperture_method(
     entry: dict,
     pipeline_idx: int,
     method_idx: int,
+    stage_defaults: "ForcedPhotometryParams",
 ) -> AperturePhotometryMethodParams:
     """Parse aperture method.
-    
+
     Parameters
     ----------
     entry : dict
     pipeline_idx : int
     method_idx : int
-    
+    stage_defaults : ForcedPhotometryParams
+
     Returns
     -------
     AperturePhotometryMethodParams"""
@@ -758,6 +826,7 @@ def _parse_aperture_method(
     )
     if entry.get("csv_basename") is not None:
         p.csv_basename = str(entry["csv_basename"]).strip()
+    _resolve_method_position(p, pipeline_idx, method_idx, stage_defaults)
     return p
 
 
@@ -804,9 +873,9 @@ class ConvolvedTemplatesParams:
 
 
 @dataclass
-class KernelSubtractParams:
-    """KernelSubtractParams."""
-    kernel_subtract_n_jobs: Optional[int] = None
+class BackgroundEstimateParams:
+    """BackgroundEstimateParams."""
+    background_estimate_n_jobs: Optional[int] = None
     tessreduce_smooth_gauss: float = 2.0
     tessreduce_anomaly_gauss: float = 2.0
     tessreduce_qe_spline_degree: int = 2
@@ -1018,9 +1087,9 @@ def parse_subtract(stage: dict, pipeline_idx: int) -> None:
     validate_stage_keys(stage, pipeline_idx, "subtract", SUBTRACT_ALLOWED)
 
 
-def parse_background(stage: dict, pipeline_idx: int):
-    """Parse background.
-    
+def parse_background_temporal_smoothing(stage: dict, pipeline_idx: int):
+    """Parse background_temporal_smoothing.
+
     Parameters
     ----------
     stage : dict
@@ -1032,11 +1101,13 @@ def parse_background(stage: dict, pipeline_idx: int):
         BackgroundStepTemporalParams,
     )
 
-    validate_stage_keys(stage, pipeline_idx, "background", BACKGROUND_ALLOWED)
+    validate_stage_keys(
+        stage, pipeline_idx, "background_temporal_smoothing", BACKGROUND_ALLOWED
+    )
     steps = stage.get("steps") or {}
     if not isinstance(steps, dict):
         raise ValueError(
-            f"pipeline[{pipeline_idx}] background: 'steps' must be a mapping"
+            f"pipeline[{pipeline_idx}] background_temporal_smoothing: 'steps' must be a mapping"
         )
 
     spatial = _merge_step_params(
@@ -1053,7 +1124,7 @@ def parse_background(stage: dict, pipeline_idx: int):
 
     if not (spatial.enabled or temporal.enabled or strap.enabled):
         raise ValueError(
-            f"pipeline[{pipeline_idx}] background: at least one step must be enabled"
+            f"pipeline[{pipeline_idx}] background_temporal_smoothing: at least one step must be enabled"
         )
 
     label_out = str(stage.get("output", "")).strip()
@@ -1065,7 +1136,7 @@ def parse_background(stage: dict, pipeline_idx: int):
         save = getattr(step, "save", None)
         if save and str(save).strip() == label_out:
             raise ValueError(
-                f"pipeline[{pipeline_idx}] background: steps.{step_name}.save "
+                f"pipeline[{pipeline_idx}] background_temporal_smoothing: steps.{step_name}.save "
                 f"must differ from output {label_out!r}"
             )
 
@@ -1111,6 +1182,20 @@ def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryP
             "'methods' list"
         )
     stage_defaults = _merge_dataclass(ForcedPhotometryParams, stage)
+    src = str(stage_defaults.position_source or "native_wcs").strip().lower()
+    if src not in ("native_wcs", "temporal_wcs"):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry: position_source must be "
+            f"'native_wcs' or 'temporal_wcs', got {stage_defaults.position_source!r}"
+        )
+    stage_defaults.position_source = src
+    if src == "temporal_wcs" and not str(stage_defaults.temporal_wcs_version or "").strip():
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] forced_photometry: position_source: temporal_wcs "
+            "requires temporal_wcs_version (must match the diff_config temporal_wcs "
+            "stage's 'version')"
+        )
+
     parsed: List[PhotometryMethodSpec] = []
     seen_names: set[str] = set()
     for mi, entry in enumerate(raw_methods):
@@ -1133,7 +1218,7 @@ def parse_forced_photometry(stage: dict, pipeline_idx: int) -> ForcedPhotometryP
         if mtype == "psf":
             spec = _parse_psf_method(entry, pipeline_idx, mi, stage_defaults)
         elif mtype == "aperture":
-            spec = _parse_aperture_method(entry, pipeline_idx, mi)
+            spec = _parse_aperture_method(entry, pipeline_idx, mi, stage_defaults)
         else:
             raise ValueError(
                 f"pipeline[{pipeline_idx}] forced_photometry methods[{mi}]: "
@@ -1209,24 +1294,24 @@ def parse_convolved_templates(
     return _merge_dataclass(ConvolvedTemplatesParams, stage)
 
 
-def parse_kernel_subtract(stage: dict, pipeline_idx: int) -> KernelSubtractParams:
-    """Parse kernel subtract.
-    
+def parse_background_estimate(stage: dict, pipeline_idx: int) -> BackgroundEstimateParams:
+    """Parse background estimate.
+
     Parameters
     ----------
     stage : dict
     pipeline_idx : int
-    
+
     Returns
     -------
-    KernelSubtractParams"""
+    BackgroundEstimateParams"""
     validate_stage_keys(
-        stage, pipeline_idx, "kernel_subtract", KERNEL_SUBTRACT_ALLOWED
+        stage, pipeline_idx, "background_estimate", BACKGROUND_ESTIMATE_ALLOWED
     )
-    ks = _merge_dataclass(KernelSubtractParams, stage)
-    if "kernel_subtract_n_jobs" in stage:
-        v = stage["kernel_subtract_n_jobs"]
-        ks.kernel_subtract_n_jobs = None if v is None else int(v)
+    ks = _merge_dataclass(BackgroundEstimateParams, stage)
+    if "background_estimate_n_jobs" in stage:
+        v = stage["background_estimate_n_jobs"]
+        ks.background_estimate_n_jobs = None if v is None else int(v)
     return ks
 
 
@@ -1274,11 +1359,13 @@ def validate_stage_for_kind(stage: dict, pipeline_idx: int, kind: str) -> None:
         "temporal_wcs": lambda: parse_temporal_wcs(stage, pipeline_idx),
         "sat_template": lambda: parse_sat_template(stage, pipeline_idx),
         "subtract": lambda: parse_subtract(stage, pipeline_idx),
-        "background": lambda: parse_background(stage, pipeline_idx),
+        "background_temporal_smoothing": lambda: parse_background_temporal_smoothing(
+            stage, pipeline_idx
+        ),
         "forced_photometry": lambda: parse_forced_photometry(stage, pipeline_idx),
         "kernel_fit": lambda: parse_kernel_fit(stage, pipeline_idx),
         "convolved_templates": lambda: parse_convolved_templates(stage, pipeline_idx),
-        "kernel_subtract": lambda: parse_kernel_subtract(stage, pipeline_idx),
+        "background_estimate": lambda: parse_background_estimate(stage, pipeline_idx),
         "photometry": lambda: validate_photometry_delegator(stage, pipeline_idx),
     }
     fn = parsers.get(kind)

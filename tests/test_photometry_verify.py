@@ -25,6 +25,7 @@ from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
 from syndiff_pipeline.difference_imaging.stages.photometry import lightcurve_csv_basename
 from syndiff_pipeline.difference_imaging.support.paths import photometry_root
 from syndiff_pipeline.photometry.orchestration.verify import (
+    collect_photometry_artifacts,
     photometry_complete,
     scc_diff_lane_complete,
     verify_photometry_prerequisites,
@@ -207,6 +208,65 @@ class TestPhotometryComplete(unittest.TestCase):
         lc_dir.mkdir(parents=True)
         (lc_dir / lightcurve_csv_basename("gepsf")).write_text("btjd,flux\n", encoding="utf-8")
         self.assertTrue(photometry_complete(self.run_config, self.event_dir))
+
+
+class TestMultiStageForcedPhotometry(unittest.TestCase):
+    """Several forced_photometry stages sharing one astrometry stage (e.g. one
+    per position source: xy_free / ffi_wcs / temporal_wcs) -- every stage's
+    output must be checked, not just the first."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.event_dir = event_scc_leaf(
+            self.root / "handoff", _target().event_name(), 20, 3, 2
+        )
+        self.event_dir.mkdir(parents=True)
+        self.run_config = PhotometryRunConfig(
+            photometry_run_id="smoke_phot",
+            pipeline=[
+                {"kind": "astrometry"},
+                {
+                    "kind": "forced_photometry",
+                    "output": "lc_xyfree",
+                    "methods": [{"name": "xyfree"}],
+                },
+                {
+                    "kind": "forced_photometry",
+                    "output": "lc_ffiwcs",
+                    "methods": [{"name": "ffiwcs"}],
+                },
+            ],
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_incomplete_when_only_first_stage_has_csv(self) -> None:
+        phot_root = Path(photometry_root(str(self.event_dir), "smoke_phot"))
+        lc1 = phot_root / "lc_xyfree"
+        lc1.mkdir(parents=True)
+        (lc1 / lightcurve_csv_basename("xyfree")).write_text("btjd,flux\n", encoding="utf-8")
+        self.assertFalse(photometry_complete(self.run_config, self.event_dir))
+
+    def test_complete_when_all_stages_have_csv(self) -> None:
+        phot_root = Path(photometry_root(str(self.event_dir), "smoke_phot"))
+        for label, name in (("lc_xyfree", "xyfree"), ("lc_ffiwcs", "ffiwcs")):
+            lc = phot_root / label
+            lc.mkdir(parents=True)
+            (lc / lightcurve_csv_basename(name)).write_text("btjd,flux\n", encoding="utf-8")
+        self.assertTrue(photometry_complete(self.run_config, self.event_dir))
+
+    def test_collect_artifacts_includes_all_stages(self) -> None:
+        phot_root = Path(photometry_root(str(self.event_dir), "smoke_phot"))
+        for label, name in (("lc_xyfree", "xyfree"), ("lc_ffiwcs", "ffiwcs")):
+            lc = phot_root / label
+            lc.mkdir(parents=True)
+            (lc / lightcurve_csv_basename(name)).write_text("btjd,flux\n", encoding="utf-8")
+        artifacts = collect_photometry_artifacts(self.run_config, self.event_dir)
+        basenames = {Path(a).name for a in artifacts}
+        self.assertIn(lightcurve_csv_basename("xyfree"), basenames)
+        self.assertIn(lightcurve_csv_basename("ffiwcs"), basenames)
 
 
 class TestVerifyPhotometryPrerequisites(unittest.TestCase):
