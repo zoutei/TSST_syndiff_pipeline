@@ -234,3 +234,30 @@ def test_patch_cache_matches_dense_assemble_and_convolve(tmp_path: Path, monkeyp
     # Sanity: interior is genuinely nonzero (real signal, not a degenerate
     # all-zero comparison).
     assert np.abs(conv_dense[hw_kernel:-hw_kernel, hw_kernel:-hw_kernel]).max() > 0
+
+
+def test_crop_hr_from_template_roi_bounds_reorders_correctly():
+    """Regression test: FieldModeTemplateContext.template_roi_bounds is
+    stored as (x_min, y_min, x_max, y_max) -- a different field order than
+    the (x0, x1, y0, y1) crop convention build_group_convolved_template
+    expects. Passing it straight through (without this reorder) computed
+    nx_hr/ny_hr as y_min-x_min / y_max-x_max instead of the real
+    width/height, which crashed on a real S20/C3/K3 run with "negative
+    dimensions are not allowed" for the group whose crop happened to make
+    that difference negative. Use a deliberately asymmetric box (all four
+    values distinct) so a swapped-order bug is caught, not masked by a
+    square/symmetric test box."""
+    from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
+        crop_hr_from_template_roi_bounds,
+    )
+
+    x_min, y_min, x_max, y_max = 100, 250, 900, 400
+    template_roi_bounds = (x_min, y_min, x_max, y_max)
+
+    crop_hr = crop_hr_from_template_roi_bounds(template_roi_bounds)
+    assert crop_hr == (x_min, x_max, y_min, y_max)
+
+    x0, x1, y0, y1 = crop_hr
+    assert x1 - x0 == x_max - x_min  # real width, not y_min - x_min
+    assert y1 - y0 == y_max - y_min  # real height, not y_max - x_max
+    assert x1 - x0 > 0 and y1 - y0 > 0

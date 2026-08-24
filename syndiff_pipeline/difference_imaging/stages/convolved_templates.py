@@ -119,6 +119,28 @@ def _unique_template_entries(template_paths: dict[int, str]) -> list[dict]:
     return rows
 
 
+def crop_hr_from_template_roi_bounds(
+    template_roi_bounds: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """``FieldModeTemplateContext.template_roi_bounds`` -> the ``(x0, x1,
+    y0, y1)`` crop convention ``build_group_convolved_template`` expects.
+
+    ``template_roi_bounds`` is stored as ``(x_min, y_min, x_max, y_max)``
+    (see ``FieldModeTemplateContext`` / ``build_field_mode_template_loader``,
+    which reorders it into ``(x0, x1, y0, y1)`` before using it as a crop
+    tuple) -- a *different* field order than the ``(x0, x1, y0, y1)`` crop
+    convention used everywhere else (``assemble_group_from_contribs``,
+    ``build_group_convolved_template``). Passing ``template_roi_bounds``
+    straight through without this reorder silently computes
+    ``nx_hr``/``ny_hr`` as ``y_min - x_min`` / ``y_max - x_max`` instead of
+    the real width/height -- usually wrong, occasionally negative (caught
+    on a real S20/C3/K3 run: ``ValueError: negative dimensions are not
+    allowed`` in ``scatter_add_patch_valid_maps``).
+    """
+    x_min, y_min, x_max, y_max = (int(v) for v in template_roi_bounds)
+    return (x_min, x_max, y_min, y_max)
+
+
 def run_convolved_templates(
     *,
     kernel_fit_dir: str,
@@ -358,7 +380,7 @@ def run_convolved_templates(
         shifts = _group_shifts_present(
             field_ctx.store_root, field_ctx.shifts_df, int(gid), present_only=True
         )
-        crop_hr = tuple(int(v) for v in field_ctx.template_roi_bounds)
+        crop_hr = crop_hr_from_template_roi_bounds(field_ctx.template_roi_bounds)
         conv_hr = build_group_convolved_template(
             field_ctx.store_root,
             shifts,
