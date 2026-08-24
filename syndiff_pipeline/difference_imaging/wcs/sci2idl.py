@@ -80,7 +80,13 @@ def join_stars(
     df = phot.to_pandas()
     gcols = [c for c in ("source_id", "ra", "dec", "x", "y") if c in gaia.columns]
     g = gaia[gcols].copy()
-    exact = df.merge(g, left_on=["x_init", "y_init"], right_on=["x", "y"], how="inner")
+    # `phot` (the centroids stage's own output) already carries source_id/ra/
+    # dec from ITS OWN Gaia match; drop those before merging so the join
+    # doesn't collide into pandas' "_x"/"_y" suffixes (which would leave no
+    # bare "ra"/"dec"/"source_id" column for select_good_stars to read) when
+    # the exact x_init/y_init == x/y merge actually finds a match.
+    df_bare = df.drop(columns=[c for c in gcols if c in df.columns])
+    exact = df_bare.merge(g, left_on=["x_init", "y_init"], right_on=["x", "y"], how="inner")
     if len(exact) > 0:
         return exact
 

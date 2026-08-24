@@ -8,12 +8,40 @@ deployment_file: deployment.yaml
 diff_config: diff_config_cvz_tvwcs_os4_epsf_centroids.yaml
 
 stages:
+  # Not run by this wrapper (diff-only submission) -- declared so the
+  # scheduler's external-stage verify (upstream "downsample" completeness
+  # check before launching diff) resolves the right on-disk store. Without
+  # this, DownsampleStageParams/MappingStageParams/RemapStageParams
+  # defaults (output_store_name: templates/, oversampling_factor: 1) make
+  # verify look in the wrong place and the run stalls with "blocked by
+  # upstream failure" even though the real templates_tvwcs/ store is
+  # complete. Values copied from pipeline_cvz_tvwcs_os4.yaml, the
+  # orchestrator that actually built this lane (found 2026-08-22).
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+  remap:
+    store_name: tvwcs
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
   diff:
     executor: condor
 
 resources:
   diff:
-    max_concurrent: 1
+    # The "diff" pool's running-count is GLOBAL across every run on this
+    # daemon (scheduler._global_pool_running counts ALL runs, not just this
+    # one) -- leaving this at 1 means this run stalls behind whatever else
+    # (e.g. the CVZ linear rollout, or an S20/C3/K3 tvwcs run) already holds
+    # the pool's single slot, exactly as S20's own
+    # pipeline_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml warns. condor_status
+    # showed 5 idle + 1 busy 500GB/64-core nodes (2026-08-23, no other users
+    # queued) -- sized to that headroom so multiple CVZ SCCs' tvwcs/OS4 diff
+    # can run side by side toward finishing all 6 sectors.
+    max_concurrent: 10
 
 scheduler:
   heartbeat_interval_s: 30.0

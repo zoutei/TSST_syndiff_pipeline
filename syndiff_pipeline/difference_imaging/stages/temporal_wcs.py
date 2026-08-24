@@ -493,6 +493,96 @@ def _write_debug_fits(debug_dir: Path, frames, *, version: str) -> None:
         fits.PrimaryHDU(header=header).writeto(out / f"{frame.stem}_temporal_cheb5.fits", overwrite=True)
 
 
+_TEMPORAL_WCS_WORKER: dict = {}
+
+
+def _resolve_ecsv_read_cache_dir(data_root, sector: int, camera: int, ccd: int) -> Path:
+    from syndiff_pipeline.common.scc_paths import scc_wcs_dir
+
+    return scc_wcs_dir(data_root, sector, camera, ccd, version="ecsv_read_cache")
+
+
+def _read_frame_table(phot_path: Path, cache_dir: Path | None) -> Table:
+    """Read one centroids-stage ecsv, transparently cached as Parquet.
+
+    astropy's ``ascii.ecsv`` reader is pure-Python and dominates temporal_wcs's
+    per-frame cost (~1.1s of ~1.4s/frame measured on a real CVZ frame via
+    cProfile -- almost entirely astropy.io.ascii.core row/cell parsing, not
+    disk I/O wait). A cached Parquet copy of the same table reads back ~10x
+    faster (measured: 81ms vs 864ms on a real frame) and needs no YAML header
+    re-parse. Private to this stage: never touches the canonical centroids_r1
+    ecsv output or any other consumer. A clean first run still pays the ecsv
+    read once per frame to populate the cache; retries of this stage are
+    where this pays off (2026-08-23).
+    """
+    if cache_dir is None:
+        return Table.read(phot_path, format="ascii.ecsv")
+    st = phot_path.stat()
+    cache_path = cache_dir / f"{phot_path.stem}.parquet"
+    meta_path = cache_dir / f"{phot_path.stem}.meta.json"
+    if cache_path.exists() and meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            if meta.get("mtime_ns") == st.st_mtime_ns and meta.get("size") == st.st_size:
+                return Table.from_pandas(pd.read_parquet(cache_path))
+        except Exception:
+            pass  # any cache read problem: fall through and rebuild from source
+    phot = Table.read(phot_path, format="ascii.ecsv")
+    try:
+        _atomic_parquet(cache_path, phot.to_pandas())
+        _atomic_json(meta_path, {"mtime_ns": st.st_mtime_ns, "size": st.st_size})
+    except OSError:
+        pass  # the cache is a pure optimization; never fail the fit over it
+    return phot
+
+
+def _init_temporal_wcs_worker(
+    gaia_df, selector, reference, center, half, poly_degree, min_stars, read_cache_dir=None
+) -> None:
+    """ProcessPoolExecutor initializer: stash per-worker shared state once
+    (pickled ``n_jobs`` times at pool start-up, not once per frame)."""
+    _TEMPORAL_WCS_WORKER.update(
+        gaia_df=gaia_df, selector=selector, reference=reference,
+        center=center, half=half, poly_degree=poly_degree, min_stars=min_stars,
+        read_cache_dir=read_cache_dir,
+    )
+
+
+def _fit_one_frame_worker(idx_frame: tuple) -> tuple:
+    """Per-frame body of the temporal_wcs loop, callable in a worker process.
+
+    The per-frame cost is ~80% ``Table.read`` of the centroids ecsv (astropy's
+    pure-Python ascii reader; measured ~1.1s of ~1.4s/frame on a real CVZ
+    frame) and only ~20% the actual Chebyshev fit -- i.e. this loop is
+    CPU-bound in pure Python, not disk-I/O-wait-bound, so threads would stay
+    GIL-blocked; a process pool is required for real speedup (2026-08-23).
+    """
+    idx, frame = idx_frame
+    w = _TEMPORAL_WCS_WORKER
+    phot = _read_frame_table(frame.phot_path, w.get("read_cache_dir"))
+    good = select_good_stars(join_stars(phot, w["gaia_df"]), w["selector"])
+    row = {"stem": frame.stem, "btjd": float(frame.btjd), "frame_index": idx,
+           "n_stars_qc": int(len(good)), "fit_provenance": "predicted",
+           "median_residual": np.nan}
+    coeff_row = None
+    coeff_vec = None
+    if len(good) >= w["min_stars"]:
+        fit = fit_per_ffi_chebyshev(
+            w["reference"], good["ra"].to_numpy(), good["dec"].to_numpy(),
+            good["x_fit"].to_numpy(), good["y_fit"].to_numpy(),
+            center=w["center"], half_extents=w["half"], poly_degree=w["poly_degree"],
+            n_sigma=w["selector"].clip_n_sigma, max_iter=w["selector"].clip_max_iter,
+        )
+        if int(fit["n_stars"]) >= w["min_stars"]:
+            coeff_vec = np.r_[fit["coeff_x"], fit["coeff_y"]]
+            row["fit_provenance"] = "fit"
+            row["median_residual"] = float(np.nanmedian(fit["residual"][fit["keep_mask"]]))
+            coeff_row = {"stem": frame.stem, "btjd": float(frame.btjd), "fit_ok": True}
+            coeff_row.update({f"cx_{j}": float(v) for j, v in enumerate(fit["coeff_x"])})
+            coeff_row.update({f"cy_{j}": float(v) for j, v in enumerate(fit["coeff_y"])})
+    return idx, row, coeff_row, coeff_vec
+
+
 def run_temporal_wcs_all_frames(
     lane_root: str,
     gaia_df: pd.DataFrame,
@@ -522,27 +612,38 @@ def run_temporal_wcs_all_frames(
     rows: list[dict] = []
     coeff_rows: list[dict] = []
     coeff_matrix = np.full((len(frames), 2 * n_terms), np.nan)
-    for idx, frame in enumerate(frames):
-        phot = Table.read(frame.phot_path, format="ascii.ecsv")
-        good = select_good_stars(join_stars(phot, gaia_df), selector)
-        row = {"stem": frame.stem, "btjd": float(frame.btjd), "frame_index": idx,
-               "n_stars_qc": int(len(good)), "fit_provenance": "predicted",
-               "median_residual": np.nan}
-        if len(good) >= int(params.min_stars):
-            fit = fit_per_ffi_chebyshev(
-                reference, good["ra"].to_numpy(), good["dec"].to_numpy(),
-                good["x_fit"].to_numpy(), good["y_fit"].to_numpy(),
-                center=center, half_extents=half, poly_degree=int(params.cheb_degree),
-                n_sigma=float(params.clip_n_sigma), max_iter=int(params.clip_max_iter),
-            )
-            if int(fit["n_stars"]) >= int(params.min_stars):
-                coeff_matrix[idx] = np.r_[fit["coeff_x"], fit["coeff_y"]]
-                row["fit_provenance"] = "fit"
-                row["median_residual"] = float(np.nanmedian(fit["residual"][fit["keep_mask"]]))
-                coeff_row = {"stem": frame.stem, "btjd": float(frame.btjd), "fit_ok": True}
-                coeff_row.update({f"cx_{j}": float(v) for j, v in enumerate(fit["coeff_x"])})
-                coeff_row.update({f"cy_{j}": float(v) for j, v in enumerate(fit["coeff_y"])})
-                coeff_rows.append(coeff_row)
+
+    n_jobs = max(1, int(getattr(params, "n_jobs", None) or 1))
+    tasks = list(enumerate(frames))
+    read_cache_dir = (
+        _resolve_ecsv_read_cache_dir(data_root, int(sector), int(camera), int(ccd))
+        if bool(getattr(params, "enable_read_cache", True))
+        else None
+    )
+    init_args = (
+        gaia_df, selector, reference, center, half, int(params.cheb_degree), int(params.min_stars),
+        read_cache_dir,
+    )
+    if n_jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(
+            max_workers=min(n_jobs, len(tasks)),
+            initializer=_init_temporal_wcs_worker,
+            initargs=init_args,
+        ) as ex:
+            results = list(ex.map(_fit_one_frame_worker, tasks))
+    else:
+        _init_temporal_wcs_worker(*init_args)
+        results = [_fit_one_frame_worker(t) for t in tasks]
+
+    # ProcessPoolExecutor.map preserves input order regardless of completion
+    # order, so appending in `results` order reproduces the exact serial
+    # row/coeff_rows ordering (downstream code positionally slices frame_df).
+    for idx, row, coeff_row, coeff_vec in results:
+        if coeff_vec is not None:
+            coeff_matrix[idx] = coeff_vec
+            coeff_rows.append(coeff_row)
         rows.append(row)
     frame_df = pd.DataFrame(rows)
     if not coeff_rows:

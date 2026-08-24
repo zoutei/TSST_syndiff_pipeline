@@ -227,6 +227,7 @@ TEMPORAL_WCS_ALLOWED = frozenset(
         "min_stars",
         "n_jobs",
         "debug_plots",
+        "enable_read_cache",
     }
 )
 
@@ -569,6 +570,12 @@ class TemporalWcsParams:
     min_stars: int = 50
     n_jobs: Optional[int] = None
     debug_plots: bool = True
+    # Private per-SCC Parquet read-through cache under wcs/ecsv_read_cache/
+    # for the slow centroids_r1 ascii.ecsv reads (measured ~10x faster on
+    # cache hit; see run_temporal_wcs_all_frames). Retries of this stage
+    # (e.g. after a transient failure) benefit most -- a clean first run
+    # still pays the ecsv read once to populate the cache.
+    enable_read_cache: bool = True
 
 
 @dataclass
