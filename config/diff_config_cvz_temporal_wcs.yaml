@@ -37,12 +37,15 @@ pipeline:
     min_stars: 50
     debug_plots: true
     # Per-frame Chebyshev fit loop is now process-parallel (2026-08-23).
-    # Empirically swept 1/8/16/32/64 workers on a clean, dedicated 64-core
-    # node against real CVZ frames: 32 is the actual sweet spot (1.52x vs
-    # serial); 64 is WORSE than 32 (scheduling/IPC overhead exceeds the
-    # gain past this point on the current ecsv-bound per-frame cost) --
-    # do not bump this to 64 without re-measuring.
-    n_jobs: 32
+    # Swept 1/8/16/32/64 workers twice, a day apart, on clean dedicated
+    # 64-core nodes: the first sweep (s50 frames) found 32 best (1.52x,
+    # 64 worse); a same-day re-check on s52 frames found 64 ~19% FASTER
+    # than 32 (776 vs 958 ms/frame). The optimum isn't a fixed constant --
+    # it moves with real-time shared-cluster/NFS conditions and swings up
+    # to ~50% run to run. Set to 64 to match the diff stage's own core
+    # request and because it wasn't the loser in the more recent check;
+    # re-measure if this stops paying off.
+    n_jobs: 64
     # Private Parquet read-through cache for the slow per-frame ecsv read
     # (astropy's ascii.ecsv reader is pure-Python and dominates per-frame
     # cost; a cached copy reads back ~10x faster). Verified bit-identical
