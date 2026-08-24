@@ -228,73 +228,146 @@ def _run_forced_photometry(
         if isinstance(method, PsfPhotometryMethodParams) and method.epsf_workspace:
             _load_epsf_workspace(method.epsf_workspace)
 
+    # Each method resolves its own position_source (native_wcs vs
+    # temporal_wcs); several methods may share one, so resolve target_xy
+    # once per distinct (position_source, temporal_wcs_version) pair rather
+    # than once per method -- this is metadata-only (WCS math against the
+    # cached wcs_table/temporal_wcs model), not a diff FITS read, but still
+    # no reason to repeat it. See run_forced_photometry_gridded_multi_method
+    # for where the actual per-epoch I/O is shared across methods.
     extras = list(cfg.additional_forced_targets or [])
     science = (float(cfg.target_ra), float(cfg.target_dec))
-    primary_xy = photometry.per_frame_target_crop_xy(
-        wcs_table,
-        float(cfg.target_ra),
-        float(cfg.target_dec),
-        crop_bounds,
-        manifest_science_ra_dec=science,
-    )
-    primary_xy = primary_xy[phot_rows]
 
-    target_specs: list[tuple] = [
-        (
-            primary_xy,
-            None,
-            "primary",
+    temporal_wcs_dir_by_version: dict[Optional[str], str] = {}
+
+    def _temporal_wcs_dir_for(version: Optional[str]) -> str:
+        if version not in temporal_wcs_dir_by_version:
+            from syndiff_pipeline.common.scc_paths import scc_wcs_dir
+
+            d = str(
+                scc_wcs_dir(
+                    cfg.data_root,
+                    int(cfg.sector),
+                    int(cfg.camera),
+                    int(cfg.ccd),
+                    version=version,
+                )
+            )
+            if not os.path.isfile(os.path.join(d, "manifest.json")):
+                raise RuntimeError(
+                    f"forced_photometry: position_source: temporal_wcs requires a "
+                    f"completed temporal_wcs artifact at {d!r} (version={version!r}); "
+                    "run the temporal_wcs diff stage for this SCC first."
+                )
+            temporal_wcs_dir_by_version[version] = d
+        return temporal_wcs_dir_by_version[version]
+
+    xy_cache: dict[tuple[str, Optional[str]], tuple[np.ndarray, list[np.ndarray]]] = {}
+
+    def _resolve_xy_for(position_source: str, version: Optional[str]) -> tuple[np.ndarray, list[np.ndarray]]:
+        key = (position_source, version)
+        if key in xy_cache:
+            return xy_cache[key]
+        twcs_dir = _temporal_wcs_dir_for(version) if position_source == "temporal_wcs" else None
+        p_xy = photometry.resolve_forced_target_xy(
             {
                 "position_mode": "sky",
                 "ra": float(cfg.target_ra),
                 "dec": float(cfg.target_dec),
             },
-        ),
-    ]
-    for j, pt in enumerate(extras):
-        extra_xy = photometry.resolve_forced_target_xy(
-            pt,
-            primary_xy,
-            wcs_for_phot,
+            None,
+            wcs_table,
             crop_bounds,
             manifest_science_ra_dec=science,
+            temporal_wcs_dir=twcs_dir,
         )
-        target_specs.append(
-            (
-                extra_xy,
-                str(pt["name"]),
-                f"extra[{j}]",
+        p_xy = p_xy[phot_rows]
+        extras_xy = [
+            photometry.resolve_forced_target_xy(
                 pt,
-            )
-        )
-
-    for target_xy, _lc_name, tag, pt in target_specs:
-        mx = float(np.nanmedian(target_xy[:, 0]))
-        my = float(np.nanmedian(target_xy[:, 1]))
-        mode = pt.get("position_mode", "sky")
-        if mode == "sky":
-            ra_log = float(pt["ra"])
-            dec_log = float(pt["dec"])
-        else:
-            ra_log = float("nan")
-            dec_log = float("nan")
-
-        psf_sizes = [
-            m.phot_cutout_size
-            for m in phot_params.methods
-            if hasattr(m, "phot_cutout_size")
-        ]
-        warn_cutout = int(max(psf_sizes)) if psf_sizes else 15
-        if np.isfinite(mx) and np.isfinite(my):
-            _warn_if_forced_target_outside_crop(
-                mx,
-                my,
+                p_xy,
+                wcs_for_phot,
                 crop_bounds,
-                warn_cutout,
-                ra=ra_log,
-                dec=dec_log,
-                tag=tag,
+                manifest_science_ra_dec=science,
+                temporal_wcs_dir=twcs_dir,
             )
+            for pt in extras
+        ]
+        xy_cache[key] = (p_xy, extras_xy)
+        return xy_cache[key]
+
+    target_specs_by_method: dict[str, list[tuple]] = {}
+    for method in phot_params.methods:
+        p_xy, extras_xy = _resolve_xy_for(method.position_source, method.temporal_wcs_version)
+        specs: list[tuple] = [
+            (
+                p_xy,
+                None,
+                "primary",
+                {
+                    "position_mode": "sky",
+                    "ra": float(cfg.target_ra),
+                    "dec": float(cfg.target_dec),
+                },
+            )
+        ]
+        for j, (pt, extra_xy) in enumerate(zip(extras, extras_xy)):
+            specs.append((extra_xy, str(pt["name"]), f"extra[{j}]", pt))
+        target_specs_by_method[method.name] = specs
+
+    if getattr(cfg, "pipeline_plots", False) and temporal_wcs_dir_by_version:
+        pdir = _pipeline_plots_root(cfg, phot_root)
+        os.makedirs(pdir, exist_ok=True)
+        try:
+            from syndiff_pipeline.common.wcs_header_cache import (
+                ffi_list_parquet_path,
+                load_ffi_list,
+            )
+
+            ffi_list_df = load_ffi_list(
+                ffi_list_parquet_path(
+                    cfg.data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+                )
+            )
+            multi = len(temporal_wcs_dir_by_version) > 1
+            for version, twcs_dir in temporal_wcs_dir_by_version.items():
+                suffix = f"_{version}" if multi else ""
+                photometry.write_temporal_wcs_offset_debug_plot(
+                    wcs_table,
+                    float(cfg.target_ra),
+                    float(cfg.target_dec),
+                    crop_bounds,
+                    twcs_dir,
+                    ffi_list_df,
+                    title_line=f"{label_out} · {run_config.photometry_run_id}",
+                    png_path=os.path.join(pdir, f"temporal_wcs_offset_{label_out}{suffix}.png"),
+                )
+        except Exception as exc:
+            log.warning("pipeline_plots: temporal_wcs offset debug plot failed: %s", exc)
+
+    for method in phot_params.methods:
+        for target_xy, _lc_name, tag, pt in target_specs_by_method[method.name]:
+            mx = float(np.nanmedian(target_xy[:, 0]))
+            my = float(np.nanmedian(target_xy[:, 1]))
+            mode = pt.get("position_mode", "sky")
+            if mode == "sky":
+                ra_log = float(pt["ra"])
+                dec_log = float(pt["dec"])
+            else:
+                ra_log = float("nan")
+                dec_log = float("nan")
+
+            warn_cutout = int(getattr(method, "phot_cutout_size", 15))
+            if np.isfinite(mx) and np.isfinite(my):
+                _warn_if_forced_target_outside_crop(
+                    mx,
+                    my,
+                    crop_bounds,
+                    warn_cutout,
+                    ra=ra_log,
+                    dec=dec_log,
+                    tag=tag,
+                )
 
     def _plot_path(method_name: str, extra_name: Optional[str]) -> str:
         pdir = _pipeline_plots_root(cfg, phot_root)
@@ -340,7 +413,7 @@ def _run_forced_photometry(
 
     photometry.run_forced_photometry_stage(
         diff_paths=paths_for_phot,
-        target_specs=target_specs,
+        target_specs_by_method=target_specs_by_method,
         phot_stage=phot_params,
         epsf_by_workspace=epsf_by_workspace,
         gridded_epsf_by_workspace=gridded_epsf_by_workspace,

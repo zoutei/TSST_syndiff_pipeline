@@ -1,0 +1,88 @@
+# SN2022jhq forced photometry: one astrometry-refined RA/Dec feeding three
+# position-resolution methods -- xy_free, ffi_wcs, temporal_wcs -- run as
+# three methods within a SINGLE forced_photometry stage so every diff FITS
+# in the SCC is read from disk exactly once for all three, instead of once
+# per method (run_forced_photometry_gridded_multi_method); each method still
+# resolves its own position_source, so the three light curves stay directly
+# comparable (same target position math, same epsf catalog, same frames)
+# while sharing I/O and running with real n_jobs parallelism:
+#   - xyfree      -- x_0/y_0 left free each frame (diagnostic: how far does
+#                     the fit actually want to centroid, relative to whichever
+#                     WCS seeded it -- large/consistent drift flags a bad seed).
+#   - ffiwcs      -- forced (fixed_position default True), position from each
+#                     frame's own native archive FITS WCS.
+#   - temporalwcs  -- forced, position from the self-calibrated per-orbit
+#                     temporal_wcs model (Gaia-fit Chebyshev + B-spline
+#                     correction); requires that diff stage to have completed
+#                     for the SCC (see scripts/submit_photometry_when_ready.py).
+#
+# astrometry pulls Fink(ZTF)/TNS/Gaia-alerts (no creds needed) plus IRSA ZTF DR
+# and ATLAS forced photometry (creds below) and survey_ivw-mixes them to refine
+# cfg.target_ra/target_dec before forced_photometry runs. Mirrors
+# photometry_config_cvz_sn2020jtg.yaml (same store naming), on SN2022jhq's own
+# chips (config/scc_sn2022jhq.csv / config/targets_sn2022jhq.csv).
+#
+# Submitted to Condor, but only once verified ready: `photometry` has deps=()
+# (see docs/markdown/stages/photometry_pipeline.md#no-upstream-gate), so the
+# scheduler does NOT hold a submitted target in a "waiting on upstream" state
+# -- scripts/submit_photometry_when_ready.py polls hp_d/epsf_r1 (and, for the
+# temporal_wcs method, the temporal_wcs manifest) itself and only calls
+# `syndiff photometry submit` once everything this config needs is on disk.
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: sn2022jhq
+  n_jobs: 64
+  pipeline_plots: true
+  max_ffis: null
+
+paths:
+  output_store_name: linear
+  template_store_name: linear
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: astrometry
+    irsa_credentials_file: /home/kshukawa/syndiff_pipeline/config/irsa_config/credentials.yaml
+    atlas_credentials_file: /home/kshukawa/syndiff_pipeline/config/atlas_config/credentials.yaml
+    atlas_api_config_file: /home/kshukawa/syndiff_pipeline/config/atlas_config/api_config_MINE.yaml
+
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_all
+    methods:
+      - name: xyfree
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        fixed_position: false
+        position_source: native_wcs
+
+      - name: ffiwcs
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        position_source: native_wcs
+
+      - name: temporalwcs
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        position_source: temporal_wcs
+        temporal_wcs_version: temporal_cheb5_bspline_v1
+
+condor:
+  request_cpus: 64
+  request_memory: 100000
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0

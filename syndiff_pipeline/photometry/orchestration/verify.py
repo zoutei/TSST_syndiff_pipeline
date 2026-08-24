@@ -89,33 +89,26 @@ def scc_diff_lane_complete(
     return True
 
 
+def _forced_photometry_stages(pipeline: list) -> list[dict]:
+    """All ``forced_photometry`` stage entries, in pipeline order.
+
+    A photometry config may chain several ``forced_photometry`` stages that
+    share one upstream ``astrometry`` stage (e.g. one per position source:
+    xy_free / ffi_wcs / temporal_wcs) -- callers must check every one, not
+    just the first.
+    """
+    return [s for s in pipeline if isinstance(s, dict) and s.get("kind") == "forced_photometry"]
+
+
 def _forced_photometry_stage(pipeline: list) -> dict | None:
-    for stage in pipeline:
-        if isinstance(stage, dict) and stage.get("kind") == "forced_photometry":
-            return stage
-    return None
+    """Deprecated: first ``forced_photometry`` stage only. Use `_forced_photometry_stages`."""
+    stages = _forced_photometry_stages(pipeline)
+    return stages[0] if stages else None
 
 
-def photometry_complete(
-    run_config: PhotometryRunConfig,
-    event_dir: str | Path,
-    photometry_run_id: str | None = None,
+def _forced_photometry_stage_complete(
+    stage: dict, phot_root: Path, extras: list, lightcurve_csv_basename
 ) -> bool:
-    """True when photometry LC CSVs exist under ``phot_{run_id}/``."""
-    from syndiff_pipeline.difference_imaging.stages.photometry import lightcurve_csv_basename
-
-    event_dir = Path(event_dir)
-    run_id = photometry_run_id if photometry_run_id is not None else run_config.photometry_run_id
-    phot_root = Path(photometry_root(str(event_dir), run_id))
-    if not phot_root.is_dir():
-        return False
-
-    stage = _forced_photometry_stage(run_config.pipeline)
-    if stage is None:
-        # astrometry-only photometry configs are complete when astrometry JSON exists
-        astro = phot_root / "astrometry_result.json"
-        return astro.is_file()
-
     label = str(stage.get("output", "")).strip()
     if not label:
         return False
@@ -126,7 +119,6 @@ def photometry_complete(
     methods = stage.get("methods") or []
     if not methods:
         return False
-    extras = run_config.additional_forced_targets or []
     for entry in methods:
         if not isinstance(entry, dict):
             return False
@@ -146,6 +138,33 @@ def photometry_complete(
             if not (phot_out / extra_csv).is_file():
                 return False
     return True
+
+
+def photometry_complete(
+    run_config: PhotometryRunConfig,
+    event_dir: str | Path,
+    photometry_run_id: str | None = None,
+) -> bool:
+    """True when every ``forced_photometry`` stage's LC CSVs exist under ``phot_{run_id}/``."""
+    from syndiff_pipeline.difference_imaging.stages.photometry import lightcurve_csv_basename
+
+    event_dir = Path(event_dir)
+    run_id = photometry_run_id if photometry_run_id is not None else run_config.photometry_run_id
+    phot_root = Path(photometry_root(str(event_dir), run_id))
+    if not phot_root.is_dir():
+        return False
+
+    stages = _forced_photometry_stages(run_config.pipeline)
+    if not stages:
+        # astrometry-only photometry configs are complete when astrometry JSON exists
+        astro = phot_root / "astrometry_result.json"
+        return astro.is_file()
+
+    extras = run_config.additional_forced_targets or []
+    return all(
+        _forced_photometry_stage_complete(stage, phot_root, extras, lightcurve_csv_basename)
+        for stage in stages
+    )
 
 
 def verify_photometry_prerequisites(
@@ -207,32 +226,29 @@ def collect_photometry_artifacts(
     if astro.is_file():
         artifacts.append(str(astro.resolve()))
 
-    stage = _forced_photometry_stage(run_config.pipeline)
-    if stage is None:
-        return artifacts
-
-    label = str(stage.get("output", "")).strip()
-    phot_out = phot_root / label
-    if not phot_out.is_dir():
-        return artifacts
-    methods = stage.get("methods") or []
     extras = run_config.additional_forced_targets or []
-    for entry in methods:
-        if not isinstance(entry, dict):
+    for stage in _forced_photometry_stages(run_config.pipeline):
+        label = str(stage.get("output", "")).strip()
+        phot_out = phot_root / label
+        if not phot_out.is_dir():
             continue
-        name = str(entry.get("name", "")).strip()
-        if not name:
-            continue
-        primary = phot_out / lightcurve_csv_basename(name)
-        if primary.is_file():
-            artifacts.append(str(primary.resolve()))
-        for pt in extras:
-            if not isinstance(pt, dict):
+        methods = stage.get("methods") or []
+        for entry in methods:
+            if not isinstance(entry, dict):
                 continue
-            extra_name = str(pt.get("name", "")).strip()
-            if not extra_name:
+            name = str(entry.get("name", "")).strip()
+            if not name:
                 continue
-            extra = phot_out / lightcurve_csv_basename(name, extra_name)
-            if extra.is_file():
-                artifacts.append(str(extra.resolve()))
+            primary = phot_out / lightcurve_csv_basename(name)
+            if primary.is_file():
+                artifacts.append(str(primary.resolve()))
+            for pt in extras:
+                if not isinstance(pt, dict):
+                    continue
+                extra_name = str(pt.get("name", "")).strip()
+                if not extra_name:
+                    continue
+                extra = phot_out / lightcurve_csv_basename(name, extra_name)
+                if extra.is_file():
+                    artifacts.append(str(extra.resolve()))
     return artifacts

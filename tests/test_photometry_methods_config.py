@@ -176,6 +176,7 @@ class TestPhotometryMultiPsfCsvs(unittest.TestCase):
             ]
         )
         target_specs = [(xy.copy(), None, "primary", {"position_mode": "sky"})]
+        target_specs_by_method = {"prf_a": target_specs, "prf_b": target_specs}
 
         g = np.linspace(-1, 1, 11)
         xx, yy = np.meshgrid(g, g)
@@ -191,7 +192,7 @@ class TestPhotometryMultiPsfCsvs(unittest.TestCase):
                     with patch.object(ph.os.path, "exists", return_value=True):
                         ph.run_forced_photometry_stage(
                             diff_paths=paths,
-                            target_specs=target_specs,
+                            target_specs_by_method=target_specs_by_method,
                             phot_stage=stage,
                             epsf_by_workspace={},
                             stage_epsf_workspace=None,
@@ -231,7 +232,7 @@ class TestPhotometryMultiPsfCsvs(unittest.TestCase):
             with self.assertRaises(ValueError) as ctx:
                 ph.run_forced_photometry_stage(
                     diff_paths=paths,
-                    target_specs=[(xy, None, "primary", {})],
+                    target_specs_by_method={"epsf": [(xy, None, "primary", {})]},
                     phot_stage=stage,
                     epsf_by_workspace={"epsf_ws": np.zeros((1, 121))},
                     stage_epsf_workspace="epsf_ws",
@@ -277,7 +278,10 @@ class TestPhotometryMultiPsfCsvs(unittest.TestCase):
             with patch.object(ph.os.path, "exists", return_value=True):
                 ph.run_forced_photometry_stage(
                     diff_paths=paths,
-                    target_specs=[(xy.copy(), None, "primary", {})],
+                    target_specs_by_method={
+                        "epsf": [(xy.copy(), None, "primary", {})],
+                        "epsf_bkg": [(xy.copy(), None, "primary", {})],
+                    },
                     phot_stage=stage,
                     epsf_by_workspace={},
                     stage_epsf_workspace="epsf_r1",
