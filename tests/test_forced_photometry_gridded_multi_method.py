@@ -97,6 +97,37 @@ class TestGriddedMultiMethodSharedIO(unittest.TestCase):
             self.assertTrue((Path(tmp) / "lc_a.csv").is_file())
             self.assertTrue((Path(tmp) / "lc_b.csv").is_file())
 
+    def test_uppercase_BTJD_does_not_reopen_fits_for_timestamps(self):
+        """SCC frames.csv copies BTJD (uppercase). The combined pass must use
+        that column instead of a serial read_diff_btjd pre-pass over every hp_d.
+        """
+        wcs = pd.DataFrame(
+            {
+                "BTJD": [200.0, 201.0, 202.0],
+                "group_id": [0, 0, 1],
+            }
+        )
+        entries = [
+            (self.method_a, self.catalog, self.xy_a, "lc_a.csv", None, "a"),
+        ]
+        read_mock = MagicMock(return_value=(np.zeros((8, 8)), None))
+        btjd_mock = MagicMock(side_effect=AssertionError("read_diff_btjd must not run"))
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(ph, "read_diff_primary_and_noise_sigma", read_mock):
+                with patch.object(ph, "read_diff_btjd", btjd_mock):
+                    with patch.object(ph, "forced_phot_gridded_epoch", side_effect=self._fake_forced_phot):
+                        with patch.object(ph.os.path, "exists", return_value=True):
+                            dfs = ph.run_forced_photometry_gridded_multi_method(
+                                diff_paths=self.diff_paths,
+                                entries=entries,
+                                wcs_table=wcs,
+                                cfg=_cfg(),
+                                output_dir=tmp,
+                            )
+            self.assertEqual(read_mock.call_count, self.n_epochs)
+            btjd_mock.assert_not_called()
+            self.assertTrue(np.allclose(dfs[0]["btjd"], [200.0, 201.0, 202.0]))
+
     def test_matches_running_each_method_separately(self):
         """The combined pass must give bit-identical output to running
         _run_forced_photometry_gridded_single once per method (the old,
@@ -231,6 +262,24 @@ class TestForcedPhotometryStageMultiPositionSource(unittest.TestCase):
             self.assertTrue(np.allclose(df_temporal["x_fit"], 50.0))
             self.assertTrue(np.allclose(df_native["flux"], 5.0 + 6.0 / 100.0))
             self.assertTrue(np.allclose(df_temporal["flux"], 50.0 + 60.0 / 100.0))
+
+
+class TestBtjdColumnFromWcsTable(unittest.TestCase):
+    def test_prefers_uppercase_BTJD(self):
+        wcs = pd.DataFrame({"BTJD": [1.5, 2.5], "group_id": [0, 1]})
+        got = ph._btjd_column_from_wcs_table(wcs, 2)
+        self.assertTrue(np.allclose(got, [1.5, 2.5]))
+
+    def test_lowercase_btjd_still_works(self):
+        wcs = pd.DataFrame({"btjd": [9.0]})
+        got = ph._btjd_column_from_wcs_table(wcs, 1)
+        self.assertTrue(np.allclose(got, [9.0]))
+
+    def test_missing_column_is_nan(self):
+        wcs = pd.DataFrame({"group_id": [0, 1]})
+        got = ph._btjd_column_from_wcs_table(wcs, 2)
+        self.assertEqual(len(got), 2)
+        self.assertTrue(np.all(~np.isfinite(got)))
 
 
 if __name__ == "__main__":

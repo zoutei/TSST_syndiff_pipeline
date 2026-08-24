@@ -162,15 +162,39 @@ def read_diff_primary_and_noise_sigma(path: str) -> tuple[np.ndarray, Optional[n
     return data, noise
 
 
+_BTJD_TABLE_COLS = ("btjd", "BTJD", "tjd", "TJD", "jd", "JD")
+
+
+def _btjd_column_from_wcs_table(wcs_table: pd.DataFrame, n_epochs: int) -> np.ndarray:
+    """Row-aligned BTJD from the SCC handoff table, without opening FITS.
+
+    ``frames.csv`` from ``scc_bootstrap`` copies ``BTJD`` (uppercase) from
+    ``ffi_list``. Older lowercase ``btjd`` is still accepted. Missing or
+    shorter tables yield NaN for those epochs — callers may fall back to
+    :func:`read_diff_btjd` only for remaining non-finite entries.
+    """
+    out = np.full(int(n_epochs), np.nan, dtype=np.float64)
+    if wcs_table is None or len(wcs_table) == 0:
+        return out
+    col = next((c for c in _BTJD_TABLE_COLS if c in wcs_table.columns), None)
+    if col is None:
+        return out
+    vals = pd.to_numeric(wcs_table[col], errors="coerce").to_numpy(dtype=np.float64)
+    n = min(int(n_epochs), len(vals))
+    if n:
+        out[:n] = vals[:n]
+    return out
+
+
 def read_diff_btjd(path: str) -> float:
     """BTJD (TSTART/TSTOP midpoint) from a diff FITS's header.
 
-    ``frames.csv``/``wcs_table`` (``scc_bootstrap.ensure_scc_diff_handoff``)
-    carries no ``btjd`` column at all -- it's ``path, ffi_basename, group_id,
-    group_dx, group_dy, wcs_ok`` only. hp_d/ks_d copy the source FFI's
-    ``TSTART``/``TSTOP`` (BJDREFI/BJDREFF-relative, i.e. already BTJD for
+    Last-resort when the handoff table has no usable ``BTJD``/``btjd`` for
+    that epoch. Prefer :func:`_btjd_column_from_wcs_table` so photometry does
+    not re-open every ``hp_d`` FITS for timestamps. hp_d/ks_d copy the source
+    FFI's ``TSTART``/``TSTOP`` (BJDREFI/BJDREFF-relative, already BTJD for
     TESS products) into the science extension header (not PRIMARY, which is
-    header-only for fpack files -- see ``read_diff_primary_and_noise_sigma``).
+    header-only for fpack files — see ``read_diff_primary_and_noise_sigma``).
     Returns NaN if neither keyword is found on any HDU.
     """
     from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
@@ -1398,17 +1422,12 @@ def run_forced_photometry_gridded_multi_method(
                 f"{txy_arr.shape} != ({n_epochs}, 2) for method {method.name!r}"
             )
 
-    btjd_col = (
-        wcs_table["btjd"].values
-        if "btjd" in wcs_table.columns
-        else np.full(n_epochs, np.nan)
-    )
+    btjd_col = _btjd_column_from_wcs_table(wcs_table, n_epochs)
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
         else np.zeros(n_epochs, int)
     )
-    btjd_col = np.asarray(btjd_col, dtype=np.float64).copy()
     for i, path in enumerate(diff_paths):
         if not np.isfinite(btjd_col[i]) and path is not None and os.path.exists(path):
             try:
@@ -1526,11 +1545,7 @@ def _run_forced_photometry_gridded_single(
     csv_name = lightcurve_csv_filename or "lightcurve.csv"
     txy = np.asarray(target_xy, dtype=np.float64)
     n_epochs = len(diff_paths)
-    btjd_col = (
-        wcs_table["btjd"].values
-        if "btjd" in wcs_table.columns
-        else np.full(n_epochs, np.nan)
-    )
+    btjd_col = _btjd_column_from_wcs_table(wcs_table, n_epochs)
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
@@ -1626,11 +1641,7 @@ def _run_forced_photometry_gridded_tessreduce_single(
     snap = str(phot.phot_snap or "brightest").lower()
     surface, poly_order = _create_psf_surface_args(phot.phot_bkg_poly_order)
 
-    btjd_col = (
-        wcs_table["btjd"].values
-        if "btjd" in wcs_table.columns
-        else np.full(n_epochs, np.nan)
-    )
+    btjd_col = _btjd_column_from_wcs_table(wcs_table, n_epochs)
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
@@ -2095,11 +2106,7 @@ def _run_aperture_photometry_multi(
         if workspace_progress_path:
             record_epoch_progress(workspace_progress_path, cli_progress_path)
 
-    btjd_col = (
-        wcs_table["btjd"].values
-        if "btjd" in wcs_table.columns
-        else np.full(n_epochs, np.nan)
-    )
+    btjd_col = _btjd_column_from_wcs_table(wcs_table, n_epochs)
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
@@ -3150,11 +3157,7 @@ def _run_forced_photometry_single(
             snap,
         )
 
-    btjd_col = (
-        wcs_table["btjd"].values
-        if "btjd" in wcs_table.columns
-        else np.full(n_epochs, np.nan)
-    )
+    btjd_col = _btjd_column_from_wcs_table(wcs_table, n_epochs)
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
@@ -3571,11 +3574,7 @@ def run_forced_photometry_multi(
         for s in range(n_src):
             sx[s], sy[s] = _offsets_after_source_only(locator_bundles[s], phot_size)
 
-    btjd_col = (
-        wcs_table["btjd"].values
-        if "btjd" in wcs_table.columns
-        else np.full(n_epochs, np.nan)
-    )
+    btjd_col = _btjd_column_from_wcs_table(wcs_table, n_epochs)
     gid_col = (
         wcs_table["group_id"].values
         if "group_id" in wcs_table.columns
