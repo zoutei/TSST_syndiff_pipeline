@@ -69,6 +69,22 @@ class TestReadLogProgress(unittest.TestCase):
         self.assertEqual(prog.text, "2/19 projections 5/10 rows")
         self.assertEqual(prog.kind, "fraction")
 
+    def test_ps1_process_overall_rows_progress_preferred(self):
+        path = self._write_log(
+            "ps1_pr.log",
+            "\n".join(
+                [
+                    "INFO [Pipeline] Processing 19 projections",
+                    # Projection/row counts vary wildly per projection, so
+                    # the cumulative "overall" row count is what's shown.
+                    "INFO [Pipeline] Progress: projection 2/19 row 5/10 overall 47/272 rows",
+                ]
+            ),
+        )
+        prog = read_log_progress(path, "ps1_process")
+        self.assertEqual(prog.text, "47/272 rows (proj 2/19)")
+        self.assertEqual(prog.kind, "fraction")
+
     def test_ps1_process_fallback_counts_finished_projections(self):
         path = self._write_log(
             "ps1_pr.log",
@@ -198,6 +214,43 @@ class TestReadLogProgress(unittest.TestCase):
         self.assertEqual(prog.text, "photometry lc_prf_on_diffs 120/842")
         self.assertEqual(prog.kind, "fraction")
 
+    def test_photometry_stage_sidecar(self):
+        log_path = self._write_log("photometry.log", "Photometry stage: forced_photometry\n")
+        sidecar = log_path.parent / "diff.photometry.progress.json"
+        sidecar.write_text(
+            (
+                '{"output_label": "lc_all", "diffs_input": "hp_d", '
+                '"n_sources": 3, "epochs_total": 3399, "epochs_done": 2257, '
+                '"phase": "flux", "updated_at": "2026-08-24T21:00:00+00:00"}\n'
+            ),
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "photometry")
+        self.assertEqual(prog.text, "photometry lc_all (3 src) 2257/3399")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_photometry_stage_tqdm_from_log(self):
+        path = self._write_log(
+            "photometry.log",
+            "Photometry stage: forced_photometry\n"
+            "photometry lc_all:  10%|█         | 340/3399 [00:40<06:00,  8.50task/s]\r"
+            "photometry lc_all:  66%|██████▋   | 2257/3399 [04:35<02:31,  7.54task/s]\n",
+        )
+        prog = read_log_progress(path, "photometry")
+        self.assertEqual(prog.text, "photometry lc_all 2257/3399")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_photometry_stage_elapsed_fallback(self):
+        path = self._write_log("photometry.log", "Photometry stage: astrometry\n")
+        prog = read_log_progress(
+            path,
+            "photometry",
+            started_at="2020-01-01T00:00:00+00:00",
+        )
+        self.assertIsNotNone(prog)
+        self.assertEqual(prog.kind, "elapsed")
+        self.assertTrue(prog.text.endswith("m") or prog.text.endswith("s"))
+
     def test_diff_centroids_sidecar(self):
         log_path = self._write_log("diff.log", "Stage: centroids\n")
         sidecar = log_path.parent / "diff.centroids.progress.json"
@@ -211,6 +264,18 @@ class TestReadLogProgress(unittest.TestCase):
         )
         prog = read_log_progress(log_path, "diff")
         self.assertEqual(prog.text, "centroids centroids_r1 45/1188")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_temporal_wcs_sidecar(self):
+        log_path = self._write_log("diff.log", "Stage: temporal_wcs\n")
+        sidecar = log_path.parent / "diff.temporal_wcs.progress.json"
+        sidecar.write_text(
+            '{"frames_total": 3623, "frames_done": 3617, "frames_ok": 3500, '
+            '"phase": "fitting", "updated_at": "2026-07-09T13:00:00+00:00"}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertEqual(prog.text, "temporal_wcs 3617/3623")
         self.assertEqual(prog.kind, "fraction")
 
     def test_diff_centroids_log_fallback(self):
