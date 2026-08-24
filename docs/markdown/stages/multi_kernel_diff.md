@@ -113,7 +113,16 @@ Mechanics:
 - Group assembly scatter-adds each constituent skycell's `(n_basis, ny, nx)` interior + seam-delta maps, then recombines with per-block kernel coefficients (`recombine_basis_maps_full`, a pixel-for-pixel port of `hotpants.pure.convolution.jit_spatial_convolve`'s blocking contract) — this is the one genuinely new numerical code path and is float64 throughout (today's default path runs in float32, so results will not match to float32's own machine epsilon, only somewhat below it).
 - Falls back to the default per-group convolution path when `use_patch_cache` is unset/`false`; both paths coexist in `convolved_templates.py` and can be A/B compared on the same SCC.
 
-Status as of 2026-08-23: implemented and verified on synthetic data (halo-exactness, block-recombination-vs-`jit_spatial_convolve`, and a full crop-aware H.1+H.2 integration test) and on real s0020/c3/k3 data restricted to a same-batch split-contrib subset (0 mismatches once compared against a *fresh* plain-contrib snapshot rather than pre-refit orphaned files — see the field_geometry.md verification pitfall note). Not yet validated end-to-end on a full real SCC production run; blocked, independent of this code, on backfilling a subset of that SCC's shared `ps1_combined.zarr` cells to the current recipe fingerprint (see the pipeline-map skill's combined-store fingerprint migration note) before a full-coverage split-contrib store can be built.
+**Status as of 2026-08-24: numerically correct but NOT a net speedup on s0020/c3/k3 -- do not enable `use_patch_cache` in production for this SCC.**
+
+Correctness is solid: verified on synthetic data (halo-exactness, block-recombination-vs-`jit_spatial_convolve`, a full crop-aware H.1+H.2 integration test) and on real s0020/c3/k3 data restricted to a same-batch split-contrib subset (0 mismatches once compared against a *fresh* plain-contrib snapshot rather than pre-refit orphaned files). A full-SCC end-to-end production run was launched and monitored; it surfaced a real coordinate-order bug (`template_roi_bounds` is `(x_min, y_min, x_max, y_max)`, not the `(x0, x1, y0, y1)` crop convention -- fixed, see `crop_hr_from_template_roi_bounds`), and after that fix, a decisive **performance** finding:
+
+- On s0020/c3/k3, **every one of the 1123 groups touches all 999 skycells** (verified against the shift table directly, not assumed) -- there is no group with a small, localized footprint.
+- The interior cache reuses exactly as designed (group 1 needed only 119 fresh interior entries out of 999).
+- But the seam-delta correction is *inherently per-group* (it depends on each group's own neighbour-shift combination) and essentially never reuses across groups. Because every group touches every skycell, every group pays close to the full cost of ~999 individual small-patch FFT convolutions for its seam corrections, with almost no caching benefit.
+- Doing ~999 separate small-patch convolutions per group is slower than the old path's *one* whole-image convolution per group -- each small FFT call pays fixed setup/allocation overhead that doesn't shrink proportionally with patch size. Measured: ~33 min/group in steady state (groups 1-15, no stall), roughly **85x slower** than the old path's ~23s/group. A full 1123-group run at that rate would take on the order of weeks, before accounting for an additional stall observed after group 15 (RSS frozen for 2h45m; not root-caused -- moot given the steady-state rate alone already rules this out) that would have made it worse still. The run was killed rather than left to continue.
+
+**Implication**: `use_patch_cache` only pays off for SCCs/lanes where individual groups have small, localized footprints (the original motivating case -- see the plan doc's 69x-duplication measurement, which counted total store-wide reuse, not per-group locality). It is a net loss when groups routinely span most or all of the SCC's skycells, as s0020/c3/k3 does. Before enabling it anywhere, check the group-size distribution first: `template_group_shifts.parquet.groupby("group_id").size()` -- if most groups touch a large fraction of the SCC's total skycell count, do not enable it. H.1 (the interior/seam-delta split store itself) remains correct and harmless to build regardless; it is only the H.2 convolution mode built on top of it that this finding is about.
 
 ---
 
@@ -194,7 +203,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `inputs.kernel_fit` | Directory with `kernel_r2.npz` |
 | `output` | Convolved template workspace label |
 | `skip_existing` | Reuse valid FITS + manifest |
-| `use_patch_cache` | `false` by default; field mode + `F>1` only — see [patch-cache convolution](#patch-cache-convolution-use_patch_cache-field-mode--f1-only) above. Requires a complete `write_split_contribs` store. |
+| `use_patch_cache` | `false` by default; field mode + `F>1` only — see [patch-cache convolution](#patch-cache-convolution-use_patch_cache-field-mode--f1-only) above. Requires a complete `write_split_contribs` store. **Measured a net slowdown on s0020/c3/k3 (~85x, groups span the whole SCC) — check the group-size distribution before enabling anywhere; do not assume it's a speedup.** |
 
 ### `kernel_subtract`
 
