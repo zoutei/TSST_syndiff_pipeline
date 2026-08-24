@@ -26,6 +26,7 @@ _RE_PS1_DL_TOTAL = re.compile(r"Found (\d+) total skycells to process")
 
 _RE_PS1_PR_PROJ_ROW_PROGRESS = re.compile(
     r"\[Pipeline\] Progress: projection (\d+)/(\d+) row (\d+)/(\d+)"
+    r"(?: overall (\d+)/(\d+) rows)?"
 )
 _RE_PS1_PR_PROCESSING_PROJECTIONS = re.compile(r"\[Pipeline\] Processing (\d+) projections")
 _RE_PS1_PR_ROW_STEP = re.compile(
@@ -61,6 +62,9 @@ _RE_EPSF_FRAMES = re.compile(
 )
 _RE_CENTROIDS_FRAMES = re.compile(
     r"centroids \[(\w+)\]: (\d+)/(\d+) frames wrote"
+)
+_RE_PHOT_TQDM = re.compile(
+    r"photometry(?:\s+(\S+))?:\s+\d+%\|[^\r\n]*?(\d+)/(\d+)"
 )
 
 _PHASE_LINES = (
@@ -221,7 +225,16 @@ def _parse_ps1_process(text: str) -> StageProgress | None:
     StageProgress | None"""
     match = _last_match(_RE_PS1_PR_PROJ_ROW_PROGRESS, text)
     if match:
-        p_done, p_total, r_done, r_total = match.groups()
+        p_done, p_total, r_done, r_total, overall_done, overall_total = match.groups()
+        if overall_done is not None:
+            # Global row count across every projection in the run -- unlike
+            # the per-projection figures, this doesn't reset at projection
+            # boundaries and isn't skewed by projections having wildly
+            # different row counts (see ps1_process.py sequential_processor).
+            return StageProgress(
+                f"{overall_done}/{overall_total} rows (proj {p_done}/{p_total})",
+                "fraction",
+            )
         return StageProgress(
             f"{p_done}/{p_total} projections {r_done}/{r_total} rows",
             "fraction",
@@ -514,11 +527,17 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
     from syndiff_pipeline.difference_imaging.stages.hotpants_progress import (
         format_progress_text as format_hotpants_progress,
         progress_path_for_diff_log as hotpants_sidecar_path,
-        read_progress,
+        read_progress as read_hotpants_progress,
     )
     from syndiff_pipeline.difference_imaging.stages.photometry_progress import (
         format_progress_text as format_photometry_progress,
         progress_path_for_diff_log as photometry_sidecar_path,
+        read_progress as read_photometry_progress,
+    )
+    from syndiff_pipeline.difference_imaging.stages.temporal_wcs_progress import (
+        format_progress_text as format_temporal_wcs_progress,
+        progress_path_for_diff_log as temporal_wcs_sidecar_path,
+        read_progress as read_temporal_wcs_progress,
     )
 
     best: tuple[str, str, str] | None = None
@@ -533,10 +552,15 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
             format_kernel_subtract_progress,
             read_kernel_subtract_progress,
         ),
-        (hotpants_sidecar_path(log_path), format_hotpants_progress, read_progress),
+        (hotpants_sidecar_path(log_path), format_hotpants_progress, read_hotpants_progress),
         (epsf_sidecar_path(log_path), format_epsf_progress, read_progress_merged),
         (centroids_sidecar_path(log_path), format_centroids_progress, read_centroids_progress_merged),
-        (photometry_sidecar_path(log_path), format_photometry_progress, read_progress),
+        (photometry_sidecar_path(log_path), format_photometry_progress, read_photometry_progress),
+        (
+            temporal_wcs_sidecar_path(log_path),
+            format_temporal_wcs_progress,
+            read_temporal_wcs_progress,
+        ),
     ):
         data = read_fn(sidecar_path)
         if not data:
@@ -552,6 +576,35 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
     if best is None:
         return None
     return StageProgress(best[1], best[2])
+
+
+def _parse_photometry_sidecar(log_path: Path) -> StageProgress | None:
+    """Read ``diff.photometry.progress.json`` beside ``photometry.log`` (or ``diff.log``)."""
+    from syndiff_pipeline.difference_imaging.stages.photometry_progress import (
+        format_progress_text as format_photometry_progress,
+        progress_path_for_diff_log as photometry_sidecar_path,
+        read_progress as read_photometry_progress,
+    )
+
+    data = read_photometry_progress(photometry_sidecar_path(log_path))
+    if not data:
+        return None
+    text = format_photometry_progress(data)
+    if text is None:
+        return None
+    phase = str(data.get("phase", ""))
+    kind = "fraction" if phase != "complete" else "phase"
+    return StageProgress(text, kind)
+
+
+def _parse_photometry(text: str) -> StageProgress | None:
+    """Parse tqdm epoch counters written to the photometry stage log."""
+    match = _last_match(_RE_PHOT_TQDM, text)
+    if not match:
+        return None
+    label, done, total = match.groups()
+    prefix = f"photometry {label}" if label else "photometry"
+    return StageProgress(f"{prefix} {done}/{total}", "fraction")
 
 
 def _parse_diff(text: str) -> StageProgress | None:
@@ -612,6 +665,7 @@ _PARSERS = {
     "mapping": _parse_mapping,
     "wcs_grouping": _parse_wcs_grouping,
     "diff": _parse_diff,
+    "photometry": _parse_photometry,
 }
 
 
@@ -637,9 +691,13 @@ def read_log_progress(
         sidecar_prog = _parse_diff_sidecar(path)
         if sidecar_prog is not None:
             return sidecar_prog
+    if stage == "photometry":
+        sidecar_prog = _parse_photometry_sidecar(path)
+        if sidecar_prog is not None:
+            return sidecar_prog
 
     if not path.is_file():
-        if stage == "wcs_grouping":
+        if stage in ("wcs_grouping", "photometry"):
             return _elapsed_progress(started_at)
         return None
 
@@ -658,6 +716,6 @@ def read_log_progress(
     )
     if result is not None:
         return result
-    if stage == "wcs_grouping":
+    if stage in ("wcs_grouping", "photometry"):
         return _elapsed_progress(started_at)
     return None

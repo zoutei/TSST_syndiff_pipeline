@@ -76,7 +76,7 @@ def stage_output_recently_active(
         return True
     if stage == "diff" and path.name != "diff.log":
         path = path.parent / "diff.log"
-    if stage == "diff":
+    if stage in ("diff", "photometry"):
         return _diff_sidecar_recently_active(path, max_age_s=max_age_s)
     return False
 

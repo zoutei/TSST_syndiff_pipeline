@@ -1391,6 +1391,8 @@ def run_forced_photometry_gridded_multi_method(
     plot_title_suffix: Optional[str] = None,
     output_label: Optional[str] = None,
     diffs_dir: Optional[str] = None,
+    diffs_input: Optional[str] = None,
+    diff_log_path: Optional[str] = None,
 ) -> List[pd.DataFrame]:
     """
     Forced photometry for many (method, target) combinations that all use a
@@ -1456,10 +1458,34 @@ def run_forced_photometry_gridded_multi_method(
     n_entries = len(entries)
     results_per_epoch: List[Optional[list]] = [None] * n_epochs
 
+    cli_progress_path = (
+        str(progress_path_for_diff_log(diff_log_path))
+        if diff_log_path is not None
+        else None
+    )
+    track_progress = output_label is not None
+    workspace_progress_path: Optional[str] = None
+    if track_progress:
+        workspace_progress_path = str(progress_path_for_output_workspace(output_dir))
+        init_progress_pair(
+            workspace_progress_path,
+            cli_progress_path,
+            output_label=str(output_label),
+            diffs_input=str(diffs_input or ""),
+            n_sources=n_entries,
+            epochs_total=n_epochs,
+            phase="flux",
+        )
+
+    def _record_epoch() -> None:
+        if workspace_progress_path:
+            record_epoch_progress(workspace_progress_path, cli_progress_path)
+
     if not parallel:
         for t in tqdm_iter(flux_tasks, desc=tqdm_base):
             i, out = _forced_phot_gridded_multi_flux_worker(t)
             results_per_epoch[i] = out
+            _record_epoch()
     else:
         log.info(
             "  forced_photometry: gridded multi-method flux n_jobs=%s (loky), "
@@ -1473,9 +1499,13 @@ def run_forced_photometry_gridded_multi_method(
             n_tasks=n_epochs,
             desc=tqdm_base,
             n_jobs_eff=n_jobs,
+            on_result=lambda _r: _record_epoch(),
         )
         for i, out in flux_results:
             results_per_epoch[i] = out
+
+    if track_progress:
+        set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
 
     filenames = [os.path.basename(p) if p else "" for p in diff_paths]
     plot_on = getattr(cfg, "pipeline_plots", False)
@@ -3851,6 +3881,8 @@ def run_forced_photometry_stage(
             plot_title_suffix=plot_title_suffix,
             output_label=output_label,
             diffs_dir=diffs_dir,
+            diffs_input=diffs_input,
+            diff_log_path=diff_log_path,
         )
 
         idx = 0

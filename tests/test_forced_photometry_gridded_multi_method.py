@@ -97,6 +97,42 @@ class TestGriddedMultiMethodSharedIO(unittest.TestCase):
             self.assertTrue((Path(tmp) / "lc_a.csv").is_file())
             self.assertTrue((Path(tmp) / "lc_b.csv").is_file())
 
+    def test_writes_progress_sidecar_when_output_label_set(self):
+        entries = [
+            (self.method_a, self.catalog, self.xy_a, "lc_a.csv", None, "a"),
+            (self.method_b, self.catalog, self.xy_b, "lc_b.csv", None, "b"),
+        ]
+        read_mock = MagicMock(return_value=(np.zeros((8, 8)), None))
+        with tempfile.TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "photometry.log"
+            log_path.touch()
+            with patch.object(ph, "read_diff_primary_and_noise_sigma", read_mock):
+                with patch.object(ph, "forced_phot_gridded_epoch", side_effect=self._fake_forced_phot):
+                    with patch.object(ph.os.path, "exists", return_value=True):
+                        ph.run_forced_photometry_gridded_multi_method(
+                            diff_paths=self.diff_paths,
+                            entries=entries,
+                            wcs_table=self.wcs,
+                            cfg=_cfg(),
+                            output_dir=tmp,
+                            output_label="lc_all",
+                            diffs_input="hp_d",
+                            diff_log_path=str(log_path),
+                        )
+            from syndiff_pipeline.difference_imaging.stages import photometry_progress as pp
+
+            cli = pp.read_progress(pp.progress_path_for_diff_log(log_path))
+            ws = pp.read_progress(pp.progress_path_for_output_workspace(tmp))
+            assert cli is not None and ws is not None
+            self.assertEqual(cli["epochs_done"], self.n_epochs)
+            self.assertEqual(cli["epochs_total"], self.n_epochs)
+            self.assertEqual(cli["n_sources"], 2)
+            self.assertEqual(cli["phase"], "complete")
+            self.assertEqual(
+                pp.format_progress_text(ws),
+                "photometry lc_all (2 src) complete 3/3",
+            )
+
     def test_uppercase_BTJD_does_not_reopen_fits_for_timestamps(self):
         """SCC frames.csv copies BTJD (uppercase). The combined pass must use
         that column instead of a serial read_diff_btjd pre-pass over every hp_d.
