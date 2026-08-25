@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
 from syndiff_pipeline.common.orchestration import logs, stage_liveness
@@ -85,7 +86,7 @@ def _orphaned_active_stage_rows(
     )
 
     resolved_cfg = cfg
-    rows = []
+    candidates = []
     for row in state.list_stage_runs(run_id):
         if row.status not in (STATUS_FAILED, STATUS_CANCELED):
             continue
@@ -101,10 +102,38 @@ def _orphaned_active_stage_rows(
         log_path = row.log_path or str(
             logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
         )
-        if not stage_liveness.stage_output_recently_active(log_path, row.stage):
-            continue
-        rows.append(row)
-    return rows
+        candidates.append((row, log_path))
+
+    # These checks are independent filesystem/sidecar reads.  On the shared
+    # filesystem they otherwise serialize behind one metadata round-trip per
+    # failed/canceled row, making progress spend tens of seconds looking for
+    # orphaned work.  Keep the original row order after the parallel scan.
+    if not candidates:
+        return []
+    workers = min(16, len(candidates))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        active = list(
+            pool.map(
+                lambda item: stage_liveness.stage_output_recently_active(
+                    item[1], item[0].stage
+                ),
+                candidates,
+            )
+        )
+    return [row for (row, _), is_active in zip(candidates, active) if is_active]
+
+
+def _read_row_progress(row, *, runs_root: str, run_id: str):
+    """Read one row's progress sidecars/log without changing display order."""
+    log_path = row.log_path or str(
+        logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
+    )
+    return read_log_progress(
+        log_path,
+        row.stage,
+        started_at=row.started_at,
+        max_scan_bytes=PROGRESS_CLI_MAX_TAIL_SCAN_BYTES,
+    )
 
 
 def _progress_detail_lines(
@@ -120,16 +149,18 @@ def _progress_detail_lines(
 
     short_names = stage_short_names()
     lines: list[str] = []
-    for row in sorted(rows, key=lambda r: (r.target_label, r.stage)):
-        log_path = row.log_path or str(
-            logs.target_log_path(runs_root, run_id, row.target_label, row.stage)
+    ordered_rows = sorted(rows, key=lambda r: (r.target_label, r.stage))
+    workers = min(16, len(ordered_rows))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        progress = list(
+            pool.map(
+                lambda row: _read_row_progress(
+                    row, runs_root=runs_root, run_id=run_id
+                ),
+                ordered_rows,
+            )
         )
-        prog = read_log_progress(
-            log_path,
-            row.stage,
-            started_at=row.started_at,
-            max_scan_bytes=PROGRESS_CLI_MAX_TAIL_SCAN_BYTES,
-        )
+    for row, prog in zip(ordered_rows, progress):
         short = short_names.get(row.stage, row.stage)
         condor_text = _condor_detail_text(row, cluster_status, cfg)
         if not condor_text and row.native_id is None:

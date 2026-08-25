@@ -6,8 +6,26 @@ import argparse
 import logging
 import sys
 
-from syndiff_pipeline.common.orchestration import cli as orch_cli
-from syndiff_pipeline.common.orchestration.cli import PRESET_NAMES, preset_stages  # noqa: F401
+# Keep the console-script import cheap.  The orchestration CLI imports YAML,
+# SQLite/state, daemon, and scheduler-control support; none of that is needed
+# until a command is actually dispatched.  In particular, this matters for
+# ``syndiff progress`` and ``syndiff --help``.
+COMBINED_PRESET = "combined"
+PRESET_NAMES = frozenset({"template", "diff", COMBINED_PRESET})
+
+
+def _orchestration_cli():
+    """Load the orchestration command module only when it is needed."""
+    from syndiff_pipeline.common.orchestration import cli as orch_cli
+
+    return orch_cli
+
+
+def __getattr__(name: str):
+    """Lazily preserve the historical orchestration-CLI re-exports."""
+    if name == "preset_stages":
+        return _orchestration_cli().preset_stages
+    raise AttributeError(name)
 
 EXECUTION_VERBS = frozenset({"submit", "run"})
 
@@ -119,6 +137,21 @@ def build_execution_parser(preset: str, verb: str) -> argparse.ArgumentParser:
             action="store_true",
             help="Executor override: run diff stage locally (submit only)",
         )
+    return p
+
+
+def build_combined_submit_parser() -> argparse.ArgumentParser:
+    """Build ``syndiff submit``: one SCC-scoped template-to-diff run."""
+    p = argparse.ArgumentParser(
+        prog="syndiff submit",
+        description="SynDiff combined SCC template-to-diff submission",
+    )
+    _add_shared_execution_args(p)
+    p.add_argument(
+        "--scc",
+        required=True,
+        help="SCC CSV (sector,camera,ccd[,enabled])",
+    )
     return p
 
 
@@ -242,7 +275,7 @@ def _dispatch_execution(preset: str, argv: list[str]) -> int:
         )
         if has_scc_scope:
             # Supervised field-mode / SCC-only run (same path as template run).
-            return orch_cli.cmd_run(args)
+            return _orchestration_cli().cmd_run(args)
         raise SystemExit(
             "syndiff diff run requires --target-name for foreground debugging, "
             "or --scc/--sector/--camera/--ccd for supervised SCC-only diff. "
@@ -250,8 +283,16 @@ def _dispatch_execution(preset: str, argv: list[str]) -> int:
         )
 
     if verb == "submit":
-        return orch_cli.cmd_submit(args)
-    return orch_cli.cmd_run(args)
+        return _orchestration_cli().cmd_submit(args)
+    return _orchestration_cli().cmd_run(args)
+
+
+def _dispatch_combined_submit(argv: list[str]) -> int:
+    """Submit one event-targeted run spanning templates through diff."""
+    parser = build_combined_submit_parser()
+    args = parser.parse_args(argv)
+    args = _finalize_execution_args(COMBINED_PRESET, args)
+    return _orchestration_cli().cmd_submit(args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -274,6 +315,8 @@ def main(argv: list[str] | None = None) -> int:
             "  syndiff template submit|run --site SITE --scc SCCS.csv\n"
             "  syndiff diff submit|run --site SITE --targets TARGETS.csv\n"
             "  syndiff diff submit|run --site SITE --scc SCCS.csv\n\n"
+            "Combined template-to-diff:\n"
+            "  syndiff submit --config PIPELINE.yaml --scc SCCS.csv\n\n"
             "Host-star light curves:\n"
             "  syndiff star submit --site SITE --star-targets STAR_TARGETS.csv\n"
             "  syndiff star run --site SITE --star-targets STAR_TARGETS.csv "
@@ -293,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
             "The 'all' preset was removed. Use 'syndiff template submit|run ...' "
             "and 'syndiff diff submit|run ...' separately."
         )
+    if noun == "submit":
+        return _dispatch_combined_submit(argv[1:])
     if noun == "star":
         from syndiff_pipeline.star.cli import main as star_main
 
@@ -311,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     if noun in PRESET_NAMES:
         return _dispatch_execution(noun, argv[1:])
 
-    return orch_cli.main(argv)
+    return _orchestration_cli().main(argv)
 
 
 if __name__ == "__main__":
