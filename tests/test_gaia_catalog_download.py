@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import numpy as np
@@ -13,6 +15,21 @@ from syndiff_pipeline.template_creation.processing import pancakes
 
 
 class GaiaCatalogDownloadTests(unittest.TestCase):
+    def test_padded_ffi_sky_polygon_is_densely_sampled(self):
+        wcs = WCS(naxis=2)
+        wcs.wcs.crpix = [1.0, 1.0]
+        wcs.wcs.crval = [10.0, -5.0]
+        wcs.wcs.cdelt = [0.1, 0.1]
+        wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
+
+        ra, dec = pancakes.padded_ffi_sky_polygon(
+            wcs, (10, 20), pixel_padding=10, edge_samples=100
+        )
+        self.assertEqual(len(ra), 400)
+        self.assertEqual(len(dec), 400)
+        self.assertTrue(np.all(np.isfinite(ra)))
+        self.assertTrue(np.all(np.isfinite(dec)))
+
     def test_gaia_catalog_columns_include_proper_motion(self):
         cols = pancakes.GAIA_CATALOG_COLUMNS
         for name in (
@@ -46,6 +63,35 @@ class GaiaCatalogDownloadTests(unittest.TestCase):
         filtered = pancakes.filter_gaia_dataframe_to_polygon(df, ra, dec)
         self.assertEqual(len(filtered), 1)
         self.assertEqual(float(filtered.iloc[0]["ra"]), 1.0)
+
+    def test_filter_gaia_dataframe_to_polygon_handles_ra_wrap(self):
+        ra = np.array([359.0, 1.0, 1.0, 359.0])
+        dec = np.array([-1.0, -1.0, 1.0, 1.0])
+        df = pd.DataFrame({"ra": [0.0, 180.0], "dec": [0.0, 0.0]})
+
+        filtered = pancakes.filter_gaia_dataframe_to_polygon(df, ra, dec)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(float(filtered.iloc[0]["ra"]), 0.0)
+
+    def test_filter_gaia_dataframe_to_polygon_rejects_invalid_coordinates(self):
+        ra = np.array([0.0, 2.0, 2.0, 0.0])
+        dec = np.array([0.0, 0.0, 2.0, 2.0])
+        df = pd.DataFrame({"ra": [1.0, np.nan, 1.0], "dec": [1.0, 1.0, 91.0]})
+
+        filtered = pancakes.filter_gaia_dataframe_to_polygon(df, ra, dec)
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(float(filtered.iloc[0]["ra"]), 1.0)
+
+    def test_legacy_catalog_without_metadata_is_not_current(self):
+        with TemporaryDirectory() as tmp:
+            catalog = Path(tmp) / "gaia.csv"
+            catalog.write_text("ra,dec\n1,1\n", encoding="utf-8")
+            self.assertFalse(pancakes.gaia_catalog_cache_is_current(str(catalog)))
+
+            pancakes._write_gaia_catalog_metadata(
+                str(catalog), pixel_padding=10, magnitude_limit=18.0
+            )
+            self.assertTrue(pancakes.gaia_catalog_cache_is_current(str(catalog)))
 
     @patch.object(pancakes, "_download_gaia_catalog_tap")
     @patch.object(pancakes, "_download_gaia_catalog_flathub")

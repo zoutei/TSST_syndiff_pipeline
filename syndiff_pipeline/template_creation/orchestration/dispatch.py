@@ -277,7 +277,10 @@ def _execute_template_stage(
         # the catalog is already complete. ``skip_download_catalog`` remains
         # an explicit escape hatch for operators who intentionally want no
         # catalog check at all.
-        if not mp.skip_download_catalog and not gaia_catalog_path.is_file():
+        if (
+            not mp.skip_download_catalog
+            and not pancakes.gaia_catalog_cache_is_current(str(gaia_catalog_path))
+        ):
 
             gaia_catalog_dir_str = str(gaia_catalog_dir)
             log.info(
