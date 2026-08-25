@@ -308,6 +308,7 @@ FORCED_PHOTOMETRY_ALLOWED = frozenset(
         "tile_ny",
         "position_source",
         "temporal_wcs_version",
+        "include_primary_target",
     }
 )
 
@@ -661,6 +662,7 @@ class ForcedPhotometryParams:
     # covered by that fit fall back to native_wcs automatically.
     position_source: str = "native_wcs"
     temporal_wcs_version: Optional[str] = None
+    include_primary_target: bool = True
 
 
 _METHOD_NAME_RE = re.compile(r"^[a-z0-9_]+$")

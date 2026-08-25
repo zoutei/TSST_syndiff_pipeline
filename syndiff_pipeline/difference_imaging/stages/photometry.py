@@ -258,6 +258,8 @@ def per_frame_target_crop_xy(
     crop_bounds: dict,
     *,
     manifest_science_ra_dec: tuple[float, float] | None = None,
+    cached_ffi_list: pd.DataFrame | None = None,
+    cached_wcs_by_name: dict[str, object] | None = None,
 ) -> np.ndarray:
     """
     For each manifest row, map (ra, dec) to **crop-local** (x, y).
@@ -278,10 +280,19 @@ def per_frame_target_crop_xy(
     from astropy.coordinates import SkyCoord
     from astropy.wcs import WCS
 
-    from syndiff_pipeline.common.wcs_grouping import (
-        open_fits_memmap,
-        world_ra_dec_to_pixel,
-    )
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+    from syndiff_pipeline.common.download import manifest_basename_from_local
+    from syndiff_pipeline.common.wcs_header_cache import wcs_from_cached_row
+
+    # The shared ffi_list contains the complete HDU1 WCS header for every FFI.
+    # Use it when available: opening compressed FFI files just to recover their
+    # headers is extremely expensive for many forced targets.
+    cached_by_name = None
+    if cached_ffi_list is not None and not cached_ffi_list.empty:
+        cached_by_name = cached_ffi_list
+        if cached_by_name.index.name is None:
+            if "filename" in cached_by_name.columns:
+                cached_by_name = cached_by_name.set_index("filename", drop=False)
 
     path_col = "path" if "path" in wcs_table.columns else "filename"
     coord_rd = SkyCoord(ra=float(ra) * u.deg, dec=float(dec) * u.deg)
@@ -297,9 +308,30 @@ def per_frame_target_crop_xy(
         if not ps:
             continue
         try:
-            with open_fits_memmap(ps) as hdul:
-                wcs = WCS(hdul[1].header, fix=False)
-                x_ffi, y_ffi = world_ra_dec_to_pixel(wcs, coord_rd.ra.deg, coord_rd.dec.deg)
+            logical = manifest_basename_from_local(ps)
+            cached_row = (
+                cached_by_name.loc[logical]
+                if cached_by_name is not None and logical in cached_by_name.index
+                else None
+            )
+            if cached_wcs_by_name is not None and logical in cached_wcs_by_name:
+                wcs = cached_wcs_by_name[logical]
+                x_ffi, y_ffi = world_ra_dec_to_pixel(
+                    wcs, coord_rd.ra.deg, coord_rd.dec.deg
+                )
+            elif cached_row is not None:
+                wcs = wcs_from_cached_row(cached_row)
+                x_ffi, y_ffi = world_ra_dec_to_pixel(
+                    wcs, coord_rd.ra.deg, coord_rd.dec.deg
+                )
+            else:
+                from syndiff_pipeline.common.wcs_grouping import open_fits_memmap
+
+                with open_fits_memmap(ps) as hdul:
+                    wcs = WCS(hdul[1].header, fix=False)
+                    x_ffi, y_ffi = world_ra_dec_to_pixel(
+                        wcs, coord_rd.ra.deg, coord_rd.dec.deg
+                    )
             out[i, 0] = float(x_ffi) - x_min
             out[i, 1] = float(y_ffi) - y_min
         except Exception as exc:
@@ -315,6 +347,8 @@ def per_frame_target_crop_xy_temporal_wcs(
     temporal_wcs_dir: str,
     *,
     manifest_science_ra_dec: tuple[float, float] | None = None,
+    cached_ffi_list: pd.DataFrame | None = None,
+    cached_wcs_by_name: dict[str, object] | None = None,
 ) -> np.ndarray:
     """
     For each manifest row, map (ra, dec) to **crop-local** (x, y) using the
@@ -371,6 +405,8 @@ def per_frame_target_crop_xy_temporal_wcs(
             dec,
             crop_bounds,
             manifest_science_ra_dec=manifest_science_ra_dec,
+            cached_ffi_list=cached_ffi_list,
+            cached_wcs_by_name=cached_wcs_by_name,
         )
         for j, i in enumerate(missing_rows):
             out[i] = fb[j]
@@ -391,6 +427,8 @@ def resolve_forced_target_xy(
     *,
     manifest_science_ra_dec: tuple[float, float] | None = None,
     temporal_wcs_dir: str | None = None,
+    cached_ffi_list: pd.DataFrame | None = None,
+    cached_wcs_by_name: dict[str, object] | None = None,
 ) -> np.ndarray:
     """
     Build per-epoch crop-local (x, y) for one normalized forced-target spec.
@@ -414,6 +452,8 @@ def resolve_forced_target_xy(
                 crop_bounds,
                 temporal_wcs_dir,
                 manifest_science_ra_dec=manifest_science_ra_dec,
+                cached_ffi_list=cached_ffi_list,
+                cached_wcs_by_name=cached_wcs_by_name,
             )
         return per_frame_target_crop_xy(
             wcs_table,
@@ -421,6 +461,8 @@ def resolve_forced_target_xy(
             float(spec["dec"]),
             crop_bounds,
             manifest_science_ra_dec=manifest_science_ra_dec,
+            cached_ffi_list=cached_ffi_list,
+            cached_wcs_by_name=cached_wcs_by_name,
         )
     if mode == "offset":
         offset = np.array([float(spec["dx"]), float(spec["dy"])], dtype=np.float64)

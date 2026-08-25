@@ -125,9 +125,10 @@ def _forced_photometry_stage_complete(
         name = str(entry.get("name", "")).strip()
         if not name:
             return False
-        primary_csv = lightcurve_csv_basename(name)
-        if not (phot_out / primary_csv).is_file():
-            return False
+        if bool(stage.get("include_primary_target", True)):
+            primary_csv = lightcurve_csv_basename(name)
+            if not (phot_out / primary_csv).is_file():
+                return False
         for pt in extras:
             if not isinstance(pt, dict):
                 continue

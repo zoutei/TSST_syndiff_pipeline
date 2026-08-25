@@ -238,6 +238,30 @@ def _run_forced_photometry(
     extras = list(cfg.additional_forced_targets or [])
     science = (float(cfg.target_ra), float(cfg.target_dec))
 
+    # Reuse the SCC-shared cached FFI headers for native-WCS target
+    # projection.  Without this cache, each sky target opens every compressed
+    # FFI just to read its header; with 100 targets that dominates the run.
+    from syndiff_pipeline.common.wcs_header_cache import (
+        ffi_list_parquet_path,
+        load_ffi_list,
+    )
+
+    ffi_list_path = ffi_list_parquet_path(
+        cfg.data_root, int(cfg.sector), int(cfg.camera), int(cfg.ccd)
+    )
+    cached_ffi_list = (
+        load_ffi_list(ffi_list_path) if ffi_list_path.is_file() else None
+    )
+    cached_wcs_by_name = None
+    if cached_ffi_list is not None and not cached_ffi_list.empty:
+        from syndiff_pipeline.common.wcs_header_cache import wcs_from_cached_row
+
+        cached_wcs_by_name = {
+            str(name): wcs_from_cached_row(row)
+            for name, row in cached_ffi_list.iterrows()
+            if bool(row.get("wcs_ok", False))
+        }
+
     temporal_wcs_dir_by_version: dict[Optional[str], str] = {}
 
     def _temporal_wcs_dir_for(version: Optional[str]) -> str:
@@ -280,6 +304,8 @@ def _run_forced_photometry(
             crop_bounds,
             manifest_science_ra_dec=science,
             temporal_wcs_dir=twcs_dir,
+            cached_ffi_list=cached_ffi_list,
+            cached_wcs_by_name=cached_wcs_by_name,
         )
         p_xy = p_xy[phot_rows]
         extras_xy = [
@@ -290,6 +316,8 @@ def _run_forced_photometry(
                 crop_bounds,
                 manifest_science_ra_dec=science,
                 temporal_wcs_dir=twcs_dir,
+                cached_ffi_list=cached_ffi_list,
+                cached_wcs_by_name=cached_wcs_by_name,
             )
             for pt in extras
         ]
@@ -299,18 +327,20 @@ def _run_forced_photometry(
     target_specs_by_method: dict[str, list[tuple]] = {}
     for method in phot_params.methods:
         p_xy, extras_xy = _resolve_xy_for(method.position_source, method.temporal_wcs_version)
-        specs: list[tuple] = [
-            (
-                p_xy,
-                None,
-                "primary",
-                {
-                    "position_mode": "sky",
-                    "ra": float(cfg.target_ra),
-                    "dec": float(cfg.target_dec),
-                },
+        specs: list[tuple] = []
+        if phot_params.include_primary_target:
+            specs.append(
+                (
+                    p_xy,
+                    None,
+                    "primary",
+                    {
+                        "position_mode": "sky",
+                        "ra": float(cfg.target_ra),
+                        "dec": float(cfg.target_dec),
+                    },
+                )
             )
-        ]
         for j, (pt, extra_xy) in enumerate(zip(extras, extras_xy)):
             specs.append((extra_xy, str(pt["name"]), f"extra[{j}]", pt))
         target_specs_by_method[method.name] = specs
