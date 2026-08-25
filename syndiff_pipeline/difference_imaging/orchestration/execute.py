@@ -498,17 +498,20 @@ def _select_ffis_for_field_lane(
 def _load_gaia_catalog(
     cfg: SynDiffConfig,
 ) -> Optional[pd.DataFrame]:
-    # When diff_config overrides the template ROI, always load the source catalog
-    # so ensure_gaia_crop_xy can reproject; skip a cached pipeline CSV from another crop.
     """Load gaia catalog from the SCC diff lane or site config."""
-    prefer_source_catalog = wcs_grouping.diff_crop_explicitly_configured(cfg)
-    if not prefer_source_catalog:
-        lane_root = _require_scc_lane_root(cfg)
-        pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
-        if pipeline_csv.is_file():
-            return pd.read_csv(pipeline_csv)
+    # An explicit path is an operator-selected source catalog.  It must not be
+    # shadowed by a previous crop-local cache: doing so can silently retain a
+    # legacy Gaia footprint when rebuilding a shared mask after a re-download.
     if cfg.gaia_catalog and os.path.isfile(cfg.gaia_catalog):
         return pd.read_csv(cfg.gaia_catalog)
+
+    # The lane-local crop cache is only a fallback for configurations that did
+    # not name a source catalog.  It is still useful for downstream stages
+    # after shared_mask has materialized projected x/y coordinates.
+    lane_root = _require_scc_lane_root(cfg)
+    pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
+    if pipeline_csv.is_file():
+        return pd.read_csv(pipeline_csv)
     return None
 
 
