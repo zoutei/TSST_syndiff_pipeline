@@ -26,6 +26,17 @@ from syndiff_pipeline.difference_imaging.stages import photometry as ph
 
 
 class TestPhotometryMethodsConfig(unittest.TestCase):
+    def test_forced_photometry_can_exclude_primary_target(self):
+        params = parse_forced_photometry(
+            {
+                "kind": "forced_photometry",
+                "include_primary_target": False,
+                "methods": [{"name": "ffiwcs", "type": "psf", "psf_type": "epsf", "position_source": "native_wcs"}],
+            },
+            0,
+        )
+        self.assertFalse(params.include_primary_target)
+
     def test_parse_two_psf_methods(self):
         p = parse_forced_photometry(
             {
