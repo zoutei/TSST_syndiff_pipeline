@@ -51,7 +51,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 DIFF_STAGE = "diff"
-PRESET_NAMES = frozenset({"template", "diff"})
+# The default "diff" preset activates all three split Condor stages (see
+# difference_imaging/orchestration/stages.py: diff_prep -> background_estimate
+# -> diff) -- kept in the DAG order they run in.
+DIFF_PRESET_STAGES = ("diff_prep", "background_estimate", "diff")
+COMBINED_PRESET = "combined"
+PRESET_NAMES = frozenset({"template", "diff", COMBINED_PRESET})
 
 
 def _template_stage_names() -> list[str]:
@@ -77,7 +82,12 @@ def preset_stages(preset: str) -> list[str]:
     if preset == "template":
         return _template_stage_names()
     if preset == "diff":
-        return [DIFF_STAGE]
+        return list(DIFF_PRESET_STAGES)
+    if preset == COMBINED_PRESET:
+        # This is intentionally only template + diff.  Photometry and star
+        # remain separate submissions because they have different target and
+        # readiness semantics.
+        return _template_stage_names() + list(DIFF_PRESET_STAGES)
     raise ValueError(f"Unknown preset: {preset!r}")
 
 
@@ -504,12 +514,9 @@ def _resolve_execution_targets(args: argparse.Namespace):
         return _resolve_template_scope(args)
     if preset == "diff":
         return _resolve_diff_scope(args)
-    if not getattr(args, "targets", None):
-        raise SystemExit("Diff runs require --targets")
-    path = str(Path(args.targets).expanduser().resolve())
-    from syndiff_pipeline.common.orchestration.targets import load_targets
-
-    return path, load_targets(path)
+    if preset == COMBINED_PRESET:
+        return _resolve_template_scope(args)
+    raise SystemExit(f"Unknown execution preset {preset!r}")
 
 
 def _patch_skip_artifact_verify(config_path: str) -> None:
@@ -717,10 +724,37 @@ def cmd_submit(args: argparse.Namespace) -> int:
     run_id = args.run_id or _default_run_id()
     runs_root = cfg.runs_dir()
 
+    preset = getattr(args, "preset", None)
+    if preset == COMBINED_PRESET:
+        if not cfg.diff_config_path:
+            raise SystemExit(
+                "syndiff submit requires pipeline config key 'diff_config' pointing to "
+                "the event diff policy."
+            )
+        # Fail before materializing any run state when an SCC cannot resolve
+        # its diff policy/template lane.  The template artifacts
+        # themselves are allowed to be absent: they are genuine upstream rows
+        # in this same run.
+        from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+            freeze_target_diff_config,
+        )
+        from syndiff_pipeline.difference_imaging.orchestration.validate import (
+            validate_pipeline,
+        )
+
+        deploy_path = deployment_path_for_config(args.config, cfg.deployment_file)
+        for target in targets:
+            validate_pipeline(
+                freeze_target_diff_config(
+                    cfg.diff_config_path,
+                    target,
+                    deployment_path=deploy_path,
+                )
+            )
+
     state = PipelineState(cfg.state_db_path)
     _reject_duplicate_run_id(state, run_id)
 
-    preset = getattr(args, "preset", None)
     if preset == "template":
         run_directory = _prepare_run_directory(
             args.config,
@@ -1898,6 +1932,25 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _build_progress_parser() -> argparse.ArgumentParser:
+    """Build only the parser needed by the hot-path ``progress`` command.
+
+    The full parser registers bookkeeping and notification commands. Those
+    registrations pull in provenance/numpy support even though progress only
+    needs workspace state and report formatting.
+    """
+    p = argparse.ArgumentParser(prog="syndiff progress")
+    _add_site_scope(p)
+    _add_run_scope(p)
+    p.add_argument(
+        "--no-detail",
+        action="store_true",
+        help="Print summary counts only (omit running-task log progress)",
+    )
+    p.set_defaults(func=cmd_progress)
+    return p
+
+
 def main(argv: list[str] | None = None) -> int:
     """Main.
     
@@ -1909,6 +1962,10 @@ def main(argv: list[str] | None = None) -> int:
     -------
     int"""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "progress":
+        args = _build_progress_parser().parse_args(argv[1:])
+        return args.func(args)
     parser = build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
