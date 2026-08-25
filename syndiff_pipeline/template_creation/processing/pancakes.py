@@ -12,6 +12,7 @@ Version: 2.0
 # Standard library imports
 import argparse
 import io
+import json
 import os
 import time
 import urllib.parse
@@ -31,7 +32,6 @@ from astropy.io.fits.verify import VerifyWarning
 from astropy.wcs import WCS, FITSFixedWarning
 from mocpy import MOC
 from numba import jit
-from shapely import contains_xy
 from shapely.geometry import Polygon
 from tqdm import tqdm
 
@@ -1697,6 +1697,9 @@ GAIA_CATALOG_COLUMNS = (
 )
 
 DEFAULT_FLATHUB_ENDPOINT = "https://flathub.flatironinstitute.org/api"
+GAIA_FOOTPRINT_VERSION = 2
+GAIA_FOOTPRINT_EDGE_SAMPLES = 100
+GAIA_DEFAULT_PIXEL_PADDING = 10
 
 _gaia_logged_in = False
 _gaia_module = None
@@ -1792,31 +1795,69 @@ def _run_gaia_catalog_query_async(catalog_query, max_attempts=4, initial_delay_s
     raise last_exc
 
 
-def padded_ffi_sky_polygon(tess_wcs, data_shape, pixel_padding=50):
-    """Return padded FFI corner sky coordinates as (ra_deg, dec_deg) arrays."""
-    height, width = data_shape
-    padded_corners = np.array(
+def padded_ffi_sky_polygon(
+    tess_wcs,
+    data_shape,
+    pixel_padding=GAIA_DEFAULT_PIXEL_PADDING,
+    edge_samples=GAIA_FOOTPRINT_EDGE_SAMPLES,
+):
+    """Return a densely sampled padded FFI boundary in sky coordinates.
+
+    Sampling happens in detector pixels before WCS conversion.  This preserves
+    the true curved sky footprint of a wide FFI and makes the margin a fixed
+    detector-pixel margin rather than an unsafe fixed RA/Dec margin.
+    """
+    height, width = (int(data_shape[0]), int(data_shape[1]))
+    if int(edge_samples) < 2:
+        raise ValueError("edge_samples must be at least 2")
+    pad = float(pixel_padding)
+    x0, x1 = -pad, width - 1 + pad
+    y0, y1 = -pad, height - 1 + pad
+    t = np.linspace(0.0, 1.0, int(edge_samples))
+    boundary = np.vstack(
         [
-            [-pixel_padding, -pixel_padding],
-            [width - 1 + pixel_padding, -pixel_padding],
-            [width - 1 + pixel_padding, height - 1 + pixel_padding],
-            [-pixel_padding, height - 1 + pixel_padding],
+            np.column_stack([x0 + (x1 - x0) * t, np.full_like(t, y0)]),
+            np.column_stack([np.full_like(t, x1), y0 + (y1 - y0) * t]),
+            np.column_stack([x1 - (x1 - x0) * t, np.full_like(t, y1)]),
+            np.column_stack([np.full_like(t, x0), y1 - (y1 - y0) * t]),
         ]
     )
-    sky_coords = tess_wcs.pixel_to_world(padded_corners[:, 0], padded_corners[:, 1])
-    return sky_coords.ra.deg, sky_coords.dec.deg
+    sky_coords = tess_wcs.pixel_to_world(boundary[:, 0], boundary[:, 1])
+    return normalize_ra_degrees(sky_coords.ra.deg), np.asarray(sky_coords.dec.deg, dtype=float)
 
 
-def _gaia_polygon_from_corners(ra_coords, dec_coords):
-    return Polygon(list(zip(ra_coords, dec_coords)))
+def _gaia_footprint_moc(ra_coords, dec_coords):
+    """Build a seam-safe spherical MOC for a Gaia FFI footprint."""
+    ra = normalize_ra_degrees(ra_coords)
+    dec = np.asarray(dec_coords, dtype=float)
+    if ra.size != dec.size or ra.size < 3:
+        raise ValueError("Gaia footprint must contain at least three matching vertices")
+    shift = moc_ra_shift_degrees(float(np.median(ra)))
+    skycoord = SkyCoord(
+        ra=shift_ras_for_moc(ra, shift) * u.deg,
+        dec=dec * u.deg,
+        frame="icrs",
+    )
+    return MOC.from_polygon_skycoord(skycoord, complement=False, max_depth=21)
 
 
 def filter_gaia_dataframe_to_polygon(df, ra_coords, dec_coords):
-    """Keep rows whose ra/dec fall inside the padded FFI sky polygon."""
+    """Keep Gaia rows inside the padded FFI footprint on the celestial sphere."""
     if df.empty:
         return df
-    footprint = _gaia_polygon_from_corners(ra_coords, dec_coords)
-    mask = contains_xy(footprint, df["ra"].to_numpy(dtype=float), df["dec"].to_numpy(dtype=float))
+    if "ra" not in df.columns or "dec" not in df.columns:
+        raise KeyError("Gaia catalog must contain 'ra' and 'dec' columns")
+    ra = pd.to_numeric(df["ra"], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(df["dec"], errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(ra) & np.isfinite(dec) & (dec >= -90.0) & (dec <= 90.0)
+    mask = np.zeros(len(df), dtype=bool)
+    if np.any(finite):
+        footprint = _gaia_footprint_moc(ra_coords, dec_coords)
+        shift = moc_ra_shift_degrees(float(np.median(normalize_ra_degrees(ra_coords))))
+        mask[finite] = footprint.contains_lonlat(
+            shift_ras_for_moc(ra[finite], shift) * u.deg,
+            dec[finite] * u.deg,
+        )
     return df.loc[mask].reset_index(drop=True)
 
 
@@ -1853,6 +1894,32 @@ def _save_gaia_catalog_dataframe(df, catalog_path):
     df.to_csv(catalog_path, index=False)
     print(f"✅ Gaia catalog saved to: {catalog_path}")
     print(f"📊 Downloaded {len(df)} stars in the padded FFI area.")
+
+
+def gaia_catalog_metadata_path(catalog_path):
+    return f"{catalog_path}.meta.json"
+
+
+def gaia_catalog_cache_is_current(catalog_path):
+    """Return whether a catalog carries the current footprint implementation marker."""
+    try:
+        with open(gaia_catalog_metadata_path(catalog_path), encoding="utf-8") as fh:
+            metadata = json.load(fh)
+    except (OSError, ValueError, TypeError):
+        return False
+    return int(metadata.get("footprint_version", -1)) == GAIA_FOOTPRINT_VERSION
+
+
+def _write_gaia_catalog_metadata(catalog_path, *, pixel_padding, magnitude_limit):
+    metadata = {
+        "footprint_version": GAIA_FOOTPRINT_VERSION,
+        "edge_samples": GAIA_FOOTPRINT_EDGE_SAMPLES,
+        "pixel_padding": int(pixel_padding),
+        "magnitude_limit": float(magnitude_limit),
+        "filter_geometry": "spherical_moc",
+    }
+    with open(gaia_catalog_metadata_path(catalog_path), "w", encoding="utf-8") as fh:
+        json.dump(metadata, fh, indent=2, sort_keys=True)
 
 
 def _download_gaia_catalog_tap(
@@ -1907,8 +1974,9 @@ def _download_gaia_catalog_flathub(
     *,
     flathub_endpoint=DEFAULT_FLATHUB_ENDPOINT,
 ):
-    ra_min = float(np.min(ra_coords))
-    ra_max = float(np.max(ra_coords))
+    normalized_ra = normalize_ra_degrees(ra_coords)
+    ra_min = float(np.min(normalized_ra))
+    ra_max = float(np.max(normalized_ra))
     if (ra_max - ra_min) > 180.0:
         raise ValueError(
             f"RA span {ra_max - ra_min:.2f}° crosses the pole; use TAP polygon query instead."
@@ -1925,7 +1993,7 @@ def _download_gaia_catalog_flathub(
     )
     df = _structured_array_to_gaia_dataframe(arr)
     n_prefetch = len(df)
-    df = filter_gaia_dataframe_to_polygon(df, ra_coords, dec_coords)
+    df = filter_gaia_dataframe_to_polygon(df, normalized_ra, dec_coords)
     print(
         f"flathub bbox prefetch returned {n_prefetch} rows; "
         f"{len(df)} remain after polygon filter."
@@ -1940,7 +2008,7 @@ def download_gaia_catalog(
     sector,
     camera_id,
     ccd_id,
-    pixel_padding=50,
+    pixel_padding=GAIA_DEFAULT_PIXEL_PADDING,
     magnitude_limit=18,
     gaia_credentials_file=None,
     gaia_backend="auto",
@@ -2012,6 +2080,11 @@ def download_gaia_catalog(
         )
 
     _save_gaia_catalog_dataframe(df, catalog_path)
+    _write_gaia_catalog_metadata(
+        catalog_path,
+        pixel_padding=pixel_padding,
+        magnitude_limit=magnitude_limit,
+    )
     return catalog_path
 
 
@@ -2023,7 +2096,7 @@ def download_gaia_catalog(
 def download_gaia_catalog_for_tess_file(
     tess_file,
     output_path,
-    pixel_padding=50,
+    pixel_padding=GAIA_DEFAULT_PIXEL_PADDING,
     magnitude_limit=18.0,
     force_download=False,
     gaia_credentials_file=None,
@@ -2063,7 +2136,7 @@ def download_gaia_catalog_for_tess_file(
     catalog_path = os.path.join(catalog_dir, catalog_filename)
 
     # Check if catalog already exists
-    if not force_download and os.path.exists(catalog_path):
+    if not force_download and os.path.exists(catalog_path) and gaia_catalog_cache_is_current(catalog_path):
         print(f"✅ Gaia catalog already exists at: {catalog_path}")
         return catalog_path
 
@@ -2414,7 +2487,7 @@ if __name__ == "__main__":
     # Gaia catalog download options
     parser.add_argument("--skip-download-catalog", action="store_false", help="Skip Gaia catalog download for the TESS file")
     parser.add_argument("--gaia_catalog_dir", default="./data/catalogs", help="Base directory for Gaia catalogs")
-    parser.add_argument("--gaia_pixel_padding", type=int, default=50, help="Pixel padding around FFI for Gaia catalog download")
+    parser.add_argument("--gaia_pixel_padding", type=int, default=GAIA_DEFAULT_PIXEL_PADDING, help="Pixel padding around FFI for Gaia catalog download")
     parser.add_argument("--gaia_magnitude_limit", type=float, default=18.0, help="Magnitude limit for Gaia RP band")
     parser.add_argument("--force-gaia-download", action="store_true", help="Force Gaia catalog download even if it already exists")
     parser.add_argument(
