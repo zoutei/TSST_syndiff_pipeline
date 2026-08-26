@@ -52,11 +52,15 @@ class Target:
 
     def label(self) -> str:
         """Label.
-        
+
         Returns
         -------
         str"""
-        return f"{self.scc_label()}_{self.event_name()}"
+        scc = self.scc_label()
+        event = self.event_name()
+        if event == scc:
+            return scc
+        return f"{scc}_{event}"
 
     def diff_scheduler_key(self) -> str:
         """Scheduler key for event/SCC split: ``{event_name}/{scc_label}``."""
