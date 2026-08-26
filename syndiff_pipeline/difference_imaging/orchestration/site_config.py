@@ -181,6 +181,15 @@ def _per_event_force_targets_for_target(
 
 def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
     """Load diff site policy from ``diff_config.yaml``."""
+    if not config_path:
+        raise ValueError(
+            "diff_config_path is empty -- the submitted orchestrator config has "
+            "no 'diff_config:' (or 'diff_site_config:'/'diff_config_path:') key "
+            "pointing at a diff_config.yaml. Submit 'syndiff diff submit' with "
+            "--config pointed at a pipeline.yaml-style file that sets "
+            "'diff_config:', not at the diff_config.yaml itself -- otherwise "
+            "Condor resource sizing for the diff stages has no policy to load."
+        )
     path = Path(config_path).expanduser().resolve()
     with path.open(encoding="utf-8") as fh:
         raw: dict = yaml.safe_load(fh) or {}

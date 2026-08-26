@@ -104,6 +104,20 @@ class TestSiteConfigLoader(unittest.TestCase):
             load_diff_site_policy(path)
         self.assertIn("host_stats_min_mem_mb", str(ctx.exception))
 
+    def test_load_diff_site_policy_rejects_empty_path(self):
+        """Regression: an empty diff_config_path must raise, not resolve to CWD.
+
+        A ``diff`` preset submitted with ``--config`` pointed straight at a
+        diff_config.yaml (rather than a pipeline.yaml-style file that sets
+        ``diff_config:``) leaves ``RunnerConfig.diff_config_path`` as ``""``.
+        Previously ``Path("").resolve()`` silently became the process's CWD,
+        so this only surfaced as a confusing IsADirectoryError deep inside
+        Condor resource sizing, with affected stages requeuing forever.
+        """
+        with self.assertRaises(ValueError) as ctx:
+            load_diff_site_policy("")
+        self.assertIn("diff_config_path is empty", str(ctx.exception))
+
     def test_freeze_target_diff_config_absolutizes_paths(self):
         cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())
         self.assertIsInstance(cfg, SynDiffConfig)
