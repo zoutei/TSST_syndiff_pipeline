@@ -72,14 +72,14 @@ from syndiff_pipeline.difference_imaging.orchestration.workspace_lock import (
 )
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-    parse_background_temporal_smoothing,
+    parse_background,
     parse_centroids,
     parse_per_ffi_wcs,
     parse_temporal_wcs,
     parse_epsf,
     parse_hotpants,
     parse_kernel_fit,
-    parse_background_estimate,
+    parse_kernel_subtract,
     parse_convolved_templates,
     kernel_fit_params_to_hotpants,
     HotpantsParams,
@@ -153,8 +153,8 @@ def _run_background_stage(
     out: str,
     crop_bounds: Optional[dict] = None,
 ) -> tuple:
-    """Execute unified ``background_temporal_smoothing`` stage; returns (shared_mask, mask_catalog)."""
-    params = parse_background_temporal_smoothing(stage, idx)
+    """Execute unified ``background`` stage; returns (shared_mask, mask_catalog)."""
+    params = parse_background(stage, idx)
     inp = stage.get("inputs") or {}
     label_out = str(stage["output"]).strip()
     out_ws = _diff_stage_dir(cfg, ctx, label_out)
@@ -896,25 +896,15 @@ def run_config_pipeline(
     validate_only: bool = False,
     diff_log_path: str | None = None,
     force_rerun: bool = False,
-    kinds: frozenset[str] | None = None,
 ) -> None:
     """Run config pipeline.
-
+    
     Parameters
     ----------
     cfg : SynDiffConfig
     validate_only : bool, optional, default ``False``
     diff_log_path : str | None, optional, default ``None``
-    force_rerun : bool, optional, default ``False``
-    kinds : frozenset[str] | None, optional, default ``None``
-        Restrict execution to stage kinds in this set (e.g. to run only the
-        diff_prep/background_estimate/diff slice of a split diff pipeline).
-        ``cfg.pipeline`` itself is never filtered -- the workspace config
-        lock and fingerprint (``assert_workspace_config_lock``,
-        ``write_immutable_workspace_config_snapshot``) always see the full,
-        unfiltered site pipeline regardless of this filter, so fingerprints
-        agree across a split run's three Condor jobs. ``None`` runs every
-        kind (today's behavior)."""
+    force_rerun : bool, optional, default ``False``"""
     validate_pipeline(cfg)
     if validate_only:
         log.info("Pipeline configuration is valid.")
@@ -1020,8 +1010,6 @@ def run_config_pipeline(
         if is_external_workspaces_entry(stage) or is_workspace_inherit_entry(stage):
             continue
         kind = stage["kind"]
-        if kinds is not None and kind not in kinds:
-            continue
         log.info("=" * 70)
         log.info("Stage: %s", kind)
 
@@ -1421,11 +1409,11 @@ def run_config_pipeline(
                 use_patch_cache=bool(ct_params.use_patch_cache),
             )
 
-        elif kind == "background_estimate":
-            ks_params = parse_background_estimate(stage, idx)
+        elif kind == "kernel_subtract":
+            ks_params = parse_kernel_subtract(stage, idx)
             if wcs_table is None or crop_bounds is None:
                 raise RuntimeError(
-                    "background_estimate requires wcs_table and crop_bounds from template handoff."
+                    "kernel_subtract requires wcs_table and crop_bounds from template handoff."
                 )
             shared_mask = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
             mask_catalog = _ensure_mask_catalog_loaded(
@@ -1451,7 +1439,7 @@ def run_config_pipeline(
             bkg_dir = _diff_stage_dir(cfg, ctx, bkg_l) if bkg_l else None
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
-            n_jobs = ks_params.background_estimate_n_jobs or cfg.n_jobs
+            n_jobs = ks_params.kernel_subtract_n_jobs or cfg.n_jobs
             results = kernel_subtract_runner.kernel_subtract_loop(
                 ffi_paths=processing_ffi_paths,
                 output_dir=out,
@@ -1708,10 +1696,6 @@ def run_config_pipeline(
                 sector=int(cfg.sector),
                 camera=int(cfg.camera),
                 ccd=int(cfg.ccd),
-                progress_path=Path(ws_out) / "temporal_wcs.progress.json",
-                cli_progress_path=(
-                    Path(diff_log_path).parent / "diff.temporal_wcs.progress.json"
-                ),
             )
             log.info("per_ffi_wcs: %d/%d frames ok -> %s", n_ok, n_total, ws_out)
 
@@ -1883,10 +1867,10 @@ def run_config_pipeline(
                 else:
                     write_image_fits(out_fp, acc.astype(np.float32))
 
-        elif kind == "background_temporal_smoothing":
+        elif kind == "background":
             if wcs_table is None:
                 raise RuntimeError(
-                    "background_temporal_smoothing requires wcs_table from template handoff."
+                    "background requires wcs_table from template handoff."
                 )
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
