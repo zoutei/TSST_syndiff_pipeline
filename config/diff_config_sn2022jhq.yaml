@@ -150,11 +150,11 @@ pipeline:
 
 condor:
   diff_prep:
-    request_cpus: 32
-    # Measured peak across full completed runs: ~150-170 MB. 16 GB leaves a
-    # huge margin while letting this stage land on any 128GB-class node
-    # instead of competing with background_estimate for the scarce
-    # 500GB-class boxes.
+    # Measured usage across full completed runs: <1 CPU-core-equivalent
+    # (Total Remote Usage ~2-3 min over a several-minute wall run), ~150-170
+    # MB peak memory. 4 cpus / 16 GB leaves generous headroom while letting
+    # this stage match on almost any node instead of needing 32 free CPUs.
+    request_cpus: 4
     request_memory: 16000
     host_stats_min_mem_mb: 16000
     host_stats_max_load15: 20.0
