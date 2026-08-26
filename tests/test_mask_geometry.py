@@ -1,10 +1,15 @@
 """Geometry YAML and radius helpers."""
 
+import numpy as np
+import pandas as pd
+
 from syndiff_pipeline.difference_imaging.masking.geometry import (
+    big_sat_empirical,
     cross_geometry_from_mag,
     empirical_circle_radius,
     load_geometry,
     radius_from_mag,
+    size_limit,
 )
 
 
@@ -35,3 +40,30 @@ def test_cross_geometry():
     assert b > 0 and L > 0 and w > 0
     b0, L0, w0 = cross_geometry_from_mag(8.0)
     assert (b0, L0, w0) == (0, 0, 0)
+
+
+def test_size_limit_margin_admits_off_array_rows():
+    image = np.zeros((100, 100))
+    x = np.array([-30, 5, 130])
+    y = np.array([50, 5, 50])
+    assert list(size_limit(x, y, image)) == [False, True, False]
+    assert list(size_limit(x, y, image, margin=40)) == [True, True, True]
+
+
+def test_big_sat_empirical_paints_from_star_just_outside_array():
+    """A very bright star centered just outside the array must still paint in.
+
+    Regression for the shared-mask boundary bug: a T<4 star's cross (arm
+    length ~97 px) painted from a center a few px outside a diff crop should
+    still leave marked pixels inside the crop.
+    """
+    image = np.zeros((200, 200))
+    table = pd.DataFrame({"x": [-5.0], "y": [100.0], "mag": [3.0]})
+
+    # Without a margin the star (x=-5, just outside the array) would be
+    # dropped before painting; confirm size_limit itself would reject it.
+    assert not size_limit(np.array([-5]), np.array([100]), image).any()
+
+    mask = big_sat_empirical(table, image)
+    assert mask.sum() > 0
+    assert mask[100, 0] == 1  # cross arm reaches the crop's left edge

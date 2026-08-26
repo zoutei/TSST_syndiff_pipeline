@@ -142,8 +142,16 @@ def project_bsc_to_crop(
     bsc_df: pd.DataFrame,
     ref_ffi_path: str,
     crop_bounds: dict,
+    *,
+    margin_px: int = 0,
 ) -> pd.DataFrame:
-    """Project BSC ``ra``/``dec`` to crop-local ``x``/``y``; keep in-bounds rows."""
+    """
+    Project BSC ``ra``/``dec`` to crop-local ``x``/``y``; keep in-bounds rows.
+
+    ``margin_px`` widens the crop-inclusion filter (see
+    :func:`wcs_grouping.ensure_gaia_crop_xy`) — bright BSC stars just outside
+    the crop can still paint a saturation cross that bleeds in.
+    """
     from syndiff_pipeline.common import wcs_grouping
 
     in_footprint = filter_catalog_to_ffi_footprint(bsc_df, ref_ffi_path)
@@ -153,4 +161,5 @@ def project_bsc_to_crop(
         crop_bounds,
         ra_col="ra",
         dec_col="dec",
+        margin_px=margin_px,
     )

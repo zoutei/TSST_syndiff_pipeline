@@ -6,7 +6,10 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 
-from syndiff_pipeline.difference_imaging.masking.geometry import size_limit
+from syndiff_pipeline.difference_imaging.masking.geometry import (
+    MASK_BOUNDARY_MARGIN_PX,
+    size_limit,
+)
 
 # Magnitude bins and square side lengths.
 # Dict keys are str(mag_hi) matching the historical list form [hi, lo].
@@ -111,7 +114,7 @@ def faint_star_squares(
     x = np.round(table["x"].to_numpy(float), 0).astype(np.int64)
     y = np.round(table["y"].to_numpy(float), 0).astype(np.int64)
     m = table["mag"].to_numpy(float).astype(np.float64)
-    ind = size_limit(x, y, image)
+    ind = size_limit(x, y, image, margin=MASK_BOUNDARY_MARGIN_PX)
     x, y, m = x[ind], y[ind], m[ind]
 
     sizes = np.maximum(

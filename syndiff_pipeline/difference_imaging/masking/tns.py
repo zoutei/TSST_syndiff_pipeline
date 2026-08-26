@@ -13,7 +13,12 @@ import numpy as np
 import pandas as pd
 
 from syndiff_pipeline.difference_imaging.masking import bits
-from syndiff_pipeline.difference_imaging.masking.geometry import paint_circles, radius_from_mag, size_limit
+from syndiff_pipeline.difference_imaging.masking.geometry import (
+    MASK_BOUNDARY_MARGIN_PX,
+    paint_circles,
+    radius_from_mag,
+    size_limit,
+)
 from syndiff_pipeline.difference_imaging.masking.settings import DEFAULT_TNS_PUBLIC_ZIP_URL
 
 log = logging.getLogger(__name__)
@@ -299,7 +304,7 @@ def paint_tns_bit(
     xs = np.round(tns_table["x"].to_numpy(float) - x_min, 0).astype(np.int64)
     ys = np.round(tns_table["y"].to_numpy(float) - y_min, 0).astype(np.int64)
     radii = tns_table["radius_px"].to_numpy(int).astype(np.int64)
-    ind = size_limit(xs, ys, out)
+    ind = size_limit(xs, ys, out, margin=MASK_BOUNDARY_MARGIN_PX)
     xs, ys, radii = xs[ind], ys[ind], radii[ind]
     if len(xs) == 0:
         return out

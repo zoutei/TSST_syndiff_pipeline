@@ -20,6 +20,7 @@ from syndiff_pipeline.difference_imaging.masking.detector import (
     resolve_straps_csv,
 )
 from syndiff_pipeline.difference_imaging.masking.geometry import (
+    MASK_BOUNDARY_MARGIN_PX,
     big_sat_empirical,
     gaia_circle_mask,
     load_geometry,
@@ -170,7 +171,9 @@ def make_shared_mask(
         )
 
         bsc_full = load_bright_star_catalog(bsc_catalog_path)
-        bsc_in_crop = project_bsc_to_crop(bsc_full, ref_ffi_path, crop_bounds)
+        bsc_in_crop = project_bsc_to_crop(
+            bsc_full, ref_ffi_path, crop_bounds, margin_px=MASK_BOUNDARY_MARGIN_PX
+        )
         if len(bsc_in_crop):
             log.info("  BSC: %d stars in crop for saturation crosses", len(bsc_in_crop))
 
@@ -245,7 +248,9 @@ def _project_bsc(
         )
 
         bsc_full = load_bright_star_catalog(bsc_catalog_path)
-        bsc_in_crop = project_bsc_to_crop(bsc_full, ref_ffi_path, crop_bounds)
+        bsc_in_crop = project_bsc_to_crop(
+            bsc_full, ref_ffi_path, crop_bounds, margin_px=MASK_BOUNDARY_MARGIN_PX
+        )
         if len(bsc_in_crop):
             log.info("  BSC: %d stars in crop for saturation crosses", len(bsc_in_crop))
         return bsc_in_crop

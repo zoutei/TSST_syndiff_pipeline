@@ -10,7 +10,10 @@ import pandas as pd
 from scipy.signal import fftconvolve
 
 from syndiff_pipeline.difference_imaging.masking.faint_star_squares import faint_star_squares
-from syndiff_pipeline.difference_imaging.masking.geometry import size_limit
+from syndiff_pipeline.difference_imaging.masking.geometry import (
+    MASK_BOUNDARY_MARGIN_PX,
+    size_limit,
+)
 
 log = logging.getLogger(__name__)
 
@@ -36,7 +39,7 @@ def Big_sat(
     x = (np.round(sat["x"].values, 0)).astype(int)
     y = (np.round(sat["y"].values, 0)).astype(int)
     m = sat["mag"].values
-    ind = size_limit(x, y, image)
+    ind = size_limit(x, y, image, margin=MASK_BOUNDARY_MARGIN_PX)
     x, y, m = x[ind], y[ind], m[ind]
 
     satmasks = []

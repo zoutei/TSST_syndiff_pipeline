@@ -1896,6 +1896,7 @@ def ensure_gaia_crop_xy(
     dec_col: str = "dec",
     xy_in_crop_fraction_min: float = 0.5,
     force_reproject: bool = False,
+    margin_px: int = 0,
 ) -> pd.DataFrame:
     """
     Ensure crop-local ``x``, ``y`` columns suitable for masking and ePSF.
@@ -1928,6 +1929,15 @@ def ensure_gaia_crop_xy(
         When ``True``, never trust pre-existing ``x``/``y`` if ``ra``/``dec`` or
         ``x_ffi``/``y_ffi`` are available (use when ``diff_config`` overrides
         the template ROI).
+    margin_px : int
+        Widen the crop-inclusion filter by this many FFI pixels on each side
+        (``x_ffi``/``y_ffi`` and reprojected ``ra``/``dec`` branches only).
+        Rows kept only because of the margin get crop-local ``x``/``y``
+        outside ``[0, nx) × [0, ny)`` (negative or beyond the crop shape) —
+        callers that index pixel arrays directly (ePSF stamps, photometry)
+        should keep the default ``0``; mask painters clip their own paint
+        extent to the array and need the margin so a bright star just outside
+        the crop still gets its cross/circle/square painted where it overlaps.
 
     Returns
     -------
@@ -1987,10 +1997,10 @@ def ensure_gaia_crop_xy(
 
     if "x_ffi" in df.columns and "y_ffi" in df.columns:
         in_crop = (
-            (df["x_ffi"] >= x_min)
-            & (df["x_ffi"] < x_max)
-            & (df["y_ffi"] >= y_min)
-            & (df["y_ffi"] < y_max)
+            (df["x_ffi"] >= x_min - margin_px)
+            & (df["x_ffi"] < x_max + margin_px)
+            & (df["y_ffi"] >= y_min - margin_px)
+            & (df["y_ffi"] < y_max + margin_px)
         )
         out = df[in_crop].copy()
         out["x"] = out["x_ffi"] - x_min
@@ -1999,6 +2009,7 @@ def ensure_gaia_crop_xy(
         n = len(out)
         log.info(
             f"Gaia catalog: rebased x_ffi/y_ffi to crop-local x,y; {n} stars in crop"
+            + (f" (margin_px={margin_px})" if margin_px else "")
         )
         return out.reset_index(drop=True)
 
@@ -2029,10 +2040,10 @@ def ensure_gaia_crop_xy(
     df["y_ffi"] = y_pix
 
     on_chip = (
-        (df["x_ffi"] >= 0)
-        & (df["x_ffi"] < nx)
-        & (df["y_ffi"] >= 0)
-        & (df["y_ffi"] < ny)
+        (df["x_ffi"] >= -margin_px)
+        & (df["x_ffi"] < nx + margin_px)
+        & (df["y_ffi"] >= -margin_px)
+        & (df["y_ffi"] < ny + margin_px)
     )
     n_all = len(df)
     n_on = int(on_chip.sum())
@@ -2040,10 +2051,10 @@ def ensure_gaia_crop_xy(
     log.info(f"Gaia catalog: {n_on} / {n_all} rows on FFI chip after WCS")
 
     in_crop = (
-        (df["x_ffi"] >= x_min)
-        & (df["x_ffi"] < x_max)
-        & (df["y_ffi"] >= y_min)
-        & (df["y_ffi"] < y_max)
+        (df["x_ffi"] >= x_min - margin_px)
+        & (df["x_ffi"] < x_max + margin_px)
+        & (df["y_ffi"] >= y_min - margin_px)
+        & (df["y_ffi"] < y_max + margin_px)
     )
     cropped = df[in_crop].copy()
     log.info(f"Gaia catalog: {len(cropped)} stars within crop after WCS projection")

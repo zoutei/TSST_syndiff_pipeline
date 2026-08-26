@@ -13,6 +13,14 @@ from numba import njit, prange
 
 _DEFAULT_GEOMETRY_NAME = "mask_geometry.yaml"
 
+# Catalog rows just outside a crop must still be retained up to this margin
+# so a bright star's cross/circle/square can bleed into the crop; see
+# ``size_limit`` and ``ensure_gaia_crop_xy``. Kept small since the star
+# itself must be a real, in-FOV catalog source close to the boundary --
+# this is not meant to cover the full ~100 px reach of the rarest T<4
+# crosses, just the common near-boundary case.
+MASK_BOUNDARY_MARGIN_PX = 10
+
 
 def default_geometry_path() -> Path:
     """Packaged ``mask_geometry.yaml`` path."""
@@ -291,10 +299,22 @@ def paint_crosses(
                 mask[y, x] = 1
 
 
-def size_limit(x, y, image) -> np.ndarray:
-    """Boolean index of pixels inside image boundaries."""
+def size_limit(x, y, image, margin: int = 0) -> np.ndarray:
+    """
+    Boolean index of catalog rows near enough to paint onto ``image``.
+
+    ``margin`` widens the interior bounds outward so that stars centered just
+    outside the array (e.g. just past a diff-crop boundary) are still kept —
+    the numba painters below clip their own paint extent to the array shape,
+    so an out-of-bounds center is safe as long as its footprint can reach in.
+    """
     yy, xx = image.shape
-    return (y > 0) & (y < yy - 1) & (x > 0) & (x < xx - 1)
+    return (
+        (y > -margin)
+        & (y < yy - 1 + margin)
+        & (x > -margin)
+        & (x < xx - 1 + margin)
+    )
 
 
 def gaia_circle_mask(
@@ -313,7 +333,7 @@ def gaia_circle_mask(
     x = np.round(table["x"].to_numpy(float), 0).astype(np.int64)
     y = np.round(table["y"].to_numpy(float), 0).astype(np.int64)
     m = table["mag"].to_numpy(float).astype(np.float64)
-    ind = size_limit(x, y, image)
+    ind = size_limit(x, y, image, margin=MASK_BOUNDARY_MARGIN_PX)
     x, y, m = x[ind], y[ind], m[ind]
 
     keep = m >= mag_min
@@ -355,7 +375,7 @@ def big_sat_empirical(
     x = np.round(sat["x"].to_numpy(float), 0).astype(np.int64)
     y = np.round(sat["y"].to_numpy(float), 0).astype(np.int64)
     m = sat["mag"].to_numpy(float).astype(np.float64)
-    ind = size_limit(x, y, image)
+    ind = size_limit(x, y, image, margin=MASK_BOUNDARY_MARGIN_PX)
     x, y, m = x[ind], y[ind], m[ind]
     if len(x) == 0:
         return mask
