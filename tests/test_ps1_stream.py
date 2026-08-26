@@ -370,6 +370,25 @@ class TestStageParams(unittest.TestCase):
         stages = parse_stage_params({})
         self.assertEqual(stages.ps1_process.ps1_source, "zarr")
         self.assertEqual(stages.ps1_process.num_ingest_workers, 16)
+        self.assertEqual(stages.ps1_process.stream_max_inflight_requests, 24)
+        self.assertEqual(stages.ps1_process.stream_prefetch_cells, 6)
+
+    def test_stream_loader_controls_parse(self):
+        stages = parse_stage_params(
+            {
+                "ps1_process": {
+                    "stream_max_inflight_requests": 12,
+                    "stream_prefetch_cells": 3,
+                }
+            }
+        )
+        self.assertEqual(stages.ps1_process.stream_max_inflight_requests, 12)
+        self.assertEqual(stages.ps1_process.stream_prefetch_cells, 3)
+
+    def test_stream_loader_controls_must_be_positive(self):
+        for key in ("stream_max_inflight_requests", "stream_prefetch_cells"):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                parse_stage_params({"ps1_process": {key: 0}})
 
 
 if __name__ == "__main__":
