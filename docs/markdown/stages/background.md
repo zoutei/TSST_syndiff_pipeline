@@ -1,6 +1,6 @@
-# Unified background stage (`background`)
+# Unified background stage (`background_temporal_smoothing`)
 
-This document describes the **production** `background` differencing stage: spatial photutils estimation, optional temporal Savitzky–Golay smoothing, and optional TESS strap correction. Steps are toggleable via `steps.spatial`, `steps.temporal`, and `steps.strap`.
+This document describes the **production** `background_temporal_smoothing` differencing stage: spatial photutils estimation, optional temporal Savitzky–Golay smoothing, and optional TESS strap correction. Steps are toggleable via `steps.spatial`, `steps.temporal`, and `steps.strap`.
 
 **Module:** [`syndiff_pipeline/difference_imaging/stages/background/`](../../syndiff_pipeline/difference_imaging/stages/background/)
 

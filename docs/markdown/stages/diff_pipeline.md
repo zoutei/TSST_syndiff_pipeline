@@ -13,9 +13,11 @@
 
 # Difference-Imaging (`diff`) Stage — Internal Pipeline Reference
 
-The orchestrator sees a single stage `diff` (`orchestration/stages.py`, `deps=("downsample",)`, Condor pool `diff`). Internally it runs an **ordered YAML pipeline of sub-stages** (`orchestration/execute.py: run_config_pipeline()`), validated against `STAGE_KINDS` in `orchestration/validate.py`:
+The orchestrator runs this as **three** Condor stages — `diff_prep` (deps=`("downsample",)`, pool `diff_prep`), `background_estimate` (deps=`("diff_prep",)`, pool `background_estimate` — the memory-hungry one, needs its own big-RAM `condor:` profile), and `diff` (deps=`("background_estimate",)`, pool `diff`) — but `syndiff status`/`progress` still show all three as one `diff` row/column, and `syndiff diff submit`'s default preset activates all three together (`orchestration/stages.py`). Internally each stage runs the same **ordered YAML pipeline of sub-stages** (`orchestration/execute.py: run_config_pipeline()`, restricted to its own kind subset via the `kinds` parameter — `cfg.pipeline` itself is never filtered, so the workspace config lock's fingerprint agrees across all three), validated against `STAGE_KINDS` in `orchestration/validate.py`:
 
-`shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `kernel_subtract`, `epsf`, `centroids`, `sat_template`, `subtract`, `background`, `photometry` (delegator → [`syndiff photometry`](../photometry.md))
+`shared_mask`, `hotpants`, `kernel_fit`, `convolved_templates`, `background_estimate` (formerly `kernel_subtract`), `epsf`, `centroids`, `sat_template`, `subtract`, `background_temporal_smoothing` (formerly `background`), `photometry` (delegator → [`syndiff photometry`](../photometry.md))
+
+`diff_prep` owns `shared_mask`/`kernel_fit`/`convolved_templates`; `background_estimate` owns `background_estimate` alone; `diff` owns everything else (`background_temporal_smoothing`, `hotpants`, `epsf`, `centroids`, `temporal_wcs`, `per_ffi_wcs`, `sat_template`, `subtract`).
 
 **Default site config** ([`config/diff_config.yaml`](../../../config/diff_config.yaml)): `shared_mask` → `hotpants` only. Astrometry and forced photometry are **not** default diff kinds — use [`syndiff photometry`](../photometry.md) (kinds `astrometry` / `forced_photometry` in `photometry_config.yaml`), or add an optional `kind: photometry` delegator that points at a photometry YAML.
 
@@ -155,7 +157,7 @@ algebraically subtracts. Full guide: [multi_kernel_diff.md](multi_kernel_diff.md
 Artifacts land under `diff_{lane}/` (e.g. `kernel_fit/kernel_r2.npz`, convolved
 templates, `ks_d` / `ks_b`).
 
-### `background` (`stages/background/pipeline.py`)
+### `background_temporal_smoothing` (`stages/background/pipeline.py`)
 
 Unified background cube (spatial photutils, temporal Savitzky–Golay, strap correction). See [background.md](background.md). Writes `stack.npz`/`stack.npy` and optional per-frame FITS.
 
@@ -242,7 +244,7 @@ The **`star`** stage reads baseline diff workspaces (not `hp_d` images directly)
 - `{diffs}_kernels` — per-frame Hotpants kernels
 - `phot_bkg` (e.g. `ks_b_s` or `ks_b`) — photutils background subtracted in star stamps (**not** `hp_b`)
 
-Produce `ks_b` via `kernel_subtract`; smooth to `ks_b_s` with the `background` stage. Star config sets `baseline.phot_bkg` explicitly.
+Produce `ks_b` via `kernel_subtract`; smooth to `ks_b_s` with the `background_temporal_smoothing` stage. Star config sets `baseline.phot_bkg` explicitly.
 
 ## 7. Config schema highlights
 
@@ -255,7 +257,7 @@ A frozen per-target copy of the effective config is written to `runs/.../per_tar
 | Goal | What to reuse | What to re-run |
 |------|---------------|----------------|
 | New photometry on existing diffs | `{data_root}/…/diff_{lane}/hp_d/*.fits.fz` | `forced_photometry` only (or `syndiff` photometry stage) |
-| Modified templates, kernel-fit path | `kernel_r2.npz` + `kernel_fit_meta.json` | `convolved_templates` → `kernel_subtract` → (`background`/`subtract`) → `forced_photometry` |
+| Modified templates, kernel-fit path | `kernel_r2.npz` + `kernel_fit_meta.json` | `convolved_templates` → `kernel_subtract` → (`background_temporal_smoothing`/`subtract`) → `forced_photometry` |
 | Modified templates, hotpants path | shared mask, substamp stars | full `hotpants` (per-frame kernels re-fit) |
 | Continue a multi-kernel run | re-run upstream diff stages on the SCC lane | remaining stages in a new run |
 

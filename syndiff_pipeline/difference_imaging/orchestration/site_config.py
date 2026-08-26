@@ -78,6 +78,9 @@ class CondorResources:
     host_stats_max_load15: float = 10.0
 
 
+DIFF_CONDOR_STAGE_NAMES: tuple[str, ...] = ("diff_prep", "background_estimate", "diff")
+
+
 @dataclass
 class DiffSitePolicy:
     """Diff imaging site policy loaded from ``diff_config.yaml``."""
@@ -89,7 +92,11 @@ class DiffSitePolicy:
     overrides: dict = field(default_factory=dict)
     additional_forced_targets: list = field(default_factory=list)
     per_event_force_targets: dict = field(default_factory=dict)
+    # Back-compat single resource profile (== condor_by_stage["diff"]); prefer
+    # condor_by_stage for new code since diff_prep/background_estimate/diff
+    # each get their own Condor resource request.
     condor: CondorResources = field(default_factory=CondorResources)
+    condor_by_stage: dict = field(default_factory=dict)
     config_path: str = ""
 
 
@@ -137,6 +144,31 @@ def _parse_condor(raw: dict | None) -> CondorResources:
         host_stats_min_mem_mb=min_mem,
         host_stats_max_load15=max_load15,
     )
+
+
+def _parse_condor_by_stage(raw: dict | None) -> dict[str, CondorResources]:
+    """Parse the ``condor:`` block into a per-stage resource map.
+
+    Two shapes are accepted:
+
+    - Flat (legacy, pre-diff-split): ``condor: {request_cpus: ..., ...}`` --
+      the same resource profile is used for diff_prep/background_estimate/diff.
+    - Nested per-stage: ``condor: {diff_prep: {...}, background_estimate:
+      {...}, diff: {...}}`` -- all three keys must be present so a config
+      author can't accidentally leave a stage on unintended defaults (e.g.
+      background_estimate silently getting a small memory request).
+    """
+    if raw and any(key in DIFF_CONDOR_STAGE_NAMES for key in raw.keys()):
+        missing = [name for name in DIFF_CONDOR_STAGE_NAMES if name not in raw]
+        if missing:
+            raise ValueError(
+                "diff_config.yaml condor: block uses the per-stage form but is "
+                f"missing entries for {missing}; provide all of "
+                f"{list(DIFF_CONDOR_STAGE_NAMES)} explicitly."
+            )
+        return {name: _parse_condor(raw[name]) for name in DIFF_CONDOR_STAGE_NAMES}
+    shared = _parse_condor(raw)
+    return {name: shared for name in DIFF_CONDOR_STAGE_NAMES}
 
 
 def _parse_per_event_force_targets(raw: Any) -> dict[str, list]:
@@ -198,6 +230,7 @@ def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
     pipeline = raw.get("pipeline")
     if pipeline is None or not isinstance(pipeline, list):
         raise ValueError(f"diff_config.yaml requires a pipeline list: {path}")
+    condor_by_stage = _parse_condor_by_stage(raw.get("condor"))
     return DiffSitePolicy(
         deployment_file=_parse_deployment_file(raw),
         pipeline=copy.deepcopy(pipeline),
@@ -208,7 +241,8 @@ def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
         per_event_force_targets=_parse_per_event_force_targets(
             raw.get("per_event_force_targets")
         ),
-        condor=_parse_condor(raw.get("condor")),
+        condor=condor_by_stage["diff"],
+        condor_by_stage=condor_by_stage,
         config_path=str(path),
     )
 

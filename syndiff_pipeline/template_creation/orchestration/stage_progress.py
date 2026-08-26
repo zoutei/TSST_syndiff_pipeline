@@ -494,16 +494,21 @@ def _parse_wcs_grouping(text: str) -> StageProgress | None:
     return None
 
 
-def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
-    """Parse diff sidecar.
-    
-    Parameters
-    ----------
-    log_path : Path
-    
-    Returns
-    -------
-    StageProgress | None"""
+# Sidecars live in the same per_target/ directory for all three split Condor
+# stages. Restrict which files each stage may advertise so a completed
+# kernel_subtract sidecar is not shown as the running `diff` (hotpants) job,
+# and so `background_estimate` actually reads its own N/total file.
+_DIFF_SIDECAR_GROUPS_BY_STAGE: dict[str, frozenset[str]] = {
+    "diff_prep": frozenset({"convolved_templates"}),
+    "background_estimate": frozenset({"kernel_subtract"}),
+    "diff": frozenset(
+        {"hotpants", "epsf", "centroids", "photometry", "temporal_wcs"}
+    ),
+}
+
+
+def _parse_diff_sidecar(log_path: Path, *, stage: str = "diff") -> StageProgress | None:
+    """Parse the newest in-scope progress sidecar for one split diff stage."""
     from syndiff_pipeline.difference_imaging.stages.centroids_progress import (
         format_progress_text as format_centroids_progress,
         progress_path_for_diff_log as centroids_sidecar_path,
@@ -540,28 +545,52 @@ def _parse_diff_sidecar(log_path: Path) -> StageProgress | None:
         read_progress as read_temporal_wcs_progress,
     )
 
+    allowed = _DIFF_SIDECAR_GROUPS_BY_STAGE.get(stage)
+    if not allowed:
+        return None
+
     best: tuple[str, str, str] | None = None
-    for sidecar_path, format_fn, read_fn in (
+    for group, sidecar_path, format_fn, read_fn in (
         (
+            "convolved_templates",
             convolved_templates_sidecar_path(log_path),
             format_convolved_templates_progress,
             read_convolved_templates_progress,
         ),
         (
+            "kernel_subtract",
             kernel_subtract_sidecar_path(log_path),
             format_kernel_subtract_progress,
             read_kernel_subtract_progress,
         ),
-        (hotpants_sidecar_path(log_path), format_hotpants_progress, read_hotpants_progress),
-        (epsf_sidecar_path(log_path), format_epsf_progress, read_progress_merged),
-        (centroids_sidecar_path(log_path), format_centroids_progress, read_centroids_progress_merged),
-        (photometry_sidecar_path(log_path), format_photometry_progress, read_photometry_progress),
         (
+            "hotpants",
+            hotpants_sidecar_path(log_path),
+            format_hotpants_progress,
+            read_hotpants_progress,
+        ),
+        ("epsf", epsf_sidecar_path(log_path), format_epsf_progress, read_progress_merged),
+        (
+            "centroids",
+            centroids_sidecar_path(log_path),
+            format_centroids_progress,
+            read_centroids_progress_merged,
+        ),
+        (
+            "photometry",
+            photometry_sidecar_path(log_path),
+            format_photometry_progress,
+            read_photometry_progress,
+        ),
+        (
+            "temporal_wcs",
             temporal_wcs_sidecar_path(log_path),
             format_temporal_wcs_progress,
             read_temporal_wcs_progress,
         ),
     ):
+        if group not in allowed:
+            continue
         data = read_fn(sidecar_path)
         if not data:
             continue
@@ -687,8 +716,8 @@ def read_log_progress(
         sidecar_prog = _parse_remap_sidecar(path)
         if sidecar_prog is not None:
             return sidecar_prog
-    if stage == "diff":
-        sidecar_prog = _parse_diff_sidecar(path)
+    if stage in ("diff", "diff_prep", "background_estimate"):
+        sidecar_prog = _parse_diff_sidecar(path, stage=stage)
         if sidecar_prog is not None:
             return sidecar_prog
     if stage == "photometry":

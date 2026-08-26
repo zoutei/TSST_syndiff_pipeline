@@ -31,7 +31,7 @@ There is **no `all` noun**. Invoking `syndiff all ...` prints a guiding error te
 | Noun | Input | Stages selected by default |
 |------|-------|------------------------------|
 | **`template`** | `--scc` or `--sector/--camera/--ccd` | All template stages: `tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample` |
-| **`diff`** | `--scc` (SCC subtract) **or** `--targets` (event-oriented submit; mutually exclusive) | `["diff"]` only |
+| **`diff`** | `--scc` (SCC subtract) **or** `--targets` (event-oriented submit; mutually exclusive) | `["diff_prep", "background_estimate", "diff"]` (the split diff pipeline, shown as one `diff` in `syndiff status`) |
 | **`photometry`** | `--targets` + photometry config | `["photometry"]` |
 | **`star`** | `--star-targets` | `["star"]` |
 
@@ -298,7 +298,7 @@ Host-star branch (independent stage):
 completed template + diff artifacts ──verify──→ star
 ```
 
-Composed registry (**9** stages): six template + `diff` + `photometry` + `star`.
+Composed registry (**11** stages): six template + three split diff stages (`diff_prep`, `background_estimate`, `diff`) + `photometry` + `star`.
 
 | Stage | Module | What it does |
 |-------|--------|--------------|
@@ -308,13 +308,17 @@ Composed registry (**9** stages): six template + `diff` + `photometry` + `star`.
 | **`ps1_process`** | `template_creation/.../ps1_process.py` | Convolution onto TESS grid (defaults to Condor). |
 | **`remap`** | `template_creation/.../field_remap.py` | Field-mode L2–L4 drift / Exact cache (skipped in linear mode). |
 | **`downsample`** | `template_creation/.../field_downsample.py` (field) or `linear_downsample.py` (linear) | L5 template store under `{data_root}/…/templates/oversampling_{N}/` (or `templates_{NAME}/`). Sidecar `field_mode_assembly.json` schema v3 + `mapping_grid`. Stage names `templates` / `tmpl` are **rejected** in strict config parse; legacy SQLite rows may still display as aliases. |
-| **`diff`** | `difference_imaging/.../execute.py` | Config-driven Hotpants / kernel / ePSF stack. Field mode: `scc_bootstrap`, SCC-primary `diff_{lane}/`. |
+| **`diff_prep`** | `difference_imaging/.../execute.py` | `shared_mask` / `kernel_fit` / `convolved_templates` kinds — the non-memory-hungry front of the diff pipeline. |
+| **`background_estimate`** | `difference_imaging/.../execute.py`, `stages/kernel_subtract.py` | The `background_estimate` kind (formerly `kernel_subtract`): PSF-matched template subtraction + photutils background estimate. The one diff stage that needs a big-memory Condor profile. |
+| **`diff`** | `difference_imaging/.../execute.py` | `hotpants` / `epsf` / `centroids` / `temporal_wcs` (and `background_temporal_smoothing`, if configured) kinds. Field mode: `scc_bootstrap`, SCC-primary `diff_{lane}/`. |
 | **`photometry`** | `photometry/runner.py` | Astrometry + forced photometry on SCC diffs → `phot_{run_id}/`. |
 | **`star`** | `star/runner.py` | Host-star light curves from diff side products. |
 
 **Product path vs stage name:** on-disk directory is still `templates/…`; the scheduler stage is **`downsample`**.
 
-**Executors:** `mapping`, `ps1_process`, `remap`, `downsample`, `diff`, `photometry`, and `star` can run on HTCondor (per `pipeline.yaml`); network stages are local on the submit host.
+**diff\_prep / background\_estimate / diff:** these three Condor stages run sequentially per target (`diff_prep → background_estimate → diff`). `syndiff status` still shows one `diff` column; `syndiff progress` running-task lines use `diff/<substage>` (e.g. `diff/background_estimate`). `syndiff diff submit`'s default preset activates all three together. `cfg.pipeline` (the site YAML's `pipeline:` list) is never filtered when computing the workspace config lock fingerprint — only which kinds actually execute is filtered per stage — so all three Condor jobs for one target agree on one fingerprint.
+
+**Executors:** `mapping`, `ps1_process`, `remap`, `downsample`, `diff_prep`, `background_estimate`, `diff`, `photometry`, and `star` can run on HTCondor (per `pipeline.yaml`); network stages are local on the submit host.
 
 ---
 
@@ -342,11 +346,11 @@ Template and diff science code lives under `template_creation/processing/` and `
 | `syndiff_pipeline/cli.py` | Noun/verb CLI; delegates to orch / photometry / star CLIs; `all` prints removal error. |
 | `photometry/cli.py` | `syndiff photometry submit\|run`. |
 | `star/cli.py` | `syndiff star submit\|run`. |
-| `common/orchestration/cli.py` | Monitoring, control, verify, daemon; `preset_stages()` (`template` → six template stages, `diff` → `["diff"]`). |
-| `common/orchestration/spec.py` | `StageSpec` / `PipelineSpec`; `DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}`. |
-| `pipeline_spec.py` | Composed registry: template + diff + photometry + star; `STATUS_GRID_STAGES` (7 columns). |
+| `common/orchestration/cli.py` | Monitoring, control, verify, daemon; `preset_stages()` (`template` → six template stages, `diff` → `["diff_prep", "background_estimate", "diff"]`, i.e. `DIFF_PRESET_STAGES`). |
+| `common/orchestration/spec.py` | `StageSpec` / `PipelineSpec`; `DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}`; `DIFF_SPLIT_STAGES = {diff_prep, background_estimate, diff}` (both the artifact-verify closure's default-diff-preset special case and `resolve_executor` key off this set). |
+| `pipeline_spec.py` | Composed registry: template + diff_prep/background_estimate/diff + photometry + star; `STATUS_GRID_STAGES` (7 columns, still ending in one `diff` column); `STATUS_GRID_LEGACY_STAGE_ALIASES` maps `diff_prep`/`background_estimate` onto it. |
 | `difference_imaging/orchestration/scc_bootstrap.py` | Field-mode diff handoff. |
-| `difference_imaging/orchestration/stages.py` | Diff registry (`diff`; deps=`downsample`). |
+| `difference_imaging/orchestration/stages.py` | Diff registry: `DIFF_PREP_STAGE` (deps=`downsample`), `BACKGROUND_ESTIMATE_STAGE` (deps=`diff_prep`), `DIFF_STAGE` (deps=`background_estimate`) — `DIFF_STAGES` is all three. |
 | `photometry/orchestration/stages.py` | Photometry registry. |
 | `star/orchestration/stages.py` | Star registry + verifier. |
 | `common/orchestration/state.py` | SQLite schema, status machine. |

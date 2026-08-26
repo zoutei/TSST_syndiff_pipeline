@@ -54,14 +54,14 @@ Targets are always passed on the CLI (`--targets` / `--star-targets`), never emb
 ### Stage DAG
 
 ```
-tess_ffi_download → mapping → ps1_download → ps1_process → remap → downsample → diff
-   (network)         (Condor)   (network)      (Condor)    (Condor)  (cpu/Condor) (Condor)
+tess_ffi_download → mapping → ps1_download → ps1_process → remap → downsample → diff_prep → background_estimate → diff
+   (network)         (Condor)   (network)      (Condor)    (Condor)  (cpu/Condor)  (Condor)       (Condor)         (Condor)
 
 completed diff lane ──verify──→ photometry   (event targets)
 completed template + diff ──verify──→ star   (star_targets.csv)
 ```
 
-`pipeline_spec.py` composes `TEMPLATE_STAGES + DIFF_STAGES + PHOTOMETRY_STAGES + STAR_STAGES` (**nine** stages). `wcs_grouping` is config-only (linear drift), not a scheduler stage. With `ps1_process.ps1_source: stream`, `ps1_download` is skipped. With `geometry_mode: linear`, `remap` is skipped.
+`pipeline_spec.py` composes `TEMPLATE_STAGES + DIFF_STAGES + PHOTOMETRY_STAGES + STAR_STAGES` (**eleven** stages). The `diff` pipeline itself is split into three Condor stages — `diff_prep` (shared_mask/kernel_fit/convolved_templates), `background_estimate` (the memory-hungry PSF-matched subtraction + photutils background estimate, formerly `kind: kernel_subtract`), and `diff` (hotpants/epsf/centroids/temporal_wcs) — so only `background_estimate` needs to bid on the pool's scarce big-RAM nodes; `diff_prep`/`diff` can land on any node meeting their (much lower) memory floor. `syndiff diff submit`'s default preset activates all three; `syndiff status`/`progress` still display them as a single `diff` column/row. See `syndiff_pipeline/difference_imaging/orchestration/stages.py`. `wcs_grouping` is config-only (linear drift), not a scheduler stage. With `ps1_process.ps1_source: stream`, `ps1_download` is skipped. With `geometry_mode: linear`, `remap` is skipped.
 
 ### Package layout
 
@@ -72,7 +72,7 @@ completed template + diff ──verify──→ star   (star_targets.csv)
 - `syndiff_pipeline/photometry/` — event astrometry + forced photometry on SCC diff lanes.
 - `syndiff_pipeline/star/` — host-star light curves.
 
-Heavy stages on HTCondor by default: `mapping`, `ps1_process`, `remap`, `downsample`, `diff`, `photometry`, `star`.
+Heavy stages on HTCondor by default: `mapping`, `ps1_process`, `remap`, `downsample`, `diff_prep`, `background_estimate`, `diff`, `photometry`, `star`.
 
 ### Storage: two roots
 
@@ -93,6 +93,7 @@ In this checkout, `data` and `workspace` are symlinks to `/astro` storage; `pyho
 10. **Star vs template Zarr paths differ**: star defaults to `{data_root}/ps1_skycells.zarr`; `ps1_download` writes `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. Set `ps1_zarr_path` in `star_config.yaml` to share.
 11. **Star gepsf**: every `psf_type: epsf` method requires `inputs.epsf: {label}`; an optional `epsf` block builds `{baseline_ws}/{epsf.output}` and must use the same label. Star also needs baseline side products (convolved templates, backgrounds, shared mask, `{diffs}_kernels/*.npz`) — backfill older workspaces with `config/diff_config_star_full_backfill.yaml`.
 12. `ps1_download` writes to a shared, file-locked Zarr — concurrent runs on one `data_root` serialize there; a stuck lock stalls the stage.
+13. **`diff_config.yaml`'s `condor:` block can be flat (one profile for all three split diff stages) or nested per-stage** (`condor: {diff_prep: {...}, background_estimate: {...}, diff: {...}}` — if nested, all three keys are required, or config loading raises). `background_estimate` (formerly `kind: kernel_subtract`) is the one stage worth giving a real `request_memory` bump on chips with a large overlapping-projection/convolved-template footprint; don't blanket-raise `diff_prep`/`diff`'s memory just to fix one SCC's `background_estimate` OOM.
 
 ## Debugging a failed/stalled run
 

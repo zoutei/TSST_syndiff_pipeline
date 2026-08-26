@@ -211,7 +211,7 @@ def diff_recipe(kind: str, params_dataclass: Any) -> dict:
     (``HotpantsParams``, ``EpsfParams``, ``BackgroundParams`` — nested step
     params flatten automatically, ``SharedMaskParams``). For kinds whose
     recipe spans two stage configs (``KernelFitParams`` +
-    ``KernelSubtractParams`` for kernel-matched ``diff_image``), pass a
+    ``BackgroundEstimateParams`` for kernel-matched ``diff_image``), pass a
     list/tuple of dataclass instances.
 
     Delegates to ``common.provenance.model``'s landed ``*_recipe_params``
@@ -611,7 +611,7 @@ def diff_image_input_fingerprints(
     cfg: Any = None,
 ) -> Optional[list[str]]:
     """
-    Input fingerprint vector matching hotpants/kernel_subtract emit sites.
+    Input fingerprint vector matching hotpants/background_estimate emit sites.
 
     Returns ``[ffi_fp, downsample_fp]`` when both resolve, or ``None`` if either
     edge is missing (fail-open — do not mint a partial vector).

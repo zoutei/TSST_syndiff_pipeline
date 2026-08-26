@@ -80,23 +80,54 @@ def _diff_config_fingerprint(ctx: StageRunContext) -> str:
     return diff_config_fingerprint(frozen_diff_config_for_context(ctx))
 
 
-def execute_diff_stage(ctx: StageRunContext):
-    """Execute diff stage.
-    
-    Parameters
-    ----------
-    ctx : StageRunContext"""
+# The diff pipeline is split across three Condor stages so only the
+# genuinely memory-hungry slice (background_estimate, formerly
+# kernel_subtract) needs to bid on the pool's scarce big-RAM boxes; the rest
+# can run on any 120GB+ node. cfg.pipeline itself is NEVER filtered -- see
+# run_config_pipeline's `kinds` parameter -- so the workspace config lock's
+# fingerprint (which always hashes the full, unfiltered pipeline) agrees
+# across all three Condor jobs for a target. `syndiff status` still shows
+# one "diff" column; progress running-task lines use diff/<substage>.
+_DIFF_PREP_KINDS = frozenset({"shared_mask", "kernel_fit", "convolved_templates"})
+_BACKGROUND_ESTIMATE_KINDS = frozenset({"background_estimate"})
+_DIFF_SPLIT_STAGE_NAMES = ("diff_prep", "background_estimate", "diff")
+
+
+def _diff_post_kinds(cfg) -> frozenset[str]:
+    """Every kind in cfg.pipeline not owned by diff_prep or background_estimate."""
+    all_kinds = {
+        str(stage.get("kind", "")).strip()
+        for stage in cfg.pipeline
+        if isinstance(stage, dict)
+    }
+    return frozenset(all_kinds - _DIFF_PREP_KINDS - _BACKGROUND_ESTIMATE_KINDS)
+
+
+def _kinds_for_split_stage(cfg, stage_name: str) -> frozenset[str]:
+    """Kind subset of cfg.pipeline owned by one of the three split diff stages."""
+    if stage_name == "diff_prep":
+        return _DIFF_PREP_KINDS
+    if stage_name == "background_estimate":
+        return _BACKGROUND_ESTIMATE_KINDS
+    if stage_name == "diff":
+        return _diff_post_kinds(cfg)
+    raise ValueError(f"unknown diff split stage {stage_name!r}")
+
+
+def _execute_diff_split_stage(ctx: StageRunContext, stage_name: str):
+    """Shared execute body for diff_prep/background_estimate/diff."""
     from syndiff_pipeline.difference_imaging.orchestration.execute import run_config_pipeline
 
-    site_path = _diff_site_config_path(ctx)
     frozen_path = _frozen_diff_config_path(ctx)
     cfg = frozen_diff_config_for_context(ctx)
     write_frozen_diff_config(cfg, frozen_path)
+    kinds = _kinds_for_split_stage(cfg, stage_name)
     run_config_pipeline(
         cfg,
         validate_only=False,
         diff_log_path=ctx.progress_path,
         force_rerun=ctx.force_rerun,
+        kinds=kinds,
     )
     event_dir = Path(cfg.output_dir)
     artifacts = collect_diff_workspace_artifacts(cfg, event_dir)
@@ -105,30 +136,47 @@ def execute_diff_stage(ctx: StageRunContext):
     return expected, produced, artifacts
 
 
-def _verify_diff(ctx: StageRunContext) -> bool:
-    """Verify diff.
-    
-    Parameters
-    ----------
-    ctx : StageRunContext
-    
-    Returns
-    -------
-    bool"""
+def execute_diff_prep_stage(ctx: StageRunContext):
+    """Run shared_mask/kernel_fit/convolved_templates (120GB-class nodes)."""
+    return _execute_diff_split_stage(ctx, "diff_prep")
+
+
+def execute_background_estimate_stage(ctx: StageRunContext):
+    """Run background_estimate, formerly kernel_subtract (500GB-class nodes)."""
+    return _execute_diff_split_stage(ctx, "background_estimate")
+
+
+def execute_diff_stage(ctx: StageRunContext):
+    """Run everything after background_estimate: hotpants/epsf/centroids/... ."""
+    return _execute_diff_split_stage(ctx, "diff")
+
+
+def _verify_diff_split_stage(ctx: StageRunContext, stage_name: str) -> bool:
+    """Shared verify body for diff_prep/background_estimate/diff."""
     cfg = frozen_diff_config_for_context(ctx)
-    return diff_workspace_complete(cfg, _event_dir_for_target(ctx))
+    kinds = _kinds_for_split_stage(cfg, stage_name)
+    return diff_workspace_complete(cfg, _event_dir_for_target(ctx), kinds=kinds)
+
+
+def _verify_diff_prep(ctx: StageRunContext) -> bool:
+    return _verify_diff_split_stage(ctx, "diff_prep")
+
+
+def _verify_background_estimate(ctx: StageRunContext) -> bool:
+    return _verify_diff_split_stage(ctx, "background_estimate")
+
+
+def _verify_diff(ctx: StageRunContext) -> bool:
+    return _verify_diff_split_stage(ctx, "diff")
 
 
 def _collect_diff_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
     """Collect diff artifacts.
-    
-    Parameters
-    ----------
-    ctx : StageRunContext
-    
-    Returns
-    -------
-    tuple[int, int, list[str]]"""
+
+    Shared across all three split stages: lists everything under the SCC
+    lane root, unfiltered by kind. Harmless over-collection for
+    diff_prep/background_estimate (their manifest just lists artifacts that
+    don't exist yet on disk at that point in the run)."""
     cfg = frozen_diff_config_for_context(ctx)
     event_dir = _event_dir_for_target(ctx)
     artifacts = collect_diff_workspace_artifacts(cfg, event_dir)
@@ -137,16 +185,12 @@ def _collect_diff_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
     return expected, produced, artifacts
 
 
-def _diff_condor_resources(cfg):
-    """Diff condor resources.
-    
-    Parameters
-    ----------
-    cfg"""
+def _condor_resources_for_stage(cfg, stage_name: str):
+    """Condor resources for one split diff stage, from the per-stage condor: block."""
     from syndiff_pipeline.common.orchestration import condor
 
     policy = load_diff_site_policy(cfg.diff_config_path)
-    c = policy.condor
+    c = policy.condor_by_stage[stage_name]
     return condor.CondorResourceRequest(
         request_cpus=c.request_cpus,
         request_memory_mb=c.request_memory,
@@ -155,16 +199,19 @@ def _diff_condor_resources(cfg):
     )
 
 
-def _diff_stage_snapshot(ctx: StageRunContext) -> dict:
-    """Diff stage snapshot.
-    
-    Parameters
-    ----------
-    ctx : StageRunContext
-    
-    Returns
-    -------
-    dict"""
+def _diff_prep_condor_resources(cfg):
+    return _condor_resources_for_stage(cfg, "diff_prep")
+
+
+def _background_estimate_condor_resources(cfg):
+    return _condor_resources_for_stage(cfg, "background_estimate")
+
+
+def _diff_condor_resources(cfg):
+    return _condor_resources_for_stage(cfg, "diff")
+
+
+def _diff_stage_snapshot_for_stage(ctx: StageRunContext, stage_name: str, pool: str) -> dict:
     event_dir = _event_dir_for_target(ctx)
     return {
         "sector": ctx.target.sector,
@@ -174,9 +221,21 @@ def _diff_stage_snapshot(ctx: StageRunContext) -> dict:
         "target_ra": ctx.target.target_ra,
         "target_dec": ctx.target.target_dec,
         "event_dir": str(event_dir),
-        "stage": "diff",
-        "pool": "diff",
+        "stage": stage_name,
+        "pool": pool,
     }
+
+
+def _diff_prep_stage_snapshot(ctx: StageRunContext) -> dict:
+    return _diff_stage_snapshot_for_stage(ctx, "diff_prep", "diff_prep")
+
+
+def _background_estimate_stage_snapshot(ctx: StageRunContext) -> dict:
+    return _diff_stage_snapshot_for_stage(ctx, "background_estimate", "background_estimate")
+
+
+def _diff_stage_snapshot(ctx: StageRunContext) -> dict:
+    return _diff_stage_snapshot_for_stage(ctx, "diff", "diff")
 
 
 def write_diff_manifest(
@@ -185,6 +244,8 @@ def write_diff_manifest(
     artifacts: list[str],
     expected_count: int,
     produced_count: int,
+    *,
+    stage_name: str = "diff",
 ) -> dict:
     """Write diff manifest.
     
@@ -206,7 +267,7 @@ def write_diff_manifest(
     path = Path(manifest_path)
     payload = {
         "schema_version": MANIFEST_SCHEMA_VERSION,
-        "stage": "diff",
+        "stage": stage_name,
         "expected_count": int(expected_count),
         "produced_count": int(produced_count),
         "artifacts": [str(p) for p in (artifacts or [])],
@@ -223,10 +284,38 @@ def write_diff_manifest(
     return payload
 
 
+DIFF_PREP_STAGE = StageSpec(
+    name="diff_prep",
+    short_name="diff/diff_prep",
+    deps=("downsample",),
+    pool="diff_prep",
+    default_executor="condor",
+    execute=execute_diff_prep_stage,
+    verify_complete=_verify_diff_prep,
+    collect_artifacts=_collect_diff_artifacts,
+    config_fingerprint=_diff_config_fingerprint,
+    condor_resources=_diff_prep_condor_resources,
+    stage_snapshot=_diff_prep_stage_snapshot,
+)
+
+BACKGROUND_ESTIMATE_STAGE = StageSpec(
+    name="background_estimate",
+    short_name="diff/background_estimate",
+    deps=("diff_prep",),
+    pool="background_estimate",
+    default_executor="condor",
+    execute=execute_background_estimate_stage,
+    verify_complete=_verify_background_estimate,
+    collect_artifacts=_collect_diff_artifacts,
+    config_fingerprint=_diff_config_fingerprint,
+    condor_resources=_background_estimate_condor_resources,
+    stage_snapshot=_background_estimate_stage_snapshot,
+)
+
 DIFF_STAGE = StageSpec(
     name="diff",
     short_name="diff",
-    deps=("downsample",),
+    deps=("background_estimate",),
     pool="diff",
     default_executor="condor",
     execute=execute_diff_stage,
@@ -237,4 +326,4 @@ DIFF_STAGE = StageSpec(
     stage_snapshot=_diff_stage_snapshot,
 )
 
-DIFF_STAGES: tuple[StageSpec, ...] = (DIFF_STAGE,)
+DIFF_STAGES: tuple[StageSpec, ...] = (DIFF_PREP_STAGE, BACKGROUND_ESTIMATE_STAGE, DIFF_STAGE)

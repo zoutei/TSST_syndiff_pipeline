@@ -158,6 +158,13 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
         out["mapping"] = ResourcePoolParams(max_concurrent=6)
     if "ps1_process" not in out:
         out["ps1_process"] = ResourcePoolParams(max_concurrent=4)
+    if "diff_prep" not in out:
+        out["diff_prep"] = ResourcePoolParams(max_concurrent=2)
+    if "background_estimate" not in out:
+        # Conservative default -- this pool contends for the pool's scarce
+        # big-RAM boxes; size it explicitly via resources.background_estimate
+        # in the site config once the real free-big-RAM-box count is known.
+        out["background_estimate"] = ResourcePoolParams(max_concurrent=2)
     if "diff" not in out:
         out["diff"] = ResourcePoolParams(max_concurrent=2)
     if "star" not in out:

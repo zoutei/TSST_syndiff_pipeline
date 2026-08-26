@@ -409,7 +409,7 @@ def _slim_pipeline_stage(stage: Any) -> Any:
         "astrometry": sp.AstrometryParams,
         "centroids": sp.CentroidsParams,
         "kernel_fit": sp.KernelFitParams,
-        "kernel_subtract": sp.KernelSubtractParams,
+        "background_estimate": sp.BackgroundEstimateParams,
         "convolved_templates": sp.ConvolvedTemplatesParams,
         "sat_template": sp.SatTemplateParams,
         "forced_photometry": sp.ForcedPhotometryParams,

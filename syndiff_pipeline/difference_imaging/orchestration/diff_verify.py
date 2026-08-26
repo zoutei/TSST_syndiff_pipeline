@@ -50,10 +50,10 @@ log = logging.getLogger(__name__)
 # marker check.
 _INDEXED_STAGE_KIND = {
     "hotpants": "diff_image",
-    "kernel_subtract": "diff_image",
+    "background_estimate": "diff_image",
     "epsf": "epsf",
     "shared_mask": "shared_mask",
-    "background": "diff_background",
+    "background_temporal_smoothing": "diff_background",
 }
 
 
@@ -225,11 +225,20 @@ def _scc_lane_root(cfg: SynDiffConfig) -> Path | None:
     )
 
 
-def _last_scc_executable_stage(cfg: SynDiffConfig) -> dict | None:
-    """Last diff pipeline stage that writes SCC lane artifacts."""
+def _last_scc_executable_stage(
+    cfg: SynDiffConfig, *, kinds: frozenset[str] | None = None
+) -> dict | None:
+    """Last diff pipeline stage that writes SCC lane artifacts.
+
+    ``kinds``, when given, restricts the search to that subset of kind names
+    (used by the split diff_prep/background_estimate/diff Condor stages so
+    each verifies completeness against its own slice of the full pipeline,
+    not the whole thing)."""
     _, _, stages = split_pipeline(cfg.pipeline)
     for _idx, stage in reversed(stages):
         kind = str(stage.get("kind") or "").strip()
+        if kinds is not None and kind not in kinds:
+            continue
         if kind not in _NON_SCC_DIFF_STAGE_KINDS:
             return stage
     return None
@@ -243,8 +252,10 @@ def _scc_label_dir_has_fits(label_dir: Path) -> bool:
     )
 
 
-def _scc_final_stage_complete(cfg: SynDiffConfig, lane_root: Path) -> bool:
-    stage = _last_scc_executable_stage(cfg)
+def _scc_final_stage_complete(
+    cfg: SynDiffConfig, lane_root: Path, *, kinds: frozenset[str] | None = None
+) -> bool:
+    stage = _last_scc_executable_stage(cfg, kinds=kinds)
     if stage is None:
         return False
 
@@ -256,12 +267,12 @@ def _scc_final_stage_complete(cfg: SynDiffConfig, lane_root: Path) -> bool:
             is not None
         )
 
-    if kind == "kernel_subtract":
+    if kind == "background_estimate":
         o = stage.get("output") or {}
         diffs = str(o.get("diffs", "")).strip()
         return bool(diffs) and _scc_label_dir_has_fits(lane_root / diffs)
 
-    if kind == "background":
+    if kind == "background_temporal_smoothing":
         label = str(stage.get("output", "")).strip()
         if not label:
             return False
@@ -347,7 +358,9 @@ def _scc_final_stage_complete(cfg: SynDiffConfig, lane_root: Path) -> bool:
     return False
 
 
-def scc_diff_lane_complete(cfg: SynDiffConfig) -> bool:
+def scc_diff_lane_complete(
+    cfg: SynDiffConfig, *, kinds: frozenset[str] | None = None
+) -> bool:
     """True when SCC bookkeeping and final diff pipeline outputs exist on the lane."""
     lane_root = _scc_lane_root(cfg)
     if lane_root is None or not lane_root.is_dir():
@@ -369,7 +382,7 @@ def scc_diff_lane_complete(cfg: SynDiffConfig) -> bool:
         return False
     if not (bk_dir / FRAMES_CSV_BASENAME).is_file():
         return False
-    return _scc_final_stage_complete(cfg, lane_root)
+    return _scc_final_stage_complete(cfg, lane_root, kinds=kinds)
 
 
 def _label_for_indexed_stage(stage: dict, kind: str) -> Optional[str]:
@@ -389,10 +402,10 @@ def _label_for_indexed_stage(stage: dict, kind: str) -> Optional[str]:
 def _params_for_indexed_stage(stage: dict):
     """Reparse one stage dict into its strict param dataclass (registry §6 recipe source)."""
     from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-        parse_background,
+        parse_background_temporal_smoothing,
         parse_epsf,
         parse_hotpants,
-        parse_kernel_subtract,
+        parse_background_estimate,
         parse_shared_mask,
     )
 
@@ -400,14 +413,14 @@ def _params_for_indexed_stage(stage: dict):
     try:
         if kind == "hotpants":
             return parse_hotpants(stage, 0)
-        if kind == "kernel_subtract":
-            return parse_kernel_subtract(stage, 0)
+        if kind == "background_estimate":
+            return parse_background_estimate(stage, 0)
         if kind == "epsf":
             return parse_epsf(stage, 0)
         if kind == "shared_mask":
             return parse_shared_mask(stage, 0)
-        if kind == "background":
-            return parse_background(stage, 0)
+        if kind == "background_temporal_smoothing":
+            return parse_background_temporal_smoothing(stage, 0)
     except Exception:
         log.debug("diff_stage_complete_indexed: stage param reparse failed", exc_info=True)
         return None
@@ -415,7 +428,7 @@ def _params_for_indexed_stage(stage: dict):
 
 
 def _upstream_diff_image_stage(cfg: SynDiffConfig, stage: dict | None = None) -> Optional[dict]:
-    """Hotpants/kernel_subtract stage that produced the diffs feeding *stage*."""
+    """Hotpants/background_estimate stage that produced the diffs feeding *stage*."""
     _, _, stages = split_pipeline(cfg.pipeline)
     diffs_label = None
     if stage is not None:
@@ -426,14 +439,14 @@ def _upstream_diff_image_stage(cfg: SynDiffConfig, stage: dict | None = None) ->
     if diffs_label:
         for _, st in stages:
             k = st.get("kind")
-            if k not in ("hotpants", "kernel_subtract"):
+            if k not in ("hotpants", "background_estimate"):
                 continue
             o = st.get("output") or {}
             if str(o.get("diffs", "")).strip() == diffs_label:
                 return st
     found = None
     for _, st in stages:
-        if st.get("kind") in ("hotpants", "kernel_subtract"):
+        if st.get("kind") in ("hotpants", "background_estimate"):
             found = st
     return found
 
@@ -695,8 +708,14 @@ def diff_stage_complete_indexed(
         _prov.close_store(store)
 
 
-def diff_workspace_complete(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
-    """True when SCC diff lane bookkeeping and final pipeline outputs exist."""
+def diff_workspace_complete(
+    cfg: SynDiffConfig, event_dir: str | Path, *, kinds: frozenset[str] | None = None
+) -> bool:
+    """True when SCC diff lane bookkeeping and final pipeline outputs exist.
+
+    ``kinds`` scopes completeness to one slice of the split diff pipeline
+    (diff_prep/background_estimate/diff); omit it for the legacy
+    whole-pipeline check."""
     event_dir = Path(event_dir)
     if not _diff_frame_manifest_available(cfg, event_dir):
         return False
@@ -706,13 +725,15 @@ def diff_workspace_complete(cfg: SynDiffConfig, event_dir: str | Path) -> bool:
         return False
 
     try:
-        indexed = diff_stage_complete_indexed(cfg, event_dir, _last_scc_executable_stage(cfg))
+        indexed = diff_stage_complete_indexed(
+            cfg, event_dir, _last_scc_executable_stage(cfg, kinds=kinds)
+        )
     except Exception:
         log.debug("diff_stage_complete_indexed raised; falling open", exc_info=True)
         indexed = None
     if indexed is not None:
         return indexed
-    return scc_diff_lane_complete(cfg)
+    return scc_diff_lane_complete(cfg, kinds=kinds)
 
 
 def collect_diff_workspace_artifacts(cfg: SynDiffConfig, event_dir: str | Path) -> list[str]:

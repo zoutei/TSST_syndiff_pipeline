@@ -70,7 +70,7 @@ def _write_single_kernel_policy(path: Path) -> None:
                 "    inputs:",
                 "      kernel_fit: kernel_fit",
                 "    output: tmpl_conv",
-                "  - kind: kernel_subtract",
+                "  - kind: background_estimate",
                 "    inputs:",
                 "      convolved: tmpl_conv",
                 "    output:",

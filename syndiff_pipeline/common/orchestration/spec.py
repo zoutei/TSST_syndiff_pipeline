@@ -15,6 +15,11 @@ DIFF_VERIFY_UPSTREAM = frozenset(
     }
 )
 
+# The diff pipeline is split into three Condor stages (diff_prep ->
+# background_estimate -> diff, see difference_imaging/orchestration/stages.py)
+# but is still activated/verified as one unit by the default "diff" preset.
+DIFF_SPLIT_STAGES = frozenset({"diff_prep", "background_estimate", "diff"})
+
 # Legacy stage names accepted by resolve_stage_name.
 _STAGE_LEGACY_ALIASES: dict[str, str] = {
     "skycell_remap": "remap",
@@ -86,7 +91,7 @@ class StageSpec:
                 return stages.ps1_process.executor
             if self.name == "remap":
                 return stages.remap.executor
-            if self.name == "diff":
+            if self.name in ("diff_prep", "background_estimate", "diff"):
                 return stages.diff.executor
             if self.name == "star":
                 return stages.star.executor
@@ -305,7 +310,7 @@ class PipelineSpec:
         full template chain (mapping, ps1_download, ps1_process).
         """
         active = set(active_stages)
-        if active == {"diff"}:
+        if active == DIFF_SPLIT_STAGES or active == {"diff"}:
             return frozenset(active | DIFF_VERIFY_UPSTREAM)
         if active == {"star"}:
             return frozenset(active)

@@ -72,7 +72,7 @@ def _write_hotpants_background_policy(path: Path) -> None:
                 "    output:",
                 "      diffs: hp_d",
                 "      convolved: hp_c",
-                "  - kind: background",
+                "  - kind: background_temporal_smoothing",
                 "    inputs:",
                 "      diffs: hp_d",
                 "    output: bkg_s1",
@@ -291,7 +291,7 @@ class TestBackgroundProvenanceEmit(unittest.TestCase):
         drain_spool(store, provenance_spool_dir(self.cfg.data_root))
         frames = dv.load_diff_frames_for_verify(self.cfg, self.event_dir)
         stage = {
-            "kind": "background",
+            "kind": "background_temporal_smoothing",
             "inputs": {"diffs": "hp_d"},
             "output": "bkg_s1",
         }

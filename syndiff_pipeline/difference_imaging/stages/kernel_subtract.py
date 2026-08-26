@@ -14,7 +14,7 @@ from joblib import delayed
 from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-    KernelSubtractParams,
+    BackgroundEstimateParams,
 )
 from syndiff_pipeline.difference_imaging.stages.convolved_templates import (
     lookup_convolved_path,
@@ -130,7 +130,7 @@ def _process_one_frame(task: tuple) -> dict:
     diff_stem = workspace_frame_stem(ffi_stem, diffs_label)
     ws_diff_out = workspace_frame_fits_path(diffs_dir, diff_stem)
     output_store_name = p.get("output_store_name")
-    ks_params = KernelSubtractParams(
+    ks_params = BackgroundEstimateParams(
         tessreduce_smooth_gauss=float(p.get("tessreduce_smooth_gauss", 2.0)),
         tessreduce_anomaly_gauss=float(p.get("tessreduce_anomaly_gauss", 2.0)),
         tessreduce_qe_spline_degree=int(p.get("tessreduce_qe_spline_degree", 2)),

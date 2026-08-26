@@ -135,7 +135,9 @@ def config_fingerprint(
     meta: dict | None = None,
 ) -> str:
     """Stable hash of the stage params that affect this stage's outputs."""
-    if stage == "diff":
+    from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
+
+    if stage in DIFF_SPLIT_STAGES:
         if runner_cfg is None:
             raise ValueError("diff config fingerprint requires RunnerConfig")
         return diff_config_fingerprint(resolved, runner_cfg, meta=meta)
@@ -1970,7 +1972,9 @@ def stage_absence_probe(
             return AbsenceProbeResult.MAYBE_PRESENT
         return AbsenceProbeResult.ABSENT
 
-    if stage == "diff":
+    from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
+
+    if stage in DIFF_SPLIT_STAGES:
         if runner_cfg is None or not runner_cfg.diff_config_path:
             return AbsenceProbeResult.UNKNOWN
         from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
@@ -2003,6 +2007,12 @@ VERIFY_FUNCS = {
     "ps1_process": verify_ps1_process,
     "remap": verify_remap,
     "downsample": verify_downsample,
+    # diff_prep/background_estimate share "diff"'s whole-workspace verify_diff:
+    # each is a link in the diff_prep -> background_estimate -> diff chain, so
+    # by the time any of them reports "not yet complete" the answer is the
+    # same "is the diff workspace done" question verify_diff already answers.
+    "diff_prep": verify_diff,
+    "background_estimate": verify_diff,
     "diff": verify_diff,
     "photometry": verify_photometry,
 }
@@ -2039,10 +2049,12 @@ def verify_stage(
             "indexed" if indexed else "not indexed",
             "",
         )
+    from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
+
     fn = VERIFY_FUNCS.get(stage)
     if fn is None:
         raise ValueError(f"Unknown stage: {stage!r}")
-    if stage == "diff":
+    if stage in DIFF_SPLIT_STAGES:
         return fn(resolved, runner_cfg, meta=meta)
     if stage == "photometry":
         return fn(resolved, runner_cfg, meta=meta)
@@ -2095,13 +2107,15 @@ def collect_stage_artifacts(
     meta: dict | None = None,
 ) -> tuple[int, int, list[str]]:
     """Return (expected_count, produced_count, artifact_paths) for manifest writing."""
-    if stage == "diff":
-        from syndiff_pipeline.difference_imaging.orchestration.stages import DIFF_STAGE
+    from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
+
+    if stage in DIFF_SPLIT_STAGES:
+        from syndiff_pipeline.pipeline_spec import get_stage_spec
 
         if runner_cfg is None:
             raise ValueError("diff artifact collection requires RunnerConfig")
         ctx = _diff_stage_context(resolved, runner_cfg, meta=meta)
-        return DIFF_STAGE.collect_artifacts(ctx)
+        return get_stage_spec(stage).collect_artifacts(ctx)
     if stage == "remap":
         from syndiff_pipeline.template_creation.processing.field_remap import (
             REMAP_MANIFEST_NAME,

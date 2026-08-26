@@ -73,10 +73,19 @@ def _write_diff_policy(path: Path) -> None:
 
 
 class TestDiffPipelineSpec(unittest.TestCase):
-    def test_diff_is_seventh_composed_stage(self):
-        self.assertEqual(len(STAGE_NAMES), 8)
-        self.assertEqual(STAGE_NAMES[-2], "diff")
-        self.assertEqual(STAGE_DEPS["diff"], ["downsample"])
+    def test_diff_split_stages_composed(self):
+        # diff is split into diff_prep -> background_estimate -> diff (the
+        # tail: hotpants/epsf/centroids/temporal_wcs), shown to operators as
+        # one "diff" stage but three real DAG nodes.
+        self.assertEqual(len(STAGE_NAMES), 11)
+        self.assertEqual(
+            STAGE_NAMES[-5:], ("diff_prep", "background_estimate", "diff", "photometry", "star")
+        )
+        self.assertEqual(STAGE_DEPS["diff_prep"], ["downsample"])
+        self.assertEqual(STAGE_DEPS["background_estimate"], ["diff_prep"])
+        self.assertEqual(STAGE_DEPS["diff"], ["background_estimate"])
+        self.assertEqual(STAGE_POOL["diff_prep"], "diff_prep")
+        self.assertEqual(STAGE_POOL["background_estimate"], "background_estimate")
         self.assertEqual(STAGE_POOL["diff"], "diff")
 
     def test_diff_resource_pool_default(self):

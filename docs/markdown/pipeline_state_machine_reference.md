@@ -71,9 +71,9 @@ Run-level `scan_queued` / `scan_running` in `progress` count only deps-eligible 
 `sc_q` is shown for `external` stages needing verify and selected `pending` stages whose dependencies are satisfied.
 ---
 
-## 2. Stage dependency DAG (8 composed stages, two disconnected sub-graphs)
+## 2. Stage dependency DAG (10 composed stages, two disconnected sub-graphs)
 
-`pipeline_spec.py` composes **six template stages + `diff` + `star`** into one registry, but `create_run` (§3) always materializes **all eight** stage rows for every target regardless of which CLI noun (`template`/`diff`) submitted the run. The template sub-graph feeds `diff` through a single DAG edge — `diff` depends on `downsample` only:
+`pipeline_spec.py` composes **six template stages + `diff_prep` + `background_estimate` + `diff` + `star`** into one registry, but `create_run` (§3) always materializes **all ten** stage rows for every target regardless of which CLI noun (`template`/`diff`) submitted the run. The template sub-graph feeds the diff trio through a single DAG edge — `diff_prep` depends on `downsample` only, then `background_estimate` depends on `diff_prep`, then `diff` depends on `background_estimate`:
 
 ```text
 Template sub-graph:
@@ -89,6 +89,12 @@ tess_ffi_download
   ps1_process ─────────┴──▶ downsample
                                   │
                                   ▼
+                              diff_prep
+                                  │
+                                  ▼
+                         background_estimate
+                                  │
+                                  ▼
                                diff
 
 Independent branch (no DAG edge from template stages):
@@ -102,7 +108,9 @@ star
 | `ps1_process` | `ps1_download` (or `mapping` only when `ps1_source=stream`) |
 | `remap` | `mapping` (pre-skipped in linear mode) |
 | `downsample` | `mapping`, `ps1_process`, `remap` (effective deps omit `remap` in linear mode) |
-| `diff` | `downsample` |
+| `diff_prep` | `downsample` |
+| `background_estimate` | `diff_prep` |
+| `diff` | `background_estimate` |
 | `star` | *(none — independent branch; prerequisites verified in stage)* |
 
 Stage-name aliases (`resolve_stage_name` / `spec.py::_STAGE_LEGACY_ALIASES`): `skycell_remap`→`remap`. Stage names `templates` / `tmpl` are **rejected** (hard cut).
@@ -122,29 +130,31 @@ Stage-name aliases (`resolve_stage_name` / `spec.py::_STAGE_LEGACY_ALIASES`): `s
 | `mapping` | tess, mapping |
 | `downsample` (or `mapping,downsample`) | tess, mapping, ps1_dl, ps1_pr, remap, downsample (all 6 template stages) |
 | `ps1_process` | tess, mapping, ps1_dl, ps1_pr |
-| `diff` (default `diff` preset) | down, diff (template chain via `downsample` dep only — see below) |
-| `diff,downsample` | all 6 template stages + diff |
+| `diff` (default `diff` preset → `diff_prep,background_estimate,diff`) | down, diff_prep, background_estimate, diff (template chain via `downsample` dep only — see below) |
+| `diff_prep,background_estimate,diff,downsample` | all 6 template stages + diff_prep, background_estimate, diff |
 
-Note there is **no `all` preset** anymore, and `--stages downsample` alone (or any subset including it) pulls in the **entire** template sub-graph. `run_stage_closure({"diff"})` is **`{"diff"}` only** — template stages are not included unless explicitly selected or pulled in as transitive deps of a selected stage (e.g. selecting `downsample`).
+Note there is **no `all` preset** anymore, and `--stages downsample` alone (or any subset including it) pulls in the **entire** template sub-graph. `run_stage_closure({"diff_prep", "background_estimate", "diff"})` is those three stages plus their internal chain deps only — template stages are not included unless explicitly selected or pulled in as transitive deps of a selected stage (e.g. selecting `downsample`).
+
+**The `diff` pipeline is split into three Condor stages** (`diff_prep → background_estimate → diff`, see `difference_imaging/orchestration/stages.py`) so only `background_estimate` (the memory-hungry PSF-matched subtraction + background estimate, formerly `kind: kernel_subtract`) needs to bid on the pool's scarce big-RAM nodes. `diff_prep` deps on `downsample`; `background_estimate` deps on `diff_prep`; `diff` (the tail: hotpants/epsf/centroids/temporal_wcs) deps on `background_estimate`. `syndiff status` still displays all three as one `diff` column (`STATUS_GRID_LEGACY_STAGE_ALIASES` maps `diff_prep`/`background_estimate` onto the `diff` grid column, with the most-actionable status — running > failed > blocked > ready > pending > canceled > skipped > external > success — winning when the three real rows disagree). `syndiff progress` running-task lines show `diff/<substage>` so the live Condor job is identifiable.
 
 ### Diff-only artifact verify closure
 
-For the default `syndiff diff submit` (`--stages diff`, i.e. `active_stages == {"diff"}`), `artifact_verify_closure` is a **special case**, not simply `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}`):
+For the default `syndiff diff submit` (no `--stages`, i.e. `active_stages == {"diff_prep", "background_estimate", "diff"}` — `DIFF_PRESET_STAGES` in `common/orchestration/cli.py`), `artifact_verify_closure` is a **special case**, not simply `run_stage_closure` (`spec.py::DIFF_VERIFY_UPSTREAM = {tess_ffi_download, downsample}`, gated on `spec.py::DIFF_SPLIT_STAGES`):
 
-| Stage | In `run_stage_closure({"diff"})`? | In `artifact_verify_closure({"diff"})`? |
+| Stage | In `run_stage_closure({diff_prep, background_estimate, diff})`? | In `artifact_verify_closure(...)`? |
 |-------|-----------------|------------------|
-| `tess_ffi_download`, `downsample` | **no** (no transitive dep from `diff` alone in closure math) | **yes** — pulled in only by the `DIFF_VERIFY_UPSTREAM` special-case, then scanned on disk |
+| `tess_ffi_download`, `downsample` | **no** (no transitive dep from the diff trio alone in closure math) | **yes** — pulled in only by the `DIFF_VERIFY_UPSTREAM` special-case, then scanned on disk |
 | `mapping`, `ps1_download`, `ps1_process`, `remap` | no | no — immediate **n/a** (`not_selected`) |
-| `diff` | yes (selected) | yes (before launch) |
+| `diff_prep`, `background_estimate`, `diff` | yes (selected) | yes (before each launches) |
 | `star` | no | no — **n/a** |
 
-**Consequence**: on the default `diff` preset, `tess_ffi_download` and `downsample` are verified on disk before `diff` launches, even though `run_stage_closure({"diff"}) == {"diff"}`. Inside `diff` execute, `scc_bootstrap` assembles `bookkeeping/diff/{frames.csv,diff_job.json}` from the SCC template store when `data_root` is set.
+**Consequence**: on the default `diff` preset, `tess_ffi_download` and `downsample` are verified on disk before `diff_prep` launches, even though `run_stage_closure` doesn't itself include them. Inside `diff_prep`'s execute, `scc_bootstrap` assembles `bookkeeping/diff/{frames.csv,diff_job.json}` from the SCC template store when `data_root` is set. The special case still also fires on the bare legacy set `active_stages == {"diff"}` (e.g. an explicit `--stages diff` with no prep/background_estimate) for backward compat.
 
 ---
 
 ## 3. Submission — initial status after `create_run`
 
-`create_run` inserts all **8** composed stages per target (regardless of which noun submitted the run — see §2):
+`create_run` inserts all **10** composed stages per target (regardless of which noun submitted the run — see §2; `diff` counts as three: `diff_prep`, `background_estimate`, `diff`):
 
 - Stage ∈ `--stages` → **`pending`**
 - Stage ∉ `--stages` → **`external`**
@@ -169,29 +179,35 @@ Legend: **P** = pending, **E** = external, **S(n/a)** = skipped (not_selected)
 | `ps1_process` | P | S(n/a) | E | E |
 | `remap` | P | S(n/a) | E | E |
 | `downsample` | P | S(n/a) | P | P |
+| `diff_prep` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
+| `background_estimate` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 | `diff` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 | `star` | S(n/a) | S(n/a) | S(n/a) | S(n/a) |
 
-`create_run` always materializes all eight composed stages (§2), so a `template` run's SQLite rows include `diff`/`star` too — both sit outside `run_stage_closure` for every template-only `--stages` combination, so they are marked **n/a** immediately.
+`create_run` always materializes all ten composed stages (§2), so a `template` run's SQLite rows include `diff_prep`/`background_estimate`/`diff`/`star` too — all sit outside `run_stage_closure` for every template-only `--stages` combination, so they are marked **n/a** immediately.
 
 **There is no combined end-to-end preset** (`all` was removed); run `template submit` and `diff submit` as two separate submissions.
 
 ### 3.2 Diff preset (`syndiff diff submit`)
 
-| Stage | `diff` only (**default** — no `--stages`) | `--stages diff,downsample` (explicit) |
-|-------|-------------|-----------------------------------|
-| `tess_ffi_download` | E (verify → skip) | E (verify → skip) |
-| `mapping` | S(n/a) | E (verify → skip) |
-| `ps1_download` | S(n/a) | E (verify → skip) |
-| `ps1_process` | S(n/a) | E (verify → skip) |
-| `remap` | S(n/a) | E (verify → skip) |
-| `downsample` | E (verify → skip) | P (runs) |
-| `diff` | P | P |
-| `star` | S(n/a) | S(n/a) |
+| Stage | `diff_prep,background_estimate,diff` (**default** — no `--stages`) | `--stages diff,downsample` (explicit, legacy single `diff`) | `--stages diff_prep,background_estimate,diff,downsample` (explicit) |
+|-------|-------------|-----------------------------------|-----------------------------------|
+| `tess_ffi_download` | E (verify → skip) | E (verify → skip) | E (verify → skip) |
+| `mapping` | S(n/a) | E (verify → skip) | E (verify → skip) |
+| `ps1_download` | S(n/a) | E (verify → skip) | E (verify → skip) |
+| `ps1_process` | S(n/a) | E (verify → skip) | E (verify → skip) |
+| `remap` | S(n/a) | E (verify → skip) | E (verify → skip) |
+| `downsample` | E (verify → skip) | P (runs) | P (runs) |
+| `diff_prep` | P | S(n/a) — not selected, blocks `diff` until externally satisfied | P |
+| `background_estimate` | P | S(n/a) — not selected, blocks `diff` until externally satisfied | P |
+| `diff` | P | P | P |
+| `star` | S(n/a) | S(n/a) | S(n/a) |
 
-**Default `--stages diff`**: `tess_ffi_download`/`downsample` get verified on disk (`DIFF_VERIFY_UPSTREAM` special-case for `active_stages == {"diff"}`). `run_stage_closure({"diff"})` is `{"diff"}` only — template stages are not DAG-deps, but verify closure still scans `tess_ffi_download` and `downsample`. `scc_bootstrap` runs inside `diff` execute when `data_root` is set.
+**Default preset (no `--stages`)**: `preset_stages("diff")` returns `DIFF_PRESET_STAGES = ("diff_prep", "background_estimate", "diff")`, so `active_stages == {"diff_prep", "background_estimate", "diff"}`. `tess_ffi_download`/`downsample` get verified on disk (`DIFF_VERIFY_UPSTREAM` special-case, gated on `spec.py::DIFF_SPLIT_STAGES`). `run_stage_closure` over the three diff stages is just those three (plus their internal chain) — template stages are not DAG-deps, but verify closure still scans `tess_ffi_download` and `downsample`. `scc_bootstrap` runs inside `diff_prep`'s execute when `data_root` is set.
 
-**Explicit `--stages diff,downsample`**: `run_stage_closure` expands to all six template stages plus `diff`; `DIFF_VERIFY_UPSTREAM` special-case does **not** fire (active set is not exactly `{"diff"}`), so upstream template stages follow normal closure verify instead.
+**Explicit `--stages diff,downsample`** (naming only the legacy single `diff` stage, not `diff_prep`/`background_estimate`): this now under-selects — `diff` depends on `background_estimate` depends on `diff_prep`, neither of which is in `active_stages`, so they're **not** covered by the `DIFF_VERIFY_UPSTREAM` special case (which only fires on the exact default set, or the bare `{"diff"}` set for backward compat) and are **not** DAG-selected either; they'll sit `not_selected`/blocked unless already externally verifiable. In practice, select the full trio explicitly (`--stages diff_prep,background_estimate,diff,downsample`) or use the default preset — don't hand-pick just `diff`.
+
+**Explicit `--stages diff_prep,background_estimate,diff,downsample`**: `run_stage_closure` expands to all six template stages plus the diff trio; the `DIFF_VERIFY_UPSTREAM` special case does **not** fire (active set is not exactly the default preset or the bare legacy `{"diff"}`), so upstream template stages follow normal closure verify instead.
 
 ### 3.3 Other partial runs
 
@@ -284,7 +300,7 @@ There is no combined "full run" preset anymore. A **template** submission and a 
 ```
 Template stages: pending
 → tess → mapping → ps1_dl → ps1_pr → remap → downsample (per target, pool-limited)
-diff, star: n/a (outside closure of the 6-stage template preset)
+diff_prep, background_estimate, diff, star: n/a (outside closure of the 6-stage template preset)
 → run: success
 ```
 
@@ -293,7 +309,7 @@ diff, star: n/a (outside closure of the 6-stage template preset)
 ```
 tess: sc_q → skip
 map:  pend → runn → succ
-ps1_dl, ps1_pr, down, diff, star: n/a
+ps1_dl, ps1_pr, down, diff_prep, background_estimate, diff, star: n/a
 → run: success
 ```
 
@@ -302,7 +318,7 @@ ps1_dl, ps1_pr, down, diff, star: n/a
 ```
 tess, map, ps1_dl, ps1_pr: sc_q → skip (sequential verify)
 down: pend → runn → succ
-diff, star: n/a
+diff_prep, background_estimate, diff, star: n/a
 → run: success
 ```
 
@@ -312,7 +328,7 @@ diff, star: n/a
 tess, ps1_dl, ps1_pr: sc_q → skip
 map:  pend → runn → succ
 down: pend → runn → succ  (after ps1_pr satisfied)
-diff, star: n/a
+diff_prep, background_estimate, diff, star: n/a
 ```
 
 Mapping and downsample can overlap across different targets (separate resource pools).
@@ -322,17 +338,21 @@ Mapping and downsample can overlap across different targets (separate resource p
 ```
 tess, down: sc_q → skip   (DIFF_VERIFY_UPSTREAM special-case)
 map, ps1_dl, ps1_pr, remap: n/a  (not artifact-verified)
-diff: pend → runn → succ  (scc_bootstrap inside execute when data_root set)
+diff_prep: pend → runn → succ  (scc_bootstrap inside execute when data_root set)
+background_estimate: pend → runn → succ
+diff: pend → runn → succ
 star: n/a
 → run: success (or failed if template store / remap artifacts missing)
 ```
 
-### 5.6 `diff,downsample` explicit (`syndiff diff submit --stages diff,downsample`)
+### 5.6 `diff_prep,background_estimate,diff,downsample` explicit (`syndiff diff submit --stages diff_prep,background_estimate,diff,downsample`)
 
 ```
 tess, map, ps1_dl, ps1_pr, remap: sc_q → skip (normal closure verify)
 down: pend → runn → succ
-diff: pend → runn → succ  (after downsample satisfied)
+diff_prep: pend → runn → succ  (after downsample satisfied)
+background_estimate: pend → runn → succ  (after diff_prep satisfied)
+diff: pend → runn → succ  (after background_estimate satisfied)
 star: n/a
 → run: success
 ```
