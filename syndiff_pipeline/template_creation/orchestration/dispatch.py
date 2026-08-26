@@ -442,6 +442,8 @@ def _execute_template_stage(
             psf_sigma=pp.psf_sigma,
             ps1_source=pp.ps1_source,
             num_ingest_workers=pp.num_ingest_workers,
+            stream_max_inflight_requests=pp.stream_max_inflight_requests,
+            stream_prefetch_cells=pp.stream_prefetch_cells,
             use_local_files=pd.use_local_files,
             local_data_path=pd.local_data_path,
             enable_saturation_correction=pp.enable_saturation_correction,

@@ -39,7 +39,10 @@ from syndiff_pipeline.template_creation.processing.band_utils import compute_tes
 from syndiff_pipeline.template_creation.processing.correct_saturation import apply_saturation_to_row
 from syndiff_pipeline.template_creation.processing.cross_projection_padding import apply_cross_projection_padding, identify_all_padding_sources
 from syndiff_pipeline.template_creation.processing.csv_utils import find_csv_file, get_projections_from_csv, load_csv_data
-from syndiff_pipeline.template_creation.processing.ps1_download import fetch_skycell_bands_masks_and_headers
+from syndiff_pipeline.template_creation.processing.ps1_download import (
+    StreamSkycellLoader,
+    fetch_skycell_bands_masks_and_headers,
+)
 from syndiff_pipeline.template_creation.processing.zarr_utils import load_skycell_bands_masks_and_headers
 
 
@@ -603,6 +606,7 @@ def ingest_worker(
     band_cache: dict | None = None,
     combined_store_data_root: str | None = None,
     combined_store_recipe: Any = None,
+    stream_loader: StreamSkycellLoader | None = None,
 ):
     """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode)."""
     from pathlib import Path
@@ -675,11 +679,22 @@ def ingest_worker(
 
         try:
             if ps1_source == "stream":
-                bands, masks, weights, headers, headers_weight = fetch_skycell_bands_masks_and_headers(
-                    skycell_id,
-                    use_local_files=use_local_files,
-                    local_data_path=local_path,
-                )
+                if stream_loader is None:
+                    # Preserve direct-call/backward-compatible behavior.  The
+                    # top-level stream pipeline always supplies one run-scoped
+                    # loader, but tests and legacy callers may invoke workers
+                    # in isolation.
+                    bands, masks, weights, headers, headers_weight = fetch_skycell_bands_masks_and_headers(
+                        skycell_id,
+                        use_local_files=use_local_files,
+                        local_data_path=local_path,
+                    )
+                else:
+                    bands, masks, weights, headers, headers_weight = stream_loader.fetch_skycell_bands_masks_and_headers(
+                        skycell_id,
+                        use_local_files=use_local_files,
+                        local_data_path=local_path,
+                    )
             else:
                 bands, masks, weights, headers, headers_weight = zarr_utils.load_skycell_bands_masks_and_headers(
                     zarr_store, projection, skycell_id
@@ -2423,6 +2438,7 @@ def sequential_processor(
     enable_saturation_correction: bool = False,
     remove_saturated_stars: bool = True,
     csv_path: Optional[str] = None,
+    total_rows: Optional[int] = None,
     pipeline_paused_event: threading.Event = None,
     band_cache: dict = None,
     band_cache_uses: dict = None,
@@ -2438,6 +2454,18 @@ def sequential_processor(
     calling a helper function to process each row, queues results, and manages
     the sliding window state.
 
+    Parameters
+    ----------
+    total_rows : int | None, optional
+        Sum of row counts across every projection in this run (known
+        upfront by the caller, which already enumerates ``row_ids`` per
+        projection while building the task list). Used to log a cumulative
+        ``overall done/total rows`` progress figure that -- unlike the
+        ``projection X/Y`` figure -- does not reset at projection
+        boundaries and is not skewed by projections having wildly
+        different row counts. ``None`` disables that figure (e.g. for
+        callers that haven't computed it).
+
     Returns:
         Tuple of (all_removed_stars, produced_skycells) where ``all_removed_stars``
         is the flat list of removed-star records accumulated across every
@@ -2449,6 +2477,10 @@ def sequential_processor(
     produced_skycells: set[str] = set()
     last_progress_log = time.monotonic()
     total_projections = len(projections)
+    rows_done = 0
+
+    def _overall_suffix() -> str:
+        return f" overall {rows_done}/{total_rows} rows" if total_rows else ""
 
     for proj_idx, projection in enumerate(projections):
         logger.info(f"[SequentialProcessor] --- Starting sequential processing for projection: {projection} ---")
@@ -2470,7 +2502,7 @@ def sequential_processor(
 
         logger.info(
             f"[Pipeline] Progress: projection {proj_idx}/{total_projections} "
-            f"row 0/{len(row_ids)}"
+            f"row 0/{len(row_ids)}{_overall_suffix()}"
         )
 
         # Inner Loop: Process each row
@@ -2513,12 +2545,13 @@ def sequential_processor(
 
                 # Track the exact skycells the saver will write for this row.
                 produced_skycells.update(str(name) for name in results_data.keys())
+                rows_done += 1
 
                 now = time.monotonic()
                 if now - last_progress_log >= 30.0:
                     logger.info(
                         f"[Pipeline] Progress: projection {proj_idx}/{total_projections} "
-                        f"row {i + 1}/{len(row_ids)}"
+                        f"row {i + 1}/{len(row_ids)}{_overall_suffix()}"
                     )
                     last_progress_log = now
 
@@ -2539,7 +2572,7 @@ def sequential_processor(
         logger.info(f"[SequentialProcessor] --- Finished sequential processing for projection: {projection} ---")
         logger.info(
             f"[Pipeline] Progress: projection {proj_idx + 1}/{total_projections} "
-            f"row {len(row_ids)}/{len(row_ids)}"
+            f"row {len(row_ids)}/{len(row_ids)}{_overall_suffix()}"
         )
 
     # Shutdown Signal for the saver
@@ -2570,6 +2603,8 @@ def run_modern_sliding_window_pipeline(
     write_per_scc_convolved_zarr: bool = True,
     oversampling_factor: int = 1,
     mapping_csv_path: str | None = None,
+    stream_max_inflight_requests: int = 24,
+    stream_prefetch_cells: int = 6,
 ):
     """The top-level master orchestrator for the entire pipeline.
 
@@ -2663,6 +2698,22 @@ def run_modern_sliding_window_pipeline(
     zarr_store = None
     if ps1_source == "zarr":
         zarr_store = zarr.open(zarr_path, mode="r")
+    stream_loader = None
+    if ps1_source == "stream":
+        try:
+            stream_loader = StreamSkycellLoader(
+                stream_max_inflight_requests,
+                stream_prefetch_cells,
+            )
+            logger.info(
+                "[Pipeline] Stream loader enabled: request cap=%d (effective=%d, cells=%d)",
+                stream_loader.max_inflight_requests,
+                stream_loader.effective_inflight_requests,
+                stream_loader.prefetch_cells,
+            )
+        except Exception as exc:
+            logger.error("[Pipeline] Failed to initialize stream loader: %s", exc)
+            return {"error": f"stream loader initialization failed: {exc}"}
     num_ingest_workers = max(1, int(num_ingest_workers))
     num_band_combiners = 4
 
@@ -2853,6 +2904,7 @@ def run_modern_sliding_window_pipeline(
                     band_cache=band_cache,
                     combined_store_data_root=data_root,
                     combined_store_recipe=combined_store_recipe,
+                    stream_loader=stream_loader,
                 )
 
             # --- Part B: per-projection classification (tiered ingest plan) ---
@@ -2945,11 +2997,13 @@ def run_modern_sliding_window_pipeline(
             master_task_list = []
             num_regular_tasks = 0
             num_padding_tasks = 0
+            num_total_rows = 0
 
             for projection in dense_projections:
                 try:
                     metadata = extract_projection_metadata(df, projection)
                     row_ids = sorted(metadata["rows"].keys())
+                    num_total_rows += len(row_ids)
                     already_dispatched_padding: set = set()
 
                     for i, row_id in enumerate(row_ids):
@@ -3003,6 +3057,7 @@ def run_modern_sliding_window_pipeline(
                 enable_saturation_correction,
                 remove_saturated_stars,
                 csv_path,
+                total_rows=num_total_rows,
                 pipeline_paused_event=pipeline_paused_event,
                 band_cache=band_cache,
                 band_cache_uses=band_cache_uses,
@@ -3047,6 +3102,9 @@ def run_modern_sliding_window_pipeline(
                 logger.info("[Pipeline] Waiting for process coordinator to finish...")
                 process_coordinator_thread.join(timeout=30)
 
+        if stream_loader is not None:
+            stream_loader.close()
+
         saver_thread.join()
         logger.info("[Pipeline] Pipeline completed successfully!")
 
@@ -3077,6 +3135,8 @@ def run_modern_sliding_window_pipeline(
         logger.exception("[Pipeline] Unhandled exception — cleaning up child processes")
         raise
     finally:
+        if stream_loader is not None:
+            stream_loader.close()
         _cleanup_child_processes()
 
 

@@ -74,6 +74,8 @@ PS1_PROCESS_ALLOWED = frozenset(
         "psf_sigma",
         "ps1_source",
         "num_ingest_workers",
+        "stream_max_inflight_requests",
+        "stream_prefetch_cells",
         "enable_saturation_correction",
         "remove_saturated_stars",
         "catalog_path",
@@ -284,6 +286,10 @@ class Ps1ProcessStageParams:
     psf_sigma: float = 40.0
     ps1_source: str = "zarr"
     num_ingest_workers: int = 16
+    # Stream-mode loader controls.  These are independent of ingest worker
+    # count: one ingest worker must not create an unbounded request fan-out.
+    stream_max_inflight_requests: int = 24
+    stream_prefetch_cells: int = 6
     enable_saturation_correction: bool = False
     remove_saturated_stars: bool = True
     catalog_path: str | None = None
@@ -307,6 +313,14 @@ class Ps1ProcessStageParams:
     small_job_host_stats_min_mem_mb: int = 25_000
 
     def __post_init__(self) -> None:
+        if self.stream_max_inflight_requests < 1:
+            raise ValueError(
+                "stages.ps1_process.stream_max_inflight_requests must be positive"
+            )
+        if self.stream_prefetch_cells < 1:
+            raise ValueError(
+                "stages.ps1_process.stream_prefetch_cells must be positive"
+            )
         if self.use_shared_convolved_store and self.write_per_scc_convolved_zarr:
             raise ValueError(
                 "stages.ps1_process: use_shared_convolved_store=True requires "

@@ -104,6 +104,89 @@ _PS1_BANDS = ("r", "i", "z", "y")
 _ARRAYS_PER_SKYCELL = len(_PS1_BANDS) * 3
 
 
+class StreamSkycellLoader:
+    """Run-scoped, bounded loader for streaming PS1 skycells.
+
+    A skycell consists of twelve independent FITS objects (four bands and
+    image/mask/weight for each band).  The old stream path created a fresh
+    twelve-thread executor for *every* ingest worker.  With sixteen ingest
+    workers that admitted up to 192 requests and left the executor's queues
+    unbounded, so the FIFO task queue did not provide meaningful request
+    priority.
+
+    This loader owns one executor for the lifetime of a pipeline run.  Cell
+    admission is serialized and bounded by ``prefetch_cells`` (six by
+    default), while the executor itself has exactly ``max_inflight_requests``
+    workers (24 by default).  Thus at most 72 component futures can be
+    admitted, but only 24 can execute at once.  Serial admission preserves
+    FIFO component priority for the earliest cells while allowing a bounded
+    prefetch window.  The class is intentionally independent of the pipeline
+    queues so it can also be used by direct stream callers.
+
+    ``close`` is idempotent and should be called once the ingest workers have
+    drained.  The legacy function below still creates a per-call executor when
+    no loader is supplied, preserving its standalone API for star processing
+    and older callers.
+    """
+
+    def __init__(self, max_inflight_requests: int = 24, prefetch_cells: int = 6):
+        max_inflight_requests = int(max_inflight_requests)
+        prefetch_cells = int(prefetch_cells)
+        if max_inflight_requests < 1:
+            raise ValueError("max_inflight_requests must be positive")
+        if prefetch_cells < 1:
+            raise ValueError("prefetch_cells must be positive")
+        self.max_inflight_requests = max_inflight_requests
+        self.prefetch_cells = prefetch_cells
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_inflight_requests,
+            thread_name_prefix="ps1-stream",
+        )
+        self._admission_lock = threading.Lock()
+        self._cell_slots = threading.BoundedSemaphore(prefetch_cells)
+        self._close_lock = threading.Lock()
+        self._closed = False
+
+    @property
+    def effective_inflight_requests(self) -> int:
+        """Actual executor request cap."""
+        return self.max_inflight_requests
+
+    def fetch_skycell_bands_masks_and_headers(
+        self,
+        skycell_id: str,
+        *,
+        use_local_files: bool = False,
+        local_data_path: Optional[Path] = None,
+    ) -> tuple[dict, dict, dict, dict, dict]:
+        """Fetch one skycell through this loader's shared bounded executor."""
+        self._ensure_open()
+        # The slot is acquired before any request is submitted.  Admission is
+        # serialized so a later ingest worker cannot interleave its twelve
+        # requests into an earlier cell's batch.
+        return _fetch_skycell_with_executor(
+            skycell_id,
+            use_local_files=use_local_files,
+            local_data_path=local_data_path,
+            executor=self._executor,
+            admission_lock=self._admission_lock,
+            cell_slots=self._cell_slots,
+        )
+
+    def _ensure_open(self) -> None:
+        with self._close_lock:
+            if self._closed:
+                raise RuntimeError("StreamSkycellLoader is closed")
+
+    def close(self) -> None:
+        """Wait for outstanding requests and release executor resources."""
+        with self._close_lock:
+            if self._closed:
+                return
+            self._closed = True
+        self._executor.shutdown(wait=True)
+
+
 def expected_array_names() -> list[str]:
     """Expected array names.
     
@@ -475,6 +558,32 @@ def fetch_skycell_bands_masks_and_headers(
 
     Returns the same tuple shape as ``zarr_utils.load_skycell_bands_masks_and_headers``.
     """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, _ARRAYS_PER_SKYCELL)) as executor:
+        return _fetch_skycell_with_executor(
+            skycell_id,
+            use_local_files=use_local_files,
+            local_data_path=local_data_path,
+            executor=executor,
+        )
+
+
+def _fetch_skycell_with_executor(
+    skycell_id: str,
+    *,
+    use_local_files: bool,
+    local_data_path: Optional[Path],
+    executor: concurrent.futures.Executor,
+    admission_lock: Optional[threading.Lock] = None,
+    cell_slots: Optional[threading.BoundedSemaphore] = None,
+) -> tuple[dict, dict, dict, dict, dict]:
+    """Fetch one skycell through an existing executor.
+
+    ``admission_lock`` and ``cell_slots`` are used by ``StreamSkycellLoader``.
+    They cover only task submission; result collection happens after the lock
+    is released so later cells can be admitted as soon as a complete-cell
+    slot becomes available.  Any slot acquired here is released even when a
+    request submission or FITS conversion fails.
+    """
     skycell_name_parts, _projection, skycell_name = _skycell_name_parts(skycell_id)
     local_path = Path(local_data_path) if local_data_path else None
 
@@ -514,11 +623,24 @@ def fetch_skycell_bands_masks_and_headers(
             return None
         return task_band, data_type, _array_name, result["data"], result["header"]
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(pending_tasks))) as executor:
-        futures = {
-            executor.submit(_fetch_one, task_band, data_type, array_name): (task_band, data_type, array_name)
-            for task_band, data_type, array_name in pending_tasks
-        }
+    acquired_slot = False
+    futures = {}
+    try:
+        if admission_lock is not None:
+            if cell_slots is None:
+                raise ValueError("cell_slots is required with admission_lock")
+            with admission_lock:
+                cell_slots.acquire()
+                acquired_slot = True
+                futures = {
+                    executor.submit(_fetch_one, task_band, data_type, array_name): (task_band, data_type, array_name)
+                    for task_band, data_type, array_name in pending_tasks
+                }
+        else:
+            futures = {
+                executor.submit(_fetch_one, task_band, data_type, array_name): (task_band, data_type, array_name)
+                for task_band, data_type, array_name in pending_tasks
+            }
         for future in concurrent.futures.as_completed(futures):
             task_band, data_type, array_name = futures[future]
             try:
@@ -538,6 +660,17 @@ def fetch_skycell_bands_masks_and_headers(
             else:
                 weights_data[band] = data
                 headers_weight_data[band] = header
+    except Exception:
+        # Queued futures can be cancelled; running futures are allowed to
+        # finish in the shared executor.  Crucially, release the cell slot so
+        # another ingest worker cannot wait forever after a submit failure.
+        for future in futures:
+            future.cancel()
+        raise
+    finally:
+        if acquired_slot:
+            assert cell_slots is not None
+            cell_slots.release()
 
     if not bands_data:
         logging.warning("No band image data fetched for %s", skycell_name)
