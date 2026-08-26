@@ -1,0 +1,36 @@
+# TEMPORARY smoke-test orchestrator wrapper -- delete after use (see
+# diff_config_cvz_linear_os1_epsf_centroids_smoke10.yaml).
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_linear_os1_epsf_centroids_smoke10.yaml
+
+stages:
+  # Not run by this wrapper (diff-only submission) -- declared so the
+  # scheduler's external-stage verify (upstream "downsample" completeness
+  # check before launching diff) resolves the right on-disk store. Without
+  # this, DownsampleStageParams defaults (geometry_mode: field,
+  # output_store_name: templates/) make verify look in the wrong place and
+  # the run stalls with "blocked by upstream failure" even though the real
+  # templates_linear/ store is complete (found 2026-08-22).
+  downsample:
+    geometry_mode: linear
+    output_store_name: linear
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

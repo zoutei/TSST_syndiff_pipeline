@@ -1,0 +1,99 @@
+# Reusable full-FFI smoke configuration for a completed linear CVZ SCC.
+# Invoke once per SCC target; do not use as a multi-SCC production launch.
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 32
+  pipeline_plots: false
+  workspace_run_id: cvz_robust_bkg_full_hp_d
+  oversampling_factor: 1
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit_robust_full
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+    tessreduce_boundary_k: 15
+    tessreduce_boundary_sigma: 3.0
+    tessreduce_boundary_rim_width: 1
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit_robust_full
+    output: tmpl_conv_robust_full
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv_robust_full
+    output:
+      diffs: ks_d_robust_full
+      phot_bkg: ks_b_robust_full
+    tessreduce_boundary_k: 15
+    tessreduce_boundary_sigma: 3.0
+    tessreduce_boundary_rim_width: 1
+  - kind: background_temporal_smoothing
+    inputs:
+      bkg_in: ks_b_robust_full
+    output: ks_b_robust_full_s
+    recombine_inputs: false
+    steps:
+      spatial:
+        enabled: false
+      temporal:
+        enabled: true
+        method: savgol
+        tile_size: 256
+      strap:
+        enabled: false
+  - kind: hotpants
+    inputs:
+      bkg: ks_b_robust_full_s
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d_robust_full
+      convolved: hp_c_robust_full
+      bkg: hp_b_robust_full
+    write_kernel_solutions: true
+
+condor:
+  request_cpus: 32
+  request_memory: 120000
+  host_stats_min_mem_mb: 51200
+  host_stats_max_load15: 10.0

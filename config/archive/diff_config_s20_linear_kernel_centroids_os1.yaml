@@ -1,0 +1,111 @@
+# S20 campaign SCC-field diff (linear/no-correction templates): shared_mask ->
+# kernel_fit -> convolved_templates -> background_estimate -> hotpants -> epsf ->
+# centroids. Identical to the most recent CVZ recipe
+# (diff_config_cvz_s50_s55_linear_centroids_os1.yaml, s54/s55 diff stage),
+# except the ePSF stage: tile grid widened 5x5 -> 6x6 and star selection
+# narrowed to tess_mag in [8, 10) (tess_mag_min is new -- see
+# gridded_epsf._filter_gaia_for_epsf) to cut per-tile star counts and speed up
+# ePSF fitting, which was taking far too long at the CVZ tuning.
+# Templates read from templates_linear/ at oversampling_factor: 1.
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 32
+  workspace_run_id: s20_linear_kf_hp
+  pipeline_plots: true
+  oversampling_factor: 1
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    write_kernel_solutions: true
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    tile_nx: 6
+    tile_ny: 6
+    epsf_oversample: 4
+    psf_size: 15
+    extract_size: 15
+    min_stars_per_tile: 5
+    tess_mag_max: 10.0
+    tess_mag_min: 8.0
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 32
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    tess_mag_max: 10.0
+    fit_shape: 11
+    aperture_radius: 2
+    psf_grouper_min_separation: 4
+    centroids_n_jobs: 32
+
+condor:
+  request_cpus: 32
+  request_memory: 120000
+  host_stats_min_mem_mb: 51200
+  host_stats_max_load15: 10.0

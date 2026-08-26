@@ -1,0 +1,45 @@
+# TEMPORARY smoke-test orchestrator wrapper -- delete after use (see
+# diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids_smoke10.yaml).
+deployment_file: deployment.yaml
+diff_config: diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids_smoke10.yaml
+
+stages:
+  # Not run by this wrapper (diff-only submission) -- declared so the
+  # scheduler's external-stage verify (upstream "downsample" completeness
+  # check before launching diff) resolves the right on-disk store. Without
+  # this, DownsampleStageParams/MappingStageParams/RemapStageParams
+  # defaults (output_store_name: templates/, oversampling_factor: 1) make
+  # verify look in the wrong place and the run stalls with "blocked by
+  # upstream failure" even though the real templates_tvwcs/ store is
+  # complete. Values copied from pipeline_s20_c3_k3_tvwcs_os4.yaml, the
+  # orchestrator that actually built this lane (found 2026-08-22).
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+  remap:
+    store_name: tvwcs
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

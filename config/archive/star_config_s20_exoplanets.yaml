@@ -1,0 +1,43 @@
+# Sector-20 exoplanet-host-star campaign: star branch on s20_astrometry workspaces.
+# Baseline ws_star_full_lc (hp_d, hp_c, kernels, epsf_r1); phot_bkg ks_b_s.
+deployment_file: deployment.yaml
+
+defaults:
+  cutout_size: 96
+  stamp_size: 24
+  kernel_margin_px: 470
+  ps1_source: stream
+  debug_plots: true
+  max_ffis: null
+  overwrite: false
+
+baseline:
+  workspace_run_id: star_full_lc_epsf
+  diffs: hp_d
+  convolved: hp_c
+  phot_bkg: ks_b_s
+
+photometry:
+  methods:
+    - name: gepsf
+      type: psf
+      psf_type: epsf
+      inputs:
+        epsf: epsf_r1
+      fit_shape: 11
+      aperture_radius: 2
+      psf_grouper_min_separation: 10
+    - name: prf
+      type: psf
+      psf_type: prf
+    - name: ap3
+      type: aperture
+      tar_ap: 3
+      sky_in: 5
+      sky_out: 9
+
+condor:
+  request_cpus: 16
+  request_memory: 100000
+  requirements: 'Memory >= 100000 && LoadAvg < 10'
+  rank: "-LoadAvg"

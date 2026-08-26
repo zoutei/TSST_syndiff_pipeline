@@ -1,0 +1,61 @@
+# Per-FFI Hotpants + photometry in a new workspace tree.
+# SCC-only: workspace_inherit removed; ks_b/ks_d must exist on the SCC diff lane.
+# Use: syndiff diff submit/run with --config config/diff_config_multi_kernel_resume.yaml
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 16
+  pipeline_plots: false
+  crop_mode: target_box
+  crop_box_size: 1024
+  workspace_run_id: multi_hp_kernel
+
+pipeline:
+  - external_workspaces:
+      - ks_b
+  - kind: background_temporal_smoothing
+    inputs:
+      bkg_in: ks_b
+    output: ks_b_s
+    recombine_inputs: false
+    steps:
+      spatial:
+        enabled: false
+      temporal:
+        enabled: true
+        method: savgol
+        tile_size: 256
+      strap:
+        enabled: false
+  - kind: hotpants
+    inputs:
+      bkg: ks_b_s
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_kernel_solutions: true
+
+condor:
+  request_cpus: 16
+  request_memory: 100000
+  host_stats_min_mem_mb: 100000
+  host_stats_max_load15: 10.0

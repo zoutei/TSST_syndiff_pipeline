@@ -1,0 +1,14 @@
+# S0022/C3/K3 temporal-WCS publication from the completed centroid lane.
+deployment_file: deployment.yaml
+diff_config: diff_config_s22_c3_k3_temporal_wcs.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  skip_artifact_verify: false

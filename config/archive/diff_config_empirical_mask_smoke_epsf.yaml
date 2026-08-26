@@ -1,0 +1,29 @@
+# Phase A follow-up (historical): empirical mask + ePSF-only smoke.
+# SCC-only: workspace_inherit removed; hp_d and mask artifacts must exist on the SCC lane.
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 8
+  workspace_run_id: empirical_mask_smoke_epsf
+  pipeline_plots: true
+  crop_mode: target_box
+  crop_box_size: 1024
+  max_ffis: 25
+
+pipeline:
+  - external_workspaces:
+      - hp_d
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    tile_nx: 2
+    tile_ny: 2
+    epsf_oversample: 4
+    psf_size: 11
+    extract_size: 11
+    min_stars_per_tile: 5
+    tess_mag_max: 12.95
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 8

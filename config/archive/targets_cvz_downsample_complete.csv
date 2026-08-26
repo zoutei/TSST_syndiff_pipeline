@@ -1,0 +1,4 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+51,4,4,270.80507757,75.46948381,s0051_c4_k4,true
+53,3,3,299.27767653,79.11141665,s0053_c3_k3,true
+54,4,3,279.31783415,75.14231969,s0054_c4_k3,true

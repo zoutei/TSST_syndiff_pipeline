@@ -1,0 +1,84 @@
+# SN2022jhq sectors 51 and 52: distortion-aware temporal-WCS OS4 field
+# templates.  This is deliberately not an FFI-WCS build: mapping consumes the
+# already-published per-SCC temporal Chebyshev/B-spline model.
+#
+# Prerequisite: both SCCs must have
+# wcs/temporal_cheb5_bspline_v1/{frames.parquet,manifest.json}, as produced by
+# the completed linear diff/centroid lane.  Verified present 2026-08-25.
+#
+# Submit templates through Hotpants as one scheduler-connected run:
+#   syndiff submit --config config/pipeline_sn2022jhq_tvwcs_os4.yaml \
+#     --scc config/scc_sn2022jhq_s51_s52.csv \
+#     --run-id sn2022jhq_s51_s52_tvwcs_os4_hp_d_20260825
+deployment_file: deployment.yaml
+diff_config: diff_config_sn2022jhq_tvwcs_os4_hp_d.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+
+stages:
+  # Keep field geometry explicit on both consumers.  The mapping source below
+  # is the temporal model, not the SPOC/FFI WCS headers.
+  wcs_grouping:
+    geometry_mode: field
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+    wcs_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    skip_download_catalog: false
+    n_threads: 64
+    condor_request_cpus: 64
+    condor_request_memory: 80000
+    host_stats_min_mem_mb: 80000
+    host_stats_max_load15: 20.0
+  ps1_process:
+    # Recipe-matched shared cells are safe to reuse across these adjacent-CVZ
+    # sectors; the requested template submit omits this stage.
+    ps1_source: stream
+    use_shared_convolved_store: true
+    write_per_scc_convolved_zarr: false
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+  remap:
+    store_name: tvwcs
+    drift_source: per_skycell_temporal_wcs
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    n_jobs: 64
+    # OS4 regmaps do not fit reliably in the available execute-host scratch
+    # allocations.  Read them from shared NFS rather than requesting 16 GB of
+    # local disk and risking an ENOSPC/fallback cycle.
+    stage_regmaps_to_scratch: false
+    condor_request_cpus: 64
+    condor_request_memory: 250000
+    host_stats_min_mem_mb: 250000
+    host_stats_max_load15: 20.0
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+    rebuild_field_store: true
+    materialize_fits: false
+    n_jobs: 64
+    executor: condor
+    condor_request_cpus: 64
+    condor_request_memory: 250000
+    host_stats_min_mem_mb: 250000
+    host_stats_max_load15: 20.0
+    stage_regmaps_to_scratch: false
+
+resources:
+  # The two SCCs overlap substantially on the sky; serialize expensive shared
+  # work and keep the OS4 memory profile to one active SCC at a time.
+  mapping:
+    max_concurrent: 2
+  ps1_process:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2

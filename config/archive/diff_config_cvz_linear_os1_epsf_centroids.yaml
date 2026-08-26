@@ -1,0 +1,130 @@
+# CVZ (s50-s55) linear-lane diff, full chain through epsf+centroids:
+# shared_mask -> kernel_fit -> convolved_templates -> background_estimate ->
+# hotpants (hp_d) -> epsf (orbit_binned) -> centroids. Reads
+# templates_linear/oversampling_1, rebuilt under the Gaia-catalog-wiring fix
+# (see run cvz_s50_s55_catalog_fix_phase3_*). epsf/centroids use EpsfParams/
+# CentroidsParams defaults (matching config/diff_config_scc_linear_kernel_
+# centroids_os1.yaml's own "stage defaults unless overridden" convention),
+# with epsf_n_jobs/centroids_n_jobs matched to this run's own n_jobs tuning.
+#
+# Use:
+#   syndiff diff submit --config config/diff_config_cvz_linear_os1_epsf_centroids.yaml \
+#     --scc config/scc_cvz_s50_s55_pilot.csv --stages diff \
+#     --run-id cvz_s50_s55_linear_epsf_centroids_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+
+# n_jobs 32 (not 64): a transient Condor memory-limit eviction was observed
+# under 64-way hotpants parallelism on this SCC lane in an earlier campaign
+# (see diff_config_cvz_s50_s55_linear_centroids_os1.yaml); 32 keeps peak
+# concurrent memory well under the request.
+defaults:
+  n_jobs: 32
+  workspace_run_id: cvz_s50_s55_linear_os1_epsf_centroids_v3
+  pipeline_plots: true
+  oversampling_factor: 1
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    # Pinned explicitly (not left to inherit condor.request_cpus): a
+    # transient Condor memory-limit eviction was observed under 64-way
+    # hotpants parallelism on this SCC lane in an earlier campaign (see
+    # diff_config_cvz_s50_s55_linear_centroids_os1.yaml). condor.request_cpus
+    # is now 64 so epsf/centroids can run at full width, but hotpants must
+    # stay at 32 regardless (2026-08-22).
+    hotpants_n_jobs: 32
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    write_kernel_solutions: true
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    epsf_mode: orbit_binned
+    tile_nx: 4
+    tile_ny: 4
+    # Star-selection matched to dev/forward_epsf_wcs's init_study epsf_pool
+    # stage (a separate, non-production GPU fitter's own ePSF-prior
+    # builder): tess_mag window (8,13) per init_study/orbit2/config.yaml
+    # (its latest study), no isolation filter (epsf_pool never applies
+    # one). Applied on the whole science array (4x4), not that fitter's
+    # own 2x2-over-a-central-crop --region restriction.
+    tess_mag_min: 8.0
+    tess_mag_max: 13.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
+    epsf_n_jobs: 64
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    centroids_n_jobs: 64
+
+condor:
+  request_cpus: 64
+  # 500GB (up from 120GB): centroids OOM'd at 120GB once epsf/centroids
+  # moved from 32 to 64 workers (used 101GB against the 120GB cgroup
+  # limit) -- memory wasn't scaled up when cores were. Nodes are only
+  # 128GB or ~520GB class, nothing in between, so there's no reason to
+  # under-ask (2026-08-22).
+  request_memory: 500000
+  host_stats_min_mem_mb: 500000
+  host_stats_max_load15: 10.0

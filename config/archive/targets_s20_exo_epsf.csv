@@ -1,0 +1,16 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+20,1,1,120.173199,45.117358,s20_astrometry,True
+20,1,2,102.258212,47.06077,s20_astrometry,True
+20,1,3,101.456529,34.784919,s20_astrometry,True
+20,1,4,116.474662,33.148529,s20_astrometry,True
+20,2,1,137.503518,67.071507,s20_astrometry,True
+20,2,2,103.613462,70.922492,s20_astrometry,True
+20,2,3,102.860384,58.614042,s20_astrometry,True
+20,3,1,104.248852,82.509717,s20_astrometry,True
+20,3,2,163.698951,75.40292,s20_astrometry,True
+20,3,3,216.085042,76.593947,s20_astrometry,True
+20,3,4,285.463636,85.200794,s20_astrometry,True
+20,4,1,285.60892,73.615312,s20_astrometry,True
+20,4,2,247.683122,69.320408,s20_astrometry,True
+20,4,3,261.73261,58.573979,s20_astrometry,True
+20,4,4,286.312167,61.303044,s20_astrometry,True

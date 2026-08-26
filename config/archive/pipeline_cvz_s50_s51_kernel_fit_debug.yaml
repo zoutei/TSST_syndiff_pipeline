@@ -1,0 +1,20 @@
+# SCC-level debug policy for S50/S51: run only the diff DAG node, using the
+# two-step diff configuration that ends at kernel_fit.
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_s50_s51_kernel_fit_debug.yaml
+
+stages:
+  downsample:
+    geometry_mode: linear
+    remap_store_name: linear
+    output_store_name: linear
+    oversampling_factor: 1
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  heartbeat_interval_s: 30.0

@@ -2,27 +2,53 @@
 
 This directory is the **config root** passed to `syndiff --site config`.
 
-## Files
+## Layout (2026-08-25 tidy-up)
+
+Config root now holds only the **generic/example** files below plus the
+files for the **active campaign** (currently SN2022jhq). Everything for
+past/other campaigns (CVZ, sector 20, 2020ut, 2020jtg, multi-kernel
+astrometry, etc.) moved into [`archive/`](archive/) via `git mv` — same
+content, same filenames, just nested one level down. `archive/` has its own
+`deployment.yaml` symlink (`-> ../deployment.yaml`) so every archived file's
+`deployment_file: deployment.yaml` (or nested campaigns' `../deployment.yaml`)
+still resolves without edits. Nothing there needs a code or invariant
+change to keep working — pass `--config config/archive/<file>.yaml` (with
+`--deployment config/deployment.yaml`) exactly as before.
+
+`config/example/`, `config/local/`, `config/atlas_config/`, `config/irsa_config/`
+are untouched — local/gitignored scratch, not part of this reorg.
+
+## Active campaign: SN2022jhq
 
 | File | Role |
 |------|------|
-| `pipeline.yaml` | Orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
-| `diff_config.yaml` | Site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor. **Default = shared_mask + hotpants.** |
-| `photometry_config_*.yaml` | Event photometry policy for `syndiff photometry` ([guide](../docs/markdown/photometry.md)) |
+| `pipeline_sn2022jhq_template.yaml` | Template DAG orchestrator (`diff_config: diff_config_sn2022jhq.yaml`); submit diff via **this** file, not the diff_config directly — see its header comment |
+| `diff_config_sn2022jhq.yaml` | Linear-lane diff policy: shared_mask → kernel_fit → convolved_templates → background_estimate → hotpants → epsf (centroids/temporal_wcs currently commented out) |
+| `pipeline_sn2022jhq_tvwcs_os4.yaml` / `diff_config_sn2022jhq_tvwcs_os4_hp_d.yaml` | OS4 temporal-WCS Hotpants-only lane (reuses the linear lane's background/mask via symlink) |
+| `pipeline_sn2022jhq_photometry.yaml` / `photometry_config_sn2022jhq.yaml` | Event forced-photometry policy |
+| `scc_sn2022jhq.csv` / `scc_sn2022jhq_s51_s52.csv` | SCC registries (sector,camera,ccd) for the two lanes above |
+| `targets_sn2022jhq.csv` / `targets_sn2022jhq_s51_s52.csv` | Event target CSVs |
+
+## Generic / shared files
+
+| File | Role |
+|------|------|
+| `pipeline.yaml` | Default orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
+| `diff_config.yaml` | Default site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor. **Default = shared_mask + hotpants.** |
+| `diff_config_single_kernel.yaml` | Default `diff_config:` target referenced by `pipeline.yaml` |
 | `mask_settings.example.yaml` | Copy to site `mask_settings.yaml` for empirical/TNS/asteroid mask policy (`difference_imaging/masking`) |
-| `diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `ks_b_s`, per-frame kernels; `write_convolved: false`) |
-| `diff_config_star_full_backfill.yaml` | One-time Hotpants backfill (`write_convolved` + `write_kernel_solutions`) for star |
 | `star_config.yaml` | Site star policy: baseline labels, photometry, `ps1_source`, SCC overrides |
-| `star_config_epsf_gepsf.yaml` | Star gridded-ePSF build/reuse and gepsf photometry example |
 | `star_targets_example.csv` | Example star SCC registry for `syndiff star submit` |
-| `star_targets_full.csv` | Production star SCC registry |
-| `star_hosts/` | Per-event host star CSVs referenced from `star_targets` |
-| `pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
-| `pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
 | `deployment.yaml` | Gitignored: `workspace_root`, `data_root`, credentials (copy from `deployment.yaml.example`) |
 | `targets_example.csv` | Example event targets CSV for `syndiff diff --targets` |
 | `scc_example.csv` | Example SCC-only CSV (`sector,camera,ccd[,enabled]`) for `syndiff template --scc` |
-| [`linear_centroids/`](linear_centroids/) | Phase-1 linear templates + kernel diff through centroids ([guide](../docs/markdown/linear_centroids_pipeline.md)) |
+
+Everything else referenced further below (`diff_config_multi_kernel.yaml`,
+`diff_config_star_full_backfill.yaml`, `star_config_epsf_gepsf.yaml`,
+`star_targets_full.csv`, `star_hosts/`, `pipeline_multi_kernel_s20_astrometry.yaml`,
+`pipeline_epsf_gepsf.yaml`, `linear_centroids/`, `photometry_config_2020ut_gepsf_lc.yaml`)
+now lives under [`archive/`](archive/) — prefix the path with `archive/` when
+following those examples below.
 
 ## Foreground diff (two entry points)
 
@@ -166,12 +192,12 @@ Allowed `fitter` values for `psf_type: epsf`: `photutils` (default) | `tessreduc
 Full parameter tables, fitting steps, outputs, and dual-method examples:
 [docs/markdown/stages/forced_photometry.md](../docs/markdown/stages/forced_photometry.md).
 
-## `background` (spatial → temporal → strap)
+## `background_temporal_smoothing` (spatial → temporal → strap)
 
-Inserted after `kernel_subtract` in [`diff_config_single_kernel.yaml`](diff_config_single_kernel.yaml) and [`diff_config_multi_kernel.yaml`](diff_config_multi_kernel.yaml). Temporally smooths the full-crop photutils background cube (`ks_b`) with Savitzky–Golay when `steps.temporal.enabled: true`; writes `ks_b_s`. Pair with a `subtract` stage for resubtracted diffs.
+Inserted after `background_estimate` in [`diff_config_single_kernel.yaml`](diff_config_single_kernel.yaml) and [`diff_config_multi_kernel.yaml`](diff_config_multi_kernel.yaml). Temporally smooths the full-crop photutils background cube (`ks_b`) with Savitzky–Golay when `steps.temporal.enabled: true`; writes `ks_b_s`. Pair with a `subtract` stage for resubtracted diffs.
 
 ```yaml
-- kind: background
+- kind: background_temporal_smoothing
   inputs:
     bkg_in: ks_b
   output: ks_b_s

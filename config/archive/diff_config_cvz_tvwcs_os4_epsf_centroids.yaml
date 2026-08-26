@@ -1,0 +1,136 @@
+# CVZ SCCs, distortion-aware (tvwcs/OS4) diff, full chain through
+# epsf+centroids -- mirrors diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml.
+# Reads templates_tvwcs/oversampling_4 built by pipeline_cvz_tvwcs_os4.yaml.
+#
+# shared_mask is intentionally omitted, matching the S20/C3/K3 tvwcs
+# convention: reuse the existing diff_linear/{shared_mask.fits.fz,
+# hotpants_substamp_stars.csv}, staged into diff_tvwcs/ before running (verify
+# native science crop shape matches for the target SCC before first use).
+#
+# Use:
+#   syndiff diff submit --config config/diff_config_cvz_tvwcs_os4_epsf_centroids.yaml \
+#     --scc config/scc_cvz_s50_only.csv --stages diff \
+#     --run-id cvz_s50_tvwcs_epsf_centroids_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 64
+  workspace_run_id: cvz_tvwcs_os4_epsf_centroids
+  pipeline_plots: true
+  oversampling_factor: 4
+
+paths:
+  template_store_name: tvwcs
+  output_store_name: tvwcs
+  remap_store_name: tvwcs
+
+pipeline:
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    # Matched to S20/C3/K3's controlled 64-thread-budget sweep on a live
+    # 500GB/64-core production node (plscience7, 2026-08-22): 8x8=8.74s/frame
+    # beat 16x4/32x2/8x4 -- see diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml.
+    hotpants_n_jobs: 8
+    hotpants_os_n_jobs: 8
+    # group_id changes almost every frame under drift tracking, so a
+    # multi-group LRU buys little reuse at OS4 scale; cap at 1 (see S20's
+    # diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml for the full-SCC
+    # OOM this is guarding against, 2026-08-22).
+    template_cache_max_groups: 1
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_kernel_solutions: true
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    epsf_mode: orbit_binned
+    tile_nx: 4
+    tile_ny: 4
+    epsf_oversample: 4
+    psf_size: 15
+    extract_size: 15
+    min_stars_per_tile: 5
+    # Matched to dev/forward_epsf_wcs's init_study epsf_pool stage (tess_mag
+    # window) plus run_fit.py's isolated-target selection (isolation) -- see
+    # diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml for the same combo.
+    tess_mag_min: 8.0
+    tess_mag_max: 13.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 64
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    tess_mag_max: 10.0
+    fit_shape: 11
+    aperture_radius: 2
+    psf_grouper_min_separation: 4
+    centroids_n_jobs: 64
+
+condor:
+  request_cpus: 64
+  # 500GB: cluster nodes are only 128GB or ~520GB class -- any request
+  # above 128GB already restricts matching to the 520GB nodes, so ask for
+  # the full 500GB rather than under-asking at 200GB. S20/C3/K3's full
+  # tvwcs/OS4 run held at ~91-100GB even with the template cache bounded
+  # to 1-2 groups (2026-08-22); sized generously until this CVZ tvwcs lane
+  # is actually run and its own real footprint is measured.
+  request_memory: 500000
+  host_stats_min_mem_mb: 500000
+  host_stats_max_load15: 10.0

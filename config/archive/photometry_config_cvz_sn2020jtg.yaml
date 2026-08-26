@@ -1,0 +1,36 @@
+# CVZ SN2020jtg photometry: astrometry + gepsf forced LCs on linear SCC diff lane.
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: cvz_sn2020jtg
+  n_jobs: 64
+  pipeline_plots: true
+  max_ffis: null
+
+paths:
+  output_store_name: linear
+  template_store_name: linear
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: astrometry
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_gepsf_2020jtg
+    methods:
+      - name: gepsf
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+
+condor:
+  request_cpus: 64
+  request_memory: 100000
+  requirements: "Memory >= 100000 && LoadAvg < 10"
+  rank: "-LoadAvg"

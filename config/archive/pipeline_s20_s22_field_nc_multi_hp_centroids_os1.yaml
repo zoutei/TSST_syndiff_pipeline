@@ -1,0 +1,38 @@
+# Diff-only rerun for s0020/c3/k3 + s0022/c3/k3 on existing field_no_correction
+# templates (from s20_s22_linear_bootstrap_v2). Kernel-fit subtraction path +
+# epsf + centroids.
+#
+# Usage:
+#   mamba activate syndiff
+#   syndiff diff submit \
+#     --config config/pipeline_s20_s22_field_nc_multi_hp_centroids_os1.yaml \
+#     --scc config/scc_s20_s22_c3_k3.csv \
+#     --stages diff \
+#     --run-id s20_s22_field_nc_multi_hp_centroids_os1 \
+#     --force-rerun --skip-artifact-verify
+deployment_file: deployment.yaml
+diff_config: diff_config_scc_field_nc_multi_hp_centroids_os1.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  skip_artifact_verify: true
+  verify_budget_per_tick: 0
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

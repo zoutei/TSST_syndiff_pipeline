@@ -1,0 +1,2 @@
+sector,camera,ccd,target_name,stars_file,baseline_workspace_run_id,baseline_diffs,baseline_convolved,phot_bkg,enabled
+20,3,2,s20_astrometry,star_hosts/s20_c3_k2_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
