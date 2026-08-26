@@ -732,6 +732,10 @@ def reconcile_running_stages(
                             reason=reason,
                             max_attempts=cfg.max_stage_attempts,
                             requeue_backoff_s=cfg.requeue_backoff_s,
+                            # Host exclusion plus requeue is an expected
+                            # recovery path; notify only if retries are
+                            # exhausted and the stage actually fails.
+                            notify_on_requeue=False,
                         ):
                             counts["requeued"] += 1
                         else:
@@ -2224,6 +2228,7 @@ def _requeue_or_fail_stage(
     max_attempts: int,
     requeue_backoff_s: float,
     terminate_if_alive: bool = False,
+    notify_on_requeue: bool = True,
 ) -> bool:
     """Requeue a lost running stage, or finalize as failed after max attempts."""
     attempts = job.attempts or 0
@@ -2270,16 +2275,17 @@ def _requeue_or_fail_stage(
         error_tail=reason,
         backoff_s=backoff_s,
     )
-    _notify_stage_outcome(
-        state,
-        run_id,
-        target_label=job.target_label,
-        stage=job.stage,
-        outcome="died",
-        runs_root=runs_root,
-        finished_at=pstate._utc_now(),
-        error_tail=reason,
-    )
+    if notify_on_requeue:
+        _notify_stage_outcome(
+            state,
+            run_id,
+            target_label=job.target_label,
+            stage=job.stage,
+            outcome="died",
+            runs_root=runs_root,
+            finished_at=pstate._utc_now(),
+            error_tail=reason,
+        )
     return True
 
 
