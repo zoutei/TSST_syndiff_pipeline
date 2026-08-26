@@ -1933,7 +1933,12 @@ def stage_absence_probe(
         )
 
     if stage == "ps1_process":
-        zarr_path = _convolved_zarr_path(resolved)
+        # Must match verify_ps1_process's own store selection: the legacy
+        # per-SCC convolved.zarr never exists for targets using the shared
+        # store, so checking it unconditionally makes this probe report
+        # ABSENT and short-circuit past the real (deep) verify below --
+        # even when the shared store is fully populated for this SCC.
+        zarr_path = resolve_ps1_process_checkpoint_location(resolved)
         return (
             AbsenceProbeResult.MAYBE_PRESENT
             if zarr_path.exists()
