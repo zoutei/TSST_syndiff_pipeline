@@ -1,0 +1,53 @@
+# Smoke test for restored geometry_mode: linear downsample (Track B), on s20
+# c3k3's existing mapping/ps1_process data (no new Condor mapping/ps1 cost).
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_s50_s55_linear_centroids_os1.yaml
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 1
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  remap:
+    drift_source: point
+    store_name: linear
+    n_jobs: 8
+    executor: local
+  downsample:
+    geometry_mode: linear
+    remap_store_name: linear
+    output_store_name: linear
+    rebuild_field_store: true
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    n_jobs: 24
+    executor: local
+  diff:
+    executor: local
+
+resources:
+  network:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 2
+  ps1_process:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: false

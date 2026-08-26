@@ -1,0 +1,87 @@
+# S20 campaign (all camera/ccd except 20/3/3, already completed): true
+# geometry_mode=linear templates (no L4a/L4b correction, original per-FFI WCS)
+# from the existing shared PS1 combined+convolved store (mapping/ps1_process
+# already done for all s20 SCCs), remapped+downsampled to templates_linear/,
+# then diffed with kernel_fit -> hotpants -> epsf -> centroids. Identical
+# recipe to the most recent CVZ runs (pipeline_cvz_bk_shared_os1.yaml).
+#
+# Usage:
+#   mamba activate syndiff
+#   syndiff diff submit \
+#     --config config/pipeline_s20_linear_kernel_centroids_os1.yaml \
+#     --scc config/scc_s20_linear_kf_hp_all.csv \
+#     --stages remap,downsample,diff \
+#     --run-id s20_linear_kf_hp_<date>
+deployment_file: deployment.yaml
+diff_config: diff_config_s20_linear_kernel_centroids_os1.yaml
+
+bookkeeping:
+  trust_index: true
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 1
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  remap:
+    drift_source: point
+    apply_intra_skycell: false
+    apply_inter_skycell: false
+    store_name: linear
+    intra_skycell_R: 1
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: false
+    raw_drift_outlier_sigma: 5.0
+    n_jobs: 32
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+  downsample:
+    geometry_mode: linear
+    remap_store_name: linear
+    output_store_name: linear
+    rebuild_field_store: true
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    n_jobs: 16
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_request_disk: 4096
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 2
+  ps1_process:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

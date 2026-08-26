@@ -1,0 +1,2 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+50,4,4,284.907949,73.983531,s0050_c4_k4_bgtest,true

@@ -1,0 +1,14 @@
+# Run only the temporal WCS diff sub-pipeline on completed S0020/C3/K3 data.
+deployment_file: deployment.yaml
+diff_config: diff_config_s20_c3_k3_temporal_wcs.yaml
+
+stages:
+  diff:
+    executor: local
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  skip_artifact_verify: false

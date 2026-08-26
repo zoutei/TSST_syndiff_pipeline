@@ -1,0 +1,59 @@
+# S0022/C3/K3 distortion-aware field-template lane:
+# mapping -> remap -> downsample at oversampling 4.
+# The temporal WCS publication is a separate prerequisite run.
+deployment_file: deployment.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+    channel_id: "1513744924133294171"
+
+stages:
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+    wcs_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    skip_download_catalog: false
+    n_threads: 64
+    condor_request_cpus: 64
+  remap:
+    store_name: tvwcs
+    drift_source: per_skycell_temporal_wcs
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    n_jobs: 64
+    intra_skycell_R: 1
+    condor_request_disk: 16000
+    condor_request_cpus: 64
+    condor_request_memory: 250_000
+  ps1_process:
+    # PS1/convolved products already exist for this SCC.  The downsample
+    # stage consumes the shared per-SCC convolved Zarr below.
+    ps1_source: stream
+  downsample:
+    geometry_mode: field
+    apply_intra_skycell: true
+    apply_inter_skycell: true
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+    convolved_dir: /astro/armin/koji/syndiff/data/convolved_results/sector_0022_camera_3_ccd_3.zarr
+    rebuild_field_store: true
+    materialize_fits: false
+
+resources:
+  network:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 1
+  downsample:
+    max_concurrent: 1
+  ps1_process:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0

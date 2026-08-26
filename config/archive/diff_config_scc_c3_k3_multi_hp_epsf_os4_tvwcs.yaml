@@ -1,0 +1,88 @@
+# SCC field-mode diff (os4, tvwcs lane): kernel_fit -> convolved_templates ->
+# background_estimate -> hotpants (hp_d/hp_c/hp_b) against the distortion-aware
+# (temporal WCS) field-template store templates_tvwcs/oversampling_4.
+# shared_mask is intentionally omitted: this reuses the existing
+# diff_linear/{shared_mask.fits.fz,hotpants_substamp_stars.csv}, staged into
+# diff_tvwcs/ before running (native crop shape matches: 2048x2048).
+# 10-FFI smoke test: max_ffis: 10 below. Remove before a full-SCC run.
+# Use: syndiff diff submit --config config/pipeline_s20_c3_k3_os4_diff_smoke.yaml \
+#        --scc config/scc_s20_c3_k3.csv --stages diff \
+#        --run-id s20_c3_k3_os4_diff_smoke10 --skip-artifact-verify
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 10
+  max_ffis: 10
+  workspace_run_id: s20_c3_k3_tvwcs_os4_smoke10_v5
+  pipeline_plots: true
+  oversampling_factor: 4
+
+paths:
+  template_store_name: tvwcs
+  output_store_name: tvwcs
+  remap_store_name: tvwcs
+
+pipeline:
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    hotpants_n_jobs: 1  # serial: OS4 template (8256x8256) is memory-heavy per worker; diagnose footprint before choosing safe concurrency.
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_kernel_solutions: true
+
+condor:
+  request_cpus: 1
+  request_memory: 80000
+  host_stats_min_mem_mb: 80000
+  host_stats_max_load15: 10.0

@@ -1,0 +1,37 @@
+# Second-pass OS4 (distortion-aware) diff smoke test for s0020/c3/k3.
+# mapping/remap/downsample already completed (templates_tvwcs, remap_tvwcs,
+# store_name=tvwcs). This orchestrator config runs only the diff stage
+# against that existing store, capped to 10 FFIs (see max_ffis in the
+# referenced diff_config).
+# Usage:
+#   mamba activate syndiff
+#   syndiff diff submit \
+#     --config config/pipeline_s20_c3_k3_os4_diff_smoke.yaml \
+#     --scc config/scc_s20_c3_k3.csv \
+#     --stages diff \
+#     --run-id s20_c3_k3_os4_diff_smoke10 \
+#     --skip-artifact-verify
+deployment_file: deployment.yaml
+diff_config: diff_config_scc_c3_k3_multi_hp_epsf_os4_tvwcs.yaml
+
+stages:
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    max_concurrent: 1
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

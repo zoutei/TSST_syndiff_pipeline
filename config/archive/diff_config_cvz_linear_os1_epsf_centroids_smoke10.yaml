@@ -1,0 +1,98 @@
+# TEMPORARY smoke-test variant of diff_config_cvz_linear_os1_epsf_centroids.yaml
+# (max_ffis: 10 added) -- s0050/c4/k4 only. Delete after use.
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 8
+  max_ffis: 10
+  workspace_run_id: cvz_linear_os1_epsf_centroids_smoke10
+  pipeline_plots: true
+  oversampling_factor: 1
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    write_kernel_solutions: true
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    epsf_mode: orbit_binned
+    tile_nx: 4
+    tile_ny: 4
+    tess_mag_min: 8.0
+    tess_mag_max: 13.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
+    epsf_n_jobs: 8
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    centroids_n_jobs: 8
+
+condor:
+  request_cpus: 8
+  request_memory: 60000
+  host_stats_min_mem_mb: 51200
+  host_stats_max_load15: 10.0

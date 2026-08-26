@@ -1,0 +1,141 @@
+# CVZ pilot (s50-55, SN 2020jtg region): true geometry_mode=linear bootstrap templates
+# (~19 wcs_grouping groups/SCC, no L4a/L4b correction, original per-FFI WCS) built from
+# a padding-aware shared PS1 combined+convolved store, diffed to Gaia/ePSF centroids.
+#
+# NOTE: downsample.geometry_mode: linear requires the Track B restoration work
+# (see ~/.claude/plans/greedy-forging-whistle.md) -- this config is written against
+# the target design; tess_ffi_download/wcs_grouping/mapping/ps1_process/remap can run
+# with today's code, downsample/diff will only succeed once that lands.
+#
+# Usage:
+#   mamba activate syndiff
+#   syndiff diff submit \
+#     --config config/pipeline_cvz_bk_shared_os1.yaml \
+#     --scc config/scc_cvz_s50_s55_pilot.csv \
+#     --run-id <new_run_id>
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_s50_s55_linear_centroids_os1.yaml
+
+# provenance.db is warm for this data_root (verified 2026-07-24: 20360 artifacts,
+# 14 recipes indexed) -- trust the checkpoint index for the 5 covered stages
+# (tess_ffi_download, mapping, remap, downsample, ps1_process) instead of scanning
+# manifests/directories on every verify pass. On a checkpoint miss this fails
+# closed (stage re-verified/re-run, not silently skipped) -- see
+# doc/template_bookkeeping_plan.md BK-8 and docs/markdown/bookkeeping.md §11.
+# ps1_download/diff/photometry/star/wcs_grouping have no checkpoint equivalent yet
+# and still use the legacy manifest/absence-probe/full-scan path regardless.
+#
+# TEMPORARILY DISABLED (2026-08-20, s50-s55 MAPGRID=3 rebuild): the checkpoint
+# index has a gap for these 6 SCCs' tess_ffi_download entries (checkpoint
+# index miss -> fail-closed -> run stalled with nothing dispatched). A full
+# `syndiff bookkeeping reindex` rescans the whole warm data_root (20k+
+# artifacts across every sector) and is far slower than we want to wait on
+# just to unblock 6 SCCs. Falling back to the real per-SCC verify functions
+# (verify_tess_ffi_download/verify_mapping/etc.) is fast at this scale (only
+# scans these 6 SCCs' own directories, not the whole store). Re-enable once
+# the index is confirmed complete for this campaign (rerun `syndiff
+# bookkeeping reindex --incremental` at a convenient time, e.g. overnight).
+bookkeeping:
+  trust_index: false
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 1
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  ps1_process:
+    ps1_source: stream
+    use_shared_convolved_store: true
+    # Hard cut (stage_params.py __post_init__): use_shared_convolved_store=True
+    # requires this False -- per doc/template_bookkeeping_plan.md decision #15,
+    # canonical cells go only to the shared store once shared mode is on. We
+    # validate the padding-aware correction against s20's pre-existing legacy
+    # convolved.zarr instead of keeping a per-SCC copy here.
+    write_per_scc_convolved_zarr: false
+    psf_sigma: 40.0
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+  remap:
+    drift_source: point
+    apply_intra_skycell: false
+    apply_inter_skycell: false
+    store_name: linear
+    intra_skycell_R: 1
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: false
+    raw_drift_outlier_sigma: 5.0
+    n_jobs: 32
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+  downsample:
+    geometry_mode: linear
+    remap_store_name: linear
+    output_store_name: linear
+    rebuild_field_store: true
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    # n_jobs lowered 32 -> 16 (2026-07-23): s54's downsample hit 3+
+    # reproducing Condor memory-limit evictions ("gone over cgroup memory
+    # limit of 128000 megabytes", measured usage well under the limit each
+    # time -- a transient peak spike, not sustained need) during the
+    # cross-projection seam-correction pass (142/991 of s54's skycells need
+    # it, each triggering a real reproject_interp call under
+    # padding_correction.compute_seam_correction). host_stats_min_mem_mb
+    # already demands >=128000MB real MemAvailable on the execute host --
+    # pool -- zero headroom for a parallel-worker spike. Lowering
+    # parallelism directly reduces peak concurrent memory; trades some
+    # wall-clock speed for reliability, applies to all 6 SCCs sharing this
+    # config (s55 didn't hit this at n_jobs=32, but s54's higher
+    # cross-projection-padding fraction makes the extra margin worthwhile
+    # pipeline-wide rather than a per-SCC special case).
+    n_jobs: 16
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+    condor_request_disk: 4096
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 5
+  # SCCs in this pilot share sky (overlapping skycells near the northern CVZ) --
+  # ps1_process MUST be serialized across SCCs so later SCCs get cache hits off
+  # earlier ones instead of redundantly recomputing/overwriting the same shared
+  # combined/convolved cells.
+  ps1_process:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 2
+
+scheduler:
+  # Greenfield SCCs (no existing artifacts) -- do NOT skip artifact verify here,
+  # that trusts tess_ffi_download/mapping as already-complete when nothing has
+  # been downloaded yet. skip_artifact_verify is only safe when re-running on
+  # top of artifacts that genuinely already exist on disk.
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

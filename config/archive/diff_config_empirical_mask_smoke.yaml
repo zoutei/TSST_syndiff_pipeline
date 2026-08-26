@@ -1,0 +1,34 @@
+# Phase A smoke: empirical static mask + Hotpants + ePSF on 25 FFIs.
+# Mask policy: site/packaged mask_settings.yaml (not embedded here).
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 8
+  workspace_run_id: empirical_mask_smoke_hp32
+  pipeline_plots: true
+  crop_mode: target_box
+  crop_box_size: 1024
+  max_ffis: 25
+
+pipeline:
+  - kind: shared_mask
+  - kind: hotpants
+    science: ffi
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_kf_spread_mask1: 0.0
+    write_kernel_solutions: true
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    tile_nx: 2
+    tile_ny: 2
+    tess_mag_max: 12.95
+    epsf_n_jobs: 8

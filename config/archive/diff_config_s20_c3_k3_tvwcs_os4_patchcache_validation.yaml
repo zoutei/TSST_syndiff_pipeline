@@ -1,0 +1,131 @@
+# H.3 validation run (2026-08-23): S20/C3/K3 field-mode diff using the new
+# H.1+H.2 precomputed-basis-convolution patch-cache path
+# (use_patch_cache: true), as the real end-to-end validation of
+# spicy-squishing-ritchie.md Part H. Otherwise identical to
+# diff_config_s20_c3_k3_tvwcs_os4_epsf_centroids.yaml (same stage chain,
+# same hotpants/epsf/centroids tuning) -- reads templates from the SAME
+# `tvwcs` template store (now backfilled with interior_contribs/
+# seam_delta_contribs via pipeline_s20_c3_k3_tvwcs_os4_split_backfill.yaml),
+# but writes diff OUTPUT to a *different* store/workspace
+# (`output_store_name: tvwcs_patchcache` -> diff_tvwcs_patchcache/) so this
+# run cannot collide with or disturb the concurrently-running
+# s20_c3_k3_tvwcs_epsf_centroids_20260823_progress run (cluster 146, plain
+# diff_tvwcs/, use_patch_cache left at its default False).
+#
+# Use (submit the PIPELINE WRAPPER below, not this file directly -- passing
+# this diff_config file to --config makes launcher.py resolve
+# stage_spec.condor_resources()'s diff_config_path to the repo root instead
+# of a real file, raising IsADirectoryError at launch; verified 2026-08-23):
+#   syndiff diff submit --config config/pipeline_s20_c3_k3_tvwcs_os4_patchcache_validation.yaml \
+#     --scc config/scc_s20_c3_k3.csv --stages diff \
+#     --run-id s20_c3_k3_tvwcs_patchcache_validation_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 64
+  workspace_run_id: s20_c3_k3_tvwcs_os4_patchcache_validation_v1
+  pipeline_plots: true
+  oversampling_factor: 4
+
+paths:
+  template_store_name: tvwcs
+  output_store_name: tvwcs_patchcache
+  remap_store_name: tvwcs
+
+pipeline:
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+    # H.2: precomputed per-skycell basis convolution instead of the default
+    # per-group full convolution -- see convolved_templates_patch_cache.py.
+    use_patch_cache: true
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    hotpants_n_jobs: 8
+    hotpants_os_n_jobs: 8
+    template_cache_max_groups: 1
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_kernel_solutions: true
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    epsf_mode: orbit_binned
+    tile_nx: 4
+    tile_ny: 4
+    epsf_oversample: 4
+    psf_size: 15
+    extract_size: 15
+    min_stars_per_tile: 5
+    tess_mag_min: 8.0
+    tess_mag_max: 13.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 64
+  - kind: centroids
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: centroids_r1
+    tess_mag_max: 10.0
+    fit_shape: 11
+    aperture_radius: 2
+    psf_grouper_min_separation: 4
+    centroids_n_jobs: 64
+
+condor:
+  request_cpus: 64
+  request_memory: 500000
+  host_stats_min_mem_mb: 500000
+  host_stats_max_load15: 10.0

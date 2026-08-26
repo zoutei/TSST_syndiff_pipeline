@@ -1,0 +1,18 @@
+# Orchestrator policy for SN2022jhq photometry submits. Photometry's stage
+# has no in-run dependency (deps=()), so its only "wait for upstream" gate is
+# launch-then-fail-and-requeue via scc_diff_lane_complete() inside
+# execute_photometry_stage -- default scheduler.max_stage_attempts=3 (backoff
+# 30s/60s/90s, runner_config.py) gives up permanently long before the
+# multi-hour template+diff build for these 5 SCCs can finish. Raise the
+# ceiling here; backoff still grows linearly (requeue_backoff_s * attempts),
+# so late retries self-throttle to widely spaced, cheap, sub-second failures
+# rather than spamming Condor (2026-08-23).
+deployment_file: deployment.yaml
+
+scheduler:
+  max_stage_attempts: 200
+  requeue_backoff_s: 60.0
+
+resources:
+  photometry:
+    max_concurrent: 5

@@ -1,0 +1,16 @@
+sector,camera,ccd,target_name,stars_file,baseline_workspace_run_id,baseline_diffs,baseline_convolved,phot_bkg,enabled
+20,1,1,s20_astrometry,config/star_hosts/s20_c1_k1_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,1,2,s20_astrometry,config/star_hosts/s20_c1_k2_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,1,3,s20_astrometry,config/star_hosts/s20_c1_k3_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,1,4,s20_astrometry,config/star_hosts/s20_c1_k4_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,2,1,s20_astrometry,config/star_hosts/s20_c2_k1_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,2,2,s20_astrometry,config/star_hosts/s20_c2_k2_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,2,3,s20_astrometry,config/star_hosts/s20_c2_k3_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,3,1,s20_astrometry,config/star_hosts/s20_c3_k1_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,3,2,s20_astrometry,config/star_hosts/s20_c3_k2_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,3,3,s20_astrometry,config/star_hosts/s20_c3_k3_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,3,4,s20_astrometry,config/star_hosts/s20_c3_k4_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,4,1,s20_astrometry,config/star_hosts/s20_c4_k1_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,4,2,s20_astrometry,config/star_hosts/s20_c4_k2_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,4,3,s20_astrometry,config/star_hosts/s20_c4_k3_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True
+20,4,4,s20_astrometry,config/star_hosts/s20_c4_k4_exoplanets_inbox.csv,star_full_lc_epsf,hp_d,hp_c,ks_b_s,True

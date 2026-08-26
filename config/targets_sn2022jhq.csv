@@ -1,0 +1,6 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+50,4,2,271.261542,56.266911,2022jhq,true
+51,4,2,271.261542,56.266911,2022jhq,true
+52,2,1,271.261542,56.266911,2022jhq,true
+54,4,1,271.261542,56.266911,2022jhq,true
+55,4,1,271.261542,56.266911,2022jhq,true

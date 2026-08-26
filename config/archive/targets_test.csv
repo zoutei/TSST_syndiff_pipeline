@@ -1,0 +1,5 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+23, 2, 1, 221.335125, 38.738419, 2020ghq, true
+24, 1, 2, 221.335125, 38.738419, 2020ghq, true
+100, 1, 2, 169.9612188, -27.8636818, 2026gvk, true
+101, 1, 4, 169.9612188, -27.8636818, 2026gvk, true

@@ -1,0 +1,112 @@
+# SN2022jhq template build (s50,51,52,54,55): true geometry_mode=linear bootstrap
+# templates, same recipe as the s50-55 CVZ pilot (pipeline_cvz_bk_shared_os1.yaml)
+# but on SN2022jhq's own chips -- its TNS position (RA 271.261542, Dec 56.266911)
+# does NOT land on the pilot's built chips (cam4/ccd4, cam3/ccd4, cam3/ccd3,
+# cam4/ccd3); tess_stars2px puts it on cam4/ccd2 (s50,s51), cam2/ccd1 (s52),
+# cam4/ccd1 (s54,s55). Not observed in s53 (chip gap) -- omitted from the SCC csv.
+#
+# Usage:
+#   mamba activate syndiff
+#   syndiff template submit \
+#     --config config/pipeline_sn2022jhq_template.yaml \
+#     --scc config/scc_sn2022jhq.csv \
+#     --run-id sn2022jhq_template_<date>
+deployment_file: deployment.yaml
+diff_config: diff_config_sn2022jhq.yaml
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+    offset_threshold: 0.01
+    wcs_drift_savgol_window: 11
+    wcs_drift_savgol_polyorder: 2
+  mapping:
+    oversampling_factor: 1
+    template_conv_pad_spare_px: 4
+    buffer: 200
+    tess_buffer: 150
+    skip_download_catalog: false
+  ps1_process:
+    ps1_source: stream
+    use_shared_convolved_store: true
+    write_per_scc_convolved_zarr: false
+    psf_sigma: 40.0
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+    executor: condor
+    condor_request_cpus: 64
+    condor_request_memory: 500000
+  remap:
+    drift_source: point
+    apply_intra_skycell: false
+    apply_inter_skycell: false
+    store_name: linear
+    intra_skycell_R: 1
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: false
+    raw_drift_outlier_sigma: 5.0
+    n_jobs: 32
+    executor: condor
+    condor_request_cpus: 32
+    condor_request_memory: 128000
+  downsample:
+    geometry_mode: linear
+    remap_store_name: linear
+    output_store_name: linear
+    rebuild_field_store: true
+    oversampling_factor: 1
+    ignore_mask_bits: [12]
+    n_jobs: 16
+    executor: condor
+    condor_request_cpus: 32
+    # 100000, not 128000: linear downsample doesn't need field-mode's memory
+    # headroom, and 128000 combined with host_stats_min_mem_mb=128000 made
+    # the 128GB-class nodes structurally unmatchable (a node can never have
+    # 128000MB *available* out of a 128380MB total). host_stats_min_mem_mb
+    # dropped to match so those nodes become real candidates again.
+    condor_request_memory: 100000
+    host_stats_min_mem_mb: 100000
+    # No condor_request_disk at all (omitted -> None -> no RequestDisk clause
+    # in the Condor Requirements): a 4GB ask previously left 0 machines able
+    # to satisfy the partitionable-disk share on the 2 memory-eligible nodes
+    # during cluster contention (condor_q -better-analyze showed Disk as the
+    # sole failing clause after Memory/Machine filtering), and downsample
+    # doesn't need a storage floor at all (2026-08-23).
+  diff:
+    executor: condor
+
+resources:
+  network:
+    max_concurrent: 1
+  mapping:
+    max_concurrent: 5
+  # These 5 SCCs are new chips (no shared-store overlap with the s50-55 pilot's
+  # cam3/cam4 chips built so far), but ps1_process still writes into the same
+  # shared combined/convolved Zarr store -- keep it serialized per the pilot's
+  # own convention rather than risk concurrent-writer cache races.
+  ps1_process:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 2
+  downsample:
+    max_concurrent: 2
+  diff_prep:
+    max_concurrent: 4
+  background_estimate:
+    max_concurrent: 2
+  diff:
+    max_concurrent: 4
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

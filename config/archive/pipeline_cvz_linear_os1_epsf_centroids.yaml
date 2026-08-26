@@ -1,0 +1,48 @@
+# Orchestrator wrapper for `syndiff diff submit` -- references the diff
+# sub-pipeline policy in diff_config_cvz_linear_os1_epsf_centroids.yaml.
+# wcs_grouping/mapping/ps1_process/remap/downsample are handled separately
+# (Phase-3 Gaia-catalog-fix rebuild via pipeline_cvz_bk_shared_os1.yaml);
+# this only ever runs --stages diff.
+#
+# Use:
+#   syndiff diff submit \
+#     --config config/pipeline_cvz_linear_os1_epsf_centroids.yaml \
+#     --scc config/scc_cvz_s50_s55_pilot.csv --stages diff \
+#     --run-id cvz_s50_s55_linear_epsf_centroids_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+diff_config: diff_config_cvz_linear_os1_epsf_centroids.yaml
+
+stages:
+  # Not run by this wrapper (diff-only submission) -- declared so the
+  # scheduler's external-stage verify (upstream "downsample" completeness
+  # check before launching diff) resolves the right on-disk store. Without
+  # this, DownsampleStageParams defaults (geometry_mode: field,
+  # output_store_name: templates/) make verify look in the wrong place and
+  # the run stalls with "blocked by upstream failure" even though the real
+  # templates_linear/ store is complete (found 2026-08-22).
+  downsample:
+    geometry_mode: linear
+    output_store_name: linear
+  diff:
+    executor: condor
+
+resources:
+  diff:
+    # Global cap is enforced across ALL runs sharing this daemon (not just
+    # this one) -- sized to real cluster headroom (checked via condor_status:
+    # multiple idle 400-500GB nodes) as of 2026-08-22, not a fixed default.
+    max_concurrent: 10
+
+scheduler:
+  heartbeat_interval_s: 30.0
+
+notifications:
+  enabled: true
+  events:
+    run_started: true
+    run_completed: true
+    run_failed: true
+    stage_failed: true
+    stage_completed: true
+  bot:
+    enabled: true

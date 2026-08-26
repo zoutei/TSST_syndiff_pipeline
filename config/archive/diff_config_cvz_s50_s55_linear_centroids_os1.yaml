@@ -1,0 +1,103 @@
+# CVZ pilot SCC-field diff (linear/no-correction templates): shared_mask ->
+# kernel_fit -> convolved_templates -> background_estimate -> hotpants -> epsf ->
+# centroids. Matched to s20/s22's pipeline (config/linear_centroids/diff_config.yaml)
+# 2026-07-23 -- the CVZ pilot's diff config originally skipped kernel_fit/
+# convolved_templates/background_estimate entirely (hotpants ran straight on the
+# FFI); added to match s20/s22 exactly, per explicit user direction, before
+# s54/s55's diff stage (kernel_fit/convolved_templates/background_estimate
+# params copied verbatim from s20/s22's config; hotpants now takes its
+# background from background_estimate's output (inputs: bkg: ks_b) instead of
+# the raw FFI -- everything else (epsf/centroids params, paths, condor)
+# unchanged from the pilot's own existing tuning).
+# Event photometry: config/photometry_config_cvz_sn2020jtg.yaml
+# Templates read from templates_linear/ at oversampling_factor: 1.
+deployment_file: deployment.yaml
+
+# n_jobs lowered 64 -> 32 (2026-07-23): s55's diff hit a Condor memory-limit
+# eviction during hotpants ("gone over cgroup memory limit of 100096 MB,
+# measured usage 38497 MB" -- well under the limit, a transient peak spike
+# under 64-way parallelism, not sustained need). Same failure class and same
+# host (plscience11) as the downsample n_jobs fix earlier this session --
+# lowering parallelism directly reduces peak concurrent memory. Also bumped
+# condor.request_memory for extra headroom (see below).
+defaults:
+  n_jobs: 32
+  workspace_run_id: cvz_s50_s55_bk_pilot
+  pipeline_plots: true
+  oversampling_factor: 1
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    write_kernel_solutions: true
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  # epsf/centroids intentionally dropped (2026-08-10): this run's goal is a
+  # clean hp_d with complete (no-missing-skycell) templates for debugging --
+  # ePSF fitting and centroiding are not needed and cost real Condor compute
+  # (epsf_n_jobs/centroids_n_jobs: 32 each). Re-add both blocks (see git
+  # history of this file for the exact params) once hp_d is validated and
+  # photometry is actually wanted.
+
+condor:
+  request_cpus: 32
+  request_memory: 120000
+  host_stats_min_mem_mb: 51200
+  host_stats_max_load15: 10.0

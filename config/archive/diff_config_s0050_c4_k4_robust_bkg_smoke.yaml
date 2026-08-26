@@ -1,0 +1,51 @@
+# Smoke test: robust TESSreduce background (biharmonic + boundary sigma-clip)
+# for kernel_fit and background_estimate, on s0050_c4_k4 (linear store), capped
+# to 10 FFIs, small target_box crop for a fast round-trip.
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 4
+  pipeline_plots: true
+  crop_mode: target_box
+  crop_box_size: 512
+  workspace_run_id: s0050_c4_k4_robust_bkg_smoke
+  oversampling_factor: 1
+  max_ffis: 10
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b

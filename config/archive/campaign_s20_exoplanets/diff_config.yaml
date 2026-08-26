@@ -1,0 +1,60 @@
+# Sector 20 exoplanet-host-star campaign: diff sub-pipeline.
+# hotpants (distortion-aware, on-demand templates) -> epsf -> forced
+# photometry with all three methods (gepsf/ePSF, prf, aperture) in one pass.
+deployment_file: ../deployment.yaml
+
+defaults:
+  n_jobs: 32
+  pipeline_plots: false
+  # Full chip -- template crop (wcs_grouping.crop_mode: full, pipeline.yaml)
+  # and diff crop must cover the whole CCD so any exoplanet host star
+  # anywhere on it can be forced-photometered.
+  crop_mode: full
+
+pipeline:
+  - kind: shared_mask
+  - kind: hotpants
+    science: ffi
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+    write_kernel_solutions: true
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    tile_nx: 2
+    tile_ny: 2
+    epsf_oversample: 4
+    psf_size: 11
+    extract_size: 11
+    min_stars_per_tile: 5
+    tess_mag_max: 12.95
+    epsf_maxiters: 15
+    epsf_recentering_maxiters: 20
+    epsf_n_jobs: 32
+
+condor:
+  request_cpus: 32
+  request_memory: 131072
+  host_stats_min_mem_mb: 131072
+  host_stats_max_load15: 10.0
