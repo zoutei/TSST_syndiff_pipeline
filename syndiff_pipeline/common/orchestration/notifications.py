@@ -599,6 +599,10 @@ def format_run_started_message(
     force_rerun: bool = False,
 ) -> str:
     """Short submit-time announcement (not progress/status grid)."""
+    # ``run_dir`` remains part of the public helper signature for callers that
+    # already provide it, but paths and monitor commands are intentionally not
+    # included in the Discord announcement.
+    del run_dir
     enabled_count = len(target_labels)
     preview = ", ".join(target_labels[:5])
     if len(target_labels) > 5:
@@ -611,15 +615,6 @@ def format_run_started_message(
     ]
     if force_rerun:
         lines.append("force_rerun: true")
-    run_path = Path(run_dir).expanduser().resolve()
-    lines.extend(
-        [
-            f"run_dir: {run_path}",
-            "",
-            "Reply in Discord for live progress/status, or:",
-            f"  syndiff progress --run-dir {run_path}",
-        ]
-    )
     return "\n".join(lines)
 
 

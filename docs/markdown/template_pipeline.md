@@ -781,7 +781,7 @@ discord_channel_id: "123456789012345678"
 | `stage_died` | Process lost without exit record (requeued to `ready`) |
 | `daemon_unhealthy` | Supervisor wedged while runs are active |
 
-Event notifications (except `run_started`) include the same **progress** summary and **status** grid as the CLI. `run_started` posts target/stage counts and monitor commands only.
+Event notifications (except `run_started`) include the same **progress** summary and **status** grid as the CLI. `run_started` posts target/stage counts only.
 
 **On-demand status via Discord bot** (requires `discord.py`):
 
