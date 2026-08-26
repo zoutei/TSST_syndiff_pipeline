@@ -232,6 +232,8 @@ class TestStageShortNamesLightweight(unittest.TestCase):
                 self.assertNotIn(mod, sys.modules)
         self.assertEqual(names["downsample"], "down")
         self.assertEqual(names["remap"], "remap")
+        self.assertEqual(names["diff_prep"], "diff/diff_prep")
+        self.assertEqual(names["background_estimate"], "diff/background_estimate")
         self.assertEqual(names["diff"], "diff")
         self.assertEqual(names["star"], "star")
 

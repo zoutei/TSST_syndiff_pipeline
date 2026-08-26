@@ -34,7 +34,7 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
 )
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     HotpantsParams,
-    KernelSubtractParams,
+    BackgroundEstimateParams,
 )
 from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_path_from_output_dir,
@@ -83,7 +83,7 @@ def _write_kernel_subtract_policy(path: Path) -> None:
                 "paths:",
                 "  template_base: shifted_downsampled",
                 "pipeline:",
-                "  - kind: kernel_subtract",
+                "  - kind: background_estimate",
                 "    output:",
                 "      diffs: ks_d",
             ]
@@ -321,7 +321,7 @@ class TestKernelSubtractIndexedVerify(_SccFramesBase):
 
     def test_kernel_subtract_indexed_kind(self):
         downsample_fp = self._seed_downsample(self.cfg)
-        ks = KernelSubtractParams()
+        ks = BackgroundEstimateParams()
         store = ProvenanceStore(str(provenance_db_path(self.cfg.data_root)))
         for pid, ffi_path in self.ffi_paths.items():
             inputs = pg.diff_image_input_fingerprints(
@@ -347,7 +347,7 @@ class TestKernelSubtractIndexedVerify(_SccFramesBase):
             )
         drain_spool(store, provenance_spool_dir(self.cfg.data_root))
 
-        stage = {"kind": "kernel_subtract", "output": {"diffs": "ks_d"}}
+        stage = {"kind": "background_estimate", "output": {"diffs": "ks_d"}}
         self.assertTrue(dv.diff_stage_complete_indexed(self.cfg, self.event_dir, stage))
 
 

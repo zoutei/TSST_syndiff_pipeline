@@ -446,12 +446,12 @@ def write_per_frame_fits(
                     location=out_path,
                     input_fingerprints=inputs,
                     data_root=data_root,
-                    meta={"producer": "background"},
+                    meta={"producer": "background_temporal_smoothing"},
                     workspace_root=workspace_root,
                 )
             except Exception:
                 log.debug(
-                    "provenance emit (diff_background/background) failed for %s",
+                    "provenance emit (diff_background/background_temporal_smoothing) failed for %s",
                     rec.product_id,
                     exc_info=True,
                 )

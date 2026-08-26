@@ -1,13 +1,17 @@
 # SynDiff unified pipeline (`syndiff`)
 
 This document describes the **orchestrated SynDiff pipeline** behind the
-`syndiff` CLI. One supervisor daemon and one SQLite state DB know about **nine**
-registered stages: a six-stage **template** DAG (`tess_ffi_download → mapping
-→ ps1_download → ps1_process → remap → downsample`), a **`diff`** stage
-(with in-process `scc_bootstrap` when `data_root` is set), plus independent
-**`photometry`** and **`star`** branches. There is **no** `syndiff all` preset —
-template, diff, photometry, and star are separate CLI nouns. CLI presets select
-stage subsets:
+`syndiff` CLI. One supervisor daemon and one SQLite state DB know about
+**eleven** registered stages: a six-stage **template** DAG (`tess_ffi_download
+→ mapping → ps1_download → ps1_process → remap → downsample`), the **`diff`**
+pipeline split into three Condor stages (`diff_prep → background_estimate →
+diff`, with in-process `scc_bootstrap` when `data_root` is set — only
+`background_estimate` needs the pool's scarce big-RAM nodes), plus independent
+**`photometry`** and **`star`** branches. `syndiff diff submit`'s default
+preset activates all three diff stages. `syndiff status` still shows them as
+one `diff` column; `syndiff progress` running-task lines use `diff/<substage>`.
+There is **no** `syndiff all` preset — template, diff, photometry, and star
+are separate CLI nouns. CLI presets select stage subsets:
 
 ```text
 syndiff template submit --site SITE --scc sccs.csv                 # template DAG only
@@ -454,7 +458,7 @@ Event workspace paths instead use `Target.event_name()` (sanitized
 
 ### Runs and stages
 
-A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). The composed registry (`pipeline_spec.py`) has **eight** stages total: six template stages (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample`), `diff`, and the independent `star` stage. `state.py::create_run` always materializes **all eight** stage rows per target, regardless of which noun (`template`/`diff`) was submitted — a `template` submit and a `diff` submit are still separate runs (separate `run_id`, separate target rows: SCC-only targets for `template`/`diff --scc`, event targets for `diff --targets`), but each run's SQLite rows span the full registry. Stages in `--stages` start `pending`; the rest start `external` (upstream-closure) or immediately `skipped`/not_selected (outside closure), and are resolved to `skipped` once verified complete on disk.
+A **run** is one batch identified by `run_id` (default: UTC timestamp `YYYYMMDD_HHMMSS`). The composed registry (`pipeline_spec.py`) has **ten** stages total: six template stages (`tess_ffi_download`, `mapping`, `ps1_download`, `ps1_process`, `remap`, `downsample`), the three split diff stages (`diff_prep`, `background_estimate`, `diff`), and the independent `star` stage (photometry is separate again). `state.py::create_run` always materializes **all ten** stage rows per target, regardless of which noun (`template`/`diff`) was submitted — a `template` submit and a `diff` submit are still separate runs (separate `run_id`, separate target rows: SCC-only targets for `template`/`diff --scc`, event targets for `diff --targets`), but each run's SQLite rows span the full registry. Stages in `--stages` start `pending`; the rest start `external` (upstream-closure) or immediately `skipped`/not_selected (outside closure), and are resolved to `skipped` once verified complete on disk.
 
 | Status | Meaning |
 |--------|---------|
@@ -1465,7 +1469,7 @@ syndiff diff submit \
 
 1. Creates `{runs_root}/{run_id}/` layout and `run_meta.json`.
 2. Copies source config and targets (or SCC CSV, for `template`) into the run directory as frozen `config.yaml` and `targets.csv`.
-3. Inserts run + **all eight composed stage rows** per target in SQLite (`create_run` always materializes `pipeline_spec.py`'s full registry, regardless of which noun was submitted) — `pending` for the selected `--stages`, `external` for stages in the artifact-verify closure, `skipped` (not_selected) for everything else. For `diff submit` with the default `--stages diff`, `tess_ffi_download` and `downsample` start `external` (verify path) while other template stages are **n/a**.
+3. Inserts run + **all ten composed stage rows** per target in SQLite (`create_run` always materializes `pipeline_spec.py`'s full registry, regardless of which noun was submitted) — `pending` for the selected `--stages`, `external` for stages in the artifact-verify closure, `skipped` (not_selected) for everything else. For `diff submit` with the default `--stages diff` preset (which activates `diff_prep`, `background_estimate`, and `diff`), `tess_ffi_download` and `downsample` start `external` (verify path) while other template stages are **n/a**.
 4. Ensures the host-level **supervisor daemon** is running (lease-guarded single owner).
 5. Symlinks `{runs_root}/latest` → `run_id`.
 

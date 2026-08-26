@@ -266,6 +266,29 @@ class TestReadLogProgress(unittest.TestCase):
         self.assertEqual(prog.text, "centroids centroids_r1 45/1188")
         self.assertEqual(prog.kind, "fraction")
 
+    def test_background_estimate_reads_kernel_subtract_sidecar(self):
+        log_path = self._write_log("background_estimate.log", "Stage: background_estimate\n")
+        sidecar = log_path.parent / "diff.kernel_subtract.progress.json"
+        sidecar.write_text(
+            '{"frames_total": 3344, "frames_done": 144, "frames_ok": 144, '
+            '"phase": "running", "updated_at": "2026-08-24T21:36:47+00:00"}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "background_estimate")
+        self.assertEqual(prog.text, "kernel_subtract 144/3344 frames")
+        self.assertEqual(prog.kind, "fraction")
+
+    def test_diff_ignores_stale_kernel_subtract_sidecar(self):
+        log_path = self._write_log("diff.log", "")
+        sidecar = log_path.parent / "diff.kernel_subtract.progress.json"
+        sidecar.write_text(
+            '{"frames_total": 3617, "frames_done": 3617, "frames_ok": 3617, '
+            '"phase": "complete", "updated_at": "2026-08-24T21:27:11+00:00"}\n',
+            encoding="utf-8",
+        )
+        prog = read_log_progress(log_path, "diff")
+        self.assertTrue(prog is None or "kernel_subtract" not in prog.text)
+
     def test_diff_temporal_wcs_sidecar(self):
         log_path = self._write_log("diff.log", "Stage: temporal_wcs\n")
         sidecar = log_path.parent / "diff.temporal_wcs.progress.json"

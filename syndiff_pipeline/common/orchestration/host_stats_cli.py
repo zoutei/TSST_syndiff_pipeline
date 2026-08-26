@@ -27,7 +27,8 @@ PRESETS = {
 _COMMON_CONDOR_MEMORY_MB = (128_000, 256_000, 500_000, 512_000, 515_000)
 
 _TEMPLATE_STAGES = frozenset({"mapping", "ps1_process", "remap", "downsample"})
-_BRANCH_STAGES = frozenset({"diff", "star", "photometry"})
+_DIFF_STAGES = frozenset({"diff_prep", "background_estimate", "diff"})
+_BRANCH_STAGES = frozenset({"star", "photometry"}) | _DIFF_STAGES
 
 
 def format_mem_gb(mb: int) -> str:
@@ -233,13 +234,14 @@ def resolve_thresholds_from_site(site_dir: str | Path, stage: str) -> tuple[int,
         cfg = load_runner_config(str(site.template_config))
         params = getattr(cfg.stages, stage_key)
         return int(params.host_stats_min_mem_mb), float(params.host_stats_max_load15)
-    if stage_key == "diff":
+    if stage_key in _DIFF_STAGES:
         from syndiff_pipeline.difference_imaging.orchestration.site_config import (
             load_diff_site_policy,
         )
 
         policy = load_diff_site_policy(site.diff_config)
-        return int(policy.condor.host_stats_min_mem_mb), float(policy.condor.host_stats_max_load15)
+        resources = policy.condor_by_stage[stage_key]
+        return int(resources.host_stats_min_mem_mb), float(resources.host_stats_max_load15)
     if stage_key == "star":
         from syndiff_pipeline.star.site_config import load_star_site_policy
 

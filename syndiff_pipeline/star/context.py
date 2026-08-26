@@ -137,7 +137,7 @@ def _photutils_bkg_from_pipeline(
     diffs_label: str,
 ) -> str | None:
     """Resolve photutils background label from diff pipeline stages."""
-    kernel_subtract_label: str | None = None
+    background_estimate_label: str | None = None
     for stage in stages:
         kind = str(stage.get("kind") or "").strip()
         if kind == "hotpants":
@@ -148,11 +148,11 @@ def _photutils_bkg_from_pipeline(
             inp_bkg = str((stage.get("inputs") or {}).get("bkg") or "").strip()
             if inp_bkg:
                 return inp_bkg
-        if kind == "kernel_subtract":
+        if kind == "background_estimate":
             phot_bkg = str((stage.get("output") or {}).get("phot_bkg") or "").strip()
             if phot_bkg:
-                kernel_subtract_label = phot_bkg
-    return kernel_subtract_label
+                background_estimate_label = phot_bkg
+    return background_estimate_label
 
 
 def _label_dir_has_fits(
@@ -229,7 +229,7 @@ def _resolve_photutils_bkg_label(
     tried = ", ".join(repr(label) for label in candidates)
     raise ValueError(
         f"No photutils background workspace found under SCC lane "
-        f"(tried {tried}). Run kernel_subtract (ks_b) and/or inherit ks_b_s "
+        f"(tried {tried}). Run background_estimate (ks_b) and/or inherit ks_b_s "
         "before star run."
     )
 
@@ -690,7 +690,7 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
         missing.append(
             f"no photutils background FITS under {phot_bkg_dir or '(unset)'}; "
             f"ensure baseline.phot_bkg={ctx.baseline_phot_bkg_label!r} exists "
-            "(run kernel_subtract ks_b and/or inherit ks_b_s in the SCC lane "
+            "(run background_estimate ks_b and/or inherit ks_b_s in the SCC lane "
             "or baseline workspace)"
         )
 

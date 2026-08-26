@@ -20,8 +20,14 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(len(TEMPLATE_STAGES), 6)
 
     def test_composed_stage_count_includes_diff(self):
-        self.assertEqual(len(STAGE_NAMES), 9)
+        # diff is split into diff_prep -> background_estimate -> diff (see
+        # difference_imaging/orchestration/stages.py), so the composed DAG
+        # has 11 stages, not 9; "diff" as a name still exists (the tail).
+        self.assertEqual(len(STAGE_NAMES), 11)
         self.assertNotIn("bind", STAGE_NAMES)
+        self.assertIn("diff_prep", STAGE_NAMES)
+        self.assertIn("background_estimate", STAGE_NAMES)
+        self.assertIn("diff", STAGE_NAMES)
         self.assertEqual(STAGE_NAMES[-1], "star")
 
     def test_template_stage_order(self):
@@ -47,7 +53,11 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(STAGE_DEPS["remap"], ["mapping"])
 
     def test_diff_depends_on_downsample(self):
-        self.assertEqual(STAGE_DEPS["diff"], ["downsample"])
+        # diff (the tail split stage) depends on background_estimate, which
+        # depends on diff_prep, which depends on downsample.
+        self.assertEqual(STAGE_DEPS["diff_prep"], ["downsample"])
+        self.assertEqual(STAGE_DEPS["background_estimate"], ["diff_prep"])
+        self.assertEqual(STAGE_DEPS["diff"], ["background_estimate"])
 
     def test_downsample_pool(self):
         self.assertEqual(STAGE_POOL.get("downsample"), "downsample")
@@ -60,6 +70,9 @@ class TestPipelineSpec(unittest.TestCase):
         self.assertEqual(STAGE_SHORT_NAMES["ps1_process"], "ps1_pr")
         self.assertEqual(STAGE_SHORT_NAMES["downsample"], "down")
         self.assertEqual(STAGE_SHORT_NAMES["remap"], "remap")
+        self.assertEqual(STAGE_SHORT_NAMES["diff_prep"], "diff/diff_prep")
+        self.assertEqual(STAGE_SHORT_NAMES["background_estimate"], "diff/background_estimate")
+        self.assertEqual(STAGE_SHORT_NAMES["diff"], "diff")
 
     def test_ps1_process_stream_effective_deps(self):
         from syndiff_pipeline.template_creation.orchestration.stage_params import (
@@ -155,7 +168,15 @@ class TestPipelineSpec(unittest.TestCase):
         downstream = SYNDIFF_PIPELINE.downstream_stages("mapping")
         self.assertEqual(
             downstream,
-            ["ps1_download", "ps1_process", "remap", "downsample", "diff"],
+            [
+                "ps1_download",
+                "ps1_process",
+                "remap",
+                "downsample",
+                "diff_prep",
+                "background_estimate",
+                "diff",
+            ],
         )
 
     def test_stages_in_pool(self):

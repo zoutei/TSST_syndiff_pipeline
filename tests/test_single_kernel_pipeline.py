@@ -93,12 +93,12 @@ def test_validate_single_kernel_pipeline():
                 "output": "tmpl_conv",
             },
             {
-                "kind": "kernel_subtract",
+                "kind": "background_estimate",
                 "inputs": {"convolved": "tmpl_conv"},
                 "output": {"diffs": "ks_d", "phot_bkg": "ks_b"},
             },
             {
-                "kind": "background",
+                "kind": "background_temporal_smoothing",
                 "inputs": {"bkg_in": "ks_b"},
                 "output": "ks_b_s",
                 "recombine_inputs": False,

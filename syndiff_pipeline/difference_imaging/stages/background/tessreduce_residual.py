@@ -12,7 +12,7 @@ variant): before biharmonic inpainting fills the masked region, pixels on the
 valid side of the mask boundary that are KNN-sigma-clip outliers relative to
 their local neighborhood are folded into the fit mask, so an anomalous rim
 pixel can't bias the smooth trend. This is the sole background-removal method
-used by ``kernel_fit`` and ``kernel_subtract`` (see
+used by ``kernel_fit`` and ``background_estimate`` (see
 ``estimate_tessreduce_residual_background`` below, which both stages call).
 """
 
@@ -380,7 +380,7 @@ def estimate_tessreduce_residual_background(
     for one input frame.
 
     This is the single shared background estimator used by both
-    ``kernel_fit`` and ``kernel_subtract``; ``boundary_k``/``boundary_sigma``/
+    ``kernel_fit`` and ``background_estimate``; ``boundary_k``/``boundary_sigma``/
     ``boundary_rim_width`` control the KNN sigma-clip applied to the mask
     boundary before biharmonic gap-filling (see ``sanitize_boundary_outliers``).
     """

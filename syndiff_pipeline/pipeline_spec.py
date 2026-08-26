@@ -13,10 +13,18 @@ _STAGE_SHORT_NAMES: dict[str, str] | None = None
 # Display-only short names for CLI progress/notifications. Kept in sync with
 # TEMPLATE_STAGES + diff/star without importing heavy stage modules.
 _STATIC_STAGE_SHORT_NAMES: dict[str, str] = {
+    "diff_prep": "diff/diff_prep",
+    "background_estimate": "diff/background_estimate",
     "diff": "diff",
     "photometry": "phot",
     "star": "star",
 }
+
+# The diff pipeline runs as three Condor stages (diff_prep -> background_estimate
+# -> diff, split so only background_estimate needs big-memory nodes). The status
+# grid still shows one "diff" column; syndiff progress running-task lines use
+# diff/<substage> so the live Condor job is identifiable.
+_DIFF_SPLIT_STAGE_NAMES: tuple[str, ...] = ("diff_prep", "background_estimate", "diff")
 
 # Columns shown by ``syndiff status`` / Discord status grids (bind and star omitted).
 STATUS_GRID_STAGES: tuple[str, ...] = (
@@ -29,10 +37,15 @@ STATUS_GRID_STAGES: tuple[str, ...] = (
     "diff",
 )
 
-# Legacy SQLite stage names from pre-downsample rename runs.
+# Legacy SQLite stage names from pre-downsample rename runs, plus the two
+# split-diff stage names that alias onto the "diff" status-grid column (see
+# _DIFF_SPLIT_STAGE_NAMES above -- run_report.py's row aggregation is what
+# actually rolls up the 3 real DB rows into one displayed "diff" status).
 STATUS_GRID_LEGACY_STAGE_ALIASES: dict[str, str] = {
     "templates": "downsample",
     "tmpl": "downsample",
+    "diff_prep": "diff",
+    "background_estimate": "diff",
 }
 
 
@@ -123,7 +136,7 @@ def build_stage_context(
         force_rerun=force_rerun,
         progress_path=progress_path,
     )
-    if stage not in ("diff", "photometry", "star"):
+    if stage not in ("diff_prep", "background_estimate", "diff", "photometry", "star"):
         return resolve_template_context(ctx)
     return ctx
 
@@ -142,7 +155,7 @@ def stage_snapshot(ctx: StageRunContext, stage: str) -> dict:
     from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
 
     spec = _pipeline().require(stage)
-    if stage not in ("diff", "photometry", "star"):
+    if stage not in ("diff_prep", "background_estimate", "diff", "photometry", "star"):
         ctx = resolve_template_context(ctx)
     if spec.stage_snapshot is not None:
         return spec.stage_snapshot(ctx)
@@ -163,7 +176,7 @@ def config_fingerprint(ctx: StageRunContext, stage: str) -> str:
     from syndiff_pipeline.template_creation.orchestration.stages import resolve_template_context
 
     spec = _pipeline().require(stage)
-    if stage not in ("diff", "photometry", "star"):
+    if stage not in ("diff_prep", "background_estimate", "diff", "photometry", "star"):
         ctx = resolve_template_context(ctx)
     return spec.config_fingerprint(ctx)
 

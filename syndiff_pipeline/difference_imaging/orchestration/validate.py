@@ -20,14 +20,14 @@ STAGE_KINDS = frozenset(
         "hotpants",
         "kernel_fit",
         "convolved_templates",
-        "kernel_subtract",
+        "background_estimate",
         "epsf",
         "centroids",
         "per_ffi_wcs",
         "temporal_wcs",
         "sat_template",
         "subtract",
-        "background",
+        "background_temporal_smoothing",
         "photometry",
     }
 )
@@ -55,7 +55,7 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         return [str(out).strip()] if out and str(out).strip() else []
     if kind == "convolved_templates":
         return [stage["output"]]
-    if kind == "kernel_subtract":
+    if kind == "background_estimate":
         o = stage.get("output") or {}
         labels = [o["diffs"]]
         if o.get("phot_bkg"):
@@ -67,7 +67,7 @@ def _outputs_for_stage(stage: dict[str, Any]) -> list[str]:
         "per_ffi_wcs",
         "sat_template",
         "subtract",
-        "background",
+        "background_temporal_smoothing",
         "photometry",
     ):
         return [stage["output"]]
@@ -97,11 +97,11 @@ def _inputs_refs(stage: dict[str, Any], idx: int) -> list[str]:
         v = (inp or {}).get("kernel_fit")
         if v is not None and str(v).strip():
             refs.append(str(v).strip())
-    elif kind == "kernel_subtract":
+    elif kind == "background_estimate":
         v = (inp or {}).get("convolved")
         if v is not None and str(v).strip():
             refs.append(str(v).strip())
-    elif kind == "background":
+    elif kind == "background_temporal_smoothing":
         for key in ("diffs", "bkg", "bkg_in"):
             v = inp.get(key)
             if v is not None and str(v).strip():
@@ -246,23 +246,25 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
                     f"pipeline[{idx}] convolved_templates: output workspace label required"
                 )
 
-        if kind == "kernel_subtract":
+        if kind == "background_estimate":
             inp = stage.get("inputs") or {}
             if "convolved" not in inp or not str(inp["convolved"]).strip():
                 raise ValueError(
-                    f"pipeline[{idx}] kernel_subtract: inputs.convolved required"
+                    f"pipeline[{idx}] background_estimate: inputs.convolved required"
                 )
             o = stage.get("output") or {}
             if "diffs" not in o or not str(o["diffs"]).strip():
                 raise ValueError(
-                    f"pipeline[{idx}] kernel_subtract: output.diffs required"
+                    f"pipeline[{idx}] background_estimate: output.diffs required"
                 )
 
-        if kind == "background":
+        if kind == "background_temporal_smoothing":
             inp = stage.get("inputs") or {}
             steps = stage.get("steps") or {}
             if not isinstance(steps, dict):
-                raise ValueError(f"pipeline[{idx}] background: steps must be a mapping")
+                raise ValueError(
+                    f"pipeline[{idx}] background_temporal_smoothing: steps must be a mapping"
+                )
             spatial_on = bool((steps.get("spatial") or {}).get("enabled", True))
             temporal_on = bool((steps.get("temporal") or {}).get("enabled", True))
             strap_on = bool((steps.get("strap") or {}).get("enabled", True))
@@ -270,26 +272,28 @@ def validate_pipeline(cfg: SynDiffConfig) -> None:
             diffs_in = str(inp.get("diffs") or "").strip()
             if not spatial_on and not bkg_in:
                 raise ValueError(
-                    f"pipeline[{idx}] background: inputs.bkg_in required when "
+                    f"pipeline[{idx}] background_temporal_smoothing: inputs.bkg_in required when "
                     "spatial step is disabled"
                 )
             if spatial_on and not diffs_in and not bkg_in:
                 raise ValueError(
-                    f"pipeline[{idx}] background: inputs.diffs required when "
+                    f"pipeline[{idx}] background_temporal_smoothing: inputs.diffs required when "
                     "spatial step is enabled"
                 )
             if strap_on and not diffs_in:
                 raise ValueError(
-                    f"pipeline[{idx}] background: inputs.diffs required when "
+                    f"pipeline[{idx}] background_temporal_smoothing: inputs.diffs required when "
                     "strap step is enabled"
                 )
             if temporal_on and not spatial_on and not bkg_in:
                 raise ValueError(
-                    f"pipeline[{idx}] background: inputs.bkg_in required for "
+                    f"pipeline[{idx}] background_temporal_smoothing: inputs.bkg_in required for "
                     "temporal step when spatial is disabled"
                 )
             if "output" not in stage or not str(stage["output"]).strip():
-                raise ValueError(f"pipeline[{idx}] background: output label required")
+                raise ValueError(
+                    f"pipeline[{idx}] background_temporal_smoothing: output label required"
+                )
 
         if kind == "epsf":
             inp = stage.get("inputs") or {}

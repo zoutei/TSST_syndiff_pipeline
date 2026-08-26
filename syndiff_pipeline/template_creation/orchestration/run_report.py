@@ -332,13 +332,42 @@ def format_progress_lines(
     return lines
 
 
+# Display priority when multiple real stage rows alias onto one status-grid
+# column (currently: diff_prep/background_estimate/diff -> "diff"). Earlier
+# entries win -- an operator glancing at the grid should see "running" the
+# whole time any of the three is active, "failed" as soon as one has failed,
+# and "success" only once every aliased row is success (i.e. the whole
+# diff_prep -> background_estimate -> diff chain is actually done).
+_STATUS_GRID_DISPLAY_PRIORITY = (
+    "running",
+    "failed",
+    "blocked",
+    "ready",
+    "pending",
+    "canceled",
+    "skipped",
+    "external",
+    "success",
+)
+
+
+def _status_grid_priority_rank(status: str) -> int:
+    try:
+        return _STATUS_GRID_DISPLAY_PRIORITY.index(status)
+    except ValueError:
+        return len(_STATUS_GRID_DISPLAY_PRIORITY)
+
+
 def _status_grid_rows(rows: list) -> list:
     """Filter and sort stage rows for status-grid display.
 
     Maps legacy SQLite names (e.g. ``templates``) onto canonical grid columns and
     returns one entry per ``status_grid_stages()`` slot. Missing stages (e.g.
     ``remap`` on runs created before that stage existed) are represented as
-    ``None`` placeholders.
+    ``None`` placeholders. When several real stage rows alias onto the same
+    column (the split diff_prep/background_estimate/diff stages all display
+    as "diff"), the most-actionable status wins -- see
+    _STATUS_GRID_DISPLAY_PRIORITY.
     """
     from syndiff_pipeline.pipeline_spec import canonical_status_grid_stage, status_grid_stages
 
@@ -350,7 +379,9 @@ def _status_grid_rows(rows: list) -> list:
         if canon not in allowed:
             continue
         existing = by_canon.get(canon)
-        if existing is None or row.stage == canon:
+        if existing is None or _status_grid_priority_rank(
+            row.status
+        ) < _status_grid_priority_rank(existing.status):
             by_canon[canon] = row
     return [by_canon.get(name) for name in names]
 

@@ -944,7 +944,7 @@ def _load_sci_bkg_crop(
     subtraction, and silently falling back to an un-subtracted science crop
     produced contaminated ``hp_d`` output that looked like a success (see
     production incident 2026-08-23, S20/C3/K3 tvwcs: 485/495 frames had no
-    background removed because kernel_subtract had failed for them upstream).
+    background removed because background_estimate had failed for them upstream).
     """
     ny, nx = expected_shape
     label = workspace_label_from_dir(sci_bkg_ws)
