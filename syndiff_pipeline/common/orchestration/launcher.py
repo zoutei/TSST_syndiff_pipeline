@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Protocol
+from typing import TYPE_CHECKING, List, Optional, Protocol
 
 from syndiff_pipeline.common.orchestration import condor
 
@@ -82,13 +82,22 @@ def launch_stage(
     run_id: str,
     target_label: str,
     launch_token: str,
+    resources_override: Optional["condor.CondorResourceRequest"] = None,
 ) -> LaunchDescriptor:
-    """Launch a stage locally or on Condor; return durable descriptor."""
-    if cfg.stage_executor(stage) == "condor":
-        from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
+    """Launch a stage locally or on Condor; return durable descriptor.
 
-        stage_spec = get_syndiff_pipeline().require(stage)
-        resources = stage_spec.condor_resources(cfg)
+    ``resources_override``, when given, replaces the stage's usual static
+    ``condor_resources(cfg)`` profile entirely (e.g. a per-target
+    preflight-sized small job for ``ps1_process``).
+    """
+    if cfg.stage_executor(stage) == "condor":
+        if resources_override is not None:
+            resources = resources_override
+        else:
+            from syndiff_pipeline.pipeline_spec import get_syndiff_pipeline
+
+            stage_spec = get_syndiff_pipeline().require(stage)
+            resources = stage_spec.condor_resources(cfg)
         if resources is None:
             raise ValueError(f"No Condor resource profile for stage {stage!r}")
         cluster_id, submit_epoch = condor.submit_job(
