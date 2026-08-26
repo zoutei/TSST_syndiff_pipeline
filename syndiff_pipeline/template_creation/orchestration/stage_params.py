@@ -85,6 +85,11 @@ PS1_PROCESS_ALLOWED = frozenset(
         "condor_request_memory",
         "host_stats_min_mem_mb",
         "host_stats_max_load15",
+        "small_job_max_skycells",
+        "small_job_request_cpus",
+        "small_job_min_memory_mb",
+        "small_job_memory_per_skycell_mb",
+        "small_job_host_stats_min_mem_mb",
     }
 )
 DIFF_ALLOWED = frozenset({"executor"})
@@ -290,12 +295,36 @@ class Ps1ProcessStageParams:
     condor_request_memory: int = 300_000
     host_stats_min_mem_mb: int = 300_000
     host_stats_max_load15: float = 10.0
+    # Pre-launch delta/small-job policy (scheduler side; see
+    # ps1_process_preflight.plan_ps1_process_launch). Only takes effect when
+    # use_shared_convolved_store is True. Set small_job_max_skycells to 0 to
+    # disable the small-job path entirely (every non-empty delta gets the
+    # full condor_request_* profile above).
+    small_job_max_skycells: int = 32
+    small_job_request_cpus: int = 16
+    small_job_min_memory_mb: int = 25_000
+    small_job_memory_per_skycell_mb: int = 2_500
+    small_job_host_stats_min_mem_mb: int = 25_000
 
     def __post_init__(self) -> None:
         if self.use_shared_convolved_store and self.write_per_scc_convolved_zarr:
             raise ValueError(
                 "stages.ps1_process: use_shared_convolved_store=True requires "
                 "write_per_scc_convolved_zarr=False (hard cut on per-SCC convolved.zarr)"
+            )
+        if self.small_job_max_skycells < 0:
+            raise ValueError("stages.ps1_process.small_job_max_skycells must be >= 0")
+        if self.small_job_request_cpus < 1:
+            raise ValueError("stages.ps1_process.small_job_request_cpus must be positive")
+        if self.small_job_min_memory_mb < 1:
+            raise ValueError("stages.ps1_process.small_job_min_memory_mb must be positive")
+        if self.small_job_memory_per_skycell_mb < 1:
+            raise ValueError(
+                "stages.ps1_process.small_job_memory_per_skycell_mb must be positive"
+            )
+        if self.small_job_host_stats_min_mem_mb < 1:
+            raise ValueError(
+                "stages.ps1_process.small_job_host_stats_min_mem_mb must be positive"
             )
 
 

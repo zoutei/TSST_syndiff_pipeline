@@ -1858,10 +1858,39 @@ def _try_launch_ready_row(
     from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
 
     cfg = ctx.cfg
-    target_stages = resolve_config(target, cfg).stages
+    resolved = resolve_config(target, cfg)
+    target_stages = resolved.stages
     if not state.deps_satisfied(run_id, row.target_label, row.stage, stages=target_stages):
         state.update_stage_status(run_id, row.target_label, row.stage, pstate.STATUS_PENDING)
         return False
+
+    resources_override = None
+    if row.stage == "ps1_process" and not force_rerun:
+        from syndiff_pipeline.template_creation.orchestration import ps1_process_preflight
+
+        plan = ps1_process_preflight.plan_ps1_process_launch(
+            data_root=resolved.data_root,
+            sector=target.sector,
+            camera=target.camera,
+            ccd=target.ccd,
+            oversampling_factor=getattr(target_stages.mapping, "oversampling_factor", 1),
+            params=target_stages.ps1_process,
+            mapping_store_name=getattr(target_stages.mapping, "store_name", None),
+        )
+        if plan.decision == ps1_process_preflight.DECISION_SKIP:
+            state.mark_skipped(run_id, row.target_label, row.stage)
+            state.cache_skip_reason(run_id, row.target_label, row.stage, pstate.SKIP_REASON_ARTIFACTS)
+            log.info(
+                "ps1_process preflight skip for %s: %s", row.target_label, plan.reason
+            )
+            return True
+        if plan.decision == ps1_process_preflight.DECISION_SMALL:
+            resources_override = plan.resources
+            log.info(
+                "ps1_process preflight small job for %s: %s",
+                row.target_label,
+                plan.reason,
+            )
 
     executor = cfg.stage_executor(row.stage)
     if executor == "condor" and row.native_id:
@@ -1896,6 +1925,7 @@ def _try_launch_ready_row(
             run_id=run_id,
             target_label=row.target_label,
             launch_token=launch_token,
+            resources_override=resources_override,
         )
     except Exception:
         log.exception("Launch failed for %s / %s; requeuing", row.target_label, row.stage)
