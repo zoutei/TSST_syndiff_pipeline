@@ -114,6 +114,50 @@ class TestEnsureGaiaCropXy(unittest.TestCase):
             self.assertAlmostEqual(float(out.iloc[0]["x"]), 250.0)
             self.assertAlmostEqual(float(out.iloc[0]["y"]), 250.0)
 
+    def test_margin_px_keeps_star_just_outside_crop(self):
+        """A star centered a few px outside the crop must survive with margin_px.
+
+        Regression: without a margin, ``ensure_gaia_crop_xy`` used to drop any
+        row outside ``[x_min, x_max) x [y_min, y_max)`` outright, so a bright
+        star's cross/circle painted just outside a diff crop never bled into
+        the crop even though its footprint (up to ~100 px) should reach in.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            ref_path = f"{tmp}/ref_ffi.fits"
+            hdr = _write_ref_ffi(ref_path, nx=2048, ny=2048)
+            crop_bounds = {
+                "x_min": 100,
+                "x_max": 612,
+                "y_min": 200,
+                "y_max": 712,
+                "shape": (512, 512),
+            }
+            # 5 px outside the crop on both the low-x and low-y edges.
+            gaia_df = pd.DataFrame(
+                {
+                    "source_id": [12345],
+                    "x_ffi": [95.0],
+                    "y_ffi": [195.0],
+                }
+            )
+
+            no_margin = wcs_grouping.ensure_gaia_crop_xy(
+                gaia_df, ref_path, crop_bounds
+            )
+            self.assertEqual(len(no_margin), 0)
+
+            padded = wcs_grouping.ensure_gaia_crop_xy(
+                gaia_df, ref_path, crop_bounds, margin_px=50
+            )
+            self.assertEqual(len(padded), 1)
+            self.assertAlmostEqual(float(padded.iloc[0]["x"]), -5.0)
+            self.assertAlmostEqual(float(padded.iloc[0]["y"]), -5.0)
+
+            too_far = wcs_grouping.ensure_gaia_crop_xy(
+                gaia_df, ref_path, crop_bounds, margin_px=3
+            )
+            self.assertEqual(len(too_far), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

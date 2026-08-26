@@ -72,14 +72,14 @@ from syndiff_pipeline.difference_imaging.orchestration.workspace_lock import (
 )
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
-    parse_background,
+    parse_background_temporal_smoothing,
     parse_centroids,
     parse_per_ffi_wcs,
     parse_temporal_wcs,
     parse_epsf,
     parse_hotpants,
     parse_kernel_fit,
-    parse_kernel_subtract,
+    parse_background_estimate,
     parse_convolved_templates,
     kernel_fit_params_to_hotpants,
     HotpantsParams,
@@ -153,8 +153,8 @@ def _run_background_stage(
     out: str,
     crop_bounds: Optional[dict] = None,
 ) -> tuple:
-    """Execute unified ``background`` stage; returns (shared_mask, mask_catalog)."""
-    params = parse_background(stage, idx)
+    """Execute unified ``background_temporal_smoothing`` stage; returns (shared_mask, mask_catalog)."""
+    params = parse_background_temporal_smoothing(stage, idx)
     inp = stage.get("inputs") or {}
     label_out = str(stage["output"]).strip()
     out_ws = _diff_stage_dir(cfg, ctx, label_out)
@@ -539,16 +539,22 @@ def _ensure_gaia_crop(
     ref_ffi_path: str,
     crop_bounds: dict,
     cfg: SynDiffConfig,
+    *,
+    margin_px: int = 0,
 ) -> pd.DataFrame:
     """Ensure gaia crop.
-    
+
     Parameters
     ----------
     gaia_df : pd.DataFrame
     ref_ffi_path : str
     crop_bounds : dict
     cfg : SynDiffConfig
-    
+    margin_px : int, optional, default ``0``
+        Widen the crop-inclusion filter (see ``ensure_gaia_crop_xy``); rows
+        kept only because of the margin get crop-local x/y outside the crop
+        shape and must not be used for anything that indexes pixel arrays.
+
     Returns
     -------
     pd.DataFrame"""
@@ -557,6 +563,7 @@ def _ensure_gaia_crop(
         ref_ffi_path,
         crop_bounds,
         force_reproject=wcs_grouping.diff_crop_explicitly_configured(cfg),
+        margin_px=margin_px,
     )
 
 
@@ -889,15 +896,25 @@ def run_config_pipeline(
     validate_only: bool = False,
     diff_log_path: str | None = None,
     force_rerun: bool = False,
+    kinds: frozenset[str] | None = None,
 ) -> None:
     """Run config pipeline.
-    
+
     Parameters
     ----------
     cfg : SynDiffConfig
     validate_only : bool, optional, default ``False``
     diff_log_path : str | None, optional, default ``None``
-    force_rerun : bool, optional, default ``False``"""
+    force_rerun : bool, optional, default ``False``
+    kinds : frozenset[str] | None, optional, default ``None``
+        Restrict execution to stage kinds in this set (e.g. to run only the
+        diff_prep/background_estimate/diff slice of a split diff pipeline).
+        ``cfg.pipeline`` itself is never filtered -- the workspace config
+        lock and fingerprint (``assert_workspace_config_lock``,
+        ``write_immutable_workspace_config_snapshot``) always see the full,
+        unfiltered site pipeline regardless of this filter, so fingerprints
+        agree across a split run's three Condor jobs. ``None`` runs every
+        kind (today's behavior)."""
     validate_pipeline(cfg)
     if validate_only:
         log.info("Pipeline configuration is valid.")
@@ -1003,6 +1020,8 @@ def run_config_pipeline(
         if is_external_workspaces_entry(stage) or is_workspace_inherit_entry(stage):
             continue
         kind = stage["kind"]
+        if kinds is not None and kind not in kinds:
+            continue
         log.info("=" * 70)
         log.info("Stage: %s", kind)
 
@@ -1019,11 +1038,31 @@ def run_config_pipeline(
             continue
 
         if kind == "shared_mask":
+            from syndiff_pipeline.difference_imaging.masking.geometry import (
+                MASK_BOUNDARY_MARGIN_PX,
+            )
+
             sm = parse_shared_mask(stage, idx)
             gaia_df = _load_gaia_catalog(cfg)
             if gaia_df is None:
                 raise RuntimeError("gaia_catalog required for shared_mask.")
-            gaia_df = _ensure_gaia_crop(gaia_df, ref_ffi_path, crop_bounds, cfg)
+            # Reproject once with a margin wide enough to cover the largest
+            # painted mask reach (bright-star crosses), then derive the
+            # strict in-crop subset from it. A star centered just outside the
+            # crop can still paint a cross/circle/square that bleeds in; the
+            # strict-crop mask painters were previously never handed such
+            # stars at all, leaving a swath near crop edges unmasked.
+            gaia_df_padded = _ensure_gaia_crop(
+                gaia_df, ref_ffi_path, crop_bounds, cfg, margin_px=MASK_BOUNDARY_MARGIN_PX
+            )
+            ny_crop, nx_crop = crop_bounds["shape"]
+            strict = (
+                (gaia_df_padded["x"] >= 0)
+                & (gaia_df_padded["x"] < nx_crop)
+                & (gaia_df_padded["y"] >= 0)
+                & (gaia_df_padded["y"] < ny_crop)
+            )
+            gaia_df = gaia_df_padded[strict].reset_index(drop=True)
 
             with wcs_grouping.open_fits_memmap(ref_ffi_path) as hdul:
                 ref_header = hdul[1].header
@@ -1032,8 +1071,18 @@ def run_config_pipeline(
                 ffi_ny = int(ref_header["NAXIS2"])
             ref_crop = wcs_grouping.crop_image(ref_data, crop_bounds)
 
+            # Strict in-crop catalog: used for hotpants ref-star selection and
+            # the persisted gaia_catalog_pipeline.csv cache that downstream
+            # stages (ePSF, centroids, photometry) load — those index pixel
+            # arrays directly and must not see out-of-crop positions.
             gaia_mask_df = epsf_fitting.add_tess_flux_ratio(gaia_df.copy())
             gaia_mask_df["mag"] = gaia_mask_df["tess_mag"]
+
+            # Margin-widened catalog: mask painting only. The numba painters
+            # clip their own paint extent to the crop array, so an
+            # out-of-crop star center is safe here.
+            gaia_paint_df = epsf_fitting.add_tess_flux_ratio(gaia_df_padded.copy())
+            gaia_paint_df["mag"] = gaia_paint_df["tess_mag"]
 
             from syndiff_pipeline.difference_imaging.masking.api import generate_shared_mask_catalog
             from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
@@ -1124,7 +1173,7 @@ def run_config_pipeline(
 
             mask_catalog = generate_shared_mask_catalog(
                 ref_image=ref_crop,
-                gaia_df=gaia_mask_df,
+                gaia_df=gaia_paint_df,
                 crop_bounds=crop_bounds,
                 lane_root=lane_root,
                 data_root=data_root,
@@ -1372,11 +1421,11 @@ def run_config_pipeline(
                 use_patch_cache=bool(ct_params.use_patch_cache),
             )
 
-        elif kind == "kernel_subtract":
-            ks_params = parse_kernel_subtract(stage, idx)
+        elif kind == "background_estimate":
+            ks_params = parse_background_estimate(stage, idx)
             if wcs_table is None or crop_bounds is None:
                 raise RuntimeError(
-                    "kernel_subtract requires wcs_table and crop_bounds from template handoff."
+                    "background_estimate requires wcs_table and crop_bounds from template handoff."
                 )
             shared_mask = _ensure_shared_mask_loaded(shared_mask, cfg=cfg)
             mask_catalog = _ensure_mask_catalog_loaded(
@@ -1402,7 +1451,7 @@ def run_config_pipeline(
             bkg_dir = _diff_stage_dir(cfg, ctx, bkg_l) if bkg_l else None
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
-            n_jobs = ks_params.kernel_subtract_n_jobs or cfg.n_jobs
+            n_jobs = ks_params.background_estimate_n_jobs or cfg.n_jobs
             results = kernel_subtract_runner.kernel_subtract_loop(
                 ffi_paths=processing_ffi_paths,
                 output_dir=out,
@@ -1659,6 +1708,10 @@ def run_config_pipeline(
                 sector=int(cfg.sector),
                 camera=int(cfg.camera),
                 ccd=int(cfg.ccd),
+                progress_path=Path(ws_out) / "temporal_wcs.progress.json",
+                cli_progress_path=(
+                    Path(diff_log_path).parent / "diff.temporal_wcs.progress.json"
+                ),
             )
             log.info("per_ffi_wcs: %d/%d frames ok -> %s", n_ok, n_total, ws_out)
 
@@ -1830,10 +1883,10 @@ def run_config_pipeline(
                 else:
                     write_image_fits(out_fp, acc.astype(np.float32))
 
-        elif kind == "background":
+        elif kind == "background_temporal_smoothing":
             if wcs_table is None:
                 raise RuntimeError(
-                    "background requires wcs_table from template handoff."
+                    "background_temporal_smoothing requires wcs_table from template handoff."
                 )
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
