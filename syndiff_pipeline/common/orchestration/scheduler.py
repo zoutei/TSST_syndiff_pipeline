@@ -2428,6 +2428,20 @@ def _apply_commands(state: pstate.PipelineState) -> None:
                         stage,
                         reset_downstream=reset_downstream,
                     )
+                    # A retry is an explicit signal that whatever caused past
+                    # evictions (often oversized request_cpus/request_memory)
+                    # may now be fixed -- don't let a stale host exclusion
+                    # outlive the config change that caused it.
+                    run_row = state.get_run(cmd.run_id)
+                    if run_row:
+                        artifacts = condor.condor_artifact_paths(
+                            run_row["runs_root"],
+                            cmd.run_id,
+                            target_label,
+                            stage,
+                            mkdir=False,
+                        )
+                        condor.write_bad_machines(artifacts["bad_machines"], set())
                     _cancel_verify_for_retry(
                         cmd.run_id,
                         target_label,
