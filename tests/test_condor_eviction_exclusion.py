@@ -943,6 +943,11 @@ class TestCondorEvictionReconcile(unittest.TestCase):
             self.assertTrue(artifacts["eviction_state"].is_file())
 
     def test_max_attempts_marks_failed_instead_of_requeue(self):
+        """Eviction-loop requeues are budgeted against max_eviction_stage_attempts,
+        not the tighter generic max_stage_attempts -- a bad/flaky host getting
+        excluded and requeued is expected recovery, not stage failure, and
+        sharing the small default budget with genuine launch failures can
+        exhaust it before ever reaching a good host in a small pool."""
         cluster_id = 900_005
         with tempfile.TemporaryDirectory() as tmp:
             state, ctx, label, artifacts = _claim_condor_stage(
@@ -951,7 +956,8 @@ class TestCondorEvictionReconcile(unittest.TestCase):
                 condor_log=_eviction_log(cluster_id, "plscience10.stsci.edu", failures=2),
                 attempts=3,
             )
-            ctx.cfg.max_stage_attempts = 3
+            ctx.cfg.max_stage_attempts = 1000
+            ctx.cfg.max_eviction_stage_attempts = 3
             with unittest.mock.patch.object(
                 condor,
                 "query_clusters",
@@ -963,6 +969,32 @@ class TestCondorEvictionReconcile(unittest.TestCase):
             row = state.get_stage_run("run_a", label, "star")
             self.assertEqual(row.status, STATUS_FAILED)
             self.assertIn("plscience10.stsci.edu", condor.read_bad_machines(artifacts["bad_machines"]))
+
+    def test_eviction_requeue_survives_past_tight_generic_max_attempts(self):
+        """A small pool exploring bad hosts must not exhaust the generic
+        max_stage_attempts budget: eviction-loop requeues use the larger,
+        dedicated max_eviction_stage_attempts allowance instead."""
+        cluster_id = 900_005
+        with tempfile.TemporaryDirectory() as tmp:
+            state, ctx, label, artifacts = _claim_condor_stage(
+                Path(tmp),
+                cluster_id=cluster_id,
+                condor_log=_eviction_log(cluster_id, "plscience12.stsci.edu", failures=2),
+                attempts=3,
+            )
+            ctx.cfg.max_stage_attempts = 3
+            ctx.cfg.max_eviction_stage_attempts = 20
+            with unittest.mock.patch.object(
+                condor,
+                "query_clusters",
+                return_value={cluster_id: (condor._JOB_IDLE, None)},
+            ), unittest.mock.patch.object(condor, "remove_cluster", return_value=True):
+                counts = reconcile_running_stages(state, "run_a", ctx)
+            self.assertEqual(counts["requeued"], 1)
+            self.assertEqual(counts["failed"], 0)
+            row = state.get_stage_run("run_a", label, "star")
+            self.assertEqual(row.status, STATUS_READY)
+            self.assertIn("plscience12.stsci.edu", condor.read_bad_machines(artifacts["bad_machines"]))
 
     def test_held_job_not_treated_as_eviction_loop(self):
         cluster_id = 900_006

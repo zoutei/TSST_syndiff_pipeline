@@ -730,7 +730,18 @@ def reconcile_running_stages(
                             job,
                             runs_root=runs_root,
                             reason=reason,
-                            max_attempts=cfg.max_stage_attempts,
+                            # A bad/flaky execute host getting excluded and
+                            # requeued is expected recovery, not stage
+                            # failure -- attempts shares its counter with
+                            # every other launch path, so budgeting this
+                            # against the tight generic max_stage_attempts
+                            # (default 3) means discovering 1-2 bad hosts in
+                            # a small pool can exhaust the whole budget
+                            # before ever reaching a good one. Give eviction
+                            # requeues their own, much larger allowance;
+                            # each retry excludes one more host, so this
+                            # naturally bounds itself by the pool size.
+                            max_attempts=cfg.max_eviction_stage_attempts,
                             requeue_backoff_s=cfg.requeue_backoff_s,
                             # Host exclusion plus requeue is an expected
                             # recovery path; notify only if retries are
