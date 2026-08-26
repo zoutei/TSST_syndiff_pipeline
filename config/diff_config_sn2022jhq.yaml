@@ -168,9 +168,9 @@ condor:
     host_stats_max_load15: 20.0
   diff:
     request_cpus: 64
-    # Measured peak (hotpants hp_d, n_jobs=64): 54-73 GB historically. 100 GB
-    # keeps real margin above that while fitting under a 128GB-class node's
-    # ~125 GiB total, opening that whole tier up as a candidate.
-    request_memory: 100000
-    host_stats_min_mem_mb: 100000
+    # Measured peak (hotpants hp_d, n_jobs=64): 54-73 GB historically. 80 GB
+    # still keeps real margin above that while opening up more nodes whose
+    # free memory sits in the 80-100 GB range.
+    request_memory: 80000
+    host_stats_min_mem_mb: 80000
     host_stats_max_load15: 20.0
