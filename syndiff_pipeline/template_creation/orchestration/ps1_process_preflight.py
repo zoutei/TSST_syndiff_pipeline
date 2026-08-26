@@ -47,7 +47,13 @@ def _small_job_resources(params: Any, missing_count: int) -> condor.CondorResour
         int(getattr(params, "small_job_min_memory_mb")),
         int(getattr(params, "small_job_memory_per_skycell_mb")) * max(1, missing_count),
     )
-    cpus = max(1, min(int(getattr(params, "small_job_request_cpus")), missing_count))
+    # Flat, not scaled down by missing_count: the source-extractor/ingest
+    # worker pools inside ps1_process.py need real parallelism to shut down
+    # cleanly regardless of how few skycells are actually being (re)computed
+    # -- a 1-cpu request starved a ~10-worker ProcessPoolExecutor badly enough
+    # to deadlock its own shutdown path (see ps1_process.py's
+    # resolve_effective_n_jobs-capped worker counts).
+    cpus = max(1, int(getattr(params, "small_job_request_cpus")))
     return condor.CondorResourceRequest(
         request_cpus=cpus,
         request_memory_mb=memory_mb,

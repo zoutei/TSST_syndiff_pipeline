@@ -94,7 +94,10 @@ def test_small_job_when_one_cell_missing(tmp_path, monkeypatch):
     assert plan.target_only_cells == frozenset({"skycell.2333.091"})
     assert plan.resources is not None
     assert plan.resources.request_memory_mb == 25_000  # floor: 1 cell * 2500 < 25000 floor
-    assert plan.resources.request_cpus == 1
+    # Flat small_job_request_cpus, not scaled down to missing-cell count --
+    # the source-extractor/ingest pools inside ps1_process.py need real
+    # parallelism to shut down cleanly even when only 1 cell is missing.
+    assert plan.resources.request_cpus == 16
 
 
 def test_small_job_memory_scales_with_missing_count(tmp_path, monkeypatch):
@@ -111,7 +114,7 @@ def test_small_job_memory_scales_with_missing_count(tmp_path, monkeypatch):
     assert plan.decision == pf.DECISION_SMALL
     assert len(plan.missing_cells) == 20
     assert plan.resources.request_memory_mb == 50_000  # 20 * 2500
-    assert plan.resources.request_cpus == 16  # min(16, 20)
+    assert plan.resources.request_cpus == 16  # flat small_job_request_cpus
 
 
 def test_full_when_missing_exceeds_small_job_ceiling(tmp_path, monkeypatch):

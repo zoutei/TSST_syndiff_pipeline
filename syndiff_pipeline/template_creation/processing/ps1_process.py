@@ -2676,14 +2676,30 @@ def run_modern_sliding_window_pipeline(
         ncpus = os.cpu_count() or 8
         mem_limit = max(2, int(available_gb // 4))
         num_source_extractors = max(2, min(ncpus // 2, mem_limit))
-        logger.info(
-            f"[Pipeline] Workers: ingest={num_ingest_workers}, band_combiners={num_band_combiners}, "
-            f"source_extractors={num_source_extractors} "
-            f"(available RAM: {available_gb:.1f} GB, cpus: {ncpus})"
-        )
     except ImportError:
         num_source_extractors = 8
-        logger.info(f"[Pipeline] Using {num_source_extractors} source extractors (psutil unavailable)")
+        ncpus = os.cpu_count() or 8
+        available_gb = 0.0
+
+    # Both pool sizes above are derived from the *host's* total cpus/RAM
+    # (os.cpu_count(), psutil.virtual_memory()), not this job's actual Condor
+    # allocation. On a heavily cpu-capped small job (e.g. a preflight-sized
+    # ps1_process delta run) that mismatch starves these pools badly enough
+    # to deadlock their own ProcessPoolExecutor/ThreadPoolExecutor shutdown
+    # path. resolve_effective_n_jobs reads SYNDIFF_REQUEST_CPUS (the actual
+    # Condor request_cpus) and only ever shrinks these, never widens them
+    # back out past what the host-based heuristic above already picked.
+    from syndiff_pipeline.common.parallelism import resolve_effective_n_jobs
+
+    num_ingest_workers = resolve_effective_n_jobs(num_ingest_workers, stage_n_jobs=num_ingest_workers)
+    num_source_extractors = resolve_effective_n_jobs(
+        num_source_extractors, stage_n_jobs=num_source_extractors
+    )
+    logger.info(
+        f"[Pipeline] Workers: ingest={num_ingest_workers}, band_combiners={num_band_combiners}, "
+        f"source_extractors={num_source_extractors} "
+        f"(available RAM: {available_gb:.1f} GB, cpus: {ncpus})"
+    )
 
     task_queue = _thread_queue.Queue()
     raw_cell_queue = _thread_queue.Queue(maxsize=max(6, num_ingest_workers * 2))
