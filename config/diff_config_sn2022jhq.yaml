@@ -150,17 +150,17 @@ pipeline:
 
 condor:
   diff_prep:
-    request_cpus: 64
+    request_cpus: 32
     request_memory: 120000
     host_stats_min_mem_mb: 120000
-    host_stats_max_load15: 10.0
+    host_stats_max_load15: 20.0
   background_estimate:
     request_cpus: 64
-    request_memory: 500000
-    host_stats_min_mem_mb: 500000
-    host_stats_max_load15: 10.0
+    request_memory: 300000
+    host_stats_min_mem_mb: 300000
+    host_stats_max_load15: 20.0
   diff:
     request_cpus: 64
     request_memory: 120000
     host_stats_min_mem_mb: 120000
-    host_stats_max_load15: 10.0
+    host_stats_max_load15: 20.0
