@@ -133,6 +133,9 @@ class TestRunStarted(unittest.TestCase):
         self.assertIn("targets: 2", text)
         self.assertIn("ps1_download", text)
         self.assertNotIn("run_id=batch_a status=", text)
+        self.assertNotIn("run_dir:", text)
+        self.assertNotIn("Reply in Discord", text)
+        self.assertNotIn("syndiff progress", text)
 
     def test_send_run_started_uses_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:
