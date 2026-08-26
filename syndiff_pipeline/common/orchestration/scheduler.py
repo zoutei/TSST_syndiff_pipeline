@@ -686,6 +686,7 @@ def reconcile_running_stages(
                 submitted_at=submit_epoch,
                 hold_timeout_s=cfg.condor_hold_timeout_s,
                 hold_path=hold_path,
+                bad_machines_path=artifacts["bad_machines"],
             )
             if exit_code is None:
                 if status in (condor._JOB_IDLE, condor._JOB_RUNNING):
@@ -694,12 +695,15 @@ def reconcile_running_stages(
                         cluster_id=int(native_id),
                         eviction_state_path=artifacts["eviction_state"],
                     )
-                    if (
-                        eviction_host
-                        and not stage_liveness.stage_output_recently_active(
-                            log_path, job.stage
-                        )
-                    ):
+                    # A confirmed execute -> evict loop is stronger evidence
+                    # than ordinary stage-log activity.  The Condor user log
+                    # itself is updated by every execute/evict event, so
+                    # gating this path on stage_output_recently_active()
+                    # defeats host exclusion for exactly the clean repeated
+                    # eviction pattern this detector handles.  Keep the
+                    # liveness guard below for jobs that disappear from
+                    # queue/history without a confirmed eviction pair.
+                    if eviction_host:
                         tallies = condor.combined_eviction_tallies(
                             artifacts["log"].read_text(encoding="utf-8", errors="replace"),
                             cluster_id=int(native_id),
@@ -753,6 +757,30 @@ def reconcile_running_stages(
                             counts["failed"] += 1
                         continue
                 counts["still_running"] += 1
+                continue
+            if status == condor._JOB_HELD:
+                # Held past hold_timeout_s: bounded auto-retry for every hold
+                # reason, not just the memory-cgroup signature (that one also
+                # gets its bad host recorded via bad_machines_path above).
+                # Same reasoning as the eviction-host path above: an
+                # infra-side hold is expected recovery, not a stage failure.
+                reason = (
+                    f"Condor cluster {native_id} held past "
+                    f"{cfg.condor_hold_timeout_s:.0f}s timeout; requeued"
+                )
+                if _requeue_or_fail_stage(
+                    state,
+                    run_id,
+                    job,
+                    runs_root=runs_root,
+                    reason=reason,
+                    max_attempts=cfg.max_eviction_stage_attempts,
+                    requeue_backoff_s=cfg.requeue_backoff_s,
+                    notify_on_requeue=False,
+                ):
+                    counts["requeued"] += 1
+                else:
+                    counts["failed"] += 1
                 continue
             if exit_code == 1 and status is None:
                 if stage_liveness.stage_output_recently_active(log_path, job.stage):
