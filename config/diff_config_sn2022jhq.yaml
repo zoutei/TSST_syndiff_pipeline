@@ -1,0 +1,166 @@
+# SN2022jhq diff: shared_mask -> kernel_fit -> convolved_templates ->
+# background_estimate -> hotpants (hp_d) -> epsf (orbit_binned).
+# centroids/temporal_wcs are commented out below (2026-08-25, shared-mask
+# boundary-bug redo) -- re-enable both together if needed; temporal_wcs
+# consumes centroids_r1 directly.
+# Own copy of diff_config_cvz_linear_os1_epsf_centroids.yaml (same recipe,
+# same knobs) rather than editing that shared pilot file directly -- SN2022jhq
+# runs on its own chips (cam4/ccd2, cam2/ccd1, cam4/ccd1; see
+# config/scc_sn2022jhq.csv), so there's no data overlap, but the shared file
+# is actively being edited by other concurrent campaigns.
+# temporal_wcs params (when re-enabled) mirror
+# config/diff_config_cvz_temporal_wcs.yaml, folded into this same
+# pipeline/run (reads centroids_r1/hp_d produced just above, no
+# external_workspaces needed since it's the same workspace).
+#
+# Use (submit via the paired template-policy file, NOT this file directly --
+# a bare `--config config/diff_config_sn2022jhq.yaml` leaves
+# RunnerConfig.diff_config_path empty, which crashes Condor resource sizing
+# for every diff-family stage, and `--stages diff` alone selects only the
+# final hotpants+epsf stage, silently skipping shared_mask/kernel_fit/
+# background_estimate as "already complete"):
+#   syndiff diff submit --config config/pipeline_sn2022jhq_template.yaml \
+#     --scc config/scc_sn2022jhq.csv \
+#     --stages diff_prep,background_estimate,diff \
+#     --run-id sn2022jhq_diff_<date> --skip-artifact-verify
+deployment_file: deployment.yaml
+
+defaults:
+  n_jobs: 32
+  workspace_run_id: sn2022jhq_v1
+  pipeline_plots: true
+  oversampling_factor: 1
+
+paths:
+  template_store_name: linear
+  remap_store_name: linear
+  output_store_name: linear
+
+pipeline:
+  - kind: shared_mask
+  - kind: kernel_fit
+    weighting_factor: 0.5
+    write_debug_fits: true
+    output: kernel_fit
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 3
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_kernel_params: true
+  - kind: convolved_templates
+    inputs:
+      kernel_fit: kernel_fit
+    output: tmpl_conv
+  - kind: background_estimate
+    inputs:
+      convolved: tmpl_conv
+    # 48, not 32/64: s52 OOM'd at n_jobs=32 / 331 GB against a 128 GB cgroup
+    # (~10.3 GB/worker). This stage now runs as its own 500 GB Condor job, so
+    # 48 workers is ~494 GB on that chip's profile -- tight but the point of
+    # the split. If s52 OOMs, drop this knob to 32 and retry (skip_existing
+    # keeps finished frames). s50/s51 already finished this kind.
+    background_estimate_n_jobs: 48
+    output:
+      diffs: ks_d
+      phot_bkg: ks_b
+  - kind: hotpants
+    inputs:
+      bkg: ks_b
+    hotpants_n_jobs: 64
+    hp_sigma_gauss: [0.752, 1.88, 3.76]
+    hp_ko: 2
+    hp_bgo: 0
+    hp_nstampx: 10
+    hp_nstampy: 10
+    hp_nss: 100
+    hp_ngauss: 3
+    hp_deg_fixe: [6, 4, 2]
+    hp_kf_spread_mask1: 0.0
+    hp_ks: 3.0
+    hp_kfm: 0.75
+    hp_fitthresh: 5.0
+    hp_stat_sig: 3.0
+    hp_force_convolve: "t"
+    hp_normalize: "t"
+    write_convolved: false
+    write_bkg: true
+    write_stamps: false
+    write_kernel_solutions: true
+    output:
+      diffs: hp_d
+      convolved: hp_c
+      bkg: hp_b
+  - kind: epsf
+    inputs:
+      diffs: hp_d
+    output: epsf_r1
+    epsf_mode: orbit_binned
+    tile_nx: 4
+    tile_ny: 4
+    tess_mag_min: 8.0
+    tess_mag_max: 13.0
+    epsf_isolation_min_sep_px: 6.0
+    epsf_isolation_neighbor_mag_max: 13.0
+    epsf_n_jobs: 64
+  # centroids/temporal_wcs disabled for the shared-mask-boundary-bug redo
+  # (2026-08-25): temporal_wcs consumes centroids_r1 directly, so both are
+  # commented out together rather than leaving a dangling input reference.
+  # - kind: centroids
+  #   inputs:
+  #     diffs: hp_d
+  #     epsf: epsf_r1
+  #   output: centroids_r1
+  #   # Bumped 32->64 (2026-08-25): the prior 32 cap was inherited from an
+  #   # epsf_n_jobs=64/centroids_n_jobs=64 OOM at 120GB (measured ~101GB) seen
+  #   # on diff_config_cvz_linear_os1_epsf_centroids.yaml's much denser CVZ
+  #   # field. Live-measured on this field's own centroids run (s0055,
+  #   # n_jobs=32): only ~20GB RSS against the 120GB cgroup limit, so 64
+  #   # workers (~35-40GB projected) still has large headroom here. Watch the
+  #   # first retry under this setting; revert to 32 (or bump request_memory
+  #   # like the CVZ config did) if it OOMs on a different SCC's field.
+  #   centroids_n_jobs: 64
+  # - kind: temporal_wcs
+  #   inputs:
+  #     centroids: centroids_r1
+  #     diffs: hp_d
+  #   output: temporal_wcs
+  #   version: temporal_cheb5_bspline_v1
+  #   spatial_basis: chebyshev
+  #   cheb_degree: 5
+  #   temporal_basis: bspline
+  #   spline_degree: 3
+  #   n_interior_knots: 20
+  #   edge_densify_knots: true
+  #   edge_fraction: 0.12
+  #   clip_n_sigma: 3.0
+  #   clip_max_iter: 3
+  #   min_stars: 50
+  #   debug_plots: true
+
+condor:
+  diff_prep:
+    request_cpus: 64
+    request_memory: 120000
+    host_stats_min_mem_mb: 120000
+    host_stats_max_load15: 10.0
+  background_estimate:
+    request_cpus: 64
+    request_memory: 500000
+    host_stats_min_mem_mb: 500000
+    host_stats_max_load15: 10.0
+  diff:
+    request_cpus: 64
+    request_memory: 120000
+    host_stats_min_mem_mb: 120000
+    host_stats_max_load15: 10.0
