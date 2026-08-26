@@ -157,7 +157,10 @@ condor:
     request_cpus: 4
     request_memory: 16000
     host_stats_min_mem_mb: 16000
-    host_stats_max_load15: 20.0
+    # diff_prep's own footprint (<1 core, ~170 MB) won't meaningfully add to
+    # a node's load, so gating it on the node's existing load15 just excludes
+    # otherwise-idle-capacity nodes for no reason. Effectively unbounded.
+    host_stats_max_load15: 200.0
   background_estimate:
     request_cpus: 64
     request_memory: 300000
