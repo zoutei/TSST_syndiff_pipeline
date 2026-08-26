@@ -151,8 +151,12 @@ pipeline:
 condor:
   diff_prep:
     request_cpus: 32
-    request_memory: 120000
-    host_stats_min_mem_mb: 120000
+    # Measured peak across full completed runs: ~150-170 MB. 16 GB leaves a
+    # huge margin while letting this stage land on any 128GB-class node
+    # instead of competing with background_estimate for the scarce
+    # 500GB-class boxes.
+    request_memory: 16000
+    host_stats_min_mem_mb: 16000
     host_stats_max_load15: 20.0
   background_estimate:
     request_cpus: 64
@@ -161,6 +165,9 @@ condor:
     host_stats_max_load15: 20.0
   diff:
     request_cpus: 64
-    request_memory: 120000
-    host_stats_min_mem_mb: 120000
+    # Measured peak (hotpants hp_d, n_jobs=64): 54-73 GB historically. 100 GB
+    # keeps real margin above that while fitting under a 128GB-class node's
+    # ~125 GiB total, opening that whole tier up as a candidate.
+    request_memory: 100000
+    host_stats_min_mem_mb: 100000
     host_stats_max_load15: 20.0
