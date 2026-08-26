@@ -110,6 +110,7 @@ class RunnerConfig:
     skip_artifact_verify: bool = False
     bookkeeping_trust_index: bool = False
     max_stage_attempts: int = 3
+    max_eviction_stage_attempts: int = 20
     requeue_backoff_s: float = 30.0
     condor_hold_timeout_s: float = 600.0
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
@@ -275,6 +276,9 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         ),
         bookkeeping_trust_index=_parse_bookkeeping_trust_index(raw),
         max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
+        max_eviction_stage_attempts=int(
+            raw.get("scheduler", {}).get("max_eviction_stage_attempts", 20)
+        ),
         requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
         condor_hold_timeout_s=float(
             raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
@@ -377,6 +381,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "verify_budget_per_tick": cfg.verify_budget_per_tick,
         "skip_artifact_verify": cfg.skip_artifact_verify,
         "max_stage_attempts": cfg.max_stage_attempts,
+        "max_eviction_stage_attempts": cfg.max_eviction_stage_attempts,
         "requeue_backoff_s": cfg.requeue_backoff_s,
         "condor_hold_timeout_s": cfg.condor_hold_timeout_s,
     }
@@ -385,6 +390,7 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
     data.pop("verify_budget_per_tick", None)
     data.pop("skip_artifact_verify", None)
     data.pop("max_stage_attempts", None)
+    data.pop("max_eviction_stage_attempts", None)
     data.pop("requeue_backoff_s", None)
     data.pop("condor_hold_timeout_s", None)
     data["deployment_file"] = cfg.deployment_file
@@ -481,6 +487,9 @@ def load_and_materialize_runner_config(
             ),
             bookkeeping_trust_index=_parse_bookkeeping_trust_index(raw),
             max_stage_attempts=int(raw.get("scheduler", {}).get("max_stage_attempts", 3)),
+            max_eviction_stage_attempts=int(
+                raw.get("scheduler", {}).get("max_eviction_stage_attempts", 20)
+            ),
             requeue_backoff_s=float(raw.get("scheduler", {}).get("requeue_backoff_s", 30.0)),
             condor_hold_timeout_s=float(
                 raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
