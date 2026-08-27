@@ -322,7 +322,8 @@ def fit_epsf_all_frames(diff_paths: list,
                          force_rerun: bool = False,
                          ffi_list_df=None,
                          science_bounds: dict | None = None,
-                         ffi_path_by_stem: dict | None = None) -> tuple:
+                         ffi_path_by_stem: dict | None = None,
+                         debug_plot_dir: str | None = None) -> tuple:
     """
     Fit gridded ePSF on every difference image in diff_paths.
 
@@ -341,6 +342,10 @@ def fit_epsf_all_frames(diff_paths: list,
     wcs_table : optional frame manifest for BTJD lookup
     force_rerun : when True, ignore already-computed per-frame ePSF models and
         recompute every frame (mirrors the hotpants stage's ``force_rerun``)
+    debug_plot_dir : when set (and ``epsf.epsf_debug_plots``), orbit-binned
+        anchor fits (``epsf_mode: orbit_binned``, the default) write a DS9
+        region + star-selection PNG inline from the fit already computed.
+        Not wired for ``epsf_mode: per_frame`` (non-default, out of scope).
     """
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
@@ -383,7 +388,13 @@ def fit_epsf_all_frames(diff_paths: list,
         from syndiff_pipeline.difference_imaging.stages import gridded_epsf_orbit
 
         result = gridded_epsf_orbit.fit_gridded_epsf_orbit_binned(
-            diff_paths, gaia_df, cfg, epsf, output_dir, **common_kwargs
+            diff_paths,
+            gaia_df,
+            cfg,
+            epsf,
+            output_dir,
+            debug_plot_dir=debug_plot_dir,
+            **common_kwargs,
         )
     else:
         result = gridded_epsf.fit_gridded_epsf_all_frames(
@@ -404,7 +415,7 @@ def fit_epsf_tiled(diff_image: np.ndarray,
     """Fit gridded ePSF on a single difference image (test / debug helper)."""
     from syndiff_pipeline.difference_imaging.stages import gridded_epsf
 
-    _model, tile_centers, stack = gridded_epsf.build_gridded_psf_for_frame(
+    _model, tile_centers, stack, _n_stars = gridded_epsf.build_gridded_psf_for_frame(
         diff_image,
         gaia_df,
         epsf,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -233,17 +234,17 @@ def test_fit_anchor_stacked_unions_window_masks(monkeypatch, tmp_path):
 
     captured = {}
 
-    def _fake_build(diff_image, gaia_df, epsf_params, *, mask_2d=None, frame_label=""):
+    def _fake_build(diff_image, gaia_df, epsf_params, *, mask_2d=None, frame_label="", star_usage_out=None):
         captured["diff_image"] = diff_image
         captured["mask_2d"] = mask_2d
-        return None, [(1.0, 1.0)], np.ones((1, 3, 3))
+        return None, [(1.0, 1.0)], np.ones((1, 3, 3)), [7]
 
     monkeypatch.setattr(geo, "build_gridded_psf_for_frame", _fake_build)
     monkeypatch.setattr(
         geo, "gaia_science_xy_for_frame", lambda gaia, path, ffi_list_df, bounds: gaia
     )
 
-    grid_xypos, stack = geo.fit_anchor_stacked(
+    grid_xypos, stack, n_stars = geo.fit_anchor_stacked(
         window_diff_paths=imgs,
         window_masks=masks,
         anchor_ffi_path=imgs[1],
@@ -254,12 +255,93 @@ def test_fit_anchor_stacked_unions_window_masks(monkeypatch, tmp_path):
         frame_label="anchor",
     )
     assert stack is not None
+    assert n_stars == [7]
     # Mean-combine of [0,1,2] at every pixel -> 1.0 everywhere.
     assert np.allclose(captured["diff_image"], 1.0)
     # Union mask: pixels (0,0), (1,1), (2,2) all rejected.
     union = captured["mask_2d"]
     assert union[0, 0] and union[1, 1] and union[2, 2]
     assert not union[3, 3]
+
+
+def test_fit_anchor_stacked_writes_star_selection_debug_output(monkeypatch, tmp_path):
+    """When debug_plot_dir is set, the anchor's own fit (no re-fit) writes a
+    DS9 region + star-selection PNG using build_gridded_psf_for_frame's
+    star_usage_out."""
+    from astropy.io import fits
+
+    img = np.zeros((16, 16), dtype=np.float64)
+    p = tmp_path / "diff_0.fits"
+    fits.PrimaryHDU(img).writeto(p)
+
+    def _fake_build(diff_image, gaia_df, epsf_params, *, mask_2d=None, frame_label="", star_usage_out=None):
+        if star_usage_out is not None:
+            star_usage_out["used_xy"] = [(2.0, 3.0), (5.0, 6.0)]
+            star_usage_out["excluded_xy"] = [(9.0, 9.0)]
+        return None, [(1.0, 1.0)], np.ones((1, 3, 3)), [3]
+
+    monkeypatch.setattr(geo, "build_gridded_psf_for_frame", _fake_build)
+    monkeypatch.setattr(
+        geo, "gaia_science_xy_for_frame", lambda gaia, path, ffi_list_df, bounds: gaia
+    )
+
+    debug_dir = str(tmp_path / "debug_plots" / "epsf_r1")
+    grid_xypos, stack, n_stars = geo.fit_anchor_stacked(
+        window_diff_paths=[str(p)],
+        window_masks=[None],
+        anchor_ffi_path=str(p),
+        gaia_base=pd.DataFrame({"ra": [1.0], "dec": [2.0]}),
+        epsf_params=EpsfParams(),
+        ffi_list_df=pd.DataFrame(),
+        science_bounds={},
+        frame_label="anchor_stem",
+        debug_plot_dir=debug_dir,
+        epsf_label="epsf_r1",
+    )
+    assert stack is not None
+
+    from syndiff_pipeline.difference_imaging.support.plot import (
+        epsf_star_selection_png_path,
+        epsf_star_selection_region_path,
+    )
+
+    region_path = epsf_star_selection_region_path(debug_dir, "epsf_r1", "anchor_stem")
+    png_path = epsf_star_selection_png_path(debug_dir, "epsf_r1", "anchor_stem")
+    assert os.path.isfile(region_path)
+    assert os.path.isfile(png_path)
+    region_text = open(region_path, encoding="utf-8").read()
+    assert "used_0" in region_text and "color=blue" in region_text
+    assert "excluded_0" in region_text and "color=red" in region_text
+
+
+def test_fit_anchor_stacked_no_debug_output_without_plot_dir(monkeypatch, tmp_path):
+    from astropy.io import fits
+
+    img = np.zeros((16, 16), dtype=np.float64)
+    p = tmp_path / "diff_0.fits"
+    fits.PrimaryHDU(img).writeto(p)
+
+    def _fake_build(diff_image, gaia_df, epsf_params, *, mask_2d=None, frame_label="", star_usage_out=None):
+        assert star_usage_out is None
+        return None, [(1.0, 1.0)], np.ones((1, 3, 3)), [3]
+
+    monkeypatch.setattr(geo, "build_gridded_psf_for_frame", _fake_build)
+    monkeypatch.setattr(
+        geo, "gaia_science_xy_for_frame", lambda gaia, path, ffi_list_df, bounds: gaia
+    )
+
+    _grid_xypos, stack, _n_stars = geo.fit_anchor_stacked(
+        window_diff_paths=[str(p)],
+        window_masks=[None],
+        anchor_ffi_path=str(p),
+        gaia_base=pd.DataFrame({"ra": [1.0], "dec": [2.0]}),
+        epsf_params=EpsfParams(),
+        ffi_list_df=pd.DataFrame(),
+        science_bounds={},
+        frame_label="anchor_stem",
+    )
+    assert stack is not None
+    assert not (tmp_path / "debug_plots").exists()
 
 
 # ── Fingerprint helpers (F1) ─────────────────────────────────────────────────
@@ -465,16 +547,15 @@ def test_resolve_btjd_by_stem_missing_date_obs_stays_absent():
 # ── TESS-mag star selection + isolation filter (dev/forward_epsf_wcs parity) ─
 
 
-def test_epsf_mag_source_default_and_validation():
-    assert EpsfParams().epsf_mag_source == "phot_rp_mean_mag"
-    assert parse_epsf({"kind": "epsf", "epsf_mag_source": "tess_mag"}, 0).epsf_mag_source == "tess_mag"
-    with pytest.raises(ValueError):
-        parse_epsf({"kind": "epsf", "epsf_mag_source": "bogus"}, 0)
+def test_epsf_tess_mag_defaults_and_isolation_validation():
+    assert EpsfParams().tess_mag_max == 12.95
+    assert EpsfParams().tess_mag_min is None
+    assert parse_epsf({"kind": "epsf", "tess_mag_max": 11.0}, 0).tess_mag_max == 11.0
     with pytest.raises(ValueError):
         parse_epsf({"kind": "epsf", "epsf_isolation_min_sep_px": -1.0}, 0)
 
 
-def test_prepare_gaia_for_gridded_epsf_tess_mag_source():
+def test_prepare_gaia_for_gridded_epsf_always_uses_tess_mag():
     df = pd.DataFrame(
         {
             "ra": [10.0, 20.0],
@@ -484,7 +565,7 @@ def test_prepare_gaia_for_gridded_epsf_tess_mag_source():
             "phot_rp_mean_mag": [7.9, 14.8],
         }
     )
-    params = EpsfParams(epsf_mag_source="tess_mag", mag_min_rp=None, mag_max_rp=11.0)
+    params = EpsfParams(tess_mag_min=None, tess_mag_max=11.0)
     out = gridded_epsf.prepare_gaia_for_gridded_epsf(df, params)
     assert len(out) == 1
     assert "tess_mag" in out.columns
@@ -503,7 +584,7 @@ def test_prepare_gaia_for_gridded_epsf_defers_filter_when_isolation_enabled():
         }
     )
     params = EpsfParams(
-        epsf_mag_source="tess_mag", mag_min_rp=7.0, mag_max_rp=11.0,
+        tess_mag_min=7.0, tess_mag_max=11.0,
         epsf_isolation_min_sep_px=6.0,
     )
     out = gridded_epsf.prepare_gaia_for_gridded_epsf(df, params)

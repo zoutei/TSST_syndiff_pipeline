@@ -63,6 +63,45 @@ class TestGriddedEpsfPlots(unittest.TestCase):
             expected_png = gridded_epsf_frame_plot_path(plot_dir, "epsf_r1", "tess123")
             self.assertIn(expected_png, written)
 
+    def test_workspace_plots_prefer_anchor_stems_over_interpolated(self):
+        # Regression: orbit-binned mode writes an npz per frame (anchor or
+        # interpolated/blended), but only anchors have a real per-tile fit
+        # (n_stars). With many interpolated frames per anchor, unrestricted
+        # evenly-spaced selection almost always lands on a frame with no
+        # star count to show. The anchor-stem sidecar must be consulted so
+        # selection prefers real fits.
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "epsf_r1")
+            os.makedirs(ws, exist_ok=True)
+            ny, nx = 15, 15
+            yy, xx = np.mgrid[0:ny, 0:nx]
+            stamp = np.exp(-((xx - 7) ** 2 + (yy - 7) ** 2) / 8.0)
+            stack = np.stack([stamp])
+            grid_xypos = [(256.0, 256.0)]
+
+            index = {}
+            anchor_stems = {"anchor_1"}
+            for stem in ["interp_a", "interp_b", "anchor_1", "interp_c", "interp_d"]:
+                npz_path = gridded_epsf.gridded_epsf_npz_path(ws, stem)
+                n_stars = [42] if stem in anchor_stems else None
+                gridded_epsf.save_gridded_epsf_npz(npz_path, stack, grid_xypos, 2, n_stars=n_stars)
+                index[stem] = npz_path
+            gridded_epsf.save_gridded_epsf_index(ws, index)
+            gridded_epsf.save_gridded_epsf_anchor_stems(ws, anchor_stems)
+
+            plot_dir = os.path.join(tmp, "debug_plots", "epsf_r1")
+            written = write_gridded_epsf_workspace_plots(
+                ws, plot_dir, epsf_label="epsf_r1", max_frames=1,
+            )
+            expected_png = gridded_epsf_frame_plot_path(plot_dir, "epsf_r1", "anchor_1")
+            self.assertIn(expected_png, written)
+
+    def test_anchor_stems_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(gridded_epsf.load_gridded_epsf_anchor_stems(tmp), set())
+            gridded_epsf.save_gridded_epsf_anchor_stems(tmp, {"a", "b"})
+            self.assertEqual(gridded_epsf.load_gridded_epsf_anchor_stems(tmp), {"a", "b"})
+
     def test_discovers_npz_when_index_empty(self):
         with tempfile.TemporaryDirectory() as tmp:
             ws = os.path.join(tmp, "epsf_r1")

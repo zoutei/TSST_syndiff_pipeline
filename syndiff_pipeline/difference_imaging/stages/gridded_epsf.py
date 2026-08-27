@@ -54,6 +54,7 @@ _suppress_photutils_epsf_noise()
 
 GRIDDED_EPSF_INDEX_BASENAME = "gridded_epsf_index.json"
 GRIDDED_EPSF_NPZ_SUFFIX = "_gridded_epsf.npz"
+GRIDDED_EPSF_ANCHORS_BASENAME = "gridded_epsf_anchors.json"
 
 # Per-process state for loky workers (initialized once per worker, not per frame).
 _WORKER_CTX: dict[str, Any] = {}
@@ -133,9 +134,15 @@ def _ensure_tess_mag_column(gaia_df: pd.DataFrame) -> pd.DataFrame:
     )
 
     df = gaia_df.copy()
-    g = pd.to_numeric(df.get("phot_g_mean_mag"), errors="coerce").to_numpy(dtype=float)
-    bp = pd.to_numeric(df.get("phot_bp_mean_mag"), errors="coerce").to_numpy(dtype=float)
-    rp = pd.to_numeric(df.get("phot_rp_mean_mag"), errors="coerce").to_numpy(dtype=float)
+
+    def _col(name: str) -> np.ndarray:
+        if name in df.columns:
+            return pd.to_numeric(df[name], errors="coerce").to_numpy(dtype=float)
+        return np.full(len(df), np.nan)
+
+    g = _col("phot_g_mean_mag")
+    bp = _col("phot_bp_mean_mag")
+    rp = _col("phot_rp_mean_mag")
     df["tess_mag"] = tess_mag_from_gaia_phot(g, bp, rp)
     return df
 
@@ -143,39 +150,28 @@ def _ensure_tess_mag_column(gaia_df: pd.DataFrame) -> pd.DataFrame:
 def _filter_gaia_for_epsf(
     gaia_df: pd.DataFrame,
     *,
-    mag_max_rp: float | None,
-    mag_min_rp: float | None = None,
-    mag_source: str = "phot_rp_mean_mag",
+    tess_mag_max: float | None,
+    tess_mag_min: float | None = None,
 ) -> pd.DataFrame:
     """
-    Brightness pre-filter for ePSF star catalogs.
+    Brightness pre-filter for ePSF star catalogs, on derived ``tess_mag``.
 
-    Mirrors ``starpositioningscript.py``::
-
-        combined_filter = (df['phot_rp_mean_mag'] < 12.95) & in_crop
-
-    ``mag_min_rp`` additionally drops stars brighter than the given
-    magnitude (e.g. to skip saturated/non-linear stars and shrink the
-    per-tile star count for faster ePSF fitting). ``mag_source ==
-    "tess_mag"`` filters on a derived per-star TESS magnitude (see
-    ``_ensure_tess_mag_column``) instead of raw ``phot_rp_mean_mag`` --
-    ``mag_min_rp``/``mag_max_rp`` are then interpreted as TESS-mag bounds
-    (see ``EpsfParams.epsf_mag_source``).
+    Standing policy (2026-08-22): star selection always filters on
+    ``tess_mag`` (see ``_ensure_tess_mag_column``), never raw Gaia
+    ``phot_rp_mean_mag``. ``tess_mag_min`` additionally drops stars brighter
+    than the given magnitude (e.g. to skip saturated/non-linear stars and
+    shrink the per-tile star count for faster ePSF fitting).
 
     Expects ``ra``/``dec`` (science-array ``x``/``y`` are computed per frame).
     """
-    df = gaia_df
-    if mag_source == "tess_mag":
-        df = _ensure_tess_mag_column(df)
-    mag_col = "tess_mag" if mag_source == "tess_mag" else "phot_rp_mean_mag"
-    if mag_col in df.columns:
-        mag = pd.to_numeric(df[mag_col], errors="coerce")
-        keep = pd.Series(True, index=df.index)
-        if mag_max_rp is not None:
-            keep &= mag < float(mag_max_rp)
-        if mag_min_rp is not None:
-            keep &= mag > float(mag_min_rp)
-        df = df.loc[keep].copy()
+    df = _ensure_tess_mag_column(gaia_df)
+    mag = pd.to_numeric(df["tess_mag"], errors="coerce")
+    keep = pd.Series(True, index=df.index)
+    if tess_mag_max is not None:
+        keep &= mag < float(tess_mag_max)
+    if tess_mag_min is not None:
+        keep &= mag > float(tess_mag_min)
+    df = df.loc[keep].copy()
     return df.reset_index(drop=True)
 
 
@@ -229,23 +225,23 @@ def apply_epsf_isolation_filter(
     return gaia_df.iloc[cand_idx].reset_index(drop=True)
 
 
-def _resolve_mag_max_rp(epsf_params) -> float:
+def _resolve_tess_mag_max(epsf_params) -> float:
     """
-    Brightness cut for ePSF star selection.
+    Bright-end cutoff for ePSF star selection, on derived ``tess_mag``.
 
-    ``starpositioningscript.py`` always uses ``phot_rp_mean_mag < 12.95``.
-    Legacy frozen configs wrote ``mag_max_rp: null`` for experiment B (no narrow
-    mag window); treat that as the reference default, not "use all Gaia".
+    Legacy frozen configs wrote ``tess_mag_max: null`` for experiment B (no
+    narrow mag window); treat that as the reference default, not "use all
+    Gaia".
     """
-    mag_max = getattr(epsf_params, "mag_max_rp", 12.95)
+    mag_max = getattr(epsf_params, "tess_mag_max", 12.95)
     if mag_max is None:
         return 12.95
     return float(mag_max)
 
 
-def _resolve_mag_min_rp(epsf_params) -> float | None:
+def _resolve_tess_mag_min(epsf_params) -> float | None:
     """Faint-end cutoff for ePSF star selection; ``None`` means no lower bound."""
-    mag_min = getattr(epsf_params, "mag_min_rp", None)
+    mag_min = getattr(epsf_params, "tess_mag_min", None)
     if mag_min is None:
         return None
     return float(mag_min)
@@ -260,9 +256,10 @@ def prepare_gaia_for_gridded_epsf(
 
     Call once in the parent process before ``Parallel`` (see
     ``starpositioningscript.py`` main block). Per-frame workers receive this
-    pre-filtered table; section loops only apply spatial cuts.
+    pre-filtered table; section loops only apply spatial cuts. Star
+    selection always filters on derived ``tess_mag`` (standing policy,
+    2026-08-22), never raw Gaia ``phot_rp_mean_mag``.
     """
-    mag_source = str(getattr(epsf_params, "epsf_mag_source", "phot_rp_mean_mag"))
     isolation_sep = getattr(epsf_params, "epsf_isolation_min_sep_px", None)
     if isolation_sep is not None:
         # Defer the magnitude-window cut to build_gridded_psf_for_frame's
@@ -270,7 +267,8 @@ def prepare_gaia_for_gridded_epsf(
         # candidate+neighbor pool together with per-frame x/y to replicate
         # dev/forward_epsf_wcs's select_isolated_stars exactly -- narrowing
         # to the mag window here would silently drop the fainter
-        # (mag_max..neighbor_mag_max) neighbors the isolation check needs.
+        # (tess_mag_max..neighbor_mag_max) neighbors the isolation check
+        # needs.
         out = _ensure_tess_mag_column(gaia_df)
         if "ra" not in out.columns or "dec" not in out.columns:
             raise ValueError("Gaia catalog for ePSF requires ra, dec columns")
@@ -279,25 +277,24 @@ def prepare_gaia_for_gridded_epsf(
             "per-frame: tess_mag window (%s, %s), min_sep_px=%s, "
             "neighbor_mag_max=%s)",
             len(out),
-            _resolve_mag_min_rp(epsf_params),
-            _resolve_mag_max_rp(epsf_params),
+            _resolve_tess_mag_min(epsf_params),
+            _resolve_tess_mag_max(epsf_params),
             isolation_sep,
             getattr(epsf_params, "epsf_isolation_neighbor_mag_max", 13.0),
         )
         return out
-    mag_max = _resolve_mag_max_rp(epsf_params)
-    mag_min = _resolve_mag_min_rp(epsf_params)
+    mag_max = _resolve_tess_mag_max(epsf_params)
+    mag_min = _resolve_tess_mag_min(epsf_params)
     out = _filter_gaia_for_epsf(
-        gaia_df, mag_max_rp=mag_max, mag_min_rp=mag_min, mag_source=mag_source
+        gaia_df, tess_mag_max=mag_max, tess_mag_min=mag_min
     )
     if "ra" not in out.columns or "dec" not in out.columns:
         raise ValueError("Gaia catalog for ePSF requires ra, dec columns")
     n = len(out)
     log.info(
-        "ePSF Gaia catalog: %d stars after %s < %s < %s pre-filter",
+        "ePSF Gaia catalog: %d stars after %s < tess_mag < %s pre-filter",
         n,
         mag_min,
-        mag_source,
         mag_max,
     )
     return out
@@ -417,6 +414,7 @@ def fit_epsf_section_multi(
     recentering_boxsize: int = 3,
     use_mask: bool = False,
     star_box_radius: int = 7,
+    star_usage_out: dict | None = None,
 ) -> np.ndarray | None:
     """
     Fit one grid-section ePSF stamp, pooling stars from one or more frames.
@@ -426,6 +424,14 @@ def fit_epsf_section_multi(
     matched lists of ``NDData``/star tables and pools the extracted stars
     into a single fit. :func:`fit_epsf_section` is a thin single-frame
     wrapper (list of length 1) kept for existing per-frame call sites.
+
+    When *star_usage_out* is provided (a dict), it is populated with
+    ``"used_xy"``/``"excluded_xy"`` lists of section-local ``(x, y)``
+    positions -- the exact candidate positions ``extract_stars`` handed to
+    ``EPSFBuilder``, split by whether the final fit excluded that star
+    (``EPSFBuildResult.excluded_star_indices``). Meaningful only for the
+    single-frame case (:func:`fit_epsf_section`); with multiple pooled
+    frames, section-local ``(x, y)`` isn't unique across frames.
 
     Returns oversampled 2D stamp array or None on failure.
     """
@@ -470,7 +476,24 @@ def fit_epsf_section_multi(
                 recentering_boxsize=int(recentering_boxsize),
                 progress_bar=False,
             )
-            epsf, _fitted = builder(extracted)
+            result = builder(extracted)
+            epsf = result.epsf
+        if star_usage_out is not None:
+            try:
+                all_stars = extracted.all_stars
+                excluded = set(result.excluded_star_indices)
+                star_usage_out["used_xy"] = [
+                    (float(s.center[0]), float(s.center[1]))
+                    for i, s in enumerate(all_stars)
+                    if i not in excluded
+                ]
+                star_usage_out["excluded_xy"] = [
+                    (float(s.center[0]), float(s.center[1]))
+                    for i, s in enumerate(all_stars)
+                    if i in excluded
+                ]
+            except Exception:
+                log.debug("fit_epsf_section_multi: star_usage_out capture failed", exc_info=True)
         stamp = np.asarray(epsf.data, dtype=np.float64)
         if not np.all(np.isfinite(stamp)):
             return None
@@ -494,11 +517,13 @@ def fit_epsf_section(
     section_mask: np.ndarray | None = None,
     use_mask: bool = False,
     star_box_radius: int = 7,
+    star_usage_out: dict | None = None,
 ) -> np.ndarray | None:
     """
     Fit one grid-section ePSF stamp with photutils (single frame).
 
-    Returns oversampled 2D stamp array or None on failure.
+    Returns oversampled 2D stamp array or None on failure. See
+    :func:`fit_epsf_section_multi` for *star_usage_out*.
     """
     if len(stars_tbl) == 0:
         return None
@@ -513,6 +538,7 @@ def fit_epsf_section(
         recentering_boxsize=recentering_boxsize,
         use_mask=use_mask,
         star_box_radius=star_box_radius,
+        star_usage_out=star_usage_out,
     )
 
 
@@ -536,7 +562,8 @@ def build_gridded_psf_for_frame(
     *,
     mask_2d: np.ndarray | None = None,
     frame_label: str = "",
-) -> tuple[GriddedPSFModel | None, list[tuple[float, float]], np.ndarray | None]:
+    star_usage_out: dict | None = None,
+) -> tuple[GriddedPSFModel | None, list[tuple[float, float]], np.ndarray | None, list[int]]:
     """
     Build a spatially varying PSF model for one difference image.
 
@@ -545,6 +572,18 @@ def build_gridded_psf_for_frame(
     fallback for failed sections → ``GriddedPSFModel``.
 
     *gaia_df* must already be prepared via :func:`prepare_gaia_for_gridded_epsf`.
+
+    When *star_usage_out* is provided (a dict), it is populated with
+    ``"used_xy"``/``"excluded_xy"`` lists of frame-local ``(x, y)`` --
+    pooled across every tile that reached ``EPSFBuilder`` (see
+    :func:`fit_epsf_section`'s own *star_usage_out*) -- for the debug-plot
+    star-selection overlay. Only covers this single-frame fitting path, not
+    :func:`fit_anchor_pooled`'s multi-frame pooling.
+
+    Returns ``(model, grid_xypos, stack, n_stars_per_tile)`` -- the last
+    element is the post-mask candidate star count per tile (same order as
+    ``grid_xypos``/``stack``), for debug-plot annotation; a fallback-filled
+    tile still reports its own (too-few) count, not the fallback source's.
     """
     ny, nx = diff_image.shape
     isolation_sep = getattr(epsf_params, "epsf_isolation_min_sep_px", None)
@@ -557,8 +596,8 @@ def build_gridded_psf_for_frame(
         n_before = len(gaia_df)
         gaia_df = apply_epsf_isolation_filter(
             gaia_df,
-            mag_min=_resolve_mag_min_rp(epsf_params),
-            mag_max=_resolve_mag_max_rp(epsf_params),
+            mag_min=_resolve_tess_mag_min(epsf_params),
+            mag_max=_resolve_tess_mag_max(epsf_params),
             min_sep_px=float(isolation_sep),
             neighbor_mag_max=float(
                 getattr(epsf_params, "epsf_isolation_neighbor_mag_max", 13.0)
@@ -603,6 +642,9 @@ def build_gridded_psf_for_frame(
 
     epsf_grid: dict[tuple[int, int], np.ndarray | str] = {}
     grid_xypos: list[tuple[float, float]] = []
+    n_stars_grid: dict[tuple[int, int], int] = {}
+    used_xy_frame: list[tuple[float, float]] = []
+    excluded_xy_frame: list[tuple[float, float]] = []
 
     for i in range(tile_ny):
         for j in range(tile_nx):
@@ -620,6 +662,7 @@ def build_gridded_psf_for_frame(
             if mask_2d is not None:
                 section_mask = np.asarray(mask_2d[y_min:y_max, x_min:x_max], dtype=bool)
                 sec_stars = _filter_stars_off_mask(sec_stars, mask_2d, ny=ny, nx=nx)
+            n_stars_grid[(i, j)] = len(sec_stars)
             if len(sec_stars) < min_stars:
                 epsf_grid[(i, j)] = "too_few"
                 continue
@@ -628,6 +671,7 @@ def build_gridded_psf_for_frame(
             stars_tbl["x"] = np.asarray(sec_stars["x"].values - x_min, dtype=float)
             stars_tbl["y"] = np.asarray(sec_stars["y"].values - y_min, dtype=float)
 
+            tile_usage: dict | None = {} if star_usage_out is not None else None
             stamp = fit_epsf_section(
                 np.asarray(section, dtype=np.float64),
                 stars_tbl,
@@ -641,17 +685,32 @@ def build_gridded_psf_for_frame(
                 section_mask=section_mask,
                 use_mask=use_section_mask and section_mask is not None,
                 star_box_radius=star_box_radius,
+                star_usage_out=tile_usage,
             )
+            if tile_usage:
+                used_xy_frame.extend(
+                    (x + x_min, y + y_min) for x, y in tile_usage.get("used_xy", [])
+                )
+                excluded_xy_frame.extend(
+                    (x + x_min, y + y_min) for x, y in tile_usage.get("excluded_xy", [])
+                )
             if stamp is None:
                 epsf_grid[(i, j)] = "fit_failed"
             else:
                 epsf_grid[(i, j)] = stamp
 
+    if star_usage_out is not None:
+        star_usage_out["used_xy"] = used_xy_frame
+        star_usage_out["excluded_xy"] = excluded_xy_frame
+
     valid = [v for v in epsf_grid.values() if isinstance(v, np.ndarray)]
+    n_stars_list = [
+        n_stars_grid.get((i, j), 0) for i in range(tile_ny) for j in range(tile_nx)
+    ]
     if not valid:
         suffix = f" ({frame_label})" if frame_label else ""
         log.warning("ePSF: all grid sections failed%s", suffix)
-        return None, grid_xypos, None
+        return None, grid_xypos, None, n_stars_list
 
     fallback = np.mean(valid, axis=0)
     psf_list: list[np.ndarray] = []
@@ -677,7 +736,7 @@ def build_gridded_psf_for_frame(
     meta = {"grid_xypos": grid_xypos, "oversampling": oversampling}
     nddata_grid = NDData(data=stack, meta=meta)
     model = GriddedPSFModel(nddata_grid)
-    return model, grid_xypos, stack
+    return model, grid_xypos, stack, n_stars_list
 
 
 def save_gridded_epsf_npz(
@@ -685,15 +744,27 @@ def save_gridded_epsf_npz(
     stack: np.ndarray,
     grid_xypos: list[tuple[float, float]],
     oversampling: int,
+    n_stars: list[int] | None = None,
 ) -> str:
-    """Write one frame's gridded PSF cube."""
+    """
+    Write one frame's gridded PSF cube.
+
+    ``n_stars`` (optional, same order as ``grid_xypos``) is the per-tile
+    candidate star count for debug-plot annotation -- omitted for
+    interpolated/blended frames, which have no fit of their own to count
+    stars for (see :func:`write_gridded_epsf_frame_plot`).
+    """
     os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
     xy = np.asarray(grid_xypos, dtype=np.float64)
+    kwargs = {}
+    if n_stars is not None:
+        kwargs["n_stars"] = np.asarray(n_stars, dtype=np.int64)
     np.savez_compressed(
         path,
         data=np.asarray(stack, dtype=np.float64),
         grid_xypos=xy,
         oversampling=int(oversampling),
+        **kwargs,
     )
     return path
 
@@ -754,6 +825,31 @@ def load_gridded_epsf_index(output_dir: str) -> dict[str, str]:
     with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
     return {str(k): str(v) for k, v in raw.items()}
+
+
+def save_gridded_epsf_anchor_stems(output_dir: str, anchor_stems) -> str:
+    """Persist the set of ffi_stems that were directly fit (orbit_binned mode).
+
+    Lets debug-plot selection prefer real fits over interpolated/blended
+    frames, which have no fit of their own and so no per-tile star count
+    (see :func:`syndiff_pipeline.difference_imaging.support.plot.
+    write_gridded_epsf_workspace_plots`). Absent for per_frame mode, where
+    every frame is a real fit and no preference is needed.
+    """
+    path = os.path.join(output_dir, GRIDDED_EPSF_ANCHORS_BASENAME)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(sorted(str(s) for s in anchor_stems), fh, indent=2)
+    return path
+
+
+def load_gridded_epsf_anchor_stems(output_dir: str) -> set[str]:
+    """Load the anchor-stem set written by :func:`save_gridded_epsf_anchor_stems`; empty if missing."""
+    path = os.path.join(output_dir, GRIDDED_EPSF_ANCHORS_BASENAME)
+    if not os.path.isfile(path):
+        return set()
+    with open(path, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    return {str(s) for s in raw}
 
 
 def workspace_has_gridded_epsf(output_dir: str) -> bool:
@@ -854,7 +950,7 @@ def _load_gridded_epsf_stack(path: str) -> np.ndarray | None:
 
 
 def _upstream_diff_image_stage(cfg, diffs_input: str | None) -> dict | None:
-    """Hotpants/kernel_subtract stage that produced diffs feeding ePSF."""
+    """Hotpants/background_estimate stage that produced diffs feeding ePSF."""
     pipeline = getattr(cfg, "pipeline", None)
     if not pipeline:
         return None
@@ -866,13 +962,13 @@ def _upstream_diff_image_stage(cfg, diffs_input: str | None) -> dict | None:
     diffs_label = (diffs_input or "").strip() or None
     if diffs_label:
         for _, st in stages:
-            if st.get("kind") not in ("hotpants", "kernel_subtract"):
+            if st.get("kind") not in ("hotpants", "background_estimate"):
                 continue
             o = st.get("output") or {}
             if str(o.get("diffs", "")).strip() == diffs_label:
                 return st
     for _, st in stages:
-        if st.get("kind") in ("hotpants", "kernel_subtract"):
+        if st.get("kind") in ("hotpants", "background_estimate"):
             return st
     return None
 
@@ -880,15 +976,15 @@ def _upstream_diff_image_stage(cfg, diffs_input: str | None) -> dict | None:
 def _diff_image_stage_params(stage: dict):
     from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
         parse_hotpants,
-        parse_kernel_subtract,
+        parse_background_estimate,
     )
 
     kind = stage.get("kind")
     try:
         if kind == "hotpants":
             return parse_hotpants(stage, 0)
-        if kind == "kernel_subtract":
-            return parse_kernel_subtract(stage, 0)
+        if kind == "background_estimate":
+            return parse_background_estimate(stage, 0)
     except Exception:
         log.debug("diff_image stage param reparse failed", exc_info=True)
     return None
@@ -1200,7 +1296,7 @@ def _fit_one_frame_task(
         log.warning("  Cannot load %s: %s", diff_path, exc)
         return frame_idx, ffi_stem, False, None, None, False, None
 
-    model, grid_xypos, stack = build_gridded_psf_for_frame(
+    model, grid_xypos, stack, n_stars = build_gridded_psf_for_frame(
         diff_img,
         gaia_df,
         epsf_params,
@@ -1215,6 +1311,7 @@ def _fit_one_frame_task(
         stack,
         grid_xypos,
         int(epsf_params.epsf_oversample),
+        n_stars=n_stars,
     )
 
     if sck is not None:
