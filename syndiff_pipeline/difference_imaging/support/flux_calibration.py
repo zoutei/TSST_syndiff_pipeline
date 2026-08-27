@@ -200,16 +200,35 @@ def build_phot_calib_rows(results: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def write_phot_calib_table(meta_dir: str, results: list[dict[str, Any]]) -> str:
-    """Write ``phot_calib.csv`` under the meta workspace, merging prior rows on resume."""
+    """Write ``phot_calib.csv`` under the meta workspace, merging prior rows on resume.
+
+    A resumed/retried Hotpants run that skips already-complete frames reports those
+    frames with no ``kernel_sum``/``tess_zp`` (NaN). The merge below never lets such a
+    NaN overwrite a previously-finite value for the same ``product_id`` -- only
+    ``stem``/``success`` take the latest write unconditionally.
+    """
     os.makedirs(meta_dir, exist_ok=True)
     path = phot_calib_csv_path(meta_dir)
     new_rows = build_phot_calib_rows(results)
     new_df = pd.DataFrame(new_rows, columns=list(PHOT_CALIB_COLUMNS))
     existing = load_phot_calib_table(meta_dir)
     if existing is not None and not existing.empty:
-        combined = pd.concat([existing, new_df], ignore_index=True)
-        combined = combined.drop_duplicates("product_id", keep="last")
-        out_df = combined[list(PHOT_CALIB_COLUMNS)]
+        existing_indexed = existing.drop_duplicates("product_id", keep="last").set_index(
+            "product_id"
+        )
+        new_indexed = new_df.drop_duplicates("product_id", keep="last").set_index(
+            "product_id"
+        )
+        out_index = existing_indexed.index.union(new_indexed.index)
+        out_df = existing_indexed.reindex(out_index)
+        has_new = out_index.isin(new_indexed.index)
+        for col in ("stem", "success"):
+            out_df.loc[has_new, col] = new_indexed.loc[out_index[has_new], col].to_numpy()
+        for col in ("kernel_sum", "tess_zp"):
+            new_col = new_indexed[col].reindex(out_index)
+            mask = new_col.notna()
+            out_df.loc[mask, col] = new_col[mask]
+        out_df = out_df.reset_index()[list(PHOT_CALIB_COLUMNS)]
     else:
         out_df = new_df
     out_df.to_csv(path, index=False)
