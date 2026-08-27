@@ -26,9 +26,9 @@ from syndiff_pipeline.template_creation.processing.remap_progress import (
     progress_path_for_log as remap_progress_path_for_log,
 )
 from syndiff_pipeline.template_creation.orchestration.verify import collect_stage_artifacts, write_manifest
-from syndiff_pipeline.pipeline_spec import build_stage_context
+from syndiff_pipeline.pipeline_spec import build_stage_context, get_stage_spec
+from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
 from syndiff_pipeline.difference_imaging.orchestration.stages import (
-    DIFF_STAGE,
     write_diff_manifest,
 )
 from syndiff_pipeline.photometry.orchestration.stages import (
@@ -135,6 +135,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     runs_root = str(Path(args.run_dir).resolve().parent)
+    # Must be read before the status write below, which overwrites the
+    # same status.json this attempt's own launch_token gets recorded into
+    # -- capturing it here is what lets stage_log() later archive the
+    # prior attempt's log under its own identity instead of this one's.
+    prior_launch_token = logs.read_previous_launch_token(
+        runs_root, args.run_id, args.target_label, args.stage
+    )
     started_at = logs._utc_now_iso()
     _write_status(
         runs_root,
@@ -156,7 +163,8 @@ def main(argv: list[str] | None = None) -> int:
         source_config = (ctx.meta or {}).get("source_config_path") or str(
             logs.run_config_path(ctx.run_dir)
         )
-        if args.stage == "diff":
+        if args.stage in DIFF_SPLIT_STAGES:
+            diff_stage_spec = get_stage_spec(args.stage)
             diff_log_path = logs.target_log_path(
                 runs_root, args.run_id, args.target_label, args.stage
             )
@@ -171,7 +179,11 @@ def main(argv: list[str] | None = None) -> int:
                 force_rerun=args.force_rerun,
                 progress_path=str(diff_log_path),
             )
-            snap = DIFF_STAGE.stage_snapshot(stage_ctx) if DIFF_STAGE.stage_snapshot else {}
+            snap = (
+                diff_stage_spec.stage_snapshot(stage_ctx)
+                if diff_stage_spec.stage_snapshot
+                else {}
+            )
         elif args.stage == "photometry":
             phot_log_path = logs.target_log_path(
                 runs_root, args.run_id, args.target_label, args.stage
@@ -262,11 +274,18 @@ def main(argv: list[str] | None = None) -> int:
 
     exit_code = 0
     try:
-        with logs.stage_log(runs_root, args.run_id, args.target_label, args.stage, snap):
+        with logs.stage_log(
+            runs_root,
+            args.run_id,
+            args.target_label,
+            args.stage,
+            snap,
+            prior_launch_token=prior_launch_token,
+        ):
             _configure_logging()
-            if args.stage == "diff":
+            if args.stage in DIFF_SPLIT_STAGES:
                 assert stage_ctx is not None
-                manifest = DIFF_STAGE.execute(stage_ctx)
+                manifest = get_stage_spec(args.stage).execute(stage_ctx)
             elif args.stage == "photometry":
                 assert stage_ctx is not None
                 manifest = PHOTOMETRY_STAGE.execute(stage_ctx)
@@ -289,9 +308,9 @@ def main(argv: list[str] | None = None) -> int:
                 cfg.bookkeeping_trust_index and checkpoint_emit_name is not None
             )
             if manifest is None and not skip_manifest:
-                if args.stage == "diff":
+                if args.stage in DIFF_SPLIT_STAGES:
                     assert stage_ctx is not None
-                    manifest = DIFF_STAGE.collect_artifacts(stage_ctx)
+                    manifest = get_stage_spec(args.stage).collect_artifacts(stage_ctx)
                 elif args.stage == "photometry":
                     assert stage_ctx is not None
                     manifest = PHOTOMETRY_STAGE.collect_artifacts(stage_ctx)
@@ -317,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
                         runs_root, args.target_label, args.stage
                     ),
                 )
-                if args.stage == "diff":
+                if args.stage in DIFF_SPLIT_STAGES:
                     assert stage_ctx is not None
                     for manifest_dest in manifest_paths:
                         write_diff_manifest(
@@ -326,6 +345,7 @@ def main(argv: list[str] | None = None) -> int:
                             artifacts,
                             expected_count,
                             produced_count,
+                            stage_name=args.stage,
                         )
                 elif args.stage == "photometry":
                     assert stage_ctx is not None

@@ -197,6 +197,38 @@ def update_run_meta(cfg_runs_root: str, run_id: str, patch: dict) -> None:
     tmp.replace(meta_path)
 
 
+def rotate_attempt_artifact(path: Path, launch_token: str | None) -> None:
+    """Move an existing per-attempt artifact aside before it gets overwritten.
+
+    Files like ``{stage}.log`` and ``{stage}.condor.stdout/.stderr/.log/.submit``
+    live at a fixed path per (run_id, target, stage) and get truncated/
+    rewritten at the start of every launch attempt (including retries),
+    silently discarding the previous attempt's content -- including error
+    tails needed to debug why it failed. Called right before that
+    truncation/rewrite: if *path* already holds non-empty content from a
+    prior attempt, it is renamed into
+    ``{path.parent}/attempts/{launch_token}/{path.name}`` (grouping one
+    attempt's full artifact set under its own directory), keyed by
+    ``launch_token`` -- the identifier the system already generates per
+    launch and surfaces in ``daemon.log``/``*.status.json``, so an archived
+    attempt is directly traceable without inventing a new id scheme.
+
+    No-op if *path* doesn't exist, is empty, or *launch_token* is falsy.
+    Best-effort: a failure to rotate must never block a launch, so OSErrors
+    (e.g. concurrent access) are swallowed.
+    """
+    if not launch_token or not path.is_file():
+        return
+    try:
+        if path.stat().st_size == 0:
+            return
+        dest_dir = path.parent / "attempts" / launch_token
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        path.replace(dest_dir / path.name)
+    except OSError:
+        pass
+
+
 def target_log_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
     """Target log path.
     
@@ -227,6 +259,33 @@ def stage_status_path(cfg_runs_root: str, run_id: str, target_label: str, stage:
     -------
     Path"""
     return run_dir(cfg_runs_root, run_id) / "per_target" / target_label / f"{stage}.status.json"
+
+
+def read_previous_launch_token(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> str | None:
+    """Return the ``launch_token`` recorded by the most recent prior attempt, if any.
+
+    Reads ``{stage}.status.json``, which a prior attempt's own process last
+    wrote its own ``launch_token`` into. Callers use this to name a rotated
+    archive after the attempt that actually produced the content being
+    archived (see :func:`rotate_attempt_artifact`), self-contained: no new
+    token needs to be threaded in from the caller, as long as this is read
+    *before* the current attempt's own status write overwrites the file
+    (true for both the Condor submit-side call in
+    ``condor.submit_job`` and the execute-side call in ``run_stage.main``,
+    which reads this before its own first ``_write_status`` call).
+
+    Best-effort: returns ``None`` on any missing/unreadable/malformed file,
+    never raises.
+    """
+    path = stage_status_path(cfg_runs_root, run_id, target_label, stage)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    token = data.get("launch_token")
+    return str(token) if token else None
 
 
 def stage_manifest_path(cfg_runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
@@ -530,18 +589,39 @@ def _format_footer(duration_s: float, exit_code: int, error_tail: str = "") -> s
 
 
 @contextmanager
-def stage_log(cfg_runs_root: str, run_id: str, target_label: str, stage: str, snapshot: dict):
+def stage_log(
+    cfg_runs_root: str,
+    run_id: str,
+    target_label: str,
+    stage: str,
+    snapshot: dict,
+    *,
+    prior_launch_token: str | None = None,
+):
     """Stage log.
-    
+
+    Before opening the log fresh, rotates any log left behind by a prior
+    attempt aside into ``attempts/{prior_launch_token}/`` (see
+    :func:`rotate_attempt_artifact`) so a retry does not silently discard
+    the previous attempt's output.
+
     Parameters
     ----------
     cfg_runs_root : str
     run_id : str
     target_label : str
     stage : str
-    snapshot : dict"""
+    snapshot : dict
+    prior_launch_token : str | None, optional
+        The launch_token of the attempt that produced whatever is
+        currently on disk at this log's path (not this attempt's own
+        token). Must be captured by the caller *before* this attempt's own
+        status write, since that overwrites the same status.json this
+        would otherwise be read from (see
+        :func:`read_previous_launch_token`)."""
     log_path = target_log_path(cfg_runs_root, run_id, target_label, stage)
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_attempt_artifact(log_path, prior_launch_token)
     t0 = time.monotonic()
     header = _format_header(stage, snapshot)
     exit_code = 0
