@@ -142,6 +142,27 @@ class TestPhotCalibTable(unittest.TestCase):
         self.assertEqual(rows[0]["product_id"], "abc")
         self.assertAlmostEqual(rows[0]["tess_zp"], 19.0)
 
+    def test_resume_does_not_replace_finite_calibration_with_nan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_phot_calib_table(
+                tmp,
+                [{
+                    "product_id": "ffi-001",
+                    "stem": "old-stem",
+                    "kernel_sum": 0.02,
+                    "tess_zp": 19.0,
+                    "success": True,
+                }],
+            )
+            write_phot_calib_table(
+                tmp,
+                [{"product_id": "ffi-001", "stem": "new-stem", "success": True}],
+            )
+            table = pd.read_csv(phot_calib_csv_path(tmp)).set_index("product_id")
+            self.assertEqual(table.loc["ffi-001", "stem"], "new-stem")
+            self.assertAlmostEqual(table.loc["ffi-001", "kernel_sum"], 0.02)
+            self.assertAlmostEqual(table.loc["ffi-001", "tess_zp"], 19.0)
+
 
 class TestApplyKernelCalibration(unittest.TestCase):
     def test_equalizes_flux_at_same_true_flux(self):
