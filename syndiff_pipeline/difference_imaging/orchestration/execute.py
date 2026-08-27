@@ -1415,6 +1415,7 @@ def run_config_pipeline(
                 template_paths={int(k): v for k, v in (cfg.template_paths or {}).items()},
                 hp=hp,
                 convolved_ws_dir=conv_ws,
+                skip_existing=not force_rerun,
                 field_ctx=field_ctx,
                 manifest=conv_manifest,
                 diff_log_path=diff_log_path,
@@ -1475,6 +1476,7 @@ def run_config_pipeline(
                 cfg=cfg,
                 mask_catalog=mask_catalog,
                 diff_log_path=diff_log_path,
+                force_rerun=force_rerun,
             )
             wcs_table = apply_hotpants_workspace_results(
                 wcs_table, processing_ffi_paths, results, diffs_l
