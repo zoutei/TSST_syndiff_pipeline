@@ -31,6 +31,7 @@ from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     SitePaths,
     freeze_target_diff_config,
     load_diff_site_policy,
+    parse_unified_diff_policy,
     resolve_diff_config,
     resolve_event_template_dir,
     write_frozen_diff_config,
@@ -292,6 +293,131 @@ class TestSiteConfigLoader(unittest.TestCase):
         frozen = absolutize_config(cfg, self.data)
         self.assertEqual(frozen.ffi_dir, str((self.data / "tess_ffi").resolve()))
         self.assertEqual(frozen.output_dir, str((self.data / "events" / "test").resolve()))
+
+
+class TestParseUnifiedDiffPolicy(unittest.TestCase):
+    """Unit tests for the v2 embedded ``diff:`` block parser (site_config.py)."""
+
+    def _minimal_raw_diff(self) -> dict:
+        return {
+            "defaults": {"n_jobs": 4},
+            "paths": {"template_base": "shifted_downsampled"},
+            "pipeline": [{"kind": "shared_mask"}],
+            "condor": {"request_cpus": 4, "request_memory": 32000},
+        }
+
+    def test_parses_flat_condor_and_source_dir(self):
+        policy = parse_unified_diff_policy(
+            self._minimal_raw_diff(),
+            source_dir=Path("/site/dir"),
+            deployment_file="deployment.yaml",
+        )
+        self.assertEqual(policy.source_dir, "/site/dir")
+        self.assertEqual(policy.deployment_file, "deployment.yaml")
+        self.assertEqual(len(policy.pipeline), 1)
+        self.assertEqual(policy.condor.request_cpus, 4)
+        # Flat condor applies to all three split diff stages identically.
+        self.assertEqual(
+            set(policy.condor_by_stage.keys()), {"diff_prep", "background_estimate", "diff"}
+        )
+        for stage_condor in policy.condor_by_stage.values():
+            self.assertEqual(stage_condor.request_cpus, 4)
+        # 'raw' carries the verbatim input, source_dir excluded (tracked separately).
+        self.assertNotIn("source_dir", policy.raw)
+        self.assertEqual(policy.raw["condor"], {"request_cpus": 4, "request_memory": 32000})
+
+    def test_nested_condor_survives_unnormalized(self):
+        raw = self._minimal_raw_diff()
+        raw["condor"] = {
+            "diff_prep": {"request_cpus": 4, "request_memory": 8000},
+            "background_estimate": {"request_cpus": 32, "request_memory": 200000},
+            "diff": {"request_cpus": 8, "request_memory": 16000},
+        }
+        policy = parse_unified_diff_policy(
+            raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+        )
+        self.assertEqual(policy.condor_by_stage["background_estimate"].request_memory, 200000)
+        self.assertEqual(policy.condor_by_stage["diff_prep"].request_memory, 8000)
+        # policy.condor (back-compat single profile) mirrors condor_by_stage["diff"].
+        self.assertEqual(policy.condor.request_cpus, 8)
+        # raw.condor is the untouched nested mapping, not flattened/normalized.
+        self.assertEqual(policy.raw["condor"], raw["condor"])
+
+    def test_nested_condor_missing_stage_still_rejected(self):
+        raw = self._minimal_raw_diff()
+        raw["condor"] = {
+            "diff_prep": {"request_cpus": 4},
+            "diff": {"request_cpus": 8},
+            # background_estimate missing -- invariant 13.
+        }
+        with self.assertRaises(ValueError) as ctx:
+            parse_unified_diff_policy(
+                raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+            )
+        self.assertIn("background_estimate", str(ctx.exception))
+
+    def test_diff_deployment_file_key_is_ignored(self):
+        """'diff.deployment_file is not a thing' -- the top-level value always wins."""
+        raw = self._minimal_raw_diff()
+        raw["deployment_file"] = "should_be_ignored.yaml"
+        policy = parse_unified_diff_policy(
+            raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+        )
+        self.assertEqual(policy.deployment_file, "deployment.yaml")
+
+    def test_frozen_source_dir_key_wins_over_param(self):
+        """A reloaded frozen config recovers the ORIGINAL authoring dir, not
+        wherever the frozen runs/{run_id}/config.yaml file now lives."""
+        raw = self._minimal_raw_diff()
+        raw["source_dir"] = "/original/site/dir"
+        policy = parse_unified_diff_policy(
+            raw,
+            source_dir=Path("/runs/some_run_id"),
+            deployment_file="deployment.yaml",
+        )
+        self.assertEqual(policy.source_dir, "/original/site/dir")
+
+    def test_rejects_event_stage_kinds_in_pipeline(self):
+        for kind in ("astrometry", "forced_photometry", "photometry"):
+            with self.subTest(kind=kind):
+                raw = self._minimal_raw_diff()
+                raw["pipeline"] = [{"kind": "shared_mask"}, {"kind": kind}]
+                with self.assertRaises(ValueError) as ctx:
+                    parse_unified_diff_policy(
+                        raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+                    )
+                msg = str(ctx.exception)
+                self.assertIn(kind, msg)
+                self.assertIn("photometry_config.yaml", msg)
+
+    def test_rejects_additional_forced_targets(self):
+        raw = self._minimal_raw_diff()
+        raw["additional_forced_targets"] = [{"target_name": "x"}]
+        with self.assertRaises(ValueError) as ctx:
+            parse_unified_diff_policy(
+                raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+            )
+        self.assertIn("additional_forced_targets", str(ctx.exception))
+        self.assertIn("photometry_config.yaml", str(ctx.exception))
+
+    def test_rejects_per_event_force_targets(self):
+        raw = self._minimal_raw_diff()
+        raw["per_event_force_targets"] = {"2020ut": [{"target_name": "x"}]}
+        with self.assertRaises(ValueError) as ctx:
+            parse_unified_diff_policy(
+                raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+            )
+        self.assertIn("per_event_force_targets", str(ctx.exception))
+        self.assertIn("photometry_config.yaml", str(ctx.exception))
+
+    def test_mask_settings_carried_through_verbatim(self):
+        raw = self._minimal_raw_diff()
+        raw["mask_settings"] = {"shared": {"bright_maglim": 14.0}}
+        policy = parse_unified_diff_policy(
+            raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+        )
+        self.assertEqual(policy.mask_settings, {"shared": {"bright_maglim": 14.0}})
+        self.assertEqual(policy.raw["mask_settings"], {"shared": {"bright_maglim": 14.0}})
 
 
 if __name__ == "__main__":

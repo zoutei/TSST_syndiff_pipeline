@@ -83,7 +83,13 @@ DIFF_CONDOR_STAGE_NAMES: tuple[str, ...] = ("diff_prep", "background_estimate", 
 
 @dataclass
 class DiffSitePolicy:
-    """Diff imaging site policy loaded from ``diff_config.yaml``."""
+    """Diff imaging site policy.
+
+    Loaded either from a standalone ``diff_config.yaml`` (schema v1, via
+    :func:`load_diff_site_policy`) or from the embedded ``diff:`` block of a
+    unified site ``pipeline.yaml`` (schema v2, via
+    :func:`parse_unified_diff_policy`). Both forms produce this same shape.
+    """
 
     deployment_file: str = "deployment.yaml"
     pipeline: list = field(default_factory=list)
@@ -97,7 +103,24 @@ class DiffSitePolicy:
     # each get their own Condor resource request.
     condor: CondorResources = field(default_factory=CondorResources)
     condor_by_stage: dict = field(default_factory=dict)
+    # Former mask_settings.yaml content, carried verbatim when authored inline
+    # under a v2 ``diff.mask_settings:`` block. Not yet consumed by any
+    # resolver in this wave -- resolve_mask_settings() still only looks at
+    # sibling mask_settings.yaml files; wiring this dict in is later-wave work.
+    mask_settings: dict = field(default_factory=dict)
     config_path: str = ""
+    # -- v2 (embedded ``diff:`` block) only, both default-empty for v1 --
+    # Absolute authoring directory: the base relative ``paths`` entries
+    # resolve against (resolve_diff_config(..., site_config_dir=...)). For a
+    # freshly authored config this is the site directory; for a config
+    # reloaded from a frozen runs/{run_id}/config.yaml it is read back from
+    # the frozen diff.source_dir value, NOT recomputed from wherever the
+    # frozen file now lives.
+    source_dir: str = ""
+    # Verbatim ``diff:`` mapping as authored (or as frozen), source_dir key
+    # excluded. This -- not a reconstruction from the parsed fields above --
+    # is what gets re-emitted on freeze; see runner_config.runner_config_to_dict.
+    raw: dict = field(default_factory=dict)
 
 
 def _parse_deployment_file(raw: dict) -> str:
@@ -211,8 +234,57 @@ def _per_event_force_targets_for_target(
     return []
 
 
+# Event-scoped diff-pipeline stage kinds: astrometry.py requires
+# cfg.target_name, photometry.py names outputs by it. diff is SCC-scoped, not
+# event-scoped, so none of these belong in diff.pipeline (v2) -- they live in
+# photometry_config.yaml instead.
+DIFF_EVENT_STAGE_KINDS: frozenset[str] = frozenset(
+    {"astrometry", "forced_photometry", "photometry"}
+)
+
+# Dead on the diff side: resolve_diff_config() zeroes additional_forced_targets
+# unconditionally, and _per_event_force_targets_for_target() has zero callers.
+# Photometry has its own copies of both. v1 (standalone diff_config.yaml)
+# still parses them for back-compat (they are simply inert there); v2 rejects
+# them outright so a config author doesn't believe they still do something.
+DIFF_V2_DEAD_KEYS: tuple[str, ...] = ("additional_forced_targets", "per_event_force_targets")
+
+
+def _diff_policy_from_raw(raw: dict, *, config_path: str = "") -> DiffSitePolicy:
+    """Parse a diff-policy mapping into a :class:`DiffSitePolicy`.
+
+    Shared core for :func:`load_diff_site_policy` (v1, standalone
+    ``diff_config.yaml`` file) and :func:`parse_unified_diff_policy` (v2,
+    embedded ``diff:`` block of a unified site ``pipeline.yaml``). Only the
+    keys below are consumed; unrecognized keys (e.g. an injected
+    ``source_dir`` on a frozen v2 config, handled by the caller) are ignored
+    here rather than rejected.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError(f"diff config must be a YAML mapping: {config_path or '<embedded>'}")
+    pipeline = raw.get("pipeline")
+    if pipeline is None or not isinstance(pipeline, list):
+        raise ValueError(f"diff config requires a pipeline list: {config_path or '<embedded>'}")
+    condor_by_stage = _parse_condor_by_stage(raw.get("condor"))
+    return DiffSitePolicy(
+        deployment_file=_parse_deployment_file(raw),
+        pipeline=copy.deepcopy(pipeline),
+        defaults=dict(raw.get("defaults") or {}),
+        paths=dict(raw.get("paths") or {}),
+        overrides=dict(raw.get("overrides") or {}),
+        additional_forced_targets=copy.deepcopy(raw.get("additional_forced_targets") or []),
+        per_event_force_targets=_parse_per_event_force_targets(
+            raw.get("per_event_force_targets")
+        ),
+        condor=condor_by_stage["diff"],
+        condor_by_stage=condor_by_stage,
+        mask_settings=dict(raw.get("mask_settings") or {}),
+        config_path=str(config_path),
+    )
+
+
 def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
-    """Load diff site policy from ``diff_config.yaml``."""
+    """Load diff site policy from ``diff_config.yaml`` (schema v1)."""
     if not config_path:
         raise ValueError(
             "diff_config_path is empty -- the submitted orchestrator config has "
@@ -227,24 +299,73 @@ def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
         raw: dict = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"Diff site config must be a YAML mapping: {path}")
-    pipeline = raw.get("pipeline")
-    if pipeline is None or not isinstance(pipeline, list):
-        raise ValueError(f"diff_config.yaml requires a pipeline list: {path}")
-    condor_by_stage = _parse_condor_by_stage(raw.get("condor"))
-    return DiffSitePolicy(
-        deployment_file=_parse_deployment_file(raw),
-        pipeline=copy.deepcopy(pipeline),
-        defaults=dict(raw.get("defaults") or {}),
-        paths=dict(raw.get("paths") or {}),
-        overrides=dict(raw.get("overrides") or {}),
-        additional_forced_targets=copy.deepcopy(raw.get("additional_forced_targets") or []),
-        per_event_force_targets=_parse_per_event_force_targets(
-            raw.get("per_event_force_targets")
-        ),
-        condor=condor_by_stage["diff"],
-        condor_by_stage=condor_by_stage,
-        config_path=str(path),
-    )
+    return _diff_policy_from_raw(raw, config_path=str(path))
+
+
+def parse_unified_diff_policy(
+    raw_diff: dict,
+    *,
+    source_dir: str | Path,
+    deployment_file: str,
+) -> DiffSitePolicy:
+    """Parse the embedded ``diff:`` block of a unified (schema v2) site config.
+
+    Parameters
+    ----------
+    raw_diff : dict
+        The raw ``diff:`` mapping as loaded from YAML -- either a freshly
+        authored site ``pipeline.yaml`` or a reloaded frozen
+        ``runs/{run_id}/config.yaml``.
+    source_dir : str | Path
+        Absolute authoring directory for this policy -- what relative
+        ``diff.paths`` entries resolve against
+        (``resolve_diff_config(..., site_config_dir=...)``). For a freshly
+        authored config this is the site directory. Ignored (in favor of the
+        recorded value) when *raw_diff* already carries a ``source_dir`` key,
+        which is how a reloaded frozen config recovers the *original*
+        authoring directory rather than wherever the frozen file now lives.
+    deployment_file : str
+        The site's single top-level ``deployment_file``. ``diff:`` has no
+        deployment_file of its own -- any ``raw_diff["deployment_file"]`` is
+        ignored, matching invariant: "diff.deployment_file is not a thing".
+
+    Raises
+    ------
+    ValueError
+        If ``diff.pipeline`` names an event-scoped stage kind (astrometry /
+        forced_photometry / photometry belong in ``photometry_config.yaml``,
+        not here), or if ``diff:`` sets ``additional_forced_targets`` /
+        ``per_event_force_targets`` (both dead on the diff side; photometry
+        has its own copies -- see ``photometry_config.yaml``).
+    """
+    if not isinstance(raw_diff, dict):
+        raise ValueError("'diff:' must be a mapping")
+
+    for dead_key in DIFF_V2_DEAD_KEYS:
+        if dead_key in raw_diff:
+            raise ValueError(
+                f"diff: must not set {dead_key!r} -- it has no effect on the diff "
+                "side (resolve_diff_config() zeroes/never reads it there); set it "
+                "in photometry_config.yaml instead."
+            )
+
+    pipeline = raw_diff.get("pipeline")
+    if isinstance(pipeline, list):
+        for stage in pipeline:
+            kind = stage.get("kind") if isinstance(stage, dict) else None
+            if kind in DIFF_EVENT_STAGE_KINDS:
+                raise ValueError(
+                    f"diff.pipeline stage kind {kind!r} is an event stage, not an "
+                    "SCC stage -- diff is SCC-scoped, not event-scoped. Move it to "
+                    "photometry_config.yaml."
+                )
+
+    policy = _diff_policy_from_raw(raw_diff, config_path="")
+    policy.deployment_file = deployment_file
+    frozen_source_dir = str(raw_diff.get("source_dir", "") or "").strip()
+    policy.source_dir = frozen_source_dir or str(Path(source_dir).expanduser().resolve())
+    policy.raw = {k: copy.deepcopy(v) for k, v in raw_diff.items() if k != "source_dir"}
+    return policy
 
 
 def _deep_merge_dict(base: dict, override: dict) -> dict:
