@@ -118,7 +118,6 @@ def _process_one_frame(task: tuple) -> dict:
     manifest = p["manifest"]
     sck = p.get("sck")
     data_root = p.get("data_root")
-    workspace_root = p.get("workspace_root")
     downsample_fp = p.get("downsample_fp")
     cfg = p.get("cfg")
     force_rerun = bool(p.get("force_rerun", False))
@@ -287,7 +286,6 @@ def _process_one_frame(task: tuple) -> dict:
                 params=ks_params,
                 output_store_name=output_store_name,
             )
-            scc_primary = True
         else:
             raise RuntimeError(
                 "SCC-only kernel_subtract requires data_root and sector/camera/ccd"
@@ -308,6 +306,10 @@ def _process_one_frame(task: tuple) -> dict:
                     cfg=cfg,
                 )
                 if inputs is not None:
+                    meta = {"producer": "kernel_subtract"}
+                    run_id = (getattr(cfg, "run_id", "") or None) if cfg is not None else None
+                    if run_id:
+                        meta["run_id"] = run_id
                     provenance_glue.emit_diff_artifact(
                         kind="diff_image",
                         sector=sck[0],
@@ -323,9 +325,7 @@ def _process_one_frame(task: tuple) -> dict:
                         location=str(write_path),
                         input_fingerprints=inputs,
                         data_root=data_root,
-                        meta={"producer": "kernel_subtract"},
-                        scc_primary=scc_primary,
-                        workspace_root=workspace_root,
+                        meta=meta,
                         output_store_name=output_store_name,
                     )
             except Exception:
@@ -348,7 +348,6 @@ def _process_one_frame(task: tuple) -> dict:
                     params=ks_params,
                     output_store_name=output_store_name,
                 )
-                bkg_scc_primary = True
             else:
                 raise RuntimeError(
                     "SCC-only kernel_subtract background write requires data_root and s/c/k"
@@ -367,6 +366,12 @@ def _process_one_frame(task: tuple) -> dict:
                         ffi_fp
                     )
                     if bkg_inputs is not None:
+                        bkg_meta = {"producer": "kernel_subtract"}
+                        bkg_run_id = (
+                            (getattr(cfg, "run_id", "") or None) if cfg is not None else None
+                        )
+                        if bkg_run_id:
+                            bkg_meta["run_id"] = bkg_run_id
                         provenance_glue.emit_diff_artifact(
                             kind="diff_background",
                             sector=sck[0],
@@ -378,9 +383,7 @@ def _process_one_frame(task: tuple) -> dict:
                             location=str(bkg_write_path),
                             input_fingerprints=bkg_inputs,
                             data_root=data_root,
-                            meta={"producer": "kernel_subtract"},
-                            scc_primary=bkg_scc_primary,
-                            workspace_root=workspace_root,
+                            meta=bkg_meta,
                             output_store_name=output_store_name,
                         )
                 except Exception:
@@ -449,7 +452,6 @@ def kernel_subtract_loop(
 
     sck = None
     data_root = None
-    workspace_root = None
     output_store_name = None
     downsample_fp = None
     if cfg is not None:
@@ -459,11 +461,6 @@ def kernel_subtract_loop(
             sck = None
         data_root = getattr(cfg, "data_root", "") or None
         output_store_name = getattr(cfg, "output_store_name", None) or None
-        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
-
-        workspace_root = _workspace_root(
-            output_dir, run_id=getattr(cfg, "workspace_run_id", None)
-        )
         if sck is not None:
             try:
                 downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(
@@ -514,7 +511,6 @@ def kernel_subtract_loop(
         "field_mode": bool(field_mode),
         "sck": sck,
         "data_root": data_root,
-        "workspace_root": workspace_root,
         "output_store_name": output_store_name,
         "downsample_fp": downsample_fp,
         "cfg": cfg,

@@ -190,12 +190,12 @@ def _hotpants_loky_initializer(
     field_mode_context: Optional[Any] = None,
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
-    workspace_root: Optional[str] = None,
     mask_catalog=None,
     btjd_by_product_id: Optional[dict] = None,
     output_store_name: Optional[str] = None,
     downsample_fp: Optional[str] = None,
     hotpants_os_n_jobs: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> None:
     """Hotpants loky initializer (MaskCatalog + cadence lookup + field-mode loader).
 
@@ -241,12 +241,12 @@ def _hotpants_loky_initializer(
         "template_loader": template_loader,
         "sck": sck,
         "data_root": data_root,
-        "workspace_root": workspace_root,
         "output_store_name": output_store_name,
         "mask_catalog": mask_catalog,
         "btjd_by_product_id": btjd_by_product_id or {},
         "mapping_grid": _field_mode_mapping_grid(field_mode_context),
         "downsample_fp": downsample_fp,
+        "run_id": run_id,
     }
 
 
@@ -284,12 +284,12 @@ def _hotpants_loky_run_task(
         force_rerun=bool(p.get("force_rerun")),
         sck=p.get("sck"),
         data_root=p.get("data_root"),
-        workspace_root=p.get("workspace_root"),
         output_store_name=p.get("output_store_name"),
         mask_catalog=p.get("mask_catalog"),
         downsample_fp=p.get("downsample_fp"),
         btjd=p.get("btjd_by_product_id", {}).get(product_id),
         mapping_grid=p.get("mapping_grid"),
+        run_id=p.get("run_id"),
     )
 
 
@@ -1167,12 +1167,12 @@ def _process_one_frame(
     force_rerun: bool = False,
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
-    workspace_root: Optional[str] = None,
     mask_catalog=None,
     btjd=None,
     mapping_grid=None,
     output_store_name: Optional[str] = None,
     downsample_fp: Optional[str] = None,
+    run_id: Optional[str] = None,
 ):
     """Process one frame.
 
@@ -1500,6 +1500,9 @@ def _process_one_frame(
                     downsample_fp=downsample_fp,
                 )
                 if inputs is not None:
+                    meta = {"round_id": round_id, "group_id": group_id}
+                    if run_id:
+                        meta["run_id"] = run_id
                     provenance_glue.emit_diff_artifact(
                         kind="diff_image",
                         sector=sck[0],
@@ -1511,9 +1514,7 @@ def _process_one_frame(
                         location=str(write_path),
                         input_fingerprints=inputs,
                         data_root=data_root,
-                        meta={"round_id": round_id, "group_id": group_id},
-                        scc_primary=scc_primary,
-                        workspace_root=workspace_root,
+                        meta=meta,
                         output_store_name=output_store_name,
                     )
             except Exception:
@@ -1573,7 +1574,6 @@ def _process_one_frame(
                     params=hp,
                     output_store_name=output_store_name,
                 )
-                bkg_scc_primary = True
             else:
                 raise RuntimeError(
                     "SCC-only hotpants background write requires data_root and s/c/k"
@@ -1592,6 +1592,13 @@ def _process_one_frame(
                         ffi_fp
                     )
                     if bkg_inputs is not None:
+                        bkg_meta = {
+                            "round_id": round_id,
+                            "group_id": group_id,
+                            "producer": "hotpants",
+                        }
+                        if run_id:
+                            bkg_meta["run_id"] = run_id
                         provenance_glue.emit_diff_artifact(
                             kind="diff_background",
                             sector=sck[0],
@@ -1603,13 +1610,7 @@ def _process_one_frame(
                             location=str(bkg_write_path),
                             input_fingerprints=bkg_inputs,
                             data_root=data_root,
-                            meta={
-                                "round_id": round_id,
-                                "group_id": group_id,
-                                "producer": "hotpants",
-                            },
-                            scc_primary=bkg_scc_primary,
-                            workspace_root=workspace_root,
+                            meta=bkg_meta,
                             output_store_name=output_store_name,
                         )
                 except Exception:
@@ -1764,11 +1765,7 @@ def hotpants_loop(
             prov_downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(cfg)
         except Exception:
             log.debug("downsample fingerprint resolve failed (non-fatal)", exc_info=True)
-    from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
-
-    prov_workspace_root = _workspace_root(
-        output_dir, run_id=getattr(cfg, "workspace_run_id", None)
-    )
+    prov_run_id = getattr(cfg, "run_id", "") or None
 
     btjd_by_product_id: dict = {}
     btjd_col = None
@@ -1894,12 +1891,12 @@ def hotpants_loop(
                 force_rerun=force_rerun,
                 sck=prov_sck,
                 data_root=prov_data_root,
-                workspace_root=prov_workspace_root,
                 output_store_name=prov_output_store_name,
                 mask_catalog=mask_catalog,
                 btjd=btjd_by_product_id.get(product_id),
                 mapping_grid=mapping_grid,
                 downsample_fp=prov_downsample_fp,
+                run_id=prov_run_id,
             )
 
         results = []
@@ -1934,12 +1931,12 @@ def hotpants_loop(
                 field_mode_context,
                 prov_sck,
                 prov_data_root,
-                prov_workspace_root,
                 mask_catalog,
                 btjd_by_product_id,
                 prov_output_store_name,
                 prov_downsample_fp,
                 hotpants_os_n_jobs,
+                prov_run_id,
             ),
             on_result=_record_progress,
         )

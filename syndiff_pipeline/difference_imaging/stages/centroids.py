@@ -144,6 +144,7 @@ def _init_centroids_worker(
     ffi_path_by_stem: dict[str, str] | None = None,
     debug_stems: frozenset[str] | None = None,
     debug_plot_dir: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Load shared centroid inputs once per loky worker."""
     _WORKER_CTX.clear()
@@ -164,6 +165,7 @@ def _init_centroids_worker(
             "ffi_path_by_stem": dict(ffi_path_by_stem or {}),
             "debug_stems": frozenset(debug_stems or ()),
             "debug_plot_dir": debug_plot_dir,
+            "run_id": run_id,
         }
     )
 
@@ -528,6 +530,10 @@ def _centroids_one_frame_task(
             epsf_fp = (ctx.get("epsf_fps") or {}).get(product_id)
             inputs = provenance_glue.required_input_fingerprints(diff_image_fp, epsf_fp)
             if inputs is not None:
+                meta = {}
+                run_id = ctx.get("run_id")
+                if run_id:
+                    meta["run_id"] = run_id
                 provenance_glue.emit_diff_artifact(
                     kind="centroids",
                     sector=sck[0],
@@ -540,6 +546,7 @@ def _centroids_one_frame_task(
                     input_fingerprints=inputs,
                     data_root=data_root,
                     is_fits=False,
+                    meta=meta or None,
                 )
         except Exception:
             log.debug("provenance emit (centroids) failed for %s", ffi_stem, exc_info=True)
@@ -600,6 +607,7 @@ def run_centroids_all_frames(
     except Exception:
         sck = None
     data_root = getattr(cfg, "data_root", "") or None
+    run_id = getattr(cfg, "run_id", "") or None
     diff_image_fps = build_diff_image_fps(
         cfg, diff_paths, diffs_input=diffs_input, sck=sck
     )
@@ -683,6 +691,7 @@ def run_centroids_all_frames(
         ffi_path_by_stem or {},
         debug_stems_frozen,
         debug_plot_dir,
+        run_id,
     )
     results: list[tuple[int, str, bool, bool]] = []
 

@@ -172,9 +172,19 @@ def _try_load_mask_settings_from_params(params: Any) -> Any:
         return None
 
 
-def _shared_mask_recipe_from_parts(parts: list) -> dict:
-    """Call model ``shared_mask_recipe_params``, loading YAML when path is set."""
+def _shared_mask_recipe_from_parts(parts: list, *, mask_settings: Any = None) -> dict:
+    """Call model ``shared_mask_recipe_params`` with the resolved mask policy.
+
+    Resolution order (Contract A2): an explicit *mask_settings* (already the
+    caller's resolved policy — a :class:`MaskSettings`, mapping, or dataclass)
+    wins outright. Otherwise fall back to the pre-existing behaviour: load
+    YAML from ``params.mask_settings`` when that path is set, else let
+    ``shared_mask_recipe_params`` use packaged defaults. This fallback branch
+    is untouched so ``mask_settings=None`` stays byte-identical to before.
+    """
     params = parts[0]
+    if mask_settings is not None:
+        return _shared_mask_recipe_params(params, mask_settings=mask_settings)
     ms = _try_load_mask_settings_from_params(params)
     if ms is not None:
         return _shared_mask_recipe_params(params, mask_settings=ms)
@@ -182,11 +192,16 @@ def _shared_mask_recipe_from_parts(parts: list) -> dict:
 
 
 _MODEL_RECIPE_BUILDERS = {
-    "diff_background": lambda parts: _diff_background_recipe_params(parts[0]),
-    "diff_image": lambda parts: _diff_image_recipe_params(*parts),
-    "epsf": lambda parts: _epsf_recipe_params(parts[0]),
+    # Every builder accepts **kw so `diff_recipe` can pass `mask_settings=`
+    # uniformly without a kind-specific dispatch branch; only the
+    # `shared_mask` builder consumes it. Least-invasive way to thread one new
+    # kwarg through `diff_recipe`'s dispatch without touching the other four
+    # kinds' call shape.
+    "diff_background": lambda parts, **_kw: _diff_background_recipe_params(parts[0]),
+    "diff_image": lambda parts, **_kw: _diff_image_recipe_params(*parts),
+    "epsf": lambda parts, **_kw: _epsf_recipe_params(parts[0]),
     "shared_mask": _shared_mask_recipe_from_parts,
-    "photometry": lambda parts: _photometry_recipe_params(parts[0]),
+    "photometry": lambda parts, **_kw: _photometry_recipe_params(parts[0]),
 }
 
 
@@ -203,7 +218,7 @@ def _asdict_any(obj: Any) -> dict:
     )
 
 
-def diff_recipe(kind: str, params_dataclass: Any) -> dict:
+def diff_recipe(kind: str, params_dataclass: Any, *, mask_settings: Any = None) -> dict:
     """
     Materialize one or more strict param dataclasses into an allow-listed recipe dict.
 
@@ -213,6 +228,11 @@ def diff_recipe(kind: str, params_dataclass: Any) -> dict:
     recipe spans two stage configs (``KernelFitParams`` +
     ``BackgroundEstimateParams`` for kernel-matched ``diff_image``), pass a
     list/tuple of dataclass instances.
+
+    ``mask_settings`` (Contract A2) is consumed only by the ``shared_mask``
+    kind — the caller's already-resolved :class:`MaskSettings` (or mapping),
+    which wins over any path load from ``params.mask_settings``. Every other
+    kind ignores this kwarg; it does not change their recipe shape.
 
     Delegates to ``common.provenance.model``'s landed ``*_recipe_params``
     builders when available (the canonical implementation every other
@@ -227,7 +247,7 @@ def diff_recipe(kind: str, params_dataclass: Any) -> dict:
     builder = _MODEL_RECIPE_BUILDERS.get(kind)
     if builder is not None:
         try:
-            params = builder(list(parts))
+            params = builder(list(parts), mask_settings=mask_settings)
             return {"kind": str(kind), "params": params, "code_version": DIFF_RECIPE_SCHEMA_VERSION}
         except Exception:
             log.debug("diff_recipe(%s): model builder failed, using local fallback", kind, exc_info=True)
@@ -405,44 +425,23 @@ def resolve_downsample_fingerprint(
     """
     Resolve the SCC-scoped ``downsample`` node fingerprint used as a template edge.
 
-    Order: explicit → ``expected_downsample_fingerprint`` via site ``pipeline.yaml``
-    → provenance-store lookup by spatial key. Returns ``None`` when unresolved
-    (callers fail-open rather than minting a ``loc:`` token).
+    Order (Contract A4 — this function is step 2/3 of the full resolution;
+    step 1, the frozen ``cfg.downsample_fingerprint``, lives in
+    :func:`resolve_downsample_fingerprint_from_cfg`, the caller nearly every
+    site actually uses): *explicit_fp* → provenance-store lookup by spatial
+    key → live ``expected_downsample_fingerprint`` read of
+    ``{site_config_dir}/pipeline.yaml`` (last-resort fallback, kept only
+    until every caller freezes ``downsample_fingerprint`` on its config —
+    wave A-3 deletes this branch). Returns ``None`` when unresolved (callers
+    fail-open rather than minting a ``loc:`` token).
 
     Store lookup: a single complete row wins; multiple complete rows for the
-    same spatial key are ambiguous (different recipes) and return ``None`` —
-    never newest-by-``created_at``. Prefer the site/expected path above when
-    a recipe match is available.
+    same spatial key are ambiguous (different recipes) and return ``None``
+    outright — never newest-by-``created_at``, and (unchanged from before)
+    not superseded by the live-read fallback below.
     """
     if explicit_fp:
         return str(explicit_fp)
-    if site_config_dir and data_root:
-        try:
-            from syndiff_pipeline.common.orchestration.targets import Target
-            from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
-                expected_downsample_fingerprint,
-            )
-            from syndiff_pipeline.template_creation.orchestration.runner_config import (
-                load_runner_config,
-                resolve_config,
-            )
-
-            site = Path(str(site_config_dir))
-            pipeline_yaml = site / "pipeline.yaml"
-            if pipeline_yaml.is_file():
-                runner_cfg = load_runner_config(pipeline_yaml)
-                target = Target(
-                    int(sector),
-                    int(camera),
-                    int(ccd),
-                    float(target_ra if target_ra is not None else 0.0),
-                    float(target_dec if target_dec is not None else 0.0),
-                    str(target_name or "unknown"),
-                )
-                resolved = resolve_config(target, runner_cfg)
-                return expected_downsample_fingerprint(resolved)
-        except Exception:
-            log.debug("resolve_downsample_fingerprint: site resolve failed", exc_info=True)
 
     if data_root and _STORE_AVAILABLE:
         try:
@@ -472,13 +471,65 @@ def resolve_downsample_fingerprint(
                     return None
         except Exception:
             log.debug("resolve_downsample_fingerprint: store lookup failed", exc_info=True)
+
+    if site_config_dir and data_root:
+        try:
+            from syndiff_pipeline.common.orchestration.targets import Target
+            from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+                expected_downsample_fingerprint,
+            )
+            from syndiff_pipeline.template_creation.orchestration.runner_config import (
+                load_runner_config,
+                resolve_config,
+            )
+
+            site = Path(str(site_config_dir))
+            pipeline_yaml = site / "pipeline.yaml"
+            if pipeline_yaml.is_file():
+                runner_cfg = load_runner_config(pipeline_yaml)
+                target = Target(
+                    int(sector),
+                    int(camera),
+                    int(ccd),
+                    float(target_ra if target_ra is not None else 0.0),
+                    float(target_dec if target_dec is not None else 0.0),
+                    str(target_name or "unknown"),
+                )
+                resolved = resolve_config(target, runner_cfg)
+                return expected_downsample_fingerprint(resolved)
+        except Exception:
+            log.debug("resolve_downsample_fingerprint: site resolve failed", exc_info=True)
+
     return None
 
 
 def resolve_downsample_fingerprint_from_cfg(
     cfg: Any, *, explicit_fp: Optional[str] = None
 ) -> Optional[str]:
-    """``resolve_downsample_fingerprint`` from a :class:`SynDiffConfig`-like object."""
+    """``resolve_downsample_fingerprint`` from a :class:`SynDiffConfig`-like object.
+
+    Contract A4 resolution order — this is the function nearly every emit/
+    verify site actually calls:
+
+    1. *explicit_fp*, when given (caller already has a real fp in-process) —
+       used verbatim.
+    2. ``getattr(cfg, "downsample_fingerprint", "")``, when non-empty — the
+       frozen value a later-wave agent (``diff-core``, wave A-3) populates on
+       ``SynDiffConfig``. Used verbatim; nothing to resolve.
+    3. delegate to :func:`resolve_downsample_fingerprint` — provenance-store
+       lookup by spatial key, then (last-resort fallback only, kept until
+       every config freezes step 2's field) a live
+       ``{site_config_dir}/pipeline.yaml`` read.
+
+    No ``SynDiffConfig`` populates ``downsample_fingerprint`` yet, so step 2
+    is inert today (``getattr`` returns ``""`` and falls through) — wiring
+    it up now means nothing else has to change when the field lands.
+    """
+    frozen_fp = str(getattr(cfg, "downsample_fingerprint", "") or "").strip()
+    if explicit_fp:
+        return str(explicit_fp)
+    if frozen_fp:
+        return frozen_fp
     return resolve_downsample_fingerprint(
         sector=int(cfg.sector),
         camera=int(cfg.camera),
@@ -490,7 +541,7 @@ def resolve_downsample_fingerprint_from_cfg(
         target_ra=getattr(cfg, "target_ra", None),
         target_dec=getattr(cfg, "target_dec", None),
         target_name=getattr(cfg, "target_name", None),
-        explicit_fp=explicit_fp,
+        explicit_fp=None,
     )
 
 
@@ -714,14 +765,23 @@ def diff_kind_fingerprint_shared_mask(
     *,
     label: str = "shared_mask",
     input_fingerprints: Sequence[Optional[str]] = (),
+    mask_settings: Any = None,
 ) -> Optional[str]:
-    """Content-addressed fingerprint for the ``shared_mask`` node."""
+    """Content-addressed fingerprint for the ``shared_mask`` node.
+
+    ``mask_settings`` (Contract A2): the resolved policy that actually
+    painted the mask (a ``MaskSettings``, mapping, or ``None``). When
+    provided it wins over any path load from ``params.mask_settings``, so
+    two lanes running different mask policy get different fingerprints even
+    though ``SharedMaskParams`` itself never carries the policy inline.
+    ``None`` (the default) reproduces today's behaviour exactly.
+    """
     if not PROVENANCE_AVAILABLE:
         return None
     if any(fp is None for fp in input_fingerprints):
         return None
     spatial_key = shared_mask_spatial_key(sector, camera, ccd, label=label)
-    recipe = diff_recipe(SHARED_MASK_KIND, params)
+    recipe = diff_recipe(SHARED_MASK_KIND, params, mask_settings=mask_settings)
     try:
         rid = _recipe_id_fn(SHARED_MASK_KIND, recipe["params"], recipe["code_version"])
         return _fingerprint_fn(
@@ -817,8 +877,15 @@ def emit_diff_artifact(
     data_root: Optional[str] = None,
     meta: Optional[dict] = None,
     is_fits: bool = True,
-    workspace_root: Optional[str] = None,
-    scc_primary: bool = False,
+    workspace_root: Optional[str] = None,  # noqa: ARG001 — see comment below
+    scc_primary: bool = False,  # noqa: ARG001 — see comment below
+    # ^ Contract A7b: `workspace_root`/`scc_primary` are accepted-and-ignored,
+    # pending removal — never referenced in the body below. Call sites are
+    # being migrated (owner: `emitters`) to stop passing them. The supervisor
+    # deletes both parameters once every call site (including
+    # `execute.py:235`, owned by `diff-core`) is updated — do not remove them
+    # unilaterally from this side first. `output_store_name` below is NOT
+    # part of this — it is used (see `full_meta` below).
     output_store_name: Optional[str] = None,
 ) -> Optional[str]:
     """
@@ -892,22 +959,30 @@ def emit_shared_mask_artifact(
     data_root: Optional[str] = None,
     label: str = "shared_mask",
     meta: Optional[dict] = None,
+    mask_settings: Any = None,
 ) -> Optional[str]:
     """``emit_diff_artifact`` counterpart for the ``shared_mask`` kind (different spatial key shape).
 
     Recipe materialization goes through :func:`diff_recipe` → model
-    ``shared_mask_recipe_params``. When ``params.mask_settings`` is a YAML
-    path, glue loads it (via :func:`load_mask_settings`) and passes
-    ``mask_settings=`` so the fingerprint hashes policy contents, not a path
-    string or packaged defaults alone.
+    ``shared_mask_recipe_params``. ``mask_settings`` (Contract A2) is the
+    already-resolved policy that painted this mask (e.g. from
+    ``resolve_mask_settings(...)`` at the ``execute.py`` call site); when
+    given it wins over any YAML load from ``params.mask_settings``, so the
+    recipe — and therefore the fingerprint — reflects the policy that
+    actually ran, not just packaged defaults. ``mask_settings=None`` (the
+    default) reproduces today's behaviour byte-for-byte: glue falls back to
+    loading ``params.mask_settings`` when it is a YAML path, else packaged
+    defaults.
     """
     try:
         if not PROVENANCE_AVAILABLE or not _SPOOL_AVAILABLE or not data_root:
             return None
-        fp = diff_kind_fingerprint_shared_mask(sector, camera, ccd, params, label=label)
+        fp = diff_kind_fingerprint_shared_mask(
+            sector, camera, ccd, params, label=label, mask_settings=mask_settings
+        )
         if fp is None:
             return None
-        recipe = diff_recipe(SHARED_MASK_KIND, params)
+        recipe = diff_recipe(SHARED_MASK_KIND, params, mask_settings=mask_settings)
         spatial_key = shared_mask_spatial_key(sector, camera, ccd, label=label)
         full_meta = dict(meta or {})
         full_meta.setdefault("label", label)

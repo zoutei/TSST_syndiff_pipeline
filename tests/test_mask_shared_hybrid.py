@@ -1,5 +1,7 @@
 """Hybrid empirical shared mask stamps."""
 
+from unittest.mock import patch
+
 import numpy as np
 import pandas as pd
 
@@ -117,3 +119,34 @@ def test_make_shared_mask_writes_canonical_basename(tmp_path):
     assert (tmp_path / SHARED_MASK_FITS_BASENAME).is_file()
     assert SHARED_MASK_FITS_BASENAME.endswith(".fits.fz")
     assert mask.dtype == np.int16
+
+
+def test_build_static_mask_forwards_resolved_mask_settings_to_emit(tmp_path):
+    """Contract A2 (emitters side): build_static_mask's *resolved* ``settings``
+    (not just ``mask_params``, the path-bearing stage params) must reach
+    ``provenance_glue.emit_shared_mask_artifact`` as ``mask_settings=``, so the
+    recorded recipe hashes the policy that actually painted the mask.
+    """
+    image = np.zeros((40, 40), dtype=np.float64)
+    crop = {"x_min": 0, "x_max": 40, "y_min": 0, "y_max": 40, "shape": (40, 40)}
+    gaia = pd.DataFrame({"x": [20.0], "y": [20.0], "mag": [12.0]})
+    settings = _settings(bright_maglim=14.0)
+
+    with patch(
+        "syndiff_pipeline.difference_imaging.orchestration.provenance_glue"
+        ".emit_shared_mask_artifact"
+    ) as mock_emit:
+        build_static_mask(
+            image,
+            gaia,
+            crop,
+            settings=settings,
+            straps_csv="/nonexistent/straps.csv",
+            output_dir=str(tmp_path),
+            sck=(20, 3, 3),
+            data_root=str(tmp_path),
+            mask_params=object(),
+        )
+
+    mock_emit.assert_called_once()
+    assert mock_emit.call_args.kwargs["mask_settings"] is settings
