@@ -594,6 +594,8 @@ def run_temporal_wcs_all_frames(
     sector: int,
     camera: int,
     ccd: int,
+    progress_path: str | Path | None = None,
+    cli_progress_path: str | Path | None = None,
 ) -> tuple[int, int]:
     """Fit per-FFI Chebyshev rows and publish orbit-wise temporal models."""
     frames = list_frames_for_lane(Path(lane_root), centroids_label=centroids_label, hp_d_label=hp_d_label)
@@ -615,6 +617,12 @@ def run_temporal_wcs_all_frames(
 
     n_jobs = max(1, int(getattr(params, "n_jobs", None) or 1))
     tasks = list(enumerate(frames))
+    progress = None
+    if progress_path is not None:
+        from syndiff_pipeline.difference_imaging.stages import temporal_wcs_progress
+
+        progress = temporal_wcs_progress
+        progress.init_progress_pair(progress_path, cli_progress_path, frames_total=len(tasks))
     read_cache_dir = (
         _resolve_ecsv_read_cache_dir(data_root, int(sector), int(camera), int(ccd))
         if bool(getattr(params, "enable_read_cache", True))
@@ -625,17 +633,37 @@ def run_temporal_wcs_all_frames(
         read_cache_dir,
     )
     if n_jobs > 1:
-        from concurrent.futures import ProcessPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, as_completed
 
         with ProcessPoolExecutor(
             max_workers=min(n_jobs, len(tasks)),
             initializer=_init_temporal_wcs_worker,
             initargs=init_args,
         ) as ex:
-            results = list(ex.map(_fit_one_frame_worker, tasks))
+            results = [None] * len(tasks)
+            futures = [ex.submit(_fit_one_frame_worker, task) for task in tasks]
+            for future in as_completed(futures):
+                result = future.result()
+                results[result[0]] = result
+                if progress is not None:
+                    progress.record_frame_progress(
+                        progress_path, cli_progress_path,
+                        success=result[2].get("fit_provenance") == "fit",
+                    )
     else:
         _init_temporal_wcs_worker(*init_args)
-        results = [_fit_one_frame_worker(t) for t in tasks]
+        results = []
+        for task in tasks:
+            result = _fit_one_frame_worker(task)
+            results.append(result)
+            if progress is not None:
+                progress.record_frame_progress(
+                    progress_path, cli_progress_path,
+                    success=result[2].get("fit_provenance") == "fit",
+                )
+
+    if progress is not None:
+        progress.set_progress_phase_pair(progress_path, cli_progress_path, "publishing")
 
     # ProcessPoolExecutor.map preserves input order regardless of completion
     # order, so appending in `results` order reproduces the exact serial
@@ -777,4 +805,7 @@ def run_temporal_wcs_all_frames(
     if bool(params.debug_plots):
         _write_debug_plots(debug_dir, pd.DataFrame(coeff_rows), runtime_frame_df, temporal_models)
         _write_debug_fits(debug_dir, frames, version=MODEL_VERSION)
-    return int(np.isfinite(coeff_matrix).all(axis=1).sum()), len(runtime_frame_df)
+    n_ok = int(np.isfinite(coeff_matrix).all(axis=1).sum())
+    if progress is not None:
+        progress.set_progress_phase_pair(progress_path, cli_progress_path, "complete")
+    return n_ok, len(runtime_frame_df)
