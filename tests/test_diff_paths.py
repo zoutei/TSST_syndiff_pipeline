@@ -13,10 +13,6 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    ensure_event_templates_symlink,
-    event_templates_symlink_path,
-)
 from syndiff_pipeline.difference_imaging.orchestration.config import (
     SynDiffConfig,
     absolutize_config,
@@ -26,7 +22,6 @@ from syndiff_pipeline.difference_imaging.stages.photometry import (
 )
 from syndiff_pipeline.difference_imaging.support.paths import (
     KERNEL_RECONSTRUCTION_NPZ_BASENAME,
-    clear_diff_workspace,
     meta_workspace_dir_from_diffs_dir,
     meta_workspace_label,
     normalize_photometry_run_id,
@@ -113,22 +108,6 @@ class TestPhotometryPaths(unittest.TestCase):
         self.assertIsNone(normalize_photometry_run_id(None))
         self.assertIsNone(normalize_photometry_run_id(""))
         self.assertEqual(normalize_photometry_run_id("run_a"), "run_a")
-
-
-class TestClearDiffWorkspace(unittest.TestCase):
-    def test_clear_diff_workspace_restores_templates_symlink(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "event"
-            physical = Path(tmp) / "templates_physical"
-            physical.mkdir()
-            ensure_event_templates_symlink(out, physical)
-            (out / "ws" / "hp_d").mkdir(parents=True)
-            (out / "ws" / "hp_d" / "x.fits").write_bytes(b"x")
-
-            clear_diff_workspace(out)
-            link = event_templates_symlink_path(out)
-            self.assertTrue(link.is_symlink())
-            self.assertEqual(link.resolve(), physical.resolve())
 
 
 class TestMetaWorkspaceLabel(unittest.TestCase):

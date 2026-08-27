@@ -25,10 +25,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stages import (
     execute_diff_stage,
     write_diff_manifest,
 )
-from syndiff_pipeline.difference_imaging.support.paths import (
-    SHARED_MASK_FITS_BASENAME,
-    clear_diff_workspace,
-)
+from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.pipeline_spec import STAGE_DEPS, STAGE_NAMES, STAGE_POOL, SYNDIFF_PIPELINE
 from syndiff_pipeline.template_creation.orchestration.runner_config import (
     RunnerConfig,
@@ -195,22 +192,6 @@ class TestDiffStageExecution(unittest.TestCase):
         self.assertGreaterEqual(expected, 1)
         self.assertGreaterEqual(produced, 0)
         self.assertIsInstance(artifacts, list)
-
-    def test_clear_diff_workspace_preserves_handoff_files(self):
-        ws_hp = self.event_dir / "ws" / "hp_d"
-        ws_hp.mkdir(parents=True)
-        (ws_hp / "frame.fits").write_bytes(b"SIMPLE  = T")
-        gaia_csv = self.event_dir / "ws" / "gaia_catalog_pipeline.csv"
-        gaia_csv.parent.mkdir(parents=True, exist_ok=True)
-        gaia_csv.write_text("source_id,ra,dec\n", encoding="utf-8")
-        handoff_json = self.event_dir / "event_job.json"
-        self.assertTrue(handoff_json.is_file())
-
-        clear_diff_workspace(self.event_dir)
-
-        self.assertFalse((self.event_dir / "ws" / "hp_d").exists())
-        self.assertFalse(gaia_csv.is_file())
-        self.assertTrue((self.event_dir / "event_job.json").is_file())
 
     @mock.patch(
         "syndiff_pipeline.difference_imaging.orchestration.execute.run_config_pipeline"

@@ -275,8 +275,9 @@ class TestSccIndexedVerify(_SccFramesBase):
 
         event_manifest = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         self.assertFalse(event_manifest.is_file())
-        ws_dir = dv.diff_workspace_root(self.cfg, self.event_dir)
-        ws_dir.mkdir(parents=True, exist_ok=True)
+        # No ws/ workspace tree under SCC-scoped output_dir (wave A-3);
+        # completeness is driven entirely by SCC bookkeeping + indexed
+        # provenance, so no directory needs to exist under event_dir here.
         self.assertTrue(dv.diff_workspace_complete(self.cfg, self.event_dir))
 
     def test_indexed_verify_uses_scc_frames(self):

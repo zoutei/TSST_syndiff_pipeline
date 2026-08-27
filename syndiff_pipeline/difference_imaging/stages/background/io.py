@@ -392,7 +392,6 @@ def write_per_frame_fits(
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
     background_params: Optional[Any] = None,
-    workspace_root: Optional[str] = None,
     run_id: Optional[str] = None,
 ) -> None:
     """Write per frame fits.
@@ -412,9 +411,7 @@ def write_per_frame_fits(
         The stage's ``BackgroundParams`` (recipe source for the sidecar).
     run_id : Optional[str], optional
         Orchestrator run id, stamped into the emitted artifact's ``meta``
-        when non-empty. Not yet fed by any caller (``SynDiffConfig.run_id``
-        lands in a later wave); accepted now so the wiring is a no-op change
-        once it does."""
+        when non-empty (``SynDiffConfig.run_id``)."""
     os.makedirs(out_dir, exist_ok=True)
     out_label = workspace_label_from_dir(out_dir)
     for i, rec in enumerate(records):
@@ -456,7 +453,6 @@ def write_per_frame_fits(
                     input_fingerprints=inputs,
                     data_root=data_root,
                     meta=meta,
-                    workspace_root=workspace_root,
                 )
             except Exception:
                 log.debug(

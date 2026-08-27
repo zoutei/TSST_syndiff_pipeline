@@ -441,16 +441,25 @@ def resolve_diff_config(
     merged_defaults = _deep_merge_dict(policy.defaults, override.get("defaults", {}))
     merged_paths = _deep_merge_dict(policy.paths, override.get("paths", {}))
 
-    event_dir = _event_dir(workspace_root, target)
     data_root_path = Path(data_root)
     # SynDiffConfig.ffi_dir is the SCC ffi leaf (same convention as template resolve_config).
     ffi_dir = str(
         scc_ffi_dir(data_root_path, target.sector, target.camera, target.ccd)
     )
 
-    from syndiff_pipeline.common.scc_paths import normalize_store_name
+    from syndiff_pipeline.common.scc_paths import normalize_store_name, scc_diff_dir
 
     output_store_name = normalize_store_name(merged_paths.get("output_store_name"))
+    # output_dir is SCC-scoped (diff is keyed by SCC, not by event) -- the
+    # lane root is where diff artifacts, the shared mask, and the frozen
+    # diff_config.yaml lock already live.
+    output_dir = scc_diff_dir(
+        data_root_path,
+        target.sector,
+        target.camera,
+        target.ccd,
+        store_name=output_store_name,
+    )
 
     os_factor = int(merged_defaults.get("oversampling_factor", 1) or 1)
     template_dir = merged_paths.get("template_dir")
@@ -514,7 +523,7 @@ def resolve_diff_config(
 
     cfg = SynDiffConfig(
         ffi_dir=ffi_dir,
-        output_dir=str(event_dir),
+        output_dir=str(output_dir),
         gaia_catalog=gaia_catalog,
         template_dir=template_dir or "",
         pipeline=pipeline,

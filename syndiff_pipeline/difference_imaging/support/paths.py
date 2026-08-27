@@ -1,11 +1,11 @@
 """
 Workspace and manifest path conventions for the config-driven pipeline.
 
-Workspaces live under ``{output_dir}/ws/{label}/``.
-``{output_dir}/ws/ffis`` symlink points at the FFI leaf directory for the
-target sector/camera/CCD when configured.
-Template FITS for differencing are linked at ``{output_dir}/ws/templates`` (see
-``event_ws_symlinks``).
+The diff pipeline's ``output_dir`` is the SCC diff lane root directly (no
+``ws/`` subtree; see ``workspace_lock.py`` for where the config lock lives).
+The ``ws/{label}/`` naming conventions below (``workspace_root``,
+``workspace_dir``, ...) remain in use by other, still event-scoped trees
+(e.g. photometry's ``pipeline_plots_root``).
 The default per-FFI manifest basename is ``syndiff_ffi_frames.csv`` at ``output_dir``.
 """
 
@@ -13,9 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
-import shutil
-from pathlib import Path
-from typing import Optional, Union
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -41,27 +39,10 @@ WORKSPACE_ROOT_ARTIFACTS = (
     DIFF_CONFIG_SNAPSHOT_BASENAME,
 )
 
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (  # noqa: E402
-    FFIS_WS_LABEL,
-    TEMPLATES_WS_LABEL,
-    ensure_event_ffis_symlink,
-    ensure_event_templates_symlink,
-    event_ffis_symlink_path,
-    event_templates_symlink_path,
-    prune_stale_per_workspace_ffis_symlinks,
-)
-
 __all__ = [
-    "FFIS_WS_LABEL",
     "HOST_STAR_WS_LABEL",
-    "TEMPLATES_WS_LABEL",
     "SHARED_MASK_FITS_BASENAME",
     "STATIC_MASK_FITS_BASENAME",
-    "ensure_event_ffis_symlink",
-    "ensure_event_templates_symlink",
-    "event_ffis_symlink_path",
-    "event_templates_symlink_path",
-    "prune_stale_per_workspace_ffis_symlinks",
 ]
 
 # ``np.savez(..., **{BACKGROUND_STACK_NPZ_ARRAY_KEY: stack})`` for rough/smooth stacks
@@ -171,44 +152,6 @@ def workspace_artifact_path(
 ) -> str:
     """Path to a run-scoped artifact at the workspace tree root."""
     return os.path.join(workspace_root(output_dir, run_id=run_id), basename)
-
-
-def clear_diff_workspace(
-    event_dir: Union[str, Path],
-    *,
-    run_id: str | None = None,
-) -> None:
-    """Remove one workspace subtree for force rerun; preserve event_dir handoff files.
-
-    Clears canonical ``ws/`` when *run_id* is unset, else ``ws_{run_id}/``.
-    The ``templates`` and ``ffis`` symlinks inside that tree are preserved across clears.
-    """
-    root = Path(event_dir)
-    ws = root / workspace_tree_name(run_id)
-    if not ws.is_dir():
-        return
-    templates_link = ws / TEMPLATES_WS_LABEL
-    templates_target = None
-    if templates_link.is_symlink():
-        try:
-            templates_target = templates_link.resolve()
-        except OSError:
-            templates_target = None
-    ffis_link = ws / FFIS_WS_LABEL
-    ffis_target = None
-    if ffis_link.is_symlink():
-        try:
-            ffis_target = ffis_link.resolve()
-        except OSError:
-            ffis_target = None
-    shutil.rmtree(ws)
-    log.info("Force rerun: removed diff workspace %s", ws)
-    if templates_target is not None and templates_target.is_dir():
-        ensure_event_templates_symlink(root, templates_target, run_id=run_id)
-        log.info("Force rerun: restored templates symlink -> %s", templates_target)
-    if ffis_target is not None and ffis_target.is_dir():
-        ensure_event_ffis_symlink(root, ffis_target, run_id=run_id)
-        log.info("Force rerun: restored ffis symlink -> %s", ffis_target)
 
 
 def resolve_manifest_path(output_dir: str, manifest_cfg: Optional[str]) -> str:

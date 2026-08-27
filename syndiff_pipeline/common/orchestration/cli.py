@@ -669,7 +669,15 @@ def _prepare_run_directory(
             shutil.copy2(site_mask, mask_dest)
         meta["mask_settings_path"] = str(mask_dest.resolve())
     if workspace_run_id is not None and str(workspace_run_id).strip():
-        meta["workspace_run_id"] = str(workspace_run_id).strip()
+        # Deprecated (wave A-3): workspace_run_id no longer selects a debug
+        # ws_{id}/ tree -- diff output is SCC-lane-scoped, not event/run
+        # scoped, so there is nothing left for this override to point at.
+        # No longer written into run_meta.json.
+        log.warning(
+            "--workspace-run-id is deprecated and has no effect (no ws_{id}/ "
+            "tree to select); ignoring %r",
+            str(workspace_run_id).strip(),
+        )
     logs.ensure_run_layout(runs_root, run_id, meta)
     logs.update_run_meta(runs_root, run_id, meta)
     return run_directory

@@ -425,20 +425,20 @@ def resolve_downsample_fingerprint(
     """
     Resolve the SCC-scoped ``downsample`` node fingerprint used as a template edge.
 
-    Order (Contract A4 — this function is step 2/3 of the full resolution;
+    Order (Contract A4 — this function is step 2/2 of the full resolution;
     step 1, the frozen ``cfg.downsample_fingerprint``, lives in
     :func:`resolve_downsample_fingerprint_from_cfg`, the caller nearly every
-    site actually uses): *explicit_fp* → provenance-store lookup by spatial
-    key → live ``expected_downsample_fingerprint`` read of
-    ``{site_config_dir}/pipeline.yaml`` (last-resort fallback, kept only
-    until every caller freezes ``downsample_fingerprint`` on its config —
-    wave A-3 deletes this branch). Returns ``None`` when unresolved (callers
-    fail-open rather than minting a ``loc:`` token).
+    site actually uses, and is populated at freeze time by
+    ``diff_verify.frozen_diff_config_for_context`` from the frozen run
+    config — no live site read): *explicit_fp* → provenance-store lookup by
+    spatial key. Returns ``None`` when unresolved (callers fail-open rather
+    than minting a ``loc:`` token). The live ``{site_config_dir}/pipeline.yaml``
+    read that used to be a third, last-resort step here was deleted in wave
+    A-3 once step 1 above started being populated for every real caller.
 
     Store lookup: a single complete row wins; multiple complete rows for the
     same spatial key are ambiguous (different recipes) and return ``None``
-    outright — never newest-by-``created_at``, and (unchanged from before)
-    not superseded by the live-read fallback below.
+    outright — never newest-by-``created_at``.
     """
     if explicit_fp:
         return str(explicit_fp)
@@ -471,34 +471,6 @@ def resolve_downsample_fingerprint(
                     return None
         except Exception:
             log.debug("resolve_downsample_fingerprint: store lookup failed", exc_info=True)
-
-    if site_config_dir and data_root:
-        try:
-            from syndiff_pipeline.common.orchestration.targets import Target
-            from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
-                expected_downsample_fingerprint,
-            )
-            from syndiff_pipeline.template_creation.orchestration.runner_config import (
-                load_runner_config,
-                resolve_config,
-            )
-
-            site = Path(str(site_config_dir))
-            pipeline_yaml = site / "pipeline.yaml"
-            if pipeline_yaml.is_file():
-                runner_cfg = load_runner_config(pipeline_yaml)
-                target = Target(
-                    int(sector),
-                    int(camera),
-                    int(ccd),
-                    float(target_ra if target_ra is not None else 0.0),
-                    float(target_dec if target_dec is not None else 0.0),
-                    str(target_name or "unknown"),
-                )
-                resolved = resolve_config(target, runner_cfg)
-                return expected_downsample_fingerprint(resolved)
-        except Exception:
-            log.debug("resolve_downsample_fingerprint: site resolve failed", exc_info=True)
 
     return None
 
@@ -877,15 +849,6 @@ def emit_diff_artifact(
     data_root: Optional[str] = None,
     meta: Optional[dict] = None,
     is_fits: bool = True,
-    workspace_root: Optional[str] = None,  # noqa: ARG001 — see comment below
-    scc_primary: bool = False,  # noqa: ARG001 — see comment below
-    # ^ Contract A7b: `workspace_root`/`scc_primary` are accepted-and-ignored,
-    # pending removal — never referenced in the body below. Call sites are
-    # being migrated (owner: `emitters`) to stop passing them. The supervisor
-    # deletes both parameters once every call site (including
-    # `execute.py:235`, owned by `diff-core`) is updated — do not remove them
-    # unilaterally from this side first. `output_store_name` below is NOT
-    # part of this — it is used (see `full_meta` below).
     output_store_name: Optional[str] = None,
 ) -> Optional[str]:
     """
