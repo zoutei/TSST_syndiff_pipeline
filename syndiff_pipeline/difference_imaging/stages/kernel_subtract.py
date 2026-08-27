@@ -121,6 +121,7 @@ def _process_one_frame(task: tuple) -> dict:
     workspace_root = p.get("workspace_root")
     downsample_fp = p.get("downsample_fp")
     cfg = p.get("cfg")
+    force_rerun = bool(p.get("force_rerun", False))
 
     product_id = tess_product_id_from_ffi_path(ffi_path) or "unknown"
     try:
@@ -141,79 +142,80 @@ def _process_one_frame(task: tuple) -> dict:
     )
 
     write_path: Optional[Path] = None
-    if sck is not None and data_root:
-        try:
-            from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
-                resolve_diff_write_path,
-            )
-
-            write_path = resolve_diff_write_path(
-                data_root=data_root,
-                sck=sck,
-                kind="diff_image",
-                stage_label=diffs_label,
-                ffi_stem=ffi_stem,
-                label=diffs_label,
-                params=ks_params,
-                output_store_name=output_store_name,
-            )
-            if write_path.is_file():
-                return {
-                    "success": True,
-                    "product_id": product_id,
-                    "stem": diff_stem,
-                    "skipped": True,
-                    "path": str(write_path),
-                    "scc_store_hit": True,
-                }
-            if downsample_fp is None and cfg is not None:
-                downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(
-                    cfg
+    if not force_rerun:
+        if sck is not None and data_root:
+            try:
+                from syndiff_pipeline.difference_imaging.orchestration.diff_store import (
+                    resolve_diff_write_path,
                 )
-            prov_complete = provenance_glue.diff_image_complete_in_store(
-                sector=sck[0],
-                camera=sck[1],
-                ccd=sck[2],
-                product_id=product_id,
-                label=diffs_label,
-                params=ks_params,
-                ffi_path=ffi_path,
-                downsample_fp=downsample_fp,
-                data_root=data_root,
-                cfg=cfg,
-            )
-        except Exception:
-            log.debug(
-                "provenance resume check failed for %s", product_id, exc_info=True
-            )
-            prov_complete = None
-        if prov_complete is True:
-            hit_path: Optional[str] = None
-            if write_path is not None and write_path.is_file():
-                hit_path = str(write_path)
-            else:
-                existing_after_prov = resolve_pipeline_fits_path(diffs_dir, diff_stem)
-                if existing_after_prov is not None:
-                    hit_path = existing_after_prov
-            if hit_path is not None:
-                return {
-                    "success": True,
-                    "product_id": product_id,
-                    "stem": diff_stem,
-                    "skipped": True,
-                    "path": hit_path,
-                    "provenance_hit": True,
-                    "scc_store_hit": True,
-                }
-            # Indexed complete but no file — fall through to process.
 
-    if resolve_pipeline_fits_path(diffs_dir, diff_stem) is not None:
-        return {
-            "success": True,
-            "product_id": product_id,
-            "stem": diff_stem,
-            "skipped": True,
-        }
+                write_path = resolve_diff_write_path(
+                    data_root=data_root,
+                    sck=sck,
+                    kind="diff_image",
+                    stage_label=diffs_label,
+                    ffi_stem=ffi_stem,
+                    label=diffs_label,
+                    params=ks_params,
+                    output_store_name=output_store_name,
+                )
+                if write_path.is_file():
+                    return {
+                        "success": True,
+                        "product_id": product_id,
+                        "stem": diff_stem,
+                        "skipped": True,
+                        "path": str(write_path),
+                        "scc_store_hit": True,
+                    }
+                if downsample_fp is None and cfg is not None:
+                    downsample_fp = provenance_glue.resolve_downsample_fingerprint_from_cfg(
+                        cfg
+                    )
+                prov_complete = provenance_glue.diff_image_complete_in_store(
+                    sector=sck[0],
+                    camera=sck[1],
+                    ccd=sck[2],
+                    product_id=product_id,
+                    label=diffs_label,
+                    params=ks_params,
+                    ffi_path=ffi_path,
+                    downsample_fp=downsample_fp,
+                    data_root=data_root,
+                    cfg=cfg,
+                )
+            except Exception:
+                log.debug(
+                    "provenance resume check failed for %s", product_id, exc_info=True
+                )
+                prov_complete = None
+            if prov_complete is True:
+                hit_path: Optional[str] = None
+                if write_path is not None and write_path.is_file():
+                    hit_path = str(write_path)
+                else:
+                    existing_after_prov = resolve_pipeline_fits_path(diffs_dir, diff_stem)
+                    if existing_after_prov is not None:
+                        hit_path = existing_after_prov
+                if hit_path is not None:
+                    return {
+                        "success": True,
+                        "product_id": product_id,
+                        "stem": diff_stem,
+                        "skipped": True,
+                        "path": hit_path,
+                        "provenance_hit": True,
+                        "scc_store_hit": True,
+                    }
+                # Indexed complete but no file — fall through to process.
+
+        if resolve_pipeline_fits_path(diffs_dir, diff_stem) is not None:
+            return {
+                "success": True,
+                "product_id": product_id,
+                "stem": diff_stem,
+                "skipped": True,
+            }
 
     try:
         template_path = None
@@ -427,6 +429,7 @@ def kernel_subtract_loop(
     cfg: Optional[Any] = None,
     mask_catalog=None,
     diff_log_path: Optional[str] = None,
+    force_rerun: bool = False,
 ) -> list[dict]:
     """Run algebraic diff + robust TESSreduce background for each FFI.
 
@@ -436,6 +439,9 @@ def kernel_subtract_loop(
     ``cfg`` (``SynDiffConfig``), when given, drives best-effort PR-D1 diff
     provenance tracking (sector/camera/ccd + ``data_root``); never changes
     what/where is written. See ``orchestration/provenance_glue.py``.
+
+    ``force_rerun``, when set, bypasses the on-disk/provenance resume checks
+    and recomputes every frame (mirrors the hotpants stage's ``force_rerun``).
     """
     os.makedirs(diffs_dir, exist_ok=True)
     if bkg_dir:
@@ -514,6 +520,7 @@ def kernel_subtract_loop(
         "cfg": cfg,
         "mask_catalog": mask_catalog,
         "btjd_by_product_id": btjd_by_product_id,
+        "force_rerun": bool(force_rerun),
     }
 
     tasks = [(ffi_path,) for ffi_path in ffi_paths]

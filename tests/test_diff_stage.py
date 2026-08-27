@@ -237,6 +237,16 @@ class TestDiffStageExecution(unittest.TestCase):
         from syndiff_pipeline.difference_imaging.support.manifest import (
             manifest_path_from_output_dir,
         )
+        from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+            _scc_lane_root,
+            frozen_diff_config_for_verify,
+            resolve_diff_site_config_path,
+        )
+        from syndiff_pipeline.common.scc_paths import resolve_scc_diff_bookkeeping_dir
+        from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+            DIFF_JOB_BASENAME,
+            FRAMES_CSV_BASENAME,
+        )
 
         from syndiff_pipeline.template_creation.orchestration.runner_config import resolve_config
 
@@ -244,12 +254,37 @@ class TestDiffStageExecution(unittest.TestCase):
         result = verify_diff(resolved, self.runner)
         self.assertFalse(result.ok)
 
+        # An empty (header-only) manifest keeps the PR-D1 indexed-completeness
+        # check falling open (no product IDs to require), so this test
+        # exercises the legacy scc_diff_lane_complete fallback: bookkeeping
+        # (diff_job.json + frames.csv) plus the final stage's SCC-lane
+        # artifact (shared_mask.fits under the SCC diff lane root, *not* the
+        # event workspace -- shared_mask moved SCC-side in the workspace-split
+        # migration).
         manifest_csv = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
-        ws_root = self.event_dir / "ws"
-        ws_root.mkdir(parents=True, exist_ok=True)
-        (ws_root / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
+
+        cfg = frozen_diff_config_for_verify(
+            resolve_diff_site_config_path(meta=None, runner_cfg=self.runner),
+            self.target,
+            meta=None,
+        )
+        lane_root = _scc_lane_root(cfg)
+        lane_root.mkdir(parents=True, exist_ok=True)
+        (lane_root / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
+
+        bk_dir = resolve_scc_diff_bookkeeping_dir(
+            cfg.data_root,
+            int(cfg.sector),
+            int(cfg.camera),
+            int(cfg.ccd),
+            oversampling_factor=max(1, int(getattr(cfg, "oversampling_factor", 1) or 1)),
+            template_store_name=getattr(cfg, "template_store_name", None),
+        )
+        bk_dir.mkdir(parents=True, exist_ok=True)
+        (bk_dir / DIFF_JOB_BASENAME).write_text("{}", encoding="utf-8")
+        (bk_dir / FRAMES_CSV_BASENAME).write_text("ffi_product_id\n", encoding="utf-8")
 
         result = verify_diff(resolved, self.runner)
         self.assertTrue(result.ok)
