@@ -1913,16 +1913,11 @@ def hotpants_loop(
         # each frame in a separate interpreter for real multi-core speed.
         # Initializer injects large read-only arrays once per worker (not per task).
         # Progress is updated in the parent via on_result (NFS-safe, no worker flock).
-        # chunk_size: per-worker memory grows across frames (leak inside the
-        # native hotpants path); recycling the executor every 250 frames
-        # bounds that growth instead of letting joblib's crash-and-respawn
-        # path collapse throughput once several workers start dying.
         results = parallel_map_with_optional_tqdm(
             (delayed(_hotpants_loky_run_task)(t) for t in tasks),
             n_tasks=len(tasks),
             desc=tqdm_desc,
             n_jobs_eff=n_workers,
-            chunk_size=250,
             initializer=_hotpants_loky_initializer,
             initargs=(
                 mask,
