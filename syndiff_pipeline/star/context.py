@@ -30,6 +30,7 @@ from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
     _resolve_reference_ffi_path,
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+    DiffSitePolicy,
     SitePaths,
     _gaia_catalog_path,
     freeze_target_diff_config,
@@ -91,10 +92,20 @@ def _resolve_hotpants_output_labels(
     *,
     site_dir: Path,
     diffs_label: str | None,
+    diff_policy: DiffSitePolicy | None = None,
 ) -> tuple[str, str | None, str | None]:
-    policy = load_diff_site_policy(site_dir / "diff_config.yaml")
+    """Resolve hotpants ``(diffs, convolved, bkg)`` output labels.
+
+    Prefers *diff_policy* -- the same :class:`DiffSitePolicy` the site's
+    ``diff_config:`` pointer (or embedded v2 ``diff:`` block) resolves to for
+    ``syndiff diff submit`` -- so star and diff agree on one recipe. Falls
+    back to a hardcoded ``{site_dir}/diff_config.yaml`` read when no policy is
+    supplied (legacy path; a later wave removes it).
+    """
+    if diff_policy is None:
+        diff_policy = load_diff_site_policy(site_dir / "diff_config.yaml")
     hotpants_stages = [
-        stage for stage in policy.pipeline if stage.get("kind") == "hotpants"
+        stage for stage in diff_policy.pipeline if stage.get("kind") == "hotpants"
     ]
     if not hotpants_stages:
         raise ValueError("diff_config.yaml has no hotpants stage")
@@ -197,22 +208,32 @@ def _resolve_photutils_bkg_label(
     data_root: str | None = None,
     target: Target | None = None,
     output_store_name: str | None = None,
+    diff_policy: DiffSitePolicy | None = None,
 ) -> str:
     """
     Workspace label for per-frame photutils background (e.g. ``ks_b`` / ``ks_b_s``).
 
     Star stamps subtract this map from raw science. Hotpants ``hp_b`` is not used.
     Prefers SCC ``diff_{lane}/`` when present.
+
+    The immutable per-lane snapshot ``{baseline_workspace_dir}/diff_config.yaml``
+    is always read from disk -- it is a workspace lock file, not the site's
+    live/pointer-resolved recipe. The *site*-level recipe comes from
+    *diff_policy* when supplied (the same policy ``syndiff diff submit``
+    resolves via ``diff_config:``/embedded ``diff:``), falling back to a
+    hardcoded ``{site_dir}/diff_config.yaml`` read when no policy is given
+    (legacy path; a later wave removes it).
     """
     ws_dir = Path(baseline_workspace_dir)
-    config_paths = [
-        ws_dir / "diff_config.yaml",
-        site_dir / "diff_config.yaml",
-    ]
+    pipelines: list[list[dict]] = [_load_yaml_pipeline(ws_dir / "diff_config.yaml")]
+    if diff_policy is not None:
+        pipelines.append(list(diff_policy.pipeline))
+    else:
+        pipelines.append(_load_yaml_pipeline(site_dir / "diff_config.yaml"))
     candidates: list[str] = []
-    for config_path in config_paths:
+    for pipeline in pipelines:
         label = _photutils_bkg_from_pipeline(
-            _load_yaml_pipeline(config_path),
+            pipeline,
             diffs_label=diffs_label,
         )
         if label:
@@ -365,8 +386,19 @@ def load_event_context(
     baseline_phot_bkg_label: str | None = None,
     star_run_config: StarRunConfig | None = None,
     star_target_row: StarTargetRow | None = None,
+    diff_policy: DiffSitePolicy | None = None,
 ) -> StarEventContext:
-    """Resolve site/target inputs into a :class:`StarEventContext`."""
+    """Resolve site/target inputs into a :class:`StarEventContext`.
+
+    *diff_policy*, when supplied, is the site's resolved diff recipe -- the
+    same :class:`DiffSitePolicy` ``syndiff diff submit`` uses (via
+    ``diff_config:``/``diff_site_config:``/``diff_config_path`` or an
+    embedded v2 ``diff:`` block) -- and is threaded into hotpants output
+    label and photutils-background label resolution so star and diff always
+    agree on one recipe. When omitted, both fall back to reading
+    ``{site}/diff_config.yaml`` directly (legacy path; a later wave removes
+    it).
+    """
     paths = SitePaths.from_site_dir(site)
 
     if star_target_row is not None:
@@ -512,6 +544,7 @@ def load_event_context(
     diffs_label, convolved_label, _hp_bkg_label = _resolve_hotpants_output_labels(
         site_dir=paths.site_dir,
         diffs_label=baseline_diffs_label,
+        diff_policy=diff_policy,
     )
     if baseline_convolved_label:
         convolved_label = baseline_convolved_label
@@ -525,6 +558,7 @@ def load_event_context(
             data_root=data_root,
             target=target,
             output_store_name=output_store_name,
+            diff_policy=diff_policy,
         )
     resolve_kw = dict(
         data_root=data_root,

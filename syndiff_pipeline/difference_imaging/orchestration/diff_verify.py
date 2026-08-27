@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Optional
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import split_pipeline
-from syndiff_pipeline.difference_imaging.orchestration.site_config import freeze_target_diff_config
+from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+    freeze_target_diff_config,
+    resolve_diff_config,
+)
 from syndiff_pipeline.difference_imaging.orchestration.validate import _outputs_for_stage
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     is_pipeline_fits_filename,
@@ -36,6 +39,7 @@ except Exception:  # pragma: no cover
 
 if TYPE_CHECKING:
     from syndiff_pipeline.common.orchestration.spec import StageRunContext
+    from syndiff_pipeline.difference_imaging.orchestration.site_config import DiffSitePolicy
     from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
 
 log = logging.getLogger(__name__)
@@ -59,7 +63,14 @@ def resolve_diff_site_config_path(
     meta: dict | None = None,
     runner_cfg: RunnerConfig | None = None,
 ) -> Path:
-    """Match execute-time config resolution: run_meta overrides runner default."""
+    """Match execute-time config resolution: run_meta overrides runner default.
+
+    Legacy (``diff_config:`` pointer) resolution only. Callers that have a
+    ``runner_cfg`` should prefer :func:`frozen_diff_config_for_verify`
+    (``runner_cfg=...``) directly -- when ``runner_cfg.diff`` is set (the
+    embedded, frozen policy) there is no live site file to point at, and
+    calling this function would raise.
+    """
     for key in ("source_diff_config_path", "diff_config_path"):
         raw = (meta or {}).get(key) or getattr(runner_cfg, "diff_config_path", "")
         if raw:
@@ -83,14 +94,68 @@ def apply_workspace_run_id_override(
     return cfg
 
 
+def _diff_config_from_frozen_policy(
+    policy: "DiffSitePolicy",
+    target: Target,
+    runner_cfg: RunnerConfig,
+) -> SynDiffConfig:
+    """Resolve a target's diff config directly from the frozen ``RunnerConfig.diff``
+    policy, without any live file read.
+
+    Deployment roots (``workspace_root``/``data_root``/``ffi_dir``) come from
+    the frozen ``RunnerConfig`` itself -- it is already the per-run config
+    materialized under ``runs/{run_id}/`` at submit time, so re-reading
+    ``deployment.yaml`` here would reintroduce the exact live-read-on-every-tick
+    problem this resolution order exists to remove. Note: a handful of
+    deployment-only keys that :func:`resolve_diff_config` optionally consults
+    (``straps_csv``, ``bsc_catalog``, ``removed_stars_csv``, ``manifest``, the
+    deprecated ``median_mask_path``) live only in ``deployment.yaml``; they are
+    frozen onto ``RunnerConfig.deployment_paths`` at submit and merged back in
+    here, so frozen-first resolution does not silently drop them.
+    """
+    deployment = {
+        "workspace_root": getattr(runner_cfg, "workspace_root", "") or "",
+        "data_root": getattr(runner_cfg, "data_root", "") or "",
+        "ffi_dir": getattr(runner_cfg, "ffi_dir", "") or "",
+    }
+    deployment.update(getattr(runner_cfg, "deployment_paths", None) or {})
+    deployment_path = Path(
+        str(getattr(runner_cfg, "deployment_file", "") or "deployment.yaml")
+    ).expanduser()
+    site_config_dir = Path(policy.source_dir) if getattr(policy, "source_dir", "") else None
+    return resolve_diff_config(
+        target,
+        policy,
+        deployment,
+        deployment_path=deployment_path,
+        site_config_dir=site_config_dir,
+    )
+
+
 def frozen_diff_config_for_verify(
-    site_config_path: str | Path,
+    site_config_path: str | Path | None,
     target: Target,
     *,
     meta: dict | None = None,
+    runner_cfg: RunnerConfig | None = None,
 ) -> SynDiffConfig:
-    """Load site policy + deployment and apply optional run-level workspace override."""
-    cfg = freeze_target_diff_config(site_config_path, target)
+    """Load site policy + deployment and apply optional run-level workspace override.
+
+    Frozen-first: when ``runner_cfg.diff`` is set (Wave B-1's embedded ``diff:``
+    policy, frozen verbatim into ``runs/{run_id}/config.yaml``), resolve
+    directly against it -- ``site_config_path`` is ignored in that case, since
+    the frozen policy (not whatever the live site file says today) is
+    authoritative. Otherwise falls back to today's behaviour exactly: resolve
+    (or accept) a live site config path and load + freeze it via
+    :func:`freeze_target_diff_config`.
+    """
+    policy = getattr(runner_cfg, "diff", None)
+    if policy is not None:
+        cfg = _diff_config_from_frozen_policy(policy, target, runner_cfg)
+    else:
+        if site_config_path is None:
+            site_config_path = resolve_diff_site_config_path(meta=meta, runner_cfg=runner_cfg)
+        cfg = freeze_target_diff_config(site_config_path, target)
     return apply_workspace_run_id_override(cfg, meta)
 
 
@@ -129,9 +194,10 @@ def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
     -------
     SynDiffConfig"""
     cfg = frozen_diff_config_for_verify(
-        resolve_diff_site_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg),
+        None,
         ctx.target,
         meta=ctx.meta,
+        runner_cfg=ctx.runner_cfg,
     )
     # Contract A3b: activates every emit site's already-landed
     # ``getattr(cfg, "run_id", "") or None`` read.

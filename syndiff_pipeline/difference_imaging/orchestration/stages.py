@@ -186,10 +186,22 @@ def _collect_diff_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
 
 
 def _condor_resources_for_stage(cfg, stage_name: str):
-    """Condor resources for one split diff stage, from the per-stage condor: block."""
+    """Condor resources for one split diff stage, from the per-stage condor: block.
+
+    ``cfg`` here is the ``RunnerConfig`` (see ``launcher.launch_stage``'s
+    ``condor_resources(cfg)`` call). Frozen-first: prefer the embedded,
+    already-frozen ``cfg.diff.condor_by_stage`` -- read on every Condor
+    submit -- over a live re-read of ``cfg.diff_config_path``'s site file.
+    This is what makes hand-editing ``diff.condor`` in the frozen
+    ``runs/{run_id}/config.yaml`` retune a live run: the supervisor re-reads
+    that file every tick, and the new value reaches ``condor.submit_job``
+    without needing the live site file to still agree.
+    """
     from syndiff_pipeline.common.orchestration import condor
 
-    policy = load_diff_site_policy(cfg.diff_config_path)
+    policy = getattr(cfg, "diff", None)
+    if policy is None:
+        policy = load_diff_site_policy(cfg.diff_config_path)
     c = policy.condor_by_stage[stage_name]
     return condor.CondorResourceRequest(
         request_cpus=c.request_cpus,

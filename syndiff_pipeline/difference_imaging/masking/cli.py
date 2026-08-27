@@ -95,9 +95,23 @@ def _store_name_from_site(site: str | None) -> str | None:
     if not site:
         return None
     paths = SitePaths.from_site_dir(site)
-    if not paths.diff_config.is_file():
+    if not paths.template_config.is_file():
         return None
-    policy = load_diff_site_policy(paths.diff_config)
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+    )
+
+    runner_cfg = load_runner_config(str(paths.template_config))
+    if runner_cfg.diff is not None:
+        # Unified (schema v2) policy from pipeline.yaml's embedded 'diff:'.
+        policy = runner_cfg.diff
+    elif runner_cfg.diff_config_path:
+        # Legacy (schema v1): pipeline.yaml's 'diff_config:'/'diff_site_config:'
+        # pointer -- kept for sites not yet migrated to an embedded 'diff:'
+        # block; a later wave removes it.
+        policy = load_diff_site_policy(runner_cfg.diff_config_path)
+    else:
+        return None
     raw = (policy.paths or {}).get("output_store_name")
     if raw is None:
         return None

@@ -39,7 +39,14 @@ def _add_shared_execution_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--config",
         default=None,
-        help="Orchestrator policy YAML (default: <site>/pipeline.yaml when --site is set)",
+        help=(
+            "Unified orchestrator policy YAML -- always a site pipeline.yaml-style "
+            "file (default: <site>/pipeline.yaml when --site is set), never a bare "
+            "diff_config.yaml. For 'diff run --target-name' (foreground debug run: "
+            "no run id, no state DB, no supervisor) this is the same pipeline.yaml; "
+            "its embedded 'diff:' policy is used when present, else the legacy "
+            "'diff_config:'/'diff_site_config:' pointer it names."
+        ),
     )
     p.add_argument(
         "--deployment",
@@ -204,35 +211,79 @@ def parse_execution_argv(argv: list[str]) -> tuple[str, str, argparse.Namespace]
 
 
 def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
-    """Foreground diff pipeline for one target (no supervisor / state DB)."""
+    """Foreground diff pipeline for one target.
+
+    Debug entry point: no run id, no state DB, no supervisor -- it resolves
+    one target's diff config and calls ``run_pipeline`` directly in this
+    process.
+    """
+    from pathlib import Path
+
+    from syndiff_pipeline.common.orchestration.deployment import (
+        deployment_path_for_config,
+        load_deployment_file,
+    )
     from syndiff_pipeline.common.orchestration.targets import find_target, load_targets
     from syndiff_pipeline.difference_imaging.orchestration.cli import run_pipeline
     from syndiff_pipeline.difference_imaging.orchestration.site_config import (
         SitePaths,
         freeze_target_diff_config,
+        resolve_diff_config,
+    )
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
     )
 
     if not args.target_name:
         raise SystemExit("--target-name is required for diff foreground run")
     if not args.targets:
         raise SystemExit("--targets is required for diff foreground run with --target-name")
-    if args.site:
-        paths = SitePaths.from_site_dir(args.site)
-        diff_config = str(paths.diff_config)
-        deployment = str(paths.deployment) if paths.deployment.is_file() else None
-    elif args.config:
-        diff_config = args.config
-        deployment = args.deployment
+    if args.config:
+        config_path = args.config
+    elif args.site:
+        config_path = str(SitePaths.from_site_dir(args.site).template_config)
     else:
-        raise SystemExit("--site or --config (diff site config) is required")
+        raise SystemExit("--site or --config (unified pipeline.yaml) is required")
 
     targets = load_targets(args.targets)
     target = find_target(targets, args.target_name)
-    cfg = freeze_target_diff_config(
-        diff_config,
-        target,
-        deployment_path=deployment,
-    )
+
+    runner_cfg = load_runner_config(config_path)
+    deploy_override = getattr(args, "deployment", None)
+
+    if runner_cfg.diff is not None:
+        # Unified (schema v2) policy from pipeline.yaml's embedded ``diff:``.
+        # diff.deployment_file is not a thing (see parse_unified_diff_policy) --
+        # the site-level deployment_file always governs here.
+        deploy_path = (
+            Path(deploy_override).expanduser().resolve()
+            if deploy_override
+            else deployment_path_for_config(config_path, runner_cfg.deployment_file)
+        )
+        deployment = load_deployment_file(deploy_path)
+        cfg = resolve_diff_config(
+            target,
+            runner_cfg.diff,
+            deployment,
+            deployment_path=deploy_path,
+            site_config_dir=Path(runner_cfg.diff.source_dir),
+        )
+    elif runner_cfg.diff_config_path:
+        # Legacy (schema v1): pipeline.yaml's 'diff_config:'/'diff_site_config:'
+        # pointer names a standalone diff_config.yaml -- kept for sites not yet
+        # migrated to an embedded 'diff:' block; a later wave removes it. Let
+        # freeze_target_diff_config resolve its own deployment path (honoring
+        # that file's own deployment_file key) unless the caller overrode it.
+        cfg = freeze_target_diff_config(
+            runner_cfg.diff_config_path,
+            target,
+            deployment_path=deploy_override,
+        )
+    else:
+        raise SystemExit(
+            f"{config_path} has no diff policy: no embedded 'diff:' block and no "
+            "'diff_config'/'diff_site_config' pointer to a diff_config.yaml."
+        )
     if getattr(args, "workspace_run_id", None):
         cfg.workspace_run_id = str(args.workspace_run_id).strip()
         cfg.pipeline_plots = True

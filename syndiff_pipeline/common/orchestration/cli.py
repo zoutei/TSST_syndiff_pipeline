@@ -627,7 +627,19 @@ def _prepare_run_directory(
         meta["source_star_config_path"] = str(Path(source_star_config_path).resolve())
         star_dest = run_directory / "star_config.yaml"
         if not star_dest.is_file():
-            shutil.copy2(source_star_config_path, star_dest)
+            # Write the canonical policy dump, not a raw copy. execute_star_stage
+            # rewrites this same file from parsed policy on first execute, so a
+            # verbatim copy would hash differently at submit than after the first
+            # run -- and _star_config_fingerprint hashes the whole file, so
+            # manifest_valid() would see a spurious mismatch across that boundary.
+            from syndiff_pipeline.star.site_config import (
+                load_star_site_policy,
+                write_frozen_star_config,
+            )
+
+            write_frozen_star_config(
+                load_star_site_policy(source_star_config_path), star_dest
+            )
         frozen_star = str(star_dest.resolve())
         meta["star_config_path"] = frozen_star
         from syndiff_pipeline.template_creation.orchestration.runner_config import (
@@ -645,7 +657,16 @@ def _prepare_run_directory(
         )
         phot_dest = run_directory / "photometry_config.yaml"
         if not phot_dest.is_file():
-            shutil.copy2(source_photometry_config_path, phot_dest)
+            # Canonical dump, not a raw copy -- same fingerprint-stability
+            # reason as star_config above.
+            from syndiff_pipeline.photometry.site_config import (
+                load_photometry_site_policy,
+                write_frozen_photometry_config,
+            )
+
+            write_frozen_photometry_config(
+                load_photometry_site_policy(source_photometry_config_path), phot_dest
+            )
         frozen_phot = str(phot_dest.resolve())
         meta["photometry_config_path"] = frozen_phot
         from syndiff_pipeline.template_creation.orchestration.runner_config import (
@@ -734,15 +755,19 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     preset = getattr(args, "preset", None)
     if preset == COMBINED_PRESET:
-        if not cfg.diff_config_path:
+        if cfg.diff is None and not cfg.diff_config_path:
             raise SystemExit(
-                "syndiff submit requires pipeline config key 'diff_config' pointing to "
-                "the event diff policy."
+                "syndiff submit requires the pipeline config to carry the event diff "
+                "policy: either an embedded 'diff:' section (schema v2) or a "
+                "'diff_config:' key pointing at a diff policy file (legacy)."
             )
         # Fail before materializing any run state when an SCC cannot resolve
         # its diff policy/template lane.  The template artifacts
         # themselves are allowed to be absent: they are genuine upstream rows
         # in this same run.
+        from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
+            frozen_diff_config_for_verify,
+        )
         from syndiff_pipeline.difference_imaging.orchestration.site_config import (
             freeze_target_diff_config,
         )
@@ -752,13 +777,19 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
         deploy_path = deployment_path_for_config(args.config, cfg.deployment_file)
         for target in targets:
-            validate_pipeline(
-                freeze_target_diff_config(
+            if cfg.diff is not None:
+                # Schema v2: resolve from the embedded policy, the same way
+                # every runtime consumer now does. No separate file exists.
+                resolved_cfg = frozen_diff_config_for_verify(
+                    None, target, runner_cfg=cfg
+                )
+            else:
+                resolved_cfg = freeze_target_diff_config(
                     cfg.diff_config_path,
                     target,
                     deployment_path=deploy_path,
                 )
-            )
+            validate_pipeline(resolved_cfg)
 
     state = PipelineState(cfg.state_db_path)
     _reject_duplicate_run_id(state, run_id)

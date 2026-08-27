@@ -22,6 +22,7 @@ from syndiff_pipeline.photometry.site_config import (
     load_photometry_site_policy,
     resolve_photometry_config_path,
     resolve_photometry_run_config,
+    resolve_photometry_site_dir,
     write_frozen_photometry_config,
 )
 
@@ -40,9 +41,20 @@ def _photometry_config_fingerprint(ctx: StageRunContext) -> str:
 
 
 def _resolve_photometry_run(ctx: StageRunContext):
+    # phot_config_path: prefers the frozen runs/{run_id}/photometry_config.yaml
+    # snapshot for policy *content* (Task 1: make the frozen copy actually
+    # authoritative). site_dir: always the live site directory -- never a run
+    # directory -- for deployment.yaml/relative-path resolution; passed as
+    # load_photometry_site_policy(..., config_path=...) so the returned
+    # policy's config_path field (which build_syndiff_config_for_photometry
+    # resolves deployment.yaml against) stays site-anchored regardless of
+    # which file supplied the content. See resolve_photometry_config_path's
+    # and resolve_photometry_site_dir's docstrings.
     phot_config_path = resolve_photometry_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg)
-    policy = load_photometry_site_policy(phot_config_path)
-    site_dir = phot_config_path.parent
+    site_dir = resolve_photometry_site_dir(meta=ctx.meta, runner_cfg=ctx.runner_cfg)
+    policy = load_photometry_site_policy(
+        phot_config_path, config_path=site_dir / "photometry_config.yaml"
+    )
     run_config = resolve_photometry_run_config(policy, ctx.target, site_dir=site_dir)
     cfg = build_syndiff_config_for_photometry(
         policy, ctx.target, run_config, site_dir=site_dir

@@ -238,8 +238,25 @@ def resolve_thresholds_from_site(site_dir: str | Path, stage: str) -> tuple[int,
         from syndiff_pipeline.difference_imaging.orchestration.site_config import (
             load_diff_site_policy,
         )
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            load_runner_config,
+        )
 
-        policy = load_diff_site_policy(site.diff_config)
+        runner_cfg = load_runner_config(str(site.template_config))
+        if runner_cfg.diff is not None:
+            # Unified (schema v2) policy from pipeline.yaml's embedded 'diff:'.
+            policy = runner_cfg.diff
+        elif runner_cfg.diff_config_path:
+            # Legacy (schema v1): pipeline.yaml's 'diff_config:'/'diff_site_config:'
+            # pointer -- kept for sites not yet migrated to an embedded 'diff:'
+            # block; a later wave removes it.
+            policy = load_diff_site_policy(runner_cfg.diff_config_path)
+        else:
+            raise FileNotFoundError(
+                f"No diff policy for site {site.site_dir}: {site.template_config} has "
+                "no embedded 'diff:' block and no 'diff_config'/'diff_site_config' "
+                "pointer."
+            )
         resources = policy.condor_by_stage[stage_key]
         return int(resources.host_stats_min_mem_mb), float(resources.host_stats_max_load15)
     if stage_key == "star":
