@@ -15,6 +15,10 @@ from syndiff_pipeline.common.orchestration.notifications import (
     NotificationConfig,
     parse_notification_config,
 )
+from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+    DiffSitePolicy,
+    parse_unified_diff_policy,
+)
 from syndiff_pipeline.template_creation.orchestration.bundled_assets import skycell_wcs_csv
 from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
@@ -97,6 +101,14 @@ class RunnerConfig:
     state_db_path: str = ""
     skycell_wcs_csv: str = ""
     diff_config_path: str = ""
+    # Unified (schema v2) diff policy, populated from the embedded ``diff:``
+    # block when present. Mutually exclusive with diff_config_path -- exactly
+    # one of the two is set when the site has a diff policy at all, both are
+    # falsy/None for template-only or photometry-only configs. See
+    # _resolve_diff_selection(). diff_config_path is unaffected and keeps
+    # working exactly as before: 36 call sites still read it (later wave
+    # migrates them to `diff`).
+    diff: DiffSitePolicy | None = None
     star_config_path: str = ""
     photometry_config_path: str = ""
     stages: TemplateStageParams = field(default_factory=lambda: parse_stage_params({}))
@@ -209,6 +221,57 @@ def _parse_bookkeeping_trust_index(raw: dict) -> bool:
     return bool(raw.get("bookkeeping_trust_index", False))
 
 
+def _resolve_diff_selection(
+    *,
+    diff_config_pointer: str,
+    raw_diff_block: Any,
+    base_dir: Path,
+    deployment_file: str,
+) -> tuple[str, Optional["DiffSitePolicy"]]:
+    """Resolve the ``diff_config:`` pointer *or* the unified ``diff:`` block.
+
+    Both forms must coexist for the length of this wave (36 call sites still
+    read ``RunnerConfig.diff_config_path``), but a single config must use at
+    most one -- mixing them silently produces two policies and would be
+    unreviewable. ``diff:`` is optional either way: template-only and
+    photometry-only configs legitimately have neither.
+
+    *diff_config_pointer* is the already-precedence-resolved
+    ``diff_config``/``diff_site_config``/``diff_config_path`` string (each
+    caller applies its own key-precedence order, unchanged from before this
+    helper existed, so byte-identical v1 behaviour is preserved exactly).
+    *raw_diff_block* is ``raw.get("diff")`` (``None`` when absent).
+
+    Returns
+    -------
+    tuple[str, DiffSitePolicy | None]
+        ``(diff_config_path, diff_policy)`` -- exactly one is
+        truthy/non-``None`` when the site has a diff policy, both are
+        falsy/``None`` when it has none.
+    """
+    diff_config_pointer = str(diff_config_pointer or "").strip()
+
+    if diff_config_pointer and raw_diff_block is not None:
+        raise ValueError(
+            "config sets both a diff_config/diff_site_config pointer and a "
+            "unified 'diff:' block -- use exactly one. Fold the pointed-to "
+            "diff_config.yaml content under 'diff:' (schema v2) and drop the "
+            "pointer key, or drop 'diff:' and keep the pointer (schema v1)."
+        )
+
+    diff_config_path = ""
+    if diff_config_pointer:
+        diff_config_path = _resolve_path(base_dir, diff_config_pointer) or ""
+
+    diff_policy: Optional["DiffSitePolicy"] = None
+    if raw_diff_block is not None:
+        diff_policy = parse_unified_diff_policy(
+            raw_diff_block, source_dir=base_dir, deployment_file=deployment_file
+        )
+
+    return diff_config_path, diff_policy
+
+
 def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> RunnerConfig:
     """Build runner config.
     
@@ -235,9 +298,12 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         or raw.get("diff_site_config", "")
         or raw.get("diff_config_path", "")
     ).strip()
-    diff_config_path = ""
-    if diff_site:
-        diff_config_path = _resolve_path(base_dir, diff_site) or ""
+    diff_config_path, diff_policy = _resolve_diff_selection(
+        diff_config_pointer=diff_site,
+        raw_diff_block=raw.get("diff"),
+        base_dir=base_dir,
+        deployment_file=deployment_file,
+    )
 
     star_site = str(
         raw.get("star_config", "")
@@ -266,6 +332,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         state_db_path=db,
         skycell_wcs_csv=wcs,
         diff_config_path=diff_config_path,
+        diff=diff_policy,
         star_config_path=star_config_path,
         photometry_config_path=photometry_config_path,
         stages=parse_stage_params(raw.get("stages", {})),
@@ -376,6 +443,21 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
     }
     if cfg.diff_config_path:
         data["diff_config_path"] = cfg.diff_config_path
+    # Freeze the diff: block verbatim -- NOT a re-serialization of the parsed
+    # DiffSitePolicy fields (asdict() above would otherwise normalize e.g. a
+    # flat `condor:` into condor_by_stage and silently drop unrecognized keys
+    # like mask_settings sub-keys nobody's added a field for yet). Verbatim
+    # keeps _parse_condor_by_stage's all-three-keys validation as the single
+    # gate, and makes hand-editing diff.condor in a frozen
+    # runs/{run_id}/config.yaml behave exactly like editing the authored
+    # file -- that hand-edit is the intended way to retune a live run's
+    # Condor resources.
+    if cfg.diff is not None:
+        diff_out = copy.deepcopy(cfg.diff.raw)
+        diff_out["source_dir"] = cfg.diff.source_dir
+        data["diff"] = diff_out
+    else:
+        data.pop("diff", None)
     if cfg.star_config_path:
         data["star_config_path"] = cfg.star_config_path
     if cfg.photometry_config_path:
@@ -452,21 +534,29 @@ def load_and_materialize_runner_config(
         raw: dict = yaml.safe_load(fh) or {}
 
     if _is_materialized_config(raw):
+        _deployment_file_m = str(raw.get("deployment_file", "deployment.yaml"))
+        _diff_site_m = str(
+            raw.get("diff_config_path")
+            or raw.get("diff_config")
+            or raw.get("diff_site_config")
+            or ""
+        ).strip()
+        _diff_config_path_m, _diff_policy_m = _resolve_diff_selection(
+            diff_config_pointer=_diff_site_m,
+            raw_diff_block=raw.get("diff"),
+            base_dir=base,
+            deployment_file=_deployment_file_m,
+        )
         cfg = RunnerConfig(
-            deployment_file=str(raw.get("deployment_file", "deployment.yaml")),
+            deployment_file=_deployment_file_m,
             data_root=_resolve_path(base, raw.get("data_root", "")) or "",
             ffi_dir=_resolve_path(base, raw.get("ffi_dir", "")) or "",
             workspace_root=_resolve_path(base, raw.get("workspace_root", "")) or "",
             runs_root=_resolve_path(base, raw.get("runs_root")) or "",
             state_db_path=_resolve_path(base, raw.get("state_db_path")) or "",
             skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
-            diff_config_path=_resolve_path(
-                base,
-                raw.get("diff_config_path")
-                or raw.get("diff_config")
-                or raw.get("diff_site_config"),
-            )
-            or "",
+            diff_config_path=_diff_config_path_m,
+            diff=_diff_policy_m,
             star_config_path=_resolve_path(
                 base,
                 raw.get("star_config_path")
