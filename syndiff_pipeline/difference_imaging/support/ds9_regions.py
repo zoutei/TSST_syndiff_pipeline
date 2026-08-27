@@ -144,6 +144,33 @@ def format_targets_ds9_regions(
     return "\n".join(lines) + "\n"
 
 
+def write_epsf_star_selection_region(
+    used_xy: Iterable[tuple[float, float]],
+    excluded_xy: Iterable[tuple[float, float]],
+    region_path: str,
+    *,
+    circle_radius_px: float = _DEFAULT_CIRCLE_RADIUS_PX,
+) -> str:
+    """
+    DS9 region file for one ePSF debug frame: blue circles for candidate
+    stars used by ``EPSFBuilder``, red for cut-selected candidates it
+    excluded. Coordinates are frame-local 0-based (x, y), converted to DS9
+    1-based ``image`` space.
+    """
+    circles: list[tuple[str, float, float, str]] = []
+    for i, (x, y) in enumerate(used_xy):
+        xd, yd = crop_local_to_ds9_xy(x, y)
+        circles.append((f"used_{i}", xd, yd, "blue"))
+    for i, (x, y) in enumerate(excluded_xy):
+        xd, yd = crop_local_to_ds9_xy(x, y)
+        circles.append((f"excluded_{i}", xd, yd, "red"))
+    content = format_targets_ds9_regions(circles, circle_radius_px=circle_radius_px)
+    root = Path(region_path).expanduser().resolve().parent
+    root.mkdir(parents=True, exist_ok=True)
+    Path(region_path).write_text(content, encoding="utf-8")
+    return region_path
+
+
 def write_targets_ds9_regions(
     output_dir: str,
     *,

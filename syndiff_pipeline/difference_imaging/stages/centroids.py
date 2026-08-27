@@ -1,8 +1,10 @@
 """
 Gaia-star PSF photometry on difference images using per-frame gridded ePSF models.
 
-Mirrors ``starpositioningscript.py``: filter Gaia to ``phot_rp_mean_mag < 12.95``,
-run ``PSFPhotometry`` on all selected stars per FFI, and save ``*_photresults.ecsv``.
+Mirrors ``starpositioningscript.py``: filter Gaia to ``tess_mag < 12.95``
+(derived TESS magnitude, never raw Gaia ``phot_rp_mean_mag`` -- standing
+policy, 2026-08-22), run ``PSFPhotometry`` on all selected stars per FFI,
+and save ``*_photresults.ecsv``.
 """
 
 from __future__ import annotations
@@ -109,18 +111,20 @@ def workspace_has_centroids(output_dir: str) -> bool:
 
 
 def _filter_gaia_for_centroids(gaia_df: pd.DataFrame, params) -> pd.DataFrame:
-    """Brightness cuts for centroid init (reference script: 7.5 < rp < 12.95)."""
-    df = gaia_df
-    if "phot_rp_mean_mag" not in df.columns:
-        return df.reset_index(drop=True)
-    rp = pd.to_numeric(df["phot_rp_mean_mag"], errors="coerce")
-    mag_max = getattr(params, "mag_max_rp", 12.95)
-    mag_min = getattr(params, "mag_min_rp", 7.5)
+    """Brightness cuts for centroid init, on derived tess_mag (7.5 < tess_mag < 12.95 by default)."""
+    from syndiff_pipeline.difference_imaging.stages.gridded_epsf import (
+        _ensure_tess_mag_column,
+    )
+
+    df = _ensure_tess_mag_column(gaia_df)
+    mag = pd.to_numeric(df["tess_mag"], errors="coerce")
+    mag_max = getattr(params, "tess_mag_max", 12.95)
+    mag_min = getattr(params, "tess_mag_min", 7.5)
     if mag_max is not None:
-        df = df.loc[rp < float(mag_max)]
-        rp = pd.to_numeric(df["phot_rp_mean_mag"], errors="coerce")
+        df = df.loc[mag < float(mag_max)]
+        mag = pd.to_numeric(df["tess_mag"], errors="coerce")
     if mag_min is not None:
-        df = df.loc[rp > float(mag_min)]
+        df = df.loc[mag > float(mag_min)]
     return df.reset_index(drop=True)
 
 
@@ -138,6 +142,8 @@ def _init_centroids_worker(
     ffi_list_df: pd.DataFrame | None = None,
     science_bounds: dict | None = None,
     ffi_path_by_stem: dict[str, str] | None = None,
+    debug_stems: frozenset[str] | None = None,
+    debug_plot_dir: str | None = None,
 ) -> None:
     """Load shared centroid inputs once per loky worker."""
     _WORKER_CTX.clear()
@@ -156,6 +162,8 @@ def _init_centroids_worker(
             "ffi_list_df": ffi_list_df,
             "science_bounds": science_bounds,
             "ffi_path_by_stem": dict(ffi_path_by_stem or {}),
+            "debug_stems": frozenset(debug_stems or ()),
+            "debug_plot_dir": debug_plot_dir,
         }
     )
 
@@ -189,6 +197,79 @@ def _attach_gaia_metadata(phot_results: Table, gaia_df: pd.DataFrame) -> Table:
     return Table.from_pandas(merged)
 
 
+def _split_oversized_group(
+    x: np.ndarray, y: np.ndarray, max_group_size: int, start_sep: float
+) -> list[np.ndarray]:
+    """
+    Partition one over-large joint-fit group into pieces of size
+    ``<= max_group_size``, splitting by proximity, never dropping stars.
+
+    Recursively re-clusters with a tighter ``min_separation`` (halved each
+    step) until every resulting piece fits. Falls back to arbitrary
+    positional chunking (sorted by x then y) if repeated shrinking doesn't
+    separate the points within 30 halvings -- e.g. near-coincident Gaia
+    positions -- which still guarantees termination and never drops a star.
+    """
+    from photutils.psf import SourceGrouper
+
+    n = len(x)
+    if n <= max_group_size:
+        return [np.arange(n)]
+    sep = start_sep
+    for _ in range(30):
+        sep = sep / 2.0
+        if sep <= 1e-9:
+            break
+        sub_ids = np.asarray(SourceGrouper(min_separation=sep)(x, y))
+        unique_ids = np.unique(sub_ids)
+        if len(unique_ids) > 1:
+            pieces: list[np.ndarray] = []
+            for gid in unique_ids:
+                local_idx = np.flatnonzero(sub_ids == gid)
+                for sub_piece in _split_oversized_group(
+                    x[local_idx], y[local_idx], max_group_size, sep
+                ):
+                    pieces.append(local_idx[sub_piece])
+            return pieces
+    order = np.lexsort((y, x))
+    return [order[i : i + max_group_size] for i in range(0, n, max_group_size)]
+
+
+class _CappedSourceGrouper:
+    """
+    ``SourceGrouper`` wrapper enforcing a hard cap on joint-fit group size.
+
+    ``photutils.psf.SourceGrouper`` has no native size limit -- a dense
+    field can produce a group with dozens of stars whose joint least-
+    squares fit becomes impractically slow (or fails to converge in
+    reasonable time). Groups larger than ``max_group_size`` are recursively
+    re-clustered with a tighter distance threshold until every sub-group
+    fits (see :func:`_split_oversized_group`) -- stars are split apart by
+    proximity, never dropped.
+    """
+
+    def __init__(self, min_separation: float, max_group_size: int):
+        self.min_separation = float(min_separation)
+        self.max_group_size = int(max_group_size)
+
+    def __call__(self, x, y):
+        from photutils.psf import SourceGrouper
+
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
+        base_ids = np.asarray(SourceGrouper(min_separation=self.min_separation)(x, y))
+        new_ids = np.empty(len(x), dtype=int)
+        next_id = 1
+        for gid in np.unique(base_ids):
+            idx = np.flatnonzero(base_ids == gid)
+            for piece in _split_oversized_group(
+                x[idx], y[idx], self.max_group_size, self.min_separation
+            ):
+                new_ids[idx[piece]] = next_id
+                next_id += 1
+        return new_ids
+
+
 def _photometry_one_frame(
     diff_img: np.ndarray,
     gridded_model,
@@ -196,7 +277,7 @@ def _photometry_one_frame(
     params,
 ) -> tuple[Table | None, Any | None]:
     """Run multi-star PSFPhotometry on one difference image."""
-    from photutils.psf import PSFPhotometry, SourceGrouper
+    from photutils.psf import PSFPhotometry
 
     if gaia_df.empty:
         log.warning("  centroids: no Gaia stars after magnitude filter")
@@ -206,12 +287,15 @@ def _photometry_one_frame(
     fit_shape = int(getattr(params, "fit_shape", 11) or 11)
     aperture_radius = float(getattr(params, "aperture_radius", 4.0) or 4.0)
     grouper_sep = float(getattr(params, "psf_grouper_min_separation", 10.0) or 10.0)
+    max_group_size = int(getattr(params, "centroids_max_group_size", 5) or 5)
 
     psf_phot = PSFPhotometry(
         gridded_model,
         fit_shape=fit_shape,
         aperture_radius=aperture_radius,
-        grouper=SourceGrouper(min_separation=grouper_sep),
+        grouper=_CappedSourceGrouper(
+            min_separation=grouper_sep, max_group_size=max_group_size
+        ),
         local_bkg_estimator=None,
     )
     with warnings.catch_warnings():
@@ -222,6 +306,27 @@ def _photometry_one_frame(
         )
     table = result if hasattr(result, "colnames") else result.to_table()
     return table, psf_phot
+
+
+def _write_residual_fits_from_psf_phot(
+    psf_phot, diff_img: np.ndarray, residual_fits_path: str
+) -> bool:
+    """Write a full-frame PSF-subtraction residual FITS from an already-fit ``psf_phot``."""
+    try:
+        residual = psf_phot.make_residual_image(diff_img)
+        os.makedirs(os.path.dirname(os.path.abspath(residual_fits_path)) or ".", exist_ok=True)
+        fits.PrimaryHDU(np.asarray(residual, dtype=np.float32)).writeto(
+            residual_fits_path,
+            overwrite=True,
+        )
+        return True
+    except Exception as exc:
+        log.warning(
+            "  centroids debug: cannot write residual FITS %s: %s",
+            residual_fits_path,
+            exc,
+        )
+        return False
 
 
 def write_frame_residual_fits(
@@ -238,6 +343,13 @@ def write_frame_residual_fits(
 ) -> Table | None:
     """
     Run PSF photometry on one frame and write the full-frame residual FITS.
+
+    Ad-hoc/manual debugging utility only -- re-fits the frame from scratch.
+    Production `centroids` pipeline_plots output is written inline during
+    the main fit (see :func:`_centroids_one_frame_task`'s ``debug_stems``
+    handling) and does not call this function; use this directly only to
+    regenerate a residual for an already-completed workspace that predates
+    that inline mechanism, or for an arbitrary one-off frame.
 
     Returns the photometry table on success, else ``None``.
     """
@@ -280,19 +392,7 @@ def write_frame_residual_fits(
         log.warning("  centroids debug: empty photometry result for %s", ffi_stem)
         return None
 
-    try:
-        residual = psf_phot.make_residual_image(diff_img)
-        os.makedirs(os.path.dirname(os.path.abspath(residual_fits_path)) or ".", exist_ok=True)
-        fits.PrimaryHDU(np.asarray(residual, dtype=np.float32)).writeto(
-            residual_fits_path,
-            overwrite=True,
-        )
-    except Exception as exc:
-        log.warning(
-            "  centroids debug: cannot write residual FITS %s: %s",
-            residual_fits_path,
-            exc,
-        )
+    if not _write_residual_fits_from_psf_phot(psf_phot, diff_img, residual_fits_path):
         return None
     return phot_results
 
@@ -386,7 +486,7 @@ def _centroids_one_frame_task(
         return frame_idx, ffi_stem, False, False
 
     try:
-        phot_results, _psf_phot = _photometry_one_frame(diff_img, model, gaia_frame, params)
+        phot_results, psf_phot = _photometry_one_frame(diff_img, model, gaia_frame, params)
     except Exception as exc:
         log.warning("  centroids: PSF photometry failed for %s: %s", ffi_stem, exc)
         return frame_idx, ffi_stem, False, False
@@ -394,6 +494,26 @@ def _centroids_one_frame_task(
     if phot_results is None or len(phot_results) == 0:
         log.warning("  centroids: empty photometry result for %s", ffi_stem)
         return frame_idx, ffi_stem, False, False
+
+    debug_stems = ctx.get("debug_stems") or frozenset()
+    debug_plot_dir = ctx.get("debug_plot_dir")
+    if debug_plot_dir and (ffi_stem in debug_stems or product_id in debug_stems) and psf_phot is not None:
+        from syndiff_pipeline.difference_imaging.support.plot import (
+            centroids_residual_fits_path,
+        )
+
+        residual_path = centroids_residual_fits_path(
+            debug_plot_dir, str(ctx.get("centroids_label") or "centroids"), ffi_stem
+        )
+        # Best-effort: reuses the fit already computed above, no re-fit.
+        # A failure here must never fail the (already-successful) centroid
+        # result -- see pipeline_plots-crash-wastes-completed-stages lesson.
+        try:
+            _write_residual_fits_from_psf_phot(psf_phot, diff_img, residual_path)
+        except Exception:
+            log.warning(
+                "  centroids debug: residual FITS failed for %s", ffi_stem, exc_info=True
+            )
 
     phot_results = _attach_gaia_metadata(phot_results, gaia_frame)
 
@@ -444,6 +564,10 @@ def run_centroids_all_frames(
     science_bounds: dict | None = None,
     ffi_path_by_stem: dict[str, str] | None = None,
     wcs_table: pd.DataFrame | None = None,
+    debug_stems: set[str] | None = None,
+    debug_plot_dir: str | None = None,
+    debug_reference_plot_dir: str | None = None,
+    debug_reference_label: str | None = None,
 ) -> tuple[list[str], list[bool]]:
     """
     PSF photometry on every difference image (thread-parallel over frames).
@@ -452,6 +576,12 @@ def run_centroids_all_frames(
     ``force_rerun`` is set (mirrors the hotpants/epsf stages' resume behavior,
     including a provenance-store fallback for artifacts not locatable in this
     workspace).
+
+    When ``debug_plot_dir`` is set, frames in ``debug_stems`` write a
+    PSF-subtraction residual FITS *inline*, reusing the fit already computed
+    for that frame -- no separate re-fit pass (see
+    :func:`_centroids_one_frame_task`). A summary index JSON matching the
+    legacy ``write_centroids_workspace_plots`` format is written at the end.
 
     Returns
     -------
@@ -483,7 +613,7 @@ def run_centroids_all_frames(
 
     # Reuse the same Gaia upper-magnitude filter as the ePSF stage (lower cut per frame).
     class _MagParams:
-        mag_max_rp = getattr(params, "mag_max_rp", 12.95)
+        tess_mag_max = getattr(params, "tess_mag_max", 12.95)
 
     if "ra" not in gaia_df.columns or "dec" not in gaia_df.columns:
         raise ValueError("Gaia catalog for centroids requires ra, dec columns")
@@ -536,6 +666,7 @@ def run_centroids_all_frames(
             success=bool(result[2]),
         )
 
+    debug_stems_frozen = frozenset(debug_stems or ())
     worker_initargs = (
         gaia_filtered,
         epsf_catalog,
@@ -550,6 +681,8 @@ def run_centroids_all_frames(
         ffi_list_df,
         science_bounds,
         ffi_path_by_stem or {},
+        debug_stems_frozen,
+        debug_plot_dir,
     )
     results: list[tuple[int, str, bool, bool]] = []
 
@@ -617,4 +750,64 @@ def run_centroids_all_frames(
             n_frames,
             PHOTRESULTS_ECSV_SUFFIX,
         )
+
+    if debug_plot_dir and debug_stems_frozen:
+        _write_centroids_debug_summary(
+            output_dir,
+            debug_plot_dir,
+            centroids_label=str(centroids_label or "centroids"),
+            debug_stems=debug_stems_frozen,
+            reference_plot_dir=debug_reference_plot_dir,
+            reference_label=debug_reference_label,
+        )
+
     return ffi_stems, centroids_ok
+
+
+def _write_centroids_debug_summary(
+    centroids_workspace_dir: str,
+    debug_plot_dir: str,
+    *,
+    centroids_label: str,
+    debug_stems: frozenset[str],
+    reference_plot_dir: str | None,
+    reference_label: str | None,
+) -> str:
+    """
+    Summary index of the residual FITS written inline during the main fit.
+
+    Matches the legacy ``write_centroids_workspace_plots`` JSON shape --
+    checks disk for what the parallel pass already wrote (or a prior run
+    left behind), does not fit anything itself.
+    """
+    from syndiff_pipeline.difference_imaging.support.plot import (
+        _safe_plot_token,
+        centroids_residual_fits_path,
+    )
+
+    written = [
+        p
+        for p in (
+            centroids_residual_fits_path(debug_plot_dir, centroids_label, stem)
+            for stem in sorted(debug_stems)
+        )
+        if os.path.isfile(p)
+    ]
+    summary_path = os.path.join(
+        debug_plot_dir, f"{_safe_plot_token(centroids_label)}_index.json"
+    )
+    os.makedirs(debug_plot_dir, exist_ok=True)
+    with open(summary_path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "centroids_workspace": centroids_workspace_dir,
+                "frames_plotted": sorted(debug_stems),
+                "reference_plot_dir": reference_plot_dir,
+                "reference_label": reference_label,
+                "residual_fits_paths": written,
+            },
+            fh,
+            indent=2,
+            sort_keys=True,
+        )
+    return summary_path

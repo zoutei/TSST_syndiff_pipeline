@@ -58,6 +58,7 @@ from syndiff_pipeline.difference_imaging.stages.gridded_epsf import (
     fit_epsf_section_multi,
     gridded_epsf_npz_path,
     prepare_gaia_for_gridded_epsf,
+    save_gridded_epsf_anchor_stems,
     save_gridded_epsf_index,
     save_gridded_epsf_npz,
     stack_from_gridded_cube,
@@ -82,6 +83,8 @@ def _init_orbit_epsf_worker(
     ffi_list_df: pd.DataFrame,
     science_bounds: dict,
     ffi_path_by_stem: dict[str, str],
+    debug_plot_dir: Optional[str] = None,
+    epsf_label: str = "epsf",
 ) -> None:
     """Load shared anchor-fitting inputs once per loky worker."""
     _ORBIT_WORKER_CTX.clear()
@@ -94,11 +97,13 @@ def _init_orbit_epsf_worker(
             "ffi_list_df": ffi_list_df,
             "science_bounds": science_bounds,
             "ffi_path_by_stem": dict(ffi_path_by_stem or {}),
+            "debug_plot_dir": debug_plot_dir,
+            "epsf_label": epsf_label,
         }
     )
 
 
-def _run_anchor_fit_task(payload: dict) -> tuple[Optional[list], Optional[np.ndarray]]:
+def _run_anchor_fit_task(payload: dict) -> tuple[Optional[list], Optional[np.ndarray], list[int]]:
     """Worker: fit one anchor. Reads shared state from _ORBIT_WORKER_CTX
     (set by _init_orbit_epsf_worker), not from closure capture."""
     ctx = _ORBIT_WORKER_CTX
@@ -109,6 +114,8 @@ def _run_anchor_fit_task(payload: dict) -> tuple[Optional[list], Optional[np.nda
     ffi_list_df = ctx["ffi_list_df"]
     science_bounds = ctx["science_bounds"]
     ffi_path_by_stem = ctx["ffi_path_by_stem"]
+    debug_plot_dir = ctx.get("debug_plot_dir")
+    epsf_label = ctx.get("epsf_label", "epsf")
 
     stack_before_fit = bool(epsf_params.epsf_stack_before_fit)
     window_masks = [
@@ -125,6 +132,8 @@ def _run_anchor_fit_task(payload: dict) -> tuple[Optional[list], Optional[np.nda
             ffi_list_df=ffi_list_df,
             science_bounds=science_bounds,
             frame_label=payload["stem"],
+            debug_plot_dir=debug_plot_dir if bool(getattr(epsf_params, "epsf_debug_plots", True)) else None,
+            epsf_label=epsf_label,
         )
     window_ffi_paths = [
         ffi_path_by_stem.get(s) or payload["anchor_ffi_path"]
@@ -446,7 +455,9 @@ def fit_anchor_stacked(
     ffi_list_df: pd.DataFrame,
     science_bounds: dict,
     frame_label: str = "",
-) -> tuple[Optional[list[tuple[float, float]]], Optional[np.ndarray]]:
+    debug_plot_dir: Optional[str] = None,
+    epsf_label: str = "epsf",
+) -> tuple[Optional[list[tuple[float, float]]], Optional[np.ndarray], list[int]]:
     """
     Mean-combine *window_diff_paths* into one synthetic frame (F4: pre-
     averaging forfeits per-frame recentering -- documented risk, see module
@@ -456,6 +467,10 @@ def fit_anchor_stacked(
     (asteroids, cosmic rays) unique to the other frames into the average
     unmasked. Gaia positions use the anchor's own assigned FFI's WCS (dithers
     are integer-pixel and already reconciled upstream of this stage).
+
+    When *debug_plot_dir* is set, writes this anchor's DS9 region + star-
+    selection PNG (blue=used by EPSFBuilder, red=cut-selected but excluded)
+    inline from the fit just computed -- no re-fit.
     """
     images = []
     for p in window_diff_paths:
@@ -464,17 +479,54 @@ def fit_anchor_stacked(
         except Exception as exc:
             log.warning("epsf orbit-binned: cannot load %s: %s", p, exc)
     if not images:
-        return None, None
+        return None, None, []
     synthetic = _nanmean_combine(images)
     real_masks = [m for m in window_masks if m is not None]
     union_mask = np.logical_or.reduce(real_masks) if real_masks else None
     gaia_df = gaia_science_xy_for_frame(
         gaia_base, anchor_ffi_path, ffi_list_df, science_bounds
     )
-    _model, grid_xypos, stack = build_gridded_psf_for_frame(
-        synthetic, gaia_df, epsf_params, mask_2d=union_mask, frame_label=frame_label
+    star_usage: Optional[dict] = {} if debug_plot_dir else None
+    _model, grid_xypos, stack, n_stars = build_gridded_psf_for_frame(
+        synthetic,
+        gaia_df,
+        epsf_params,
+        mask_2d=union_mask,
+        frame_label=frame_label,
+        star_usage_out=star_usage,
     )
-    return grid_xypos, stack
+    if debug_plot_dir and star_usage:
+        try:
+            from syndiff_pipeline.difference_imaging.support.ds9_regions import (
+                write_epsf_star_selection_region,
+            )
+            from syndiff_pipeline.difference_imaging.support.plot import (
+                epsf_star_selection_png_path,
+                epsf_star_selection_region_path,
+                write_epsf_star_selection_plot,
+            )
+
+            used_xy = star_usage.get("used_xy", [])
+            excluded_xy = star_usage.get("excluded_xy", [])
+            write_epsf_star_selection_region(
+                used_xy,
+                excluded_xy,
+                epsf_star_selection_region_path(debug_plot_dir, epsf_label, frame_label),
+            )
+            write_epsf_star_selection_plot(
+                synthetic,
+                used_xy,
+                excluded_xy,
+                epsf_star_selection_png_path(debug_plot_dir, epsf_label, frame_label),
+                title=f"{epsf_label} · {frame_label} · star selection",
+            )
+        except Exception:
+            log.warning(
+                "epsf orbit-binned: star-selection debug output failed for %s",
+                frame_label,
+                exc_info=True,
+            )
+    return grid_xypos, stack, n_stars
 
 
 def fit_anchor_pooled(
@@ -487,12 +539,16 @@ def fit_anchor_pooled(
     ffi_list_df: pd.DataFrame,
     science_bounds: dict,
     frame_label: str = "",
-) -> tuple[list[tuple[float, float]], Optional[np.ndarray]]:
+) -> tuple[list[tuple[float, float]], Optional[np.ndarray], list[int]]:
     """
     Pool per-frame Gaia-star extractions (each frame keeps its own
     recentering) across the whole window into one ``EPSFBuilder`` call per
     tile, via :func:`fit_epsf_section_multi`. Generalizes
     :func:`build_gridded_psf_for_frame`'s single-frame section loop.
+
+    Returns ``(grid_xypos, stack, n_stars_per_tile)`` -- ``n_stars_per_tile``
+    is the pooled candidate-star count (summed across the whole window) per
+    tile, for debug-plot annotation.
     """
     images: list[np.ndarray] = []
     gaia_dfs: list[pd.DataFrame] = []
@@ -509,7 +565,7 @@ def fit_anchor_pooled(
         )
         masks.append(mask)
     if not images:
-        return [], None
+        return [], None, []
 
     ny, nx = images[0].shape
     tile_ny = int(epsf_params.tile_ny)
@@ -529,6 +585,7 @@ def fit_anchor_pooled(
 
     epsf_grid: dict[tuple[int, int], Any] = {}
     grid_xypos: list[tuple[float, float]] = []
+    n_stars_grid: dict[tuple[int, int], int] = {}
     for i in range(tile_ny):
         for j in range(tile_nx):
             x_min, x_max, y_min, y_max = _section_bounds(ny, nx, tile_ny, tile_nx, i, j)
@@ -556,7 +613,8 @@ def fit_anchor_pooled(
                     (np.asarray(img[y_min:y_max, x_min:x_max], dtype=np.float64), stars_tbl, section_mask)
                 )
 
-            if sum(len(t) for _, t, _ in section_frames) < min_stars:
+            n_stars_grid[(i, j)] = sum(len(t) for _, t, _ in section_frames)
+            if n_stars_grid[(i, j)] < min_stars:
                 epsf_grid[(i, j)] = "too_few"
                 continue
             stamp = fit_epsf_section_multi(
@@ -574,12 +632,15 @@ def fit_anchor_pooled(
             epsf_grid[(i, j)] = stamp if stamp is not None else "fit_failed"
 
     valid = [v for v in epsf_grid.values() if isinstance(v, np.ndarray)]
+    n_stars_list = [
+        n_stars_grid.get((i, j), 0) for i in range(tile_ny) for j in range(tile_nx)
+    ]
     if not valid:
         log.warning(
             "epsf orbit-binned (pooled): all grid sections failed%s",
             f" ({frame_label})" if frame_label else "",
         )
-        return grid_xypos, None
+        return grid_xypos, None, n_stars_list
     fallback = np.mean(valid, axis=0)
     psf_list = []
     for i in range(tile_ny):
@@ -592,7 +653,7 @@ def fit_anchor_pooled(
             arr if bc * 2 >= arr.shape[0] or bc * 2 >= arr.shape[1] else arr[bc:-bc, bc:-bc]
             for arr in psf_list
         ]
-    return grid_xypos, np.array(psf_list, dtype=np.float64)
+    return grid_xypos, np.array(psf_list, dtype=np.float64), n_stars_list
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -726,6 +787,7 @@ def fit_gridded_epsf_orbit_binned(
     science_bounds: Optional[dict] = None,
     ffi_path_by_stem: Optional[dict[str, str]] = None,
     wcs_table: Optional[pd.DataFrame] = None,
+    debug_plot_dir: Optional[str] = None,
 ) -> tuple[np.ndarray, list[tuple[float, float]], list[str], list[bool]]:
     """
     Fit orbit-binned gridded ePSF: a handful of anchor models per orbit,
@@ -737,6 +799,16 @@ def fit_gridded_epsf_orbit_binned(
     flags) so callers/downstream stages (``prepare_epsf_stack``,
     ``save_epsf_stack_bundle``, ``compute_group_epsf``) work unchanged
     regardless of ``epsf_mode``.
+
+    When ``debug_plot_dir`` is set and ``epsf_params.epsf_debug_plots`` is
+    True, each anchor's own real fit (not the blended/interpolated frames,
+    which have none) writes a DS9 region + star-selection PNG inline --
+    reusing the fit already computed, no re-fit. Anchor frames are
+    naturally few and bounded (``epsf_per_orbit`` per orbit), so no
+    separate frame-selection step is needed the way centroids' debug
+    residual FITS needs one. Only the default ``epsf_stack_before_fit:
+    true`` (stacked) anchor-fit path is covered -- not
+    :func:`fit_anchor_pooled`.
     """
     n_frames = len(diff_paths)
     epsf_label_str = str(epsf_label or "epsf")
@@ -908,6 +980,7 @@ def fit_gridded_epsf_orbit_binned(
     anchor_window_global: dict[tuple[int, int], list[int]] = {}
     fit_tasks: list[tuple[tuple[int, int], dict]] = []
     anchor_stack: dict[tuple[int, int], Optional[np.ndarray]] = {}
+    anchor_n_stars: dict[tuple[int, int], list[int]] = {}
     anchor_grid_xypos: Optional[list[tuple[float, float]]] = None
 
     for orbit_idx, anchors in orbit_anchor_lists.items():
@@ -980,6 +1053,8 @@ def fit_gridded_epsf_orbit_binned(
             ffi_list_df,
             science_bounds,
             ffi_path_by_stem,
+            debug_plot_dir,
+            epsf_label_str,
         )
         if n_workers <= 1 or len(fit_tasks) <= 1:
             _init_orbit_epsf_worker(*worker_initargs)
@@ -1003,8 +1078,9 @@ def fit_gridded_epsf_orbit_binned(
                 initializer=_init_orbit_epsf_worker,
                 initargs=worker_initargs,
             )
-        for (key, payload), (grid_xypos, stack) in zip(fit_tasks, fit_results):
+        for (key, payload), (grid_xypos, stack, n_stars) in zip(fit_tasks, fit_results):
             anchor_stack[key] = stack
+            anchor_n_stars[key] = n_stars
             if stack is not None and anchor_grid_xypos is None:
                 anchor_grid_xypos = grid_xypos
             if track_progress and workspace_progress_path is not None:
@@ -1013,7 +1089,11 @@ def fit_gridded_epsf_orbit_binned(
                 )
             if stack is not None:
                 save_gridded_epsf_npz(
-                    anchor_write_path[key], stack, grid_xypos, int(epsf_params.epsf_oversample)
+                    anchor_write_path[key],
+                    stack,
+                    grid_xypos,
+                    int(epsf_params.epsf_oversample),
+                    n_stars=n_stars,
                 )
                 orbit_idx, a_idx = key
                 pid = product_ids[
@@ -1062,6 +1142,7 @@ def fit_gridded_epsf_orbit_binned(
 
     # ── Pass 3: index materialization for every frame (anchor / blend / clamp) ──
     index: dict[str, str] = {}
+    anchor_stems: set[str] = set()
     stems_out: list[str] = list(stems)
     epsf_ok: list[bool] = [False] * n_frames
     stacks_by_pos: list[Optional[np.ndarray]] = [None] * n_frames
@@ -1090,6 +1171,8 @@ def fit_gridded_epsf_orbit_binned(
                 index[stem] = write_path
                 stacks_by_pos[global_pos] = stack
                 epsf_ok[global_pos] = stack is not None
+                if stack is not None:
+                    anchor_stems.add(stem)
                 continue
 
             frame_btjd = btjd_by_stem.get(pid, np.nan)
@@ -1142,6 +1225,10 @@ def fit_gridded_epsf_orbit_binned(
                     output_store_name=prov_output_store_name,
                 )
                 if not (skip_existing and _is_valid_gridded_epsf_npz(write_path)):
+                    # n_stars intentionally omitted: this frame has no fit of
+                    # its own (interpolated/blended from two anchors), and a
+                    # synthetic blended count would misrepresent it as a real
+                    # per-tile candidate count in the debug-plot title.
                     save_gridded_epsf_npz(
                         write_path,
                         blended,
@@ -1211,6 +1298,7 @@ def fit_gridded_epsf_orbit_binned(
         set_progress_phase_pair(workspace_progress_path, cli_progress_path, "complete")
 
     save_gridded_epsf_index(output_dir, index)
+    save_gridded_epsf_anchor_stems(output_dir, anchor_stems)
 
     if anchor_grid_xypos is None:
         first_path = next((p for p in diff_paths if p and os.path.exists(p)), None)

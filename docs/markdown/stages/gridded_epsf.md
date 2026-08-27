@@ -34,7 +34,7 @@ Legacy tile-stack bundles (`epsf_stack_r*.npz`, `epsf_r*_smooth.npz`, `group_eps
 
 ## Algorithm (per difference image)
 
-1. **Gaia pre-filter** — `phot_rp_mean_mag < mag_max_rp` (default 12.95); expects `ra`/`dec` in the catalog.
+1. **Gaia pre-filter** — `tess_mag < tess_mag_max` (default 12.95), on a per-star TESS magnitude derived from Gaia G/BP/RP, never raw `phot_rp_mean_mag`; expects `ra`/`dec` in the catalog.
 2. **Per-frame positions** — `gaia_science_xy_for_frame()` projects stars using **per-FFI full-FFI WCS** from `ffi_list.parquet`, rebased to the science crop via `MappingGrid.science_ffi_bounds()` (not diff FITS headers).
 3. **Tile grid** — image split into `tile_ny × tile_nx` sections (default **5×5**). Section bounds match `starpositioningscript.py` layout (`step_x = nx // tile_nx`, half-open intervals).
 4. **Per section** — Gaia stars in section (with edge margin `extract_size/2 + 2`) → mask filter → `extract_stars` + `EPSFBuilder` → oversampled stamp.
@@ -68,9 +68,14 @@ Per-FFI stems follow `tess{digits}-s{SSSS}-{C}-{K}_{label}` convention when usin
 data          # (n_tiles, ny_stamp, nx_stamp) float64 cube
 grid_xypos    # (n_tiles, 2) tile centers in crop-local pixels
 oversampling  # int, from epsf_oversample (default 2)
+n_stars       # optional (n_tiles,) int64 -- per-tile candidate star count,
+              # for debug-plot titles; omitted for interpolated/blended
+              # orbit-binned frames (no fit of their own to count stars for)
 ```
 
 `GriddedEpsfCatalog` (`catalog_from_workspace`) provides `load_model(ffi_stem)` for photometry stages.
+
+`write_gridded_epsf_frame_plot` (pipeline_plots debug output) reads `n_stars` when present and adds `N={count}` to each tile's subplot title, alongside its grid position.
 
 ---
 
@@ -83,7 +88,8 @@ oversampling  # int, from epsf_oversample (default 2)
 | `psf_size` | 3 | Half-size of model stamp |
 | `extract_size` | — | Star cutout size (defaults to `psf_size` derivation) |
 | `min_stars_per_tile` | 5 | Minimum Gaia stars per section |
-| `mag_max_rp` | 12.95 | Bright-end cut (`null` → 12.95) |
+| `tess_mag_max` | 12.95 | Bright-end cut on derived tess_mag (`null` → 12.95) |
+| `tess_mag_min` | null | Faint-end cut on derived tess_mag |
 | `epsf_maxiters` | 15 | EPSFBuilder iterations |
 | `epsf_recentering_maxiters` | 20 | Recentering iterations |
 | `epsf_smoothing_kernel` | `quadratic` | Builder smoothing |
@@ -102,8 +108,7 @@ oversampling  # int, from epsf_oversample (default 2)
 | `epsf_anchor_window_max_expand` | 80 | Cap on window-expansion radius before falling back to best-available frame count |
 | `epsf_quality_bitmask` | 583 | `DQUALITY` bits that disqualify a frame from anchor building (default: attitude tweak\|safe mode\|coarse point\|manual exclude\|Earth/Moon in FFI — see table below) |
 | `epsf_debug_plots` | true | Write per-orbit anchor/window diagnostic plots (orbit-binned only) |
-| `epsf_mag_source` | `phot_rp_mean_mag` | `phot_rp_mean_mag` or `tess_mag` — see [§ Star-selection parity with dev/forward_epsf_wcs](#star-selection-parity-with-devforward_epsf_wcs) |
-| `epsf_isolation_min_sep_px` | null (disabled) | Minimum pixel separation from any `tess_mag < epsf_isolation_neighbor_mag_max` neighbor |
+| `epsf_isolation_min_sep_px` | null (disabled) | Minimum pixel separation from any `tess_mag < epsf_isolation_neighbor_mag_max` neighbor — see [§ Star-selection parity with dev/forward_epsf_wcs](#star-selection-parity-with-devforward_epsf_wcs) |
 | `epsf_isolation_neighbor_mag_max` | 13.0 | TESS-mag threshold for isolation-check neighbors |
 
 Stage wiring example:
@@ -229,11 +234,11 @@ criteria can optionally be ported into the production `epsf` stage, applied
 within the existing tile-grid `EPSFBuilder` pipeline (not that fitter's own
 irregular-stamp/packed-support architecture):
 
-- **`epsf_mag_source: tess_mag`** — `mag_min_rp`/`mag_max_rp` are
-  reinterpreted as bounds on a per-star TESS magnitude derived from Gaia
-  G/BP/RP (`epsf.tess_mag_from_gaia_phot`, the TGLC polynomial) instead of
-  raw `phot_rp_mean_mag`. Default remains `phot_rp_mean_mag` (unchanged
-  legacy behavior).
+- **Star selection always filters on `tess_mag`** — `tess_mag_min`/
+  `tess_mag_max` bound a per-star TESS magnitude derived from Gaia G/BP/RP
+  (`epsf.tess_mag_from_gaia_phot`, the TGLC polynomial). Raw Gaia
+  `phot_rp_mean_mag` is never used for star selection (standing policy,
+  2026-08-22) — there is no source-column toggle.
 - **`epsf_isolation_min_sep_px`** — when set, adds a global (whole-frame,
   not per-tile) isolation filter: a candidate star is dropped unless its
   nearest Gaia neighbor brighter than `epsf_isolation_neighbor_mag_max`
@@ -241,8 +246,8 @@ irregular-stamp/packed-support architecture):
   of `dev/forward_epsf_wcs.isolated_forced_phot.select_isolated_stars`'s
   rule (`gridded_epsf.apply_epsf_isolation_filter`) — the candidate window
   and the neighbor pool are drawn from the *same* full, unfiltered Gaia
-  catalog (a star between `mag_max_rp` and `neighbor_mag_max` isn't itself a
-  candidate but still counts as a contaminating neighbor), evaluated after
+  catalog (a star between `tess_mag_max` and `neighbor_mag_max` isn't itself
+  a candidate but still counts as a contaminating neighbor), evaluated after
   per-frame `x`/`y` projection, before the tile-section loop. `None`
   (default) disables isolation filtering entirely.
 - forward_epsf_wcs's own defaults: `--tess-mag 7,11`, `--min-sep-px 6.0`,
@@ -257,6 +262,27 @@ deliberately **skips** its magnitude-window prefilter (deferring it to the
 per-frame isolation pass) — narrowing to the mag window before computing
 isolation would silently drop the fainter neighbors the isolation check
 needs to see.
+
+---
+
+## Star-selection debug output (`pipeline_plots: true`, orbit-binned only)
+
+For each orbit-binned anchor's own real fit (not the blended/interpolated
+frames, which have no fit of their own), the debug plot dir gets:
+
+- `{epsf_label}_{anchor_stem}_star_selection.reg` — DS9 region file, blue
+  circles for candidates `EPSFBuilder` used, red for cut-selected candidates
+  it excluded (`EPSFBuildResult.excluded_star_indices`).
+- `{epsf_label}_{anchor_stem}_star_selection.png` — the (mean-combined)
+  anchor diff image, `vmin=-20, vmax=20`, gray colormap, same red/blue
+  overlay.
+
+Written inline from the fit already computed in `fit_anchor_stacked` (no
+re-fit — `build_gridded_psf_for_frame`'s `star_usage_out` out-param). Anchor
+frames are naturally few and bounded (`epsf_per_orbit` per orbit), so unlike
+centroids' debug residual FITS there's no separate frame-selection step.
+Scoped to `epsf_stack_before_fit: true` (the default, "stacked" anchor
+fitting) — not wired for `fit_anchor_pooled` or `epsf_mode: per_frame`.
 
 ---
 

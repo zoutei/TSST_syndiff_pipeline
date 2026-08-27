@@ -35,6 +35,30 @@ def gridded_epsf_frame_plot_path(
     )
 
 
+def epsf_star_selection_png_path(
+    plot_dir: str,
+    epsf_label: str,
+    ffi_stem: str,
+) -> str:
+    """PNG path for one frame's used/excluded star-selection overlay."""
+    return os.path.join(
+        plot_dir,
+        f"{_safe_plot_token(epsf_label)}_{_safe_plot_token(ffi_stem)}_star_selection.png",
+    )
+
+
+def epsf_star_selection_region_path(
+    plot_dir: str,
+    epsf_label: str,
+    ffi_stem: str,
+) -> str:
+    """DS9 region path for one frame's used/excluded star selection."""
+    return os.path.join(
+        plot_dir,
+        f"{_safe_plot_token(epsf_label)}_{_safe_plot_token(ffi_stem)}_star_selection.reg",
+    )
+
+
 def lightcurve_plot_path_from_csv(
     plot_dir: str,
     lc_label: str,
@@ -186,6 +210,7 @@ def write_gridded_epsf_frame_plot(
         stack = np.asarray(z["data"], dtype=np.float64)
         grid_xypos = np.asarray(z["grid_xypos"], dtype=np.float64)
         oversampling = int(z["oversampling"])
+        n_stars = np.asarray(z["n_stars"]) if "n_stars" in z.files else None
     finally:
         z.close()
 
@@ -208,11 +233,12 @@ def write_gridded_epsf_frame_plot(
             norm=norm,
             interpolation="nearest",
         )
+        n_label = f"\nN={int(n_stars[k])}" if n_stars is not None and k < len(n_stars) else ""
         if k < len(grid_xypos):
             gx, gy = grid_xypos[k]
-            ax.set_title(f"node {k}\n({gx:.0f}, {gy:.0f})", fontsize=8)
+            ax.set_title(f"node {k}\n({gx:.0f}, {gy:.0f}){n_label}", fontsize=8)
         else:
-            ax.set_title(f"node {k}", fontsize=8)
+            ax.set_title(f"node {k}{n_label}", fontsize=8)
         ax.set_xticks([])
         ax.set_yticks([])
 
@@ -246,6 +272,64 @@ def write_gridded_epsf_frame_plot(
     return png_path
 
 
+def write_epsf_star_selection_plot(
+    diff_image: np.ndarray,
+    used_xy: list[tuple[float, float]],
+    excluded_xy: list[tuple[float, float]],
+    png_path: str,
+    *,
+    dpi: int = 150,
+    title: str = "",
+) -> Optional[str]:
+    """
+    Diff image (gray, [-20, 20]) with candidate stars circled: blue = used by
+    ``EPSFBuilder``, red = selected by the tess_mag/isolation cuts but
+    excluded from the final fit. Frame-local 0-based ``(x, y)``.
+    """
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        log.warning(
+            "pipeline_plots: matplotlib is not installed; skipping ePSF star-selection plot."
+        )
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 8), layout="constrained")
+    ax.imshow(
+        np.asarray(diff_image, dtype=np.float64),
+        origin="lower",
+        cmap="gray",
+        vmin=-20,
+        vmax=20,
+        interpolation="nearest",
+    )
+    if excluded_xy:
+        ex = np.asarray(excluded_xy, dtype=np.float64)
+        ax.scatter(
+            ex[:, 0], ex[:, 1],
+            s=80, facecolors="none", edgecolors="red", linewidths=1.2,
+            label=f"cut-selected, not used ({len(ex)})",
+        )
+    if used_xy:
+        us = np.asarray(used_xy, dtype=np.float64)
+        ax.scatter(
+            us[:, 0], us[:, 1],
+            s=80, facecolors="none", edgecolors="blue", linewidths=1.2,
+            label=f"used by ePSF builder ({len(us)})",
+        )
+    if used_xy or excluded_xy:
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.7)
+    ax.set_title(title or os.path.basename(png_path), fontsize=10)
+    ax.set_xticks([])
+    ax.set_yticks([])
+
+    os.makedirs(os.path.dirname(os.path.abspath(png_path)) or ".", exist_ok=True)
+    fig.savefig(png_path, dpi=dpi)
+    plt.close(fig)
+    log.info("  pipeline_plots: ePSF star-selection figure %s", png_path)
+    return png_path
+
+
 def write_gridded_epsf_workspace_plots(
     epsf_workspace_dir: str,
     plot_dir: str,
@@ -274,8 +358,20 @@ def write_gridded_epsf_workspace_plots(
         )
         return written
 
+    # Orbit-binned mode: prefer stems that were directly fit (real per-tile
+    # star counts) over interpolated/blended frames, which have no fit of
+    # their own and so no count to show in the debug-plot title. Anchors
+    # are a small minority of frames per orbit, so unrestricted
+    # evenly-spaced selection over the whole index almost never lands on
+    # one. Falls back to the full index when no anchor sidecar exists
+    # (per_frame mode, or an older run predating this file).
+    anchor_stems = gridded_epsf.load_gridded_epsf_anchor_stems(epsf_workspace_dir)
+    candidate_stems = [s for s in index if s in anchor_stems] if anchor_stems else list(index.keys())
+    if not candidate_stems:
+        candidate_stems = list(index.keys())
+
     stems = select_evenly_spaced_stems(
-        list(index.keys()),
+        candidate_stems,
         wcs_table=wcs_table,
         max_frames=max_frames,
     )
@@ -412,7 +508,7 @@ def write_centroids_workspace_plots(
     )
 
     class _MagParams:
-        mag_max_rp = getattr(params, "mag_max_rp", 12.95)
+        tess_mag_max = getattr(params, "tess_mag_max", 12.95)
 
     gaia_filtered = prepare_gaia_for_gridded_epsf(gaia_df, _MagParams())
 

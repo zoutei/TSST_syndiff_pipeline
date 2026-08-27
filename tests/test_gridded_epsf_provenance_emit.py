@@ -26,6 +26,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     HotpantsParams,
 )
 from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_path_from_output_dir,
 )
@@ -182,11 +183,14 @@ class TestGriddedEpsfProvenanceEmit(unittest.TestCase):
             epsf_label="epsf_r1",
             workspace_root=str(self.handoff),
             diff_image_fps={self.product_id: real_fp},
+            ffi_list_df=pd.DataFrame({"stem": [self.product_id]}),
+            science_bounds={"x_min": 0, "y_min": 0, "shape": (8, 8)},
+            ffi_path_by_stem={self.product_id: str(self.ffi_path)},
         )
 
         with patch.object(
-            gridded_epsf, "build_gridded_psf_for_frame", return_value=(object(), grid_xypos, stack)
-        ), patch.object(pg, "upstream_label_edge") as mock_loc_edge, patch.object(
+            gridded_epsf, "build_gridded_psf_for_frame", return_value=(object(), grid_xypos, stack, [4] * len(grid_xypos))
+        ), patch.object(wcs_grouping, "gaia_science_xy_for_frame", return_value=pd.DataFrame({"x": [4.0], "y": [4.0]})), patch.object(pg, "upstream_label_edge") as mock_loc_edge, patch.object(
             pg, "emit_diff_artifact"
         ) as mock_emit:
             result = gridded_epsf._fit_one_frame_task(0, str(diff_path))
@@ -222,11 +226,14 @@ class TestGriddedEpsfProvenanceEmit(unittest.TestCase):
             epsf_label="epsf_r1",
             workspace_root=str(self.handoff),
             diff_image_fps={},
+            ffi_list_df=pd.DataFrame({"stem": [self.product_id]}),
+            science_bounds={"x_min": 0, "y_min": 0, "shape": (8, 8)},
+            ffi_path_by_stem={self.product_id: str(self.ffi_path)},
         )
 
         with patch.object(
-            gridded_epsf, "build_gridded_psf_for_frame", return_value=(object(), grid_xypos, stack)
-        ), patch.object(pg, "upstream_label_edge") as mock_loc_edge, patch.object(
+            gridded_epsf, "build_gridded_psf_for_frame", return_value=(object(), grid_xypos, stack, [4] * len(grid_xypos))
+        ), patch.object(wcs_grouping, "gaia_science_xy_for_frame", return_value=pd.DataFrame({"x": [4.0], "y": [4.0]})), patch.object(pg, "upstream_label_edge") as mock_loc_edge, patch.object(
             pg, "emit_diff_artifact"
         ) as mock_emit:
             result = gridded_epsf._fit_one_frame_task(0, str(diff_path))
