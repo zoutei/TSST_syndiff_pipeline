@@ -13,8 +13,16 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration import logs
-from syndiff_pipeline.common.scc_paths import event_scc_leaf
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    resolve_scc_diff_bookkeeping_dir,
+    scc_diff_dir,
+)
 from syndiff_pipeline.common.orchestration.targets import Target
+from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+    DIFF_JOB_BASENAME,
+    FRAMES_CSV_BASENAME,
+)
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.template_creation.orchestration.runner_config import (
@@ -112,12 +120,38 @@ class TestVerifyDiffCli(unittest.TestCase):
         self.tmp.cleanup()
 
     def _write_diff_outputs(self) -> None:
+        # Event-level frame manifest (checked before the SCC lane fall-through).
         manifest_csv = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
-        ws_root = self.event_dir / "ws"
-        ws_root.mkdir(parents=True, exist_ok=True)
-        (ws_root / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
+
+        # SCC diff handoff bookkeeping: diff_workspace_complete requires both
+        # frames.csv and diff_job.json under the per-lane bookkeeping dir
+        # before it will even consider the lane's final-stage outputs.
+        bk_dir = resolve_scc_diff_bookkeeping_dir(
+            self.data,
+            self.target.sector,
+            self.target.camera,
+            self.target.ccd,
+            oversampling_factor=1,
+            template_store_name=None,
+        )
+        bk_dir.mkdir(parents=True, exist_ok=True)
+        (bk_dir / FRAMES_CSV_BASENAME).write_text("ffi_product_id\n", encoding="utf-8")
+        (bk_dir / DIFF_JOB_BASENAME).write_text("{}", encoding="utf-8")
+
+        # Final pipeline-stage output for the site's ``shared_mask`` stage
+        # lives directly under the SCC diff lane root (not the legacy
+        # event_dir/ws/ workspace).
+        lane_root = scc_diff_dir(
+            self.data,
+            self.target.sector,
+            self.target.camera,
+            self.target.ccd,
+            store_name=None,
+        )
+        lane_root.mkdir(parents=True, exist_ok=True)
+        (lane_root / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
 
     def test_verify_stage_diff_with_runner_cfg(self):
         self._write_diff_outputs()
@@ -156,7 +190,10 @@ class TestVerifyDiffCli(unittest.TestCase):
 
         result = verify_stage(self.resolved, "diff", runner_cfg=self.runner)
         self.assertFalse(result.ok)
-        self.assertIn("Final pipeline outputs missing", result.message)
+        self.assertIn(
+            "SCC diff lane incomplete (bookkeeping or final stage outputs missing)",
+            result.message,
+        )
 
     def test_stage_complete_diff_stale_fingerprint(self):
         artifact = self.event_dir / "ws" / "hp_d" / "frame.fits"

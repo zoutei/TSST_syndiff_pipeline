@@ -72,7 +72,7 @@ class TestStarContext(unittest.TestCase):
             with self.assertRaises(StarPrerequisiteError) as cm:
                 validate_star_prerequisites(ctx)
             message = str(cm.exception)
-            self.assertIn("cluster_template_job.json", message)
+            self.assertIn("event_job.json", message)
             self.assertIn("frames.csv", message)
             self.assertIn("syndiff_template_", message)
             self.assertIn("baseline diff FITS", message)

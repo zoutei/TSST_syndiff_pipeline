@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
@@ -23,6 +24,11 @@ from syndiff_pipeline.common.orchestration.deployment import (
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import workspace_tree_path
 from syndiff_pipeline.common.orchestration.targets import Target, find_target, load_targets
 from syndiff_pipeline.common import wcs_grouping
+from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+    DIFF_JOB_BASENAME,
+    FRAMES_CSV_BASENAME,
+    _resolve_reference_ffi_path,
+)
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     SitePaths,
     _gaia_catalog_path,
@@ -293,61 +299,6 @@ def _mapping_paths(
     return str(mapping_dir), mapping_csv, master_mapping_fits
 
 
-def _coords_missing(target: Target) -> bool:
-    return abs(target.target_ra) < 1e-9 and abs(target.target_dec) < 1e-9
-
-
-def _target_coords_from_event_diff_configs(event_dir: Path) -> tuple[float, float] | None:
-    candidates = [event_dir / "ws" / "diff_config.yaml"]
-    candidates.extend(sorted(event_dir.glob("ws_*/diff_config.yaml")))
-    for path in candidates:
-        if not path.is_file():
-            continue
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        ra = data.get("target_ra")
-        dec = data.get("target_dec")
-        if ra is not None and dec is not None:
-            return float(ra), float(dec)
-    return None
-
-
-def _enrich_star_target_coords(
-    target: Target,
-    *,
-    targets_csv: str | None,
-    target_name: str,
-    workspace_root: str,
-) -> Target:
-    """Fill placeholder (0, 0) coords from transient targets or frozen event configs."""
-    if not _coords_missing(target):
-        return target
-    if targets_csv:
-        try:
-            main = find_target(load_targets(targets_csv), target_name)
-            if not _coords_missing(main):
-                return replace(
-                    target,
-                    target_ra=main.target_ra,
-                    target_dec=main.target_dec,
-                )
-        except (KeyError, ValueError):
-            pass
-    from syndiff_pipeline.common.scc_paths import event_scc_leaf
-
-    event_dir = event_scc_leaf(
-        workspace_root,
-        target.event_name(),
-        target.sector,
-        target.camera,
-        target.ccd,
-    )
-    coords = _target_coords_from_event_diff_configs(event_dir)
-    if coords is not None:
-        ra, dec = coords
-        return replace(target, target_ra=ra, target_dec=dec)
-    return target
-
-
 def _load_scc_diff_job(
     data_root: str | Path,
     sector: int,
@@ -440,13 +391,6 @@ def load_event_context(
         deployment, "data_root", deployment_path=paths.deployment
     )
 
-    target = _enrich_star_target_coords(
-        target,
-        targets_csv=targets_csv,
-        target_name=target_name,
-        workspace_root=workspace_root,
-    )
-
     cfg = freeze_target_diff_config(
         paths.diff_config,
         target,
@@ -454,13 +398,21 @@ def load_event_context(
     )
 
     event_dir = str(Path(cfg.output_dir).expanduser().resolve())
-    cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
 
     os_factor = 1
     template_store_name = None
     if star_run_config is not None:
         os_factor = max(1, int(star_run_config.oversampling_factor or 1))
         template_store_name = star_run_config.template_store_name
+
+    scc_bookkeeping_dir = resolve_scc_diff_bookkeeping_dir(
+        data_root,
+        target.sector,
+        target.camera,
+        target.ccd,
+        oversampling_factor=os_factor,
+        template_store_name=normalize_store_name(template_store_name),
+    )
 
     diff_job = _load_scc_diff_job(
         data_root,
@@ -473,20 +425,37 @@ def load_event_context(
     mapping_grid = None
     output_store_name = None
     if diff_job is not None:
+        # Modern SCC-bootstrapped lane: bookkeeping/diff_{lane}/oversampling_N/
+        # holds both diff_job.json (already loaded above) and frames.csv.
+        cluster_job_path = str(scc_bookkeeping_dir / DIFF_JOB_BASENAME)
         mapping_grid = MappingGrid.from_mapping_dict(diff_job["mapping_grid"])
         crop_bounds = diff_job.get("crop_bounds") or mapping_grid.science_ffi_bounds()
         output_store_name = diff_job.get("output_store_name")
         cluster_job = diff_job
+        frames_csv_path = scc_bookkeeping_dir / FRAMES_CSV_BASENAME
+        frames_df = (
+            pd.read_csv(frames_csv_path) if frames_csv_path.is_file() else pd.DataFrame()
+        )
+        reference_ffi_path = _resolve_reference_ffi_path(
+            Path(data_root),
+            target.sector,
+            target.camera,
+            target.ccd,
+            frames_df,
+        )
     else:
+        # Legacy event-dir handoff (pre-SCC-bootstrap lane); run_wcs_grouping has
+        # zero callers repo-wide, so this branch is a dead-writer fallback kept
+        # only for older data_roots that already have the files on disk.
+        cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
         with Path(wcs_grouping._event_job_path(event_dir)).open(encoding="utf-8") as fh:
             cluster_job = json.load(fh)
         crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)
-
-    reference_ffi_path = wcs_grouping.load_reference_ffi_path(event_dir)
-    if not reference_ffi_path:
-        raise FileNotFoundError(
-            f"Missing reference_ffi_path in {cluster_job_path}"
-        )
+        reference_ffi_path = wcs_grouping.load_reference_ffi_path(event_dir)
+        if not reference_ffi_path:
+            raise FileNotFoundError(
+                f"Missing reference_ffi_path in {cluster_job_path}"
+            )
 
     templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
     if star_run_config is not None:
@@ -624,6 +593,19 @@ def resolve_host_full_ffi_xy(
     return wcs_grouping.world_ra_dec_to_pixel(wcs, host.ra, host.dec)
 
 
+def resolve_star_manifest_path(ctx: StarEventContext) -> Path:
+    """Absolute path to the frame manifest CSV (``frames.csv``) for *ctx*'s lane.
+
+    Sits beside ``ctx.cluster_job_path`` — the SCC bookkeeping directory
+    (``bookkeeping/diff_{lane}/oversampling_N/``) for modern SCC-bootstrapped
+    lanes, or the legacy event-dir handoff directory for older data_roots
+    without SCC bootstrap (see the two branches in ``load_event_context``).
+    Every manifest reader and the prerequisite gate must go through this one
+    function so they can never disagree about which lane they're reading.
+    """
+    return Path(ctx.cluster_job_path).parent / DEFAULT_MANIFEST_BASENAME
+
+
 def _dir_has_glob(path: str, pattern: str) -> bool:
     root = Path(path)
     if not root.is_dir():
@@ -635,18 +617,23 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
     """Fail fast with an actionable checklist when prerequisites are missing."""
     missing: list[str] = []
 
+    # cluster_job_path/DEFAULT_MANIFEST_BASENAME sit side by side, sourced from
+    # SCC bookkeeping (bookkeeping/diff_{lane}/oversampling_N/) for modern lanes,
+    # or the legacy event-dir handoff for older data_roots (see load_event_context).
     cluster_path = Path(ctx.cluster_job_path)
     if not cluster_path.is_file():
         missing.append(
-            f"cluster_template_job.json missing at {cluster_path}; "
-            "run wcs_grouping for this event"
+            f"{cluster_path.name} missing at {cluster_path}; "
+            "run the SCC diff bootstrap (bootstrap_scc_diff/ensure_scc_diff_handoff) "
+            "for this sector/camera/ccd"
         )
 
-    manifest_path = Path(ctx.event_dir) / DEFAULT_MANIFEST_BASENAME
+    manifest_path = resolve_star_manifest_path(ctx)
     if not manifest_path.is_file():
         missing.append(
-            f"syndiff_ffi_frames.csv missing at {manifest_path}; "
-            "run wcs_grouping for this event"
+            f"frames.csv missing at {manifest_path}; "
+            "run the SCC diff bootstrap (bootstrap_scc_diff/ensure_scc_diff_handoff) "
+            "for this sector/camera/ccd"
         )
 
     templates_path = Path(ctx.templates_dir)

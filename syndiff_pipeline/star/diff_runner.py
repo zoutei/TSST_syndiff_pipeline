@@ -21,11 +21,10 @@ from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     workspace_label_from_dir,
 )
 from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
-from syndiff_pipeline.difference_imaging.support.paths import DEFAULT_MANIFEST_BASENAME
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     template_offsets_for_ffi,
 )
-from syndiff_pipeline.star.context import StarEventContext
+from syndiff_pipeline.star.context import StarEventContext, resolve_star_manifest_path
 
 
 def load_frame_kernel_for_diff(
@@ -277,7 +276,7 @@ def _expanded_window_bounds(
 
 
 def _manifest_path_for_ctx(ctx: StarEventContext) -> str:
-    return os.path.join(ctx.event_dir, DEFAULT_MANIFEST_BASENAME)
+    return str(resolve_star_manifest_path(ctx))
 
 
 def _ffi_path_for_product_id(manifest: pd.DataFrame, product_id: str) -> str:

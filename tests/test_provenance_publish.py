@@ -5,20 +5,24 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from syndiff_pipeline.common.provenance import publish as publish_mod
 from syndiff_pipeline.common.provenance.publish import (
     append_spool_record,
     build_record,
     default_spool_path,
+    git_sha,
     host_pid_tag,
     publish_dir,
     publish_record,
@@ -249,6 +253,103 @@ class TestSpoolAppend(_TempDirCase):
             record = json.loads(line)  # raises if a line got interleaved/corrupted
             fps.add(record["fingerprint"])
         self.assertEqual(fps, {f"fp{i}" for i in range(n)})
+
+
+class _GitShaCacheResetCase(unittest.TestCase):
+    """Save/restore the module-level git_sha() cache around each test so
+    tests can force a fresh resolution without leaking state to others."""
+
+    def setUp(self):
+        self._old_cache = publish_mod._git_sha_cache
+        publish_mod._git_sha_cache = publish_mod._UNRESOLVED
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        publish_mod._git_sha_cache = self._old_cache
+
+
+class TestGitSha(_GitShaCacheResetCase):
+    def test_resolves_a_40char_hex_sha_in_this_real_checkout(self):
+        # This test file lives inside an actual git checkout, so a correctly
+        # implemented git_sha() must resolve a real, full-length SHA here.
+        sha = git_sha()
+        self.assertIsNotNone(sha)
+        self.assertEqual(len(sha), 40)
+        int(sha, 16)  # raises ValueError if not valid hex
+
+    def test_matches_git_rev_parse_head_directly(self):
+        expected = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout.strip()
+        self.assertEqual(git_sha(), expected)
+
+    def test_cached_after_first_call_subprocess_not_rerun(self):
+        first = git_sha()
+        with mock.patch.object(publish_mod.subprocess, "run") as mocked:
+            second = git_sha()
+        mocked.assert_not_called()
+        self.assertEqual(first, second)
+
+    def test_never_raises_when_git_binary_missing(self):
+        with mock.patch.object(
+            publish_mod.subprocess, "run", side_effect=FileNotFoundError("no git")
+        ):
+            self.assertIsNone(git_sha())
+
+    def test_never_raises_and_returns_none_on_timeout(self):
+        with mock.patch.object(
+            publish_mod.subprocess,
+            "run",
+            side_effect=subprocess.TimeoutExpired(cmd="git", timeout=5),
+        ):
+            self.assertIsNone(git_sha())
+
+    def test_none_on_nonzero_returncode(self):
+        fake = mock.Mock(returncode=128, stdout="")
+        with mock.patch.object(publish_mod.subprocess, "run", return_value=fake):
+            self.assertIsNone(git_sha())
+
+    def test_none_result_is_cached_not_retried_forever(self):
+        with mock.patch.object(
+            publish_mod.subprocess, "run", side_effect=FileNotFoundError("no git")
+        ) as mocked:
+            first = git_sha()
+            second = git_sha()
+        self.assertIsNone(first)
+        self.assertIsNone(second)
+        self.assertEqual(mocked.call_count, 1)
+
+
+class TestBuildRecordCarriesGitSha(_GitShaCacheResetCase):
+    def test_build_record_includes_git_sha_from_cache(self):
+        with mock.patch.object(publish_mod, "_resolve_git_sha", return_value="deadbeef" * 5):
+            record = build_record("fp1", "mapping", {"s": 1, "c": 1, "k": 1}, "rid1", 1, [], "loc1")
+        self.assertEqual(record["git_sha"], "deadbeef" * 5)
+
+    def test_build_record_includes_none_when_git_unavailable(self):
+        with mock.patch.object(publish_mod, "_resolve_git_sha", return_value=None):
+            record = build_record("fp1", "mapping", {"s": 1, "c": 1, "k": 1}, "rid1", 1, [], "loc1")
+        self.assertIsNone(record["git_sha"])
+
+    def test_meta_is_forwarded_verbatim(self):
+        # Contract A3b depends on this: a later-wave agent adds
+        # meta["run_id"] at diff-stage emit sites and relies on build_record
+        # not filtering/renaming/normalizing the meta mapping in any way.
+        meta = {"run_id": "20260827_120000", "custom_key": {"nested": [1, 2, 3]}}
+        record = build_record(
+            "fp1", "mapping", {"s": 1, "c": 1, "k": 1}, "rid1", 1, [], "loc1", meta=meta,
+        )
+        self.assertEqual(record["meta"], meta)
+
+    def test_meta_omitted_when_falsy(self):
+        record = build_record("fp1", "mapping", {"s": 1, "c": 1, "k": 1}, "rid1", 1, [], "loc1", meta=None)
+        self.assertNotIn("meta", record)
+        record2 = build_record("fp1", "mapping", {"s": 1, "c": 1, "k": 1}, "rid1", 1, [], "loc1", meta={})
+        self.assertNotIn("meta", record2)
 
 
 if __name__ == "__main__":

@@ -57,6 +57,12 @@ class TestReindexSharedStore(_TempCase):
         self.assertEqual(row.kind, "combined_skycell")
         recipe = store.recipe(rid)
         self.assertEqual(recipe.params, params)
+        # A3a: the sidecar's git_sha (stamped by build_record/publish_dir)
+        # must survive an offline reindex from disk, not just the live
+        # spool-drain path.
+        from syndiff_pipeline.common.provenance.publish import git_sha
+
+        self.assertEqual(recipe.git_sha, git_sha())
 
     def test_tampered_sidecar_falls_back_to_legacy(self):
         combined_root = ps1_combined_zarr_path(self.data_root)

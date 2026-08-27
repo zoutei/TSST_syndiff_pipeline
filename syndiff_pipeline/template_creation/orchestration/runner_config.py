@@ -434,8 +434,12 @@ def write_runner_config(cfg: RunnerConfig, yaml_path: str | Path) -> None:
     yaml_path : str | Path"""
     path = Path(yaml_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(runner_config_to_dict(cfg), fh, sort_keys=False, default_flow_style=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def load_and_materialize_runner_config(

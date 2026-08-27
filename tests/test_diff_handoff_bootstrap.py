@@ -11,45 +11,71 @@ import pandas as pd
 from astropy.io import fits
 import numpy as np
 
-from syndiff_pipeline.common.scc_paths import event_scc_leaf
+from syndiff_pipeline.common.mapping_grid import MappingGrid
+from syndiff_pipeline.common.scc_paths import event_scc_leaf, resolve_scc_diff_bookkeeping_dir
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.execute import _load_template_handoff
+from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
+    DIFF_JOB_BASENAME,
+    FRAMES_CSV_BASENAME,
+)
 from syndiff_pipeline.difference_imaging.orchestration.validate import validate_pipeline
 
 
-def _minimal_handoff(event_dir: Path, ref_fits: Path) -> None:
-    event_dir.mkdir(parents=True, exist_ok=True)
-    job = {
-        "schema_version": 1,
-        "reference_ffi_path": str(ref_fits),
-        "reference_ffi_basename": ref_fits.name,
+def _write_scc_diff_bookkeeping(data_root: Path, ref_fits: Path) -> None:
+    """Seed ``bookkeeping/diff/oversampling_1/{diff_job.json,frames.csv}``.
+
+    Mirrors the SCC-only handoff ``ensure_scc_diff_handoff`` reuses when a
+    matching ``diff_job.json`` (schema_version >= 2) and ``frames.csv``
+    already exist (`scc_bootstrap.py`) -- this is what
+    ``_load_template_handoff``/``load_scc_diff_handoff_for_config`` now read
+    instead of the legacy per-event ``event_job.json``/``frames.csv`` that
+    ``bind`` used to write.
+    """
+    grid = MappingGrid(
+        ffi_xmin=-8,
+        ffi_ymin=-8,
+        ffi_xmax=72,
+        ffi_ymax=72,
+        science_xmin_ffi=0,
+        science_ymin_ffi=0,
+        science_xmax_ffi=64,
+        science_ymax_ffi=64,
+    )
+    bk_dir = resolve_scc_diff_bookkeeping_dir(
+        data_root, 20, 3, 3, oversampling_factor=1, template_store_name=None
+    )
+    bk_dir.mkdir(parents=True, exist_ok=True)
+    diff_job = {
+        "schema_version": 2,
         "sector": 20,
         "camera": 3,
         "ccd": 3,
-        "offset_threshold": 0.02,
-        "x_min": 0,
-        "y_min": 0,
-        "x_max": 64,
-        "y_max": 64,
-        "shape": [64, 64],
-        "groups": [{"group_id": 0, "group_dx": 0.0, "group_dy": 0.0, "n_frames": 1}],
+        "geometry_mode": "field",
+        "mapping_grid": grid.to_mapping_dict(),
+        "crop_bounds": grid.science_ffi_bounds(),
+        "template_store_name": None,
+        "output_store_name": None,
+        "remap_store_name": None,
+        "oversampling_factor": 1,
+        "event_name": "2020ut",
     }
-    (event_dir / "event_job.json").write_text(json.dumps(job), encoding="utf-8")
+    (bk_dir / DIFF_JOB_BASENAME).write_text(json.dumps(diff_job), encoding="utf-8")
     pd.DataFrame(
         {
             "path": [str(ref_fits)],
+            "ffi_basename": [ref_fits.name],
             "group_id": [0],
-            "group_dx": [0.0],
-            "group_dy": [0.0],
             "wcs_ok": [True],
         }
-    ).to_csv(event_dir / "frames.csv", index=False)
+    ).to_csv(bk_dir / FRAMES_CSV_BASENAME, index=False)
 
 
 class TestDiffHandoffBootstrap(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.data = self.root / "data"
         self.event_dir = event_scc_leaf(self.root, "2020ut", 20, 3, 3)
         ref = self.root / "ref.fits"
         data = np.zeros((64, 64), dtype=np.float32)
@@ -66,13 +92,14 @@ class TestDiffHandoffBootstrap(unittest.TestCase):
         hdu1.header["CTYPE2"] = "DEC--TAN"
         fits.HDUList([fits.PrimaryHDU(), hdu1]).writeto(ref, overwrite=True)
         self.ref_fits = ref
-        _minimal_handoff(self.event_dir, ref)
+        _write_scc_diff_bookkeeping(self.data, ref)
 
     def tearDown(self):
         self.tmp.cleanup()
 
     def test_load_handoff_inherits_cluster_crop(self):
         cfg = SynDiffConfig(
+            data_root=str(self.data),
             output_dir=str(self.event_dir),
             target_ra=100.0,
             target_dec=10.0,
@@ -84,10 +111,36 @@ class TestDiffHandoffBootstrap(unittest.TestCase):
         self.assertEqual(len(wcs_table), 1)
         self.assertEqual(crop["x_max"], 64)
         self.assertEqual(ref, str(self.ref_fits))
-        self.assertEqual(thresh, 0.02)
+        # SCC-only handoff no longer reads a per-job offset_threshold; it is
+        # the fixed CLAUDE.md invariant (1 PS1 px quantization -> 0.01 TESS
+        # px), hardcoded in load_scc_diff_handoff_for_config (scc_bootstrap.py).
+        self.assertEqual(thresh, 0.01)
 
-    def test_load_handoff_diff_config_crop_override(self):
+    def test_scc_handoff_crop_is_always_full_science_bounds(self):
+        """SCC diff crop comes from the mapping grid, never from the target.
+
+        The per-event ``crop_mode: target_box`` / ``crop_box_size`` knobs were
+        dropped by the SCC-only storage refactor (041e996), which deleted the
+        ``wcs_grouping.resolve_diff_crop_bounds(cfg, out)`` call from
+        ``execute.py``. ``scc_bootstrap`` reads neither key -- both the linear
+        and field paths set ``crop_bounds = mapping_grid.science_ffi_bounds()``
+        unconditionally -- so the crop is a property of the SCC, not of whichever
+        event happens to reference it. That is the intended behaviour under
+        SCC-scoped diff; the keys themselves are being removed.
+
+        Regression guard: setting the legacy knobs must NOT shrink the crop.
+        """
         cfg = SynDiffConfig(
+            data_root=str(self.data),
+            output_dir=str(self.event_dir),
+            target_ra=100.0,
+            target_dec=10.0,
+            pipeline=[{"kind": "shared_mask"}],
+        )
+        _, baseline_crop, _, _ = _load_template_handoff(cfg, str(self.event_dir), None)
+
+        cfg_with_legacy_knobs = SynDiffConfig(
+            data_root=str(self.data),
             output_dir=str(self.event_dir),
             target_ra=100.0,
             target_dec=10.0,
@@ -95,8 +148,12 @@ class TestDiffHandoffBootstrap(unittest.TestCase):
             crop_box_size=32,
             pipeline=[{"kind": "shared_mask"}],
         )
-        _, crop, _, _ = _load_template_handoff(cfg, str(self.event_dir), None)
-        self.assertEqual(crop["shape"], (32, 32))
+        _, crop, _, _ = _load_template_handoff(
+            cfg_with_legacy_knobs, str(self.event_dir), None
+        )
+
+        self.assertEqual(crop["shape"], baseline_crop["shape"])
+        self.assertNotEqual(crop["shape"], (32, 32))
 
     def test_missing_manifest_raises(self):
         cfg = SynDiffConfig(output_dir=str(self.root / "empty"), pipeline=[])

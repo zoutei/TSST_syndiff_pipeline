@@ -87,6 +87,7 @@ class TestProcessOneFrameKernelPersistence(unittest.TestCase):
         root = Path(self._tmp.name)
         self.diffs = root / "ws" / "hp_d"
         self.convolved = root / "ws" / "hp_c"
+        self.data_root = root / "data"
         self.diffs.mkdir(parents=True)
         self.convolved.mkdir(parents=True)
         self.dirs = hotpants.HotpantsWorkspaceDirs(
@@ -145,6 +146,13 @@ class TestProcessOneFrameKernelPersistence(unittest.TestCase):
                 ref_stars_xy=np.array([[8.0, 8.0]]),
                 dirs=self.dirs,
                 round_id=1,
+                # SCC-only storage (041e996): hotpants always resolves its
+                # write path via data_root/sck (resolve_diff_write_path) --
+                # there is no workspace-only fallback any more, so both are
+                # required even though write_diff_noise_mask_fits is mocked
+                # out below and never touches disk.
+                sck=(20, 3, 3),
+                data_root=str(self.data_root),
             )
 
     def test_default_does_not_write_kernels(self):

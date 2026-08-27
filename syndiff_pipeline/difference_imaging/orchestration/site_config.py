@@ -347,26 +347,38 @@ def _gaia_catalog_path(
     target: Target,
     *,
     data_root: Path,
-    event_dir: Path,
-    catalog_root: str,
+    output_store_name: str | None,
 ) -> Path:
-    """Gaia catalog path.
-    
+    """Resolve the SCC-scoped Gaia catalog path.
+
+    Keyed by SCC (+ output store lane) only -- never by event label -- so the
+    same SCC always resolves the same catalog regardless of which event/target
+    row references it.
+
     Parameters
     ----------
     target : Target
     data_root : Path
-    event_dir : Path
-    catalog_root : str
-    
+    output_store_name : str | None
+        Normalized diff output store lane name (``None`` for the default lane).
+
     Returns
     -------
-    Path"""
-    for rel in ("ws/gaia_catalog_pipeline.csv", "gaia_catalog_pipeline.csv"):
-        pipeline_csv = event_dir / rel
-        if pipeline_csv.is_file():
-            return pipeline_csv.resolve()
+    Path
+        ``{lane_root}/gaia_catalog_pipeline.csv`` if the diff pipeline has
+        already cached one for this SCC/lane, else the SCC catalogs-dir
+        default.
+    """
+    from syndiff_pipeline.common.scc_paths import scc_diff_dir
+    from syndiff_pipeline.difference_imaging.support.paths import (
+        GAIA_CATALOG_PIPELINE_BASENAME,
+    )
+
     s, c, k = target.sector, target.camera, target.ccd
+    lane_root = scc_diff_dir(data_root, s, c, k, store_name=output_store_name)
+    pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
+    if pipeline_csv.is_file():
+        return pipeline_csv.resolve()
     return (
         scc_catalogs_dir(data_root, s, c, k)
         / f"gaia_catalog_s{s:04d}_{c}_{k}.csv"
@@ -430,12 +442,15 @@ def resolve_diff_config(
     merged_paths = _deep_merge_dict(policy.paths, override.get("paths", {}))
 
     event_dir = _event_dir(workspace_root, target)
-    catalog_root = str(merged_paths.get("catalog_root", DEFAULT_CATALOG_ROOT))
     data_root_path = Path(data_root)
     # SynDiffConfig.ffi_dir is the SCC ffi leaf (same convention as template resolve_config).
     ffi_dir = str(
         scc_ffi_dir(data_root_path, target.sector, target.camera, target.ccd)
     )
+
+    from syndiff_pipeline.common.scc_paths import normalize_store_name
+
+    output_store_name = normalize_store_name(merged_paths.get("output_store_name"))
 
     os_factor = int(merged_defaults.get("oversampling_factor", 1) or 1)
     template_dir = merged_paths.get("template_dir")
@@ -464,8 +479,7 @@ def resolve_diff_config(
             _gaia_catalog_path(
                 target,
                 data_root=data_root_path,
-                event_dir=event_dir,
-                catalog_root=catalog_root,
+                output_store_name=output_store_name,
             )
         )
 
@@ -474,8 +488,6 @@ def resolve_diff_config(
         val = merged_paths.get(key) or deployment.get(key)
         if val:
             optional_paths[key] = resolve_config_path(str(val), data_root_path)
-
-    from syndiff_pipeline.common.scc_paths import normalize_store_name
 
     store_names: dict[str, str | None] = {}
     for key in ("template_store_name", "output_store_name", "remap_store_name"):
