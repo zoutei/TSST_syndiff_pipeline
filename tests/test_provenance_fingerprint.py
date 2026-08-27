@@ -138,6 +138,54 @@ class TestDeterminism(unittest.TestCase):
         self.assertEqual(rid1, rid2)
 
 
+class TestGitShaIsStoredNotHashed(unittest.TestCase):
+    """Contract A3a hard invariant: ``git_sha`` is recorded on the recipe row
+    (store.py) purely as descriptive metadata -- it must never be an input
+    to ``recipe_id``/``fingerprint``. Adding it must change zero existing
+    ``recipe_id`` values, or every already-published artifact in the
+    bookkeeping DB would be orphaned (its recipe_id would no longer match
+    what's on disk)."""
+
+    def test_recipe_id_and_fingerprint_signatures_have_no_git_sha_parameter(self):
+        # A structural guard: if a future change threads git_sha into either
+        # hashing primitive's signature, this fails loudly and immediately,
+        # before anyone has to rediscover the invariant the hard way.
+        import inspect
+
+        self.assertNotIn("git_sha", inspect.signature(recipe_id).parameters)
+        self.assertNotIn("git_sha", inspect.signature(fingerprint).parameters)
+
+    def test_recipe_id_unchanged_regardless_of_process_git_sha_cache(self):
+        # recipe_id() takes exactly (kind, params, code_version); there is no
+        # git_sha channel into it at all. Prove that by mutating the running
+        # process's cached git_sha (as publish.git_sha() would populate it,
+        # e.g. across a mid-run commit) and confirming recipe_id for a fixed
+        # (kind, params, code_version) is byte-for-byte identical before and
+        # after.
+        from syndiff_pipeline.common.provenance import publish as publish_mod
+
+        kind = "shared_mask"
+        params = {"pad_px": 12, "grow_iterations": 2, "labels": ["sat", "bleed"]}
+        code_version = 3
+
+        rid_before = recipe_id(kind, params, code_version)
+
+        old_cache = publish_mod._git_sha_cache
+        try:
+            publish_mod._git_sha_cache = "0" * 40
+            rid_with_sha_a = recipe_id(kind, params, code_version)
+            publish_mod._git_sha_cache = "f" * 40
+            rid_with_sha_b = recipe_id(kind, params, code_version)
+            publish_mod._git_sha_cache = None  # legitimate cached "no git" result
+            rid_with_no_git = recipe_id(kind, params, code_version)
+        finally:
+            publish_mod._git_sha_cache = old_cache
+
+        self.assertEqual(rid_before, rid_with_sha_a)
+        self.assertEqual(rid_before, rid_with_sha_b)
+        self.assertEqual(rid_before, rid_with_no_git)
+
+
 class TestMerkleInvalidation(unittest.TestCase):
     """Flipping one param must change the recipe_id (and thus the
     fingerprint) for the affected kind, and must NOT change a sibling

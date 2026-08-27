@@ -12,11 +12,20 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration.targets import Target, load_targets
-from syndiff_pipeline.common.scc_paths import event_scc_leaf, scc_ffi_dir, scc_templates_dir
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    scc_catalogs_dir,
+    scc_diff_dir,
+    scc_ffi_dir,
+    scc_templates_dir,
+)
 from syndiff_pipeline.difference_imaging.orchestration.config import (
     SynDiffConfig,
     absolutize_config,
     load_config,
+)
+from syndiff_pipeline.difference_imaging.support.paths import (
+    GAIA_CATALOG_PIPELINE_BASENAME,
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     SitePaths,
@@ -149,14 +158,46 @@ class TestSiteConfigLoader(unittest.TestCase):
         )
 
     def test_prefers_gaia_catalog_pipeline_in_workspace(self):
+        # Regression for the SCC-only Gaia resolution fix: the pipeline-cached
+        # catalog lives under the SCC diff lane root (keyed by sector/camera/ccd
+        # + output store lane), not under any per-event workspace directory.
+        # An event-scoped ``ws/gaia_catalog_pipeline.csv`` must NOT be picked up
+        # (that was the pre-SCC-migration probe this test used to exercise).
         target = _target()
-        event_dir = event_scc_leaf(self.handoff, target.event_name(), target.sector, target.camera, target.ccd)
-        ws = event_dir / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        pipeline_csv = ws / "gaia_catalog_pipeline.csv"
+        lane_root = scc_diff_dir(self.data, target.sector, target.camera, target.ccd)
+        lane_root.mkdir(parents=True, exist_ok=True)
+        pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
         pipeline_csv.write_text("x,y\n", encoding="utf-8")
         cfg = freeze_target_diff_config(self.site / "diff_config.yaml", target)
         self.assertEqual(cfg.gaia_catalog, str(pipeline_csv.resolve()))
+
+    def test_ignores_stale_event_scoped_gaia_catalog(self):
+        """A stale per-event catalog must not change SCC-keyed resolution.
+
+        Pre-SCC-migration workspaces still hold ``gaia_catalog_pipeline.csv``
+        under ``events/{event}/s..._c..._k.../`` (e.g. 2020ut, 2019pdx). The old
+        probe preferred those, so one SCC resolved different catalogs depending
+        on which event label sat on the target row. Diff config is keyed by SCC
+        alone, so both layouts below must be ignored.
+        """
+        target = _target()
+        event_dir = event_scc_leaf(
+            self.handoff, target.event_name(), target.sector, target.camera, target.ccd
+        )
+        (event_dir / "ws").mkdir(parents=True, exist_ok=True)
+        for stale in (
+            event_dir / "ws" / GAIA_CATALOG_PIPELINE_BASENAME,
+            event_dir / GAIA_CATALOG_PIPELINE_BASENAME,
+        ):
+            stale.write_text("stale,event,scoped\n", encoding="utf-8")
+
+        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", target)
+
+        expected = scc_catalogs_dir(
+            self.data, target.sector, target.camera, target.ccd
+        ) / f"gaia_catalog_s{target.sector:04d}_{target.camera}_{target.ccd}.csv"
+        self.assertEqual(cfg.gaia_catalog, str(expected))
+        self.assertNotIn(str(event_dir), cfg.gaia_catalog)
 
     def test_write_frozen_diff_config_round_trip(self):
         cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())

@@ -116,7 +116,7 @@ class _ParityBase(unittest.TestCase):
 
         manifest_csv = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame(
+        frames_frame = pd.DataFrame(
             {
                 "filename": [
                     Path(self.ffi_paths["tess0001"]).name,
@@ -126,7 +126,34 @@ class _ParityBase(unittest.TestCase):
                 "wcs_ok": [True, True],
                 "group_id": [0, 0],
             }
-        ).to_csv(manifest_csv, index=False)
+        )
+        frames_frame.to_csv(manifest_csv, index=False)
+
+        # SCC-only storage: load_diff_frames_for_verify (the primary indexed
+        # verify path) reads bookkeeping/diff/oversampling_N/frames.csv +
+        # diff_job.json, not the legacy event-level manifest above. Seed both
+        # so indexed-parity checks below can resolve the frame manifest.
+        bk = scc_diff_bookkeeping_dir(
+            self.data, self.target.sector, self.target.camera, self.target.ccd
+        )
+        bk.mkdir(parents=True, exist_ok=True)
+        frames_frame.to_csv(bk / FRAMES_CSV_BASENAME, index=False)
+        (bk / DIFF_JOB_BASENAME).write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "sector": self.target.sector,
+                    "camera": self.target.camera,
+                    "ccd": self.target.ccd,
+                    "mapping_grid": {
+                        "sector": self.target.sector,
+                        "camera": self.target.camera,
+                        "ccd": self.target.ccd,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
 
         self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)

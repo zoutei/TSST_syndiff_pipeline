@@ -1,4 +1,4 @@
-"""Tests for star output path resolution under phot_{run_id}/host_star."""
+"""Tests for star output path resolution under ``{lane_root}/host_star`` (per-SCC)."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.difference_imaging.support.paths import photometry_root
+from syndiff_pipeline.common.scc_paths import scc_diff_dir
 from syndiff_pipeline.star.runner import (
     HOST_STAR_SUBDIR,
     resolve_star_host_root,
@@ -27,44 +27,63 @@ from syndiff_pipeline.star.site_config import (
 )
 
 
-def _fake_ctx(*, event_dir: Path, baseline_ws: Path) -> SimpleNamespace:
+def _fake_ctx(
+    *,
+    data_root: str,
+    sector: int = 20,
+    camera: int = 3,
+    ccd: int = 2,
+    output_store_name: str | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
-        event_dir=str(event_dir),
-        baseline_workspace_dir=str(baseline_ws),
+        data_root=str(data_root),
+        sector=sector,
+        camera=camera,
+        ccd=ccd,
+        output_store_name=output_store_name,
     )
 
 
 class TestStarOutputRoot(unittest.TestCase):
-    def test_star_output_root_is_host_star_under_photometry_tree(self):
+    def test_star_output_root_is_host_star_under_scc_diff_lane(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            event = Path(tmpdir) / "events" / "s0020_c3_k2_s20_astrometry"
-            baseline = event / "ws_star_full_lc"
-            baseline.mkdir(parents=True)
-            ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
-            self.assertEqual(
-                star_output_root(ctx, photometry_run_id="star_full_lc"),
-                Path(photometry_root(str(event), "star_full_lc")) / HOST_STAR_SUBDIR,
+            ctx = _fake_ctx(data_root=tmpdir)
+            expected = (
+                scc_diff_dir(tmpdir, 20, 3, 2, store_name=None) / HOST_STAR_SUBDIR
             )
             self.assertEqual(
-                star_output_root(ctx, photometry_run_id=None),
-                Path(photometry_root(str(event), None)) / HOST_STAR_SUBDIR,
+                star_output_root(ctx, photometry_run_id="star_full_lc"), expected
+            )
+            # photometry_run_id no longer namespaces the SCC-lane output.
+            self.assertEqual(
+                star_output_root(ctx, photometry_run_id=None), expected
             )
 
-    def test_resolve_returns_phot_host_star(self):
+    def test_star_output_root_respects_output_store_name(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            event = Path(tmpdir) / "evt"
-            baseline = event / "ws_star_full_lc"
-            host = Path(photometry_root(str(event), "run_a")) / HOST_STAR_SUBDIR
-            host.mkdir(parents=True)
-            ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
+            ctx = _fake_ctx(data_root=tmpdir, output_store_name="alt")
+            expected = (
+                scc_diff_dir(tmpdir, 20, 3, 2, store_name="alt") / HOST_STAR_SUBDIR
+            )
+            self.assertEqual(
+                star_output_root(ctx, photometry_run_id="run_a"), expected
+            )
+
+    def test_resolve_returns_lane_host_star(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ctx = _fake_ctx(data_root=tmpdir)
+            expected = (
+                scc_diff_dir(tmpdir, 20, 3, 2, store_name=None) / HOST_STAR_SUBDIR
+            )
             self.assertEqual(
                 resolve_star_host_root(ctx, "star_lc_full", photometry_run_id="run_a"),
-                host,
+                expected,
             )
 
     def test_deprecated_workspace_run_id_warns_and_does_not_affect_output(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            site = Path(tmpdir)
+            site = Path(tmpdir) / "site"
+            site.mkdir()
             policy_path = site / "star_config.yaml"
             policy_path.write_text(
                 """
@@ -98,18 +117,15 @@ baseline:
             self.assertEqual(run_cfg.photometry_run_id, "star_full_lc")
             self.assertEqual(run_cfg.baseline.workspace_run_id, "star_full_lc")
 
-            event = site / "events" / "s0020_c3_k2_s20_astrometry"
-            baseline = event / "ws_star_full_lc"
-            baseline.mkdir(parents=True)
-            ctx = _fake_ctx(event_dir=event, baseline_ws=baseline)
-            expected = Path(photometry_root(str(event), "star_full_lc")) / "host_star"
+            data_root = Path(tmpdir) / "data"
+            ctx = _fake_ctx(data_root=str(data_root))
+            expected = (
+                scc_diff_dir(str(data_root), 20, 3, 2, store_name=None)
+                / HOST_STAR_SUBDIR
+            )
             self.assertEqual(
                 star_output_root(ctx, photometry_run_id=run_cfg.photometry_run_id),
                 expected,
-            )
-            self.assertNotEqual(
-                star_output_root(ctx, photometry_run_id=run_cfg.photometry_run_id),
-                event / "star_star_lc_full",
             )
 
 

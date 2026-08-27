@@ -138,7 +138,7 @@ class TestStarEpsfGepsfConfig(unittest.TestCase):
             site = Path(tmpdir)
             policy_path = site / "star_config.yaml"
             policy_path.write_text(
-                (_ROOT / "config" / "star_config_epsf_gepsf.yaml")
+                (_ROOT / "config" / "archive" / "star_config_epsf_gepsf.yaml")
                 .read_text(encoding="utf-8")
                 .replace(
                     "  requirements: 'Memory >= 100000 && LoadAvg < 10 && Machine != \"plscience10.stsci.edu\"'\n  rank: \"-LoadAvg\"\n",
