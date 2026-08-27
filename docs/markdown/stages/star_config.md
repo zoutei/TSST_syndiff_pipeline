@@ -50,7 +50,7 @@ epsf:
   psf_size: 11
   extract_size: 11
   min_stars_per_tile: 5
-  mag_max_rp: 12.95
+  tess_mag_max: 12.95
   epsf_maxiters: 15
   epsf_recentering_maxiters: 20
   epsf_n_jobs: 8

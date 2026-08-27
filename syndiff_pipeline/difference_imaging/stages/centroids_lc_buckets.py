@@ -111,7 +111,7 @@ def parse_lane_path(lane: Path) -> tuple[Path, int, int, int, str]:
 
 
 def _centroids_params_defaults() -> SimpleNamespace:
-    return SimpleNamespace(mag_max_rp=12.95, mag_min_rp=7.5)
+    return SimpleNamespace(tess_mag_max=12.95, tess_mag_min=7.5)
 
 
 def _load_progress(path: Path) -> set[str]:

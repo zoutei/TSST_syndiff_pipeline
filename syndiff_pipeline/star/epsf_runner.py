@@ -154,7 +154,7 @@ def ensure_star_epsf_catalog(
         psf_size=build_cfg.psf_size,
         extract_size=build_cfg.extract_size,
         min_stars_per_tile=build_cfg.min_stars_per_tile,
-        mag_max_rp=build_cfg.mag_max_rp,
+        tess_mag_max=build_cfg.tess_mag_max,
         epsf_maxiters=build_cfg.epsf_maxiters,
         epsf_recentering_maxiters=build_cfg.epsf_recentering_maxiters,
         epsf_n_jobs=build_cfg.epsf_n_jobs,
