@@ -38,12 +38,14 @@ Example YAML:
 
 ## Gaia star selection
 
-Two magnitude cuts (defaults match `starpositioningscript.py`):
+Two magnitude cuts on derived `tess_mag` (never raw Gaia `phot_rp_mean_mag`
+— standing policy, 2026-08-22; defaults match `starpositioningscript.py`'s
+original RP-magnitude values):
 
 | Cut | Default | Applied |
 |-----|---------|---------|
-| Bright end | `mag_max_rp` = 12.95 | Parent-process pre-filter (same as ePSF) |
-| Faint end | `mag_min_rp` = 7.5 | Per-frame after `gaia_science_xy_for_frame` |
+| Bright end | `tess_mag_max` = 12.95 | Parent-process pre-filter (same as ePSF) |
+| Faint end | `tess_mag_min` = 7.5 | Per-frame after `gaia_science_xy_for_frame` |
 
 Requires `ra`, `dec` in the Gaia table. Star **x/y** are computed per FFI from full-FFI WCS — not taken from the static Gaia CSV crop columns.
 
@@ -79,9 +81,11 @@ SCC-primary path when configured:
 
 Resume: valid non-empty ECSV on disk (or provenance-complete `centroids` artifact) is skipped unless `force_rerun: true`.
 
-### Debug helper
+### Debug residual FITS (`pipeline_plots: true`)
 
-`write_frame_residual_fits()` runs one frame and writes a full-frame residual FITS via `psf_phot.make_residual_image()` — intended for interactive debugging, not production pipeline output.
+Up to 10 representative frames (`select_pipeline_debug_stems`, preferring the same stems already plotted for `epsf`) get a full-frame PSF-subtraction residual FITS under `debug_plots/{centroids_label}/`. As of 2026-08-22 this is written **inline** during the main fit — `_centroids_one_frame_task` reuses the `psf_phot` it already computed (`psf_phot.make_residual_image()`), no second fit. A summary `{centroids_label}_index.json` is written once the parallel pass completes.
+
+`write_frame_residual_fits()` in `centroids.py` still exists as an ad-hoc/manual debugging utility that re-fits a single frame from scratch — used to regenerate a residual for an already-completed workspace that predates the inline mechanism, or for an arbitrary one-off frame. It is not called by the production pipeline.
 
 ---
 
@@ -89,12 +93,22 @@ Resume: valid non-empty ECSV on disk (or provenance-complete `centroids` artifac
 
 | Key | Default | Notes |
 |-----|---------|-------|
-| `mag_max_rp` | 12.95 | Upper RP magnitude |
-| `mag_min_rp` | 7.5 | Lower RP magnitude |
+| `tess_mag_max` | 12.95 | Upper tess_mag bound |
+| `tess_mag_min` | 7.5 | Lower tess_mag bound |
 | `fit_shape` | 11 | PSFPhotometry fit region |
 | `aperture_radius` | 4 | Aperture for initial fluxes |
 | `psf_grouper_min_separation` | 10 | `SourceGrouper` separation (pixels) |
+| `centroids_max_group_size` | 5 | Hard cap on joint-fit group size (see below) |
 | `centroids_n_jobs` | — | Frame parallelism override |
+
+`psf_grouper_min_separation` groups nearby stars for a joint PSF fit, but
+`SourceGrouper` has no native size limit — a dense field can produce one
+group with dozens of stars whose joint least-squares fit becomes
+impractically slow. `_CappedSourceGrouper` wraps `SourceGrouper`: any
+resulting group larger than `centroids_max_group_size` is recursively
+re-clustered with a tighter separation threshold until every sub-group fits
+(`centroids._split_oversized_group`) — splits by proximity, never drops
+stars.
 
 ---
 

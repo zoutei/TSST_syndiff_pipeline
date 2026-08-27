@@ -62,7 +62,10 @@ class StarEpsfConfig:
     psf_size: int = 11
     extract_size: int | None = 11
     min_stars_per_tile: int = 5
-    mag_max_rp: float | None = 12.95
+    # Always filters on derived tess_mag, never raw Gaia phot_rp_mean_mag
+    # (standing policy, 2026-08-22) -- resolved the same way as the diff
+    # stage's EpsfParams.tess_mag_max.
+    tess_mag_max: float | None = 12.95
     epsf_maxiters: int = 15
     epsf_recentering_maxiters: int = 20
     epsf_n_jobs: int | None = 8
@@ -265,7 +268,7 @@ def _parse_star_epsf(raw: dict | None) -> StarEpsfConfig | None:
         psf_size=int(raw.get("psf_size", 11)),
         extract_size=int(extract_size) if extract_size not in (None, "") else None,
         min_stars_per_tile=int(raw.get("min_stars_per_tile", 5)),
-        mag_max_rp=float(raw["mag_max_rp"]) if raw.get("mag_max_rp") not in (None, "") else 12.95,
+        tess_mag_max=float(raw["tess_mag_max"]) if raw.get("tess_mag_max") not in (None, "") else 12.95,
         epsf_maxiters=int(raw.get("epsf_maxiters", 15)),
         epsf_recentering_maxiters=int(raw.get("epsf_recentering_maxiters", 20)),
         epsf_n_jobs=int(raw["epsf_n_jobs"]) if raw.get("epsf_n_jobs") not in (None, "") else None,
