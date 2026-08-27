@@ -163,7 +163,6 @@ class TestProvenanceHitRequiresArtifact(unittest.TestCase):
                     force_rerun=False,
                     sck=(1, 1, 1),
                     data_root=tmp,
-                    workspace_root=tmp,
                     downsample_fp="downsample_fp_test",
                 )
 

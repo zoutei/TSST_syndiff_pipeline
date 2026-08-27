@@ -56,8 +56,16 @@ def _write_shared_mask_fits(
     sck: tuple | None = None,
     data_root: str | None = None,
     mask_params: Any = None,
+    mask_settings: Any = None,
+    run_id: str | None = None,
 ) -> str:
-    """Write fpacked shared_mask and best-effort provenance emit."""
+    """Write fpacked shared_mask and best-effort provenance emit.
+
+    ``mask_settings``, when given, is the already-resolved :class:`MaskSettings`
+    (or mapping) that actually painted this mask; it is forwarded to
+    :func:`provenance_glue.emit_shared_mask_artifact` so the recipe hashes the
+    real policy instead of falling back to packaged defaults (Contract A2).
+    """
     os.makedirs(output_dir, exist_ok=True)
     out_path = os.path.join(str(output_dir), SHARED_MASK_FITS_BASENAME)
     hdu = fits.PrimaryHDU(np.asarray(mask, dtype=np.int16))
@@ -72,6 +80,9 @@ def _write_shared_mask_fits(
         try:
             from syndiff_pipeline.difference_imaging.orchestration import provenance_glue
 
+            meta = {}
+            if run_id:
+                meta["run_id"] = run_id
             provenance_glue.emit_shared_mask_artifact(
                 sector=sck[0],
                 camera=sck[1],
@@ -79,6 +90,8 @@ def _write_shared_mask_fits(
                 params=mask_params,
                 location=out_path,
                 data_root=data_root,
+                mask_settings=mask_settings,
+                meta=meta or None,
             )
         except Exception:
             log.debug("provenance emit (shared_mask) failed", exc_info=True)
@@ -157,6 +170,8 @@ def make_shared_mask(
     sck: tuple | None = None,
     data_root: str | None = None,
     mask_params: Any = None,
+    mask_settings: Any = None,
+    run_id: str | None = None,
 ) -> np.ndarray:
     """
     TESSreduce shared bitmask (bits 1/2/4/8/16 only; no 32/64/128).
@@ -229,6 +244,8 @@ def make_shared_mask(
             sck=sck,
             data_root=data_root,
             mask_params=mask_params,
+            mask_settings=mask_settings,
+            run_id=run_id,
         )
 
     return mask.astype(np.int16)
@@ -280,6 +297,7 @@ def build_static_mask(
     sck: tuple | None = None,
     data_root: str | None = None,
     mask_params: Any = None,
+    run_id: str | None = None,
 ) -> np.ndarray:
     """
     Build static shared bitmask.
@@ -327,6 +345,8 @@ def build_static_mask(
             sck=sck,
             data_root=data_root,
             mask_params=mask_params,
+            mask_settings=settings,
+            run_id=run_id,
         )
 
     geo = load_geometry(settings.geometry_file)
@@ -438,5 +458,7 @@ def build_static_mask(
             sck=sck,
             data_root=data_root,
             mask_params=mask_params,
+            mask_settings=settings,
+            run_id=run_id,
         )
     return mask

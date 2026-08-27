@@ -782,7 +782,6 @@ def fit_gridded_epsf_orbit_binned(
     epsf_label: Optional[str] = None,
     diffs_input: Optional[str] = None,
     skip_existing: bool = True,
-    workspace_root: Optional[str] = None,
     ffi_list_df: Optional[pd.DataFrame] = None,
     science_bounds: Optional[dict] = None,
     ffi_path_by_stem: Optional[dict[str, str]] = None,
@@ -852,14 +851,7 @@ def fit_gridded_epsf_orbit_binned(
         prov_sck = None
     prov_data_root = getattr(cfg, "data_root", "") or None
     prov_output_store_name = getattr(cfg, "output_store_name", None) or None
-    if workspace_root is None:
-        from syndiff_pipeline.difference_imaging.support.paths import (
-            workspace_root as _workspace_root,
-        )
-
-        workspace_root = _workspace_root(
-            cfg.output_dir, run_id=getattr(cfg, "workspace_run_id", None)
-        )
+    prov_run_id = getattr(cfg, "run_id", "") or None
 
     diff_image_fps = build_diff_image_fps(
         cfg, diff_paths, diffs_input=diffs_input, sck=prov_sck
@@ -1109,6 +1101,9 @@ def fit_gridded_epsf_orbit_binned(
                     ) if window_fps else None
                     if inputs is not None:
                         try:
+                            anchor_meta = {}
+                            if prov_run_id:
+                                anchor_meta["run_id"] = prov_run_id
                             provenance_glue.emit_diff_artifact(
                                 kind="epsf",
                                 sector=prov_sck[0],
@@ -1121,9 +1116,8 @@ def fit_gridded_epsf_orbit_binned(
                                 input_fingerprints=inputs,
                                 data_root=prov_data_root,
                                 is_fits=False,
-                                scc_primary=True,
-                                workspace_root=workspace_root,
                                 output_store_name=prov_output_store_name,
+                                meta=anchor_meta or None,
                             )
                         except Exception:
                             log.debug(
@@ -1251,6 +1245,9 @@ def fit_gridded_epsf_orbit_binned(
                             )
                             if inputs is not None:
                                 try:
+                                    blend_meta = {"producer": "gridded_epsf_orbit_blend"}
+                                    if prov_run_id:
+                                        blend_meta["run_id"] = prov_run_id
                                     provenance_glue.emit_diff_artifact(
                                         kind="epsf",
                                         sector=prov_sck[0],
@@ -1263,10 +1260,8 @@ def fit_gridded_epsf_orbit_binned(
                                         input_fingerprints=inputs,
                                         data_root=prov_data_root,
                                         is_fits=False,
-                                        scc_primary=True,
-                                        workspace_root=workspace_root,
                                         output_store_name=prov_output_store_name,
-                                        meta={"producer": "gridded_epsf_orbit_blend"},
+                                        meta=blend_meta,
                                     )
                                 except Exception:
                                     log.debug(
