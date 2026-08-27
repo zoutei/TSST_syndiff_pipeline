@@ -612,7 +612,7 @@ def diff_image_recipe_params(*params: Any) -> dict:
     """``diff_image`` recipe params.
 
     Accepts one dataclass (``HotpantsParams``) or two (``KernelFitParams``,
-    ``KernelSubtractParams``) and merges them under their dataclass type name
+    ``BackgroundEstimateParams``) and merges them under their dataclass type name
     so the two producer families never collide on a shared key.
     """
     if not params:

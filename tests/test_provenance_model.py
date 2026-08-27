@@ -172,6 +172,7 @@ class TestTemplateRecipeParamsBuilders(unittest.TestCase):
                     "y_edge_strip": 30,
                     "conv_pad_native": 8,
                     "oversampling_factor": 2,
+                    "mapgrid_version": 3,
                 },
             },
         )
@@ -207,6 +208,7 @@ class TestTemplateRecipeParamsBuilders(unittest.TestCase):
                     "y_edge_strip": 30,
                     "conv_pad_native": 8,
                     "oversampling_factor": 2,
+                    "mapgrid_version": 3,
                 },
             },
         )
@@ -376,9 +378,9 @@ class TestDiffRecipeParamsBuilders(unittest.TestCase):
         self.assertEqual(
             model.mapping_grid_recipe_fragment(block),
             {
-                "x_left_dead": 44,
-                "x_right_dead": 44,
-                "y_edge_strip": 30,
+                "x_left_dead": 36,
+                "x_right_dead": 36,
+                "y_edge_strip": 22,
                 "conv_pad_native": 8,
                 "oversampling_factor": 2,
             },
@@ -402,15 +404,15 @@ class TestDiffRecipeParamsBuilders(unittest.TestCase):
     def test_diff_image_recipe_params_kernel_fit_and_subtract_merge(self):
         from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
             KernelFitParams,
-            KernelSubtractParams,
+            BackgroundEstimateParams,
         )
 
         fit = KernelFitParams(weighting_factor=0.7)
-        sub = KernelSubtractParams(tessreduce_boundary_k=6)
+        sub = BackgroundEstimateParams(tessreduce_boundary_k=6)
         params = model.diff_image_recipe_params(fit, sub)
-        self.assertEqual(set(params.keys()), {"KernelFitParams", "KernelSubtractParams"})
+        self.assertEqual(set(params.keys()), {"KernelFitParams", "BackgroundEstimateParams"})
         self.assertEqual(params["KernelFitParams"]["weighting_factor"], 0.7)
-        self.assertEqual(params["KernelSubtractParams"]["tessreduce_boundary_k"], 6)
+        self.assertEqual(params["BackgroundEstimateParams"]["tessreduce_boundary_k"], 6)
 
     def test_diff_image_recipe_params_requires_at_least_one(self):
         with self.assertRaises(ValueError):
