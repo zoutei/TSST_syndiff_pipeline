@@ -26,7 +26,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     EpsfParams,
     HotpantsParams,
     KernelFitParams,
-    KernelSubtractParams,
+    BackgroundEstimateParams,
     SharedMaskParams,
 )
 
@@ -51,8 +51,8 @@ class TestRecipeDeterminism(unittest.TestCase):
         self.assertEqual(m1, m2)
 
     def test_kernel_pair_recipe_namespaced_by_classname(self):
-        r = pg.diff_recipe("diff_image", [KernelFitParams(), KernelSubtractParams()])
-        self.assertEqual(set(r["params"].keys()), {"KernelFitParams", "KernelSubtractParams"})
+        r = pg.diff_recipe("diff_image", [KernelFitParams(), BackgroundEstimateParams()])
+        self.assertEqual(set(r["params"].keys()), {"KernelFitParams", "BackgroundEstimateParams"})
 
     def test_recipe_changes_with_params(self):
         r1 = pg.diff_recipe("diff_image", HotpantsParams())
