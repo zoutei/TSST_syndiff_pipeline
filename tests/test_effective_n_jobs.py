@@ -37,6 +37,25 @@ class TestResolveEffectiveNJobs(unittest.TestCase):
                 2,
             )
 
+    def test_condor_env_does_not_widen_explicit_stage_n_jobs(self):
+        # Regression: hotpants_n_jobs=1 must stay 1 on a Condor node that was
+        # granted more CPUs for other stages (e.g. epsf/centroids), not get
+        # silently widened back out to the full allocation.
+        with mock.patch.dict(os.environ, {"SYNDIFF_REQUEST_CPUS": "10"}, clear=False):
+            with mock.patch("multiprocessing.cpu_count", return_value=16):
+                self.assertEqual(
+                    resolve_effective_n_jobs(10, stage_n_jobs=1),
+                    1,
+                )
+
+    def test_condor_env_still_shrinks_explicit_stage_n_jobs(self):
+        with mock.patch.dict(os.environ, {"SYNDIFF_REQUEST_CPUS": "4"}, clear=False):
+            with mock.patch("multiprocessing.cpu_count", return_value=16):
+                self.assertEqual(
+                    resolve_effective_n_jobs(10, stage_n_jobs=8),
+                    4,
+                )
+
     def test_minimum_one(self):
         with mock.patch("multiprocessing.cpu_count", return_value=0):
             self.assertEqual(resolve_effective_n_jobs(0), 1)

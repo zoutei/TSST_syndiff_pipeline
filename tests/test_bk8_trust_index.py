@@ -232,7 +232,7 @@ class TestSchedulerTrustIndexOnly(unittest.TestCase):
                 STATUS_SKIPPED,
             )
 
-    def test_warmed_external_checkpoint_promoted_after_fail_closed_miss(self):
+    def test_missing_external_checkpoint_fails_closed(self):
         target = Target(20, 3, 3, 210.0, 81.0, "2020ut")
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -245,21 +245,7 @@ class TestSchedulerTrustIndexOnly(unittest.TestCase):
             )
             self.assertEqual(
                 state.get_stage_run(run_id, label, "ps1_process").status,
-                STATUS_EXTERNAL,
-            )
-
-            resolved = resolve_config(target, ctx.cfg)
-            _publish_and_ingest_checkpoint(resolved)
-
-            from syndiff_pipeline.common.orchestration.scheduler import (
-                _promote_warmed_external_checkpoints,
-            )
-
-            promoted = _promote_warmed_external_checkpoints(state, run_id, ctx)
-            self.assertEqual(promoted, 1)
-            self.assertEqual(
-                state.get_stage_run(run_id, label, "ps1_process").status,
-                STATUS_SKIPPED,
+                "failed",
             )
 
 
@@ -290,7 +276,7 @@ class TestIdxMsStatusMarker(unittest.TestCase):
             row = state.get_stage_run(run_id, label, "ps1_process")
             self.assertEqual(
                 _format_stage_status_short(state, run_id, row, trust_index=True),
-                "ps1_pr:idx_ms",
+                "ps1_pr:fail",
             )
 
     def test_idx_ms_not_shown_before_verify_attempted(self):

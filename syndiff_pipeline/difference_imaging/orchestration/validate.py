@@ -29,6 +29,7 @@ STAGE_KINDS = frozenset(
         "subtract",
         "background_temporal_smoothing",
         "photometry",
+        "forced_photometry",
     }
 )
 

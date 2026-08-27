@@ -882,7 +882,7 @@ class TestCondorEvictionReconcile(unittest.TestCase):
             self.assertEqual(row.status, STATUS_READY)
             self.assertIn("plscience10.stsci.edu", condor.read_bad_machines(artifacts["bad_machines"]))
 
-    def test_active_stage_log_defers_eviction_requeue(self):
+    def test_active_stage_log_does_not_defeat_eviction_requeue(self):
         cluster_id = 900_003
         with tempfile.TemporaryDirectory() as tmp:
             state, ctx, label, artifacts = _claim_condor_stage(
@@ -897,10 +897,13 @@ class TestCondorEvictionReconcile(unittest.TestCase):
                 return_value={cluster_id: (condor._JOB_IDLE, None)},
             ), unittest.mock.patch.object(condor, "remove_cluster") as rm:
                 counts = reconcile_running_stages(state, "run_a", ctx)
-            self.assertEqual(counts["still_running"], 1)
-            self.assertEqual(counts["requeued"], 0)
-            rm.assert_not_called()
-            self.assertFalse(artifacts["bad_machines"].is_file())
+            self.assertEqual(counts["still_running"], 0)
+            self.assertEqual(counts["requeued"], 1)
+            rm.assert_called_once()
+            self.assertIn(
+                "plscience10.stsci.edu",
+                condor.read_bad_machines(artifacts["bad_machines"]),
+            )
 
     def test_second_reconcile_does_not_double_requeue(self):
         cluster_id = 900_004
@@ -1160,7 +1163,7 @@ class TestCondorEvictionReconcile(unittest.TestCase):
             self.assertIn("plscience11.stsci.edu", merged.requirements or "")
             self.assertEqual(counts["requeued"], 1)
 
-    def test_diff_sidecar_activity_defers_eviction_requeue(self):
+    def test_diff_sidecar_activity_does_not_defeat_eviction_requeue(self):
         cluster_id = 900_009
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -1219,9 +1222,13 @@ class TestCondorEvictionReconcile(unittest.TestCase):
                 return_value={cluster_id: (condor._JOB_IDLE, None)},
             ), unittest.mock.patch.object(condor, "remove_cluster") as rm:
                 counts = reconcile_running_stages(state, "run_a", ctx)
-            self.assertEqual(counts["still_running"], 1)
-            self.assertEqual(counts["requeued"], 0)
-            rm.assert_not_called()
+            self.assertEqual(counts["still_running"], 0)
+            self.assertEqual(counts["requeued"], 1)
+            rm.assert_called_once()
+            self.assertIn(
+                "plscience10.stsci.edu",
+                condor.read_bad_machines(artifacts["bad_machines"]),
+            )
 
 
 if __name__ == "__main__":

@@ -53,6 +53,42 @@ Completion: `photometry_complete()` checks expected light-curve CSVs (and astrom
 
 SCC products remain under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` — photometry is read-only on those planes.
 
+## No automatic upstream gate {#no-upstream-gate}
+
+`PHOTOMETRY_STAGE` is declared with `deps=()` (`photometry/orchestration/stages.py`)
+— unlike `diff`, which structurally depends on `downsample` and is held by the
+scheduler in a "waiting on upstream" state until that dependency's own
+`verify_complete` passes. With no declared dep, the scheduler treats a
+submitted photometry target as immediately ready and attempts a **real
+launch** (a real Condor submission by default) on its very first tick. If the
+underlying diff lane (`hp_d`, and `epsf_r1` when any method is
+`psf_type: epsf`) doesn't exist yet, `execute_photometry_stage` fails fast
+(sub-second — a missing-artifact error, not a crash), and the scheduler
+requeues with backoff (`scheduler.max_stage_attempts`, default **3**;
+`scheduler.requeue_backoff_s`, default 30s — so attempts land at
+roughly 30s/60s/90s) before giving up and marking the run permanently
+`failed`.
+
+Two consequences worth knowing before submitting a photometry run for an SCC
+whose diff lane isn't finished yet:
+
+- Submitting early is not a benign hold — each retry is a real Condor
+  submission (visible in `condor_q`/`daemon.log` as `Submitted Condor
+  cluster ...`), repeated on a shared pool for as long as attempts remain.
+- Raising `scheduler.max_stage_attempts` in the run's orchestrator config
+  (`--config`, not `--photometry-config`) makes the run keep trying for
+  longer, but does **not** make retries cheaper — it just means more real
+  Condor submissions over a longer window.
+
+The safe pattern is to verify the upstream artifact yourself (e.g. poll for
+`{data_root}/s{SSSS}/c{C}/k{K}/diff_{output_store_name}/epsf_r1/gridded_epsf_index.json`
+on disk, or `hp_d/*.fits*` for aperture-only methods) and only call
+`syndiff photometry submit` for an SCC once that check passes — a single-row
+targets CSV lets you submit one already-ready SCC at a time instead of
+batching the whole targets CSV ahead of readiness. See the matching note in
+[syndiff-run-ops REFERENCE.md](../../../.cursor/skills/syndiff-run-ops/REFERENCE.md)
+(local skill file, not part of this doc tree).
+
 ## Condor / CLI
 
 - Stage default executor: Condor (`stages.photometry` in `pipeline.yaml`).
