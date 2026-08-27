@@ -136,6 +136,27 @@ class TestDispatchPs1ProcessKwargs(unittest.TestCase):
         kwargs = run_mock.call_args.kwargs
         self.assertFalse(kwargs["use_shared_convolved_store"])
         self.assertTrue(kwargs["write_per_scc_convolved_zarr"])
+        self.assertEqual(kwargs["stream_max_inflight_requests"], 24)
+        self.assertEqual(kwargs["stream_prefetch_cells"], 6)
+
+    @mock.patch("syndiff_pipeline.template_creation.processing.ps1_process.run_modern_sliding_window_pipeline")
+    def test_dispatch_passes_stream_loader_controls(self, run_mock):
+        run_mock.return_value = {
+            "expected_count": 0,
+            "produced_count": 0,
+            "artifacts": [],
+        }
+        resolved = self._resolved(
+            Ps1ProcessStageParams(
+                ps1_source="stream",
+                stream_max_inflight_requests=12,
+                stream_prefetch_cells=3,
+            )
+        )
+        dispatch._execute_template_stage(resolved, "ps1_process")
+        kwargs = run_mock.call_args.kwargs
+        self.assertEqual(kwargs["stream_max_inflight_requests"], 12)
+        self.assertEqual(kwargs["stream_prefetch_cells"], 3)
 
 
 class TestCheckpointAndVerifyResolvers(unittest.TestCase):

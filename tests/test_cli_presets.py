@@ -14,9 +14,19 @@ if str(_ROOT) not in sys.path:
 import yaml
 
 from syndiff_pipeline.common.orchestration import cli as orch_cli
-from syndiff_pipeline.common.orchestration.cli import DIFF_STAGE, preset_stages
+from syndiff_pipeline.common.orchestration.cli import (
+    COMBINED_PRESET,
+    DIFF_PRESET_STAGES,
+    DIFF_STAGE,
+    preset_stages,
+)
 from syndiff_pipeline.template_creation.orchestration.stages import TEMPLATE_STAGES
-from syndiff_pipeline.cli import build_execution_parser, main, parse_execution_argv
+from syndiff_pipeline.cli import (
+    build_combined_submit_parser,
+    build_execution_parser,
+    main,
+    parse_execution_argv,
+)
 from syndiff_pipeline.cli import preset_stages as entry_preset_stages
 
 
@@ -29,8 +39,15 @@ class TestPresetStageLists(unittest.TestCase):
         with self.assertRaises(ValueError):
             preset_stages("all")
 
-    def test_diff_preset_is_diff_only(self):
-        self.assertEqual(preset_stages("diff"), [DIFF_STAGE])
+    def test_diff_preset_activates_split_diff_stages(self):
+        self.assertEqual(preset_stages("diff"), list(DIFF_PRESET_STAGES))
+        self.assertEqual(DIFF_PRESET_STAGES[-1], DIFF_STAGE)
+
+    def test_combined_preset_contains_template_then_diff(self):
+        combined = preset_stages(COMBINED_PRESET)
+        expected_template = [spec.name for spec in TEMPLATE_STAGES]
+        self.assertEqual(combined[: len(expected_template)], expected_template)
+        self.assertEqual(combined[len(expected_template) :], list(DIFF_PRESET_STAGES))
 
     def test_entry_point_reexports_preset_stages(self):
         self.assertIs(entry_preset_stages, preset_stages)
@@ -136,6 +153,13 @@ class TestExecutionParser(unittest.TestCase):
     def test_build_execution_parser_prog(self):
         parser = build_execution_parser("template", "submit")
         self.assertEqual(parser.prog, "syndiff template submit")
+
+    def test_combined_submit_parser_requires_scc_scope(self):
+        parser = build_combined_submit_parser()
+        args = parser.parse_args(["--config", "/tmp/pipeline.yaml", "--scc", "/tmp/scc.csv"])
+        self.assertEqual(args.scc, "/tmp/scc.csv")
+        with self.assertRaises(SystemExit):
+            parser.parse_args(["--config", "/tmp/pipeline.yaml"])
 
     def test_template_parser_has_no_targets(self):
         parser = build_execution_parser("template", "submit")

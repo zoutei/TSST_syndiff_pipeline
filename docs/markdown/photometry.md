@@ -24,6 +24,27 @@ Default site [`config/diff_config.yaml`](../../config/diff_config.yaml) is **`sh
 
 Verify gates check the named SCC diff lane before launch — see [photometry pipeline](stages/photometry_pipeline.md#verify).
 
+**Submit only once those prerequisites are actually on disk.** Unlike `diff`
+(which waits on `downsample`), `photometry` has no declared upstream
+dependency and will attempt a real Condor launch immediately on submit —
+launching before the diff lane exists means repeated real Condor submissions
+that fail fast and retry with a short backoff before giving up, not a benign
+hold. Use [`scripts/submit_photometry_when_ready.py`](../../scripts/submit_photometry_when_ready.py)
+instead of `syndiff photometry submit` directly when any target's diff lane
+might not be finished yet — it polls the same on-disk readiness check the
+daemon uses and only submits a target (one Condor run per SCC, via a
+single-row targets CSV) once it will actually succeed:
+
+```bash
+python scripts/submit_photometry_when_ready.py \
+  --photometry-config config/photometry_config.yaml \
+  --targets config/targets_example.csv \
+  --run-id-prefix my_phot_run
+```
+
+See [photometry pipeline §No automatic upstream gate](stages/photometry_pipeline.md#no-upstream-gate)
+for why this is necessary.
+
 ## Quick start
 
 ```bash

@@ -363,6 +363,56 @@ class TestCondorEvictionExclusion(unittest.TestCase):
             self.assertIn('Machine != "plscience10.stsci.edu"', text)
             self.assertIn("LoadAvg < 10", text)
 
+    def test_submit_job_rotates_prior_attempt_artifacts_not_durable_state(self):
+        # Regression: {stage}.condor.stdout/.stderr/.log/.submit are fixed
+        # paths per (run_id, target, stage) that get overwritten by every
+        # retry, silently discarding the previous attempt's output. A
+        # prior attempt's own launch_token (from status.json, written
+        # before this submission) should archive those four aside;
+        # clusters/hold/poll_misses/bad_machines/eviction_state are
+        # durable across resubmissions and must be left untouched.
+        with tempfile.TemporaryDirectory() as tmp:
+            runs_root = str(Path(tmp) / "runs")
+            run_id = "run_a"
+            target_label = "s0001_c1_k1_test"
+            stage = "diff"
+
+            status_path = logs.stage_status_path(runs_root, run_id, target_label, stage)
+            status_path.parent.mkdir(parents=True, exist_ok=True)
+            status_path.write_text(
+                '{"launch_token": "prior-tok", "state": "exited"}', encoding="utf-8"
+            )
+
+            artifacts = condor.condor_artifact_paths(runs_root, run_id, target_label, stage)
+            for key in ("stdout", "stderr", "log", "submit"):
+                artifacts[key].write_text(f"old {key} content\n", encoding="utf-8")
+            artifacts["clusters"].write_text("41\n42\n", encoding="utf-8")
+
+            with unittest.mock.patch.object(condor, "_run_condor") as run:
+                run.return_value = unittest.mock.Mock(
+                    stdout="submitted to cluster 99.\n", stderr="", returncode=0
+                )
+                condor.submit_job(
+                    ["echo", "hi"], runs_root, run_id, target_label, stage
+                )
+
+            for key in ("stdout", "stderr", "log", "submit"):
+                archived = artifacts[key].parent / "attempts" / "prior-tok" / artifacts[key].name
+                self.assertTrue(archived.is_file(), f"{key} not archived")
+                self.assertEqual(archived.read_text(encoding="utf-8"), f"old {key} content\n")
+
+            # Durable state: the new cluster id is appended (normal
+            # behavior), but the pre-existing content is not rotated away.
+            clusters_text = artifacts["clusters"].read_text(encoding="utf-8")
+            self.assertTrue(clusters_text.startswith("41\n42\n"))
+            self.assertFalse(
+                (artifacts["clusters"].parent / "attempts" / "prior-tok" / artifacts["clusters"].name).exists()
+            )
+
+            # Fresh submit file for this attempt at the original path.
+            self.assertTrue(artifacts["submit"].is_file())
+            self.assertNotIn("old submit content", artifacts["submit"].read_text(encoding="utf-8"))
+
     def test_reconcile_requeues_on_eviction_loop(self):
         cluster_id = 888_020
         with tempfile.TemporaryDirectory() as tmp:
