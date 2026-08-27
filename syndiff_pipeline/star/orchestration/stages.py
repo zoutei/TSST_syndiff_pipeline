@@ -53,10 +53,36 @@ def _site_dir_from_ctx(ctx: StageRunContext) -> Path:
     return SitePaths.from_site_dir(".").site_dir
 
 
+def _resolve_diff_policy(runner_cfg):
+    """Resolve the site's diff recipe exactly as ``syndiff diff submit`` would.
+
+    Prefers the unified (schema v2) ``diff:`` block already parsed onto
+    ``RunnerConfig.diff``; falls back to loading the v1 ``diff_config_path``
+    pointer target. Returns ``None`` only when the site has no diff policy
+    configured at all. Passing the result into
+    :func:`~syndiff_pipeline.star.context.load_event_context` is what makes
+    star stop reading a hardcoded ``{site}/diff_config.yaml`` and instead
+    resolve the same recipe the diff stage uses, whether that recipe lives
+    at the default filename or is redirected via ``diff_config:``.
+    """
+    diff_policy = getattr(runner_cfg, "diff", None)
+    if diff_policy is not None:
+        return diff_policy
+    diff_config_path = str(getattr(runner_cfg, "diff_config_path", "") or "").strip()
+    if not diff_config_path:
+        return None
+    from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+        load_diff_site_policy,
+    )
+
+    return load_diff_site_policy(diff_config_path)
+
+
 def _resolve_star_run(ctx: StageRunContext):
-    star_config_path = resolve_star_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg)
+    star_config_path, site_dir = resolve_star_config_path(
+        meta=ctx.meta, runner_cfg=ctx.runner_cfg
+    )
     policy = load_star_site_policy(star_config_path)
-    site_dir = star_config_path.parent
     star_targets = load_star_targets(_frozen_star_targets_path(ctx), site_dir=site_dir)
     star_row = find_star_target_row(star_targets, ctx.target_label)
     photometry_config_path = getattr(ctx.runner_cfg, "photometry_config_path", "") or ""
@@ -66,6 +92,7 @@ def _resolve_star_run(ctx: StageRunContext):
         site_dir=site_dir,
         photometry_config_path=photometry_config_path or None,
     )
+    diff_policy = _resolve_diff_policy(ctx.runner_cfg)
     workspace_run_id = (ctx.meta or {}).get("workspace_run_id")
     if workspace_run_id is not None and str(workspace_run_id).strip():
         log.warning(
@@ -73,7 +100,7 @@ def _resolve_star_run(ctx: StageRunContext):
             "star outputs land in phot_{photometry_run_id}/host_star/",
             workspace_run_id,
         )
-    return policy, star_row, run_config, site_dir
+    return policy, star_row, run_config, site_dir, diff_policy
 
 
 def execute_star_stage(ctx: StageRunContext):
@@ -81,7 +108,7 @@ def execute_star_stage(ctx: StageRunContext):
     from syndiff_pipeline.star.context import load_event_context
     from syndiff_pipeline.star.runner import run_star_pipeline, star_output_root
 
-    policy, star_row, run_config, site_dir = _resolve_star_run(ctx)
+    policy, star_row, run_config, site_dir, diff_policy = _resolve_star_run(ctx)
     frozen_path = _frozen_star_config_path(ctx)
     write_frozen_star_config(policy, frozen_path)
 
@@ -90,6 +117,7 @@ def execute_star_stage(ctx: StageRunContext):
         target_name=ctx.target_label,
         star_run_config=run_config,
         star_target_row=star_row,
+        diff_policy=diff_policy,
     )
     manifest_path = run_star_pipeline(event_ctx, run_config=run_config, validate=True)
     artifacts = [str(manifest_path)]
@@ -108,12 +136,13 @@ def _verify_star(ctx: StageRunContext) -> bool:
     from syndiff_pipeline.star.runner import resolve_star_host_root, verify_star_batch_manifest
 
     try:
-        _policy, _star_row, run_config, site_dir = _resolve_star_run(ctx)
+        _policy, _star_row, run_config, site_dir, diff_policy = _resolve_star_run(ctx)
         event_ctx = load_event_context(
             site=str(site_dir),
             target_name=ctx.target_label,
             star_run_config=run_config,
             star_target_row=_star_row,
+            diff_policy=diff_policy,
         )
         host_root = resolve_star_host_root(
             event_ctx,
@@ -129,12 +158,13 @@ def _collect_star_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
     from syndiff_pipeline.star.context import load_event_context
     from syndiff_pipeline.star.runner import resolve_star_host_root
 
-    _policy, star_row, run_config, site_dir = _resolve_star_run(ctx)
+    _policy, star_row, run_config, site_dir, diff_policy = _resolve_star_run(ctx)
     event_ctx = load_event_context(
         site=str(site_dir),
         target_name=ctx.target_label,
         star_run_config=run_config,
         star_target_row=star_row,
+        diff_policy=diff_policy,
     )
     host_root = resolve_star_host_root(
         event_ctx,

@@ -125,6 +125,11 @@ class RunnerConfig:
     max_eviction_stage_attempts: int = 20
     requeue_backoff_s: float = 30.0
     condor_hold_timeout_s: float = 600.0
+    # Deployment-only optional paths that resolve_diff_config consults as a
+    # fallback when the diff policy's own paths: block does not set them.
+    # Frozen alongside the roots so frozen-first diff resolution does not
+    # silently drop them (they live only in deployment.yaml otherwise).
+    deployment_paths: Dict[str, str] = field(default_factory=dict)
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     def runs_dir(self) -> str:
@@ -184,6 +189,16 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
     if "photometry" not in out:
         out["photometry"] = ResourcePoolParams(max_concurrent=4)
     return out
+
+
+DEPLOYMENT_OPTIONAL_PATH_KEYS = (
+    "straps_csv",
+    "bsc_catalog",
+    "removed_stars_csv",
+    "manifest",
+    "median_mask_path",
+)
+"""Deployment keys resolve_diff_config falls back to when the policy omits them."""
 
 
 def _paths_from_deployment(
@@ -293,6 +308,12 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         deployment, deployment_path=deployment_path
     )
 
+    deployment_paths = {
+        key: str(deployment[key]).strip()
+        for key in DEPLOYMENT_OPTIONAL_PATH_KEYS
+        if str(deployment.get(key, "")).strip()
+    }
+
     diff_site = str(
         raw.get("diff_config", "")
         or raw.get("diff_site_config", "")
@@ -357,6 +378,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         condor_hold_timeout_s=float(
             raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
         ),
+        deployment_paths=deployment_paths,
         notifications=notifications,
     )
 
@@ -595,6 +617,7 @@ def load_and_materialize_runner_config(
             condor_hold_timeout_s=float(
                 raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
             ),
+            deployment_paths=dict(raw.get("deployment_paths") or {}),
             notifications=parse_notification_config(raw.get("notifications")),
         )
         if not cfg.ffi_dir and cfg.data_root:

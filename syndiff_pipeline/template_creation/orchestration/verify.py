@@ -1803,7 +1803,6 @@ def verify_diff(
         _scc_lane_root,
         diff_workspace_complete,
         frozen_diff_config_for_verify,
-        resolve_diff_site_config_path,
     )
     from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 
@@ -1811,20 +1810,24 @@ def verify_diff(
         return VerifyResult(
             "diff",
             False,
-            "diff verification requires RunnerConfig with diff_config_path",
+            "diff verification requires RunnerConfig with a diff policy",
             resolved.event_dir,
         )
-    if not runner_cfg.diff_config_path:
+    if runner_cfg.diff is None and not runner_cfg.diff_config_path:
         return VerifyResult(
             "diff",
             False,
-            "diff verification requires diff_config_path on RunnerConfig",
+            "diff verification requires diff_config_path or an embedded diff: "
+            "policy on RunnerConfig",
             resolved.event_dir,
         )
+    # Frozen-first: when runner_cfg.diff is set, this resolves directly
+    # against the embedded policy and ignores site_config_path entirely.
     cfg = frozen_diff_config_for_verify(
-        resolve_diff_site_config_path(meta=meta, runner_cfg=runner_cfg),
+        None,
         resolved.target,
         meta=meta,
+        runner_cfg=runner_cfg,
     )
     event_dir = Path(resolved.event_dir)
     manifest_csv = manifest_path_from_output_dir(str(event_dir), None)
@@ -1980,19 +1983,23 @@ def stage_absence_probe(
     from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
 
     if stage in DIFF_SPLIT_STAGES:
-        if runner_cfg is None or not runner_cfg.diff_config_path:
+        if runner_cfg is None or (
+            runner_cfg.diff is None and not runner_cfg.diff_config_path
+        ):
             return AbsenceProbeResult.UNKNOWN
         from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
             _diff_frame_manifest_available,
             _scc_lane_root,
             frozen_diff_config_for_verify,
-            resolve_diff_site_config_path,
         )
 
+        # Frozen-first: when runner_cfg.diff is set, resolves directly
+        # against the embedded policy, ignoring any live site file.
         cfg = frozen_diff_config_for_verify(
-            resolve_diff_site_config_path(meta=meta, runner_cfg=runner_cfg),
+            None,
             resolved.target,
             meta=meta,
+            runner_cfg=runner_cfg,
         )
 
         if _diff_frame_manifest_available(cfg, resolved.event_dir):
