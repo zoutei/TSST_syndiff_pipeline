@@ -126,10 +126,23 @@ class TestDiffHandoffBootstrap(unittest.TestCase):
         and field paths set ``crop_bounds = mapping_grid.science_ffi_bounds()``
         unconditionally -- so the crop is a property of the SCC, not of whichever
         event happens to reference it. That is the intended behaviour under
-        SCC-scoped diff; the keys themselves are being removed.
+        SCC-scoped diff; wave A-3 removed the keys themselves (``SynDiffConfig``
+        no longer has ``crop_mode``/``crop_box_size`` at all).
 
-        Regression guard: setting the legacy knobs must NOT shrink the crop.
+        Regression guard: the handoff crop always equals the mapping grid's
+        own ``science_ffi_bounds()`` -- there is no config knob left that
+        could shrink or otherwise change it.
         """
+        grid = MappingGrid(
+            ffi_xmin=-8,
+            ffi_ymin=-8,
+            ffi_xmax=72,
+            ffi_ymax=72,
+            science_xmin_ffi=0,
+            science_ymin_ffi=0,
+            science_xmax_ffi=64,
+            science_ymax_ffi=64,
+        )
         cfg = SynDiffConfig(
             data_root=str(self.data),
             output_dir=str(self.event_dir),
@@ -137,23 +150,12 @@ class TestDiffHandoffBootstrap(unittest.TestCase):
             target_dec=10.0,
             pipeline=[{"kind": "shared_mask"}],
         )
-        _, baseline_crop, _, _ = _load_template_handoff(cfg, str(self.event_dir), None)
+        _, crop, _, _ = _load_template_handoff(cfg, str(self.event_dir), None)
 
-        cfg_with_legacy_knobs = SynDiffConfig(
-            data_root=str(self.data),
-            output_dir=str(self.event_dir),
-            target_ra=100.0,
-            target_dec=10.0,
-            crop_mode="target_box",
-            crop_box_size=32,
-            pipeline=[{"kind": "shared_mask"}],
-        )
-        _, crop, _, _ = _load_template_handoff(
-            cfg_with_legacy_knobs, str(self.event_dir), None
-        )
-
-        self.assertEqual(crop["shape"], baseline_crop["shape"])
-        self.assertNotEqual(crop["shape"], (32, 32))
+        expected = grid.science_ffi_bounds()
+        self.assertEqual(tuple(crop["shape"]), tuple(expected["shape"]))
+        for key in ("x_min", "x_max", "y_min", "y_max"):
+            self.assertEqual(crop[key], expected[key])
 
     def test_missing_manifest_raises(self):
         cfg = SynDiffConfig(output_dir=str(self.root / "empty"), pipeline=[])

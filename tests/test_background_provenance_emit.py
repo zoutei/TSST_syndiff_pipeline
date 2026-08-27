@@ -257,7 +257,6 @@ class TestBackgroundProvenanceEmit(unittest.TestCase):
             sck=(20, 3, 3),
             data_root=str(self.cfg.data_root),
             background_params=BackgroundParams(),
-            workspace_root=str(self.ws_tree),
         )
 
         store = ProvenanceStore(str(provenance_db_path(self.cfg.data_root)))
@@ -284,7 +283,6 @@ class TestBackgroundProvenanceEmit(unittest.TestCase):
             sck=(20, 3, 3),
             data_root=str(self.cfg.data_root),
             background_params=bkg_params,
-            workspace_root=str(self.ws_tree),
         )
 
         store = ProvenanceStore(str(provenance_db_path(self.cfg.data_root)))
@@ -323,7 +321,6 @@ class TestBackgroundProvenanceEmit(unittest.TestCase):
             sck=(20, 3, 3),
             data_root=str(self.cfg.data_root),
             background_params=BackgroundParams(),
-            workspace_root=str(self.ws_tree),
         )
 
         store = ProvenanceStore(str(provenance_db_path(self.cfg.data_root)))

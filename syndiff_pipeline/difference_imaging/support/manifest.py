@@ -22,7 +22,7 @@ from .ffi_naming import (
     tess_product_id_from_ffi_path,
     workspace_frame_stem,
 )
-from .paths import DEFAULT_MANIFEST_BASENAME, LEGACY_MANIFEST_BASENAME, workspace_dir
+from .paths import DEFAULT_MANIFEST_BASENAME, LEGACY_MANIFEST_BASENAME
 
 
 def manifest_path_from_output_dir(output_dir: str, manifest_abspath: str | None = None) -> str:
@@ -517,47 +517,6 @@ def ordered_diff_paths_for_scc(
                     )
                     if cand is not None:
                         p = str(Path(cand).resolve())
-        out.append(p)
-    return out
-
-
-def ordered_diff_paths_for_workspace(
-    df: pd.DataFrame,
-    output_dir: str,
-    label: str,
-    manifest_path: str | None = None,
-    *,
-    run_id: str | None = None,
-) -> list:
-    """
-    One FITS path per manifest row for a workspace label (``ws/<label>/``).
-
-    Uses column ``diff_<label>_path`` when present and valid; otherwise
-    ``{output_dir}/ws/{label}/{tess<digits>}_{label}.fits``.
-    """
-    safe = sanitize_workspace_label(label)
-    path_col = f"diff_{safe}_path"
-    pids = row_ffi_product_id_series(df).reset_index(drop=True)
-    df_reset = df.reset_index(drop=True)
-    ws = workspace_dir(output_dir, label, run_id=run_id)
-    use_col = path_col if path_col in df_reset.columns else None
-    out: list = []
-    for i in range(len(df_reset)):
-        p = None
-        if use_col is not None:
-            cell = df_reset.iloc[i][path_col]
-            if pd.notna(cell) and str(cell).strip():
-                cand = str(cell).strip()
-                if os.path.isfile(cand):
-                    p = str(Path(cand).resolve())
-        if p is None:
-            pid = str(pids.iloc[i])
-            if pid:
-                cand = resolve_pipeline_fits_path(
-                    ws, workspace_frame_stem(pid, safe)
-                )
-                if cand is not None:
-                    p = str(Path(cand).resolve())
         out.append(p)
     return out
 

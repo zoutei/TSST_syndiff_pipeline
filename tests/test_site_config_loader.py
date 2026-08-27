@@ -138,9 +138,14 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertEqual(cfg.camera, 3)
         self.assertEqual(cfg.ccd, 3)
         self.assertEqual(cfg.target_ra, 210.219333)
-        self.assertIn("events", cfg.output_dir)
-        self.assertIn("2020ut", cfg.output_dir)
-        self.assertIn("s0020_c3_k3", cfg.output_dir)
+        # output_dir is the SCC diff lane root (wave A-3 re-root), keyed by
+        # sector/camera/ccd -- never by event name.
+        self.assertEqual(
+            Path(cfg.output_dir),
+            scc_diff_dir(self.data, cfg.sector, cfg.camera, cfg.ccd),
+        )
+        self.assertNotIn("events", cfg.output_dir)
+        self.assertNotIn("2020ut", cfg.output_dir)
         self.assertEqual(cfg.ffi_dir, str((self.data / "s0020" / "c3" / "k3" / "ffi").resolve()))
         # Bundled straps/BSC are not injected; empty means packaged default at use time.
         self.assertEqual(cfg.straps_csv, "")

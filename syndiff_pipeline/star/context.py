@@ -450,7 +450,11 @@ def load_event_context(
         cluster_job_path = str(Path(event_dir) / wcs_grouping.EVENT_JOB_FILENAME)
         with Path(wcs_grouping._event_job_path(event_dir)).open(encoding="utf-8") as fh:
             cluster_job = json.load(fh)
-        crop_bounds = wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)
+        # crop_mode/crop_box_size were removed (wave A-3): the diff crop is
+        # always the cluster job's full science bounds, never overridable
+        # per-config. Was ``wcs_grouping.resolve_diff_crop_bounds(cfg, event_dir)``,
+        # which (with those knobs gone) always fell through to this same call.
+        crop_bounds = wcs_grouping.load_crop_bounds(event_dir)
         reference_ffi_path = wcs_grouping.load_reference_ffi_path(event_dir)
         if not reference_ffi_path:
             raise FileNotFoundError(

@@ -2,7 +2,7 @@
 # Targets are passed on the CLI via --targets (never embedded here).
 #
 # Ownership:
-#   defaults: / top-level — multi-stage knobs (crop, n_jobs, plots, workspace_run_id)
+#   defaults: / top-level — multi-stage knobs (n_jobs, plots, workspace_run_id)
 #   pipeline kind: — stage-only knobs (omit keys that match dataclass defaults)
 #   mask_settings.yaml (sibling; optional) — mask geometry/policy (NOT embedded here)
 # Frozen ws/diff_config.yaml is a slim snapshot (empties/defaults/bundled paths omitted).
@@ -11,8 +11,6 @@ deployment_file: deployment.yaml
 defaults:
   n_jobs: 16
   pipeline_plots: false
-  crop_mode: target_box
-  crop_box_size: 1024
 
 # Global forced-photometry extras — applied to every target.
 # dx/dy are crop-local pixel offsets from the primary target's per-frame WCS position.

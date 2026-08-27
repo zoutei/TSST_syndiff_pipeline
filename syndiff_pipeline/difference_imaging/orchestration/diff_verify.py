@@ -23,10 +23,7 @@ from syndiff_pipeline.common.scc_paths import (
     scc_temporal_wcs_dir,
 )
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
-from syndiff_pipeline.difference_imaging.support.paths import (
-    SHARED_MASK_FITS_BASENAME,
-    workspace_root,
-)
+from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 
 # Guarded: provenance_glue itself never raises on import (it guards its own
 # common.provenance import internally), but this import is wrapped again here
@@ -97,21 +94,52 @@ def frozen_diff_config_for_verify(
     return apply_workspace_run_id_override(cfg, meta)
 
 
+def _expected_downsample_fingerprint_for_ctx(ctx: StageRunContext) -> str:
+    """Best-effort expected ``downsample`` fingerprint from the frozen run config.
+
+    ``ctx.runner_cfg`` is already the frozen per-run config (materialized
+    under ``runs/{run_id}/`` at submit time), so this needs no live site
+    config read -- it mirrors what ``provenance_glue.resolve_downsample_fingerprint``'s
+    now-deleted live ``{site_config_dir}/pipeline.yaml`` read used to compute
+    (Contract A4). Never raises; returns ``""`` when unresolved.
+    """
+    try:
+        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+            expected_downsample_fingerprint,
+        )
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            resolve_config,
+        )
+
+        resolved = resolve_config(ctx.target, ctx.runner_cfg)
+        return str(expected_downsample_fingerprint(resolved) or "")
+    except Exception:
+        log.debug("_expected_downsample_fingerprint_for_ctx failed", exc_info=True)
+        return ""
+
+
 def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
     """Frozen diff config for context.
-    
+
     Parameters
     ----------
     ctx : StageRunContext
-    
+
     Returns
     -------
     SynDiffConfig"""
-    return frozen_diff_config_for_verify(
+    cfg = frozen_diff_config_for_verify(
         resolve_diff_site_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg),
         ctx.target,
         meta=ctx.meta,
     )
+    # Contract A3b: activates every emit site's already-landed
+    # ``getattr(cfg, "run_id", "") or None`` read.
+    cfg.run_id = ctx.run_id
+    # Contract A4: frozen value feeds resolve_downsample_fingerprint_from_cfg
+    # step 2, ahead of the (now live-read-free) provenance-store lookup.
+    cfg.downsample_fingerprint = _expected_downsample_fingerprint_for_ctx(ctx)
+    return cfg
 
 
 def load_diff_frames_for_verify(
@@ -189,22 +217,6 @@ def _diff_frame_manifest_available(cfg: SynDiffConfig, event_dir: str | Path) ->
     except Exception:
         log.debug("_diff_frame_manifest_available: SCC check failed", exc_info=True)
         return False
-
-
-def diff_workspace_root(cfg: SynDiffConfig, event_dir: str | Path) -> Path:
-    """Diff workspace root.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    event_dir : str | Path
-    
-    Returns
-    -------
-    Path"""
-    return Path(
-        workspace_root(str(event_dir), run_id=getattr(cfg, "workspace_run_id", None))
-    )
 
 
 _NON_SCC_DIFF_STAGE_KINDS = frozenset(
