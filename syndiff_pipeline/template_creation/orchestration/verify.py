@@ -110,6 +110,7 @@ def diff_config_fingerprint(
     runner_cfg: RunnerConfig,
     *,
     meta: dict | None = None,
+    version: int = 2,
 ) -> str:
     """Diff config fingerprint.
     
@@ -124,7 +125,9 @@ def diff_config_fingerprint(
     str"""
     from syndiff_pipeline.difference_imaging.orchestration.stages import _diff_config_fingerprint
 
-    return _diff_config_fingerprint(_diff_stage_context(resolved, runner_cfg, meta=meta))
+    return _diff_config_fingerprint(
+        _diff_stage_context(resolved, runner_cfg, meta=meta), version=version
+    )
 
 
 def config_fingerprint(
@@ -133,6 +136,7 @@ def config_fingerprint(
     *,
     runner_cfg: RunnerConfig | None = None,
     meta: dict | None = None,
+    version: int = 2,
 ) -> str:
     """Stable hash of the stage params that affect this stage's outputs."""
     from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
@@ -140,7 +144,7 @@ def config_fingerprint(
     if stage in DIFF_SPLIT_STAGES:
         if runner_cfg is None:
             raise ValueError("diff config fingerprint requires RunnerConfig")
-        return diff_config_fingerprint(resolved, runner_cfg, meta=meta)
+        return diff_config_fingerprint(resolved, runner_cfg, meta=meta, version=version)
     parts: list[str] = [stage]
     t = resolved.target
     parts.extend([str(t.sector), str(t.camera), str(t.ccd)])
@@ -291,10 +295,21 @@ def manifest_valid(
         return False
     if manifest.get("stage") != stage:
         return False
-    if manifest.get("config_fingerprint") != config_fingerprint(
+    stored_fp = manifest.get("config_fingerprint")
+    if stored_fp != config_fingerprint(
         resolved, stage, runner_cfg=runner_cfg, meta=meta
     ):
-        return False
+        # Manifests written before the params/resources split hashed execution
+        # resources (``*_n_jobs``, ``pipeline_plots``) into the diff fingerprint.
+        # Accept such a manifest when it matches under the legacy v1 rules: the
+        # recipe is unchanged and only the hashing rules moved, so completed
+        # work must not be re-run just because this code was deployed.
+        from syndiff_pipeline.common.orchestration.spec import DIFF_SPLIT_STAGES
+
+        if stage not in DIFF_SPLIT_STAGES or stored_fp != config_fingerprint(
+            resolved, stage, runner_cfg=runner_cfg, meta=meta, version=1
+        ):
+            return False
     expected = manifest.get("expected_count")
     produced = manifest.get("produced_count")
     if not isinstance(expected, int) or not isinstance(produced, int):

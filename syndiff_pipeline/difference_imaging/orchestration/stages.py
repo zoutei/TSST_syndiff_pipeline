@@ -45,13 +45,16 @@ def _frozen_diff_config_path(ctx: StageRunContext) -> Path:
     return logs.run_dir(ctx.runs_root, ctx.run_id) / "per_target" / ctx.target_label / "diff_config.yaml"
 
 
-def _diff_config_fingerprint(ctx: StageRunContext) -> str:
+def _diff_config_fingerprint(ctx: StageRunContext, *, version: int = 2) -> str:
     """Diff config fingerprint.
-    
+
     Parameters
     ----------
     ctx : StageRunContext
-    
+    version : int, optional, default ``2``
+        ``1`` reproduces the pre-resource-split hash, used only to accept
+        manifests written before execution resources left the fingerprint.
+
     Returns
     -------
     str"""
@@ -59,7 +62,7 @@ def _diff_config_fingerprint(ctx: StageRunContext) -> str:
         diff_config_fingerprint,
     )
 
-    return diff_config_fingerprint(frozen_diff_config_for_context(ctx))
+    return diff_config_fingerprint(frozen_diff_config_for_context(ctx), version=version)
 
 
 # The diff pipeline is split across three Condor stages so only the

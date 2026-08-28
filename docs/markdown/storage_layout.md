@@ -145,7 +145,15 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       hotpants_substamp_stars.csv
       gaia_catalog_pipeline.csv
       diff_config.yaml             # immutable per-lane config lock (chmod 444)
-      diff_config.fingerprint      # its fingerprint sibling
+      diff_config.fingerprint      # its fingerprint sibling, `v2:`-prefixed;
+                                   #   records the RECIPE only -- execution
+                                   #   resources (n_jobs, condor requests) are
+                                   #   hashed nowhere and live per-run in
+                                   #   runs/{run_id}/config.yaml instead, since
+                                   #   one lane is built by many runs at
+                                   #   different worker counts. A bare
+                                   #   (pre-v2) fingerprint self-migrates on
+                                   #   the lane's next run.
       mask_settings.yaml           # frozen effective mask policy
       host_star/                   # star branch outputs (per-SCC, not per-event)
       hp_d/tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz
