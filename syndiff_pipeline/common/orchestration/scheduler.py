@@ -1969,6 +1969,7 @@ def _try_launch_ready_row(
             target_label=row.target_label,
             launch_token=launch_token,
             resources_override=resources_override,
+            priority=row.priority or 0,
         )
     except Exception:
         log.exception("Launch failed for %s / %s; requeuing", row.target_label, row.stage)
