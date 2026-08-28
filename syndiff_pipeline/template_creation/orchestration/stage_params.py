@@ -298,8 +298,12 @@ class Ps1ProcessStageParams:
     write_per_scc_convolved_zarr: bool = True
     executor: str = "condor"
     condor_request_cpus: int = 64
-    condor_request_memory: int = 300_000
-    host_stats_min_mem_mb: int = 300_000
+    # 2026-08-28: trimmed 300GB->200GB after the sn2020hvq config-unification
+    # smoke run showed a full-profile job (64 missing skycells, s0025) peaking
+    # at ~146.5GB actual RSS (29% of the old 500GB site override); 200GB still
+    # leaves ~35% headroom over that sample.
+    condor_request_memory: int = 200_000
+    host_stats_min_mem_mb: int = 200_000
     host_stats_max_load15: float = 10.0
     # Pre-launch delta/small-job policy (scheduler side; see
     # ps1_process_preflight.plan_ps1_process_launch). Only takes effect when
@@ -308,9 +312,16 @@ class Ps1ProcessStageParams:
     # full condor_request_* profile above).
     small_job_max_skycells: int = 32
     small_job_request_cpus: int = 16
-    small_job_min_memory_mb: int = 25_000
+    # 2026-08-28: raised 25GB->110GB (sized for a 128GB execute host, matching
+    # the process-internal memory governor's 15%-of-host-total pause
+    # threshold -- see MIN_AVAILABLE_MEMORY_FRACTION in ps1_process.py) after
+    # a 21-missing-skycell small job on sn2020hvq/s0023 peaked at ~97.7GB
+    # actual RSS against a 52.5GB request (2500MB/skycell underestimates the
+    # real per-job floor). At small_job_max_skycells=32, the per-skycell term
+    # below now never exceeds this floor, so small jobs get a flat 110GB.
+    small_job_min_memory_mb: int = 110_000
     small_job_memory_per_skycell_mb: int = 2_500
-    small_job_host_stats_min_mem_mb: int = 25_000
+    small_job_host_stats_min_mem_mb: int = 110_000
 
     def __post_init__(self) -> None:
         if self.stream_max_inflight_requests < 1:

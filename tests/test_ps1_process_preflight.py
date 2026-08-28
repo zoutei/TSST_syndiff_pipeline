@@ -103,7 +103,14 @@ def test_small_job_when_one_cell_missing(tmp_path, monkeypatch):
 def test_small_job_memory_scales_with_missing_count(tmp_path, monkeypatch):
     cells = [f"skycell.2333.{i:03d}" for i in range(20)]
     _patch_expected_cells(monkeypatch, target_cells=cells, os1_cells=[])
-    params = _params(small_job_max_skycells=32, small_job_request_cpus=16)
+    # small_job_min_memory_mb pinned below 20*2500 so the per-skycell term
+    # (not the floor) is what this test observes.
+    params = _params(
+        small_job_max_skycells=32,
+        small_job_request_cpus=16,
+        small_job_min_memory_mb=25_000,
+        small_job_memory_per_skycell_mb=2_500,
+    )
     # Nothing published: all 20 cells are "missing".
 
     plan = pf.plan_ps1_process_launch(
