@@ -50,7 +50,11 @@ Catalog source is **Gaia** (+ all **BSC** for bit 1). Never `ps1_removed_stars`.
 
 ## Settings
 
-Mask policy lives in **`mask_settings.yaml`**, not in `diff_config.yaml`.
+Mask policy lives in **`mask_settings.yaml`**, not in `diff:`. A `diff.mask_settings`
+key exists in the schema v2 `pipeline.yaml` shape for carrying former
+`mask_settings.yaml` content inline, but it is not yet consumed by any
+resolver — `resolve_mask_settings()` still only reads sibling
+`mask_settings.yaml` files.
 
 You do **not** need to set anything under `- kind: shared_mask` for mask
 geometry/policy. A bare `- kind: shared_mask` is enough.
@@ -58,13 +62,13 @@ geometry/policy. A bare `- kind: shared_mask` is enough.
 Resolve order ([`resolve_mask_settings`](../../syndiff_pipeline/difference_imaging/masking/settings.py)):
 
 1. Optional stage path: `mask_settings: /path/to.yaml` under `- kind: shared_mask`
-2. Already-frozen `{ws}/mask_settings.yaml` (from a prior `shared_mask` run)
-3. Site `{site_dir}/mask_settings.yaml` (sibling of `diff_config.yaml`)
+2. Already-frozen `{lane}/mask_settings.yaml` (from a prior `shared_mask` run on that SCC diff lane)
+3. Site `{site_dir}/mask_settings.yaml` (sibling of `pipeline.yaml`)
 4. Packaged code defaults (`MaskSettings()` — empirical; TNS/asteroids **enabled**)
 
 Because step 2 wins over the site file, editing site `mask_settings.yaml`
-alone does **not** change an existing workspace until you remove/replace
-`{ws}/mask_settings.yaml` (or force-rerun `shared_mask`).
+alone does **not** change an existing lane until you remove/replace
+`{lane}/mask_settings.yaml` (or force-rerun `shared_mask`).
 
 Copy [`config/mask_settings.example.yaml`](../../config/mask_settings.example.yaml)
 to site `mask_settings.yaml` when you want non-default maglims (`epsf_mag_lim`,
@@ -85,8 +89,9 @@ selection** only: `ref_mag_min` / `ref_mag_max` / `ref_isolation_*` /
 
 Two freeze locations (do not confuse them):
 
-- `{ws}/mask_settings.yaml` — **effective** settings written on `shared_mask`
-  execute (includes any stage-path YAML and legacy stage-key overrides).
+- `{lane}/mask_settings.yaml` — **effective** settings written on `shared_mask`
+  execute (includes any stage-path YAML and legacy stage-key overrides), at the
+  SCC diff lane root (`cfg.output_dir`).
 - `runs/{run_id}/mask_settings.yaml` — on submit, a copy of the **site** sibling
   only (audit trail; not post-override effective settings).
 
@@ -94,9 +99,9 @@ Two freeze locations (do not confuse them):
 
 | Artifact | Location |
 |----------|----------|
-| `shared_mask.fits.gz` | event `ws/` — **static** int16 bitmask (may include bit 64; never bit 128). Pipeline stage kind remains `shared_mask` for BC. |
-| `mask_settings.yaml` | event `ws/` (frozen effective) |
-| `transient_fixed.parquet` | event `ws/` |
+| `shared_mask.fits.gz` | SCC diff lane root (`{data_root}/s{S}/c{C}/k{K}/diff_{lane}/`) — **static** int16 bitmask (may include bit 64; never bit 128). Pipeline stage kind remains `shared_mask` for BC. |
+| `mask_settings.yaml` | SCC diff lane root (frozen effective) |
+| `transient_fixed.parquet` | SCC diff lane root |
 | TNS public CSV | `{data_root}/catalogs/tns/tns_public_objects.csv` |
 | `pixel_intervals.parquet` + `asteroid_ffi_times.parquet` | `{data_root}/catalogs/sector_*/camera_*/ccd_*/asteroids/` |
 | `TESS_orbit_times.csv` | `{data_root}/catalogs/` (auto-downloaded from MIT) |

@@ -49,7 +49,7 @@ Field mode measures drift during **`remap`** (see [field_geometry.md](../field_g
 
 ## Diff imaging
 
-**`diff`** runs the config-driven internal pipeline from [`config/diff_config.yaml`](../../../config/diff_config.yaml) (default: `shared_mask` + `hotpants`). See [diff pipeline internals](diff_pipeline.md). Multi-kernel path: [multi_kernel_diff.md](multi_kernel_diff.md). Masks: [masking.md](../masking.md). Oversampling: [oversampled templates](../oversampled_templates.md).
+**`diff`** runs the config-driven internal pipeline from `pipeline.yaml`'s embedded `diff:` block (schema v2 — see [`config/pipeline.yaml`](../../../config/pipeline.yaml) and [config_schema_v2.md](../config_schema_v2.md)) or a legacy standalone [`config/diff_config.yaml`](../../../config/diff_config.yaml) (schema v1 default: `shared_mask` + `hotpants`). See [diff pipeline internals](diff_pipeline.md). Multi-kernel path: [multi_kernel_diff.md](multi_kernel_diff.md). Masks: [masking.md](../masking.md). Oversampling: [oversampled templates](../oversampled_templates.md).
 
 ## Event photometry and host stars
 

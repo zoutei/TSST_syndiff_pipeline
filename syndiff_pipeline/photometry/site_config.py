@@ -243,12 +243,10 @@ def resolve_photometry_deployment(policy: PhotometrySitePolicy) -> tuple[dict, P
     """Load ``deployment.yaml`` for a photometry site policy.
 
     Uses the generic (non-diff-specific) deployment loader directly.
-    ``photometry_config.yaml`` happens to share ``diff_config.yaml``'s
+    ``photometry_config.yaml`` happens to share the diff policy's
     ``deployment_file``/``pipeline``/``paths`` shape, but photometry must not
-    depend on ``difference_imaging.orchestration.site_config
-    .load_deployment_for_diff_config`` for that reason alone -- it is a
-    diff-specific helper (parses the target file as a *diff* policy, which
-    only works by coincidence of shape) slated for deletion in a later wave.
+    depend on any diff-specific site_config helper for that reason alone --
+    it should stay independent of how the diff side happens to be shaped.
 
     Returns
     -------
@@ -359,13 +357,11 @@ def write_frozen_photometry_config(policy: PhotometrySitePolicy, dest: str | Pat
 def resolve_photometry_config_path(*, meta: dict | None, runner_cfg) -> Path:
     """Resolve the photometry policy *content* path from run metadata.
 
-    Prefers the frozen ``runs/{run_id}/photometry_config.yaml`` snapshot --
-    recorded as ``photometry_config_path`` in run_meta / on ``RunnerConfig``
-    -- over the live site file, so a submitted run's frozen config is
-    actually authoritative (matching the "check the frozen copies... when
-    debugging" invariant), instead of always losing to the live site file.
-    Falls back to the live site file (``source_photometry_config_path``)
-    when no frozen copy is recorded.
+    The frozen ``runs/{run_id}/photometry_config.yaml`` snapshot -- recorded
+    as ``photometry_config_path`` in run_meta / on ``RunnerConfig`` -- is the
+    sole source: submit always freezes it (see ``_prepare_run_directory``),
+    so a submitted run's frozen config is authoritative (matching the "check
+    the frozen copies... when debugging" invariant).
 
     This is the policy *content* path only. Do not derive a site directory
     from it (e.g. via ``.parent``) for ``deployment.yaml``/relative-path
@@ -376,13 +372,14 @@ def resolve_photometry_config_path(*, meta: dict | None, runner_cfg) -> Path:
     deployment resolution keys off) stays site-anchored.
     """
     meta = meta or {}
-    for key in ("photometry_config_path", "source_photometry_config_path"):
-        raw = meta.get(key) or getattr(runner_cfg, "photometry_config_path", "")
-        if raw:
-            return Path(str(raw)).expanduser().resolve()
+    raw = meta.get("photometry_config_path") or getattr(
+        runner_cfg, "photometry_config_path", ""
+    )
+    if raw:
+        return Path(str(raw)).expanduser().resolve()
     raise ValueError(
-        "Photometry stage requires source_photometry_config_path in run_meta or "
-        "photometry_config_path on RunnerConfig"
+        "Photometry stage requires photometry_config_path in run_meta or on "
+        "RunnerConfig"
     )
 
 

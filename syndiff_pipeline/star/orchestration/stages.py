@@ -56,26 +56,14 @@ def _site_dir_from_ctx(ctx: StageRunContext) -> Path:
 def _resolve_diff_policy(runner_cfg):
     """Resolve the site's diff recipe exactly as ``syndiff diff submit`` would.
 
-    Prefers the unified (schema v2) ``diff:`` block already parsed onto
-    ``RunnerConfig.diff``; falls back to loading the v1 ``diff_config_path``
-    pointer target. Returns ``None`` only when the site has no diff policy
-    configured at all. Passing the result into
+    The unified ``diff:`` block already parsed onto ``RunnerConfig.diff``.
+    Returns ``None`` only when the site has no diff policy configured at
+    all. Passing the result into
     :func:`~syndiff_pipeline.star.context.load_event_context` is what makes
-    star stop reading a hardcoded ``{site}/diff_config.yaml`` and instead
-    resolve the same recipe the diff stage uses, whether that recipe lives
-    at the default filename or is redirected via ``diff_config:``.
+    star resolve the same recipe the diff stage uses instead of reading a
+    hardcoded ``{site}/diff_config.yaml``.
     """
-    diff_policy = getattr(runner_cfg, "diff", None)
-    if diff_policy is not None:
-        return diff_policy
-    diff_config_path = str(getattr(runner_cfg, "diff_config_path", "") or "").strip()
-    if not diff_config_path:
-        return None
-    from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-        load_diff_site_policy,
-    )
-
-    return load_diff_site_policy(diff_config_path)
+    return getattr(runner_cfg, "diff", None)
 
 
 def _resolve_star_run(ctx: StageRunContext):

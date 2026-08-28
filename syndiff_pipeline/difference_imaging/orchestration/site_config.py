@@ -12,12 +12,7 @@ from typing import Any
 import yaml
 
 from syndiff_pipeline.common.orchestration.condor import parse_condor_policy_block
-from syndiff_pipeline.common.orchestration.deployment import (
-    deployment_path_for_config,
-    load_deployment,
-    load_deployment_file,
-    require_deployment_path,
-)
+from syndiff_pipeline.common.orchestration.deployment import require_deployment_path
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.common.scc_paths import (
     event_scc_leaf,
@@ -44,18 +39,17 @@ class SitePaths:
 
     site_dir: Path
     template_config: Path
-    diff_config: Path
     deployment: Path
     deployment_example: Path
 
     @classmethod
     def from_site_dir(cls, site_dir: str | Path) -> SitePaths:
         """From site dir.
-        
+
         Parameters
         ----------
         site_dir : str | Path
-        
+
         Returns
         -------
         SitePaths"""
@@ -63,7 +57,6 @@ class SitePaths:
         return cls(
             site_dir=root,
             template_config=root / "pipeline.yaml",
-            diff_config=root / "diff_config.yaml",
             deployment=root / "deployment.yaml",
             deployment_example=root / "deployment.yaml.example",
         )
@@ -284,15 +277,18 @@ def _diff_policy_from_raw(raw: dict, *, config_path: str = "") -> DiffSitePolicy
 
 
 def load_diff_site_policy(config_path: str | Path) -> DiffSitePolicy:
-    """Load diff site policy from ``diff_config.yaml`` (schema v1)."""
+    """Load diff site policy from a standalone ``diff_config.yaml`` (schema v1).
+
+    This parses the standalone-file *shape* directly -- it is not reached
+    via any ``pipeline.yaml`` pointer key any more (those are rejected, see
+    ``runner_config._reject_legacy_diff_pointer``). It remains useful for
+    reading a historical/archived standalone policy file directly, e.g.
+    ``config/archive/*.yaml``.
+    """
     if not config_path:
         raise ValueError(
-            "diff_config_path is empty -- the submitted orchestrator config has "
-            "no 'diff_config:' (or 'diff_site_config:'/'diff_config_path:') key "
-            "pointing at a diff_config.yaml. Submit 'syndiff diff submit' with "
-            "--config pointed at a pipeline.yaml-style file that sets "
-            "'diff_config:', not at the diff_config.yaml itself -- otherwise "
-            "Condor resource sizing for the diff stages has no policy to load."
+            "diff_config_path is empty -- no standalone diff policy file path "
+            "was given to load."
         )
     path = Path(config_path).expanduser().resolve()
     with path.open(encoding="utf-8") as fh:
@@ -670,40 +666,8 @@ def resolve_diff_config(
     return absolutize_config(cfg, site_dir)
 
 
-def freeze_target_diff_config(
-    config_path: str | Path,
-    target: Target,
-    *,
-    deployment_path: str | Path | None = None,
-) -> SynDiffConfig:
-    """Load site policy + deployment and return a frozen per-target SynDiffConfig."""
-    policy = load_diff_site_policy(config_path)
-    cfg_path = Path(config_path).expanduser().resolve()
-    deploy_path = (
-        Path(deployment_path).expanduser().resolve()
-        if deployment_path is not None
-        else deployment_path_for_config(cfg_path, policy.deployment_file)
-    )
-    deployment = load_deployment_file(deploy_path)
-    return resolve_diff_config(
-        target,
-        policy,
-        deployment,
-        deployment_path=deploy_path,
-        site_config_dir=cfg_path.parent,
-    )
-
-
 def write_frozen_diff_config(cfg: SynDiffConfig, yaml_path: str | Path) -> Path:
     """Write a frozen per-target diff config with absolute paths."""
     path = Path(yaml_path).expanduser().resolve()
     save_config(cfg, str(path))
     return path
-
-
-def load_deployment_for_diff_config(config_path: str | Path) -> tuple[dict, Path]:
-    """Load deployment dict for a diff site config path."""
-    cfg_path = Path(config_path).expanduser().resolve()
-    policy = load_diff_site_policy(cfg_path)
-    deploy_path = deployment_path_for_config(cfg_path, policy.deployment_file)
-    return load_deployment(cfg_path, policy.deployment_file), deploy_path

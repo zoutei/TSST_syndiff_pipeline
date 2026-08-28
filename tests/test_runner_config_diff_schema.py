@@ -1,9 +1,12 @@
 """Tests for RunnerConfig's unified (schema v2) ``diff:`` block support.
 
-Covers the additive-only contract for this wave: v1 (``diff_config:``
-pointer) keeps working byte-identically, v2 (embedded ``diff:``) is new, and
-exactly one of the two may be used per config. See CONTRACT.md and
-CLAUDE.md's site-config table for the schema this exercises.
+v1 (a standalone ``diff_config.yaml`` + ``diff_config:``/``diff_site_config:``
+pointer key in ``pipeline.yaml``) is no longer accepted for an authored site
+config: every live config must embed its diff recipe under a top-level
+``diff:`` block, and a leftover pointer key now raises a migration error
+naming the file (see ``runner_config._reject_legacy_diff_pointer``). See
+CLAUDE.md's site-config table and docs/markdown/config_schema_v2.md for the
+schema this exercises.
 """
 
 from __future__ import annotations
@@ -68,7 +71,6 @@ class TestUnifiedSchemaParsing(_TempSiteMixin, unittest.TestCase):
             diff=_MINIMAL_DIFF_FLAT,
         )
         cfg = load_runner_config(self.site / "pipeline.yaml")
-        self.assertEqual(cfg.diff_config_path, "")
         self.assertIsNotNone(cfg.diff)
         self.assertEqual(len(cfg.diff.pipeline), 2)
         self.assertEqual(cfg.diff.defaults["n_jobs"], 4)
@@ -84,10 +86,9 @@ class TestUnifiedSchemaParsing(_TempSiteMixin, unittest.TestCase):
         )
         cfg = load_runner_config(self.site / "pipeline.yaml")
         self.assertIsNone(cfg.diff)
-        self.assertEqual(cfg.diff_config_path, "")
 
-    def test_v1_pointer_still_works_unaffected(self):
-        """Byte-identical-behaviour guarantee: the old diff_config: pointer form."""
+    def test_v1_pointer_alone_is_rejected(self):
+        """The old standalone diff_config.yaml + pointer form no longer loads."""
         diff_yaml = self.site / "diff_config.yaml"
         diff_yaml.parent.mkdir(parents=True, exist_ok=True)
         diff_yaml.write_text(
@@ -105,11 +106,15 @@ class TestUnifiedSchemaParsing(_TempSiteMixin, unittest.TestCase):
         )
         (self.site / "pipeline.yaml").write_text(text, encoding="utf-8")
 
-        cfg = load_runner_config(self.site / "pipeline.yaml")
-        self.assertIsNone(cfg.diff)
-        self.assertTrue(cfg.diff_config_path.endswith("diff_config.yaml"))
+        with self.assertRaises(ValueError) as ctx:
+            load_runner_config(self.site / "pipeline.yaml")
+        msg = str(ctx.exception)
+        self.assertIn(str((self.site / "pipeline.yaml").resolve()), msg)
+        self.assertIn("diff_config", msg)
+        self.assertIn("diff:", msg)
+        self.assertIn("config_schema_v2.md", msg)
 
-    def test_both_forms_rejected(self):
+    def test_legacy_pointer_key_rejected_even_with_diff_block(self):
         write_unified_site_config(
             self.site / "pipeline.yaml",
             workspace_root=str(self.handoff),
@@ -120,8 +125,22 @@ class TestUnifiedSchemaParsing(_TempSiteMixin, unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             load_runner_config(self.site / "pipeline.yaml")
         msg = str(ctx.exception)
-        self.assertIn("diff", msg)
-        self.assertIn("exactly one", msg)
+        self.assertIn("diff_config", msg)
+        self.assertIn("diff:", msg)
+
+    def test_all_legacy_pointer_key_spellings_rejected(self):
+        for key in ("diff_config", "diff_site_config", "diff_config_path"):
+            with self.subTest(key=key):
+                write_unified_site_config(
+                    self.site / "pipeline.yaml",
+                    workspace_root=str(self.handoff),
+                    data_root=str(self.data),
+                    diff=None,
+                    extra={key: "diff_config.yaml"},
+                )
+                with self.assertRaises(ValueError) as ctx:
+                    load_runner_config(self.site / "pipeline.yaml")
+                self.assertIn(key, str(ctx.exception))
 
     def test_event_kinds_rejected(self):
         for kind in ("astrometry", "forced_photometry", "photometry"):

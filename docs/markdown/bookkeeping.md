@@ -83,6 +83,15 @@ Same fingerprint = same work. A recipe change produces a new fingerprint and inv
 
 Code: `syndiff_pipeline/common/provenance/fingerprint.py`.
 
+Every recipe row also carries `git_sha` — the full 40-char SHA of the checkout
+that upserted it (`common/provenance/publish.py:git_sha()`, cached per
+process, never raises). It is **stored, not hashed**: it plays no part in
+`recipe_id`, so a code checkout change alone never moves a fingerprint. Diff
+artifact `meta` additionally carries `run_id` (the orchestrator run that
+produced it; empty for foreground/ad-hoc runs), also not part of any
+fingerprint. Together they let an artifact trace back to both the exact code
+revision and the run that produced it.
+
 `RECIPE_SCHEMA_VERSION` is currently **2**. Bump it when producer algorithms change in ways that alter bytes for the same YAML params; then re-run affected stages or `syndiff bookkeeping reindex`.
 
 ### 2.3 Provenance graph
@@ -467,7 +476,7 @@ syndiff_pipeline/common/orchestration/run_stage.py
 **Diff re-processes every FFI**
 
 1. `syndiff bookkeeping stats` — `diff_image` rows present?
-2. Frozen `ws/diff_config.yaml` matches emit/verify recipe params?
+2. Frozen `{lane}/diff_config.yaml` (SCC diff lane root) matches emit/verify recipe params?
 3. Worker had `data_root` set?
 
 **Deleted `provenance.db`**

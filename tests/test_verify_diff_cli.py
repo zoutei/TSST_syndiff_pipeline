@@ -26,8 +26,7 @@ from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.template_creation.orchestration.runner_config import (
-    RunnerConfig,
-    parse_stage_params,
+    load_runner_config,
     resolve_config,
 )
 from syndiff_pipeline.template_creation.orchestration.verify import (
@@ -38,7 +37,7 @@ from syndiff_pipeline.template_creation.orchestration.verify import (
     verify_stage,
     write_stable_manifest,
 )
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import write_unified_site_config
 
 
 def _target() -> Target:
@@ -52,22 +51,20 @@ def _target() -> Target:
     )
 
 
-def _write_diff_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "defaults:",
-                "  n_jobs: 2",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+_DIFF_POLICY = {
+    "defaults": {"n_jobs": 2},
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [{"kind": "shared_mask"}],
+}
+
+
+def _write_diff_policy(site: Path, *, workspace_root: str, data_root: str) -> None:
+    write_unified_site_config(
+        site / "pipeline.yaml",
+        workspace_root=workspace_root,
+        data_root=data_root,
+        diff=_DIFF_POLICY,
+        stages={"diff": {"executor": "condor"}},
     )
 
 
@@ -79,12 +76,9 @@ class TestVerifyDiffCli(unittest.TestCase):
         self.site.mkdir()
         self.handoff = self.root / "handoff"
         self.data = self.root / "data"
-        write_site_deployment(
-            self.site,
-            workspace_root=str(self.handoff),
-            data_root=str(self.data),
+        _write_diff_policy(
+            self.site, workspace_root=str(self.handoff), data_root=str(self.data)
         )
-        _write_diff_policy(self.site / "diff_config.yaml")
         self.target = _target()
         self.event_dir = event_scc_leaf(
             self.handoff,
@@ -108,12 +102,8 @@ class TestVerifyDiffCli(unittest.TestCase):
             encoding="utf-8",
         )
 
-        self.runner = RunnerConfig(
-            workspace_root=str(self.handoff),
-            runs_root=str(self.handoff / "runs"),
-            diff_config_path=str(self.site / "diff_config.yaml"),
-            stages=parse_stage_params({"diff": {"executor": "condor"}}),
-        )
+        self.runner = load_runner_config(self.site / "pipeline.yaml")
+        self.runner.runs_root = str(self.handoff / "runs")
         self.resolved = resolve_config(self.target, self.runner)
 
     def tearDown(self) -> None:

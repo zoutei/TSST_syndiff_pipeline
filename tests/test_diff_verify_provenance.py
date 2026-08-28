@@ -35,14 +35,11 @@ from syndiff_pipeline.common.provenance.ingest import drain_spool
 from syndiff_pipeline.common.provenance.store import ProvenanceStore
 from syndiff_pipeline.difference_imaging.orchestration import diff_verify as dv
 from syndiff_pipeline.difference_imaging.orchestration import provenance_glue as pg
-from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    freeze_target_diff_config,
-)
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import HotpantsParams
 from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_path_from_output_dir,
 )
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import resolve_target_diff_config, write_site_deployment, write_unified_site_config
 
 
 def _target() -> Target:
@@ -56,25 +53,13 @@ def _target() -> Target:
     )
 
 
-def _write_hotpants_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-                "  - kind: hotpants",
-                "    output:",
-                "      diffs: diffs",
-                "      convolved: convolved",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+_HOTPANTS_DIFF_POLICY = {
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [
+        {"kind": "shared_mask"},
+        {"kind": "hotpants", "output": {"diffs": "diffs", "convolved": "convolved"}},
+    ],
+}
 
 
 class _BaseCase(unittest.TestCase):
@@ -91,7 +76,12 @@ class _BaseCase(unittest.TestCase):
             workspace_root=str(self.handoff),
             data_root=str(self.data),
         )
-        _write_hotpants_policy(self.site / "diff_config.yaml")
+        write_unified_site_config(
+            self.site / "pipeline.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff=_HOTPANTS_DIFF_POLICY,
+        )
 
         self.target = _target()
         self.event_dir = event_scc_leaf(
@@ -131,7 +121,7 @@ class _BaseCase(unittest.TestCase):
             }
         ).to_csv(manifest_csv, index=False)
 
-        self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        self.cfg = resolve_target_diff_config(self.site, self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)
         self._write_scc_handoff()
 

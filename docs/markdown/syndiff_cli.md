@@ -65,7 +65,7 @@ See [field_geometry.md](field_geometry.md).
 
 ### Event photometry
 
-Prefer **`syndiff photometry`** after SCC diffs exist. Diff `--targets` submits still register the `diff` stage only unless your `diff_config` includes a `kind: photometry` delegator.
+Prefer **`syndiff photometry`** after SCC diffs exist. Diff `--targets` submits still register the `diff` stage only unless your diff policy includes a `kind: photometry` delegator (schema v1 standalone `diff_config.yaml` only — a schema v2 embedded `diff.pipeline` rejects that kind; see [config_schema_v2.md](config_schema_v2.md)).
 
 ```bash
 syndiff photometry submit \
@@ -238,7 +238,7 @@ syndiff cluster                              # status only (no VERDICT)
 syndiff cluster --check --preset 500gb       # placement preview for ps1_process
 syndiff cluster --check --preset 128gb       # mapping / remap class hosts
 syndiff cluster --check --site config/ --stage ps1_process   # thresholds from pipeline.yaml
-syndiff cluster --check --site config/ --stage diff          # thresholds from diff_config.yaml
+syndiff cluster --check --site config/ --stage diff          # thresholds from pipeline.yaml's diff.condor block
 syndiff cluster --check --site config/ --stage star          # star_config.yaml condor block
 syndiff cluster --format requirements --check --preset 500gb  # Condor exclusion expression only
 ```

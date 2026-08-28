@@ -29,14 +29,14 @@ from syndiff_pipeline.difference_imaging.support.paths import (
 )
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     SitePaths,
-    freeze_target_diff_config,
     load_diff_site_policy,
     parse_unified_diff_policy,
     resolve_diff_config,
     resolve_event_template_dir,
     write_frozen_diff_config,
 )
-from tests.site_fixtures import write_site_deployment
+from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
+from tests.site_fixtures import resolve_target_diff_config, write_site_deployment, write_unified_site_config
 
 
 def _target() -> Target:
@@ -51,6 +51,8 @@ def _target() -> Target:
 
 
 def _write_diff_policy(path: Path) -> None:
+    """Write a standalone v1 diff policy file (for load_diff_site_policy tests
+    -- that function's own file-parsing purpose is retained post-migration)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
@@ -72,6 +74,14 @@ def _write_diff_policy(path: Path) -> None:
     )
 
 
+_DIFF_POLICY_DICT = {
+    "defaults": {"n_jobs": 4},
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [{"kind": "shared_mask"}],
+    "condor": {"request_cpus": 4, "request_memory": 32000},
+}
+
+
 class TestSiteConfigLoader(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -86,6 +96,12 @@ class TestSiteConfigLoader(unittest.TestCase):
             data_root=str(self.data),
         )
         _write_diff_policy(self.site / "diff_config.yaml")
+        write_unified_site_config(
+            self.site / "pipeline.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff=_DIFF_POLICY_DICT,
+        )
         target = _target()
         template_store = scc_templates_dir(self.data, target.sector, target.camera, target.ccd, oversampling_factor=1)
         template_store.mkdir(parents=True)
@@ -128,8 +144,8 @@ class TestSiteConfigLoader(unittest.TestCase):
             load_diff_site_policy("")
         self.assertIn("diff_config_path is empty", str(ctx.exception))
 
-    def test_freeze_target_diff_config_absolutizes_paths(self):
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())
+    def test_resolve_target_diff_config_absolutizes_paths(self):
+        cfg = resolve_target_diff_config(self.site, _target())
         self.assertIsInstance(cfg, SynDiffConfig)
         self.assertTrue(Path(cfg.ffi_dir).is_absolute())
         self.assertTrue(Path(cfg.output_dir).is_absolute())
@@ -174,7 +190,7 @@ class TestSiteConfigLoader(unittest.TestCase):
         lane_root.mkdir(parents=True, exist_ok=True)
         pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
         pipeline_csv.write_text("x,y\n", encoding="utf-8")
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", target)
+        cfg = resolve_target_diff_config(self.site, target)
         self.assertEqual(cfg.gaia_catalog, str(pipeline_csv.resolve()))
 
     def test_ignores_stale_event_scoped_gaia_catalog(self):
@@ -197,7 +213,7 @@ class TestSiteConfigLoader(unittest.TestCase):
         ):
             stale.write_text("stale,event,scoped\n", encoding="utf-8")
 
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", target)
+        cfg = resolve_target_diff_config(self.site, target)
 
         expected = scc_catalogs_dir(
             self.data, target.sector, target.camera, target.ccd
@@ -206,7 +222,7 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertNotIn(str(event_dir), cfg.gaia_catalog)
 
     def test_write_frozen_diff_config_round_trip(self):
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())
+        cfg = resolve_target_diff_config(self.site, _target())
         out = self.root / "frozen" / "diff_config.yaml"
         write_frozen_diff_config(cfg, out)
         loaded = load_config(str(out))
@@ -217,9 +233,10 @@ class TestSiteConfigLoader(unittest.TestCase):
     def test_example_site_files_exist(self):
         example = SitePaths.from_site_dir(_ROOT / "config")
         self.assertTrue(example.template_config.is_file())
-        self.assertTrue(example.diff_config.is_file())
         self.assertTrue(example.deployment_example.is_file())
-        policy = load_diff_site_policy(example.diff_config)
+        runner_cfg = load_runner_config(str(example.template_config))
+        policy = runner_cfg.diff
+        self.assertIsNotNone(policy)
         self.assertTrue(policy.pipeline)
         self.assertEqual(policy.condor.request_memory, 100_000)
         targets = load_targets(_ROOT / "config" / "targets_example.csv")
@@ -248,27 +265,18 @@ class TestSiteConfigLoader(unittest.TestCase):
         )
         named.mkdir(parents=True)
         (named / "template_manifest.json").write_text("{}", encoding="utf-8")
-        policy_path = self.site / "diff_config_named.yaml"
-        policy_path.write_text(
-            "\n".join(
-                [
-                    "deployment_file: deployment.yaml",
-                    "defaults:",
-                    "  n_jobs: 4",
-                    "  oversampling_factor: 1",
-                    "paths:",
-                    "  template_store_name: no_l4b",
-                    "pipeline:",
-                    "  - kind: shared_mask",
-                    "condor:",
-                    "  request_cpus: 4",
-                    "  request_memory: 32000",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
+        write_unified_site_config(
+            self.site / "pipeline_named.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff={
+                "defaults": {"n_jobs": 4, "oversampling_factor": 1},
+                "paths": {"template_store_name": "no_l4b"},
+                "pipeline": [{"kind": "shared_mask"}],
+                "condor": {"request_cpus": 4, "request_memory": 32000},
+            },
         )
-        cfg = freeze_target_diff_config(policy_path, target)
+        cfg = resolve_target_diff_config(self.site, target, config_filename="pipeline_named.yaml")
         self.assertTrue(cfg.template_dir.endswith("templates_no_l4b/oversampling_1"))
         self.assertEqual(Path(cfg.template_dir).resolve(), named.resolve())
 

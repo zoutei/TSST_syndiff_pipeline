@@ -1,9 +1,9 @@
-> **Package integration**: diff sub-stages `kernel_fit`, `convolved_templates`, `kernel_subtract` · modules under `difference_imaging/stages/` · configured in `config/diff_config_single_kernel.yaml` and relatives  
+> **Package integration**: diff sub-stages `kernel_fit`, `convolved_templates`, `background_estimate` (module `kernel_subtract.py`, kind `background_estimate`) · modules under `difference_imaging/stages/` · configured under `pipeline.yaml`'s `diff:` block (schema v2) — see [`config/pipeline.yaml`](../../../config/pipeline.yaml) — or a legacy standalone `config/diff_config_single_kernel.yaml` and relatives (schema v1)  
 > **Related docs**: [diff pipeline internals](diff_pipeline.md) · [background stage](background.md) · [forced photometry](forced_photometry.md) · [oversampled templates](../oversampled_templates.md) · [linear centroids campaign](../linear_centroids_pipeline.md)
 
-# Multi-kernel difference imaging (`kernel_fit` → `convolved_templates` → `kernel_subtract`)
+# Multi-kernel difference imaging (`kernel_fit` → `convolved_templates` → `background_estimate`)
 
-Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a carefully chosen science frame, convolve each WCS-group template with that fixed kernel, then form per-epoch difference images by **algebraic subtraction** plus a shared robust-TESSreduce background estimate (biharmonic inpainting with KNN boundary sigma-clip; see [background stage](background.md) for the *separate*, optional downstream Savitzky–Golay smoothing stage). Downstream stages (`background`, `subtract`, `hotpants` round 2, `forced_photometry`) consume the `ks_*` / `hp_*` labels this path produces.
+Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a carefully chosen science frame, convolve each WCS-group template with that fixed kernel, then form per-epoch difference images by **algebraic subtraction** plus a shared robust-TESSreduce background estimate (biharmonic inpainting with KNN boundary sigma-clip; see [background stage](background.md) for the *separate*, optional downstream Savitzky–Golay smoothing stage). Downstream stages (`background_temporal_smoothing`, `subtract`, `hotpants` round 2, `forced_photometry`) consume the `ks_*` / `hp_*` labels this path produces.
 
 ---
 
@@ -13,11 +13,11 @@ Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a ca
 |--------|-----------------|--------------------------------|
 | Kernel | One `kernel_r2.npz` per target (min-background FFI) | Per-FFI kernel fit (discarded unless `write_kernel_solutions: true`) |
 | Per-frame work | Cheap subtract + robust-TESSreduce bkg | Full Hotpants each FFI |
-| Template swap | Re-run `convolved_templates` + `kernel_subtract` with same `kernel_r2.npz` | Must re-run Hotpants |
+| Template swap | Re-run `convolved_templates` + `background_estimate` with same `kernel_r2.npz` | Must re-run Hotpants |
 | PSF variability | Single kernel for all epochs | Adapts per frame |
-| Typical configs | `diff_config_single_kernel.yaml`, `diff_config_multi_kernel.yaml`, linear-centroids phase 1b | `diff_config.yaml` (production default) |
+| Typical configs | `config/pipeline.yaml`'s `diff:` block (schema v2 reference) / `diff_config_single_kernel.yaml` (schema v1), `config/archive/diff_config_multi_kernel.yaml`, linear-centroids phase 1b | `diff_config.yaml` (schema v1, production default) |
 
-**Multi-kernel** (`diff_config_multi_kernel.yaml`) runs this prefix, then `background` on `ks_b`, then a **second Hotpants pass** (`hp_bgo=0`) on temporally smoothed backgrounds — combining a stable kernel with per-epoch Hotpants refinement.
+**Multi-kernel** (`config/archive/diff_config_multi_kernel.yaml`) runs this prefix, then `background_temporal_smoothing` on `ks_b`, then a **second Hotpants pass** (`hp_bgo=0`) on temporally smoothed backgrounds — combining a stable kernel with per-epoch Hotpants refinement.
 
 ---
 
@@ -27,9 +27,9 @@ Alternative to per-FFI **Hotpants**: fit **one target-level PSF kernel** on a ca
 shared_mask
   → kernel_fit          # HP1(bgo) → bkg1 (robust tessreduce) → HP2(bgo=0) → bkg2 → HP3(bgo=0, final) → kernel_r2.npz
   → convolved_templates # each unique template × kernel_r2
-  → kernel_subtract     # ffi − convolved_template → diff_raw; robust-tessreduce bkg → ks_d (bkg-subtracted), ks_b (bkg)
-  → background          # optional: further spatial/temporal/strap refinement -- NOTE: since ks_d is now
-                         # already background-subtracted, chaining this stage after kernel_subtract will
+  → background_estimate # ffi − convolved_template → diff_raw; robust-tessreduce bkg → ks_d (bkg-subtracted), ks_b (bkg)
+  → background_temporal_smoothing # optional: further spatial/temporal/strap refinement -- NOTE: since ks_d is now
+                         # already background-subtracted, chaining this stage after background_estimate will
                          # re-run its own spatial photutils estimate on an already-cleaned diff; verify it's
                          # still wanted before enabling both (see caveat in Stage 3 below).
   → subtract            # optional: ks_d + ks_b − ks_b_s → ks_d_s
@@ -37,7 +37,7 @@ shared_mask
   → forced_photometry
 ```
 
-Example YAML: [`config/diff_config_single_kernel.yaml`](../../../config/diff_config_single_kernel.yaml).
+Example YAML: [`config/pipeline.yaml`](../../../config/pipeline.yaml)'s `diff:` block (schema v2 reference), or the legacy [`config/diff_config_single_kernel.yaml`](../../../config/diff_config_single_kernel.yaml) (schema v1).
 
 ---
 
@@ -47,7 +47,7 @@ Fits the shared kernel on the **minimum Earth/Moon angle** FFI (`pick_best_angle
 
 **Three-round hotpants + robust-TESSreduce recipe** (on the chosen frame only; see
 [`background/tessreduce_residual.py`](../../../syndiff_pipeline/difference_imaging/stages/background/tessreduce_residual.py)
-for the shared estimator both `kernel_fit` and `kernel_subtract` call):
+for the shared estimator both `kernel_fit` and `kernel_subtract.py` call):
 
 1. **HP1** — `hp_bgo` at the stage-configured order (default 3); kernel params not collected. `conv1` = its convolved template.
 2. `diff1 = ffi − conv1`; `bkg1 = estimate_tessreduce_residual_background(diff1, ...)` (biharmonic inpainting + KNN boundary sigma-clip); `cleaned_ffi1 = ffi − bkg1`.
@@ -126,7 +126,7 @@ Correctness is solid: verified on synthetic data (halo-exactness, block-recombin
 
 ---
 
-## Stage 3: `kernel_subtract` (`kernel_subtract.py`)
+## Stage 3: `background_estimate` (module `kernel_subtract.py`)
 
 Per-FFI loop (joblib `loky`, `n_jobs` from config):
 
@@ -139,7 +139,7 @@ diff_final = diff_raw − tessreduce_bkg
 - **Diff FITS** (`output.diffs`, e.g. `ks_d`) — **background-subtracted** (`diff_final`), science-ready.
 - **Background FITS** (`output.phot_bkg`, e.g. `ks_b`) — the robust-TESSreduce background plane, still saved separately for diagnostics/the star branch.
 
-> **Caveat:** because `ks_d` is now already background-subtracted, chaining an optional downstream `background` stage (spatial photutils + temporal Savitzky–Golay + strap, see [background stage](background.md)) after `kernel_subtract` will re-estimate/re-subtract background from an already-cleaned diff. Configs that enable both (`diff_config_single_kernel.yaml`, `diff_config_multi_kernel.yaml`) should be reviewed/re-tuned before relying on this combination; configs that only use `kernel_fit` → `kernel_subtract` are unaffected and now receive a properly background-subtracted diff where previously they did not.
+> **Caveat:** because `ks_d` is now already background-subtracted, chaining an optional downstream `background_temporal_smoothing` stage (spatial photutils + temporal Savitzky–Golay + strap, see [background stage](background.md)) after `background_estimate` will re-estimate/re-subtract background from an already-cleaned diff. Configs that enable both (`config/pipeline.yaml`'s `diff:` block, `config/archive/diff_config_multi_kernel.yaml`) should be reviewed/re-tuned before relying on this combination; configs that only use `kernel_fit` → `background_estimate` are unaffected and now receive a properly background-subtracted diff where previously they did not.
 
 Template lookup:
 
@@ -160,7 +160,7 @@ The star branch expects `ks_b` (or smoothed `ks_b_s`) for host stamps — see [d
 | `convolved_templates/` | Pre-convolved template FITS + CSV | One per offset group or `group_id` |
 | `{diffs}_kernels/*.npz` | Per-frame Hotpants kernels | Only when `write_kernel_solutions: true` on a `hotpants` stage |
 
-Reusing a modified template set: keep `kernel_r2.npz`, clear or `skip_existing: false` on `convolved_templates`, re-run `convolved_templates` → `kernel_subtract` → downstream.
+Reusing a modified template set: keep `kernel_r2.npz`, clear or `skip_existing: false` on `convolved_templates`, re-run `convolved_templates` → `background_estimate` → downstream.
 
 ---
 
@@ -205,7 +205,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `skip_existing` | Reuse valid FITS + manifest |
 | `use_patch_cache` | `false` by default; field mode + `F>1` only — see [patch-cache convolution](#patch-cache-convolution-use_patch_cache-field-mode--f1-only) above. Requires a complete `write_split_contribs` store. **Measured a net slowdown on s0020/c3/k3 (~85x, groups span the whole SCC) — check the group-size distribution before enabling anywhere; do not assume it's a speedup.** |
 
-### `kernel_subtract`
+### `background_estimate`
 
 | Key | Role |
 |-----|------|

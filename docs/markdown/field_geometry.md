@@ -39,9 +39,13 @@ syndiff template submit \
 # Field-mode diff (after template rebuild with MAPGRID=3 + sidecar v3):
 syndiff diff submit \
   --site config \
-  --config config/diff_config_single_kernel.yaml \
   --scc config/scc_example.csv
 ```
+
+`--site config` resolves `config/pipeline.yaml`, whose embedded `diff:` block
+already carries the single-kernel recipe (formerly
+`config/diff_config_single_kernel.yaml`, folded in verbatim under schema v2 —
+see [config_schema_v2.md](config_schema_v2.md)).
 
 Defaults (no YAML required beyond a normal site):
 
@@ -113,8 +117,9 @@ coordinates to the raw model. The temporal frame-contract fingerprint is part
 of mapping/remap/L5 provenance, so caches made before this contract are not
 reusable. See [coordinate frames and cropping](coordinate_frames_and_cropping.md#4-temporal-wcs-boundary).
 
-Diff does **not** use `crop_mode` / `target_box` for geometry — the science
-grid is fully determined by the SCC `MappingGrid`.
+Diff has no `crop_mode` / `target_box` knob at all — those keys were removed
+from `SynDiffConfig` (they were a silent no-op since commit `041e996`); the
+science grid is fully determined by the SCC `MappingGrid`.
 
 ---
 

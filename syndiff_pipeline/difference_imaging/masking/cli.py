@@ -26,10 +26,7 @@ from syndiff_pipeline.difference_imaging.masking.ffi_mask import (
     normalize_ffi_product_id,
     write_mask_fits_for_ffi,
 )
-from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    SitePaths,
-    load_diff_site_policy,
-)
+from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     resolve_pipeline_artifact_path,
 )
@@ -103,13 +100,7 @@ def _store_name_from_site(site: str | None) -> str | None:
 
     runner_cfg = load_runner_config(str(paths.template_config))
     if runner_cfg.diff is not None:
-        # Unified (schema v2) policy from pipeline.yaml's embedded 'diff:'.
         policy = runner_cfg.diff
-    elif runner_cfg.diff_config_path:
-        # Legacy (schema v1): pipeline.yaml's 'diff_config:'/'diff_site_config:'
-        # pointer -- kept for sites not yet migrated to an embedded 'diff:'
-        # block; a later wave removes it.
-        policy = load_diff_site_policy(runner_cfg.diff_config_path)
     else:
         return None
     raw = (policy.paths or {}).get("output_store_name")

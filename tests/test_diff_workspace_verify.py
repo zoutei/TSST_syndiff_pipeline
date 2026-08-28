@@ -33,12 +33,11 @@ from syndiff_pipeline.difference_imaging.orchestration.stages import _diff_confi
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
 from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.template_creation.orchestration.runner_config import (
-    RunnerConfig,
-    parse_stage_params,
+    load_runner_config,
     resolve_config,
 )
 from syndiff_pipeline.template_creation.orchestration.verify import verify_diff
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import write_unified_site_config
 
 
 def _target() -> Target:
@@ -52,36 +51,34 @@ def _target() -> Target:
     )
 
 
-def _write_single_kernel_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "defaults:",
-                "  n_jobs: 2",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-                "  - kind: kernel_fit",
-                "    output: kernel_fit",
-                "  - kind: convolved_templates",
-                "    inputs:",
-                "      kernel_fit: kernel_fit",
-                "    output: tmpl_conv",
-                "  - kind: background_estimate",
-                "    inputs:",
-                "      convolved: tmpl_conv",
-                "    output:",
-                "      diffs: ks_d",
-                "condor:",
-                "  request_cpus: 4",
-                "  request_memory: 32000",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+_SINGLE_KERNEL_DIFF_POLICY = {
+    "defaults": {"n_jobs": 2},
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [
+        {"kind": "shared_mask"},
+        {"kind": "kernel_fit", "output": "kernel_fit"},
+        {
+            "kind": "convolved_templates",
+            "inputs": {"kernel_fit": "kernel_fit"},
+            "output": "tmpl_conv",
+        },
+        {
+            "kind": "background_estimate",
+            "inputs": {"convolved": "tmpl_conv"},
+            "output": {"diffs": "ks_d"},
+        },
+    ],
+    "condor": {"request_cpus": 4, "request_memory": 32000},
+}
+
+
+def _write_single_kernel_policy(site: Path, *, workspace_root: str, data_root: str) -> None:
+    write_unified_site_config(
+        site / "pipeline.yaml",
+        workspace_root=workspace_root,
+        data_root=data_root,
+        diff=_SINGLE_KERNEL_DIFF_POLICY,
+        stages={"diff": {"executor": "condor"}},
     )
 
 
@@ -111,12 +108,9 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
         self.site.mkdir()
         self.handoff = self.root / "handoff"
         self.data = self.root / "data"
-        write_site_deployment(
-            self.site,
-            workspace_root=str(self.handoff),
-            data_root=str(self.data),
+        _write_single_kernel_policy(
+            self.site, workspace_root=str(self.handoff), data_root=str(self.data)
         )
-        _write_single_kernel_policy(self.site / "diff_config.yaml")
 
         self.target = _target()
         self.event_dir = event_scc_leaf(
@@ -136,21 +130,17 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
 
-        self.runner = RunnerConfig(
-            workspace_root=str(self.handoff),
-            runs_root=str(self.handoff / "runs"),
-            diff_config_path=str(self.site / "diff_config.yaml"),
-            stages=parse_stage_params({"diff": {"executor": "condor"}}),
-        )
+        self.runner = load_runner_config(self.site / "pipeline.yaml")
+        self.runner.runs_root = str(self.handoff / "runs")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
     def _cfg(self, *, meta: dict | None = None):
         return frozen_diff_config_for_verify(
-            self.site / "diff_config.yaml",
             self.target,
             meta=meta,
+            runner_cfg=self.runner,
         )
 
     def _lane_root(self) -> Path:
@@ -203,7 +193,7 @@ class TestDiffWorkspaceVerify(unittest.TestCase):
             target_label=self.target.label(),
             target=self.target,
             runner_cfg=self.runner,
-            meta={"source_diff_config_path": str(self.site / "diff_config.yaml")},
+            meta={},
         )
         fp_default = _diff_config_fingerprint(ctx)
 
@@ -239,24 +229,14 @@ class TestSharedMaskOnlyVerify(unittest.TestCase):
             site.mkdir()
             handoff = root / "handoff"
             data = root / "data"
-            write_site_deployment(
-                site,
+            write_unified_site_config(
+                site / "pipeline.yaml",
                 workspace_root=str(handoff),
                 data_root=str(data),
-            )
-            policy = site / "diff_config.yaml"
-            policy.write_text(
-                "\n".join(
-                    [
-                        "deployment_file: deployment.yaml",
-                        "paths:",
-                        "  template_base: shifted_downsampled",
-                        "pipeline:",
-                        "  - kind: shared_mask",
-                    ]
-                )
-                + "\n",
-                encoding="utf-8",
+                diff={
+                    "paths": {"template_base": "shifted_downsampled"},
+                    "pipeline": [{"kind": "shared_mask"}],
+                },
             )
             target = _target()
             event_dir = event_scc_leaf(
@@ -274,11 +254,8 @@ class TestSharedMaskOnlyVerify(unittest.TestCase):
             lane.mkdir(parents=True, exist_ok=True)
             (lane / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
 
-            runner = RunnerConfig(
-                workspace_root=str(handoff),
-                diff_config_path=str(policy),
-            )
-            cfg = frozen_diff_config_for_verify(policy, target)
+            runner = load_runner_config(site / "pipeline.yaml")
+            cfg = frozen_diff_config_for_verify(target, runner_cfg=runner)
             self.assertTrue(diff_workspace_complete(cfg, event_dir))
 
             result = verify_diff(resolve_config(target, runner), runner)

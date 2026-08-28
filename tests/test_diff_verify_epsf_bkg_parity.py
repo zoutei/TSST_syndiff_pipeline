@@ -29,9 +29,6 @@ from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
     DIFF_JOB_BASENAME,
     FRAMES_CSV_BASENAME,
 )
-from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    freeze_target_diff_config,
-)
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     EpsfParams,
     HotpantsParams,
@@ -39,7 +36,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
 from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_path_from_output_dir,
 )
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import resolve_target_diff_config, write_site_deployment, write_unified_site_config
 
 
 def _target() -> Target:
@@ -53,28 +50,20 @@ def _target() -> Target:
     )
 
 
-def _write_hotpants_epsf_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: hotpants",
-                "    output:",
-                "      diffs: hp_d",
-                "      convolved: hp_c",
-                "  - kind: epsf",
-                "    inputs:",
-                "      diffs: hp_d",
-                "    output: epsf_r1",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+_HOTPANTS_EPSF_DIFF_POLICY = {
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [
+        {
+            "kind": "hotpants",
+            "output": {"diffs": "hp_d", "convolved": "hp_c"},
+        },
+        {
+            "kind": "epsf",
+            "inputs": {"diffs": "hp_d"},
+            "output": "epsf_r1",
+        },
+    ],
+}
 
 
 class _ParityBase(unittest.TestCase):
@@ -91,7 +80,12 @@ class _ParityBase(unittest.TestCase):
             workspace_root=str(self.handoff),
             data_root=str(self.data),
         )
-        _write_hotpants_epsf_policy(self.site / "diff_config.yaml")
+        write_unified_site_config(
+            self.site / "pipeline.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff=_HOTPANTS_EPSF_DIFF_POLICY,
+        )
 
         self.target = _target()
         self.event_dir = event_scc_leaf(
@@ -155,7 +149,7 @@ class _ParityBase(unittest.TestCase):
             encoding="utf-8",
         )
 
-        self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        self.cfg = resolve_target_diff_config(self.site, self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)
 
     def _downsample_fp(self) -> str:

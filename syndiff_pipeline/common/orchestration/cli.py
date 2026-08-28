@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import shutil
 import sys
 import time
 from datetime import datetime, timezone
@@ -544,7 +543,6 @@ def _prepare_run_directory(
     source_targets: str | None = None,
     source_scc: str | None = None,
     inline_scc_targets: list | None = None,
-    source_diff_config_path: str | None = None,
     source_star_config_path: str | None = None,
     source_photometry_config_path: str | None = None,
     workspace_run_id: str | None = None,
@@ -561,7 +559,6 @@ def _prepare_run_directory(
     stages : list[str]
     detach : bool
     force_rerun : bool
-    source_diff_config_path : str | None, optional, default ``None``
     source_star_config_path : str | None, optional, default ``None``
     workspace_run_id : str | None, optional, default ``None``
     skip_artifact_verify : bool, optional, default ``False``
@@ -621,8 +618,6 @@ def _prepare_run_directory(
     if skip_artifact_verify:
         _patch_skip_artifact_verify(config_path)
         meta["skip_artifact_verify"] = True
-    if source_diff_config_path:
-        meta["source_diff_config_path"] = str(Path(source_diff_config_path).resolve())
     if source_star_config_path:
         meta["source_star_config_path"] = str(Path(source_star_config_path).resolve())
         star_dest = run_directory / "star_config.yaml"
@@ -678,17 +673,6 @@ def _prepare_run_directory(
         rcfg.photometry_config_path = frozen_phot
         write_runner_config(rcfg, config_path)
 
-    # Freeze site mask_settings.yaml when present (star_config pattern).
-    site_mask = None
-    if source_diff_config_path:
-        cand = Path(source_diff_config_path).expanduser().resolve().parent / "mask_settings.yaml"
-        if cand.is_file():
-            site_mask = cand
-    if site_mask is not None:
-        mask_dest = run_directory / "mask_settings.yaml"
-        if not mask_dest.is_file():
-            shutil.copy2(site_mask, mask_dest)
-        meta["mask_settings_path"] = str(mask_dest.resolve())
     if workspace_run_id is not None and str(workspace_run_id).strip():
         # Deprecated (wave A-3): workspace_run_id no longer selects a debug
         # ws_{id}/ tree -- diff output is SCC-lane-scoped, not event/run
@@ -755,11 +739,11 @@ def cmd_submit(args: argparse.Namespace) -> int:
 
     preset = getattr(args, "preset", None)
     if preset == COMBINED_PRESET:
-        if cfg.diff is None and not cfg.diff_config_path:
+        if cfg.diff is None:
             raise SystemExit(
                 "syndiff submit requires the pipeline config to carry the event diff "
-                "policy: either an embedded 'diff:' section (schema v2) or a "
-                "'diff_config:' key pointing at a diff policy file (legacy)."
+                "policy: an embedded 'diff:' section. See "
+                "docs/markdown/config_schema_v2.md."
             )
         # Fail before materializing any run state when an SCC cannot resolve
         # its diff policy/template lane.  The template artifacts
@@ -768,27 +752,12 @@ def cmd_submit(args: argparse.Namespace) -> int:
         from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
             frozen_diff_config_for_verify,
         )
-        from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-            freeze_target_diff_config,
-        )
         from syndiff_pipeline.difference_imaging.orchestration.validate import (
             validate_pipeline,
         )
 
-        deploy_path = deployment_path_for_config(args.config, cfg.deployment_file)
         for target in targets:
-            if cfg.diff is not None:
-                # Schema v2: resolve from the embedded policy, the same way
-                # every runtime consumer now does. No separate file exists.
-                resolved_cfg = frozen_diff_config_for_verify(
-                    None, target, runner_cfg=cfg
-                )
-            else:
-                resolved_cfg = freeze_target_diff_config(
-                    cfg.diff_config_path,
-                    target,
-                    deployment_path=deploy_path,
-                )
+            resolved_cfg = frozen_diff_config_for_verify(target, runner_cfg=cfg)
             validate_pipeline(resolved_cfg)
 
     state = PipelineState(cfg.state_db_path)
@@ -804,7 +773,6 @@ def cmd_submit(args: argparse.Namespace) -> int:
             force_rerun=bool(args.force_rerun),
             source_scc=source_input_path,
             inline_scc_targets=targets if source_input_path is None else None,
-            source_diff_config_path=cfg.diff_config_path or None,
             workspace_run_id=getattr(args, "workspace_run_id", None),
             skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
@@ -818,7 +786,6 @@ def cmd_submit(args: argparse.Namespace) -> int:
                 detach=True,
                 force_rerun=bool(args.force_rerun),
                 source_targets=source_input_path,
-                source_diff_config_path=cfg.diff_config_path or None,
                 workspace_run_id=getattr(args, "workspace_run_id", None),
                 skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
             )
@@ -832,7 +799,6 @@ def cmd_submit(args: argparse.Namespace) -> int:
                 force_rerun=bool(args.force_rerun),
                 source_scc=source_input_path,
                 inline_scc_targets=targets if source_input_path is None else None,
-                source_diff_config_path=cfg.diff_config_path or None,
                 workspace_run_id=getattr(args, "workspace_run_id", None),
                 skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
             )
@@ -942,7 +908,6 @@ def cmd_run(args: argparse.Namespace) -> int:
             force_rerun=bool(args.force_rerun),
             source_scc=source_input_path,
             inline_scc_targets=targets if source_input_path is None else None,
-            source_diff_config_path=cfg.diff_config_path or None,
             workspace_run_id=getattr(args, "workspace_run_id", None),
             skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
         )
@@ -956,7 +921,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                 detach=False,
                 force_rerun=bool(args.force_rerun),
                 source_targets=source_input_path,
-                source_diff_config_path=cfg.diff_config_path or None,
                 workspace_run_id=getattr(args, "workspace_run_id", None),
                 skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
             )
@@ -970,7 +934,6 @@ def cmd_run(args: argparse.Namespace) -> int:
                 force_rerun=bool(args.force_rerun),
                 source_scc=source_input_path,
                 inline_scc_targets=targets if source_input_path is None else None,
-                source_diff_config_path=cfg.diff_config_path or None,
                 workspace_run_id=getattr(args, "workspace_run_id", None),
                 skip_artifact_verify=bool(getattr(args, "skip_artifact_verify", False)),
             )
@@ -1725,7 +1688,7 @@ def _add_site_scope(sp: argparse.ArgumentParser) -> None:
     sp.add_argument(
         "--site",
         default=None,
-        help="Config directory with pipeline.yaml, diff_config.yaml, and deployment.yaml",
+        help="Config directory with pipeline.yaml (embedded diff: policy) and deployment.yaml",
     )
 
 

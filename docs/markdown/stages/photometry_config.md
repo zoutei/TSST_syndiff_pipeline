@@ -52,7 +52,7 @@ Optional first stage. Params mirror the former diff-side astrometry block (`sigm
 | `output` | Light-curve subdirectory label under `phot_{run_id}/` |
 | `methods` | List of aperture / PSF method dicts — see [forced_photometry.md](forced_photometry.md) |
 | `position_source` | `native_wcs` (default) or `temporal_wcs` — see below. Stage-level default; each method may override it. |
-| `temporal_wcs_version` | Required when `position_source: temporal_wcs` (stage-level or per-method); must match the diff_config `temporal_wcs` stage's `version` |
+| `temporal_wcs_version` | Required when `position_source: temporal_wcs` (stage-level or per-method); must match the diff `temporal_wcs` stage's `version` |
 
 Every `psf_type: epsf` method needs a resolvable gridded ePSF catalog (`gridded_epsf_index.json`) under the named ePSF label on the SCC diff lane.
 
@@ -110,4 +110,4 @@ placeholder WCS. Built by `write_temporal_wcs_offset_debug_plot` in
 
 ## Orchestrator wiring
 
-`pipeline.yaml` still owns `stages.photometry` executor / Condor pool settings. Photometry science knobs stay in `photometry_config.yaml` — same split as `diff_config.yaml` vs `pipeline.yaml` for the diff stage.
+`pipeline.yaml` still owns `stages.photometry` executor / Condor pool settings. Photometry science knobs stay in `photometry_config.yaml` — same split kept for `diff:` (embedded directly in `pipeline.yaml` since schema v2, formerly a standalone `diff_config.yaml`) vs `pipeline.yaml` for the diff stage.
