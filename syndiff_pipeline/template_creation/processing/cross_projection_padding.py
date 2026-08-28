@@ -50,7 +50,7 @@ class SkycellPaddingInfo:
     locations: List[str]  # e.g., ["top", "top_left"]
     cell_position: str  # "first", "last", "interior"
     row_position: str  # "top", "bottom", "middle"
-    actual_index: int  # Index in the row
+    actual_index: int  # Global slot index of the requiring cell (x - starting_x)
 
 
 @dataclass(frozen=True)
@@ -192,10 +192,20 @@ def create_master_array_wcs(metadata: dict, config, current_row_id: int) -> WCS:
 
     cd = _get_cd_matrix(first_cell)
 
+    # The assembler anchors every cell at slot ``x - starting_x`` (projection-
+    # wide starting_x), so a ragged row whose first cell has x > starting_x
+    # does NOT start at PAD_SIZE. Anchor the master WCS at the first cell's
+    # true slot; otherwise every padding placement for the row lands whole
+    # cell-widths off.
+    full_df = metadata["dataframe"]
+    starting_x = int(full_df["x"].min())
+    row_first_slot = int(first_cell["x"]) - starting_x
+    x_anchor = PAD_SIZE + row_first_slot * (config.cell_width - CELL_OVERLAP)
+
     # Create WCS object
     master_wcs = WCS(naxis=2)
     master_wcs.wcs.crval = [crval1, crval2]
-    master_wcs.wcs.crpix = [crpix1 + PAD_SIZE, crpix2 + PAD_SIZE]  # Adjust for padding
+    master_wcs.wcs.crpix = [crpix1 + x_anchor, crpix2 + PAD_SIZE]  # Adjust for padding
     master_wcs.wcs.cd = cd
     master_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     master_wcs.wcs.cunit = ["deg", "deg"]
@@ -222,6 +232,14 @@ def _parse_row_padding_requirements_df(metadata: dict, df: pd.DataFrame, row_id:
 
     proj_df = df[df["projection"].astype(str) == str(current_projection)]
     row_df = proj_df[proj_df["y"] == row_id]
+
+    # Global slot origin of the projection: placement (and, after the ragged-
+    # row fix, the master WCS) anchor cells at slot ``x - starting_x``, so
+    # actual_index must be the global slot index, not the index within the
+    # row's own (possibly ragged) cell list.
+    starting_x = metadata.get("starting_x")
+    if starting_x is None:
+        starting_x = int(proj_df["x"].min())
 
     requirements: Dict[str, SkycellPaddingInfo] = {}
     padding_cols = [
@@ -271,7 +289,7 @@ def _parse_row_padding_requirements_df(metadata: dict, df: pd.DataFrame, row_id:
                     requirements[p_cell] = SkycellPaddingInfo(
                         skycell_name=p_cell, projection=p_proj, locations=[],
                         cell_position=cell_info_type, row_position=row_position,
-                        actual_index=row_cells.index(main_cell_name),
+                        actual_index=int(row_data["x"]) - starting_x,
                     )
                 requirements[p_cell].locations.append(location)
 

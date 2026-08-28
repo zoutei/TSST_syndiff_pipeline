@@ -278,6 +278,17 @@ def extract_projection_metadata(df: pd.DataFrame, projection: str) -> dict:
         logger.warning(f"[Metadata] Inconsistent cell dimensions found: {set(all_dims)}")
     typical_width, typical_height = max(all_dims, key=lambda item: item[0] * item[1]) if all_dims else (0, 0)
     max_cells_per_row = max(len(cells) for cells in rows.values()) if rows else 0
+    # Placement anchors every cell at slot ``x - starting_x`` (see
+    # assemble_row_from_bundles), so the master array must span the global
+    # x-range of the projection, NOT the longest row's cell count. When the
+    # chip clips a projection diagonally the rows are ragged (e.g. row y=9
+    # covers x=3..8 while row y=3 covers x=7..9): starting_x comes from one
+    # row and the maximum x from another, so max_cells_per_row undersizes the
+    # array and the high-x cells of other rows overflow. Overflowing cells
+    # used to be skipped with a warning, silently leaving stale or missing
+    # convolved data in the output Zarr.
+    max_x = max(x for cells in rows.values() for _, x in cells) if rows else -1
+    slot_count = (max_x - starting_x + 1) if rows else 0
 
     return {
         "projection": projection,
@@ -285,6 +296,7 @@ def extract_projection_metadata(df: pd.DataFrame, projection: str) -> dict:
         "cell_width": typical_width,
         "cell_height": typical_height,
         "max_cells_per_row": max_cells_per_row,
+        "slot_count": slot_count,
         "starting_x": starting_x,
         "cell_dimensions": cell_dimensions,
         "dataframe": proj_df,
@@ -295,10 +307,19 @@ def create_master_array_config(metadata: dict) -> MasterArrayConfig:
     """Create master array configuration from metadata."""
     cell_width = metadata["cell_width"]
     cell_height = metadata["cell_height"]
-    max_cells = metadata["max_cells_per_row"]
+    # Slot count = global x-span, not the longest row's cell count -- ragged
+    # rows (diagonal chip/projection intersections) place cells at slot
+    # indices up to (max_x - starting_x). See extract_projection_metadata.
+    max_cells = metadata["slot_count"]
     starting_x = metadata["starting_x"]
-    master_width = PAD_SIZE + (max_cells * (cell_width - CELL_OVERLAP)) + CELL_OVERLAP + PAD_SIZE
-    master_height = cell_height + (2 * PAD_SIZE)
+    # Cells' NAXIS1/NAXIS2 vary by a few dozen px around the typical (largest-
+    # area) cell; pad the width with the largest per-cell excess so a
+    # wider-than-typical last cell cannot overflow its slot.
+    dims = metadata["cell_dimensions"].values()
+    extra_width = max((w - cell_width for w, _ in dims), default=0)
+    extra_height = max((h - cell_height for _, h in dims), default=0)
+    master_width = PAD_SIZE + (max_cells * (cell_width - CELL_OVERLAP)) + CELL_OVERLAP + PAD_SIZE + max(extra_width, 0)
+    master_height = cell_height + (2 * PAD_SIZE) + max(extra_height, 0)
     return MasterArrayConfig(width=master_width, height=master_height, cell_width=cell_width, cell_height=cell_height, max_cells=max_cells, starting_x=starting_x, cell_dimensions=metadata["cell_dimensions"])
 
 
@@ -1218,7 +1239,20 @@ def assemble_row_from_bundles(target_array: np.ndarray, cell_bundles: list[dict]
             cell_masks[cell_name] = mask
             cell_positions[cell_name] = (target_x_start_full, target_x_start_full + config.cell_width, PAD_SIZE, PAD_SIZE + config.cell_height)
         else:
-            logger.warning(f"[Assembler] Cell {cell_name} out of bounds for master array. Skipping placement.")
+            # A skipped cell is never written to the output Zarr, so the store
+            # silently keeps whatever a previous run wrote for it (stale data
+            # from an old pipeline version) or has no entry at all -- verify
+            # gates only check non-emptiness, so downstream stages consume the
+            # corruption without noticing (observed as bright cross-projection
+            # bands in s0020/3/3 templates). Fail loudly instead.
+            raise RuntimeError(
+                f"[Assembler] Cell {cell_name} out of bounds for master array: "
+                f"placement x=[{target_x_start},{target_x_end}) y=[{target_y_start},{target_y_end}) "
+                f"vs array shape {target_array.shape} (cell_index={cell_index}, "
+                f"starting_x={first_x_coord}, cell_width={config.cell_width}). "
+                "This indicates a master-array sizing bug -- the cell would be "
+                "silently dropped from the convolved output Zarr."
+            )
 
     logger.info(f"[Assembler] Assembled row with {len(cell_bundles)} cells.")
     return cell_positions, cell_masks
