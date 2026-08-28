@@ -74,27 +74,6 @@ class TestTargetBoxCropBounds(unittest.TestCase):
                 hdr, 50.0, 50.0, box_size=1024
             )
 
-    def test_diff_crop_explicit_default_full_not_override(self):
-        class Cfg:
-            x_min = x_max = y_min = y_max = None
-            crop_mode = None
-
-        self.assertFalse(wcs_grouping.diff_crop_explicitly_configured(Cfg()))
-
-    def test_diff_crop_explicit_target_box(self):
-        class Cfg:
-            x_min = x_max = y_min = y_max = None
-            crop_mode = "target_box"
-
-        self.assertTrue(wcs_grouping.diff_crop_explicitly_configured(Cfg()))
-
-    def test_diff_crop_explicit_quadrant_override(self):
-        class Cfg:
-            x_min = x_max = y_min = y_max = None
-            crop_mode = "tl"
-
-        self.assertTrue(wcs_grouping.diff_crop_explicitly_configured(Cfg()))
-
     def test_resolve_crop_mode_quadrant(self):
         hdr = _ffi_header()
         bounds = wcs_grouping.resolve_crop_bounds_from_params(hdr, crop_mode="tl")

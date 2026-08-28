@@ -99,6 +99,20 @@ class SynDiffConfig:
     site_config_dir: str = ""
     """Site config directory (for resolving ``mask_settings.yaml``)."""
 
+    # ── Provenance / run identity ─────────────────────────────────────────────
+    run_id: str = ""
+    """Orchestrator run id that produced this config; "" for foreground/ad-hoc runs.
+
+    Stamped into provenance artifact meta so an artifact can be traced back to the
+    run that made it. Never participates in any recipe_id or fingerprint.
+    """
+
+    downsample_fingerprint: str = ""
+    """Frozen expected downsample fingerprint, resolved once at submit.
+
+    Preferred over re-reading the authored site pipeline.yaml at artifact-emit time.
+    """
+
     pipeline: list = field(default_factory=list)
     """Ordered list of stage dicts (``kind`` + fields). Required; :func:`run_pipeline`
     executes these stages in order."""
@@ -187,12 +201,6 @@ class SynDiffConfig:
 
     y_max: Optional[int] = None
     """Top row of the crop, exclusive. Same explicit-mode rules as ``x_min``."""
-
-    crop_mode: Optional[str] = None
-    """Crop preset when no manual ``x_min``/``x_max``/``y_min``/``y_max`` are set: ``'full'`` (entire FFI), quadrant ``'tl'``/``'tr'``/``'bl'``/``'br'``, or ``'target_box'`` (square around ``target_ra``/``target_dec``). Unset inherits from ``cluster_template_job.json`` at diff bootstrap."""
-
-    crop_box_size: int = 1024
-    """Side length for ``crop_mode: target_box`` (default 1024)."""
 
     x_left_dead: int = 44
     """Dead columns on the left edge of the FFI (usable x starts here)."""

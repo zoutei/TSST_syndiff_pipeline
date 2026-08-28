@@ -8,17 +8,15 @@ from pathlib import Path
 import pandas as pd
 from astropy.io import fits
 
+from syndiff_pipeline.common.scc_paths import scc_diff_dir
 from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
 from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
-from syndiff_pipeline.difference_imaging.support.paths import (
-    DEFAULT_MANIFEST_BASENAME,
-    photometry_root,
-)
 from syndiff_pipeline.star.context import (
     StarEventContext,
     StarPrerequisiteError,
     full_ffi_to_crop_local,
     resolve_host_full_ffi_xy,
+    resolve_star_manifest_path,
     validate_star_prerequisites,
 )
 from syndiff_pipeline.star.diff_runner import (
@@ -52,8 +50,16 @@ def star_output_root(
     *,
     photometry_run_id: str | None = None,
 ) -> Path:
-    """Return ``phot_{run_id}/host_star`` for star-branch outputs."""
-    return Path(photometry_root(ctx.event_dir, photometry_run_id)) / HOST_STAR_SUBDIR
+    """Return ``{lane_root}/host_star`` — per-SCC, beside the diff products it derives from."""
+    del photometry_run_id  # legacy; SCC lane is not namespaced by photometry run
+    lane_root = scc_diff_dir(
+        ctx.data_root,
+        ctx.sector,
+        ctx.camera,
+        ctx.ccd,
+        store_name=ctx.output_store_name,
+    )
+    return lane_root / HOST_STAR_SUBDIR
 
 
 def resolve_star_host_root(
@@ -62,8 +68,8 @@ def resolve_star_host_root(
     *,
     photometry_run_id: str | None = None,
 ) -> Path:
-    """Return ``phot_{run_id}/host_star`` (SCC-only storage layout)."""
-    del workspace_run_id  # legacy; photometry_run_id namespaces outputs
+    """Return ``{lane_root}/host_star`` (SCC-only storage layout)."""
+    del workspace_run_id  # legacy; SCC lane root is not namespaced by workspace run
     return star_output_root(ctx, photometry_run_id=photometry_run_id)
 
 
@@ -84,7 +90,7 @@ def _blend_flag(iso_result: dict) -> bool:
 
 
 def _load_manifest(ctx: StarEventContext) -> pd.DataFrame:
-    manifest_path = Path(ctx.event_dir) / DEFAULT_MANIFEST_BASENAME
+    manifest_path = resolve_star_manifest_path(ctx)
     return pd.read_csv(manifest_path)
 
 

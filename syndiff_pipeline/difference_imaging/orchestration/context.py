@@ -7,18 +7,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
-from syndiff_pipeline.difference_imaging.support.paths import (
-    normalize_workspace_run_id,
-    resolve_manifest_path,
-    workspace_artifact_path,
-    workspace_dir,
-    workspace_root,
-)
+from syndiff_pipeline.difference_imaging.support.paths import resolve_manifest_path
 
 
 @dataclass
 class PipelineInvocationContext:
-    """Holds resolved paths for one ``run_config_pipeline`` execution."""
+    """Holds resolved paths for one ``run_config_pipeline`` execution.
+
+    ``cfg.output_dir`` is the SCC diff lane root directly -- there is no
+    per-run ``ws/`` workspace tree under it (removed in wave A-3; see
+    ``workspace_lock.py`` for where the config lock now lives).
+    """
 
     cfg: SynDiffConfig
     manifest_path: str
@@ -26,58 +25,13 @@ class PipelineInvocationContext:
     @classmethod
     def from_config(cls, cfg: SynDiffConfig) -> PipelineInvocationContext:
         """From config.
-        
+
         Parameters
         ----------
         cfg : SynDiffConfig
-        
+
         Returns
         -------
         PipelineInvocationContext"""
         mp = resolve_manifest_path(cfg.output_dir, cfg.manifest or None)
         return cls(cfg=cfg, manifest_path=mp)
-
-    @property
-    def workspace_run_id(self) -> str | None:
-        """Workspace run id.
-        
-        Returns
-        -------
-        str | None"""
-        return normalize_workspace_run_id(getattr(self.cfg, "workspace_run_id", None))
-
-    def workspace_root_path(self) -> str:
-        """Workspace root path.
-        
-        Returns
-        -------
-        str"""
-        return workspace_root(self.cfg.output_dir, run_id=self.workspace_run_id)
-
-    def workspace(self, label: str) -> str:
-        """Workspace.
-        
-        Parameters
-        ----------
-        label : str
-        
-        Returns
-        -------
-        str"""
-        return workspace_dir(
-            self.cfg.output_dir, label, run_id=self.workspace_run_id
-        )
-
-    def workspace_artifact(self, basename: str) -> str:
-        """Workspace artifact.
-        
-        Parameters
-        ----------
-        basename : str
-        
-        Returns
-        -------
-        str"""
-        return workspace_artifact_path(
-            self.cfg.output_dir, basename, run_id=self.workspace_run_id
-        )

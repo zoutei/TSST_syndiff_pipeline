@@ -48,12 +48,6 @@ from syndiff_pipeline.difference_imaging.support.manifest import (
     save_frame_manifest,
 )
 from syndiff_pipeline.difference_imaging.stages.hotpants import HotpantsWorkspaceDirs
-from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
-    ensure_event_ffis_symlink,
-    ensure_event_templates_symlink,
-    event_ffis_symlink_path,
-    event_templates_symlink_path,
-)
 from syndiff_pipeline.difference_imaging.support.paths import (
     GAIA_CATALOG_PIPELINE_BASENAME,
     HOTPANTS_SUBSTAMP_STARS_BASENAME,
@@ -64,7 +58,6 @@ from syndiff_pipeline.difference_imaging.orchestration.context import PipelineIn
 from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import (
     is_external_workspaces_entry,
     is_workspace_inherit_entry,
-    split_pipeline,
 )
 from syndiff_pipeline.difference_imaging.orchestration.workspace_lock import (
     assert_workspace_config_lock,
@@ -229,11 +222,6 @@ def _run_background_stage(
     if params.write_stack:
         background.save_stack(stack, out_ws)
     if params.write_per_frame_fits:
-        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
-
-        ws_index_root = _workspace_root(
-            cfg.output_dir, run_id=getattr(cfg, "workspace_run_id", None)
-        )
         background.write_per_frame_fits(
             out_ws,
             stack,
@@ -241,7 +229,7 @@ def _run_background_stage(
             sck=(int(cfg.sector), int(cfg.camera), int(cfg.ccd)),
             data_root=getattr(cfg, "data_root", "") or None,
             background_params=params,
-            workspace_root=ws_index_root,
+            run_id=getattr(cfg, "run_id", "") or None,
         )
 
     stem_rows = _records_to_stem_rows(records)
@@ -285,21 +273,6 @@ def _resolve_scc_epsf_plots_dir(cfg: SynDiffConfig, epsf_label: str) -> str:
     if not label:
         raise ValueError("epsf plot directory requires a non-empty label")
     return _resolve_scc_pipeline_plots_dir(cfg, category=label)
-
-
-def _pipeline_plots_root(cfg: SynDiffConfig) -> str:
-    """Legacy event workspace-tree path (astrometry and other per-target plots)."""
-    from syndiff_pipeline.difference_imaging.support.paths import (
-        normalize_workspace_run_id,
-        pipeline_plots_root,
-    )
-
-    sub = getattr(cfg, "pipeline_plots_dir", None)
-    return pipeline_plots_root(
-        cfg.output_dir,
-        sub,
-        run_id=normalize_workspace_run_id(getattr(cfg, "workspace_run_id", None)),
-    )
 
 
 def _maybe_write_background_gif(
@@ -558,11 +531,15 @@ def _ensure_gaia_crop(
     Returns
     -------
     pd.DataFrame"""
+    del cfg
+    # SCC diff crop is always the full science bounds (no per-config
+    # override any more -- crop_mode/crop_box_size were removed), so the
+    # crop-changed re-reprojection path is never needed here.
     return wcs_grouping.ensure_gaia_crop_xy(
         gaia_df,
         ref_ffi_path,
         crop_bounds,
-        force_reproject=wcs_grouping.diff_crop_explicitly_configured(cfg),
+        force_reproject=False,
         margin_px=margin_px,
     )
 
@@ -841,25 +818,6 @@ def _mask_catalog_scc_kwargs(cfg: SynDiffConfig) -> dict:
         "ccd": int(cfg.ccd) if cfg.ccd is not None else None,
     }
 
-def _ensure_workspace_tree_symlinks(ctx: PipelineInvocationContext, cfg: SynDiffConfig) -> None:
-    """Ensure ffis symlink exists in the active workspace tree (templates are SCC-absolute)."""
-    out = cfg.output_dir
-    run_id = ctx.workspace_run_id
-    os.makedirs(ctx.workspace_root_path(), exist_ok=True)
-
-    ffis_link = event_ffis_symlink_path(out, run_id=run_id)
-    if not ffis_link.is_symlink():
-        canon = event_ffis_symlink_path(out)
-        if canon.is_symlink():
-            try:
-                ensure_event_ffis_symlink(out, canon.resolve(), run_id=run_id)
-            except OSError as exc:
-                log.warning("workspace ffis symlink failed: %s", exc)
-        elif cfg.ffi_dir:
-            ffi_leaf = _cfg_ffi_leaf(cfg)
-            if os.path.isdir(ffi_leaf):
-                ensure_event_ffis_symlink(out, ffi_leaf, run_id=run_id)
-
 
 def _ensure_template_paths_for_kernel(
     cfg: SynDiffConfig,
@@ -933,21 +891,18 @@ def run_config_pipeline(
 
     ctx = PipelineInvocationContext.from_config(cfg)
     out = ctx.cfg.output_dir
-    ws_root = ctx.workspace_root_path()
+    # No more ws/ workspace tree: output_dir is already the SCC diff lane
+    # root, and the config lock lives there directly (siblings of
+    # mask_settings.yaml). ws_root is kept as an alias of out for the
+    # (unused) downstream plumbing that still threads a "workspace root"
+    # string through stage helpers.
+    ws_root = out
     manifest_path = ctx.manifest_path
     os.makedirs(out, exist_ok=True)
-    os.makedirs(ws_root, exist_ok=True)
 
     assert_workspace_config_lock(ws_root, cfg)
     _require_scc_lane_root(cfg)
-    _, inherit_specs, _ = split_pipeline(cfg.pipeline)
-    if inherit_specs:
-        raise RuntimeError(
-            "workspace_inherit is not supported under SCC-only diff storage; "
-            "re-run upstream diff stages on the SCC lane instead."
-        )
 
-    _ensure_workspace_tree_symlinks(ctx, cfg)
     write_immutable_workspace_config_snapshot(ctx, cfg)
 
     shared_mask = None
@@ -1772,7 +1727,9 @@ def run_config_pipeline(
                 crop_bounds,
                 gaia_df,
                 ref_ffi_path,
-                force_reproject=wcs_grouping.diff_crop_explicitly_configured(cfg),
+                # SCC diff crop is always the full science bounds (no
+                # per-config override any more).
+                force_reproject=False,
             )
             ws_sat = _diff_stage_dir(cfg, ctx, label_out)
             os.makedirs(ws_sat, exist_ok=True)

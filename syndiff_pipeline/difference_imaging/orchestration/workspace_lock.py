@@ -126,7 +126,7 @@ def assert_workspace_config_lock(ws_root: str | Path, cfg: SynDiffConfig) -> Non
         raise WorkspaceConfigMismatchError(
             f"Workspace {ws_root} was created with a different diff config "
             f"(stored fingerprint {stored!r}, incoming {incoming!r}). "
-            f"Use a new workspace_run_id or workspace_inherit.from to start a new tree."
+            f"Use a new output_store_name to start a new lane."
         )
 
 
@@ -139,7 +139,9 @@ def write_immutable_workspace_config_snapshot(
         cfg_to_snapshot_dict,
     )
 
-    ws_root = Path(ctx.workspace_root_path())
+    # Lock artifacts live at the SCC diff lane root (``cfg.output_dir``),
+    # as siblings of ``mask_settings.yaml`` -- there is no ``ws/`` tree.
+    ws_root = Path(ctx.cfg.output_dir)
     snap = _snapshot_path(ws_root)
     fp_path = _fingerprint_path(ws_root)
     incoming = diff_config_fingerprint(cfg)

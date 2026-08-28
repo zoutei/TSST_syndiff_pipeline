@@ -6,7 +6,7 @@ This document describes the **production** `background_temporal_smoothing` diffe
 
 **Savitzky–Golay primitive:** [`syndiff_pipeline/difference_imaging/stages/adaptive_background.py`](../../syndiff_pipeline/difference_imaging/stages/adaptive_background.py) (`savgol_smooth_3d`, `savgol_smooth_3d_parallel`)
 
-**Configs:** [`config/diff_config_single_kernel.yaml`](../../config/diff_config_single_kernel.yaml), [`config/diff_config_multi_kernel.yaml`](../../config/diff_config_multi_kernel.yaml), [`config/diff_config_multi_kernel_resume.yaml`](../../config/diff_config_multi_kernel_resume.yaml)
+**Configs:** [`config/pipeline.yaml`](../../config/pipeline.yaml)'s `diff:` block (schema v2 reference, single-kernel recipe), [`config/diff_config_single_kernel.yaml`](../../config/diff_config_single_kernel.yaml) (schema v1), [`config/archive/diff_config_multi_kernel.yaml`](../../config/archive/diff_config_multi_kernel.yaml), [`config/archive/diff_config_multi_kernel_resume.yaml`](../../config/archive/diff_config_multi_kernel_resume.yaml)
 
 **Experimental predecessor:** [`experimental/phot_bkg_temporal_smooth/`](../../experimental/phot_bkg_temporal_smooth/) (cutout-only prototypes; production always smooths the **full crop**)
 
@@ -56,24 +56,24 @@ Footprint-only smoothing of science products is **not** implemented in the produ
 
 ## Pipeline placement
 
-### Single-kernel (`diff_config_single_kernel.yaml`)
+### Single-kernel (`config/pipeline.yaml`'s `diff:` block / `diff_config_single_kernel.yaml`)
 
 ```text
-shared_mask → kernel_fit → convolved_templates → kernel_subtract
+shared_mask → kernel_fit → convolved_templates → background_estimate
   → phot_bkg_temporal_smooth → forced_photometry (diffs = ks_d_s)
 ```
 
 No Hotpants. Photometry runs directly on resubtracted algebraic diffs.
 
-### Multi-kernel (`diff_config_multi_kernel.yaml`)
+### Multi-kernel (`config/archive/diff_config_multi_kernel.yaml`)
 
 ```text
-… → kernel_subtract → phot_bkg_temporal_smooth → hotpants (bkg = ks_b_s) → forced_photometry (diffs = hp_d)
+… → background_estimate → phot_bkg_temporal_smooth → hotpants (bkg = ks_b_s) → forced_photometry (diffs = hp_d)
 ```
 
 Hotpants sees temporally smoothed photutils backgrounds. Photometry uses Hotpants diffs `hp_d`, not `ks_d_s`.
 
-### Resume multi-kernel (`diff_config_multi_kernel_resume.yaml`)
+### Resume multi-kernel (`config/archive/diff_config_multi_kernel_resume.yaml`)
 
 Reuses `ks_b` and `ks_d` from a completed single-kernel workspace (`workspace_inherit: from: single_hp_kernel`), runs `phot_bkg_temporal_smooth`, then Hotpants on `ks_b_s`. Use this when single-kernel products already exist and you only need the Hotpants leg in a new `workspace_run_id`.
 
@@ -132,7 +132,7 @@ The smooth stage runs **after** `kernel_subtract` but **before** Hotpants. It st
 | `ks_d_s` | Resubtracted diff per epoch (full crop) |
 | `ks_bkg_smooth_meta/` | Optional diagnostics (not consumed by downstream stages) |
 
-> **Caveat:** `ks_d` used to be the raw, unsubtracted diff (`ffi − convolved`), with this stage's own spatial photutils step doing the first real background subtraction. `kernel_subtract` now subtracts its own robust-TESSreduce background before writing `ks_d`, so this stage's `spatial` step (if enabled) now runs on an already-cleaned diff. Review `steps.spatial.enabled` in configs that chain both stages (`diff_config_single_kernel.yaml`, `diff_config_multi_kernel.yaml`) if double background handling is undesired.
+> **Caveat:** `ks_d` used to be the raw, unsubtracted diff (`ffi − convolved`), with this stage's own spatial photutils step doing the first real background subtraction. `background_estimate` (formerly `kind: kernel_subtract`) now subtracts its own robust-TESSreduce background before writing `ks_d`, so this stage's `spatial` step (if enabled) now runs on an already-cleaned diff. Review `steps.spatial.enabled` in configs that chain both stages (`config/pipeline.yaml`'s `diff:` block, `diff_config_multi_kernel.yaml`) if double background handling is undesired.
 
 Do **not** label pre-Hotpants smoothed products `hp_*`; that collides with Hotpants outputs (`hp_d`, `hp_b`, `hp_c`).
 

@@ -40,11 +40,10 @@ Only three top-level subtrees belong here long-term:
   events/                          # per-event nested SCC leaves
     {event_name}/                  # e.g. 2020ftl
       s{SSSS}_c{C}_k{K}/           # e.g. s0023_c1_k3
-      phot_{photometry_run_id}/   # astrometry + forced LCs (photometry stage)
+      phot_{photometry_run_id}/   # astrometry + forced LCs (photometry stage) -- the ONLY thing under events/ now
         targets.reg
         astrometry_result.json
         {lc_label}/lightcurve_*.csv
-        host_star/                 # star branch outputs
       frames.csv                   # optional event copy of SCC frame manifest
       ps1_removed_stars.csv        # crop-local Gaia (downsample stage; linear geometry_mode)
 ```
@@ -64,7 +63,7 @@ Legacy `ws/` / `ws_{workspace_run_id}/` trees may still exist from older runs bu
 
 **Deprecated event `ws/` trees:** older runs stored diff FITS, masks, ePSF, and forced photometry under `events/{name}/s…/ws/` (or `ws_{workspace_run_id}/`). Current diff writes are **SCC-primary** on `data_root` (below). Event trees may still hold progress sidecars, frozen `diff_config.yaml`, and `templates`/`ffis` symlinks for exploration; they are not the source of truth for subtract/ePSF completeness. Per-event photometry lives under `phot_{photometry_run_id}/`, not `ws/{lc_label}/`.
 
-**Legacy star layout:** older runs used `events/{label}/star/` or `star_{id}/`. SCC-only verify requires `phot_{run_id}/host_star/batch_manifest.csv`.
+**Legacy star layout:** older runs used `events/{label}/star/`, `star_{id}/`, or `phot_{run_id}/host_star/`. Star is now per-SCC, not per-event: SCC-only verify requires `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/host_star/batch_manifest.csv`.
 
 **`workspace_inherit`** (removed): SCC-only diff no longer supports inheriting labels from a parent event `ws/` tree. Re-run upstream diff stages on the SCC lane instead.
 
@@ -145,6 +144,10 @@ Shared across targets on the same SCC where noted. Paths are derived in `runner_
       shared_mask.fits.fz
       hotpants_substamp_stars.csv
       gaia_catalog_pipeline.csv
+      diff_config.yaml             # immutable per-lane config lock (chmod 444)
+      diff_config.fingerprint      # its fingerprint sibling
+      mask_settings.yaml           # frozen effective mask policy
+      host_star/                   # star branch outputs (per-SCC, not per-event)
       hp_d/tess{digits}-s{SSSS}-{C}-{K}_{label}.fits.fz
       hp_b/
       hp_c/
@@ -215,7 +218,7 @@ Code dual-reads legacy L2–L4 files colocated under `templates/` when
 
 Linear template FITS at `N>1` carry native `XMIN`/`XMAX`/`YMIN`/`YMAX` plus `OVERSAMP=N`; array planes are shape `(native_h·N, native_w·N)`. Diff crops stay native and are scaled at load time (`common/template_coverage.py`).
 
-`events/{event}/s_c_k/phot_{run_id}/` holds per-event astrometry and forced photometry. Star outputs default to `host_star/` under the baseline workspace or photometry tree.
+`events/{event}/s_c_k/phot_{run_id}/` holds per-event astrometry and forced photometry only. Star is per-SCC, not per-event: outputs default to `host_star/` under the SCC diff lane (`{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/host_star/`), derived directly from `data_root`/sector/camera/ccd — never from an event workspace or photometry run id.
 
 ---
 
@@ -273,16 +276,20 @@ SCC-scoped diff store (field mode v2 — SCC-primary write-through):
   diff/                              # default lane (store_name null)
   diff_{lane}/                       # named lane (e.g. diff_linear/)
     shared_mask.fits.fz
+    diff_config.yaml                 # immutable per-lane config lock (chmod 444)
+    diff_config.fingerprint
+    mask_settings.yaml
     hp_d/tess{digits}-s{SSSS}-{C}-{K}_hp_d.fits.fz
     hp_d_kernels/
     epsf_r1/gridded_epsf_index.json
+    host_star/                       # star branch outputs (per-SCC)
   bookkeeping/
     diff/oversampling_{N}/           # lane bookkeeping (or legacy flat bookkeeping/diff/)
       frames.csv                     # SCC frame manifest (bootstrap)
       diff_job.json                  # v2: mapping_grid, store names, crop_bounds
 ```
 
-Recipe fingerprints are recorded in `provenance.db` only; they are **not** encoded in the on-disk directory layout. Event workspaces do not receive mirrored diff FITS under `ws/{label}/`.
+Recipe fingerprints are recorded in `provenance.db` only; they are **not** encoded in the on-disk directory layout. Event workspaces do not receive mirrored diff FITS under `ws/{label}/`. Every diff artifact's `provenance.db` recipe row also carries `git_sha` (the full 40-char SHA of the checkout that produced it, stored but not part of the fingerprint hash) and, in the FITS/NPZ `meta`, `run_id` (the orchestrator run that produced it, empty for foreground/ad-hoc runs) — see [config_schema_v2.md](config_schema_v2.md#provenance).
 
 Operator commands:
 

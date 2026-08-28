@@ -39,6 +39,7 @@ import logging
 import os
 import shutil
 import socket
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -49,6 +50,7 @@ log = logging.getLogger(__name__)
 __all__ = [
     "PROVENANCE_JSON_BASENAME",
     "host_pid_tag",
+    "git_sha",
     "default_spool_path",
     "build_record",
     "append_spool_record",
@@ -64,6 +66,57 @@ PROVENANCE_JSON_BASENAME = "_provenance.json"
 def host_pid_tag() -> str:
     """``{host}.{pid}`` tag used for spool filenames and tmp-dir uniqueness."""
     return f"{socket.gethostname()}.{os.getpid()}"
+
+
+# Sentinel distinguishing "not resolved yet" from a legitimately cached
+# ``None`` (e.g. running from a tarball with no ``.git``) -- see git_sha().
+_UNRESOLVED = object()
+_git_sha_cache: Any = _UNRESOLVED
+
+
+def git_sha() -> Optional[str]:
+    """Git SHA of the running checkout, or ``None``. Cached per process; never raises.
+
+    Resolved once via ``git rev-parse HEAD`` run with ``cwd`` set to this
+    module's own directory (inside the package, so ``git`` finds the
+    enclosing repo by walking up from there regardless of where the process
+    itself was launched from). Because there is no deploy step in this
+    project -- ``pip install -e .`` means the daemon and every re-executed
+    Condor job import live source straight off disk, sometimes hours after
+    submission (see CLAUDE.md invariant 14) -- this is often the only way to
+    tell which code version actually produced a given artifact, so the full
+    40-character SHA is stored (unambiguous for ``git show``/``git log``),
+    not an abbreviated form.
+
+    Never raises and never blocks past the 5s subprocess timeout: a missing
+    ``git`` binary, a checkout with no ``.git`` (e.g. an extracted tarball),
+    a non-zero exit, or a timeout all resolve to ``None`` -- which is then
+    cached just like a real SHA, so a broken environment is not retried on
+    every subsequent call.
+    """
+    global _git_sha_cache
+    if _git_sha_cache is _UNRESOLVED:
+        _git_sha_cache = _resolve_git_sha()
+    return _git_sha_cache
+
+
+def _resolve_git_sha() -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    except Exception:  # noqa: BLE001 - this helper must never raise
+        return None
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha or None
 
 
 def default_spool_path(spool_dir: str | Path) -> Path:
@@ -96,6 +149,12 @@ def build_record(
     Build the JSON-serializable record shared by ``_provenance.json`` and the
     spool line. Both carry the full recipe (not just its id) so ``ingest``
     can populate the ``recipes`` table without a second lookup.
+
+    ``git_sha`` (this process's :func:`git_sha`, cached) is always stamped
+    onto the record alongside the recipe, purely as descriptive metadata --
+    it is never an input to ``recipe_id``/``fingerprint`` (see
+    :mod:`fingerprint`), so its value can never change an artifact's or
+    recipe's identity.
     """
     record: dict[str, Any] = {
         "fingerprint": str(fingerprint),
@@ -110,6 +169,7 @@ def build_record(
         "wall_time_s": wall_time_s,
         "produced_by": produced_by or host_pid_tag(),
         "created_at": created_at or _utcnow_iso(),
+        "git_sha": git_sha(),
     }
     if recipe_params is not None:
         record["recipe_params"] = dict(recipe_params)

@@ -133,7 +133,9 @@ class TestWorkspaceConfigLock(unittest.TestCase):
             cfg = _minimal_cfg(output_dir=tmp, workspace_run_id="lock_test")
             ctx = PipelineInvocationContext.from_config(cfg)
             write_immutable_workspace_config_snapshot(ctx, cfg)
-            snap = Path(ctx.workspace_artifact(DIFF_CONFIG_SNAPSHOT_BASENAME))
+            # Lock artifacts live at the lane root (cfg.output_dir) directly
+            # (wave A-3 removed the ws[_{run_id}]/ tree).
+            snap = Path(ctx.cfg.output_dir) / DIFF_CONFIG_SNAPSHOT_BASENAME
             fp = snap.parent / "diff_config.fingerprint"
             self.assertTrue(snap.is_file())
             self.assertTrue(fp.is_file())

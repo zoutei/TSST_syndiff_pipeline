@@ -13,7 +13,7 @@ Quick start for the **photometry** orchestrator stage: forced photometry (and op
 | Astrometry + forced LCs on events | **`syndiff photometry submit\|run`** |
 | Host-star LCs | `syndiff star submit\|run` |
 
-Default site [`config/diff_config.yaml`](../../config/diff_config.yaml) is **`shared_mask` + `hotpants` only**. Event light curves are **not** part of that default; they run via this noun (or an optional in-diff `kind: photometry` delegator — see [diff pipeline](stages/diff_pipeline.md)).
+The default schema v1 site config [`config/diff_config.yaml`](../../config/diff_config.yaml) is **`shared_mask` + `hotpants` only**. Event light curves are **not** part of that default; they run via this noun (or, on schema v1 sites only, an optional in-diff `kind: photometry` delegator — a schema v2 `diff.pipeline` rejects that kind outright, since diff is SCC-scoped, not event-scoped; see [diff pipeline](stages/diff_pipeline.md) and [config_schema_v2.md](config_schema_v2.md)).
 
 ## Prerequisites
 

@@ -1256,6 +1256,13 @@ def _try_emit_photometry_provenance(
             else lightcurve_csv_basename(method.name)
         )
         loc = os.path.join(str(output_dir), csv_name)
+        meta = {
+            "n_epochs": int(len(diff_paths)),
+            "n_targets": len(phot_targets),
+        }
+        run_id = getattr(cfg, "run_id", "") or None
+        if run_id:
+            meta["run_id"] = run_id
         provenance_glue.emit_photometry_artifact(
             event=str(event),
             sector=sector,
@@ -1267,10 +1274,7 @@ def _try_emit_photometry_provenance(
             location=loc,
             input_fingerprints=input_fps,
             data_root=data_root,
-            meta={
-                "n_epochs": int(len(diff_paths)),
-                "n_targets": len(phot_targets),
-            },
+            meta=meta,
         )
     except Exception:
         log.debug(

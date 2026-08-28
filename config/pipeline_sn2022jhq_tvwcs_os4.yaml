@@ -10,8 +10,8 @@
 #   syndiff submit --config config/pipeline_sn2022jhq_tvwcs_os4.yaml \
 #     --scc config/scc_sn2022jhq_s51_s52.csv \
 #     --run-id sn2022jhq_s51_s52_tvwcs_os4_hp_d_20260825
+config_schema_version: 2
 deployment_file: deployment.yaml
-diff_config: diff_config_sn2022jhq_tvwcs_os4_hp_d.yaml
 
 notifications:
   enabled: true
@@ -82,3 +82,92 @@ resources:
     max_concurrent: 2
   downsample:
     max_concurrent: 2
+
+# Diff sub-pipeline policy (folded in verbatim here per schema v2, formerly
+# config/diff_config_sn2022jhq_tvwcs_os4_hp_d.yaml). SN2022jhq sectors 51 and
+# 52: temporal-WCS, OS4 Hotpants-only diff.
+#
+# Templates are read from templates_tvwcs/oversampling_4, which is built by
+# pipeline_sn2022jhq_tvwcs_os4.yaml using temporal_cheb5_bspline_v1.  No
+# FFI-WCS template products are consumed.
+#
+# This intentionally runs only Hotpants and writes hp_d (plus its normal hp_c,
+# hp_b, hp_m, and kernel metadata companions).  It reuses the robust background
+# already estimated by the completed linear lane instead of re-running
+# kernel_fit, convolved_templates, or background_estimate.
+#
+# SCC-only lane note: external_workspaces validates the dependency label but
+# does not cross-link lanes.  Before submitting, create lane-local *symlinks*
+# for each SCC (never copies) so the active diff_tvwcs lane can see the linear
+# background and Hotpants mask inputs:
+#   diff_tvwcs/ks_b -> ../diff_linear/ks_b
+#   diff_tvwcs/shared_mask.fits.fz -> ../diff_linear/shared_mask.fits.fz
+#   diff_tvwcs/hotpants_substamp_stars.csv -> ../diff_linear/hotpants_substamp_stars.csv
+# Confirm the crop/manifest shape matches before creating those links.
+diff:
+  defaults:
+    n_jobs: 64
+    workspace_run_id: sn2022jhq_tvwcs_os4_hp_d_v1
+    pipeline_plots: true
+    oversampling_factor: 4
+
+  paths:
+    template_store_name: tvwcs
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+
+  pipeline:
+    - external_workspaces: [ks_b]
+    - kind: hotpants
+      inputs:
+        bkg: ks_b
+      # Measured on a 64-core/500-GB production node for the OS4 temporal-WCS
+      # lane: 8 frame workers x 8 Hotpants threads was the best controlled
+      # 64-thread setting.  Bound the group cache because drift changes groups
+      # frequently and an unbounded OS4 cache is memory-expensive.
+      hotpants_n_jobs: 8
+      hotpants_os_n_jobs: 8
+      template_cache_max_groups: 1
+      hp_sigma_gauss: [0.752, 1.88, 3.76]
+      hp_ko: 2
+      hp_bgo: 0
+      hp_nstampx: 10
+      hp_nstampy: 10
+      hp_nss: 100
+      hp_ngauss: 3
+      hp_deg_fixe: [6, 4, 2]
+      hp_kf_spread_mask1: 0.0
+      hp_ks: 3.0
+      hp_kfm: 0.75
+      hp_fitthresh: 5.0
+      hp_stat_sig: 3.0
+      hp_force_convolve: "t"
+      hp_normalize: "t"
+      write_convolved: false
+      write_bkg: true
+      write_stamps: false
+      write_kernel_solutions: true
+      output:
+        diffs: hp_d
+        convolved: hp_c
+        bkg: hp_b
+
+  condor:
+    # Keep the split-stage profiles explicit even though this Hotpants-only
+    # policy executes only the final ``diff`` slice.  The smaller class is now
+    # 80 GB; the large background class is 400 GB for future reuse.
+    diff_prep:
+      request_cpus: 64
+      request_memory: 80000
+      host_stats_min_mem_mb: 80000
+      host_stats_max_load15: 20.0
+    background_estimate:
+      request_cpus: 64
+      request_memory: 400000
+      host_stats_min_mem_mb: 400000
+      host_stats_max_load15: 20.0
+    diff:
+      request_cpus: 64
+      request_memory: 80000
+      host_stats_min_mem_mb: 80000
+      host_stats_max_load15: 20.0

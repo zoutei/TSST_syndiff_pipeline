@@ -186,14 +186,9 @@ def verify_photometry_prerequisites(
     ):
         return False, "target requires finite target_ra and target_dec"
 
-    from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-        load_deployment_for_diff_config,
-    )
+    from syndiff_pipeline.photometry.site_config import resolve_photometry_deployment
 
-    _, deploy_path = load_deployment_for_diff_config(policy.config_path)
-    deployment = __import__(
-        "syndiff_pipeline.common.orchestration.deployment", fromlist=["load_deployment"]
-    ).load_deployment(policy.config_path, policy.deployment_file)
+    deployment, _deploy_path = resolve_photometry_deployment(policy)
     data_root = deployment.get("data_root")
     if not data_root:
         return False, "deployment missing data_root"

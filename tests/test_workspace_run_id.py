@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 import tempfile
 import unittest
@@ -16,13 +15,8 @@ from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
     ensure_event_templates_symlink,
     event_templates_symlink_path,
 )
-from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
-from syndiff_pipeline.difference_imaging.orchestration.context import (
-    PipelineInvocationContext,
-)
 from syndiff_pipeline.difference_imaging.support.paths import (
     DIFF_CONFIG_SNAPSHOT_BASENAME,
-    SHARED_MASK_FITS_BASENAME,
     workspace_root,
     workspace_tree_name,
 )
@@ -34,25 +28,13 @@ class TestWorkspaceRunId(unittest.TestCase):
         self.assertEqual(workspace_tree_name(""), "ws")
         self.assertEqual(workspace_tree_name("dbg1"), "ws_dbg1")
 
-    def test_debug_workspace_paths(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            event = os.path.join(tmp, "event")
-            cfg = SynDiffConfig(output_dir=event, workspace_run_id="dbg_test")
-            ctx = PipelineInvocationContext.from_config(cfg)
-            self.assertEqual(
-                ctx.workspace_root_path(),
-                os.path.join(os.path.abspath(event), "ws_dbg_test"),
-            )
-            self.assertEqual(
-                ctx.workspace("ks_d"),
-                os.path.join(os.path.abspath(event), "ws_dbg_test", "ks_d"),
-            )
-            self.assertEqual(
-                ctx.workspace_artifact(SHARED_MASK_FITS_BASENAME),
-                os.path.join(
-                    os.path.abspath(event), "ws_dbg_test", SHARED_MASK_FITS_BASENAME
-                ),
-            )
+    # NOTE (wave A-3): PipelineInvocationContext.workspace_root_path() /
+    # .workspace() / .workspace_artifact() were deleted -- diff output_dir is
+    # now the SCC diff lane root directly, with no ws[_{run_id}]/ subtree.
+    # workspace_run_id survives only as a term in diff_config_fingerprint
+    # (see tests/test_diff_workspace_verify.py); it has no path effect any
+    # more. workspace_root()/workspace_tree_name() themselves remain generic
+    # path helpers still used by other, still event-scoped trees (photometry).
 
     def test_debug_tree_gets_templates_symlink(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -392,7 +392,7 @@ def write_per_frame_fits(
     sck: Optional[tuple] = None,
     data_root: Optional[str] = None,
     background_params: Optional[Any] = None,
-    workspace_root: Optional[str] = None,
+    run_id: Optional[str] = None,
 ) -> None:
     """Write per frame fits.
 
@@ -408,7 +408,10 @@ def write_per_frame_fits(
         written; see ``orchestration/provenance_glue.py``).
     data_root : Optional[str], optional
     background_params : Optional[Any], optional
-        The stage's ``BackgroundParams`` (recipe source for the sidecar)."""
+        The stage's ``BackgroundParams`` (recipe source for the sidecar).
+    run_id : Optional[str], optional
+        Orchestrator run id, stamped into the emitted artifact's ``meta``
+        when non-empty (``SynDiffConfig.run_id``)."""
     os.makedirs(out_dir, exist_ok=True)
     out_label = workspace_label_from_dir(out_dir)
     for i, rec in enumerate(records):
@@ -435,6 +438,9 @@ def write_per_frame_fits(
                 inputs = provenance_glue.required_input_fingerprints(diff_image_fp)
                 if inputs is None:
                     continue
+                meta = {"producer": "background_temporal_smoothing"}
+                if run_id:
+                    meta["run_id"] = run_id
                 provenance_glue.emit_diff_artifact(
                     kind="diff_background",
                     sector=sck[0],
@@ -446,8 +452,7 @@ def write_per_frame_fits(
                     location=out_path,
                     input_fingerprints=inputs,
                     data_root=data_root,
-                    meta={"producer": "background_temporal_smoothing"},
-                    workspace_root=workspace_root,
+                    meta=meta,
                 )
             except Exception:
                 log.debug(

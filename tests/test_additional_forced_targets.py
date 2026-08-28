@@ -22,9 +22,13 @@ from syndiff_pipeline.difference_imaging.stages import photometry as ph
 from syndiff_pipeline.photometry.runner import (
     _forced_photometry_lightcurve_plot_path,
 )
+from syndiff_pipeline.common.orchestration.deployment import (
+    deployment_path_for_config,
+    load_deployment_file,
+)
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    freeze_target_diff_config,
     load_diff_site_policy,
+    resolve_diff_config,
 )
 from tests.site_fixtures import write_site_deployment
 from syndiff_pipeline.common.orchestration.event_ws_symlinks import (
@@ -40,6 +44,30 @@ def _target_2020ut() -> Target:
         target_ra=210.219333,
         target_dec=81.846589,
         target_name="2020ut",
+    )
+
+
+def _resolve_standalone_diff_config(path: Path, target: Target):
+    """Resolve a target's diff config from a standalone v1 policy file.
+
+    ``additional_forced_targets``/``per_event_force_targets`` are inert on
+    the diff side in both schema forms, but only v1's standalone-file
+    parser (:func:`load_diff_site_policy`, explicitly retained -- see
+    site_config.py) still accepts those keys at all; v2's embedded ``diff:``
+    block rejects them outright. This directly composes the retained
+    primitives (the removed ``freeze_target_diff_config`` convenience
+    wrapper did exactly this).
+    """
+    policy = load_diff_site_policy(path)
+    cfg_path = Path(path).expanduser().resolve()
+    deploy_path = deployment_path_for_config(cfg_path, policy.deployment_file)
+    deployment = load_deployment_file(deploy_path)
+    return resolve_diff_config(
+        target,
+        policy,
+        deployment,
+        deployment_path=deploy_path,
+        site_config_dir=cfg_path.parent,
     )
 
 
@@ -268,7 +296,7 @@ class TestSitePolicyForcedTargets(unittest.TestCase):
                 ]
             )
         )
-        cfg = freeze_target_diff_config(path, _target_2020ut())
+        cfg = _resolve_standalone_diff_config(path, _target_2020ut())
         self.assertEqual(cfg.additional_forced_targets, [])
 
     def test_freeze_other_target_gets_global_only(self):
@@ -283,7 +311,7 @@ class TestSitePolicyForcedTargets(unittest.TestCase):
                 ]
             )
         )
-        cfg = freeze_target_diff_config(path, _target_other())
+        cfg = _resolve_standalone_diff_config(path, _target_other())
         self.assertEqual(cfg.additional_forced_targets, [])
 
 
