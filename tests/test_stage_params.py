@@ -11,9 +11,12 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     SHARED_MASK_ALLOWED,
+    parse_background_estimate,
     parse_background_temporal_smoothing,
+    parse_epsf,
     parse_forced_photometry,
     parse_hotpants,
+    parse_temporal_wcs,
     validate_stage_keys,
 )
 
@@ -241,6 +244,64 @@ class TestStageParams(unittest.TestCase):
                     "methods": [{"name": "ap3", "type": "aperture", "tar_ap": 3}],
                 },
                 0,
+            )
+
+
+class TestStageResourcesBlock(unittest.TestCase):
+    """The nested ``resources:`` spelling for execution-only knobs."""
+
+    def test_hotpants_nested_resources(self):
+        hp = parse_hotpants(
+            {"kind": "hotpants", "resources": {"n_jobs": 64, "os_n_jobs": 8}}, 0
+        )
+        self.assertEqual(hp.hotpants_n_jobs, 64)
+        self.assertEqual(hp.hotpants_os_n_jobs, 8)
+
+    def test_flat_spelling_still_accepted(self):
+        """Every already-frozen run config uses the flat keys; they must work."""
+        hp = parse_hotpants({"kind": "hotpants", "hotpants_n_jobs": 48}, 0)
+        self.assertEqual(hp.hotpants_n_jobs, 48)
+
+    def test_nested_null_means_derive_from_allocation(self):
+        ks = parse_background_estimate(
+            {"kind": "background_estimate", "resources": {"n_jobs": None}}, 0
+        )
+        self.assertIsNone(ks.background_estimate_n_jobs)
+
+    def test_background_estimate_nested_resources(self):
+        ks = parse_background_estimate(
+            {"kind": "background_estimate", "resources": {"n_jobs": 64}}, 0
+        )
+        self.assertEqual(ks.background_estimate_n_jobs, 64)
+
+    def test_epsf_nested_resources(self):
+        params = parse_epsf({"kind": "epsf", "resources": {"n_jobs": 12}}, 0)
+        self.assertEqual(params.epsf_n_jobs, 12)
+
+    def test_temporal_wcs_bool_resource_coerced(self):
+        params = parse_temporal_wcs(
+            {"kind": "temporal_wcs", "resources": {"enable_read_cache": False}}, 0
+        )
+        self.assertIs(params.enable_read_cache, False)
+
+    def test_unknown_resources_key_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_epsf({"kind": "epsf", "resources": {"bogus": 1}}, 0)
+        self.assertIn("bogus", str(ctx.exception))
+
+    def test_resources_must_be_a_mapping(self):
+        with self.assertRaises(ValueError) as ctx:
+            parse_hotpants({"kind": "hotpants", "resources": 5}, 0)
+        self.assertIn("must be a mapping", str(ctx.exception))
+
+    def test_resources_not_allowed_on_stage_without_resource_knobs(self):
+        """shared_mask has no parallelism; a resources block there is a typo."""
+        with self.assertRaises(ValueError):
+            validate_stage_keys(
+                {"kind": "shared_mask", "resources": {"n_jobs": 4}},
+                0,
+                "shared_mask",
+                SHARED_MASK_ALLOWED,
             )
 
 

@@ -32,6 +32,52 @@ _WORKSPACE_FINGERPRINT_EXEMPT_STAGE_KINDS = frozenset(
     {"epsf", "centroids", "per_ffi_wcs", "temporal_wcs"}
 )
 
+# ── Fingerprint schema versioning ────────────────────────────────────────────
+#
+# v1 (unversioned, bare 16-hex on disk): hashed every key of every stage dict,
+#     so a pure worker-count change invalidated the whole lane.
+# v2 (``v2:`` prefixed): execution-resource keys are stripped before hashing, so
+#     retuning parallelism no longer forces a new lane.
+#
+# Existing lanes carry v1 fingerprints. ``assert_workspace_config_lock`` accepts
+# a v1 fingerprint when it matches the v1 recomputation (i.e. the recipe is
+# provably unchanged) and rewrites it to v2 in place -- lanes self-heal on first
+# touch, so no lane is invalidated and no re-run is forced.
+FINGERPRINT_SCHEMA_VERSION = 2
+_V2_PREFIX = "v2:"
+
+# Keys describing HOW a stage runs, never WHAT it produces. Stripped from the v2
+# hash. ``resources`` is the modern nested spelling; the flat names are the
+# legacy spelling still present in every already-frozen run config, so both must
+# be stripped for a migrated and an unmigrated config to agree.
+_STAGE_RESOURCES_KEY = "resources"
+_LEGACY_RESOURCE_KEYS = frozenset(
+    {
+        "hotpants_n_jobs",
+        "hotpants_os_n_jobs",
+        "template_cache_max_groups",
+        "background_estimate_n_jobs",
+        "epsf_n_jobs",
+        "centroids_n_jobs",
+        "per_ffi_wcs_n_jobs",
+        "enable_read_cache",
+    }
+)
+# Nested under ``steps.{spatial,temporal,strap}`` of background_temporal_smoothing.
+_NESTED_RESOURCE_KEYS = frozenset({"n_jobs"})
+
+# DENYLIST -- these read like resource knobs but change output bytes or which
+# artifacts exist. They must NEVER be added above:
+#   convolved_templates.use_patch_cache  runs float64 where production runs
+#       float32; convolved_templates_patch_cache.py documents that the two "will
+#       not match to float32's own machine epsilon".
+#   hotpants.use_c_extension             swaps the C extension for the pure-Python
+#       implementation -- same math on paper, different numeric path.
+#   steps.temporal.tile_size             selects a different function entirely
+#       (savgol_smooth_3d vs savgol_smooth_3d_parallel) once n_jobs > 1.
+#   max_ffis, rebuild_*, write_*, materialize_fits
+#       change which frames are processed / which artifacts exist.
+
 
 def _pipeline_for_workspace_fingerprint(pipeline: list) -> list:
     """Return pipeline stages that participate in the workspace config lock."""
@@ -42,23 +88,64 @@ def _pipeline_for_workspace_fingerprint(pipeline: list) -> list:
     ]
 
 
+def _strip_stage_resources(stage: dict) -> dict:
+    """Drop execution-resource keys from one stage dict (v2 hashing)."""
+    if not isinstance(stage, dict):
+        return stage
+    out = {
+        k: v
+        for k, v in stage.items()
+        if k != _STAGE_RESOURCES_KEY and k not in _LEGACY_RESOURCE_KEYS
+    }
+    steps = out.get("steps")
+    if isinstance(steps, dict):
+        out["steps"] = {
+            name: (
+                {k: v for k, v in step.items() if k not in _NESTED_RESOURCE_KEYS}
+                if isinstance(step, dict)
+                else step
+            )
+            for name, step in steps.items()
+        }
+    return out
+
+
 class WorkspaceConfigMismatchError(RuntimeError):
     """Raised when a diff config does not match the frozen workspace snapshot."""
 
 
-def diff_config_fingerprint(cfg: SynDiffConfig) -> str:
-    """Stable hash for workspace config lock (matches orchestrator diff stage)."""
+def diff_config_fingerprint(cfg: SynDiffConfig, *, version: int = FINGERPRINT_SCHEMA_VERSION) -> str:
+    """Stable hash for workspace config lock (matches orchestrator diff stage).
+
+    ``version=1`` reproduces the pre-resource-split hash exactly, so an existing
+    lane's stored fingerprint can be validated before being migrated to v2.
+    """
+    pipeline = _pipeline_for_workspace_fingerprint(cfg.pipeline)
     parts = [
         "diff",
         str(cfg.sector),
         str(cfg.camera),
         str(cfg.ccd),
-        json.dumps(_pipeline_for_workspace_fingerprint(cfg.pipeline), sort_keys=True, default=str),
-        json.dumps(cfg.additional_forced_targets, sort_keys=True, default=str),
-        str(cfg.pipeline_plots),
-        str(getattr(cfg, "workspace_run_id", None) or ""),
     ]
+    if version == 1:
+        parts.append(json.dumps(pipeline, sort_keys=True, default=str))
+        parts.append(json.dumps(cfg.additional_forced_targets, sort_keys=True, default=str))
+        # pipeline_plots writes only diagnostic PNGs; it is a resource knob in v2.
+        parts.append(str(cfg.pipeline_plots))
+    else:
+        parts.append(
+            json.dumps(
+                [_strip_stage_resources(s) for s in pipeline], sort_keys=True, default=str
+            )
+        )
+        parts.append(json.dumps(cfg.additional_forced_targets, sort_keys=True, default=str))
+    parts.append(str(getattr(cfg, "workspace_run_id", None) or ""))
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def versioned_fingerprint(cfg: SynDiffConfig) -> str:
+    """The value written to disk today: a ``v2:``-prefixed fingerprint."""
+    return f"{_V2_PREFIX}{diff_config_fingerprint(cfg, version=2)}"
 
 
 def _fingerprint_path(ws_root: str | Path) -> Path:
@@ -104,30 +191,72 @@ def _read_stored_fingerprint(ws_root: str | Path) -> str | None:
     return text if text else None
 
 
+def _write_fingerprint_file(ws_root: str | Path, value: str) -> None:
+    """Atomically (re)write the fingerprint file, even though it is mode 444.
+
+    ``os.replace`` acts on the directory entry, so the target's read-only mode
+    does not block it.
+    """
+    fp_path = _fingerprint_path(ws_root)
+    tmp_fp = fp_path.with_name(f"{fp_path.name}.tmp.{os.getpid()}")
+    tmp_fp.write_text(value + "\n", encoding="utf-8")
+    os.replace(tmp_fp, fp_path)
+    try:
+        os.chmod(fp_path, _WORKSPACE_SNAPSHOT_MODE)
+    except OSError as exc:
+        log.warning("Could not chmod fingerprint read-only: %s", exc)
+
+
 def assert_workspace_config_lock(ws_root: str | Path, cfg: SynDiffConfig) -> None:
     """
     Require incoming *cfg* to match the frozen workspace snapshot when present.
 
-  First run (no snapshot): no-op. Re-run with matching fingerprint: no-op.
-  Mismatch: raise :class:`WorkspaceConfigMismatchError`.
+    First run (no snapshot): no-op. Re-run with matching fingerprint: no-op.
+    Mismatch: raise :class:`WorkspaceConfigMismatchError`.
+
+    A legacy (unversioned) v1 fingerprint is accepted when it matches the v1
+    recomputation -- that proves the recipe is unchanged and only the hashing
+    rules moved -- and is rewritten to v2 in place, so the lane self-heals on
+    first touch and subsequent resource retunes no longer trip the lock.
     """
     snap = _snapshot_path(ws_root)
     if not snap.is_file():
         return
 
-    incoming = diff_config_fingerprint(cfg)
     stored = _read_stored_fingerprint(ws_root)
     if stored is None:
         raise WorkspaceConfigMismatchError(
             f"Workspace {ws_root} has {DIFF_CONFIG_SNAPSHOT_BASENAME} but missing "
             f"{DIFF_CONFIG_FINGERPRINT_BASENAME}; cannot verify config compatibility."
         )
-    if stored != incoming:
-        raise WorkspaceConfigMismatchError(
-            f"Workspace {ws_root} was created with a different diff config "
-            f"(stored fingerprint {stored!r}, incoming {incoming!r}). "
-            f"Use a new output_store_name to start a new lane."
+
+    incoming_v2 = diff_config_fingerprint(cfg, version=2)
+    if stored.startswith(_V2_PREFIX):
+        if stored[len(_V2_PREFIX) :] != incoming_v2:
+            raise WorkspaceConfigMismatchError(
+                f"Workspace {ws_root} was created with a different diff config "
+                f"(stored fingerprint {stored!r}, incoming {_V2_PREFIX + incoming_v2!r}). "
+                f"Use a new output_store_name to start a new lane."
+            )
+        return
+
+    # Legacy unversioned (v1) fingerprint.
+    if stored == diff_config_fingerprint(cfg, version=1):
+        _write_fingerprint_file(ws_root, _V2_PREFIX + incoming_v2)
+        log.info(
+            "Migrated workspace fingerprint %s from v1 %s to v2 %s "
+            "(recipe unchanged; execution-resource keys no longer hashed)",
+            _fingerprint_path(ws_root),
+            stored,
+            incoming_v2,
         )
+        return
+
+    raise WorkspaceConfigMismatchError(
+        f"Workspace {ws_root} was created with a different diff config "
+        f"(stored v1 fingerprint {stored!r} does not match this config). "
+        f"Use a new output_store_name to start a new lane."
+    )
 
 
 def write_immutable_workspace_config_snapshot(
@@ -144,11 +273,19 @@ def write_immutable_workspace_config_snapshot(
     ws_root = Path(ctx.cfg.output_dir)
     snap = _snapshot_path(ws_root)
     fp_path = _fingerprint_path(ws_root)
-    incoming = diff_config_fingerprint(cfg)
+    incoming_v2 = diff_config_fingerprint(cfg, version=2)
+    incoming = _V2_PREFIX + incoming_v2
 
     if snap.is_file():
         stored = _read_stored_fingerprint(ws_root)
-        if stored == incoming:
+        # A legacy v1 fingerprint that still matches its v1 recomputation has
+        # already been migrated to v2 by assert_workspace_config_lock, which
+        # always runs first; accept either spelling so this stays a no-op.
+        if stored == incoming or (
+            stored is not None
+            and not stored.startswith(_V2_PREFIX)
+            and stored == diff_config_fingerprint(cfg, version=1)
+        ):
             log.info(
                 "Workspace config snapshot unchanged (%s); skipping rewrite",
                 snap,
@@ -180,5 +317,6 @@ def write_immutable_workspace_config_snapshot(
         os.chmod(fp_path, _WORKSPACE_SNAPSHOT_MODE)
     except OSError as exc:
         log.warning("Could not chmod workspace snapshot read-only: %s", exc)
+
 
     log.info("Wrote immutable workspace diff config snapshot %s", snap)
