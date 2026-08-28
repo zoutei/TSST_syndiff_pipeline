@@ -99,9 +99,71 @@ the pipeline enforces that in three different ways:
 
 | Tier | Keys | What happens if you edit it mid-run |
 |---|---|---|
-| **Safe anytime** | `diff.condor.*`, `scheduler.*`, `resources.*`, `notifications.*` | Takes effect on the next tick / next Condor submit. None of these participate in the workspace config lock fingerprint. |
-| **Stops you rather than diverging** | `diff.pipeline`, `pipeline_plots`, `workspace_run_id` | `workspace_lock.diff_config_fingerprint()` hashes these (plus `sector`/`camera`/`ccd`); `assert_workspace_config_lock()` compares the incoming fingerprint against the one frozen in `{lane}/diff_config.fingerprint` and raises `WorkspaceConfigMismatchError` on mismatch rather than silently building against a different recipe. `epsf`, `centroids`, `per_ffi_wcs`, and `temporal_wcs` stage kinds are exempt from the pipeline hash specifically so you can append them without bumping `workspace_run_id`. |
-| **Silent, no guard** | `diff.defaults.*` (besides `pipeline_plots`/`workspace_run_id`), `diff.paths.*`, `diff.overrides.*`, `diff.mask_settings`, and the four lock-exempt stage kinds above | Not fingerprinted at all. An edit here changes behavior on the next run of that stage with no mismatch error — it is on you to know whether the change is safe for artifacts already on disk. |
+| **Safe anytime** | `diff.condor.*`, **every execution-resource knob** (see below), `scheduler.*`, `resources.*`, `notifications.*` | Takes effect on the next tick / next Condor submit. None of these participate in the workspace config lock fingerprint. |
+| **Stops you rather than diverging** | `diff.pipeline`'s *recipe* keys, `workspace_run_id` | `workspace_lock.diff_config_fingerprint()` hashes these (plus `sector`/`camera`/`ccd`); `assert_workspace_config_lock()` compares the incoming fingerprint against the one frozen in `{lane}/diff_config.fingerprint` and raises `WorkspaceConfigMismatchError` on mismatch rather than silently building against a different recipe. `epsf`, `centroids`, `per_ffi_wcs`, and `temporal_wcs` stage kinds are exempt from the pipeline hash specifically so you can append them without bumping `workspace_run_id`. |
+| **Silent, no guard** | `diff.defaults.*` (besides `workspace_run_id`), `diff.paths.*`, `diff.overrides.*`, `diff.mask_settings`, and the four lock-exempt stage kinds above | Not fingerprinted at all. An edit here changes behavior on the next run of that stage with no mismatch error — it is on you to know whether the change is safe for artifacts already on disk. |
+
+### Execution resources vs. recipe params
+
+Every key on a `diff.pipeline` stage is either a **recipe** param (it can change
+output bytes — fingerprinted, immutable for the life of the lane) or an
+**execution resource** (it only changes wall-time/memory/placement — hashed
+nowhere, editable at any time). Resources may be written either as a nested
+`resources:` block (preferred) or under their original flat key; both spellings
+are equivalent and both are stripped from the fingerprint.
+
+```yaml
+- kind: background_estimate
+  inputs: {convolved: tmpl_conv}
+  output: {diffs: ks_d, phot_bkg: ks_b}
+  resources: {n_jobs: null}        # null => derive from the Condor request_cpus
+- kind: hotpants
+  resources: {n_jobs: null, os_n_jobs: 8, template_cache_max_groups: 2}
+  hp_ko: 2                         # recipe params stay at the top level
+```
+
+| Stage | Resource keys (nested name → legacy flat name) |
+|---|---|
+| `hotpants` | `n_jobs`→`hotpants_n_jobs`, `os_n_jobs`→`hotpants_os_n_jobs`, `template_cache_max_groups` |
+| `background_estimate` | `n_jobs`→`background_estimate_n_jobs` |
+| `epsf` / `centroids` / `per_ffi_wcs` | `n_jobs`→`{kind}_n_jobs` |
+| `temporal_wcs` | `n_jobs`, `enable_read_cache` |
+| `background_temporal_smoothing` | `steps.spatial.n_jobs` |
+
+`pipeline_plots` is also a resource now (it writes only diagnostic PNGs), so
+plotting can be toggled on a lane that is already built.
+
+**Leaving `n_jobs` unset is the recommended default.** `resolve_effective_n_jobs`
+then derives the worker count from `SYNDIFF_REQUEST_CPUS`, which Condor sets
+from that stage's `request_cpus` — so the pool automatically matches the
+allocation. An explicit value can still *shrink* the pool but can no longer
+exceed the allocation. Hardcoding a number is how a 64-CPU
+`background_estimate` job ended up running 48 workers and idling a quarter of
+what it was paying for.
+
+**Knobs that read like resources but are not** — these stay in the recipe, and
+the reasons are recorded in the denylist comment in `stage_params.py`:
+`convolved_templates.use_patch_cache` (runs float64 where production runs
+float32; its own module documents that the two will not match to float32's
+machine epsilon), `hotpants.use_c_extension` (swaps the C extension for the
+pure-Python implementation), `steps.temporal.tile_size` (selects a different
+function once `n_jobs > 1`), and anything that changes which frames run or which
+artifacts exist (`max_ffis`, `rebuild_*`, `write_*`, `materialize_fits`).
+
+### Fingerprint schema versions and lane self-healing
+
+`{lane}/diff_config.fingerprint` is written `v2:`-prefixed. Lanes built before
+resources left the hash carry a bare (v1) fingerprint; on the next run of such a
+lane, `assert_workspace_config_lock()` recomputes the v1 hash, and if it matches
+— proving the recipe is unchanged and only the hashing rules moved — rewrites
+the file to `v2:` and continues. **Lanes migrate themselves on first touch; no
+lane is invalidated and no re-run is forced.** Stage manifests are handled the
+same way, so completed work is not re-executed.
+
+One ordering consequence: deploy first and let a lane self-migrate on its next
+touch, *then* change resource values. Changing both at once means the v1
+recomputation no longer matches and the lane cannot prove its recipe is
+unchanged.
 
 Freezing buys isolation between the authored file and a running run — editing
 the site `pipeline.yaml` mid-run cannot affect it. It does **not** buy
@@ -109,6 +171,41 @@ immutability *within* a run, and cannot, because the frozen file is
 deliberately editable: **to retune a live run (most commonly, to bump a
 Condor `request_memory` after an OOM), edit `runs/{run_id}/config.yaml`
 directly.** That is the intended workflow, not a workaround.
+
+### Recipe: retuning a live run's resources
+
+```bash
+# 1. Edit the FROZEN copy. Editing the authored config/pipeline.yaml is inert:
+#    it is never read again after submit.
+vi {workspace_root}/runs/{run_id}/config.yaml
+#      diff.condor.{diff_prep,background_estimate,diff}.request_cpus / request_memory
+#      diff.pipeline[].resources.n_jobs        (or the legacy flat *_n_jobs key)
+
+# 2. Nothing else to do. No daemon restart, no resubmit: the supervisor
+#    re-reads the file every tick (~30 s) and every Condor job re-reads it at
+#    process start. The change applies to jobs launched after the next tick.
+
+# 3. Confirm what was actually submitted.
+syndiff logs | grep 'Submitted Condor cluster'      # ... cpus=64 mem=200000MB
+
+# 4. Jobs ALREADY QUEUED keep the values they were submitted with. To apply the
+#    new resources to one of those, re-launch it:
+syndiff retry --run-id {run_id} --deployment config/deployment.yaml \
+              --scc 25/2/2 --stage background_estimate
+```
+
+Two things that used to bite and no longer do:
+
+- Editing a `*_n_jobs` value no longer raises `WorkspaceConfigMismatchError`.
+  It used to force a whole new lane (redoing `shared_mask`, `kernel_fit` and
+  `convolved_templates`) to change a worker count.
+- Bumping Condor resources cannot invalidate completed work — `diff.condor.*`
+  has never been part of any fingerprint, and resources now aren't either.
+
+What still stops you, correctly: changing a *recipe* param (`hp_ko`,
+`stamp_mode`, `use_patch_cache`, mask geometry, …) on a lane that already has
+artifacts. That is the guard doing its job; use a new `output_store_name` to
+start a separate lane.
 
 ## Provenance
 
