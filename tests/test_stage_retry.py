@@ -13,6 +13,7 @@ if str(_ROOT) not in sys.path:
 from syndiff_pipeline.common.orchestration.state import (
     PipelineState,
     SKIP_REASON_ARTIFACTS,
+    SKIP_REASON_LINEAR_GEOMETRY,
     STATUS_BLOCKED,
     STATUS_CANCELED,
     STATUS_EXTERNAL,
@@ -255,6 +256,41 @@ class TestStageRetry(unittest.TestCase):
             down = state.get_stage_run("run_a", label, "downsample")
             self.assertEqual(ps1_dl.status, STATUS_EXTERNAL)
             self.assertEqual(down.status, STATUS_EXTERNAL)
+
+    def test_upstream_retry_preserves_linear_geometry_remap_skip(self):
+        """A downstream-reset sweep from an unrelated upstream failure must
+        not un-skip `remap` under geometry_mode=linear (mirrors the
+        SKIP_REASON_STREAM carve-out for ps1_download)."""
+        target = self._target()
+        with tempfile.TemporaryDirectory() as tmp:
+            state = PipelineState(str(Path(tmp) / "state.sqlite"))
+            stages = [
+                "tess_ffi_download",
+                "mapping",
+                "ps1_process",
+                "remap",
+                "downsample",
+            ]
+            state.create_run("run_a", "/cfg.yaml", "/targets.csv", tmp, [target], stages)
+            label = target.label()
+            state.mark_skipped("run_a", label, "remap")
+            state.cache_skip_reason(
+                "run_a", label, "remap", SKIP_REASON_LINEAR_GEOMETRY
+            )
+            state.update_stage_status(
+                "run_a", label, "tess_ffi_download", STATUS_FAILED, exit_code=1
+            )
+
+            state.reopen_failed_canceled("run_a")
+
+            remap = state.get_stage_run("run_a", label, "remap")
+            self.assertEqual(remap.status, STATUS_SKIPPED)
+            self.assertEqual(
+                state.get_skip_reason("run_a", label, "remap"),
+                SKIP_REASON_LINEAR_GEOMETRY,
+            )
+            mapping = state.get_stage_run("run_a", label, "mapping")
+            self.assertEqual(mapping.status, STATUS_PENDING)
 
     def test_repair_orphaned_pending_upstream(self):
         target = self._target()
