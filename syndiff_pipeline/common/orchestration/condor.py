@@ -60,6 +60,10 @@ class CondorResourceRequest:
     host_stats_max_load15: float = 10.0
     requirements: str | None = None
     rank: str | None = None
+    # CSV-row-order derived (PipelineState.create_run); not user-configurable
+    # via the YAML condor: block -- deliberately excluded from
+    # CONDOR_POLICY_ALLOWED/LEGACY_CONDOR_POLICY_KEYS below.
+    priority: int = 0
 
 
 CONDOR_POLICY_ALLOWED = frozenset(
@@ -719,6 +723,9 @@ def write_submit_file(
         lines.append(f"requirements = {resources.requirements}")
     if resources.rank:
         lines.append(f"rank = {resources.rank}")
+    # Always emitted, even at the default 0 -- matches Condor's own submit-file
+    # default, so this line is a no-op unless CSV-row-order priority set it.
+    lines.append(f"priority = {resources.priority}")
     lines.extend(
         [
             f"output = {artifacts['stdout']}",
@@ -777,7 +784,8 @@ def submit_job(
     _submission_times[cluster_id] = submit_epoch
     _record_cluster_submission(artifacts, cluster_id)
     log.info(
-        "Submitted Condor cluster %s for %s / %s (cpus=%s mem=%sMB disk=%sKB req=%r rank=%r)",
+        "Submitted Condor cluster %s for %s / %s "
+        "(cpus=%s mem=%sMB disk=%sKB req=%r rank=%r priority=%s)",
         cluster_id,
         target_label,
         stage,
@@ -786,6 +794,7 @@ def submit_job(
         resources.request_disk_kb,
         resources.requirements,
         resources.rank,
+        resources.priority,
     )
     return cluster_id, submit_epoch
 

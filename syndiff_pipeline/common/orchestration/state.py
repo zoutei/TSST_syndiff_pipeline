@@ -119,6 +119,7 @@ class StageRunRow:
     attempts: int | None = None
     not_before: str | None = None
     force_launch: int | None = None
+    priority: int | None = None
 
 
 _STAGE_RUN_FIELDS = frozenset(f.name for f in fields(StageRunRow))
@@ -564,6 +565,7 @@ class PipelineState:
             self._ensure_column(conn, "stage_runs", "attempts", "INTEGER")
             self._ensure_column(conn, "stage_runs", "not_before", "TEXT")
             self._ensure_column(conn, "stage_runs", "force_launch", "INTEGER DEFAULT 0")
+            self._ensure_column(conn, "stage_runs", "priority", "INTEGER DEFAULT 0")
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
@@ -786,7 +788,13 @@ class PipelineState:
 
     def fetch_ready_batch(self, run_id: str, pool: str, limit: int) -> List[StageRunRow]:
         """Fetch ready batch.
-        
+
+        Ordered ``priority DESC`` first: this is the gate that decides which
+        ready rows are admitted to Condor's queue at all when ``limit`` (the
+        pool's remaining global capacity) is smaller than the ready set --
+        CSV-row-order priority only changes anything downstream (via
+        ``JobPrio``) for rows that make it past this cut.
+
         Parameters
         ----------
         run_id : str
@@ -807,7 +815,7 @@ class PipelineState:
                 SELECT * FROM stage_runs
                 WHERE run_id = ? AND status = ? AND stage IN ({placeholders})
                 AND (not_before IS NULL OR not_before <= ?)
-                ORDER BY target_label, stage
+                ORDER BY priority DESC, target_label, stage
                 LIMIT ?
                 """,
                 (run_id, STATUS_READY, *stages_in_pool, now, limit),
@@ -827,7 +835,7 @@ class PipelineState:
                 SELECT * FROM stage_runs
                 WHERE run_id = ? AND status = ? AND stage IN ({placeholders})
                 AND (not_before IS NULL OR not_before <= ?)
-                ORDER BY target_label, stage
+                ORDER BY priority DESC, target_label, stage
                 """,
                 (run_id, STATUS_READY, *unpooled, now),
             ).fetchall()
@@ -870,7 +878,7 @@ class PipelineState:
                 SELECT * FROM stage_runs
                 WHERE run_id = ? AND status = ? AND force_launch = 1
                 AND (not_before IS NULL OR not_before <= ?)
-                ORDER BY target_label, stage
+                ORDER BY priority DESC, target_label, stage
                 """,
                 (run_id, STATUS_READY, now),
             ).fetchall()
@@ -1125,19 +1133,30 @@ class PipelineState:
                     int(bool(force_rerun)),
                 ),
             )
-            for t in targets:
+            target_list = list(targets)
+            for index, t in enumerate(target_list):
                 conn.execute(
                     "INSERT OR IGNORE INTO targets "
                     "(run_id, target_label, sector, camera, ccd, target_name, enabled) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (run_id, t.label(), t.sector, t.camera, t.ccd, t.target_name, int(t.enabled)),
                 )
+                # First CSV row -> 0 (Condor's own default, same as every
+                # pre-existing/legacy row), each later row one lower ->
+                # strictly less preferred among this user's own idle Condor
+                # jobs (JobPrio: higher wins). Deliberately NOT
+                # len(target_list) - index: that would make every row of a
+                # freshly submitted run outrank every row of an already
+                # in-flight run (whose rows are all still priority 0),
+                # silently starving work nobody meant to touch.
+                priority = -index
                 for stage in self.pipeline_spec.stage_names:
                     status = STATUS_PENDING if stage in selected else STATUS_EXTERNAL
                     conn.execute(
-                        "INSERT OR IGNORE INTO stage_runs (run_id, target_label, stage, status) "
-                        "VALUES (?, ?, ?, ?)",
-                        (run_id, t.label(), stage, status),
+                        "INSERT OR IGNORE INTO stage_runs "
+                        "(run_id, target_label, stage, status, priority) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (run_id, t.label(), stage, status, priority),
                     )
 
     def _distinct_target_labels(self, run_id: str) -> List[str]:
@@ -1177,6 +1196,13 @@ class PipelineState:
         count = 0
         with self._conn() as conn:
             for label in labels:
+                priority_row = conn.execute(
+                    "SELECT priority FROM stage_runs "
+                    "WHERE run_id = ? AND target_label = ? AND priority IS NOT NULL "
+                    "LIMIT 1",
+                    (run_id, label),
+                ).fetchone()
+                priority = priority_row["priority"] if priority_row else 0
                 for stage in self.pipeline_spec.stage_names:
                     exists = conn.execute(
                         "SELECT 1 FROM stage_runs "
@@ -1187,9 +1213,9 @@ class PipelineState:
                         continue
                     status = STATUS_PENDING if stage in active else STATUS_EXTERNAL
                     conn.execute(
-                        "INSERT INTO stage_runs (run_id, target_label, stage, status) "
-                        "VALUES (?, ?, ?, ?)",
-                        (run_id, label, stage, status),
+                        "INSERT INTO stage_runs (run_id, target_label, stage, status, priority) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (run_id, label, stage, status, priority),
                     )
                     count += 1
         return count
