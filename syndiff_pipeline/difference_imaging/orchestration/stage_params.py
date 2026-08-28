@@ -50,6 +50,76 @@ def _merge_dataclass(cls: Type[T], stage: dict) -> T:
     return cls(**{**base.__dict__, **kw})  # type: ignore[arg-type]
 
 
+# ── Execution resources ──────────────────────────────────────────────────────
+#
+# Resource params affect only wall-time/memory/placement, never output bytes,
+# so they are stripped from the workspace-lock fingerprint (see
+# workspace_lock._strip_stage_resources) and can be retuned on a live run.
+#
+# They may be written either as a nested ``resources:`` sub-mapping (preferred)
+# or under their original flat key. Both spellings populate the same dataclass
+# field, and both are stripped from the fingerprint, so a migrated and an
+# unmigrated config are equivalent. The flat spelling is retained -- not merely
+# deprecated -- because every already-frozen ``runs/{run_id}/config.yaml`` uses
+# it and those files are re-read on every scheduler tick.
+#
+# DENYLIST -- do NOT add these; they read like resource knobs but are not:
+#   convolved_templates.use_patch_cache  float64 vs production float32 (its own
+#       module documents that the two will not match to float32 epsilon)
+#   hotpants.use_c_extension             swaps C for pure-Python numerics
+#   steps.temporal.tile_size             selects a different function at n_jobs>1
+#   max_ffis / rebuild_* / write_* / materialize_fits
+#       change which frames run or which artifacts exist
+STAGE_RESOURCES_KEY = "resources"
+
+_STAGE_RESOURCE_FIELD_MAP: dict[str, dict[str, str]] = {
+    "hotpants": {
+        "n_jobs": "hotpants_n_jobs",
+        "os_n_jobs": "hotpants_os_n_jobs",
+        "template_cache_max_groups": "template_cache_max_groups",
+    },
+    "background_estimate": {"n_jobs": "background_estimate_n_jobs"},
+    "epsf": {"n_jobs": "epsf_n_jobs"},
+    "centroids": {"n_jobs": "centroids_n_jobs"},
+    "per_ffi_wcs": {"n_jobs": "per_ffi_wcs_n_jobs"},
+    "temporal_wcs": {"n_jobs": "n_jobs", "enable_read_cache": "enable_read_cache"},
+}
+
+_BOOL_RESOURCE_FIELDS = frozenset({"enable_read_cache"})
+
+
+def apply_stage_resources(stage: dict, params: T, pipeline_idx: int, kind: str) -> T:
+    """Populate resource fields on *params* from a nested ``resources:`` block.
+
+    A ``None`` value means "derive from the Condor allocation" and is preserved
+    as-is so ``resolve_effective_n_jobs`` can fall back to SYNDIFF_REQUEST_CPUS.
+    """
+    res = stage.get(STAGE_RESOURCES_KEY)
+    if res is None:
+        return params
+    if not isinstance(res, dict):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] ({kind}): {STAGE_RESOURCES_KEY} must be a "
+            f"mapping, got {type(res).__name__}"
+        )
+    field_map = _STAGE_RESOURCE_FIELD_MAP.get(kind, {})
+    unknown = set(res) - set(field_map)
+    if unknown:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] ({kind}): unknown {STAGE_RESOURCES_KEY} keys "
+            f"{sorted(unknown)!r}; allowed: {sorted(field_map)!r}"
+        )
+    for key, value in res.items():
+        attr = field_map[key]
+        if value is None:
+            setattr(params, attr, None)
+        elif key in _BOOL_RESOURCE_FIELDS:
+            setattr(params, attr, bool(value))
+        else:
+            setattr(params, attr, int(value))
+    return params
+
+
 def validate_stage_keys(
     stage: dict,
     pipeline_idx: int,
@@ -64,6 +134,11 @@ def validate_stage_keys(
     pipeline_idx : int
     kind : str
     allowed : FrozenSet[str]"""
+    # Any stage with execution-resource knobs also accepts the nested
+    # ``resources:`` spelling; its inner keys are validated separately by
+    # apply_stage_resources.
+    if kind in _STAGE_RESOURCE_FIELD_MAP:
+        allowed = allowed | {STAGE_RESOURCES_KEY}
     unknown = set(stage.keys()) - allowed
     if unknown:
         raise ValueError(
@@ -966,6 +1041,7 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
                 f"[lo, hi], got {cap!r}"
             )
         hp.region_weight_cap = (float(cap[0]), float(cap[1]))
+    hp = apply_stage_resources(stage, hp, pipeline_idx, "hotpants")
     return hp
 
 
@@ -1002,6 +1078,7 @@ def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
             raise ValueError("epsf: epsf_anchor_edge_boost must be positive")
         if int(params.epsf_anchor_window_max_expand) < 1:
             raise ValueError("epsf: epsf_anchor_window_max_expand must be positive")
+    params = apply_stage_resources(stage, params, pipeline_idx, "epsf")
     return params
 
 
@@ -1019,6 +1096,7 @@ def parse_centroids(stage: dict, pipeline_idx: int) -> CentroidsParams:
     if "centroids_n_jobs" in stage:
         v = stage["centroids_n_jobs"]
         params.centroids_n_jobs = None if v is None else int(v)
+    params = apply_stage_resources(stage, params, pipeline_idx, "centroids")
     return params
 
 
@@ -1029,6 +1107,7 @@ def parse_per_ffi_wcs(stage: dict, pipeline_idx: int) -> PerFfiWcsParams:
     if "per_ffi_wcs_n_jobs" in stage:
         v = stage["per_ffi_wcs_n_jobs"]
         params.per_ffi_wcs_n_jobs = None if v is None else int(v)
+    params = apply_stage_resources(stage, params, pipeline_idx, "per_ffi_wcs")
     return params
 
 
@@ -1061,6 +1140,7 @@ def parse_temporal_wcs(stage: dict, pipeline_idx: int) -> TemporalWcsParams:
         raise ValueError("temporal_wcs: min_stars must be positive")
     if "n_jobs" in stage:
         params.n_jobs = None if stage["n_jobs"] is None else int(stage["n_jobs"])
+    params = apply_stage_resources(stage, params, pipeline_idx, "temporal_wcs")
     return params
 
 
@@ -1314,6 +1394,7 @@ def parse_background_estimate(stage: dict, pipeline_idx: int) -> BackgroundEstim
     if "background_estimate_n_jobs" in stage:
         v = stage["background_estimate_n_jobs"]
         ks.background_estimate_n_jobs = None if v is None else int(v)
+    ks = apply_stage_resources(stage, ks, pipeline_idx, "background_estimate")
     return ks
 
 

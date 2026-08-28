@@ -185,6 +185,38 @@ class TestVerifyDiffCli(unittest.TestCase):
             result.message,
         )
 
+    def test_legacy_v1_manifest_fingerprint_still_valid(self):
+        """Deploying the params/resources split must not re-run completed work.
+
+        Manifests written before the split stored a v1 fingerprint (which hashed
+        ``*_n_jobs``/``pipeline_plots``). They must still validate, or every
+        completed diff stage across the existing runs would be re-executed just
+        because the hashing rules changed.
+        """
+        artifact = self.event_dir / "ws" / "hp_d" / "frame.fits"
+        artifact.parent.mkdir(parents=True, exist_ok=True)
+        artifact.write_bytes(b"SIMPLE  = T")
+        legacy_fp = config_fingerprint(
+            self.resolved, "diff", runner_cfg=self.runner, version=1
+        )
+        current_fp = config_fingerprint(self.resolved, "diff", runner_cfg=self.runner)
+        # Guard against a vacuous test: the two schemas must really differ,
+        # otherwise this would pass without exercising the compatibility path.
+        self.assertNotEqual(legacy_fp, current_fp)
+        legacy_manifest = {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "stage": "diff",
+            "config_fingerprint": legacy_fp,
+            "expected_count": 1,
+            "produced_count": 1,
+            "artifacts": [str(artifact)],
+        }
+        self.assertTrue(
+            manifest_valid(
+                legacy_manifest, self.resolved, "diff", runner_cfg=self.runner
+            )
+        )
+
     def test_stage_complete_diff_stale_fingerprint(self):
         artifact = self.event_dir / "ws" / "hp_d" / "frame.fits"
         manifest_path = logs.stage_manifest_path(

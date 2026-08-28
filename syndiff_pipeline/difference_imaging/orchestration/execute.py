@@ -1407,7 +1407,17 @@ def run_config_pipeline(
             bkg_dir = _diff_stage_dir(cfg, ctx, bkg_l) if bkg_l else None
             if not processing_ffi_paths:
                 processing_ffi_paths = _ffi_paths_for_processing(cfg, wcs_table)
-            n_jobs = ks_params.background_estimate_n_jobs or cfg.n_jobs
+            # Route through resolve_effective_n_jobs like every other stage.
+            # Reading the stage value directly bypassed the Condor allocation
+            # cap (SYNDIFF_REQUEST_CPUS) entirely, so a configured value larger
+            # than request_cpus oversubscribed the slot. An explicit value may
+            # still shrink the pool; it can no longer exceed the allocation.
+            # Leaving it unset now derives the pool from request_cpus, which is
+            # the way to avoid the inverse problem of under-using the slot.
+            n_jobs = resolve_effective_n_jobs(
+                int(cfg.n_jobs or 1),
+                stage_n_jobs=ks_params.background_estimate_n_jobs,
+            )
             results = kernel_subtract_runner.kernel_subtract_loop(
                 ffi_paths=processing_ffi_paths,
                 output_dir=out,
