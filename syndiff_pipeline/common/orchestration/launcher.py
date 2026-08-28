@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, List, Optional, Protocol
 
 from syndiff_pipeline.common.orchestration import condor
@@ -83,12 +83,16 @@ def launch_stage(
     target_label: str,
     launch_token: str,
     resources_override: Optional["condor.CondorResourceRequest"] = None,
+    priority: int = 0,
 ) -> LaunchDescriptor:
     """Launch a stage locally or on Condor; return durable descriptor.
 
     ``resources_override``, when given, replaces the stage's usual static
     ``condor_resources(cfg)`` profile entirely (e.g. a per-target
-    preflight-sized small job for ``ps1_process``).
+    preflight-sized small job for ``ps1_process``). ``priority`` (CSV-row-order
+    derived; see ``PipelineState.create_run``) is applied as a final override
+    on whichever resource profile was selected, so it covers both the static
+    per-stage profile and any per-target override uniformly.
     """
     if cfg.stage_executor(stage) == "condor":
         if resources_override is not None:
@@ -100,6 +104,7 @@ def launch_stage(
             resources = stage_spec.condor_resources(cfg)
         if resources is None:
             raise ValueError(f"No Condor resource profile for stage {stage!r}")
+        resources = replace(resources, priority=priority)
         cluster_id, submit_epoch = condor.submit_job(
             cmd,
             runs_root,
