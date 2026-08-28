@@ -20,6 +20,7 @@ from syndiff_pipeline.difference_imaging.support.plot import (
     gridded_epsf_frame_plot_path,
     select_evenly_spaced_stems,
     spatial_tile_subplot_grid,
+    write_gridded_epsf_native_anchor_difference_plots,
     write_gridded_epsf_frame_plot,
     write_gridded_epsf_workspace_plots,
 )
@@ -95,6 +96,28 @@ class TestGriddedEpsfPlots(unittest.TestCase):
             )
             expected_png = gridded_epsf_frame_plot_path(plot_dir, "epsf_r1", "anchor_1")
             self.assertIn(expected_png, written)
+
+    def test_native_anchor_difference_plots_use_both_orbits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = os.path.join(tmp, "epsf_r1")
+            os.makedirs(ws, exist_ok=True)
+            grid_xypos = [(128.0, 128.0)]
+            index = {}
+            stems = [f"tess{i}" for i in range(6)]
+            for i, stem in enumerate(stems):
+                cube = np.full((1, 9, 9), 1.0 + 0.05 * i)
+                path = gridded_epsf.gridded_epsf_npz_path(ws, stem)
+                gridded_epsf.save_gridded_epsf_npz(path, cube, grid_xypos, 2)
+                index[stem] = path
+            gridded_epsf.save_gridded_epsf_index(ws, index)
+            gridded_epsf.save_gridded_epsf_anchor_stems(ws, stems)
+            # A gap >0.75 d splits the two native-anchor orbit groups.
+            wcs = pd.DataFrame({"product_id": stems, "btjd": [1, 2, 3, 10, 11, 12]})
+            out = write_gridded_epsf_native_anchor_difference_plots(
+                ws, os.path.join(tmp, "debug_plots", "epsf_r1"), wcs_table=wcs,
+            )
+            self.assertEqual(len(out), 4)
+            self.assertTrue(all(os.path.isfile(path) for path in out))
 
     def test_anchor_stems_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

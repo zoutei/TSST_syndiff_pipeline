@@ -1525,6 +1525,7 @@ def run_config_pipeline(
             if getattr(cfg, "pipeline_plots", False):
                 try:
                     from syndiff_pipeline.difference_imaging.support.plot import (
+                        write_gridded_epsf_native_anchor_difference_plots,
                         write_gridded_epsf_workspace_plots,
                     )
 
@@ -1537,6 +1538,14 @@ def run_config_pipeline(
                         dpi=dpi,
                         max_frames=10,
                         wcs_table=wcs_table,
+                    )
+                    write_gridded_epsf_native_anchor_difference_plots(
+                        ws_out,
+                        plot_dir,
+                        epsf_label=label_out,
+                        dpi=dpi,
+                        wcs_table=wcs_table,
+                        ffi_list_df=ffi_list_df,
                     )
                 except Exception:
                     log.warning(

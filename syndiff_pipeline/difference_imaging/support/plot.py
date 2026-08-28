@@ -409,6 +409,212 @@ def write_gridded_epsf_workspace_plots(
     return written
 
 
+def _native_epsf_anchor_orbits(
+    index: dict[str, str],
+    anchor_stems: set[str],
+    wcs_table: "pd.DataFrame | None",
+    ffi_list_df: "pd.DataFrame | None" = None,
+) -> list[list[str]]:
+    """Return directly-fit ePSF anchors split into temporal orbit groups.
+
+    The anchor sidecar deliberately records only native (rather than blended)
+    models.  A TESS downlink/orbit break is much larger than the normal FFI
+    cadence, so the time gaps between those anchors provide a robust fallback
+    for diagnostics without requiring the fitting process to still be alive.
+    """
+    from syndiff_pipeline.difference_imaging.stages.epsf import (
+        btjd_by_stem_from_manifest,
+    )
+
+    stems = [s for s in anchor_stems if s in index and os.path.isfile(index[s])]
+    if len(stems) < 3:
+        return []
+    btjd_by_stem = btjd_by_stem_from_manifest(wcs_table)
+    date_by_product_id: dict[str, str] = {}
+    if ffi_list_df is not None and "filename" in ffi_list_df.columns:
+        # Linear-lane manifests do not carry BTJD.  Reconstruct it from the
+        # cached FFI DATE-OBS values, mirroring the orbit fitter's own
+        # fallback, so a later plot-only diagnosis selects the same epochs.
+        try:
+            from astropy.time import Time
+            from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+                tess_product_id_from_ffi_path,
+            )
+
+            date_col = next((c for c in ("date_obs", "DATE-OBS") if c in ffi_list_df.columns), None)
+            if date_col is not None:
+                for filename, date_obs in zip(ffi_list_df["filename"], ffi_list_df[date_col]):
+                    pid = tess_product_id_from_ffi_path(str(filename))
+                    if pid and date_obs is not None and pid not in btjd_by_stem:
+                        btjd_by_stem[pid] = float(
+                            Time(str(date_obs), format="isot", scale="utc").jd - 2457000.0
+                        )
+                    if pid and date_obs is not None:
+                        date_by_product_id[pid] = str(date_obs)
+        except Exception:
+            log.debug("pipeline_plots: unable to derive native-anchor BTJD from ffi_list", exc_info=True)
+    timed = [(float(_btjd_for_stem(s, btjd_by_stem)), s) for s in stems]
+    if not all(np.isfinite(t) for t, _s in timed):
+        return [sorted(stems)]
+    timed.sort()
+    # When the cached FFI table is available, use the exact same MIT orbit
+    # windows as fitting instead of inferring a boundary from an anchor gap.
+    # This matters for sparse edge-weighted anchor schedules, whose ordinary
+    # in-orbit gaps can be longer than a cadence-based heuristic.
+    try:
+        from syndiff_pipeline.difference_imaging.support.ffi_naming import (
+            tess_product_id_from_ffi_path,
+        )
+        from syndiff_pipeline.template_creation.orchestration.bundled_assets import (
+            ensure_tess_orbit_times_csv,
+        )
+        from syndiff_pipeline.template_creation.processing.shift_schedule import (
+            _split_orbit_segments_from_csv,
+        )
+
+        sector_match = re.search(r"-s(\d+)-\d+-\d+$", timed[0][1], re.IGNORECASE)
+        dates = [date_by_product_id.get(tess_product_id_from_ffi_path(s) or "") for _t, s in timed]
+        if sector_match and all(dates):
+            bounds = _split_orbit_segments_from_csv(
+                int(sector_match.group(1)), dates, ensure_tess_orbit_times_csv()
+            )
+            exact_groups = [[s for _t, s in timed[int(lo) : int(hi)]] for lo, hi in bounds]
+            if len(exact_groups) > 1:
+                return [g for g in exact_groups if len(g) >= 3]
+    except Exception:
+        log.debug("pipeline_plots: unable to split native anchors using TESS orbit table", exc_info=True)
+    times = np.asarray([t for t, _s in timed], dtype=np.float64)
+    gaps = np.diff(times)
+    positive = gaps[gaps > 0]
+    cadence = float(np.median(positive)) if positive.size else 0.0
+    # The lower bound is deliberately much longer than ordinary FFI cadence;
+    # the relative term still works for a reduced/sparse diagnostic input.
+    break_gap = max(0.75, 4.0 * cadence)
+    split_after = set(np.flatnonzero(gaps > break_gap).tolist())
+    groups: list[list[str]] = []
+    start = 0
+    for i in range(len(timed) - 1):
+        if i in split_after:
+            groups.append([s for _t, s in timed[start : i + 1]])
+            start = i + 1
+    groups.append([s for _t, s in timed[start:]])
+    return [g for g in groups if len(g) >= 3]
+
+
+def write_gridded_epsf_native_anchor_difference_plots(
+    epsf_workspace_dir: str,
+    plot_dir: str,
+    *,
+    epsf_label: str = "epsf_r1",
+    dpi: int = 150,
+    wcs_table: "pd.DataFrame | None" = None,
+    ffi_list_df: "pd.DataFrame | None" = None,
+) -> list[str]:
+    """Plot native begin-minus-mid and end-minus-mid ePSF residuals per orbit.
+
+    Only stems in ``gridded_epsf_anchors.json`` are used: those are the
+    models actually fitted to FFI windows, never an interpolated/blended
+    per-frame product.  Residuals remain raw signed ePSF values and use a
+    symmetric logarithmic scale, with the limits pinned at ``±max(abs(diff))``.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib import cm
+        from matplotlib.colors import SymLogNorm
+    except ImportError:
+        log.warning("pipeline_plots: matplotlib is not installed; skipping native ePSF comparisons.")
+        return []
+
+    from syndiff_pipeline.difference_imaging.stages import gridded_epsf
+
+    index = gridded_epsf.load_gridded_epsf_index(epsf_workspace_dir)
+    anchors = gridded_epsf.load_gridded_epsf_anchor_stems(epsf_workspace_dir)
+    orbits = _native_epsf_anchor_orbits(index, anchors, wcs_table, ffi_list_df)
+    if not orbits:
+        log.warning("pipeline_plots: fewer than three time-resolved native ePSF anchors in %s; skip comparisons.", epsf_workspace_dir)
+        return []
+
+    os.makedirs(plot_dir, exist_ok=True)
+    written: list[str] = []
+    for orbit_number, stems in enumerate(orbits, start=1):
+        # The three requested models are native anchors nearest the temporal
+        # beginning, midpoint, and end of this orbit.
+        begin, end = stems[0], stems[-1]
+        mid = stems[len(stems) // 2]
+        paths = {s: index[s] for s in (begin, mid, end)}
+        try:
+            cubes = {}
+            grid_xypos = None
+            for stem, path in paths.items():
+                with np.load(path, allow_pickle=False) as z:
+                    cubes[stem] = np.asarray(z["data"], dtype=np.float64)
+                    if grid_xypos is None:
+                        grid_xypos = np.asarray(z["grid_xypos"], dtype=np.float64)
+            if grid_xypos is None or any(c.shape != cubes[mid].shape for c in cubes.values()):
+                raise ValueError("anchor ePSF cubes have incompatible shapes")
+        except Exception as exc:
+            log.warning("pipeline_plots: cannot load native ePSF orbit %d comparison: %s", orbit_number, exc)
+            continue
+
+        mid_cube = cubes[mid]
+        residuals = {
+            "begin_minus_mid": cubes[begin] - mid_cube,
+            "end_minus_mid": cubes[end] - mid_cube,
+        }
+        all_values = np.concatenate([r[np.isfinite(r)] for r in residuals.values()])
+        if all_values.size == 0:
+            continue
+        max_abs = float(np.nanmax(np.abs(all_values)))
+        if not np.isfinite(max_abs) or max_abs <= 0:
+            continue
+        # Keep the innermost 1% of the full residual range linear.  This
+        # makes the sign and fine core differences legible while preserving
+        # logarithmic sensitivity in both positive and negative wings.
+        linthresh = max(np.finfo(np.float64).tiny, 0.01 * max_abs)
+        norm = SymLogNorm(
+            linthresh=linthresh,
+            linscale=1.0,
+            vmin=-max_abs,
+            vmax=max_abs,
+            base=10,
+        )
+        n_rows, n_cols, placements = spatial_tile_subplot_grid(grid_xypos)
+
+        for comparison, residual in residuals.items():
+            fig = plt.figure(
+                figsize=(2.0 * n_cols + 1.1, 2.0 * n_rows + 1.0),
+                layout="constrained",
+            )
+            gs = fig.add_gridspec(n_rows, n_cols)
+            for k, row, col in placements:
+                ax = fig.add_subplot(gs[row, col])
+                ax.imshow(residual[k], origin="lower", cmap="coolwarm", norm=norm, interpolation="nearest")
+                gx, gy = grid_xypos[k]
+                ax.set_title(f"node {k} ({gx:.0f}, {gy:.0f})", fontsize=8)
+                ax.set_xticks([])
+                ax.set_yticks([])
+            left, right = (begin, mid) if comparison.startswith("begin") else (end, mid)
+            fig.suptitle(
+                f"Native ePSF orbit {orbit_number}: {left} − {right} (raw)",
+                fontsize=10,
+            )
+            mappable = cm.ScalarMappable(norm=norm, cmap="coolwarm")
+            mappable.set_array([])
+            cbar = fig.colorbar(mappable, ax=fig.axes, location="right", shrink=0.86, pad=0.02)
+            cbar.set_label(
+                f"raw ePSF difference (SymLogNorm; linear |Δ| ≤ {linthresh:.3g})"
+            )
+            path = os.path.join(
+                plot_dir,
+                f"{_safe_plot_token(epsf_label)}_orbit_{orbit_number:02d}_{comparison}_lognorm.png",
+            )
+            fig.savefig(path, dpi=dpi)
+            plt.close(fig)
+            written.append(path)
+            log.info("  pipeline_plots: native ePSF comparison %s", path)
+    return written
+
+
 def centroids_residual_fits_path(
     plot_dir: str,
     centroids_label: str,

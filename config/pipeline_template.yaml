@@ -89,7 +89,7 @@ resources:
   remap:
     max_concurrent: 2
   downsample:
-    max_concurrent: 2
+    max_concurrent: 3
   diff_prep:
     max_concurrent: 4
   background_estimate:
