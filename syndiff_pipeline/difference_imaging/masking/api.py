@@ -59,6 +59,7 @@ def generate_shared_mask_catalog(
     write_plots_dir: str | Path | None = None,
     mask_params: object | None = None,
     output_store_name: str | None = None,
+    run_id: str | None = None,
 ) -> MaskCatalog:
     """
     Resolve settings, build static FITS (+ TNS), load/generate asteroids, return catalog.
@@ -125,6 +126,7 @@ def generate_shared_mask_catalog(
         sck=(int(sector), int(camera), int(ccd)),
         data_root=str(data_root) if data_root else None,
         mask_params=mask_params,
+        run_id=run_id,
     )
 
     asteroid_iv = None

@@ -43,7 +43,7 @@ Transient template + diff must have completed for the baseline workspace referen
 | Shared mask | `shared_mask.fits.fz` | `shared_mask` |
 | Mapping + Gaia catalog | `data_root/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`, `.../catalogs/…` | `mapping` |
 
-Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline workspace: `ws/` when `baseline.workspace_run_id: none`, else `ws_{run_id}/`.
+Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline artifacts (`hp_c`, `hp_d_kernels/`, `ks_b`/`ks_b_s`) are resolved from the SCC diff lane, not an event `ws/` tree — `baseline.workspace_run_id` is a legacy config name kept for label-heuristic back-compat only; `_label_dir_has_fits` checks existence under the flat SCC lane exclusively, with no event-workspace fallback.
 
 ### Kernel backfill
 
@@ -51,17 +51,19 @@ Older workspaces may have `hp_d` without `hp_d_kernels/`. Run a one-time Hotpant
 
 ```bash
 syndiff diff run \
-  --config config/diff_config_star_full_backfill.yaml \
+  --config config/archive/diff_config_star_full_backfill.yaml \
   --deployment config/deployment.yaml \
   --targets config/targets_example.csv \
   --target-name 20/3/2
 ```
 
-`--config` is the diff policy only when `--site` is omitted; with `--site`,
-foreground diff always reads `<site>/diff_config.yaml`. Then set
-`baseline.workspace_run_id: star_full_lc` (or your `workspace_run_id`) in
-`star_config` / `star_targets`. See [star_pipeline.md](stages/star_pipeline.md)
-and [`config/diff_config_star_full_backfill.yaml`](../../config/diff_config_star_full_backfill.yaml).
+`--config`/`--site` both always resolve a `pipeline.yaml`-style file now — its
+embedded `diff:` block is used when present, else its legacy `diff_config:`
+pointer is followed (a bare standalone `diff_config.yaml` is never passed
+directly). Then set `baseline.workspace_run_id: star_full_lc` (or your
+`workspace_run_id`) in `star_config` / `star_targets`. See
+[star_pipeline.md](stages/star_pipeline.md) and
+[`config/archive/diff_config_star_full_backfill.yaml`](../../config/archive/diff_config_star_full_backfill.yaml).
 
 ## Config files
 
@@ -79,9 +81,9 @@ Related transient orchestrators (produce the baseline diff workspace star reads)
 
 | File | Purpose |
 |------|---------|
-| `config/diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, kernels) |
-| `config/pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff (`ps1_source: stream`) |
-| `config/pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
+| `config/archive/diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, kernels) |
+| `config/archive/pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff (`ps1_source: stream`) |
+| `config/archive/pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
 
 ## `ps1_source`
 
@@ -115,7 +117,10 @@ CLI flags on `syndiff star run` override merged config: `--stars-file`, `--basel
 
 ## Outputs
 
-Under `phot_{photometry_run_id}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c{C}_k{K}/phot_star_full_lc/host_star/` when `defaults.photometry_run_id: star_full_lc`):
+Star is per-SCC, not per-event: outputs land under `{lane_root}/host_star/`, beside the
+diff products they derive from — `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/host_star/`
+(`star_output_root()` derives the lane root directly from `data_root`/sector/camera/ccd,
+independent of any event workspace):
 
 ```text
 {gaia_source_id}/
@@ -131,7 +136,9 @@ Under `phot_{photometry_run_id}/host_star/` (e.g. `events/{event_name}/s{SSSS}_c
 batch_manifest.csv               # per-host status (ok | error | skipped_*)
 ```
 
-Legacy sibling trees `events/{label}/star/` and `star_{id}/` are no longer read; star verify requires `phot_{run_id}/host_star/batch_manifest.csv`.
+Legacy sibling trees `events/{label}/star/`, `star_{id}/`, and the older
+`phot_{run_id}/host_star/` event-scoped location are no longer read; star
+verify requires `{lane_root}/host_star/batch_manifest.csv`.
 
 ## Stamp formula
 

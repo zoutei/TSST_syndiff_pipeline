@@ -69,7 +69,6 @@ def _init_gridded_epsf_worker(
     sck: tuple | None = None,
     data_root: str | None = None,
     epsf_label: str | None = None,
-    workspace_root: str | None = None,
     output_store_name: str | None = None,
     mask_catalog=None,
     btjd_by_stem: dict | None = None,
@@ -77,6 +76,7 @@ def _init_gridded_epsf_worker(
     ffi_list_df: pd.DataFrame | None = None,
     science_bounds: dict | None = None,
     ffi_path_by_stem: dict[str, str] | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Load shared ePSF inputs once per loky worker (see starpositioningscript)."""
     _suppress_photutils_epsf_noise()
@@ -91,8 +91,8 @@ def _init_gridded_epsf_worker(
             "sck": sck,
             "data_root": data_root,
             "epsf_label": epsf_label,
-            "workspace_root": workspace_root,
             "output_store_name": output_store_name,
+            "run_id": run_id,
             "mask_catalog": mask_catalog,
             "btjd_by_stem": btjd_by_stem or {},
             "diff_image_fps": dict(diff_image_fps or {}),
@@ -1251,7 +1251,6 @@ def _fit_one_frame_task(
             output_store_name=output_store_name,
             suffix=".npz",
         )
-        scc_primary = True
     else:
         raise RuntimeError(
             "SCC-only gridded_epsf requires deployment data_root and sector/camera/ccd"
@@ -1322,6 +1321,10 @@ def _fit_one_frame_task(
                 diff_image_path=diff_path,
             )
             if inputs is not None:
+                meta = {}
+                run_id = ctx.get("run_id")
+                if run_id:
+                    meta["run_id"] = run_id
                 provenance_glue.emit_diff_artifact(
                     kind="epsf",
                     sector=sck[0],
@@ -1334,9 +1337,8 @@ def _fit_one_frame_task(
                     input_fingerprints=inputs,
                     data_root=data_root,
                     is_fits=False,
-                    scc_primary=scc_primary,
-                    workspace_root=ctx.get("workspace_root"),
                     output_store_name=output_store_name,
+                    meta=meta or None,
                 )
         except Exception:
             log.debug("provenance emit (epsf) failed for %s", ffi_stem, exc_info=True)
@@ -1359,7 +1361,6 @@ def fit_gridded_epsf_all_frames(
     epsf_label: str | None = None,
     diffs_input: str | None = None,
     skip_existing: bool = True,
-    workspace_root: str | None = None,
     ffi_list_df: pd.DataFrame | None = None,
     science_bounds: dict | None = None,
     ffi_path_by_stem: dict[str, str] | None = None,
@@ -1446,14 +1447,7 @@ def fit_gridded_epsf_all_frames(
         prov_sck = None
     prov_data_root = getattr(cfg, "data_root", "") or None
     prov_output_store_name = getattr(cfg, "output_store_name", None) or None
-    if workspace_root is None:
-        from syndiff_pipeline.difference_imaging.support.paths import workspace_root as _workspace_root
-
-        prov_workspace_root = _workspace_root(
-            cfg.output_dir, run_id=getattr(cfg, "workspace_run_id", None)
-        )
-    else:
-        prov_workspace_root = workspace_root
+    prov_run_id = getattr(cfg, "run_id", "") or None
 
     diff_image_fps = build_diff_image_fps(
         cfg,
@@ -1471,7 +1465,6 @@ def fit_gridded_epsf_all_frames(
         prov_sck,
         prov_data_root,
         epsf_label,
-        prov_workspace_root,
         prov_output_store_name,
         mask_catalog,
         btjd_by_stem or {},
@@ -1479,6 +1472,7 @@ def fit_gridded_epsf_all_frames(
         ffi_list_df,
         science_bounds,
         ffi_path_by_stem or {},
+        prov_run_id,
     )
     results: list[tuple] = []
     if n_workers <= 1 or n_frames <= 1:

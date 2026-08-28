@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.orchestration.config import SynDiffConfig
 from syndiff_pipeline.difference_imaging.orchestration.pipeline_entries import split_pipeline
-from syndiff_pipeline.difference_imaging.orchestration.site_config import freeze_target_diff_config
+from syndiff_pipeline.difference_imaging.orchestration.site_config import resolve_diff_config
 from syndiff_pipeline.difference_imaging.orchestration.validate import _outputs_for_stage
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     is_pipeline_fits_filename,
@@ -23,10 +23,7 @@ from syndiff_pipeline.common.scc_paths import (
     scc_temporal_wcs_dir,
 )
 from syndiff_pipeline.difference_imaging.support.manifest import manifest_path_from_output_dir
-from syndiff_pipeline.difference_imaging.support.paths import (
-    SHARED_MASK_FITS_BASENAME,
-    workspace_root,
-)
+from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 
 # Guarded: provenance_glue itself never raises on import (it guards its own
 # common.provenance import internally), but this import is wrapped again here
@@ -39,6 +36,7 @@ except Exception:  # pragma: no cover
 
 if TYPE_CHECKING:
     from syndiff_pipeline.common.orchestration.spec import StageRunContext
+    from syndiff_pipeline.difference_imaging.orchestration.site_config import DiffSitePolicy
     from syndiff_pipeline.template_creation.orchestration.runner_config import RunnerConfig
 
 log = logging.getLogger(__name__)
@@ -57,22 +55,6 @@ _INDEXED_STAGE_KIND = {
 }
 
 
-def resolve_diff_site_config_path(
-    *,
-    meta: dict | None = None,
-    runner_cfg: RunnerConfig | None = None,
-) -> Path:
-    """Match execute-time config resolution: run_meta overrides runner default."""
-    for key in ("source_diff_config_path", "diff_config_path"):
-        raw = (meta or {}).get(key) or getattr(runner_cfg, "diff_config_path", "")
-        if raw:
-            return Path(str(raw)).expanduser().resolve()
-    raise ValueError(
-        "Diff verification requires source_diff_config_path in run_meta or "
-        "diff_config_path on RunnerConfig"
-    )
-
-
 def apply_workspace_run_id_override(
     cfg: SynDiffConfig,
     meta: dict | None,
@@ -86,32 +68,112 @@ def apply_workspace_run_id_override(
     return cfg
 
 
+def _diff_config_from_frozen_policy(
+    policy: "DiffSitePolicy",
+    target: Target,
+    runner_cfg: RunnerConfig,
+) -> SynDiffConfig:
+    """Resolve a target's diff config directly from the frozen ``RunnerConfig.diff``
+    policy, without any live file read.
+
+    Deployment roots (``workspace_root``/``data_root``/``ffi_dir``) come from
+    the frozen ``RunnerConfig`` itself -- it is already the per-run config
+    materialized under ``runs/{run_id}/`` at submit time, so re-reading
+    ``deployment.yaml`` here would reintroduce the exact live-read-on-every-tick
+    problem this resolution order exists to remove. Note: a handful of
+    deployment-only keys that :func:`resolve_diff_config` optionally consults
+    (``straps_csv``, ``bsc_catalog``, ``removed_stars_csv``, ``manifest``, the
+    deprecated ``median_mask_path``) live only in ``deployment.yaml``; they are
+    frozen onto ``RunnerConfig.deployment_paths`` at submit and merged back in
+    here, so frozen-first resolution does not silently drop them.
+    """
+    deployment = {
+        "workspace_root": getattr(runner_cfg, "workspace_root", "") or "",
+        "data_root": getattr(runner_cfg, "data_root", "") or "",
+        "ffi_dir": getattr(runner_cfg, "ffi_dir", "") or "",
+    }
+    deployment.update(getattr(runner_cfg, "deployment_paths", None) or {})
+    deployment_path = Path(
+        str(getattr(runner_cfg, "deployment_file", "") or "deployment.yaml")
+    ).expanduser()
+    site_config_dir = Path(policy.source_dir) if getattr(policy, "source_dir", "") else None
+    return resolve_diff_config(
+        target,
+        policy,
+        deployment,
+        deployment_path=deployment_path,
+        site_config_dir=site_config_dir,
+    )
+
+
 def frozen_diff_config_for_verify(
-    site_config_path: str | Path,
     target: Target,
     *,
     meta: dict | None = None,
+    runner_cfg: RunnerConfig | None = None,
 ) -> SynDiffConfig:
-    """Load site policy + deployment and apply optional run-level workspace override."""
-    cfg = freeze_target_diff_config(site_config_path, target)
+    """Resolve a target's frozen diff config and apply any run-level override.
+
+    Resolves directly against ``runner_cfg.diff`` (the embedded ``diff:``
+    policy, frozen verbatim into ``runs/{run_id}/config.yaml``) -- the sole
+    source of diff policy; there is no live site file to fall back to.
+    """
+    policy = getattr(runner_cfg, "diff", None)
+    if policy is None:
+        raise ValueError(
+            "Diff verification requires an embedded 'diff:' policy on "
+            "RunnerConfig (runner_cfg.diff)."
+        )
+    cfg = _diff_config_from_frozen_policy(policy, target, runner_cfg)
     return apply_workspace_run_id_override(cfg, meta)
+
+
+def _expected_downsample_fingerprint_for_ctx(ctx: StageRunContext) -> str:
+    """Best-effort expected ``downsample`` fingerprint from the frozen run config.
+
+    ``ctx.runner_cfg`` is already the frozen per-run config (materialized
+    under ``runs/{run_id}/`` at submit time), so this needs no live site
+    config read -- it mirrors what ``provenance_glue.resolve_downsample_fingerprint``'s
+    now-deleted live ``{site_config_dir}/pipeline.yaml`` read used to compute
+    (Contract A4). Never raises; returns ``""`` when unresolved.
+    """
+    try:
+        from syndiff_pipeline.template_creation.orchestration.provenance_checkpoint import (
+            expected_downsample_fingerprint,
+        )
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            resolve_config,
+        )
+
+        resolved = resolve_config(ctx.target, ctx.runner_cfg)
+        return str(expected_downsample_fingerprint(resolved) or "")
+    except Exception:
+        log.debug("_expected_downsample_fingerprint_for_ctx failed", exc_info=True)
+        return ""
 
 
 def frozen_diff_config_for_context(ctx: StageRunContext) -> SynDiffConfig:
     """Frozen diff config for context.
-    
+
     Parameters
     ----------
     ctx : StageRunContext
-    
+
     Returns
     -------
     SynDiffConfig"""
-    return frozen_diff_config_for_verify(
-        resolve_diff_site_config_path(meta=ctx.meta, runner_cfg=ctx.runner_cfg),
+    cfg = frozen_diff_config_for_verify(
         ctx.target,
         meta=ctx.meta,
+        runner_cfg=ctx.runner_cfg,
     )
+    # Contract A3b: activates every emit site's already-landed
+    # ``getattr(cfg, "run_id", "") or None`` read.
+    cfg.run_id = ctx.run_id
+    # Contract A4: frozen value feeds resolve_downsample_fingerprint_from_cfg
+    # step 2, ahead of the (now live-read-free) provenance-store lookup.
+    cfg.downsample_fingerprint = _expected_downsample_fingerprint_for_ctx(ctx)
+    return cfg
 
 
 def load_diff_frames_for_verify(
@@ -189,22 +251,6 @@ def _diff_frame_manifest_available(cfg: SynDiffConfig, event_dir: str | Path) ->
     except Exception:
         log.debug("_diff_frame_manifest_available: SCC check failed", exc_info=True)
         return False
-
-
-def diff_workspace_root(cfg: SynDiffConfig, event_dir: str | Path) -> Path:
-    """Diff workspace root.
-    
-    Parameters
-    ----------
-    cfg : SynDiffConfig
-    event_dir : str | Path
-    
-    Returns
-    -------
-    Path"""
-    return Path(
-        workspace_root(str(event_dir), run_id=getattr(cfg, "workspace_run_id", None))
-    )
 
 
 _NON_SCC_DIFF_STAGE_KINDS = frozenset(

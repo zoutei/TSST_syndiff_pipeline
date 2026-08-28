@@ -141,15 +141,35 @@ def _per_event_force_targets_for_target(
     return []
 
 
-def load_photometry_site_policy(path: str | Path) -> PhotometrySitePolicy:
-    """Load ``photometry_config.yaml`` site policy."""
-    config_path = Path(path).expanduser().resolve()
-    raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+def load_photometry_site_policy(
+    path: str | Path, *, config_path: str | Path | None = None
+) -> PhotometrySitePolicy:
+    """Load ``photometry_config.yaml`` site policy.
+
+    Parameters
+    ----------
+    path : str | Path
+        Read policy *content* (defaults/paths/pipeline/overrides/etc.) from
+        here.
+    config_path : str | Path | None, optional
+        What to record as the returned policy's ``config_path`` field --
+        which ``deployment.yaml``/relative-path resolution keys off (see
+        :func:`build_syndiff_config_for_photometry`). Defaults to *path*
+        (unchanged pre-existing behaviour) when omitted. Pass this
+        explicitly when *path* is a frozen run-directory snapshot, so
+        ``config_path`` stays anchored at the live site directory instead of
+        a run directory with no ``deployment.yaml`` of its own.
+    """
+    resolved_path = Path(path).expanduser().resolve()
+    raw = yaml.safe_load(resolved_path.read_text(encoding="utf-8")) or {}
     if not isinstance(raw, dict):
-        raise ValueError(f"Photometry site config must be a YAML mapping: {config_path}")
+        raise ValueError(f"Photometry site config must be a YAML mapping: {resolved_path}")
     pipeline = raw.get("pipeline")
     if pipeline is None or not isinstance(pipeline, list):
-        raise ValueError(f"photometry_config.yaml requires a pipeline list: {config_path}")
+        raise ValueError(f"photometry_config.yaml requires a pipeline list: {resolved_path}")
+    resolved_config_path = (
+        Path(config_path).expanduser().resolve() if config_path is not None else resolved_path
+    )
     return PhotometrySitePolicy(
         deployment_file=str(raw.get("deployment_file", "deployment.yaml")).strip()
         or "deployment.yaml",
@@ -162,7 +182,7 @@ def load_photometry_site_policy(path: str | Path) -> PhotometrySitePolicy:
         ),
         overrides=dict(raw.get("overrides") or {}),
         condor=_parse_condor(raw.get("condor")),
-        config_path=str(config_path),
+        config_path=str(resolved_config_path),
     )
 
 
@@ -217,6 +237,26 @@ def resolve_photometry_run_config(
         epsf_label=epsf_label,
         additional_forced_targets=additional_forced_targets,
     )
+
+
+def resolve_photometry_deployment(policy: PhotometrySitePolicy) -> tuple[dict, Path]:
+    """Load ``deployment.yaml`` for a photometry site policy.
+
+    Uses the generic (non-diff-specific) deployment loader directly.
+    ``photometry_config.yaml`` happens to share the diff policy's
+    ``deployment_file``/``pipeline``/``paths`` shape, but photometry must not
+    depend on any diff-specific site_config helper for that reason alone --
+    it should stay independent of how the diff side happens to be shaped.
+
+    Returns
+    -------
+    tuple[dict, Path]
+        ``(deployment, deploy_path)`` -- the parsed ``deployment.yaml``
+        mapping and the path it was loaded from
+        (``{policy.config_path parent}/{policy.deployment_file}``).
+    """
+    deploy_path = deployment_path_for_config(policy.config_path, policy.deployment_file)
+    return load_deployment(policy.config_path, policy.deployment_file), deploy_path
 
 
 def build_syndiff_config_for_photometry(
@@ -315,12 +355,47 @@ def write_frozen_photometry_config(policy: PhotometrySitePolicy, dest: str | Pat
 
 
 def resolve_photometry_config_path(*, meta: dict | None, runner_cfg) -> Path:
-    """Resolve frozen or site photometry config path from run metadata."""
-    for key in ("source_photometry_config_path", "photometry_config_path"):
-        raw = (meta or {}).get(key) or getattr(runner_cfg, "photometry_config_path", "")
-        if raw:
-            return Path(str(raw)).expanduser().resolve()
-    raise ValueError(
-        "Photometry stage requires source_photometry_config_path in run_meta or "
-        "photometry_config_path on RunnerConfig"
+    """Resolve the photometry policy *content* path from run metadata.
+
+    The frozen ``runs/{run_id}/photometry_config.yaml`` snapshot -- recorded
+    as ``photometry_config_path`` in run_meta / on ``RunnerConfig`` -- is the
+    sole source: submit always freezes it (see ``_prepare_run_directory``),
+    so a submitted run's frozen config is authoritative (matching the "check
+    the frozen copies... when debugging" invariant).
+
+    This is the policy *content* path only. Do not derive a site directory
+    from it (e.g. via ``.parent``) for ``deployment.yaml``/relative-path
+    resolution -- the frozen copy lives in a run directory with no
+    ``deployment.yaml`` of its own. Use :func:`resolve_photometry_site_dir`
+    for that, and pass it as ``load_photometry_site_policy(...,
+    config_path=...)`` so the returned policy's ``config_path`` field (which
+    deployment resolution keys off) stays site-anchored.
+    """
+    meta = meta or {}
+    raw = meta.get("photometry_config_path") or getattr(
+        runner_cfg, "photometry_config_path", ""
     )
+    if raw:
+        return Path(str(raw)).expanduser().resolve()
+    raise ValueError(
+        "Photometry stage requires photometry_config_path in run_meta or on "
+        "RunnerConfig"
+    )
+
+
+def resolve_photometry_site_dir(*, meta: dict | None, runner_cfg) -> Path:
+    """Resolve the photometry site's authoring directory from run metadata.
+
+    Always the directory of the live/site ``photometry_config.yaml`` (never
+    a frozen run directory), for ``deployment.yaml`` and any other path
+    recorded relative to the site config. Falls back to
+    :func:`resolve_photometry_config_path`'s result when no
+    ``source_photometry_config_path`` is recorded (e.g. an ad hoc run with
+    incomplete run_meta) -- matching that function's own pre-fix
+    "site wins" behaviour for this edge case.
+    """
+    meta = meta or {}
+    source_raw = str(meta.get("source_photometry_config_path") or "").strip()
+    if source_raw:
+        return Path(source_raw).expanduser().resolve().parent
+    return resolve_photometry_config_path(meta=meta, runner_cfg=runner_cfg).parent

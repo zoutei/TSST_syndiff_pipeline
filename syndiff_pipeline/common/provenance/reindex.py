@@ -170,6 +170,7 @@ def reindex_shared_store(
                             record["kind"],
                             recipe_params,
                             int(record.get("code_version", 0)),
+                            git_sha=record.get("git_sha"),
                             created_at=record.get("created_at"),
                         )
                     store.upsert_artifact(

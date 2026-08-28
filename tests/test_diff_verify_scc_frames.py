@@ -29,9 +29,6 @@ from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
     DIFF_JOB_BASENAME,
     FRAMES_CSV_BASENAME,
 )
-from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    freeze_target_diff_config,
-)
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     HotpantsParams,
     BackgroundEstimateParams,
@@ -39,7 +36,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
 from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_path_from_output_dir,
 )
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import resolve_target_diff_config, write_site_deployment, write_unified_site_config
 
 
 def _target() -> Target:
@@ -53,43 +50,37 @@ def _target() -> Target:
     )
 
 
-def _write_hotpants_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-                "  - kind: hotpants",
-                "    output:",
-                "      diffs: diffs",
-                "      convolved: convolved",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+_HOTPANTS_DIFF_POLICY = {
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [
+        {"kind": "shared_mask"},
+        {"kind": "hotpants", "output": {"diffs": "diffs", "convolved": "convolved"}},
+    ],
+}
+
+_KERNEL_SUBTRACT_DIFF_POLICY = {
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [
+        {"kind": "background_estimate", "output": {"diffs": "ks_d"}},
+    ],
+}
+
+
+def _write_hotpants_policy(site: Path, *, workspace_root: str, data_root: str) -> None:
+    write_unified_site_config(
+        site / "pipeline.yaml",
+        workspace_root=workspace_root,
+        data_root=data_root,
+        diff=_HOTPANTS_DIFF_POLICY,
     )
 
 
-def _write_kernel_subtract_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: background_estimate",
-                "    output:",
-                "      diffs: ks_d",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+def _write_kernel_subtract_policy(site: Path, *, workspace_root: str, data_root: str) -> None:
+    write_unified_site_config(
+        site / "pipeline.yaml",
+        workspace_root=workspace_root,
+        data_root=data_root,
+        diff=_KERNEL_SUBTRACT_DIFF_POLICY,
     )
 
 
@@ -197,8 +188,8 @@ class _SccFramesBase(unittest.TestCase):
 
 class TestLoadDiffFramesForVerify(_SccFramesBase):
     def test_prefers_scc_bookkeeping_without_event_manifest(self):
-        _write_hotpants_policy(self.site / "diff_config.yaml")
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        _write_hotpants_policy(self.site, workspace_root=str(self.handoff), data_root=str(self.data))
+        cfg = resolve_target_diff_config(self.site, self.target)
         cfg.ffi_dir = str(self.ffi_dir)
 
         event_manifest = Path(manifest_path_from_output_dir(str(self.event_dir), None))
@@ -210,8 +201,8 @@ class TestLoadDiffFramesForVerify(_SccFramesBase):
         self.assertTrue(str(frames.iloc[0]["path"]).endswith(".fits"))
 
     def test_raises_when_no_scc_handoff(self):
-        _write_hotpants_policy(self.site / "diff_config.yaml")
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        _write_hotpants_policy(self.site, workspace_root=str(self.handoff), data_root=str(self.data))
+        cfg = resolve_target_diff_config(self.site, self.target)
         cfg.ffi_dir = str(self.ffi_dir)
 
         bk = scc_diff_bookkeeping_dir(
@@ -241,8 +232,8 @@ class TestLoadDiffFramesForVerify(_SccFramesBase):
 class TestSccIndexedVerify(_SccFramesBase):
     def setUp(self) -> None:
         super().setUp()
-        _write_hotpants_policy(self.site / "diff_config.yaml")
-        self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        _write_hotpants_policy(self.site, workspace_root=str(self.handoff), data_root=str(self.data))
+        self.cfg = resolve_target_diff_config(self.site, self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)
 
     def test_workspace_complete_without_event_manifest(self):
@@ -275,8 +266,9 @@ class TestSccIndexedVerify(_SccFramesBase):
 
         event_manifest = Path(manifest_path_from_output_dir(str(self.event_dir), None))
         self.assertFalse(event_manifest.is_file())
-        ws_dir = dv.diff_workspace_root(self.cfg, self.event_dir)
-        ws_dir.mkdir(parents=True, exist_ok=True)
+        # No ws/ workspace tree under SCC-scoped output_dir (wave A-3);
+        # completeness is driven entirely by SCC bookkeeping + indexed
+        # provenance, so no directory needs to exist under event_dir here.
         self.assertTrue(dv.diff_workspace_complete(self.cfg, self.event_dir))
 
     def test_indexed_verify_uses_scc_frames(self):
@@ -315,8 +307,8 @@ class TestSccIndexedVerify(_SccFramesBase):
 class TestKernelSubtractIndexedVerify(_SccFramesBase):
     def setUp(self) -> None:
         super().setUp()
-        _write_kernel_subtract_policy(self.site / "diff_config.yaml")
-        self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        _write_kernel_subtract_policy(self.site, workspace_root=str(self.handoff), data_root=str(self.data))
+        self.cfg = resolve_target_diff_config(self.site, self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)
 
     def test_kernel_subtract_indexed_kind(self):
@@ -354,8 +346,8 @@ class TestKernelSubtractIndexedVerify(_SccFramesBase):
 @unittest.skipUnless(pg.PROVENANCE_AVAILABLE, "common.provenance not importable")
 class TestMissingFingerprintsResume(_SccFramesBase):
     def test_diff_image_complete_in_store_fail_open_without_db(self):
-        _write_hotpants_policy(self.site / "diff_config.yaml")
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        _write_hotpants_policy(self.site, workspace_root=str(self.handoff), data_root=str(self.data))
+        cfg = resolve_target_diff_config(self.site, self.target)
         cfg.ffi_dir = str(self.ffi_dir)
         result = pg.diff_image_complete_in_store(
             sector=20,
@@ -370,8 +362,8 @@ class TestMissingFingerprintsResume(_SccFramesBase):
         self.assertIsNone(result)
 
     def test_diff_image_complete_in_store_true_when_indexed(self):
-        _write_hotpants_policy(self.site / "diff_config.yaml")
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        _write_hotpants_policy(self.site, workspace_root=str(self.handoff), data_root=str(self.data))
+        cfg = resolve_target_diff_config(self.site, self.target)
         cfg.ffi_dir = str(self.ffi_dir)
         downsample_fp = self._seed_downsample(cfg)
         hp = HotpantsParams()

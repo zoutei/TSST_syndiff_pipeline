@@ -9,6 +9,7 @@ TESS FFI template building, difference imaging, event photometry, and host-star 
 markdown/README
 markdown/template_pipeline
 markdown/syndiff_cli
+markdown/config_schema_v2
 markdown/storage_layout
 markdown/bookkeeping
 ```

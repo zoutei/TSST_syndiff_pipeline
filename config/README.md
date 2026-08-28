@@ -22,9 +22,8 @@ are untouched — local/gitignored scratch, not part of this reorg.
 
 | File | Role |
 |------|------|
-| `pipeline_sn2022jhq_template.yaml` | Template DAG orchestrator (`diff_config: diff_config_sn2022jhq.yaml`); submit diff via **this** file, not the diff_config directly — see its header comment |
-| `diff_config_sn2022jhq.yaml` | Linear-lane diff policy: shared_mask → kernel_fit → convolved_templates → background_estimate → hotpants → epsf (centroids/temporal_wcs currently commented out) |
-| `pipeline_sn2022jhq_tvwcs_os4.yaml` / `diff_config_sn2022jhq_tvwcs_os4_hp_d.yaml` | OS4 temporal-WCS Hotpants-only lane (reuses the linear lane's background/mask via symlink) |
+| `pipeline_sn2022jhq_template.yaml` | Template DAG orchestrator with an embedded `diff:` policy (schema v2 — see its header comment): linear-lane diff, shared_mask → kernel_fit → convolved_templates → background_estimate → hotpants → epsf (centroids/temporal_wcs currently commented out) |
+| `pipeline_sn2022jhq_tvwcs_os4.yaml` | Template DAG orchestrator with an embedded `diff:` policy (schema v2): OS4 temporal-WCS Hotpants-only lane (reuses the linear lane's background/mask via symlink) |
 | `pipeline_sn2022jhq_photometry.yaml` / `photometry_config_sn2022jhq.yaml` | Event forced-photometry policy |
 | `scc_sn2022jhq.csv` / `scc_sn2022jhq_s51_s52.csv` | SCC registries (sector,camera,ccd) for the two lanes above |
 | `targets_sn2022jhq.csv` / `targets_sn2022jhq_s51_s52.csv` | Event target CSVs |
@@ -33,9 +32,8 @@ are untouched — local/gitignored scratch, not part of this reorg.
 
 | File | Role |
 |------|------|
-| `pipeline.yaml` | Default orchestrator policy: stage DAG params, resource pools, scheduler, notifications |
-| `diff_config.yaml` | Default site diff policy: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor. **Default = shared_mask + hotpants.** |
-| `diff_config_single_kernel.yaml` | Default `diff_config:` target referenced by `pipeline.yaml` |
+| `pipeline.yaml` | Default orchestrator policy: stage DAG params, resource pools, scheduler, notifications, plus an embedded `diff:` policy (schema v2 — single-kernel: shared_mask → kernel_fit → convolved_templates → background_estimate, no Hotpants) |
+| `diff_config.yaml` | Default site diff policy for foreground `--site` debugging: `pipeline:` stage list, defaults (`n_jobs`), SCC overrides, Condor. **Default = shared_mask + hotpants.** |
 | `mask_settings.example.yaml` | Copy to site `mask_settings.yaml` for empirical/TNS/asteroid mask policy (`difference_imaging/masking`) |
 | `star_config.yaml` | Site star policy: baseline labels, photometry, `ps1_source`, SCC overrides |
 | `star_targets_example.csv` | Example star SCC registry for `syndiff star submit` |
@@ -55,14 +53,18 @@ following those examples below.
 | Path | When to use | Command |
 |------|-------------|---------|
 | **Site policy** | Normal debugging with live `diff_config.yaml` | `syndiff diff run --site config --targets targets_example.csv --target-name 2020ut` |
-| **Alternate diff policy** | Foreground run with a selected diff YAML | `syndiff diff run --config diff_config_star_full_backfill.yaml --deployment deployment.yaml --targets targets_example.csv --target-name 20/3/2` |
+| **Alternate diff policy** | Foreground run with a selected pipeline.yaml (embedded `diff:` policy) | `syndiff diff run --config local/pipeline_s20_exo_backfill.yaml --deployment deployment.yaml --targets targets_example.csv --target-name 20/3/2` |
 | **Materialized YAML** | Frozen per-target config with absolute paths | `python -m syndiff_pipeline.difference_imaging.orchestration.cli --config example/diff_config_a_prf.yaml` |
 
 With `--site`, foreground diff always reads `<site>/diff_config.yaml`; the
-`diff_config:` selected by `pipeline.yaml` is used by supervised submit. Omit
-`--site` and pass `--config` + `--deployment` to choose another foreground
-diff policy. Materialized examples live under `example/diff_config_*.yaml`;
-legacy names are in `example/legacy/recipe_*.yaml` (read-only reference).
+embedded `diff:` policy in `pipeline.yaml` (schema v2 — a legacy
+`diff_config:` pointer to a standalone diff YAML still works as a fallback,
+but every config under this directory now uses the embedded form) is used by
+supervised submit. Omit `--site` and pass `--config` (a pipeline.yaml-style
+file, never a bare diff_config.yaml) + `--deployment` to choose another
+foreground diff policy. Materialized examples live under
+`example/diff_config_*.yaml`; legacy names are in
+`example/legacy/recipe_*.yaml` (read-only reference).
 
 ## Supervised pipeline
 
@@ -72,9 +74,9 @@ cp config/deployment.yaml.example config/deployment.yaml   # first time
 # Template DAG: SCC-only input, no event coordinates
 syndiff template submit --site config --scc config/scc_example.csv --run-id my_template_run
 
-# Field-mode diff (SCC-only), once templates exist
+# Field-mode diff (SCC-only), once templates exist -- reads pipeline.yaml's
+# embedded single-kernel diff: policy (schema v2); --site already implies it
 syndiff diff submit --site config \
-  --config config/diff_config_single_kernel.yaml \
   --scc config/scc_example.csv --run-id my_diff_run
 
 # Event photometry (after SCC diffs exist)
@@ -194,7 +196,7 @@ Full parameter tables, fitting steps, outputs, and dual-method examples:
 
 ## `background_temporal_smoothing` (spatial → temporal → strap)
 
-Inserted after `background_estimate` in [`diff_config_single_kernel.yaml`](diff_config_single_kernel.yaml) and [`diff_config_multi_kernel.yaml`](diff_config_multi_kernel.yaml). Temporally smooths the full-crop photutils background cube (`ks_b`) with Savitzky–Golay when `steps.temporal.enabled: true`; writes `ks_b_s`. Pair with a `subtract` stage for resubtracted diffs.
+Inserted after `background_estimate` in [`pipeline.yaml`](pipeline.yaml)'s embedded `diff:` policy and [`diff_config_multi_kernel.yaml`](archive/diff_config_multi_kernel.yaml). Temporally smooths the full-crop photutils background cube (`ks_b`) with Savitzky–Golay when `steps.temporal.enabled: true`; writes `ks_b_s`. Pair with a `subtract` stage for resubtracted diffs.
 
 ```yaml
 - kind: background_temporal_smoothing

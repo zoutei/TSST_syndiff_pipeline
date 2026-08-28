@@ -30,25 +30,6 @@ from syndiff_pipeline.pipeline_spec import STAGE_DEPS
 from tests.site_fixtures import write_site_deployment
 
 
-def _write_diff_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "defaults:",
-                "  n_jobs: 2",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def _eight_stage_run_setup(tmp_path: Path, target: Target):
     """Run directory + state with all eight stages and local executors."""
     site = tmp_path / "site"
@@ -58,7 +39,6 @@ def _eight_stage_run_setup(tmp_path: Path, target: Target):
         workspace_root=str(tmp_path),
         data_root=str(tmp_path / "data"),
     )
-    _write_diff_policy(site / "diff_config.yaml")
 
     runs_root = tmp_path / "runs"
     run_id = "run_a"
@@ -74,7 +54,9 @@ def _eight_stage_run_setup(tmp_path: Path, target: Target):
                 f"runs_root: {runs_root}",
                 f"state_db_path: {tmp_path / 'state.sqlite'}",
                 "skycell_wcs_csv: x.csv",
-                f"diff_config_path: {site / 'diff_config.yaml'}",
+                # No diff: block -- downstream stage-completion checks are
+                # mocked out in this test, so a real diff policy is never
+                # resolved (cfg.diff stays None).
                 "stages:",
                 "  mapping: {executor: local}",
                 "  ps1_process: {executor: local}",
@@ -93,7 +75,6 @@ def _eight_stage_run_setup(tmp_path: Path, target: Target):
         json.dumps(
             {
                 "run_id": run_id,
-                "source_diff_config_path": str(site / "diff_config.yaml"),
             }
         ),
         encoding="utf-8",

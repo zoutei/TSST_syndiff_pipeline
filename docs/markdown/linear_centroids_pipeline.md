@@ -7,7 +7,7 @@ templates (using a temporally varying WCS from those centroids — phase 2) and
 run the **existing** field kernel-fit diff to `hp_d`.
 
 Configs for the implemented phase live under
-[`config/linear_centroids/`](../../config/linear_centroids/).
+[`config/archive/linear_centroids/`](../../config/archive/linear_centroids/).
 
 ---
 
@@ -34,10 +34,10 @@ flowchart LR
 
 | Phase | Status | Goal | Config |
 |-------|--------|------|--------|
-| **1a** Templates | Implemented | Point-drift linear templates from TESS FFI headers | `config/linear_centroids/pipeline_templates.yaml` |
-| **1b** Diff + centroids | Implemented | Kernel-fit subtraction; star positions on `hp_d` | `config/linear_centroids/pipeline.yaml` + `diff_config.yaml` |
+| **1a** Templates | Implemented | Point-drift linear templates from TESS FFI headers | `config/archive/linear_centroids/pipeline_templates.yaml` |
+| **1b** Diff + centroids | Implemented | Kernel-fit subtraction; star positions on `hp_d` | `config/archive/linear_centroids/pipeline.yaml` + `diff_config.yaml` (schema v1) |
 | **2** TV WCS | **Not implemented** | Per-epoch WCS field derived from phase-1 centroids | — (next development task) |
-| **3** Field templates + diff | **Diff implemented**; TV-aware remap TBD | Full field remap/downsample, then kernel diff → `hp_d` (no ePSF) | `config/pipeline_field_c3_k3_os1.yaml` + `config/diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml` |
+| **3** Field templates + diff | **Diff implemented**; TV-aware remap TBD | Full field remap/downsample, then kernel diff → `hp_d` (no ePSF) | `config/archive/pipeline_field_c3_k3_os1.yaml` + `config/archive/diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml` |
 
 ---
 
@@ -71,7 +71,7 @@ s{SSSS}/c{C}/k{K}/
 
 ```bash
 syndiff template submit \
-  --config config/linear_centroids/pipeline_templates.yaml \
+  --config config/archive/linear_centroids/pipeline_templates.yaml \
   --scc config/scc_my_lanes.csv \
   --stages remap,downsample \
   --run-id my_linear_templates \
@@ -89,7 +89,7 @@ the relationship between point-drift remap and the `linear` store lane.
 fit ePSF and extract centroids on full-chip `hp_d` difference images. Centroids
 are the input to phase 2 (TV WCS).
 
-**Diff sub-pipeline** (`config/linear_centroids/diff_config.yaml`):
+**Diff sub-pipeline** (`config/archive/linear_centroids/diff_config.yaml`, schema v1):
 
 | Step | Purpose |
 |------|---------|
@@ -115,7 +115,7 @@ are the input to phase 2 (TV WCS).
 
 ```bash
 syndiff diff submit \
-  --config config/linear_centroids/pipeline.yaml \
+  --config config/archive/linear_centroids/pipeline.yaml \
   --scc config/scc_my_lanes.csv \
   --stages diff \
   --run-id my_linear_centroids
@@ -125,7 +125,7 @@ syndiff diff submit \
 
 ```bash
 syndiff diff run \
-  --config config/linear_centroids/pipeline.yaml \
+  --config config/archive/linear_centroids/pipeline.yaml \
   --scc config/scc_my_lanes.csv
 ```
 
@@ -171,9 +171,9 @@ implemented and in production configs:
 
 | Piece | Config |
 |-------|--------|
-| Field remap + downsample + diff (full L4a/L4b) | [`config/pipeline_field_c3_k3_os1.yaml`](../../config/pipeline_field_c3_k3_os1.yaml) |
-| Diff recipe (kernel_fit → hotpants only) | [`config/diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml`](../../config/diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml) |
-| Point-drift field lane (no L4a/L4b; bootstrap) | [`config/pipeline_linear_bootstrap_os1.yaml`](../../config/pipeline_linear_bootstrap_os1.yaml) + [`config/diff_config_scc_field_nc_multi_hp_centroids_os1.yaml`](../../config/diff_config_scc_field_nc_multi_hp_centroids_os1.yaml) |
+| Field remap + downsample + diff (full L4a/L4b) | [`config/archive/pipeline_field_c3_k3_os1.yaml`](../../config/archive/pipeline_field_c3_k3_os1.yaml) |
+| Diff recipe (kernel_fit → hotpants only) | [`config/archive/diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml`](../../config/archive/diff_config_scc_c3_k3_multi_hp_epsf_os1.yaml) |
+| Point-drift field lane (no L4a/L4b; bootstrap) | [`config/archive/pipeline_linear_bootstrap_os1.yaml`](../../config/archive/pipeline_linear_bootstrap_os1.yaml) + [`config/archive/diff_config_scc_field_nc_multi_hp_centroids_os1.yaml`](../../config/archive/diff_config_scc_field_nc_multi_hp_centroids_os1.yaml) |
 
 **Diff sub-pipeline** (already wired — no `epsf` / `centroids` stages):
 
@@ -188,7 +188,7 @@ when `paths.template_store_name` / `output_store_name` are set.
 
 ```bash
 syndiff diff submit \
-  --config config/pipeline_field_c3_k3_os1.yaml \
+  --config config/archive/pipeline_field_c3_k3_os1.yaml \
   --scc config/scc_my_lanes.csv \
   --stages mapping,remap,downsample,diff \
   --run-id my_field_diff
@@ -218,12 +218,18 @@ remap drift source / bookkeeping path feeding field downsample.
 ## Quick reference — config files
 
 ```
-config/linear_centroids/
+config/archive/linear_centroids/
   README.md                 ← short ops pointer
   pipeline_templates.yaml   ← phase 1a: remap + linear downsample
-  diff_config.yaml          ← phase 1b: diff recipe
+  diff_config.yaml          ← phase 1b: diff recipe (schema v1)
   pipeline.yaml             ← phase 1b: Condor diff submit wrapper
 ```
+
+This whole folder has since moved to `config/archive/linear_centroids/` (kept
+for reference; not the active campaign). New sites should author the diff
+recipe inline under `pipeline.yaml`'s `diff:` block — schema v2, see
+[config_schema_v2.md](config_schema_v2.md) — rather than a standalone
+`diff_config.yaml`.
 
 SCC target lists stay as top-level CSVs (e.g. `config/scc_s20_c3_k3.csv`) and
 are passed with `--scc`; they are not duplicated inside this folder.

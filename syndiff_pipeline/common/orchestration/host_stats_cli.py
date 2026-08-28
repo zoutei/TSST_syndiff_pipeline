@@ -235,11 +235,18 @@ def resolve_thresholds_from_site(site_dir: str | Path, stage: str) -> tuple[int,
         params = getattr(cfg.stages, stage_key)
         return int(params.host_stats_min_mem_mb), float(params.host_stats_max_load15)
     if stage_key in _DIFF_STAGES:
-        from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-            load_diff_site_policy,
+        from syndiff_pipeline.template_creation.orchestration.runner_config import (
+            load_runner_config,
         )
 
-        policy = load_diff_site_policy(site.diff_config)
+        runner_cfg = load_runner_config(str(site.template_config))
+        if runner_cfg.diff is not None:
+            policy = runner_cfg.diff
+        else:
+            raise FileNotFoundError(
+                f"No diff policy for site {site.site_dir}: {site.template_config} has "
+                "no embedded 'diff:' block."
+            )
         resources = policy.condor_by_stage[stage_key]
         return int(resources.host_stats_min_mem_mb), float(resources.host_stats_max_load15)
     if stage_key == "star":

@@ -38,7 +38,7 @@ Three knobs that look similar and are **not** interchangeable:
 | Knob | Where | Meaning |
 |------|-------|---------|
 | **`oversampling_factor` (`F`)** | `pipeline.yaml` → `stages.mapping` / `stages.downsample`; `star_config.yaml` → `defaults.oversampling_factor` | Build / consume templates and mapping on an `F×F` finer TESS grid under `oversampling_{F}/` |
-| **`hotpants.oversample`** | `diff_config.yaml` → `pipeline: [{kind: hotpants, oversample: …}]` | Tell pyhotpants the template is HR relative to science. Usually **omit** — syndiff infers `F` from array shapes |
+| **`hotpants.oversample`** | diff `pipeline:` → `[{kind: hotpants, oversample: …}]` (`pipeline.yaml`'s `diff.pipeline`, or a legacy standalone `diff_config.yaml`'s `pipeline:`) | Tell pyhotpants the template is HR relative to science. Usually **omit** — syndiff infers `F` from array shapes |
 | **`epsf_oversample`** | ePSF / photometry stages | Unrelated ePSF model oversampling (photutils). Do not set this to match template `F` |
 
 **Hotpants stamp modes** (diff only; star never runs Hotpants):
@@ -330,7 +330,7 @@ regions around catalog stars.
 
 ## 7. Kernel reuse path (`kernel_fit` / `convolved_templates`)
 
-Used by configs such as `diff_config_single_kernel.yaml`.
+Used by configs such as `config/pipeline.yaml`'s `diff:` block (schema v2 reference) or the legacy standalone `diff_config_single_kernel.yaml` (schema v1).
 
 1. **`kernel_fit`** runs Hotpants twice on the min-background FFI and writes
    `kernel_r2.npz` (native-indexed kernel solution + metadata).
@@ -444,7 +444,7 @@ stages:
     oversampling_factor: 2
 ```
 
-**`diff_config.yaml`:** leave Hotpants `oversample` unset; keep
+**Diff policy:** leave Hotpants `oversample` unset; keep
 `hp_force_convolve: "t"`. Prefer Condor memory high enough for HR templates.
 
 **`star_config.yaml`:**
@@ -466,7 +466,8 @@ so `hotpants_substamp_stars.csv` exists.
 ### 11.3 Combine `F>1` + connected regions
 
 Supported: both force pure Python. Cost is high (HR convolution + irregular
-stamps). Start with a small `crop_box_size` / `max_ffis` smoke before production.
+stamps). Start with a small `max_ffis` smoke before production (the diff-side
+`crop_box_size` knob is removed — see [config_schema_v2.md](config_schema_v2.md)).
 
 ---
 

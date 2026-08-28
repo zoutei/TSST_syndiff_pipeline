@@ -12,21 +12,31 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.common.orchestration.targets import Target, load_targets
-from syndiff_pipeline.common.scc_paths import event_scc_leaf, scc_ffi_dir, scc_templates_dir
+from syndiff_pipeline.common.scc_paths import (
+    event_scc_leaf,
+    scc_catalogs_dir,
+    scc_diff_dir,
+    scc_ffi_dir,
+    scc_templates_dir,
+)
 from syndiff_pipeline.difference_imaging.orchestration.config import (
     SynDiffConfig,
     absolutize_config,
     load_config,
 )
+from syndiff_pipeline.difference_imaging.support.paths import (
+    GAIA_CATALOG_PIPELINE_BASENAME,
+)
 from syndiff_pipeline.difference_imaging.orchestration.site_config import (
     SitePaths,
-    freeze_target_diff_config,
     load_diff_site_policy,
+    parse_unified_diff_policy,
     resolve_diff_config,
     resolve_event_template_dir,
     write_frozen_diff_config,
 )
-from tests.site_fixtures import write_site_deployment
+from syndiff_pipeline.template_creation.orchestration.runner_config import load_runner_config
+from tests.site_fixtures import resolve_target_diff_config, write_site_deployment, write_unified_site_config
 
 
 def _target() -> Target:
@@ -41,6 +51,8 @@ def _target() -> Target:
 
 
 def _write_diff_policy(path: Path) -> None:
+    """Write a standalone v1 diff policy file (for load_diff_site_policy tests
+    -- that function's own file-parsing purpose is retained post-migration)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         "\n".join(
@@ -62,6 +74,14 @@ def _write_diff_policy(path: Path) -> None:
     )
 
 
+_DIFF_POLICY_DICT = {
+    "defaults": {"n_jobs": 4},
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [{"kind": "shared_mask"}],
+    "condor": {"request_cpus": 4, "request_memory": 32000},
+}
+
+
 class TestSiteConfigLoader(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
@@ -76,6 +96,12 @@ class TestSiteConfigLoader(unittest.TestCase):
             data_root=str(self.data),
         )
         _write_diff_policy(self.site / "diff_config.yaml")
+        write_unified_site_config(
+            self.site / "pipeline.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff=_DIFF_POLICY_DICT,
+        )
         target = _target()
         template_store = scc_templates_dir(self.data, target.sector, target.camera, target.ccd, oversampling_factor=1)
         template_store.mkdir(parents=True)
@@ -118,8 +144,8 @@ class TestSiteConfigLoader(unittest.TestCase):
             load_diff_site_policy("")
         self.assertIn("diff_config_path is empty", str(ctx.exception))
 
-    def test_freeze_target_diff_config_absolutizes_paths(self):
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())
+    def test_resolve_target_diff_config_absolutizes_paths(self):
+        cfg = resolve_target_diff_config(self.site, _target())
         self.assertIsInstance(cfg, SynDiffConfig)
         self.assertTrue(Path(cfg.ffi_dir).is_absolute())
         self.assertTrue(Path(cfg.output_dir).is_absolute())
@@ -129,9 +155,14 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertEqual(cfg.camera, 3)
         self.assertEqual(cfg.ccd, 3)
         self.assertEqual(cfg.target_ra, 210.219333)
-        self.assertIn("events", cfg.output_dir)
-        self.assertIn("2020ut", cfg.output_dir)
-        self.assertIn("s0020_c3_k3", cfg.output_dir)
+        # output_dir is the SCC diff lane root (wave A-3 re-root), keyed by
+        # sector/camera/ccd -- never by event name.
+        self.assertEqual(
+            Path(cfg.output_dir),
+            scc_diff_dir(self.data, cfg.sector, cfg.camera, cfg.ccd),
+        )
+        self.assertNotIn("events", cfg.output_dir)
+        self.assertNotIn("2020ut", cfg.output_dir)
         self.assertEqual(cfg.ffi_dir, str((self.data / "s0020" / "c3" / "k3" / "ffi").resolve()))
         # Bundled straps/BSC are not injected; empty means packaged default at use time.
         self.assertEqual(cfg.straps_csv, "")
@@ -149,17 +180,49 @@ class TestSiteConfigLoader(unittest.TestCase):
         )
 
     def test_prefers_gaia_catalog_pipeline_in_workspace(self):
+        # Regression for the SCC-only Gaia resolution fix: the pipeline-cached
+        # catalog lives under the SCC diff lane root (keyed by sector/camera/ccd
+        # + output store lane), not under any per-event workspace directory.
+        # An event-scoped ``ws/gaia_catalog_pipeline.csv`` must NOT be picked up
+        # (that was the pre-SCC-migration probe this test used to exercise).
         target = _target()
-        event_dir = event_scc_leaf(self.handoff, target.event_name(), target.sector, target.camera, target.ccd)
-        ws = event_dir / "ws"
-        ws.mkdir(parents=True, exist_ok=True)
-        pipeline_csv = ws / "gaia_catalog_pipeline.csv"
+        lane_root = scc_diff_dir(self.data, target.sector, target.camera, target.ccd)
+        lane_root.mkdir(parents=True, exist_ok=True)
+        pipeline_csv = lane_root / GAIA_CATALOG_PIPELINE_BASENAME
         pipeline_csv.write_text("x,y\n", encoding="utf-8")
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", target)
+        cfg = resolve_target_diff_config(self.site, target)
         self.assertEqual(cfg.gaia_catalog, str(pipeline_csv.resolve()))
 
+    def test_ignores_stale_event_scoped_gaia_catalog(self):
+        """A stale per-event catalog must not change SCC-keyed resolution.
+
+        Pre-SCC-migration workspaces still hold ``gaia_catalog_pipeline.csv``
+        under ``events/{event}/s..._c..._k.../`` (e.g. 2020ut, 2019pdx). The old
+        probe preferred those, so one SCC resolved different catalogs depending
+        on which event label sat on the target row. Diff config is keyed by SCC
+        alone, so both layouts below must be ignored.
+        """
+        target = _target()
+        event_dir = event_scc_leaf(
+            self.handoff, target.event_name(), target.sector, target.camera, target.ccd
+        )
+        (event_dir / "ws").mkdir(parents=True, exist_ok=True)
+        for stale in (
+            event_dir / "ws" / GAIA_CATALOG_PIPELINE_BASENAME,
+            event_dir / GAIA_CATALOG_PIPELINE_BASENAME,
+        ):
+            stale.write_text("stale,event,scoped\n", encoding="utf-8")
+
+        cfg = resolve_target_diff_config(self.site, target)
+
+        expected = scc_catalogs_dir(
+            self.data, target.sector, target.camera, target.ccd
+        ) / f"gaia_catalog_s{target.sector:04d}_{target.camera}_{target.ccd}.csv"
+        self.assertEqual(cfg.gaia_catalog, str(expected))
+        self.assertNotIn(str(event_dir), cfg.gaia_catalog)
+
     def test_write_frozen_diff_config_round_trip(self):
-        cfg = freeze_target_diff_config(self.site / "diff_config.yaml", _target())
+        cfg = resolve_target_diff_config(self.site, _target())
         out = self.root / "frozen" / "diff_config.yaml"
         write_frozen_diff_config(cfg, out)
         loaded = load_config(str(out))
@@ -170,9 +233,10 @@ class TestSiteConfigLoader(unittest.TestCase):
     def test_example_site_files_exist(self):
         example = SitePaths.from_site_dir(_ROOT / "config")
         self.assertTrue(example.template_config.is_file())
-        self.assertTrue(example.diff_config.is_file())
         self.assertTrue(example.deployment_example.is_file())
-        policy = load_diff_site_policy(example.diff_config)
+        runner_cfg = load_runner_config(str(example.template_config))
+        policy = runner_cfg.diff
+        self.assertIsNotNone(policy)
         self.assertTrue(policy.pipeline)
         self.assertEqual(policy.condor.request_memory, 100_000)
         targets = load_targets(_ROOT / "config" / "targets_example.csv")
@@ -201,27 +265,18 @@ class TestSiteConfigLoader(unittest.TestCase):
         )
         named.mkdir(parents=True)
         (named / "template_manifest.json").write_text("{}", encoding="utf-8")
-        policy_path = self.site / "diff_config_named.yaml"
-        policy_path.write_text(
-            "\n".join(
-                [
-                    "deployment_file: deployment.yaml",
-                    "defaults:",
-                    "  n_jobs: 4",
-                    "  oversampling_factor: 1",
-                    "paths:",
-                    "  template_store_name: no_l4b",
-                    "pipeline:",
-                    "  - kind: shared_mask",
-                    "condor:",
-                    "  request_cpus: 4",
-                    "  request_memory: 32000",
-                ]
-            )
-            + "\n",
-            encoding="utf-8",
+        write_unified_site_config(
+            self.site / "pipeline_named.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff={
+                "defaults": {"n_jobs": 4, "oversampling_factor": 1},
+                "paths": {"template_store_name": "no_l4b"},
+                "pipeline": [{"kind": "shared_mask"}],
+                "condor": {"request_cpus": 4, "request_memory": 32000},
+            },
         )
-        cfg = freeze_target_diff_config(policy_path, target)
+        cfg = resolve_target_diff_config(self.site, target, config_filename="pipeline_named.yaml")
         self.assertTrue(cfg.template_dir.endswith("templates_no_l4b/oversampling_1"))
         self.assertEqual(Path(cfg.template_dir).resolve(), named.resolve())
 
@@ -246,6 +301,131 @@ class TestSiteConfigLoader(unittest.TestCase):
         frozen = absolutize_config(cfg, self.data)
         self.assertEqual(frozen.ffi_dir, str((self.data / "tess_ffi").resolve()))
         self.assertEqual(frozen.output_dir, str((self.data / "events" / "test").resolve()))
+
+
+class TestParseUnifiedDiffPolicy(unittest.TestCase):
+    """Unit tests for the v2 embedded ``diff:`` block parser (site_config.py)."""
+
+    def _minimal_raw_diff(self) -> dict:
+        return {
+            "defaults": {"n_jobs": 4},
+            "paths": {"template_base": "shifted_downsampled"},
+            "pipeline": [{"kind": "shared_mask"}],
+            "condor": {"request_cpus": 4, "request_memory": 32000},
+        }
+
+    def test_parses_flat_condor_and_source_dir(self):
+        policy = parse_unified_diff_policy(
+            self._minimal_raw_diff(),
+            source_dir=Path("/site/dir"),
+            deployment_file="deployment.yaml",
+        )
+        self.assertEqual(policy.source_dir, "/site/dir")
+        self.assertEqual(policy.deployment_file, "deployment.yaml")
+        self.assertEqual(len(policy.pipeline), 1)
+        self.assertEqual(policy.condor.request_cpus, 4)
+        # Flat condor applies to all three split diff stages identically.
+        self.assertEqual(
+            set(policy.condor_by_stage.keys()), {"diff_prep", "background_estimate", "diff"}
+        )
+        for stage_condor in policy.condor_by_stage.values():
+            self.assertEqual(stage_condor.request_cpus, 4)
+        # 'raw' carries the verbatim input, source_dir excluded (tracked separately).
+        self.assertNotIn("source_dir", policy.raw)
+        self.assertEqual(policy.raw["condor"], {"request_cpus": 4, "request_memory": 32000})
+
+    def test_nested_condor_survives_unnormalized(self):
+        raw = self._minimal_raw_diff()
+        raw["condor"] = {
+            "diff_prep": {"request_cpus": 4, "request_memory": 8000},
+            "background_estimate": {"request_cpus": 32, "request_memory": 200000},
+            "diff": {"request_cpus": 8, "request_memory": 16000},
+        }
+        policy = parse_unified_diff_policy(
+            raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+        )
+        self.assertEqual(policy.condor_by_stage["background_estimate"].request_memory, 200000)
+        self.assertEqual(policy.condor_by_stage["diff_prep"].request_memory, 8000)
+        # policy.condor (back-compat single profile) mirrors condor_by_stage["diff"].
+        self.assertEqual(policy.condor.request_cpus, 8)
+        # raw.condor is the untouched nested mapping, not flattened/normalized.
+        self.assertEqual(policy.raw["condor"], raw["condor"])
+
+    def test_nested_condor_missing_stage_still_rejected(self):
+        raw = self._minimal_raw_diff()
+        raw["condor"] = {
+            "diff_prep": {"request_cpus": 4},
+            "diff": {"request_cpus": 8},
+            # background_estimate missing -- invariant 13.
+        }
+        with self.assertRaises(ValueError) as ctx:
+            parse_unified_diff_policy(
+                raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+            )
+        self.assertIn("background_estimate", str(ctx.exception))
+
+    def test_diff_deployment_file_key_is_ignored(self):
+        """'diff.deployment_file is not a thing' -- the top-level value always wins."""
+        raw = self._minimal_raw_diff()
+        raw["deployment_file"] = "should_be_ignored.yaml"
+        policy = parse_unified_diff_policy(
+            raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+        )
+        self.assertEqual(policy.deployment_file, "deployment.yaml")
+
+    def test_frozen_source_dir_key_wins_over_param(self):
+        """A reloaded frozen config recovers the ORIGINAL authoring dir, not
+        wherever the frozen runs/{run_id}/config.yaml file now lives."""
+        raw = self._minimal_raw_diff()
+        raw["source_dir"] = "/original/site/dir"
+        policy = parse_unified_diff_policy(
+            raw,
+            source_dir=Path("/runs/some_run_id"),
+            deployment_file="deployment.yaml",
+        )
+        self.assertEqual(policy.source_dir, "/original/site/dir")
+
+    def test_rejects_event_stage_kinds_in_pipeline(self):
+        for kind in ("astrometry", "forced_photometry", "photometry"):
+            with self.subTest(kind=kind):
+                raw = self._minimal_raw_diff()
+                raw["pipeline"] = [{"kind": "shared_mask"}, {"kind": kind}]
+                with self.assertRaises(ValueError) as ctx:
+                    parse_unified_diff_policy(
+                        raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+                    )
+                msg = str(ctx.exception)
+                self.assertIn(kind, msg)
+                self.assertIn("photometry_config.yaml", msg)
+
+    def test_rejects_additional_forced_targets(self):
+        raw = self._minimal_raw_diff()
+        raw["additional_forced_targets"] = [{"target_name": "x"}]
+        with self.assertRaises(ValueError) as ctx:
+            parse_unified_diff_policy(
+                raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+            )
+        self.assertIn("additional_forced_targets", str(ctx.exception))
+        self.assertIn("photometry_config.yaml", str(ctx.exception))
+
+    def test_rejects_per_event_force_targets(self):
+        raw = self._minimal_raw_diff()
+        raw["per_event_force_targets"] = {"2020ut": [{"target_name": "x"}]}
+        with self.assertRaises(ValueError) as ctx:
+            parse_unified_diff_policy(
+                raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+            )
+        self.assertIn("per_event_force_targets", str(ctx.exception))
+        self.assertIn("photometry_config.yaml", str(ctx.exception))
+
+    def test_mask_settings_carried_through_verbatim(self):
+        raw = self._minimal_raw_diff()
+        raw["mask_settings"] = {"shared": {"bright_maglim": 14.0}}
+        policy = parse_unified_diff_policy(
+            raw, source_dir=Path("/site/dir"), deployment_file="deployment.yaml"
+        )
+        self.assertEqual(policy.mask_settings, {"shared": {"bright_maglim": 14.0}})
+        self.assertEqual(policy.raw["mask_settings"], {"shared": {"bright_maglim": 14.0}})
 
 
 if __name__ == "__main__":

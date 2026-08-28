@@ -24,8 +24,10 @@ syndiff star submit --site SITE --star-targets star_targets.csv    # host-star l
 `--sector/--camera/--ccd` for one SCC) — no event coordinates. `syndiff diff`
 takes **either** `--scc` (SCC-only field subtraction; mutually exclusive with
 `--targets`) **or** `--targets` (event-oriented submit). The default `diff`
-preset selects **`["diff"]` only** (site `diff_config.yaml` defaults to
-`shared_mask` + `hotpants`). Event forced photometry is **`syndiff photometry`**
+preset selects **`["diff"]` only** (the default `diff_config.yaml` diff policy
+defaults to `shared_mask` + `hotpants`; schema v2 sites embed the same shape
+under `pipeline.yaml`'s `diff:` block — see
+[config_schema_v2.md](config_schema_v2.md)). Event forced photometry is **`syndiff photometry`**
 (see [photometry.md](photometry.md)). `diff` depends on `downsample` in the DAG
 and, on launch, verifies `tess_ffi_download` + `downsample` on disk via
 `DIFF_VERIFY_UPSTREAM` in `common/orchestration/spec.py`. Inside `diff` execute,
@@ -41,7 +43,7 @@ Event photometry: [photometry.md](photometry.md), [stages/photometry_pipeline.md
 
 Monitoring verbs (`progress`, `status`, `retry`, …) are workspace-wide and work identically regardless of which preset started the run.
 
-For difference imaging stage lists and example YAMLs, see [`config/diff_config.yaml`](../../config/diff_config.yaml) and [`config/example/`](../../config/example/). Forked **pyhotpants** and **MOCPy** requirements are summarized in the [main README](../../README.md#forked-dependencies).
+For difference imaging stage lists and example YAMLs, see [`config/diff_config.yaml`](../../config/diff_config.yaml) (schema v1 default), [`config/pipeline.yaml`](../../config/pipeline.yaml)'s embedded `diff:` block (schema v2 reference), and [`config/example/`](../../config/example/). Forked **pyhotpants** and **MOCPy** requirements are summarized in the [main README](../../README.md#forked-dependencies).
 
 **Documentation index**: [`docs/README.md`](README.md)
 
@@ -102,7 +104,7 @@ The template pipeline produces **PS1-based templates on the TESS pixel grid**, o
 
 **Diff** (`syndiff diff submit`; `--scc` for SCC field subtract or `--targets` for event photometry):
 
-7. **`diff`** — run the config-driven difference-imaging pipeline. Depends on `downsample` in the DAG. When `data_root` is set, `scc_bootstrap` runs in-process: loads `field_mode_assembly.json` (schema v3 + `MappingGrid`; `MAPGRID=3` required; missing or other values fail closed) from the SCC template store, writes `bookkeeping/diff/{frames.csv,diff_job.json}`, then runs Hotpants → photometry. Diff products are SCC-primary under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`; event photometry workspaces remain under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/` when using `--targets`.
+7. **`diff`** — run the config-driven difference-imaging pipeline. Depends on `downsample` in the DAG. When `data_root` is set, `scc_bootstrap` runs in-process: loads `field_mode_assembly.json` (schema v3 + `MappingGrid`; `MAPGRID=3` required; missing or other values fail closed) from the SCC template store, writes `bookkeeping/diff/{frames.csv,diff_job.json}`, then runs Hotpants → photometry. Diff products are SCC-primary under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` regardless of whether the submit used `--scc` or `--targets` — diff is SCC-scoped, not event-scoped, so there is no event `ws/` tree. Event workspaces (`{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/`) hold only per-event photometry, under `phot_{run_id}/` (see `syndiff photometry`).
 
 The separately submitted **star** branch verifies those completed artifacts,
 then writes host-star products under `{baseline_ws}/host_star/`; it does not
@@ -131,7 +133,7 @@ standalone research workflow.
 | Orchestration | This file (`docs/template_pipeline.md`) | YAML config, scheduler, SQLite, Condor, CLI, logs |
 | Stage algorithms | [`docs/stages/`](stages/README.md) | PanCAKES mapping, PS1 convolution, downsampling internals |
 | Legacy standalone workflow | [`docs/stages/standalone_pipeline_overview.md`](stages/standalone_pipeline_overview.md) | Original `pipeline.py` + per-script CLI |
-| Diff imaging | [`config/example/`](../../config/example/), [`config/diff_config.yaml`](../../config/diff_config.yaml) | Hotpants → photometry after templates exist |
+| Diff imaging | [`config/example/`](../../config/example/), [`config/diff_config.yaml`](../../config/diff_config.yaml), [`config/pipeline.yaml`](../../config/pipeline.yaml)'s `diff:` block | Hotpants → photometry after templates exist |
 
 ### Script → module → stage mapping
 
@@ -149,7 +151,7 @@ standalone research workflow.
 
 The runner adds capabilities not present in the standalone scripts: **multi-target batching**, **SCC-scoped reference-FFI selection** for template building, **SCC-primary diff bookkeeping** (`scc_bootstrap` inside `diff`), **artifact verification**, **force-rerun cleanup**, **pause/kill/retry**, and **HTCondor** for `mapping` and `ps1_process`.
 
-If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff template submit --site config --scc config/scc_example.csv` followed by `syndiff diff submit --site config --scc config/scc_example.csv` for field subtraction (or `--targets targets.csv` for event photometry). There is no combined `syndiff all` preset. Site configs live under `config/` (`pipeline.yaml`, `diff_config.yaml`, `deployment.yaml`).
+If you previously used `syndiff/run.sh` one-liners, the equivalent production path is `syndiff template submit --site config --scc config/scc_example.csv` followed by `syndiff diff submit --site config --scc config/scc_example.csv` for field subtraction (or `--targets targets.csv` for event photometry). There is no combined `syndiff all` preset. Site configs live under `config/`: `pipeline.yaml` (template policy, plus the diff sub-pipeline embedded inline under `diff:` — schema v2) and `deployment.yaml`; a standalone `diff_config.yaml` pointed to by a legacy `diff_config:` key still loads (schema v1). See [config_schema_v2.md](config_schema_v2.md).
 
 ---
 
@@ -303,8 +305,7 @@ cp config/deployment.yaml.example config/deployment.yaml
 
 | File | Role |
 |------|------|
-| `pipeline.yaml` | Template policy: stages, resource pools, notifications |
-| `diff_config.yaml` | Diff-imaging policy + `condor:` resources for the `diff` stage |
+| `pipeline.yaml` | `config_schema_version: 2`. Template policy (stages, resource pools, notifications) plus the diff-imaging policy + `condor:` resources for the `diff` stage, embedded inline under `diff:`. A legacy standalone `diff_config.yaml` (schema v1) still loads via a `diff_config:` pointer — see [config_schema_v2.md](config_schema_v2.md) |
 | `deployment.yaml` | Gitignored paths + credentials (`workspace_root`, `data_root`, Gaia, Discord) |
 | `targets_example.csv` | Targets (always passed via `--targets` on the CLI) |
 
@@ -402,8 +403,8 @@ Template output lands in the SCC's shared store at
 nested, including `N=1`; override the root with `stages.downsample.output_base`
 / legacy key `stages.downsample.output_base`). There is **no** `ws/templates`
 symlink anymore — the `diff` stage resolves `cfg.template_dir` directly from
-that SCC path (or an explicit `paths.template_dir` override in
-`diff_config.yaml`). Run `syndiff diff submit --site config --scc sccs.csv` for
+that SCC path (or an explicit `paths.template_dir` override in `diff.paths`).
+Run `syndiff diff submit --site config --scc sccs.csv` for
 SCC field subtraction once templates exist, or `--targets targets.csv` for event
 photometry at a transient position.
 
@@ -507,7 +508,7 @@ Configure under `resources:` in YAML. For Condor stages, each pool's `max_concur
 
 The Condor path:
 
-1. Builds a `CondorResourceRequest` from stage YAML (`pipeline.yaml` template stages, or `condor:` in `diff_config.yaml` / `star_config.yaml` / `photometry_config.yaml`).
+1. Builds a `CondorResourceRequest` from stage YAML (`pipeline.yaml` template stages, or `condor:` in `pipeline.yaml`'s `diff:` block / `star_config.yaml` / `photometry_config.yaml`).
 2. At submit time, reads cluster host sampler JSON from `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`) and sets `requirements` + `rank` automatically — see [HTCondor Integration](#htcondor-integration).
 3. Merges reactive exclusions from `{stage}.condor.bad_machines` (eviction / memory-hold hosts).
 4. Writes a `.condor.submit` file next to the stage log.
@@ -644,7 +645,7 @@ templates/oversampling_{N}/
 
 **Module**: `difference_imaging/orchestration/execute.py` (registry: `difference_imaging/orchestration/stages.py`)
 
-Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → background → forced photometry) after templates exist. **DAG dependency**: `downsample` only (`DIFF_STAGE.deps = ("downsample",)`). Policy comes from the site [`diff_config.yaml`](../../config/diff_config.yaml), referenced by `diff_config:` in `pipeline.yaml`; per-target copies are frozen under `per_target/<label>/diff_config.yaml` at launch.
+Runs the config-driven difference-imaging pipeline (Hotpants → ePSF → background → forced photometry) after templates exist. **DAG dependency**: `downsample` only (`DIFF_STAGE.deps = ("downsample",)`). Policy comes from `pipeline.yaml`'s embedded `diff:` block (schema v2), or a legacy standalone `diff_config.yaml` referenced by a `diff_config:` pointer key (schema v1) — see [config_schema_v2.md](config_schema_v2.md). The whole resolved policy is frozen verbatim into `runs/{run_id}/config.yaml` at submit (the sole runtime authority thereafter); a write-only per-target debug dump also lands at `per_target/<label>/diff_config.yaml`.
 
 #### `scc_bootstrap` (in-process, inside `diff` execute)
 
@@ -660,7 +661,7 @@ When `data_root` is set on the frozen diff config, `difference_imaging/orchestra
 **Outputs**:
 
 - **SCC field subtract** (`syndiff diff submit --scc`): products under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` (Hotpants diffs, kernels, photometry caches per recipe fingerprint).
-- **Event photometry** (`syndiff diff submit --targets`): workspace under `{workspace_root}/events/{event_name}/s{SSSS}_c{C}_k{K}/ws/`; templates resolved from the SCC template store — there is no `ws/templates` symlink.
+- **`syndiff diff submit --targets`**: `cfg.output_dir` resolves to the same SCC diff lane as `--scc` — diff is SCC-scoped, not event-scoped, so a `--targets` submit just derives `(sector, camera, ccd)` from each target row and writes to the identical lane; there is no event `ws/` tree and no `ws/templates` symlink. Templates resolve directly from the SCC template store.
 
 **Config** (`stages.diff` in `pipeline.yaml`):
 
@@ -668,7 +669,7 @@ When `data_root` is set on the frozen diff config, `difference_imaging/orchestra
 |-----|---------|-------------|
 | `executor` | `"condor"` | `"condor"` or `"local"`; uses resource pool `diff` |
 
-Condor cgroup claims (`request_cpus`, `request_memory`, optional `request_disk`) and host-stats thresholds (`host_stats_min_mem_mb`, `host_stats_max_load15`) are defined in `diff_config.yaml` under `condor:`.
+Condor cgroup claims (`request_cpus`, `request_memory`, optional `request_disk`) and host-stats thresholds (`host_stats_min_mem_mb`, `host_stats_max_load15`) are defined under `diff.condor:` in `pipeline.yaml` (or `condor:` in a legacy standalone `diff_config.yaml`).
 
 **Verification**: SCC bookkeeping (`bookkeeping/diff/diff_job.json` + `frames.csv`) and template sidecar when using field mode; frame manifest CSV and workspace label directories for event photometry workspaces.
 
@@ -695,7 +696,9 @@ Loaded by `template_creation/orchestration/runner_config.py`. On submit, a **fro
 | Key | Required | Description |
 |-----|----------|-------------|
 | `deployment_file` | no | Filename of the gitignored deployment overlay beside config (default: `deployment.yaml`) |
-| `diff_config` | no | Path to diff site policy YAML (default: `diff_config.yaml` beside `pipeline.yaml`) |
+| `config_schema_version` | no | Informational marker only (`2` for the embedded-`diff:` shape); no loader reads or validates it — see [config_schema_v2.md](config_schema_v2.md) |
+| `diff` | no | Diff-imaging policy, embedded inline (schema v2) — mutually exclusive with `diff_config`/`diff_site_config` below; setting both raises at load |
+| `diff_config` / `diff_site_config` | no | Path to a standalone diff site policy YAML (schema v1, legacy) |
 | `stages` | no | Per-stage parameters (see below) |
 | `resources` | no | Pool concurrency limits |
 | `scheduler` | no | Scheduler tuning |
@@ -955,7 +958,7 @@ Named store lanes (optional A/B): `stages.remap.store_name` writes `remap_{NAME}
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `executor` | `"condor"` | `"condor"` or `"local"`; Condor resource requests come from `diff_config.yaml` |
+| `executor` | `"condor"` | `"condor"` or `"local"`; Condor resource requests come from `pipeline.yaml`'s `diff.condor:` block (or a legacy standalone `diff_config.yaml`'s `condor:`) |
 
 ### Resolved per-target paths
 
@@ -1408,7 +1411,7 @@ Requires `discord_webhook_url` in `deployment.yaml` and `notifications.enabled: 
 
 | Flag | Commands | Description |
 |------|----------|-------------|
-| `--site DIR` | `submit`, `run`, `verify`, workspace verbs | Site folder (`pipeline.yaml` + `diff_config.yaml` + `deployment.yaml`) |
+| `--site DIR` | `submit`, `run`, `verify`, workspace verbs | Site folder (`pipeline.yaml`, with its embedded `diff:` block or legacy `diff_config.yaml` pointer, + `deployment.yaml`) |
 | `--config PATH` | `submit`, `run`, `verify`, `reconcile-manifests` | Site `pipeline.yaml`; loads deployment beside config |
 | `--deployment PATH` | workspace | `deployment.yaml`; optional when one supervisor is auto-discovered |
 | `--run-dir PATH` | run-scoped | `{workspace_root}/runs/<run_id>` with frozen `config.yaml` |
@@ -1574,7 +1577,7 @@ Tables: `runs`, `targets`, `stage_runs`. Safe to query while scheduler runs (WAL
 | `ps1_process` | Each expected skycell's `{skycell}_data` array has materialized chunks |
 | `remap` | `remap_manifest.json`, `shift_schedule.npz`, and group artifacts under `remap/oversampling_{N}/` (field mode) |
 | `downsample` | Complete field-mode manifest and `field_mode_assembly.json` (schema v3) under the SCC template directory |
-| `diff` | SCC bookkeeping (`bookkeeping/diff/diff_job.json` + `frames.csv`) and diff lane products under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`, or event workspace manifest + label dirs under `events/{event_name}/{scc_label}/ws/` for `--targets` runs |
+| `diff` | SCC bookkeeping (`bookkeeping/diff/diff_job.json` + `frames.csv`) and diff lane products under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` — same lane for `--scc` and `--targets` runs alike; there is no event `ws/` tree |
 
 Partial convolved Zarr (interrupted run) reports e.g. `Partial convolved zarr: 3/120 skycells saved`.
 
@@ -1644,7 +1647,7 @@ re-scanning the store.
 
 ### How machine selection works at submit time
 
-Syndiff no longer accepts YAML `condor_requirements`, `condor_rank`, or `diff_config.yaml` / `star_config.yaml` / `photometry_config.yaml` `condor.requirements` / `condor.rank`. Those keys raise `ValueError` at config load.
+Syndiff no longer accepts YAML `condor_requirements`, `condor_rank`, or `condor.requirements` / `condor.rank` under `pipeline.yaml`'s `diff:` block (or a legacy standalone `diff_config.yaml`) / `star_config.yaml` / `photometry_config.yaml`. Those keys raise `ValueError` at config load.
 
 At every `condor_submit`, `common/orchestration/host_stats.py` reads the sampler JSON and:
 
@@ -1862,11 +1865,11 @@ Template building and diff imaging are **two separate DAGs, two separate submits
          │                                              │
          ▼                                              ▼
 {data_root}/s{SSSS}/c{C}/k{K}/         {data_root}/s{SSSS}/c{C}/k{K}/
-  templates/oversampling_{N}/              bookkeeping/diff/, diff_{lane}/
-  remap/, mapping/, …                    events/{event_name}/…/ws/ (event photometry)
+  templates/oversampling_{N}/              bookkeeping/diff/, diff_{lane}/ (SCC-primary; both --scc and --targets land here)
+  remap/, mapping/, …
 ```
 
-Template and diff are **two separate submits** sharing `data_root` science caches. Field-mode crop bounds come from `MappingGrid` in `field_mode_assembly.json` (written by downsample, consumed by `scc_bootstrap` inside `diff`). Event photometry (`--targets`) still uses transient RA/Dec from the targets CSV. Foreground single-target diff works via `syndiff diff run` without the daemon.
+Template and diff are **two separate submits** sharing `data_root` science caches. Field-mode crop bounds come from `MappingGrid` in `field_mode_assembly.json` (written by downsample, consumed by `scc_bootstrap` inside `diff`). Diff is SCC-scoped either way — `--targets` derives `(sector, camera, ccd)` from each row and writes to the same lane `--scc` would. Event photometry (`syndiff photometry`, a separate stage) still uses transient RA/Dec from the targets CSV and writes per-event `phot_{run_id}/` under the event workspace. Foreground single-target diff works via `syndiff diff run` without the daemon.
 
 ---
 
@@ -1923,8 +1926,8 @@ references are vendored under [`docs/markdown/stages/`](stages/README.md):
 
 | File | Purpose |
 |------|---------|
-| `config/pipeline.yaml` | Site policy (stages, pools, notifications) |
-| `config/diff_config.yaml` | Diff-imaging policy + Condor resources |
+| `config/pipeline.yaml` | Site policy (stages, pools, notifications), including the diff-imaging policy + Condor resources embedded under `diff:` |
+| `config/diff_config.yaml` | Legacy standalone diff-imaging policy + Condor resources (schema v1) |
 | `config/deployment.yaml.example` | Deployment paths + credentials template |
 | `config/scc_example.csv` | Example SCC CSV for `syndiff template --scc` |
 | `config/targets_example.csv` | Normalized multi-target CSV for `syndiff diff --targets` |

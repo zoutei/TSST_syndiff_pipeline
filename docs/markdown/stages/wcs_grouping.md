@@ -131,7 +131,7 @@ All under `{workspace_root}/events/{target_label}/`:
 |----------|---------------|
 | `mapping` (PanCAKES) | `reference_ffi_path` — the *only* WCS the whole mapping is built against; also drives the Gaia catalog footprint |
 | `downsample` | `groups` → the unique `(dx, dy)` offset list; crop bounds → ROI; `reference_ffi_basename` → consistency check against the master mapping's `TESS_FFI` header |
-| `diff` | Crop bounds (unless `diff_config` overrides with `crop_mode`/explicit bounds); per-frame `group_id`/`group_dx`/`group_dy` from `syndiff_ffi_frames.csv` for template selection (`support/template_resolution.py`) |
+| `diff` | Crop bounds — always the cluster job's full science bounds; the diff-side `crop_mode`/`crop_box_size` override knobs are removed (SCC diff crop is a property of the SCC, not the diff config); per-frame `group_id`/`group_dx`/`group_dy` from `syndiff_ffi_frames.csv` for template selection (`support/template_resolution.py`) |
 | `downsample` post-step | Reference WCS to project PS1 removed stars into crop-local coordinates (`events/{label}/ps1_removed_stars.csv`) |
 
 ## 10. Single-point drift (linear mode) and field-mode fix

@@ -14,10 +14,10 @@ from astropy.wcs import WCS
 
 from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
 from syndiff_pipeline.star.context import (
-    DEFAULT_MANIFEST_BASENAME,
     StarEventContext,
     full_ffi_to_crop_local,
     resolve_host_full_ffi_xy,
+    resolve_star_manifest_path,
 )
 from syndiff_pipeline.star.identifiers import ResolvedHost
 from syndiff_pipeline.star.mini_downsample import (
@@ -595,7 +595,7 @@ def isolate_and_write_mini_templates(
         # template_group_shifts drive the SAME star-only binning, deduped to the
         # distinct local shift signatures over the star's few skycells.
         gsf = pd.read_parquet(Path(ctx.event_dir) / "template_group_shifts.parquet")
-        frames = pd.read_csv(Path(ctx.event_dir) / DEFAULT_MANIFEST_BASENAME)
+        frames = pd.read_csv(resolve_star_manifest_path(ctx))
         group_ids = sorted(
             {int(g) for g in frames["group_id"].tolist() if pd.notna(g) and int(g) >= 0}
         )

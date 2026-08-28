@@ -26,10 +26,7 @@ from syndiff_pipeline.difference_imaging.masking.ffi_mask import (
     normalize_ffi_product_id,
     write_mask_fits_for_ffi,
 )
-from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    SitePaths,
-    load_diff_site_policy,
-)
+from syndiff_pipeline.difference_imaging.orchestration.site_config import SitePaths
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     resolve_pipeline_artifact_path,
 )
@@ -95,9 +92,17 @@ def _store_name_from_site(site: str | None) -> str | None:
     if not site:
         return None
     paths = SitePaths.from_site_dir(site)
-    if not paths.diff_config.is_file():
+    if not paths.template_config.is_file():
         return None
-    policy = load_diff_site_policy(paths.diff_config)
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+    )
+
+    runner_cfg = load_runner_config(str(paths.template_config))
+    if runner_cfg.diff is not None:
+        policy = runner_cfg.diff
+    else:
+        return None
     raw = (policy.paths or {}).get("output_store_name")
     if raw is None:
         return None

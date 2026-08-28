@@ -17,9 +17,9 @@ Photometry kinds (not the same set as diff `STAGE_KINDS`):
 | Path | How photometry runs |
 |------|---------------------|
 | **`syndiff photometry submit\|run`** | Preferred. Freezes `photometry_config.yaml`, registers stage `photometry` in SQLite. |
-| Diff `pipeline: [{kind: photometry, config: …}]` | Delegator: `execute.py` → `run_photometry_delegator()` loads that YAML and runs the same runner in-process during a diff stage. |
+| Diff `pipeline: [{kind: photometry, config: …}]` | Delegator: `execute.py` → `run_photometry_delegator()` loads that YAML and runs the same runner in-process during a diff stage. Schema v1 standalone `diff_config.yaml` only — a schema v2 `diff.pipeline` (embedded in `pipeline.yaml`) rejects this kind outright, since diff is SCC-scoped, not event-scoped. |
 
-Default site [`diff_config.yaml`](../../../config/diff_config.yaml) does **not** include the delegator. Astrometry and forced photometry are **not** diff `STAGE_KINDS` (except the `photometry` delegator kind).
+Neither the default schema v1 site [`diff_config.yaml`](../../../config/diff_config.yaml) nor the schema v2 reference [`config/pipeline.yaml`](../../../config/pipeline.yaml) includes the delegator. Astrometry and forced photometry are **not** diff `STAGE_KINDS` (except the `photometry` delegator kind, v1 only).
 
 ## Execution flow
 

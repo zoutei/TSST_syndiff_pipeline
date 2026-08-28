@@ -15,6 +15,10 @@ from syndiff_pipeline.common.orchestration.notifications import (
     NotificationConfig,
     parse_notification_config,
 )
+from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+    DiffSitePolicy,
+    parse_unified_diff_policy,
+)
 from syndiff_pipeline.template_creation.orchestration.bundled_assets import skycell_wcs_csv
 from syndiff_pipeline.common.orchestration.deployment import (
     deployment_path_for_config,
@@ -96,7 +100,10 @@ class RunnerConfig:
     runs_root: str = ""
     state_db_path: str = ""
     skycell_wcs_csv: str = ""
-    diff_config_path: str = ""
+    # Diff policy, populated from the embedded ``diff:`` block. ``None`` for
+    # template-only or photometry-only configs that have no diff policy at
+    # all. See _reject_legacy_diff_pointer().
+    diff: DiffSitePolicy | None = None
     star_config_path: str = ""
     photometry_config_path: str = ""
     stages: TemplateStageParams = field(default_factory=lambda: parse_stage_params({}))
@@ -113,6 +120,11 @@ class RunnerConfig:
     max_eviction_stage_attempts: int = 20
     requeue_backoff_s: float = 30.0
     condor_hold_timeout_s: float = 600.0
+    # Deployment-only optional paths that resolve_diff_config consults as a
+    # fallback when the diff policy's own paths: block does not set them.
+    # Frozen alongside the roots so frozen-first diff resolution does not
+    # silently drop them (they live only in deployment.yaml otherwise).
+    deployment_paths: Dict[str, str] = field(default_factory=dict)
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
 
     def runs_dir(self) -> str:
@@ -174,6 +186,16 @@ def _parse_resources(raw: dict | None) -> Dict[str, ResourcePoolParams]:
     return out
 
 
+DEPLOYMENT_OPTIONAL_PATH_KEYS = (
+    "straps_csv",
+    "bsc_catalog",
+    "removed_stars_csv",
+    "manifest",
+    "median_mask_path",
+)
+"""Deployment keys resolve_diff_config falls back to when the policy omits them."""
+
+
 def _paths_from_deployment(
     deployment: dict, *, deployment_path: Path
 ) -> tuple[str, str, str, str, str, str]:
@@ -209,6 +231,51 @@ def _parse_bookkeeping_trust_index(raw: dict) -> bool:
     return bool(raw.get("bookkeeping_trust_index", False))
 
 
+_LEGACY_DIFF_POINTER_KEYS: tuple[str, ...] = (
+    "diff_config",
+    "diff_site_config",
+    "diff_config_path",
+)
+
+
+def _reject_legacy_diff_pointer(raw: dict, *, config_path: Path) -> None:
+    """Raise a migration error when *raw* still carries a v1 ``diff_config:`` pointer.
+
+    The standalone ``diff_config.yaml`` + pointer form (schema v1) is gone --
+    every site config must embed its diff recipe under a ``diff:`` block
+    (schema v2). Silently ignoring a leftover pointer key would be worse
+    than the old behaviour (the config would quietly lose its diff policy
+    instead of failing loudly), so this raises and names the offending file.
+    """
+    present = [key for key in _LEGACY_DIFF_POINTER_KEYS if str(raw.get(key, "")).strip()]
+    if not present:
+        return
+    raise ValueError(
+        f"{config_path}: {present[0]!r} is a schema v1 pointer to a standalone "
+        "diff_config.yaml, which is no longer supported. Fold that file's "
+        "content under a top-level 'diff:' block in this config instead (schema "
+        "v2) and delete the pointer key. See docs/markdown/config_schema_v2.md."
+    )
+
+
+def _parse_diff_policy(
+    raw_diff_block: Any,
+    *,
+    base_dir: Path,
+    deployment_file: str,
+) -> Optional["DiffSitePolicy"]:
+    """Parse the unified ``diff:`` block, or ``None`` when absent.
+
+    Template-only and photometry-only configs legitimately have no ``diff:``
+    block at all.
+    """
+    if raw_diff_block is None:
+        return None
+    return parse_unified_diff_policy(
+        raw_diff_block, source_dir=base_dir, deployment_file=deployment_file
+    )
+
+
 def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> RunnerConfig:
     """Build runner config.
     
@@ -222,6 +289,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
     -------
     RunnerConfig"""
     warn_legacy_config_paths(raw, config_path=config_path)
+    _reject_legacy_diff_pointer(raw, config_path=config_path)
     deployment_file = parse_deployment_file(raw)
     notifications = parse_notification_config(raw.get("notifications"))
     deployment_path = deployment_path_for_config(config_path, deployment_file)
@@ -230,14 +298,15 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         deployment, deployment_path=deployment_path
     )
 
-    diff_site = str(
-        raw.get("diff_config", "")
-        or raw.get("diff_site_config", "")
-        or raw.get("diff_config_path", "")
-    ).strip()
-    diff_config_path = ""
-    if diff_site:
-        diff_config_path = _resolve_path(base_dir, diff_site) or ""
+    deployment_paths = {
+        key: str(deployment[key]).strip()
+        for key in DEPLOYMENT_OPTIONAL_PATH_KEYS
+        if str(deployment.get(key, "")).strip()
+    }
+
+    diff_policy = _parse_diff_policy(
+        raw.get("diff"), base_dir=base_dir, deployment_file=deployment_file
+    )
 
     star_site = str(
         raw.get("star_config", "")
@@ -265,7 +334,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         runs_root=runs,
         state_db_path=db,
         skycell_wcs_csv=wcs,
-        diff_config_path=diff_config_path,
+        diff=diff_policy,
         star_config_path=star_config_path,
         photometry_config_path=photometry_config_path,
         stages=parse_stage_params(raw.get("stages", {})),
@@ -290,6 +359,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         condor_hold_timeout_s=float(
             raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
         ),
+        deployment_paths=deployment_paths,
         notifications=notifications,
     )
 
@@ -374,8 +444,21 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "star": asdict(cfg.stages.star),
         "photometry": asdict(cfg.stages.photometry),
     }
-    if cfg.diff_config_path:
-        data["diff_config_path"] = cfg.diff_config_path
+    # Freeze the diff: block verbatim -- NOT a re-serialization of the parsed
+    # DiffSitePolicy fields (asdict() above would otherwise normalize e.g. a
+    # flat `condor:` into condor_by_stage and silently drop unrecognized keys
+    # like mask_settings sub-keys nobody's added a field for yet). Verbatim
+    # keeps _parse_condor_by_stage's all-three-keys validation as the single
+    # gate, and makes hand-editing diff.condor in a frozen
+    # runs/{run_id}/config.yaml behave exactly like editing the authored
+    # file -- that hand-edit is the intended way to retune a live run's
+    # Condor resources.
+    if cfg.diff is not None:
+        diff_out = copy.deepcopy(cfg.diff.raw)
+        diff_out["source_dir"] = cfg.diff.source_dir
+        data["diff"] = diff_out
+    else:
+        data.pop("diff", None)
     if cfg.star_config_path:
         data["star_config_path"] = cfg.star_config_path
     if cfg.photometry_config_path:
@@ -434,8 +517,12 @@ def write_runner_config(cfg: RunnerConfig, yaml_path: str | Path) -> None:
     yaml_path : str | Path"""
     path = Path(yaml_path).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as fh:
         yaml.safe_dump(runner_config_to_dict(cfg), fh, sort_keys=False, default_flow_style=False)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
 
 
 def load_and_materialize_runner_config(
@@ -448,21 +535,23 @@ def load_and_materialize_runner_config(
         raw: dict = yaml.safe_load(fh) or {}
 
     if _is_materialized_config(raw):
+        _deployment_file_m = str(raw.get("deployment_file", "deployment.yaml"))
+        # A frozen runs/{run_id}/config.yaml is a historical artifact, not an
+        # authored file -- no legacy-pointer rejection here (an old run from
+        # before the v1 pointer was removed may still carry one; it is simply
+        # ignored on reload, same as any other unrecognized key).
+        _diff_policy_m = _parse_diff_policy(
+            raw.get("diff"), base_dir=base, deployment_file=_deployment_file_m
+        )
         cfg = RunnerConfig(
-            deployment_file=str(raw.get("deployment_file", "deployment.yaml")),
+            deployment_file=_deployment_file_m,
             data_root=_resolve_path(base, raw.get("data_root", "")) or "",
             ffi_dir=_resolve_path(base, raw.get("ffi_dir", "")) or "",
             workspace_root=_resolve_path(base, raw.get("workspace_root", "")) or "",
             runs_root=_resolve_path(base, raw.get("runs_root")) or "",
             state_db_path=_resolve_path(base, raw.get("state_db_path")) or "",
             skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
-            diff_config_path=_resolve_path(
-                base,
-                raw.get("diff_config_path")
-                or raw.get("diff_config")
-                or raw.get("diff_site_config"),
-            )
-            or "",
+            diff=_diff_policy_m,
             star_config_path=_resolve_path(
                 base,
                 raw.get("star_config_path")
@@ -501,6 +590,7 @@ def load_and_materialize_runner_config(
             condor_hold_timeout_s=float(
                 raw.get("scheduler", {}).get("condor_hold_timeout_s", 600.0)
             ),
+            deployment_paths=dict(raw.get("deployment_paths") or {}),
             notifications=parse_notification_config(raw.get("notifications")),
         )
         if not cfg.ffi_dir and cfg.data_root:

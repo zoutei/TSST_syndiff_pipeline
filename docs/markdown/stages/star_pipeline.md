@@ -96,19 +96,18 @@ Kernels are read from `{baseline.diffs}_kernels/` (e.g. `hp_d_kernels/{product_i
 | Mapping CSV + master FITS | `data_root/skycell_pixel_mapping/…` | `mapping` |
 | Gaia catalog CSV | `data_root/catalogs/…` | `mapping` |
 
-Baseline workspace path: `events/{label}/ws/` when `baseline.workspace_run_id: none`, else `events/{label}/ws_{run_id}/`.
+Baseline artifacts are resolved from the SCC diff lane (`{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/`), not an event `ws/` tree; `baseline.workspace_run_id` is a legacy config name kept for label-heuristic back-compat only.
 
 ### Kernel backfill
 
-Workspaces that completed Hotpants before `write_kernel_solutions` was enabled have `hp_d` and `hp_c` but no `hp_d_kernels/`. Run a one-time backfill with [`diff_config_star_full_backfill.yaml`](../../../config/diff_config_star_full_backfill.yaml):
+Lanes that completed Hotpants before `write_kernel_solutions` was enabled have `hp_d` and `hp_c` but no `hp_d_kernels/`. Run a one-time backfill with [`config/archive/diff_config_star_full_backfill.yaml`](../../../config/archive/diff_config_star_full_backfill.yaml):
 
-- `workspace_inherit` from the existing multi-kernel workspace (`ks_b_s`, `shared_mask`, …)
-- Single `hotpants` stage with `write_convolved: true` and `write_kernel_solutions: true`
-- Default `workspace_run_id: star_full_lc` → outputs under `ws_star_full_lc/`
+- `workspace_inherit` from the existing multi-kernel lane (`ks_b_s`, `shared_mask`, …) — legacy mechanism, not supported under SCC-only diff storage; re-run upstream diff stages on the SCC lane instead if you need a from-scratch backfill
+- Single `hotpants` stage with `write_convolved: true` and `write_kernel_solutions: true`, writing directly to the same SCC diff lane
 
-Point `star_config` / `star_targets` `baseline.workspace_run_id` at that suffix.
+`baseline.workspace_run_id` in `star_config` / `star_targets` no longer selects an output tree; keep it only if a label heuristic depends on it.
 
-Site and example diff configs now set `write_kernel_solutions: true` on every active `hotpants` stage so new runs do not need backfill.
+Site and example diff policies now set `write_kernel_solutions: true` on every active `hotpants` stage so new runs do not need backfill.
 
 ## PS1 ingest (`ps1_source`)
 
@@ -184,12 +183,12 @@ only when star must build that catalog.
 | File | Role |
 |------|------|
 | [`star_config.yaml`](../../../config/star_config.yaml) | Site star policy |
-| [`star_config_epsf_gepsf.yaml`](../../../config/star_config_epsf_gepsf.yaml) | Gridded-ePSF verification policy |
+| [`star_config_epsf_gepsf.yaml`](../../../config/archive/star_config_epsf_gepsf.yaml) | Gridded-ePSF verification policy |
 | [`star_targets_example.csv`](../../../config/star_targets_example.csv) | Example SCC registry |
-| [`diff_config_star_full_backfill.yaml`](../../../config/diff_config_star_full_backfill.yaml) | One-time Hotpants kernel + convolved backfill |
-| [`diff_config_multi_kernel.yaml`](../../../config/diff_config_multi_kernel.yaml) | Production multi-kernel diff (`hp_d`, `ks_b_s`, kernels); committed config does not write `hp_c` |
-| [`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/pipeline_multi_kernel_s20_astrometry.yaml) | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
-| [`pipeline_epsf_gepsf.yaml`](../../../config/pipeline_epsf_gepsf.yaml) | 2020ut ePSF/gepsf diff-only orchestrator (transient LC recipe; star uses separate `star_config`) |
+| [`diff_config_star_full_backfill.yaml`](../../../config/archive/diff_config_star_full_backfill.yaml) | One-time Hotpants kernel + convolved backfill |
+| [`diff_config_multi_kernel.yaml`](../../../config/archive/diff_config_multi_kernel.yaml) | Production multi-kernel diff (`hp_d`, `ks_b_s`, kernels); committed config does not write `hp_c` |
+| [`pipeline_multi_kernel_s20_astrometry.yaml`](../../../config/archive/pipeline_multi_kernel_s20_astrometry.yaml) | Sector-20 astrometry template+diff orchestrator (`ps1_source: stream`) |
+| [`pipeline_epsf_gepsf.yaml`](../../../config/archive/pipeline_epsf_gepsf.yaml) | 2020ut ePSF/gepsf diff-only orchestrator (transient LC recipe; star uses separate `star_config`) |
 
 ## Orchestration
 

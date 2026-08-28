@@ -147,7 +147,6 @@ class TestDiffSccStore(unittest.TestCase):
                 round_id=1,
                 sck=(20, 3, 3),
                 data_root=str(self.data_root),
-                workspace_root=str(root / "events" / "s0020_c3_k3"),
             )
 
         self.assertTrue(result["success"])

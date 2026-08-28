@@ -139,6 +139,33 @@ class TestDrainSpool(_TempCase):
         self.assertIsNotNone(self.store.artifact("fp1"))
         self.assertIsNotNone(self.store.artifact("fp2"))
 
+    def test_recipe_upsert_records_a_nonnull_git_sha(self):
+        """A3a end-to-end: a recipe published through the normal
+        build_record -> spool -> drain_spool -> ProvenanceStore path (against
+        a throwaway temp DB, never the live one under data/) carries the
+        running process's real git SHA -- this test runs inside an actual
+        git checkout, so it must resolve to a genuine, non-null value."""
+        from syndiff_pipeline.common.provenance.publish import git_sha
+
+        expected_sha = git_sha()
+        self.assertIsNotNone(expected_sha, "this test must run inside a real git checkout")
+
+        rec = build_record(
+            "fp-gitsha", "mapping", {"s": 9, "c": 9, "k": 9}, "rid-gitsha", 1, [], "loc-gitsha",
+            recipe_params={"z": 1},
+        )
+        self.assertEqual(rec["git_sha"], expected_sha)
+        append_spool_record(self.spool_dir, rec)
+
+        result = drain_spool(self.store, self.spool_dir)
+        self.assertEqual(result.records_ingested, 1)
+
+        recipe = self.store.recipe("rid-gitsha")
+        self.assertIsNotNone(recipe)
+        self.assertIsNotNone(recipe.git_sha)
+        self.assertEqual(recipe.git_sha, expected_sha)
+        self.assertEqual(len(recipe.git_sha), 40)
+
 
 if __name__ == "__main__":
     unittest.main()

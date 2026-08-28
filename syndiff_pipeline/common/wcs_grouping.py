@@ -1758,53 +1758,6 @@ def resolve_crop_bounds_from_params(
     )
 
 
-def diff_crop_explicitly_configured(cfg) -> bool:
-    """True when diff_config crop fields should override cluster JSON."""
-    if any(
-        getattr(cfg, k, None) is not None
-        for k in ("x_min", "x_max", "y_min", "y_max")
-    ):
-        return True
-    mode = str(getattr(cfg, "crop_mode", None) or "").strip().lower()
-    if mode == "target_box":
-        return True
-    return mode not in ("", "full")
-
-
-def resolve_diff_crop_bounds(cfg, event_dir: str) -> dict:
-    """Diff bootstrap crop: ``diff_config`` override or cluster JSON default."""
-    from astropy.io import fits
-
-    ref_path = load_reference_ffi_path(event_dir, getattr(cfg, "ref_ffi_path", None))
-    if not ref_path:
-        raise FileNotFoundError(
-            f"No reference_ffi_path in {event_dir}/{CLUSTER_TEMPLATE_JOB_FILENAME}"
-        )
-    ref_path = str(resolve_existing_fits_path(ref_path))
-    with open_fits_memmap(ref_path) as hdul:
-        ref_header = hdul[1].header
-
-    if diff_crop_explicitly_configured(cfg):
-        bounds = resolve_crop_bounds_from_params(
-            ref_header,
-            x_min=getattr(cfg, "x_min", None),
-            x_max=getattr(cfg, "x_max", None),
-            y_min=getattr(cfg, "y_min", None),
-            y_max=getattr(cfg, "y_max", None),
-            crop_mode=getattr(cfg, "crop_mode", None),
-            crop_box_size=int(getattr(cfg, "crop_box_size", 1024)),
-            target_ra=getattr(cfg, "target_ra", None),
-            target_dec=getattr(cfg, "target_dec", None),
-            x_left_dead=int(getattr(cfg, "x_left_dead", 44)),
-            x_right_dead=int(getattr(cfg, "x_right_dead", 44)),
-            y_edge_strip=int(getattr(cfg, "y_edge_strip", 30)),
-        )
-        log.info("Diff crop from diff_config override")
-        return bounds
-
-    bounds = load_crop_bounds(event_dir)
-    log.info("Diff crop inherited from cluster_template_job.json")
-    return bounds
 
 
 def crop_image(data: np.ndarray, bounds: dict) -> np.ndarray:

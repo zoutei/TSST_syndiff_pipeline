@@ -25,10 +25,7 @@ from syndiff_pipeline.difference_imaging.orchestration.stages import (
     execute_diff_stage,
     write_diff_manifest,
 )
-from syndiff_pipeline.difference_imaging.support.paths import (
-    SHARED_MASK_FITS_BASENAME,
-    clear_diff_workspace,
-)
+from syndiff_pipeline.difference_imaging.support.paths import SHARED_MASK_FITS_BASENAME
 from syndiff_pipeline.pipeline_spec import STAGE_DEPS, STAGE_NAMES, STAGE_POOL, SYNDIFF_PIPELINE
 from syndiff_pipeline.template_creation.orchestration.runner_config import (
     RunnerConfig,
@@ -36,7 +33,7 @@ from syndiff_pipeline.template_creation.orchestration.runner_config import (
     parse_stage_params,
 )
 from syndiff_pipeline.template_creation.orchestration.verify import verify_diff
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import write_unified_site_config
 
 
 def _target() -> Target:
@@ -50,25 +47,21 @@ def _target() -> Target:
     )
 
 
-def _write_diff_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "defaults:",
-                "  n_jobs: 2",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-                "condor:",
-                "  request_cpus: 4",
-                "  request_memory: 32000",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
+_DIFF_POLICY = {
+    "defaults": {"n_jobs": 2},
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [{"kind": "shared_mask"}],
+    "condor": {"request_cpus": 4, "request_memory": 32000},
+}
+
+
+def _write_diff_policy(site: Path, *, workspace_root: str, data_root: str) -> None:
+    write_unified_site_config(
+        site / "pipeline.yaml",
+        workspace_root=workspace_root,
+        data_root=data_root,
+        diff=_DIFF_POLICY,
+        stages={"diff": {"executor": "condor"}},
     )
 
 
@@ -98,16 +91,10 @@ class TestDiffPipelineSpec(unittest.TestCase):
             root = Path(tmp)
             site = root / "site"
             site.mkdir()
-            write_site_deployment(
-                site,
-                workspace_root=str(root / "handoff"),
-                data_root=str(root / "data"),
-            )
-            _write_diff_policy(site / "diff_config.yaml")
-            runner = RunnerConfig(
-                stages=parse_stage_params({"diff": {"executor": "condor"}}),
-                diff_config_path=str(site / "diff_config.yaml"),
-            )
+            handoff = root / "handoff"
+            data = root / "data"
+            _write_diff_policy(site, workspace_root=str(handoff), data_root=str(data))
+            runner = load_runner_config(site / "pipeline.yaml")
             resources = DIFF_STAGE.condor_resources(runner)
             self.assertIsInstance(resources, condor.CondorResourceRequest)
             self.assertEqual(resources.request_cpus, 4)
@@ -122,12 +109,9 @@ class TestDiffStageExecution(unittest.TestCase):
         self.site.mkdir()
         self.handoff = self.root / "handoff"
         self.data = self.root / "data"
-        write_site_deployment(
-            self.site,
-            workspace_root=str(self.handoff),
-            data_root=str(self.data),
+        _write_diff_policy(
+            self.site, workspace_root=str(self.handoff), data_root=str(self.data)
         )
-        _write_diff_policy(self.site / "diff_config.yaml")
 
         self.target = _target()
         self.event_dir = event_scc_leaf(
@@ -152,12 +136,8 @@ class TestDiffStageExecution(unittest.TestCase):
             encoding="utf-8",
         )
 
-        self.runner = RunnerConfig(
-            workspace_root=str(self.handoff),
-            runs_root=str(self.handoff / "runs"),
-            diff_config_path=str(self.site / "diff_config.yaml"),
-            stages=parse_stage_params({"diff": {"executor": "condor"}}),
-        )
+        self.runner = load_runner_config(self.site / "pipeline.yaml")
+        self.runner.runs_root = str(self.handoff / "runs")
         self.runs_root = self.runner.runs_root
         self.run_id = "test_run"
         run_dir = Path(self.runs_root) / self.run_id
@@ -174,7 +154,7 @@ class TestDiffStageExecution(unittest.TestCase):
             target_label=self.target.label(),
             target=self.target,
             runner_cfg=self.runner,
-            meta={"source_diff_config_path": str(self.site / "diff_config.yaml")},
+            meta={},
         )
 
     @mock.patch(
@@ -195,22 +175,6 @@ class TestDiffStageExecution(unittest.TestCase):
         self.assertGreaterEqual(expected, 1)
         self.assertGreaterEqual(produced, 0)
         self.assertIsInstance(artifacts, list)
-
-    def test_clear_diff_workspace_preserves_handoff_files(self):
-        ws_hp = self.event_dir / "ws" / "hp_d"
-        ws_hp.mkdir(parents=True)
-        (ws_hp / "frame.fits").write_bytes(b"SIMPLE  = T")
-        gaia_csv = self.event_dir / "ws" / "gaia_catalog_pipeline.csv"
-        gaia_csv.parent.mkdir(parents=True, exist_ok=True)
-        gaia_csv.write_text("source_id,ra,dec\n", encoding="utf-8")
-        handoff_json = self.event_dir / "event_job.json"
-        self.assertTrue(handoff_json.is_file())
-
-        clear_diff_workspace(self.event_dir)
-
-        self.assertFalse((self.event_dir / "ws" / "hp_d").exists())
-        self.assertFalse(gaia_csv.is_file())
-        self.assertTrue((self.event_dir / "event_job.json").is_file())
 
     @mock.patch(
         "syndiff_pipeline.difference_imaging.orchestration.execute.run_config_pipeline"
@@ -240,7 +204,6 @@ class TestDiffStageExecution(unittest.TestCase):
         from syndiff_pipeline.difference_imaging.orchestration.diff_verify import (
             _scc_lane_root,
             frozen_diff_config_for_verify,
-            resolve_diff_site_config_path,
         )
         from syndiff_pipeline.common.scc_paths import resolve_scc_diff_bookkeeping_dir
         from syndiff_pipeline.difference_imaging.orchestration.scc_bootstrap import (
@@ -265,11 +228,7 @@ class TestDiffStageExecution(unittest.TestCase):
         manifest_csv.parent.mkdir(parents=True, exist_ok=True)
         manifest_csv.write_text("ffi_product_id\n", encoding="utf-8")
 
-        cfg = frozen_diff_config_for_verify(
-            resolve_diff_site_config_path(meta=None, runner_cfg=self.runner),
-            self.target,
-            meta=None,
-        )
+        cfg = frozen_diff_config_for_verify(self.target, runner_cfg=self.runner)
         lane_root = _scc_lane_root(cfg)
         lane_root.mkdir(parents=True, exist_ok=True)
         (lane_root / SHARED_MASK_FITS_BASENAME).write_bytes(b"SIMPLE  = T")
@@ -305,8 +264,12 @@ class TestDiffStageExecution(unittest.TestCase):
         self.assertIn("config_fingerprint", payload)
         self.assertTrue(manifest_path.is_file())
 
-    def test_site_config_loads_diff_path(self):
-        site_config = self.site / "pipeline.yaml"
+    def test_site_config_rejects_legacy_diff_pointer(self):
+        # v1's standalone diff_config.yaml + pointer form is gone -- a
+        # 'diff_config:' key must raise a migration error naming the file,
+        # not silently resolve. (This used to assert the pointer loaded a
+        # cfg.diff_config_path; that field no longer exists.)
+        site_config = self.site / "pipeline_legacy.yaml"
         site_config.write_text(
             "\n".join(
                 [
@@ -320,9 +283,10 @@ class TestDiffStageExecution(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        cfg = load_runner_config(site_config)
-        self.assertTrue(cfg.diff_config_path.endswith("diff_config.yaml"))
-        self.assertEqual(cfg.stages.diff.executor, "condor")
+        with self.assertRaises(ValueError) as ctx:
+            load_runner_config(site_config)
+        self.assertIn(str(site_config), str(ctx.exception))
+        self.assertIn("diff:", str(ctx.exception))
 
 
 if __name__ == "__main__":

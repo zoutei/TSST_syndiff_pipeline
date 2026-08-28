@@ -29,25 +29,6 @@ from syndiff_pipeline.template_creation.orchestration.verify import AbsenceProbe
 from tests.site_fixtures import write_site_deployment
 
 
-def _write_diff_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "defaults:",
-                "  n_jobs: 2",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: shared_mask",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-
 def _diff_only_run_setup(tmp_path: Path, target: Target, *, run_id: str = "run_a"):
     site = tmp_path / "site"
     site.mkdir()
@@ -56,8 +37,6 @@ def _diff_only_run_setup(tmp_path: Path, target: Target, *, run_id: str = "run_a
         workspace_root=str(tmp_path),
         data_root=str(tmp_path / "data"),
     )
-    _write_diff_policy(site / "diff_config.yaml")
-
     runs_root = tmp_path / "runs"
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True)
@@ -71,7 +50,9 @@ def _diff_only_run_setup(tmp_path: Path, target: Target, *, run_id: str = "run_a
                 f"runs_root: {runs_root}",
                 f"state_db_path: {tmp_path / 'state.sqlite'}",
                 "skycell_wcs_csv: x.csv",
-                f"diff_config_path: {site / 'diff_config.yaml'}",
+                # No diff: block -- this test exercises scheduler tick/launch
+                # mechanics with stage_complete/launch_stage mocked out, so a
+                # real diff policy is never resolved (cfg.diff stays None).
                 "stages:",
                 "  diff: {executor: local}",
             ]
@@ -88,7 +69,6 @@ def _diff_only_run_setup(tmp_path: Path, target: Target, *, run_id: str = "run_a
         json.dumps(
             {
                 "run_id": run_id,
-                "source_diff_config_path": str(site / "diff_config.yaml"),
             }
         ),
         encoding="utf-8",
