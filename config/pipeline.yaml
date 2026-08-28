@@ -90,7 +90,6 @@ overrides:
 # mask -> min-background HP2 kernel -> convolved templates -> per-FFI
 # algebraic diff + photutils (no Hotpants).
 diff:
-  deployment_file: deployment.yaml
 
   defaults:
     n_jobs: 16

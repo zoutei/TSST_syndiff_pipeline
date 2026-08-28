@@ -18,9 +18,6 @@ if str(_ROOT) not in sys.path:
 
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.difference_imaging.orchestration import provenance_glue as pg
-from syndiff_pipeline.difference_imaging.orchestration.site_config import (
-    freeze_target_diff_config,
-)
 from syndiff_pipeline.difference_imaging.orchestration.stage_params import (
     EpsfParams,
     HotpantsParams,
@@ -30,31 +27,23 @@ from syndiff_pipeline.common import wcs_grouping
 from syndiff_pipeline.difference_imaging.support.manifest import (
     manifest_path_from_output_dir,
 )
-from tests.site_fixtures import write_site_deployment
+from tests.site_fixtures import resolve_target_diff_config, write_site_deployment, write_unified_site_config
 
 
-def _write_hotpants_epsf_policy(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "\n".join(
-            [
-                "deployment_file: deployment.yaml",
-                "paths:",
-                "  template_base: shifted_downsampled",
-                "pipeline:",
-                "  - kind: hotpants",
-                "    output:",
-                "      diffs: hp_d",
-                "      convolved: hp_c",
-                "  - kind: epsf",
-                "    inputs:",
-                "      diffs: hp_d",
-                "    output: epsf_r1",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
+_HOTPANTS_EPSF_DIFF_POLICY = {
+    "paths": {"template_base": "shifted_downsampled"},
+    "pipeline": [
+        {
+            "kind": "hotpants",
+            "output": {"diffs": "hp_d", "convolved": "hp_c"},
+        },
+        {
+            "kind": "epsf",
+            "inputs": {"diffs": "hp_d"},
+            "output": "epsf_r1",
+        },
+    ],
+}
 
 
 @unittest.skipUnless(pg.PROVENANCE_AVAILABLE, "common.provenance not importable")
@@ -72,7 +61,12 @@ class TestGriddedEpsfProvenanceEmit(unittest.TestCase):
             workspace_root=str(self.handoff),
             data_root=str(self.data),
         )
-        _write_hotpants_epsf_policy(self.site / "diff_config.yaml")
+        write_unified_site_config(
+            self.site / "pipeline.yaml",
+            workspace_root=str(self.handoff),
+            data_root=str(self.data),
+            diff=_HOTPANTS_EPSF_DIFF_POLICY,
+        )
 
         self.target = Target(
             sector=20,
@@ -103,7 +97,7 @@ class TestGriddedEpsfProvenanceEmit(unittest.TestCase):
             }
         ).to_csv(manifest_csv, index=False)
 
-        self.cfg = freeze_target_diff_config(self.site / "diff_config.yaml", self.target)
+        self.cfg = resolve_target_diff_config(self.site, self.target)
         self.cfg.ffi_dir = str(self.ffi_dir)
         self.cfg.output_dir = str(self.event_dir)
 

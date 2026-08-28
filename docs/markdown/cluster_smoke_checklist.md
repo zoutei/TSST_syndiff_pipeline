@@ -54,10 +54,19 @@ mamba activate syndiff
 
 syndiff diff submit \
   --site config \
-  --config config/diff_config_single_kernel.yaml \
   --scc config/scc_s20_c1_k1.csv \
   --run-id smoke_diff_01
 ```
+
+`--site config` alone resolves `config/pipeline.yaml`, whose embedded `diff:`
+block already carries the single-kernel recipe (`shared_mask` → `kernel_fit` →
+`convolved_templates` → `background_estimate` → `background_temporal_smoothing`
+→ `subtract`). `--config` and `--site` both always resolve a `pipeline.yaml`-
+style file now — pointing `--config` straight at a standalone
+`config/diff_config_single_kernel.yaml` (a bare diff-only YAML) no longer
+works, since that file has neither `stages:` nor a `diff:`/`diff_config:` key
+of its own for the loader to find. See
+[config_schema_v2.md](config_schema_v2.md).
 
 Optional: `--local` to run `diff` on the submit host instead of Condor.
 
@@ -190,7 +199,7 @@ Event workspace (when using `--targets`):
 | Step | Command |
 |------|---------|
 | Submit template | `syndiff template submit --site config --scc … --run-id <id>` |
-| Submit field diff | `syndiff diff submit --site config --config diff_config.yaml --scc … --run-id <id>` |
+| Submit field diff | `syndiff diff submit --site config --scc … --run-id <id>` |
 | Submit event diff | `syndiff diff submit --site config --targets … --run-id <id>` |
 | Monitor | `syndiff progress --site config --run-id <id>` |
 | Verify | `syndiff verify --site config --run-id <id>` |

@@ -34,18 +34,17 @@ def _add_shared_execution_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--site",
         default=None,
-        help="Config directory with pipeline.yaml, diff_config.yaml, and deployment.yaml",
+        help="Config directory with pipeline.yaml (embedded diff: policy) and deployment.yaml",
     )
     p.add_argument(
         "--config",
         default=None,
         help=(
             "Unified orchestrator policy YAML -- always a site pipeline.yaml-style "
-            "file (default: <site>/pipeline.yaml when --site is set), never a bare "
-            "diff_config.yaml. For 'diff run --target-name' (foreground debug run: "
-            "no run id, no state DB, no supervisor) this is the same pipeline.yaml; "
-            "its embedded 'diff:' policy is used when present, else the legacy "
-            "'diff_config:'/'diff_site_config:' pointer it names."
+            "file (default: <site>/pipeline.yaml when --site is set). For "
+            "'diff run --target-name' (foreground debug run: no run id, no state "
+            "DB, no supervisor) this is the same pipeline.yaml; its embedded "
+            "'diff:' policy is used to resolve the diff recipe."
         ),
     )
     p.add_argument(
@@ -227,7 +226,6 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
     from syndiff_pipeline.difference_imaging.orchestration.cli import run_pipeline
     from syndiff_pipeline.difference_imaging.orchestration.site_config import (
         SitePaths,
-        freeze_target_diff_config,
         resolve_diff_config,
     )
     from syndiff_pipeline.template_creation.orchestration.runner_config import (
@@ -252,7 +250,6 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
     deploy_override = getattr(args, "deployment", None)
 
     if runner_cfg.diff is not None:
-        # Unified (schema v2) policy from pipeline.yaml's embedded ``diff:``.
         # diff.deployment_file is not a thing (see parse_unified_diff_policy) --
         # the site-level deployment_file always governs here.
         deploy_path = (
@@ -268,21 +265,10 @@ def _cmd_diff_foreground_run(args: argparse.Namespace) -> int:
             deployment_path=deploy_path,
             site_config_dir=Path(runner_cfg.diff.source_dir),
         )
-    elif runner_cfg.diff_config_path:
-        # Legacy (schema v1): pipeline.yaml's 'diff_config:'/'diff_site_config:'
-        # pointer names a standalone diff_config.yaml -- kept for sites not yet
-        # migrated to an embedded 'diff:' block; a later wave removes it. Let
-        # freeze_target_diff_config resolve its own deployment path (honoring
-        # that file's own deployment_file key) unless the caller overrode it.
-        cfg = freeze_target_diff_config(
-            runner_cfg.diff_config_path,
-            target,
-            deployment_path=deploy_override,
-        )
     else:
         raise SystemExit(
-            f"{config_path} has no diff policy: no embedded 'diff:' block and no "
-            "'diff_config'/'diff_site_config' pointer to a diff_config.yaml."
+            f"{config_path} has no diff policy: no embedded 'diff:' block. Add "
+            "one under 'diff:' -- see docs/markdown/config_schema_v2.md."
         )
     if getattr(args, "workspace_run_id", None):
         cfg.workspace_run_id = str(args.workspace_run_id).strip()

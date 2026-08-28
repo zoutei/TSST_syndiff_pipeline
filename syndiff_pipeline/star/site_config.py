@@ -552,12 +552,10 @@ def resolve_star_config_path(*, meta: dict | None, runner_cfg) -> tuple[Path, Pa
     """Resolve ``(policy_path, site_dir)`` for the star stage from run metadata.
 
     ``policy_path`` is where policy *content* (defaults/baseline/photometry/
-    epsf/overrides) is read from. It prefers the frozen
-    ``runs/{run_id}/star_config.yaml`` snapshot -- recorded as
-    ``star_config_path`` in run_meta / on ``RunnerConfig`` -- over the live
-    site file, so a submitted run's frozen config is actually authoritative
-    instead of always losing to the live site file. Falls back to the live
-    site file (``source_star_config_path``) when no frozen copy is recorded.
+    epsf/overrides) is read from: the frozen ``runs/{run_id}/star_config.yaml``
+    snapshot -- recorded as ``star_config_path`` in run_meta / on
+    ``RunnerConfig`` -- which submit always freezes (see
+    ``_prepare_run_directory``), so it is authoritative.
 
     ``site_dir`` is always the directory of the *live* site ``star_config.yaml``
     (``source_star_config_path``'s parent) -- never a run directory. Callers
@@ -569,20 +567,16 @@ def resolve_star_config_path(*, meta: dict | None, runner_cfg) -> tuple[Path, Pa
     execute; see the wave-B-2 brief this fixes.
 
     When no ``source_star_config_path`` is recorded (e.g. an ad hoc run with
-    incomplete run_meta), ``site_dir`` falls back to ``policy_path.parent``,
-    matching pre-fix behaviour for that edge case.
+    incomplete run_meta), ``site_dir`` falls back to ``policy_path.parent``.
     """
     meta = meta or {}
     frozen_raw = str(
         meta.get("star_config_path") or getattr(runner_cfg, "star_config_path", "") or ""
     ).strip()
+    if not frozen_raw:
+        raise ValueError("Star stage requires star_config_path in run_meta or on RunnerConfig")
+    policy_path = Path(frozen_raw).expanduser().resolve()
     source_raw = str(meta.get("source_star_config_path") or "").strip()
-    if not frozen_raw and not source_raw:
-        raise ValueError(
-            "Star stage requires source_star_config_path in run_meta or "
-            "star_config_path on RunnerConfig"
-        )
-    policy_path = Path(frozen_raw or source_raw).expanduser().resolve()
     site_dir = (
         Path(source_raw).expanduser().resolve().parent if source_raw else policy_path.parent
     )

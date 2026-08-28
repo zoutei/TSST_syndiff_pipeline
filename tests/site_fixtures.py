@@ -123,6 +123,42 @@ def write_unified_site_config(
     )
 
 
+def resolve_target_diff_config(site_dir: Path, target, *, config_filename: str = "pipeline.yaml"):
+    """Load a unified site config's embedded ``diff:`` policy, resolved for one target.
+
+    The v2 replacement for the removed ``freeze_target_diff_config(diff_config.yaml,
+    target)``: instead of pointing at a standalone ``diff_config.yaml``, this
+    loads ``{site_dir}/{config_filename}`` (written by :func:`write_unified_site_config`,
+    with a ``diff=`` block) via :func:`load_runner_config` and resolves its
+    embedded ``diff:`` policy against *target* + the sibling ``deployment.yaml``.
+    """
+    from syndiff_pipeline.common.orchestration.deployment import (
+        deployment_path_for_config,
+        load_deployment,
+    )
+    from syndiff_pipeline.difference_imaging.orchestration.site_config import (
+        resolve_diff_config,
+    )
+    from syndiff_pipeline.template_creation.orchestration.runner_config import (
+        load_runner_config,
+    )
+
+    site_dir = Path(site_dir)
+    config_path = site_dir / config_filename
+    runner_cfg = load_runner_config(config_path)
+    if runner_cfg.diff is None:
+        raise ValueError(f"{config_path} has no embedded 'diff:' policy")
+    deploy_path = deployment_path_for_config(config_path, runner_cfg.deployment_file)
+    deployment = load_deployment(config_path, runner_cfg.deployment_file)
+    return resolve_diff_config(
+        target,
+        runner_cfg.diff,
+        deployment,
+        deployment_path=deploy_path,
+        site_config_dir=site_dir,
+    )
+
+
 def write_materialized_config(
     path: Path,
     *,

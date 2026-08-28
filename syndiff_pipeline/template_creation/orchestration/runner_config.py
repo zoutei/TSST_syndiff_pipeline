@@ -100,14 +100,9 @@ class RunnerConfig:
     runs_root: str = ""
     state_db_path: str = ""
     skycell_wcs_csv: str = ""
-    diff_config_path: str = ""
-    # Unified (schema v2) diff policy, populated from the embedded ``diff:``
-    # block when present. Mutually exclusive with diff_config_path -- exactly
-    # one of the two is set when the site has a diff policy at all, both are
-    # falsy/None for template-only or photometry-only configs. See
-    # _resolve_diff_selection(). diff_config_path is unaffected and keeps
-    # working exactly as before: 36 call sites still read it (later wave
-    # migrates them to `diff`).
+    # Diff policy, populated from the embedded ``diff:`` block. ``None`` for
+    # template-only or photometry-only configs that have no diff policy at
+    # all. See _reject_legacy_diff_pointer().
     diff: DiffSitePolicy | None = None
     star_config_path: str = ""
     photometry_config_path: str = ""
@@ -236,55 +231,49 @@ def _parse_bookkeeping_trust_index(raw: dict) -> bool:
     return bool(raw.get("bookkeeping_trust_index", False))
 
 
-def _resolve_diff_selection(
-    *,
-    diff_config_pointer: str,
+_LEGACY_DIFF_POINTER_KEYS: tuple[str, ...] = (
+    "diff_config",
+    "diff_site_config",
+    "diff_config_path",
+)
+
+
+def _reject_legacy_diff_pointer(raw: dict, *, config_path: Path) -> None:
+    """Raise a migration error when *raw* still carries a v1 ``diff_config:`` pointer.
+
+    The standalone ``diff_config.yaml`` + pointer form (schema v1) is gone --
+    every site config must embed its diff recipe under a ``diff:`` block
+    (schema v2). Silently ignoring a leftover pointer key would be worse
+    than the old behaviour (the config would quietly lose its diff policy
+    instead of failing loudly), so this raises and names the offending file.
+    """
+    present = [key for key in _LEGACY_DIFF_POINTER_KEYS if str(raw.get(key, "")).strip()]
+    if not present:
+        return
+    raise ValueError(
+        f"{config_path}: {present[0]!r} is a schema v1 pointer to a standalone "
+        "diff_config.yaml, which is no longer supported. Fold that file's "
+        "content under a top-level 'diff:' block in this config instead (schema "
+        "v2) and delete the pointer key. See docs/markdown/config_schema_v2.md."
+    )
+
+
+def _parse_diff_policy(
     raw_diff_block: Any,
+    *,
     base_dir: Path,
     deployment_file: str,
-) -> tuple[str, Optional["DiffSitePolicy"]]:
-    """Resolve the ``diff_config:`` pointer *or* the unified ``diff:`` block.
+) -> Optional["DiffSitePolicy"]:
+    """Parse the unified ``diff:`` block, or ``None`` when absent.
 
-    Both forms must coexist for the length of this wave (36 call sites still
-    read ``RunnerConfig.diff_config_path``), but a single config must use at
-    most one -- mixing them silently produces two policies and would be
-    unreviewable. ``diff:`` is optional either way: template-only and
-    photometry-only configs legitimately have neither.
-
-    *diff_config_pointer* is the already-precedence-resolved
-    ``diff_config``/``diff_site_config``/``diff_config_path`` string (each
-    caller applies its own key-precedence order, unchanged from before this
-    helper existed, so byte-identical v1 behaviour is preserved exactly).
-    *raw_diff_block* is ``raw.get("diff")`` (``None`` when absent).
-
-    Returns
-    -------
-    tuple[str, DiffSitePolicy | None]
-        ``(diff_config_path, diff_policy)`` -- exactly one is
-        truthy/non-``None`` when the site has a diff policy, both are
-        falsy/``None`` when it has none.
+    Template-only and photometry-only configs legitimately have no ``diff:``
+    block at all.
     """
-    diff_config_pointer = str(diff_config_pointer or "").strip()
-
-    if diff_config_pointer and raw_diff_block is not None:
-        raise ValueError(
-            "config sets both a diff_config/diff_site_config pointer and a "
-            "unified 'diff:' block -- use exactly one. Fold the pointed-to "
-            "diff_config.yaml content under 'diff:' (schema v2) and drop the "
-            "pointer key, or drop 'diff:' and keep the pointer (schema v1)."
-        )
-
-    diff_config_path = ""
-    if diff_config_pointer:
-        diff_config_path = _resolve_path(base_dir, diff_config_pointer) or ""
-
-    diff_policy: Optional["DiffSitePolicy"] = None
-    if raw_diff_block is not None:
-        diff_policy = parse_unified_diff_policy(
-            raw_diff_block, source_dir=base_dir, deployment_file=deployment_file
-        )
-
-    return diff_config_path, diff_policy
+    if raw_diff_block is None:
+        return None
+    return parse_unified_diff_policy(
+        raw_diff_block, source_dir=base_dir, deployment_file=deployment_file
+    )
 
 
 def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> RunnerConfig:
@@ -300,6 +289,7 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
     -------
     RunnerConfig"""
     warn_legacy_config_paths(raw, config_path=config_path)
+    _reject_legacy_diff_pointer(raw, config_path=config_path)
     deployment_file = parse_deployment_file(raw)
     notifications = parse_notification_config(raw.get("notifications"))
     deployment_path = deployment_path_for_config(config_path, deployment_file)
@@ -314,16 +304,8 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         if str(deployment.get(key, "")).strip()
     }
 
-    diff_site = str(
-        raw.get("diff_config", "")
-        or raw.get("diff_site_config", "")
-        or raw.get("diff_config_path", "")
-    ).strip()
-    diff_config_path, diff_policy = _resolve_diff_selection(
-        diff_config_pointer=diff_site,
-        raw_diff_block=raw.get("diff"),
-        base_dir=base_dir,
-        deployment_file=deployment_file,
+    diff_policy = _parse_diff_policy(
+        raw.get("diff"), base_dir=base_dir, deployment_file=deployment_file
     )
 
     star_site = str(
@@ -352,7 +334,6 @@ def _build_runner_config(raw: dict, *, config_path: Path, base_dir: Path) -> Run
         runs_root=runs,
         state_db_path=db,
         skycell_wcs_csv=wcs,
-        diff_config_path=diff_config_path,
         diff=diff_policy,
         star_config_path=star_config_path,
         photometry_config_path=photometry_config_path,
@@ -463,8 +444,6 @@ def runner_config_to_dict(cfg: RunnerConfig) -> dict:
         "star": asdict(cfg.stages.star),
         "photometry": asdict(cfg.stages.photometry),
     }
-    if cfg.diff_config_path:
-        data["diff_config_path"] = cfg.diff_config_path
     # Freeze the diff: block verbatim -- NOT a re-serialization of the parsed
     # DiffSitePolicy fields (asdict() above would otherwise normalize e.g. a
     # flat `condor:` into condor_by_stage and silently drop unrecognized keys
@@ -557,17 +536,12 @@ def load_and_materialize_runner_config(
 
     if _is_materialized_config(raw):
         _deployment_file_m = str(raw.get("deployment_file", "deployment.yaml"))
-        _diff_site_m = str(
-            raw.get("diff_config_path")
-            or raw.get("diff_config")
-            or raw.get("diff_site_config")
-            or ""
-        ).strip()
-        _diff_config_path_m, _diff_policy_m = _resolve_diff_selection(
-            diff_config_pointer=_diff_site_m,
-            raw_diff_block=raw.get("diff"),
-            base_dir=base,
-            deployment_file=_deployment_file_m,
+        # A frozen runs/{run_id}/config.yaml is a historical artifact, not an
+        # authored file -- no legacy-pointer rejection here (an old run from
+        # before the v1 pointer was removed may still carry one; it is simply
+        # ignored on reload, same as any other unrecognized key).
+        _diff_policy_m = _parse_diff_policy(
+            raw.get("diff"), base_dir=base, deployment_file=_deployment_file_m
         )
         cfg = RunnerConfig(
             deployment_file=_deployment_file_m,
@@ -577,7 +551,6 @@ def load_and_materialize_runner_config(
             runs_root=_resolve_path(base, raw.get("runs_root")) or "",
             state_db_path=_resolve_path(base, raw.get("state_db_path")) or "",
             skycell_wcs_csv=_resolve_path(base, raw.get("skycell_wcs_csv", "")) or "",
-            diff_config_path=_diff_config_path_m,
             diff=_diff_policy_m,
             star_config_path=_resolve_path(
                 base,

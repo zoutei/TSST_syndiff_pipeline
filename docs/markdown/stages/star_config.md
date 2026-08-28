@@ -1,6 +1,6 @@
 # Star configuration reference
 
-Star uses three config surfaces (parallel to diff's `diff_config.yaml` + `targets.csv`):
+Star uses three config surfaces (parallel to diff's `pipeline.yaml` `diff:` block + `targets.csv`):
 
 | File | Role |
 |------|------|
@@ -33,7 +33,7 @@ defaults:
   overwrite: false
 
 baseline:
-  workspace_run_id: none      # ws/ vs ws_{id}/; star writes to {baseline_ws}/host_star/
+  workspace_run_id: none      # legacy label-heuristic key only; star writes to {lane_root}/host_star/
   diffs: hp_d                 # locates {diffs}_kernels/
   convolved: hp_c
   phot_bkg: ks_b_s            # subtract from raw FFI (NOT hp_b)
@@ -94,22 +94,22 @@ overrides:
 | `max_ffis` | `null` | Limit frames processed (debug) |
 | `overwrite` | `false` | Recompute existing stamps |
 
-Deprecated: `defaults.workspace_run_id` (ignored for output paths). Star writes under `phot_{photometry_run_id}/host_star/`.
+Deprecated: `defaults.workspace_run_id` (ignored for output paths). Star writes under `{lane_root}/host_star/` — the SCC diff lane, not any event or photometry-run path.
 
 ### `baseline.*` labels
 
 | Key | Example | Purpose |
 |-----|---------|---------|
-| `workspace_run_id` | `star_full_lc` | Baseline diff under `ws_{id}/` (`none` → `ws/`); star outputs go in `{baseline_ws}/host_star/` |
+| `workspace_run_id` | `star_full_lc` | Legacy name kept for label-heuristic back-compat only; baseline artifacts and star outputs both resolve from the SCC diff lane (`{lane_root}/`), not any `ws/` tree |
 | `diffs` | `hp_d` | Hotpants diffs label; kernels at `hp_d_kernels/` |
 | `convolved` | `hp_c` | Per-frame convolved template windows |
 | `phot_bkg` | `ks_b_s` or `ks_b` | Photutils background subtracted in stamp |
 
-- `ks_b` — raw photutils map from `kernel_subtract`
-- `ks_b_s` — temporally smoothed (`background` stage); typical choice for star stamps
+- `ks_b` — raw photutils map from `background_estimate`
+- `ks_b_s` — temporally smoothed (`background_temporal_smoothing` stage); typical choice for star stamps
 - `hp_b` — Hotpants internal background; **not used by star**
 
-If `phot_bkg` is unset, star falls back to reading `inputs.bkg` from the workspace/site `diff_config.yaml`, then probes `ks_b_s` / `ks_b` on disk.
+If `phot_bkg` is unset, star falls back to reading `inputs.bkg` from the immutable per-lane `diff_config.yaml` snapshot / site diff policy, then probes `ks_b_s` / `ks_b` on disk.
 
 ### `photometry.methods`
 
@@ -128,7 +128,7 @@ tessreduce ePSF parity and the new aperture knobs are not yet mirrored here.
 
 PRF photometry requires the `PRF` package and TESS PRF data (same as diff stage).
 ePSF (photutils) photometry loads a per-frame `GriddedPSFModel` catalog from
-`{baseline_workspace}/{photometry.inputs.epsf}`. To build a missing catalog,
+`{lane_root}/{photometry.inputs.epsf}`. To build a missing catalog,
 add an enabled `epsf` block whose `output` matches that label; `epsf.inputs.diffs`
 optionally selects the source baseline difference workspace and defaults to
 `baseline.diffs`. The fit uses the SCC Gaia catalog and baseline shared mask.
@@ -202,25 +202,29 @@ submit uses cluster host sampler JSON (see [template pipeline HTCondor section](
 
 ## Baseline workspace pairing
 
-The committed `diff_config_multi_kernel.yaml` writes `hp_d`, kernels, and
+The archived `config/archive/diff_config_multi_kernel.yaml` writes `hp_d`, kernels, and
 backgrounds but has `write_convolved: false`; it does not by itself satisfy
-star's `hp_c` prerequisite:
+star's `hp_c` prerequisite. Star reads all baseline artifacts directly from the
+SCC diff lane — not from an event `ws/` tree — so the `baseline_workspace_run_id`
+config key is a legacy name kept only for label-heuristic back-compat (see
+[star_lightcurves.md](../star_lightcurves.md)):
 
 ```text
-ws_multi_hp_temp_calib/     # kernel_subtract → ks_b, background → ks_b_s
-  hp_d/                     # baseline.diffs
-  hp_d_kernels/             # write_kernel_solutions: true
-  ks_b_s/                   # baseline.phot_bkg
+{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/   # background_estimate → ks_b, background_temporal_smoothing → ks_b_s
+  hp_d/                                      # baseline.diffs
+  hp_d_kernels/                              # write_kernel_solutions: true
+  ks_b_s/                                    # baseline.phot_bkg
 ```
 
-After kernel/convolved backfill (`diff_config_star_full_backfill.yaml`):
+After kernel/convolved backfill (`config/archive/diff_config_star_full_backfill.yaml`),
+the same lane additionally has `hp_c/`, and star writes its own output tree
+beside those inputs — `host_star/` is per-SCC, not nested inside any baseline
+workspace:
 
 ```text
-ws_star_full_lc/            # baseline.workspace_run_id: star_full_lc
+{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/
   hp_d/, hp_c/, hp_d_kernels/, ks_b_s/
-  host_star/                # syndiff star outputs (nested in baseline ws)
+  host_star/                # syndiff star outputs — {lane_root}/host_star
     batch_manifest.csv
     {gaia_source_id}/...
 ```
-
-Set matching `baseline_workspace_run_id` in `star_targets` or `star_config.overrides`.
