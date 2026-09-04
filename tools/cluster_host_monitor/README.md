@@ -1,65 +1,47 @@
 # Cluster Host Monitor
 
-Samples real host memory and load on the STScI science cluster (`plscience1`–`plscience15`).
-Syndiff reads these heartbeats at every `condor_submit` to exclude bad execute hosts and
-rank survivors by lowest 15-minute load (`load15`).
+Reads live host memory and load on the STScI science cluster (`plscience1`–`plscience15`)
+straight from HTCondor's own ClassAds. Syndiff queries this at every `condor_submit` to
+exclude execute hosts with no live data and rank survivors by lowest load (`LOAD15`), and
+to filter live on real available memory / load via Requirements clauses.
 
 **Primary CLI:** `syndiff cluster` (see [Cluster host snapshot](../../docs/markdown/syndiff_cli.md#cluster-host-snapshot)).
 
 ## How it fits together
 
 ```text
-plscienceN  →  host_sampler.sh (every 60s)  →  ~/.syndiff/host_stats/plscienceN.stsci.edu.json
-                                                          ↓
-              syndiff cluster (read)  ←────────  condor_submit (filter + rank)
-                    ↓
+plscienceN execute host  --STARTD_CRON (every 30s)-->  MemAvailableMB ClassAd attribute
+                                                                  |
+                                                          condor_status collector
+                                                                  |
+              syndiff cluster (query)  <───────────────  condor_submit (filter + rank)
+                    |
               Discord bot (message contains "cluster")
 ```
 
+`MemAvailableMB` is published by an HTCondor `STARTD_CRON` job installed on every plscience
+execute host (STARS ticket RITM0202207, baked into Ansible so it survives host rebuilds):
+a small script reads `/proc/meminfo MemAvailable` every 30s and merges it into the machine's
+ClassAd. `DetectedMemory` (stable total physical RAM) and `LoadAvg` (native Condor load) round
+out the three live attributes syndiff reads. There is no separate sampler daemon, heartbeat
+file, or NFS directory to maintain — a host's data is exactly as fresh as the last
+`condor_status` query.
+
 | Component | Path / command |
 |-----------|----------------|
-| Sampler script (on each host) | `~/.syndiff/bin/host_sampler.sh` |
-| Heartbeat JSON | `HOST_STATS_DIR` / `plscienceN.stsci.edu.json` (default `~/.syndiff/host_stats`) |
-| Submit-time selection | `syndiff_pipeline/common/orchestration/host_stats.py` |
+| Live query + policy | `syndiff_pipeline/common/orchestration/host_stats.py` (`query_condor_host_samples`, `apply_host_stats_policy`) |
 | Human-readable table | `syndiff cluster` → `host_stats_cli.py` |
 | Legacy placement check | `read_host_stats.py` (= `syndiff cluster --check`) |
 
-## Layout (shared home NFS)
-
-```text
-/home/kshukawa/.syndiff/
-  bin/host_sampler.sh          # shared across all hosts
-  host_stats/
-    plscience1.stsci.edu.json  # one heartbeat per host, updated every 60s
-    ...
-    sampler.log
-```
-
-Each JSON file contains (among other fields): `hostname`, `timestamp`, `mem_total_mb`,
-`mem_available_mb`, `load1`, `load5`, `load15`.
-
-## Deploy samplers (from your Mac)
-
-Copy `launch_monitors.sh` to your Mac (or run from a machine with SSH to science hosts).
+## Verify the Condor-side attribute directly
 
 ```bash
-./launch_monitors.sh start      # run ~/.syndiff/bin/host_sampler.sh on all hosts
-./launch_monitors.sh start science5            # one host only (also: plscience5, science5.stsci.edu)
-./launch_monitors.sh start --install --force plscience12
-./launch_monitors.sh status
-./launch_monitors.sh status science5
-./launch_monitors.sh debug science1.stsci.edu   # troubleshoot one host
-./launch_monitors.sh stop
-./launch_monitors.sh stop science12
+condor_config_val STARTD_CRON_JOBLIST                              # expect: MEM_AVAILABLE
+condor_status -af Machine DetectedMemory MemAvailableMB LoadAvg
+grep MemAvailable /proc/meminfo                                    # compare on a given host
 ```
 
-No `scp` / install step unless you pass `--install` to push an updated sampler.
-
-Each host is started with `setsid nohup ... &` so the sampler **keeps running after SSH
-disconnects**. It does **not** auto-restart after a host reboot or monthly patch — re-run
-`launch_monitors.sh start` after maintenance.
-
-## Reading sampler JSON
+## Reading cluster status
 
 ### `syndiff cluster` (preferred)
 
@@ -69,7 +51,7 @@ disconnects**. It does **not** auto-restart after a host reboot or monthly patch
 syndiff cluster
 ```
 
-**Placement check** — preview Condor exclusions for a stage class:
+**Placement check** — preview Condor exclusions/live clauses for a stage class:
 
 ```bash
 syndiff cluster --check --preset 500gb       # ps1_process (300 GB min available)
@@ -81,11 +63,11 @@ syndiff cluster --check --site config/ --stage diff
 Example status output (fixed-width columns; widths grow to fit values like `361.7GB`):
 
 ```text
-HOST                   SLOT   AVAIL LOAD15 AGE
---------------------- ----- ------- ------ ---
-plscience4.stsci.edu  515GB 361.7GB  37.90  8s
-plscience5.stsci.edu  515GB 423.7GB   4.75  0s
-plscience7.stsci.edu      ?       ?      ?   ?
+HOST                   SLOT   AVAIL LOAD15
+--------------------- ----- ------- ------
+plscience4.stsci.edu  515GB 361.7GB  37.90
+plscience5.stsci.edu  515GB 423.7GB   4.75
+plscience7.stsci.edu      ?       ?      ?
 ```
 
 #### Column reference
@@ -93,16 +75,17 @@ plscience7.stsci.edu      ?       ?      ?   ?
 | Column | Meaning |
 |--------|---------|
 | `HOST` | Execute hostname (`plscienceN.stsci.edu`) |
-| `SLOT` | Total RAM rounded to Condor `Memory` buckets (`128GB`, `515GB`, …) from `mem_total_mb` |
-| `AVAIL` | Available RAM from `mem_available_mb` (decimal GB) |
-| `LOAD15` | 15-minute load average — **sole ranking key** among eligible hosts at submit |
-| `AGE` | Seconds since last heartbeat; stale if >300 s (excluded at submit) |
-| `VERDICT` | Only with `--check`: `OK` or `EXCLUDE (reason, …)` |
+| `SLOT` | Total RAM from `DetectedMemory` (stable physical total, not the fluctuating claimable `Memory`) |
+| `AVAIL` | Available RAM from `MemAvailableMB` |
+| `LOAD15` | `LoadAvg` — ranking key among hosts with live data at submit |
+| `VERDICT` | Only with `--check`: `OK` or `EXCLUDE (reason, ...)` — shown for any host that currently fails a threshold, even though only a `?` (no data at all) host is hard-excluded by name in the generated Requirements |
 
-With `--check`, a footer prints thresholds, excluded/OK counts, and a Condor `requirements`
-snippet (`Machine != "plscience4.stsci.edu" || …`).
+With `--check`, a footer prints thresholds, excluded/OK counts, a Condor `requirements`
+snippet for genuinely-missing hosts, and the live `MemAvailableMB`/`LoadAvg` clauses that
+filter everything else (re-evaluated by the negotiator every cycle, not frozen at submit time).
 
-Machine-readable output (for scripting):
+Machine-readable output (for scripting) — note these only ever list hosts with **no live
+data at all**, since low-mem/high-load hosts are filtered live, not by name:
 
 ```bash
 syndiff cluster --format requirements --check --preset 500gb
@@ -137,8 +120,8 @@ Template stages (`pipeline.yaml` → `stages.*`):
 
 | Key | Meaning | Example |
 |-----|---------|---------|
-| `host_stats_min_mem_mb` | Exclude if `mem_available_mb` below this | `300000` for `ps1_process` |
-| `host_stats_max_load15` | Exclude if 15-min load at or above this | `10.0` |
+| `host_stats_min_mem_mb` | Live `MemAvailableMB >= ...` Requirements floor | `300000` for `ps1_process` |
+| `host_stats_max_load15` | Live `LoadAvg <= ...` Requirements ceiling | `10.0` |
 
 Diff / star / photometry: same keys under `condor:` in `diff_config.yaml`, `star_config.yaml`,
 `photometry_config.yaml`.
@@ -146,21 +129,15 @@ Diff / star / photometry: same keys under `condor:` in `diff_config.yaml`, `star
 | Concept | Role |
 |---------|------|
 | `condor_request_memory` | HTCondor cgroup **claim** (`Memory >= …` in requirements) |
-| `host_stats_min_mem_mb` | Real `MemAvailable` **filter** from sampler JSON (not ranking) |
-| `load15` | **Filter** (< `host_stats_max_load15`) and **rank** (lowest wins) |
+| `host_stats_min_mem_mb` | Live `MemAvailableMB` **filter** (Requirements clause, re-evaluated every cycle) |
+| `host_stats_max_load15` | Live `LoadAvg` **filter** (Requirements clause) and **rank** (lowest wins among hosts with live data) |
 
-If no usable sampler JSON exists at submit time, syndiff falls back to
-`Memory >= request_memory` and `rank = -LoadAvg`.
+If `condor_status` returns no usable data at submit time (collector unreachable, or
+`MemAvailableMB` not yet published anywhere), syndiff falls back to `Memory >= request_memory`
+and `rank = -LoadAvg`.
 
 Reactive per-run exclusions from `{stage}.condor.bad_machines` (eviction/memory holds)
 still merge on top of host-stats exclusions at submit time.
-
-## Environment overrides
-
-```bash
-export HOST_STATS_DIR=/home/kshukawa/.syndiff/host_stats   # default
-export REMOTE_SAMPLER=/home/kshukawa/.syndiff/bin/host_sampler.sh
-```
 
 ## Manual inspection before a big run
 
@@ -169,16 +146,23 @@ condor_status -af Name State Activity LoadAv Mem
 syndiff cluster
 syndiff cluster --check --preset 500gb
 syndiff cluster --check --min-mem-mb 300000 --max-load15 10
-ls -la /home/kshukawa/.syndiff/host_stats/
 ```
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Action |
 |---------|--------------|--------|
-| `?` for a host in `syndiff cluster` | Sampler not running or stale JSON | `./launch_monitors.sh debug plscienceN.stsci.edu` |
-| All hosts `EXCLUDE (missing)` | Wrong `HOST_STATS_DIR` or NFS mount | Check `stats_dir:` line from `syndiff cluster` |
-| Submit warns, uses `-LoadAvg` rank | No fresh heartbeats | Restart samplers; verify JSON age <300 s |
-| Discord shows table but CLI empty | Bot runs on submit host with NFS access | Run `syndiff cluster` on same host |
+| `?` for a host in `syndiff cluster` | Host down, decommissioned, or STARTD_CRON not yet rolled out on it | `condor_status -af Machine MemAvailableMB` for that host directly; check with IT if it's a live host that should be reporting |
+| Submit warns, uses `-LoadAvg` rank | `condor_status` unreachable or returned nothing usable | Check `condor_status` works from the submit host; check collector connectivity |
+| Discord shows table but CLI empty | Bot runs on submit host with Condor CLI access | Run `syndiff cluster` on the same host |
 | Discord replies **N identical** cluster/status tables | N Discord bot processes with the same token (orphans after daemon restarts) | `pgrep -af orchestration.discord_bot` on every science host that has run the supervisor; `pkill -f 'template_creation.orchestration.discord_bot'`; single `syndiff daemon start`. After the lease fix, bots hold `control/discord_bot.lease.json` so a second instance exits before connecting. |
 
+## History
+
+Before the `MemAvailableMB` STARTD_CRON attribute existed (STARS ticket RITM0202207,
+completed 2026-09-02), this directory ran a home-grown sampler: an SSH-launched bash loop
+(`host_sampler.sh`) on each host writing JSON heartbeats to a shared NFS directory
+(`launch_monitors.sh` to deploy/manage it). That had real operational costs — autofs/NFS
+mount races, no survival across host reboots/patches, manual babysitting, orphaned-process
+bugs — all now moot since Condor publishes the same data live. Those scripts were removed
+once this migration landed; see git history if you need to reference them.

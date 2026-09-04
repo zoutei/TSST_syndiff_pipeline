@@ -197,7 +197,7 @@ condor:
 ```
 
 Legacy `requirements` / `rank` keys are rejected at load time. Machine selection at
-submit uses cluster host sampler JSON (see [template pipeline HTCondor section](../template_pipeline.md#htcondor-integration)).
+submit uses live Condor host memory/load (see [template pipeline HTCondor section](../template_pipeline.md#htcondor-integration)).
 `--local` on `syndiff star submit` bypasses Condor for a smoke test.
 
 ## Baseline workspace pairing

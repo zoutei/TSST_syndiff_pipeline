@@ -1,4 +1,4 @@
-"""CLI and Discord formatting for cluster host sampler JSON."""
+"""CLI and Discord formatting for live Condor cluster host status."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from pathlib import Path
 from typing import Sequence
 
 from syndiff_pipeline.common.orchestration.host_stats import (
-    default_stats_dir,
-    discover_samples,
+    HostSample,
     evaluate_host,
     expected_hosts,
     format_machine_exclusions,
     plan_host_selection,
+    query_condor_host_samples,
 )
 
 PRESETS = {
@@ -47,9 +47,13 @@ def format_condor_slot_gb(mem_total_mb: int) -> str:
     return format_mem_gb(mem_total_mb)
 
 
+def format_live_clauses(min_mem_mb: int, max_load15: float) -> str:
+    return f"(MemAvailableMB >= {int(min_mem_mb)}) && (LoadAvg <= {float(max_load15)})"
+
+
 def format_reasons_for_display(
     reasons: tuple[str, ...],
-    sample,
+    sample: HostSample | None,
 ) -> tuple[str, ...]:
     out: list[str] = []
     for reason in reasons:
@@ -73,21 +77,15 @@ class HostVerdict:
 
 
 def build_verdicts(
-    samples: dict,
+    samples: dict[str, HostSample],
     *,
     min_mem_mb: int,
     max_load15: float,
-    max_age_s: int,
 ) -> list[tuple[str, HostVerdict]]:
     verdicts: list[tuple[str, HostVerdict]] = []
     for host in expected_hosts():
         sample = samples.get(host)
-        reasons = evaluate_host(
-            sample,
-            min_mem_mb=min_mem_mb,
-            max_load15=max_load15,
-            max_age_s=max_age_s,
-        )
+        reasons = evaluate_host(sample, min_mem_mb=min_mem_mb, max_load15=max_load15)
         verdicts.append(
             (
                 host,
@@ -106,31 +104,27 @@ class _ClusterTableRow:
     slot: str
     avail: str
     load15: str
-    age: str
     verdict: str | None = None
 
 
 def _cluster_table_row(
     host: str,
-    sample,
+    sample: HostSample | None,
     verdict: HostVerdict | None,
 ) -> _ClusterTableRow:
     if sample is None:
         slot = "?"
         avail = "?"
         load15 = "?"
-        age = "?"
     else:
         slot = format_condor_slot_gb(sample.mem_total_mb)
         avail = format_mem_gb(sample.mem_available_mb)
         load15 = f"{sample.load15:.2f}"
-        age = f"{sample.age_s}s"
     return _ClusterTableRow(
         host=host,
         slot=slot,
         avail=avail,
         load15=load15,
-        age=age,
         verdict=verdict.label if verdict is not None else None,
     )
 
@@ -166,7 +160,7 @@ def _format_fixed_width_table(
 
 
 def format_cluster_table(
-    samples: dict,
+    samples: dict[str, HostSample],
     verdicts: Sequence[tuple[str, HostVerdict]] | None = None,
     *,
     include_verdict: bool = False,
@@ -179,17 +173,17 @@ def format_cluster_table(
         _cluster_table_row(host, samples.get(host), verdict if include_verdict else None)
         for host, verdict in verdicts
     ]
-    headers = ["HOST", "SLOT", "AVAIL", "LOAD15", "AGE"]
-    aligns = ["l", "r", "r", "r", "r"]
+    headers = ["HOST", "SLOT", "AVAIL", "LOAD15"]
+    aligns = ["l", "r", "r", "r"]
     if include_verdict:
         headers.append("VERDICT")
         aligns.append("l")
 
     rows = [
         (
-            (row.host, row.slot, row.avail, row.load15, row.age, row.verdict)
+            (row.host, row.slot, row.avail, row.load15, row.verdict)
             if include_verdict
-            else (row.host, row.slot, row.avail, row.load15, row.age)
+            else (row.host, row.slot, row.avail, row.load15)
         )
         for row in table_rows
     ]
@@ -198,25 +192,18 @@ def format_cluster_table(
 
 def render_cluster_table_text(
     *,
-    stats_dir: Path | None = None,
+    host_samples: dict[str, HostSample] | None = None,
     include_verdict: bool = False,
     min_mem_mb: int | None = None,
     max_load15: float | None = None,
-    max_age_s: int = 300,
 ) -> str:
     """Build the cluster table body (for CLI stdout or Discord code fence)."""
-    stats_dir = stats_dir or default_stats_dir()
-    samples = discover_samples(stats_dir)
+    samples = host_samples if host_samples is not None else query_condor_host_samples()
     verdicts = None
     if include_verdict:
         min_mem = min_mem_mb if min_mem_mb is not None else PRESETS["500gb"]["min_mem_mb"]
         max_load = max_load15 if max_load15 is not None else PRESETS["500gb"]["max_load15"]
-        verdicts = build_verdicts(
-            samples,
-            min_mem_mb=min_mem,
-            max_load15=max_load,
-            max_age_s=max_age_s,
-        )
+        verdicts = build_verdicts(samples, min_mem_mb=min_mem, max_load15=max_load)
     return format_cluster_table(samples, verdicts, include_verdict=include_verdict)
 
 
@@ -303,16 +290,11 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
         description=(
-            "Show science-cluster execute-host memory and load from sampler JSON. "
-            "Default is a compact status table (no VERDICT column). "
-            "Use --check for placement preview with pass/fail per host."
+            "Show science-cluster execute-host memory and load, live from Condor "
+            "(condor_status MemAvailableMB/LoadAvg). Default is a compact status "
+            "table (no VERDICT column). Use --check for placement preview with "
+            "pass/fail per host."
         ),
-    )
-    parser.add_argument(
-        "--stats-dir",
-        type=Path,
-        default=None,
-        help=f"Per-host JSON directory (default: {default_stats_dir()})",
     )
     parser.add_argument(
         "--check",
@@ -327,18 +309,12 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-mem-mb",
         type=int,
-        help="With --check: min MemAvailable (MB) from sampler JSON",
+        help="With --check: min MemAvailableMB",
     )
     parser.add_argument(
         "--max-load15",
         type=float,
         help="With --check: exclude hosts with load15 at or above this value",
-    )
-    parser.add_argument(
-        "--max-age-s",
-        type=int,
-        default=300,
-        help="With --check: max heartbeat age in seconds (default: 300)",
     )
     parser.add_argument(
         "--site",
@@ -363,11 +339,6 @@ def build_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
         "ones (no effect on requirements/bad-machines, which are exclusion "
         "lists by definition)",
     )
-    parser.add_argument(
-        "--no-stats-dir-line",
-        action="store_true",
-        help="Omit stats_dir header line (for machine consumers)",
-    )
     return parser
 
 
@@ -376,44 +347,31 @@ def main(argv: list[str] | None = None, *, default_check: bool = False) -> int:
     if default_check:
         parser.set_defaults(check=True)
     args = parser.parse_args(argv)
-    stats_dir = args.stats_dir or default_stats_dir()
 
     check_mode = bool(args.check) or args.format != "table"
     min_mem_mb, max_load15 = resolve_thresholds(args) if check_mode else (0, 0.0)
 
-    samples = discover_samples(stats_dir)
+    samples = query_condor_host_samples()
     verdicts = (
-        build_verdicts(
-            samples,
-            min_mem_mb=min_mem_mb,
-            max_load15=max_load15,
-            max_age_s=args.max_age_s,
-        )
+        build_verdicts(samples, min_mem_mb=min_mem_mb, max_load15=max_load15)
         if check_mode
         else None
     )
 
     selection = (
-        plan_host_selection(
-            stats_dir=stats_dir,
-            min_mem_mb=min_mem_mb,
-            max_load15=max_load15,
-            max_age_s=args.max_age_s,
-        )
+        plan_host_selection(host_samples=samples, min_mem_mb=min_mem_mb, max_load15=max_load15)
         if check_mode
         else None
     )
+    # plan_host_selection only hard-excludes hosts with no live data at all
+    # ("missing") -- low-mem/high-load hosts are still "eligible" there
+    # because they're filtered live via MemAvailableMB/LoadAvg Requirements
+    # clauses at submit time, not by name. The VERDICT column (from
+    # build_verdicts/evaluate_host) still flags them for human visibility.
     excluded = sorted(selection.excluded) if selection else []
     ok_hosts = [host.hostname for host in selection.eligible] if selection else []
 
     if args.format == "table":
-        if not args.no_stats_dir_line:
-            print(f"stats_dir: {stats_dir}")
-            if not stats_dir.is_dir():
-                print(
-                    f"WARNING: stats directory does not exist: {stats_dir}",
-                    file=sys.stderr,
-                )
         print(
             format_cluster_table(
                 samples,
@@ -423,15 +381,15 @@ def main(argv: list[str] | None = None, *, default_check: bool = False) -> int:
         )
         if check_mode:
             print()
-            print(
-                f"Thresholds: min_mem={format_mem_gb(min_mem_mb)}, "
-                f"max_load15={max_load15}, max_age_s={args.max_age_s}"
-            )
+            print(f"Thresholds: min_mem={format_mem_gb(min_mem_mb)}, max_load15={max_load15}")
             print(f"Excluded: {len(excluded)}  OK: {len(ok_hosts)}")
             if excluded:
                 print()
                 print("requirements:")
                 print(format_machine_exclusions(excluded))
+            print()
+            print("live clauses (re-evaluated every negotiation cycle, not shown above):")
+            print(format_live_clauses(min_mem_mb, max_load15))
         return 0
 
     if args.format == "hosts":

@@ -25,7 +25,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from syndiff_pipeline.common.orchestration import condor, logs
+from syndiff_pipeline.common.orchestration import condor, host_stats, logs
 from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 from syndiff_pipeline.common.orchestration.scheduler import reconcile_running_stages
 from syndiff_pipeline.common.orchestration.state import (
@@ -763,10 +763,8 @@ class TestCondorRequirementsExclusion(unittest.TestCase):
 
 
 class TestCondorSubmitExclusions(unittest.TestCase):
-    def _empty_host_stats_env(self, tmp: str):
-        stats_dir = Path(tmp) / "empty_host_stats"
-        stats_dir.mkdir()
-        return unittest.mock.patch.dict(os.environ, {"HOST_STATS_DIR": str(stats_dir)})
+    def _no_host_samples(self):
+        return unittest.mock.patch.object(host_stats, "query_condor_host_samples", return_value={})
 
     def test_submit_job_merges_bad_machines_into_requirements(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -778,7 +776,7 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 stderr="",
                 returncode=0,
             )
-            with self._empty_host_stats_env(tmp), unittest.mock.patch.object(
+            with self._no_host_samples(), unittest.mock.patch.object(
                 condor, "_run_condor", return_value=proc
             ):
                 cluster_id, _epoch = condor.submit_job(
@@ -803,7 +801,7 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 stderr="",
                 returncode=0,
             )
-            with self._empty_host_stats_env(tmp), unittest.mock.patch.object(
+            with self._no_host_samples(), unittest.mock.patch.object(
                 condor, "_run_condor", return_value=proc
             ):
                 condor.submit_job(
@@ -828,7 +826,7 @@ class TestCondorSubmitExclusions(unittest.TestCase):
                 stderr="",
                 returncode=0,
             )
-            with self._empty_host_stats_env(tmp), unittest.mock.patch.object(
+            with self._no_host_samples(), unittest.mock.patch.object(
                 condor, "_run_condor", return_value=proc
             ):
                 cluster_id, _epoch = condor.submit_job(
