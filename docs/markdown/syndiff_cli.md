@@ -133,7 +133,7 @@ syndiff retry \
 |---------|--------------|
 | **`syndiff progress`** | Aggregate stage counts; optional per-task detail from stage logs and progress sidecars (`downsample.progress.json`, `diff.hotpants.progress.json`, `diff.epsf.progress.json`, `diff.centroids.progress.json`, `diff.photometry.progress.json`). Condor detail lines show `condor_q` state. Use `--no-detail` for summary-only. |
 | **`syndiff status`** | Per-target stage grid: `tess_dl \| map \| ps1_dl \| ps1_pr \| remap \| down \| diff` (`photometry` and `star` omitted). `--watch` for live refresh. |
-| **`syndiff cluster`** | Compact table of science-cluster execute hosts from sampler JSON (`HOST`, `SLOT`, `AVAIL`, `LOAD15`, `AGE`). No VERDICT column by default. Use `--check` for placement preview (VERDICT + exclusion summary). See [Cluster host snapshot](#cluster-host-snapshot). |
+| **`syndiff cluster`** | Compact table of science-cluster execute hosts, live from Condor (`HOST`, `SLOT`, `AVAIL`, `LOAD15`). No VERDICT column by default. Use `--check` for placement preview (VERDICT + exclusion summary). See [Cluster host snapshot](#cluster-host-snapshot). |
 | **`syndiff show`** | Dump `run_meta.json`. |
 | **`syndiff logs`** / **`syndiff tail`** | Daemon log or `per_target/<label>/<stage>.log`. |
 
@@ -179,57 +179,56 @@ There is **no** `syndiff discord bot` CLI. When `notifications.bot.enabled` is t
 
 ### Cluster host snapshot
 
-`syndiff cluster` reads per-host sampler JSON from `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`) and prints a **fixed-width, monospace-friendly table** of all expected execute hosts (`plscience1`–`plscience15`). This is the same heartbeat data syndiff uses at `condor_submit` for host filtering and `load15` ranking (see [HTCondor integration](template_pipeline.md#htcondor-integration)).
+`syndiff cluster` queries `condor_status` live (`MemAvailableMB`/`DetectedMemory`/`LoadAvg` ClassAd attributes, published by an HTCondor `STARTD_CRON` job on every execute host) and prints a **fixed-width, monospace-friendly table** of all expected execute hosts (`plscience1`–`plscience15`). This is the same live data syndiff reads at `condor_submit` for host filtering and `load15` ranking (see [HTCondor integration](template_pipeline.md#htcondor-integration)). There is no local sampler daemon or heartbeat file — a host's data is exactly as fresh as the last query.
 
-Implementation: `common/orchestration/host_stats_cli.py` (table formatting + CLI); selection logic lives in `common/orchestration/host_stats.py`.
+Implementation: `common/orchestration/host_stats_cli.py` (table formatting + CLI); the live query + selection logic live in `common/orchestration/host_stats.py`.
 
 #### Default vs placement check
 
 | Mode | Command | Output |
 |------|---------|--------|
-| **Status** (default) | `syndiff cluster` | `HOST`, `SLOT`, `AVAIL`, `LOAD15`, `AGE` — no pass/fail column |
-| **Placement check** | `syndiff cluster --check` | Above + `VERDICT`, threshold footer, Condor `requirements` exclusion snippet |
+| **Status** (default) | `syndiff cluster` | `HOST`, `SLOT`, `AVAIL`, `LOAD15` — no pass/fail column |
+| **Placement check** | `syndiff cluster --check` | Above + `VERDICT`, threshold footer, Condor `requirements` exclusion snippet + live clauses |
 
 Status mode answers “what does the cluster look like right now?” Placement check answers “would stage *X* be able to land on these hosts with the configured thresholds?”
 
 #### Example output
 
-Default (live heartbeats):
+Default (live query):
 
 ```text
-HOST                   SLOT   AVAIL LOAD15 AGE
---------------------- ----- ------- ------ ---
-plscience4.stsci.edu  515GB 361.7GB  37.90  8s
-plscience5.stsci.edu  515GB 423.7GB   4.75  0s
-plscience7.stsci.edu      ?       ?      ?   ?
+HOST                   SLOT   AVAIL LOAD15
+--------------------- ----- ------- ------
+plscience4.stsci.edu  515GB 361.7GB  37.90
+plscience5.stsci.edu  515GB 423.7GB   4.75
+plscience7.stsci.edu      ?       ?      ?
 ```
 
-`?` means no sampler JSON (or unreadable file) for that host. Column widths are computed from the data so values like `361.7GB` stay aligned.
+`?` means no live data for that host (down, decommissioned, or not yet publishing `MemAvailableMB`). Column widths are computed from the data so values like `361.7GB` stay aligned.
 
 Placement check (`--check --preset 500gb`):
 
 ```text
-HOST                   SLOT   AVAIL LOAD15 AGE VERDICT
---------------------- ----- ------- ------ --- -------------------------------------------
-plscience4.stsci.edu  515GB 361.7GB  37.90  9s EXCLUDE (high load15 37.90)
-plscience5.stsci.edu  515GB 423.7GB   4.75  1s OK
-plscience7.stsci.edu      ?       ?      ?   ? EXCLUDE (missing)
+HOST                   SLOT   AVAIL LOAD15 VERDICT
+--------------------- ----- ------- ------ -------------------------------------------
+plscience4.stsci.edu  515GB 361.7GB  37.90 EXCLUDE (high load15 37.90)
+plscience5.stsci.edu  515GB 423.7GB   4.75 OK
+plscience7.stsci.edu      ?       ?      ? EXCLUDE (missing)
 ```
 
-Footer (not shown): `Thresholds: …`, `Excluded: N  OK: M`, and a `requirements:` block listing `Machine != "…"` exclusions.
+Footer (not shown): `Thresholds: …`, `Excluded: N  OK: M`, a `requirements:` block listing `Machine != "…"` exclusions for hosts with **no live data at all**, and a `live clauses:` line showing the `MemAvailableMB`/`LoadAvg` Requirements that filter everything else — a low-mem/high-load host like `plscience4` above shows `VERDICT=EXCLUDE` but is *not* named in the `requirements:` snippet, because it's filtered live (re-evaluated by the negotiator every cycle) rather than frozen by name at submit time.
 
 #### Column reference
 
 | Column | Align | Source | Notes |
 |--------|-------|--------|-------|
 | `HOST` | left | `plscienceN.stsci.edu` | Fixed list of 15 execute hosts |
-| `SLOT` | right | `mem_total_mb` | Rounded to Condor `Memory` buckets (`128GB`, `515GB`, …) |
-| `AVAIL` | right | `mem_available_mb` | Decimal GB (`MemAvailable` from sampler) |
-| `LOAD15` | right | `load15` | 15-minute load average; sole **ranking** key at submit |
-| `AGE` | right | heartbeat timestamp | Seconds since last JSON write; stale if >300 s at submit |
+| `SLOT` | right | `DetectedMemory` | Rounded to Condor `Memory` buckets (`128GB`, `515GB`, …); stable physical total, not the fluctuating claimable `Memory` |
+| `AVAIL` | right | `MemAvailableMB` | Decimal GB, live from Condor's STARTD_CRON |
+| `LOAD15` | right | `LoadAvg` | Native Condor load; ranking key among hosts with live data at submit |
 | `VERDICT` | left | `--check` only | `OK` or `EXCLUDE (reason, …)` |
 
-At submit time, `mem_available_mb` is a **filter only** (must be ≥ `host_stats_min_mem_mb`); more free RAM does not improve rank once above the threshold.
+At submit time, both `MemAvailableMB` and `LoadAvg` are **live Requirements filters** (re-evaluated by the negotiator every cycle, not frozen at submit time); `load15` is additionally the **ranking** key among hosts that currently match.
 
 #### Common commands
 
@@ -249,11 +248,10 @@ syndiff cluster --format requirements --check --preset 500gb  # Condor exclusion
 |------|---------|
 | `--check` | Add `VERDICT` column, threshold footer, and Condor `requirements` exclusion snippet |
 | `--preset 128gb\|500gb` | Shortcut thresholds for `--check` (`128000`/`300000` MB min mem, `10.0` max load15) |
-| `--min-mem-mb`, `--max-load15`, `--max-age-s` | Override thresholds for `--check` (default max age: 300 s) |
+| `--min-mem-mb`, `--max-load15` | Override thresholds for `--check` |
 | `--site` + `--stage` | Load `host_stats_min_mem_mb` / `host_stats_max_load15` from site config for that stage |
-| `--format requirements\|bad-machines\|hosts` | Machine-readable exclusion lists (implies `--check`) |
+| `--format requirements\|bad-machines\|hosts` | Machine-readable exclusion lists (implies `--check`); only ever lists hosts with no live data at all |
 | `--include-ok` | With `--format`, include passing hosts instead of excluded only |
-| `--stats-dir` | Override `HOST_STATS_DIR` |
 
 **`--stage` values** for `--site`: template stages `mapping`, `ps1_process`, `remap`, `downsample`; branch stages `diff`, `star`, `photometry` (read from the matching site YAML `condor:` block).
 
@@ -269,9 +267,9 @@ When `notifications.bot.enabled` is true, the supervisor-managed status bot hand
 
 **Precedence:** exact Condor triggers win over the cluster substring. A message that is only `condor_q` does not also match cluster. A message like `how is the cluster?` returns the host table, not pipeline status.
 
-#### Sampler deployment and legacy script
+#### Legacy script
 
-Deploy and troubleshoot the sampler with [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md) (`launch_monitors.sh` on science hosts).
+`tools/cluster_host_monitor/read_host_stats.py` is a thin wrapper equivalent to `syndiff cluster --check`; see [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md) for background on the live `MemAvailableMB` ClassAd attribute this reads.
 
 `tools/cluster_host_monitor/read_host_stats.py` is a thin wrapper around the same code path as `syndiff cluster --check` (VERDICT on by default). Prefer `syndiff cluster` for day-to-day use.
 
@@ -374,7 +372,7 @@ Template and diff science code lives under `template_creation/processing/` and `
 | [`storage_layout.md`](storage_layout.md) | `diff_{lane}/`, `bookkeeping/diff/`, `phot_{run_id}/` |
 | [`bookkeeping.md`](bookkeeping.md) | Provenance CLI |
 | [`template_runner_architecture.md`](template_runner_architecture.md) | Scheduler, verify, recovery |
-| [`../../tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md) | Host sampler deploy + `syndiff cluster` |
+| [`../../tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md) | Live `MemAvailableMB` ClassAd background + `syndiff cluster` |
 | [`pipeline_state_machine_reference.md`](pipeline_state_machine_reference.md) | SQLite status transitions |
 | [`../config/`](../../config/) | Site config examples |
 | [`README.md`](README.md) | Documentation index |

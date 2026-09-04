@@ -509,7 +509,7 @@ Configure under `resources:` in YAML. For Condor stages, each pool's `max_concur
 The Condor path:
 
 1. Builds a `CondorResourceRequest` from stage YAML (`pipeline.yaml` template stages, or `condor:` in `pipeline.yaml`'s `diff:` block / `star_config.yaml` / `photometry_config.yaml`).
-2. At submit time, reads cluster host sampler JSON from `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`) and sets `requirements` + `rank` automatically — see [HTCondor Integration](#htcondor-integration).
+2. At submit time, queries live Condor host memory/load (`MemAvailableMB`/`LoadAvg`) and sets `requirements` + `rank` automatically — see [HTCondor Integration](#htcondor-integration).
 3. Merges reactive exclusions from `{stage}.condor.bad_machines` (eviction / memory-hold hosts).
 4. Writes a `.condor.submit` file next to the stage log.
 5. Submits via `condor_submit`.
@@ -897,7 +897,7 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 | `executor` | `"condor"` | `"condor"` or `"local"` |
 | `condor_request_cpus` | `16` | HTCondor `request_cpus` |
 | `condor_request_memory` | `100000` | HTCondor `request_memory` (MB cgroup limit) |
-| `host_stats_min_mem_mb` | `128000` | Exclude execute hosts whose sampler `mem_available_mb` is below this (pass/fail filter only) |
+| `host_stats_min_mem_mb` | `128000` | Live-filter out execute hosts whose `MemAvailableMB` is below this (Requirements clause, re-checked every cycle) |
 | `host_stats_max_load15` | `10.0` | Exclude hosts with 15-minute load at or above this; rank survivors by lowest `load15` |
 
 #### `stages.ps1_download`
@@ -923,7 +923,7 @@ Shared WCS/grouping knobs consumed by field-mode `remap` and `downsample` (`WcsG
 | `executor` | `"condor"` | `"condor"` or `"local"` |
 | `condor_request_cpus` | `64` | HTCondor `request_cpus` |
 | `condor_request_memory` | `300000` | HTCondor `request_memory` (MB cgroup limit) |
-| `host_stats_min_mem_mb` | `300000` | Exclude execute hosts whose sampler `mem_available_mb` is below this |
+| `host_stats_min_mem_mb` | `300000` | Live-filter out execute hosts whose `MemAvailableMB` is below this |
 | `host_stats_max_load15` | `10.0` | Exclude hosts with 15-minute load at or above this; rank survivors by lowest `load15` |
 
 #### `stages.downsample`
@@ -947,7 +947,7 @@ rows named `templates`/`tmpl` map to `downsample` in the status grid only.
 | `condor_request_cpus` | `16` | HTCondor `request_cpus` |
 | `condor_request_memory` | `128000` | HTCondor `request_memory` (MB cgroup limit) |
 | `condor_request_disk` | null | Optional `request_disk` (MB); omit from submit when null |
-| `host_stats_min_mem_mb` | `128000` | Exclude execute hosts whose sampler `mem_available_mb` is below this |
+| `host_stats_min_mem_mb` | `128000` | Live-filter out execute hosts whose `MemAvailableMB` is below this |
 | `host_stats_max_load15` | `10.0` | Exclude hosts with 15-minute load at or above this; rank survivors by lowest `load15` |
 
 Field-mode-only keys (`apply_intra_skycell`, `apply_inter_skycell`, `rebuild_field_store`, `n_jobs`, `stage_regmaps_to_scratch`, `materialize_fits`, `output_store_name`, `remap_store_name`, …): see [field_geometry.md](field_geometry.md). Removed keys (`apply_hybrid_exact`, `l4b_policy`, `hybrid_R` on downsample) are rejected at parse.
@@ -1643,35 +1643,33 @@ re-scanning the store.
 - Submit host: Condor client tools, `syndiff` conda env, NFS access to `data_root`, `workspace_root`, and `runs_root`.
 - Execute nodes: same NFS mounts for `/home` (conda) and science data; no inbound file transfer (`should_transfer_files = NO`).
 - Jobs run as the submitting Unix user (`getenv = false` — wrapper sets up environment).
-- **Host sampler heartbeats** (optional but recommended): per-host JSON under `HOST_STATS_DIR` (default `/home/kshukawa/.syndiff/host_stats`). Deploy with `tools/cluster_host_monitor/launch_monitors.sh`. See [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md).
+- **Live host memory/load** (recommended): HTCondor publishes `MemAvailableMB` on every execute host via a `STARTD_CRON` job (real `/proc/meminfo MemAvailable`, refreshed every 30s), alongside native `DetectedMemory`/`LoadAvg` ClassAd attributes. No sampler daemon or heartbeat file to deploy. See [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md).
 
 ### How machine selection works at submit time
 
 Syndiff no longer accepts YAML `condor_requirements`, `condor_rank`, or `condor.requirements` / `condor.rank` under `pipeline.yaml`'s `diff:` block (or a legacy standalone `diff_config.yaml`) / `star_config.yaml` / `photometry_config.yaml`. Those keys raise `ValueError` at config load.
 
-At every `condor_submit`, `common/orchestration/host_stats.py` reads the sampler JSON and:
+At every `condor_submit`, `common/orchestration/host_stats.py` queries `condor_status` live and:
 
 1. **Sets base requirements** — `Memory >= request_memory_mb` (HTCondor slot memory classad).
-2. **Filters execute hosts** (pass/fail, not ranking):
-   - missing or stale heartbeat (>300 s),
-   - `mem_available_mb < host_stats_min_mem_mb`,
-   - `load15 >= host_stats_max_load15`.
-3. **Ranks survivors** by lowest `load15` only (more free RAM does not improve rank once above the minimum).
-4. **Merges reactive exclusions** from `{stage}.condor.bad_machines` (eviction loops, low-usage memory holds).
+2. **Hard-excludes by name** only hosts with no live data at all (down, decommissioned, or not yet publishing `MemAvailableMB`) — there's no live substitute for "no data."
+3. **Folds in live Requirements clauses** — `MemAvailableMB >= host_stats_min_mem_mb` and `LoadAvg <= host_stats_max_load15` — re-evaluated by the negotiator every cycle, not frozen at submit time. A job idle in the queue can still match a host once its memory frees up or its load drops, with no resubmission needed.
+4. **Ranks survivors** (hosts with live data) by lowest `load15`.
+5. **Merges reactive exclusions** from `{stage}.condor.bad_machines` (eviction loops, low-usage memory holds).
 
-If no usable sampler JSON exists, syndiff falls back to `Memory >= request_memory_mb` and `rank = -LoadAvg` (Condor's own load classad) and logs a warning.
+If `condor_status` returns no usable data at submit time (collector unreachable, or `MemAvailableMB` not published anywhere yet), syndiff falls back to `Memory >= request_memory_mb` and `rank = -LoadAvg` (Condor's own load classad) and logs a warning.
 
 #### Inspect before submit (`syndiff cluster`)
 
-Use `syndiff cluster` to read the same sampler JSON the submit path uses. Two modes:
+Use `syndiff cluster` to query the same live Condor data the submit path uses. Two modes:
 
 | Mode | Command | Use when |
 |------|---------|----------|
-| Status | `syndiff cluster` | Quick health check — memory, load, heartbeat age per host |
+| Status | `syndiff cluster` | Quick health check — memory, load per host, right now |
 | Placement check | `syndiff cluster --check [--preset …]` | Preview which hosts would be excluded/ranked for a stage |
 
 ```bash
-syndiff cluster                              # live heartbeats (no VERDICT)
+syndiff cluster                              # live snapshot (no VERDICT)
 syndiff cluster --check --preset 500gb       # ps1_process thresholds (300 GB min mem)
 syndiff cluster --check --preset 128gb       # mapping / remap thresholds
 syndiff cluster --check --site config/ --stage mapping
@@ -1682,13 +1680,13 @@ python3 tools/cluster_host_monitor/read_host_stats.py --preset 500gb   # legacy;
 Example status output (columns auto-sized for alignment):
 
 ```text
-HOST                   SLOT   AVAIL LOAD15 AGE
---------------------- ----- ------- ------ ---
-plscience5.stsci.edu  515GB 423.7GB   4.75  0s
-plscience7.stsci.edu      ?       ?      ?   ?
+HOST                   SLOT   AVAIL LOAD15
+--------------------- ----- ------- ------
+plscience5.stsci.edu  515GB 423.7GB   4.75
+plscience7.stsci.edu      ?       ?      ?
 ```
 
-`?` = missing or unreadable heartbeat. In Discord, post any message containing `cluster` for this compact table; use `--check` on the CLI for `VERDICT` and Condor exclusion preview.
+`?` = no live data for that host. In Discord, post any message containing `cluster` for this compact table; use `--check` on the CLI for `VERDICT` and Condor exclusion preview.
 
 See [`syndiff_cli.md` — Cluster host snapshot](syndiff_cli.md#cluster-host-snapshot) and [`tools/cluster_host_monitor/README.md`](../../tools/cluster_host_monitor/README.md).
 
@@ -1696,9 +1694,9 @@ See [`syndiff_cli.md` — Cluster host snapshot](syndiff_cli.md#cluster-host-sna
 
 | Signal | Role |
 |--------|------|
-| `mem_available_mb` | Filter only — must be ≥ `host_stats_min_mem_mb` |
-| `load15` | Filter (must be < `host_stats_max_load15`) **and** sole ranking key among eligible hosts |
-| Stale / missing JSON | Filter only — exclude (conservative) |
+| `MemAvailableMB` | Live Requirements filter — must be ≥ `host_stats_min_mem_mb`, re-checked every negotiation cycle |
+| `LoadAvg` | Live Requirements filter (must be ≤ `host_stats_max_load15`) **and** sole ranking key among hosts with live data |
+| No live data at all | Hard, name-based exclusion (the only case with no live substitute) |
 
 ### Wrapper script
 

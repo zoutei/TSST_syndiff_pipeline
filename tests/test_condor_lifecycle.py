@@ -23,7 +23,7 @@ from syndiff_pipeline.template_creation.processing.pancakes import (
     shift_polygon_ras_for_moc,
     shift_ras_for_moc,
 )
-from syndiff_pipeline.common.orchestration import condor, logs
+from syndiff_pipeline.common.orchestration import condor, host_stats, logs
 from syndiff_pipeline.common.orchestration.run_context import resolve_run_context
 from syndiff_pipeline.common.orchestration.scheduler import reconcile_running_stages
 from syndiff_pipeline.common.orchestration.state import (
@@ -388,7 +388,10 @@ class TestCondorEvictionExclusion(unittest.TestCase):
                 artifacts[key].write_text(f"old {key} content\n", encoding="utf-8")
             artifacts["clusters"].write_text("41\n42\n", encoding="utf-8")
 
-            with unittest.mock.patch.object(condor, "_run_condor") as run:
+            with (
+                unittest.mock.patch.object(condor, "_run_condor") as run,
+                unittest.mock.patch.object(host_stats, "query_condor_host_samples", return_value={}),
+            ):
                 run.return_value = unittest.mock.Mock(
                     stdout="submitted to cluster 99.\n", stderr="", returncode=0
                 )

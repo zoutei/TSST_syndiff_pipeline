@@ -1193,12 +1193,10 @@ def cmd_active(args: argparse.Namespace) -> int:
 
 
 def cmd_cluster(args: argparse.Namespace) -> int:
-    """Show cluster execute-host sampler snapshot (optional placement check)."""
+    """Show live cluster execute-host status from Condor (optional placement check)."""
     from syndiff_pipeline.common.orchestration.host_stats_cli import main as cluster_main
 
     argv: list[str] = []
-    if args.stats_dir is not None:
-        argv.extend(["--stats-dir", str(args.stats_dir)])
     if args.check:
         argv.append("--check")
     if args.preset:
@@ -1207,8 +1205,6 @@ def cmd_cluster(args: argparse.Namespace) -> int:
         argv.extend(["--min-mem-mb", str(args.min_mem_mb)])
     if args.max_load15 is not None:
         argv.extend(["--max-load15", str(args.max_load15)])
-    if args.max_age_s != 300:
-        argv.extend(["--max-age-s", str(args.max_age_s)])
     if args.site:
         argv.extend(["--site", args.site])
     if args.stage:
@@ -1762,13 +1758,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser(
         "cluster",
-        help="Execute-host memory/load snapshot from cluster host sampler JSON",
-    )
-    sp.add_argument(
-        "--stats-dir",
-        type=Path,
-        default=None,
-        help="Per-host JSON directory (default: HOST_STATS_DIR or ~/.syndiff/host_stats)",
+        help="Execute-host memory/load snapshot, live from Condor (MemAvailableMB/LoadAvg)",
     )
     sp.add_argument(
         "--check",
@@ -1782,7 +1772,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument("--min-mem-mb", type=int, default=None)
     sp.add_argument("--max-load15", type=float, default=None)
-    sp.add_argument("--max-age-s", type=int, default=300)
     sp.add_argument(
         "--site",
         default=None,

@@ -1,14 +1,20 @@
-"""Cluster host sampler JSON → Condor machine selection at submit time."""
+"""Live Condor ClassAd host memory/load → machine selection at submit time.
+
+Memory/load come straight from HTCondor's own ClassAds: ``MemAvailableMB`` is
+published by a ``STARTD_CRON`` job on every plscience execute host (real
+``/proc/meminfo MemAvailable``, refreshed every 30s -- unlike Condor's own
+``Memory`` attribute, which only tracks Condor-claimed capacity and misses
+memory consumed outside Condor). ``DetectedMemory``/``LoadAvg`` are native
+Condor attributes. There is no local sampler daemon or heartbeat file to
+maintain; a host's data is exactly as fresh as the last time we queried
+``condor_status``.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import re
-import time
+import subprocess
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 if TYPE_CHECKING:
@@ -16,35 +22,18 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-_DEFAULT_STATS_DIR = "/home/kshukawa/.syndiff/host_stats"
-DEFAULT_MAX_AGE_S = 300
-
-
-def default_stats_dir() -> Path:
-    return Path(os.environ.get("HOST_STATS_DIR", _DEFAULT_STATS_DIR))
-
-
-# Back-compat alias for CLI default=...
-DEFAULT_STATS_DIR = default_stats_dir()
+_CONDOR_STATUS_TIMEOUT_S = 15.0
+_CONDOR_STATUS_FIELDS = ("Machine", "DetectedMemory", "MemAvailableMB", "LoadAvg")
 
 
 @dataclass(frozen=True)
 class HostSample:
-    """One host heartbeat from the cluster sampler."""
+    """One host's live memory/load, as of the moment it was queried."""
 
     hostname: str
-    login_hostname: str | None
-    timestamp: int
     mem_available_mb: int
     mem_total_mb: int
-    load1: float
-    load5: float
     load15: float
-    path: Path
-
-    @property
-    def age_s(self) -> int:
-        return max(0, int(time.time()) - self.timestamp)
 
 
 @dataclass(frozen=True)
@@ -56,50 +45,61 @@ class HostSelection:
     usable: bool
 
 
-def normalize_condor_host(host: str) -> str:
-    text = str(host or "").strip()
-    if "@" in text:
-        text = text.rsplit("@", 1)[-1]
-    match = re.fullmatch(r"science(\d+)(?:\.stsci\.edu)?", text)
-    if match:
-        return f"plscience{match.group(1)}.stsci.edu"
-    return text
+def expected_hosts() -> list[str]:
+    return [f"plscience{n}.stsci.edu" for n in range(1, 16)]
 
 
-def load_sample(path: Path) -> HostSample:
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    hostname = normalize_condor_host(str(payload.get("hostname", path.stem)))
-    login_hostname = payload.get("login_hostname")
-    return HostSample(
-        hostname=hostname,
-        login_hostname=str(login_hostname) if login_hostname else None,
-        timestamp=int(payload["timestamp"]),
-        mem_available_mb=int(payload["mem_available_mb"]),
-        mem_total_mb=int(payload["mem_total_mb"]),
-        load1=float(payload["load1"]),
-        load5=float(payload["load5"]),
-        load15=float(payload["load15"]),
-        path=path,
-    )
+def _parse_condor_status_output(stdout: str) -> dict[str, HostSample]:
+    """Parse ``condor_status -af Machine DetectedMemory MemAvailableMB LoadAvg``.
 
-
-def discover_samples(stats_dir: Path) -> dict[str, HostSample]:
+    One row per Condor slot -- a partitionable host with claimed dynamic
+    slots emits several rows for the same ``Machine``, but the fields we
+    read are machine-wide (STARTD_CRON/native), so they're identical across
+    a machine's rows; the first row seen wins. A field the STARTD hasn't
+    published yet prints the literal token ``undefined``, which is treated
+    as "no data for this host" (dropped), never as ``0``.
+    """
     samples: dict[str, HostSample] = {}
-    if not stats_dir.is_dir():
-        return samples
-    for path in sorted(stats_dir.glob("*.json")):
-        if path.name.endswith(".tmp"):
+    for line in stdout.splitlines():
+        parts = line.split()
+        if len(parts) != len(_CONDOR_STATUS_FIELDS) or "undefined" in parts:
+            continue
+        machine, detected_mem, mem_avail, load = parts
+        if machine in samples:
             continue
         try:
-            sample = load_sample(path)
-        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            samples[machine] = HostSample(
+                hostname=machine,
+                mem_available_mb=int(float(mem_avail)),
+                mem_total_mb=int(float(detected_mem)),
+                load15=float(load),
+            )
+        except ValueError:
             continue
-        samples[sample.hostname] = sample
     return samples
 
 
-def expected_hosts() -> list[str]:
-    return [f"plscience{n}.stsci.edu" for n in range(1, 16)]
+def query_condor_host_samples(*, timeout_s: float = _CONDOR_STATUS_TIMEOUT_S) -> dict[str, HostSample]:
+    """Live per-host memory/load, straight from the Condor collector."""
+    try:
+        proc = subprocess.run(
+            ["condor_status", "-af", *_CONDOR_STATUS_FIELDS],
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning("condor_status timed out after %.0fs", timeout_s)
+        return {}
+    if proc.returncode != 0:
+        log.warning(
+            "condor_status failed (exit %d): %s",
+            proc.returncode,
+            proc.stderr.strip() or proc.stdout.strip(),
+        )
+        return {}
+    return _parse_condor_status_output(proc.stdout)
 
 
 def evaluate_host(
@@ -107,13 +107,10 @@ def evaluate_host(
     *,
     min_mem_mb: int,
     max_load15: float,
-    max_age_s: int,
 ) -> tuple[str, ...]:
     if sample is None:
         return ("missing",)
     reasons: list[str] = []
-    if sample.age_s > max_age_s:
-        reasons.append(f"stale {sample.age_s}s")
     if sample.mem_available_mb < min_mem_mb:
         reasons.append(f"low mem {sample.mem_available_mb}MB")
     if sample.load15 >= max_load15:
@@ -123,25 +120,28 @@ def evaluate_host(
 
 def plan_host_selection(
     *,
-    stats_dir: Path,
+    host_samples: dict[str, HostSample] | None = None,
     min_mem_mb: int,
     max_load15: float,
-    max_age_s: int = DEFAULT_MAX_AGE_S,
 ) -> HostSelection:
-    samples = discover_samples(stats_dir)
+    """Split expected hosts into eligible (live data) vs excluded (missing).
+
+    Low-mem/high-load hosts stay ``eligible`` here -- they're filtered out of
+    matching by live ``MemAvailableMB``/``LoadAvg`` clauses in
+    :func:`apply_host_stats_policy` instead, re-evaluated by the negotiator
+    every cycle, not frozen at submit time. Only a host with no live data at
+    all (down, decommissioned, or not yet publishing) has no such live
+    substitute, so it's the only case that gets a hard ``Machine != ...``
+    name exclusion here.
+    """
+    samples = host_samples if host_samples is not None else query_condor_host_samples()
     excluded: dict[str, tuple[str, ...]] = {}
     eligible: list[HostSample] = []
     for host in expected_hosts():
         sample = samples.get(host)
-        reasons = evaluate_host(
-            sample,
-            min_mem_mb=min_mem_mb,
-            max_load15=max_load15,
-            max_age_s=max_age_s,
-        )
-        if reasons:
-            excluded[host] = reasons
-        elif sample is not None:
+        if sample is None:
+            excluded[host] = evaluate_host(sample, min_mem_mb=min_mem_mb, max_load15=max_load15)
+        else:
             eligible.append(sample)
     eligible.sort(key=lambda s: (s.load15, s.hostname))
     usable = bool(samples) and bool(eligible)
@@ -176,25 +176,22 @@ def format_machine_exclusions(hosts: Sequence[str]) -> str:
 def apply_host_stats_policy(
     resources: CondorResourceRequest,
     *,
-    stats_dir: Path | None = None,
-    max_age_s: int = DEFAULT_MAX_AGE_S,
+    host_samples: dict[str, HostSample] | None = None,
 ) -> CondorResourceRequest:
     from syndiff_pipeline.common.orchestration.condor import merge_requirements_with_exclusions
 
-    stats_dir = stats_dir or default_stats_dir()
+    samples = host_samples if host_samples is not None else query_condor_host_samples()
     base = build_base_requirements(resources.request_memory_mb)
     selection = plan_host_selection(
-        stats_dir=stats_dir,
+        host_samples=samples,
         min_mem_mb=resources.host_stats_min_mem_mb,
         max_load15=resources.host_stats_max_load15,
-        max_age_s=max_age_s,
     )
     if not selection.usable:
         log.warning(
-            "host_stats: no usable samples in %s (json=%d eligible=%d); "
+            "host_stats: no usable condor_status samples (queried=%d eligible=%d); "
             "using Memory requirement and -LoadAvg rank",
-            stats_dir,
-            len(discover_samples(stats_dir)),
+            len(samples),
             len(selection.eligible),
         )
         return replace(
@@ -205,6 +202,17 @@ def apply_host_stats_policy(
 
     excluded_hosts = set(selection.excluded)
     requirements = merge_requirements_with_exclusions(base, excluded_hosts)
+    # Live, continuously-reevaluated clauses using Condor's own STARTD-
+    # published MemAvailableMB/LoadAvg (real host memory/load, including
+    # non-Condor activity). Unlike the name-based exclusion above, these are
+    # not frozen at submit time: the negotiator checks them against each
+    # machine's *current* state on every cycle, so an idle job can still
+    # match a host once its memory frees up or its load drops, with no
+    # resubmission needed.
+    requirements = (
+        f"({requirements}) && (MemAvailableMB >= {int(resources.host_stats_min_mem_mb)}) "
+        f"&& (LoadAvg <= {float(resources.host_stats_max_load15)})"
+    )
     rank = build_load15_rank(selection.eligible)
     top = selection.eligible[0]
     log.info(
