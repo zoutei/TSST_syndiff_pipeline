@@ -8,25 +8,45 @@ The gap-fill step additionally ports the "robust" boundary sigma-clip from
 ``dev/background/tessreduce_smooth_bkg_steps_s50_robust.ipynb``
 (``sanitize_boundary_outliers`` + ``robust_trend_residual_gap_fill``,
 ``fill_method="robust"``, ``interpolate=False`` / "biharmonic_robust"
-variant): before biharmonic inpainting fills the masked region, pixels on the
+variant): before gap-filling the masked region, pixels on the
 valid side of the mask boundary that are KNN-sigma-clip outliers relative to
 their local neighborhood are folded into the fit mask, so an anomalous rim
 pixel can't bias the smooth trend. This is the sole background-removal method
 used by ``kernel_fit`` and ``background_estimate`` (see
 ``estimate_tessreduce_residual_background`` below, which both stages call).
+
+The gap fill itself (``smooth_bkg_decomposed``'s ``fill_method``) defaults to
+an exact harmonic (Laplace) solve (``harmonic_inpaint``) rather than
+``skimage.restoration.inpaint_biharmonic``. Over the large merged mask holes
+this pipeline produces (strap columns x bright-star mask crosses; masked
+pixels are ~58% of the frame), biharmonic inpainting matches both boundary
+values AND slopes and has no maximum principle, so it extrapolates rim
+gradients into the hole with either sign -- this was identified as the direct
+cause of the diffuse +-4-8 e/s black/white patches seen in difference images.
+The harmonic solve obeys the maximum principle (fill values are bounded by
+the rim/valid values) and cannot overshoot; validated full-frame it reduces
+negative patches 34->1 and masked high-pass RMS 1.22->0.62 at essentially
+identical runtime. Pass ``fill_method="biharmonic"`` to
+``smooth_bkg_decomposed``/``estimate_tessreduce_residual_background`` to
+restore the previous behaviour for comparison.
 """
 
 from __future__ import annotations
 
+import logging
 from copy import deepcopy
 
 import numpy as np
+import scipy.sparse as sp
+import scipy.sparse.linalg as spla
 from astropy.stats import SigmaClip, sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage import binary_dilation, gaussian_filter, label as ndi_label, laplace
 from scipy.spatial import cKDTree
 from skimage import restoration as inpaint
+
+log = logging.getLogger(__name__)
 
 FAINT_CAT = 32
 STRAP_BIT = 4
@@ -92,6 +112,120 @@ def sanitize_boundary_outliers(
     return sanitized_mask
 
 
+def _sparse_cg(A: sp.spmatrix, b: np.ndarray, *, M, maxiter: int) -> np.ndarray:
+    """``scipy.sparse.linalg.cg`` across the ``tol``/``rtol`` keyword rename.
+
+    SciPy >=1.12 renamed the convergence-tolerance keyword ``tol`` to
+    ``rtol`` (and removed ``tol`` outright in >=1.14); older SciPy only
+    accepts ``tol``. Try the modern keyword first so we don't silently run
+    with a different tolerance than intended on either version.
+    """
+    try:
+        sol, info = spla.cg(A, b, rtol=1e-6, maxiter=maxiter, M=M)
+    except TypeError:
+        sol, info = spla.cg(A, b, tol=1e-6, maxiter=maxiter, M=M)
+    if info != 0:
+        # info > 0: maxiter reached without converging; info < 0: bad input.
+        # Either way ``sol`` is not the harmonic solution, and silently
+        # returning it would put a wrong background on one frame out of
+        # thousands with nothing in the log to find it by.
+        log.warning(
+            "harmonic_inpaint CG did not converge (info=%s, n=%d, maxiter=%d); "
+            "the returned fill is the unconverged iterate",
+            info,
+            b.size,
+            maxiter,
+        )
+    return sol
+
+
+def harmonic_inpaint(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    """Exact Laplace (harmonic) inpainting of ``mask`` pixels, Dirichlet BC from the
+    unmasked (valid) pixels, dropping missing neighbors at the frame edge
+    (Neumann there). Solved with Jacobi-preconditioned CG on the sparse SPD
+    5-point Laplacian (full frame ~2.4M unknowns -- too large for spsolve).
+
+    Replaces ``skimage.restoration.inpaint_biharmonic``: harmonic obeys the
+    maximum principle, so the fill cannot overshoot the rim values, whereas
+    biharmonic matches rim slopes as well and extrapolates them into large
+    holes, which is what produced the +-4-8 e/s patches at strap x bright-star
+    mask holes.
+
+    Invalid pixels whose 4-connected component touches no valid pixel
+    anywhere (fully enclosed by other invalid pixels / the frame edge, so no
+    Dirichlet data reaches them) are excluded from the linear system and set
+    to the frame median of valid pixels instead.
+    """
+    ny, nx = image.shape
+    invalid = np.asarray(mask, dtype=bool)
+    valid = ~invalid
+    out = np.asarray(image, dtype=np.float64).copy()
+
+    struct4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]])
+    labeled, ncomp = ndi_label(invalid, structure=struct4)
+    touches_valid = np.zeros(ncomp + 1, dtype=bool)
+    padded_valid = np.zeros((ny + 2, nx + 2), dtype=bool)
+    padded_valid[1:-1, 1:-1] = valid
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        shifted = padded_valid[1 + dy:1 + dy + ny, 1 + dx:1 + dx + nx]
+        sel = invalid & shifted
+        if sel.any():
+            touches_valid[labeled[sel]] = True
+    isolated_labels = np.flatnonzero(~touches_valid[1:]) + 1
+    isolated_mask = (
+        np.isin(labeled, isolated_labels) if isolated_labels.size
+        else np.zeros_like(invalid)
+    )
+    frame_median = float(np.median(image[valid])) if valid.any() else 0.0
+    if isolated_mask.any():
+        out[isolated_mask] = frame_median
+
+    attached = invalid & ~isolated_mask
+    coords = np.argwhere(attached)
+    n = coords.shape[0]
+    if n == 0:
+        return out
+
+    id_map = -np.ones((ny, nx), dtype=np.int64)
+    id_map[attached] = np.arange(n)
+    y, x = coords[:, 0], coords[:, 1]
+    k_idx = np.arange(n)
+    diag = np.zeros(n)
+    b = np.zeros(n)
+    rows = []
+    cols = []
+    data_parts = []
+    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        yn, xn = y + dy, x + dx
+        inb = (yn >= 0) & (yn < ny) & (xn >= 0) & (xn < nx)
+        diag[inb] += 1.0
+        yin, xin, kk = yn[inb], xn[inb], k_idx[inb]
+        nb_id = id_map[yin, xin]
+        is_inv_nb = nb_id >= 0
+        if is_inv_nb.any():
+            rows.append(kk[is_inv_nb])
+            cols.append(nb_id[is_inv_nb])
+            data_parts.append(-np.ones(int(is_inv_nb.sum())))
+        is_val_nb = ~is_inv_nb
+        if is_val_nb.any():
+            np.add.at(b, kk[is_val_nb], image[yin[is_val_nb], xin[is_val_nb]])
+    # Diagonal block appended last, in lockstep across rows/cols/data -- it must
+    # stay last in ALL THREE lists (an earlier version put k_idx first in
+    # rows/cols but last in data, silently misaligning every entry).
+    rows.append(k_idx)
+    cols.append(k_idx)
+    data_parts.append(diag)
+    rows = np.concatenate(rows)
+    cols = np.concatenate(cols)
+    data = np.concatenate(data_parts)
+    A = sp.csr_matrix((data, (rows, cols)), shape=(n, n))
+
+    M = sp.diags(1.0 / A.diagonal())
+    sol = _sparse_cg(A, b, M=M, maxiter=20000)
+    out[attached] = sol
+    return out
+
+
 def smooth_bkg_decomposed(
     data: np.ndarray,
     *,
@@ -99,11 +233,16 @@ def smooth_bkg_decomposed(
     boundary_k: int = BOUNDARY_CLIP_K,
     boundary_sigma: float = BOUNDARY_CLIP_SIGMA,
     boundary_rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
+    fill_method: str = "harmonic",
 ) -> np.ndarray:
     """Notebook ``robust_trend_residual_gap_fill(interpolate=False,
-    fill_method="robust")`` biharmonic branch: KNN-sigma-clip the mask
-    boundary (``sanitize_boundary_outliers``) before biharmonic inpainting,
-    then optional Gaussian smoothing (unchanged from the legacy variant).
+    fill_method="robust")`` branch: KNN-sigma-clip the mask boundary
+    (``sanitize_boundary_outliers``) before gap-filling, then optional
+    Gaussian smoothing (unchanged from the legacy variant).
+
+    ``fill_method`` selects the gap fill: ``"harmonic"`` (default) is the
+    exact Laplace solve (see ``harmonic_inpaint``); ``"biharmonic"`` restores
+    the original ``skimage.restoration.inpaint_biharmonic`` behaviour.
     """
     data = np.asarray(data, dtype=np.float64)
     if not (~np.isnan(data)).any():
@@ -121,12 +260,24 @@ def smooth_bkg_decomposed(
     )
     fill_input = data.copy()
     fill_input[safe_invalid_mask] = np.nan
-    filled = np.asarray(
-        inpaint.inpaint_biharmonic(
-            np.nan_to_num(fill_input, nan=0.0), safe_invalid_mask
-        ),
-        dtype=np.float64,
-    )
+    if fill_method == "harmonic":
+        filled = np.asarray(
+            harmonic_inpaint(
+                np.nan_to_num(fill_input, nan=0.0), safe_invalid_mask
+            ),
+            dtype=np.float64,
+        )
+    elif fill_method == "biharmonic":
+        filled = np.asarray(
+            inpaint.inpaint_biharmonic(
+                np.nan_to_num(fill_input, nan=0.0), safe_invalid_mask
+            ),
+            dtype=np.float64,
+        )
+    else:
+        raise ValueError(
+            f"unknown fill_method {fill_method!r}; expected 'harmonic' or 'biharmonic'"
+        )
     gs = float(gauss_smooth)
     if gs > 0:
         if np.nanmedian(filled) < 150 and np.nanstd(filled) < 3:
@@ -375,6 +526,7 @@ def estimate_tessreduce_residual_background(
     boundary_k: int = BOUNDARY_CLIP_K,
     boundary_sigma: float = BOUNDARY_CLIP_SIGMA,
     boundary_rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
+    fill_method: str = "harmonic",
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Notebook ``run_tessreduce_variant`` (``biharmonic_robust``) arithmetic
     for one input frame.
@@ -382,7 +534,9 @@ def estimate_tessreduce_residual_background(
     This is the single shared background estimator used by both
     ``kernel_fit`` and ``background_estimate``; ``boundary_k``/``boundary_sigma``/
     ``boundary_rim_width`` control the KNN sigma-clip applied to the mask
-    boundary before biharmonic gap-filling (see ``sanitize_boundary_outliers``).
+    boundary before gap-filling (see ``sanitize_boundary_outliers``).
+    ``fill_method`` (``"harmonic"`` default, or ``"biharmonic"`` for the
+    legacy behaviour) is forwarded to ``smooth_bkg_decomposed``.
     """
     flux = np.asarray(residual, dtype=np.float64)
     if flux.ndim != 2:
@@ -397,6 +551,7 @@ def estimate_tessreduce_residual_background(
         boundary_k=boundary_k,
         boundary_sigma=boundary_sigma,
         boundary_rim_width=boundary_rim_width,
+        fill_method=fill_method,
     )
     pre_qe = fix_bkg_frame_decomposed(
         smooth, flux, bkgmask, mask, gauss_smooth=anomaly_gauss,

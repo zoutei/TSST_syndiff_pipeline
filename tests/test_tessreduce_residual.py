@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+import scipy.sparse as sp
+from skimage import restoration as inpaint
 
 from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
     _accumulate_sep_object_mask,
@@ -10,6 +13,7 @@ from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual i
     _qe_spline_map,
     _sep_object_stamp_slices,
     estimate_tessreduce_residual_background,
+    harmonic_inpaint,
     sanitize_boundary_outliers,
     smooth_bkg_decomposed,
 )
@@ -105,6 +109,144 @@ def test_force_anomaly_repair_runs_on_high_median_image():
     assert np.isfinite(component).all()
     assert np.isfinite(pre_qe).all()
     np.testing.assert_array_equal(qe, 1.0)
+
+
+def _local_rim(mask, iterations=1):
+    from scipy.ndimage import binary_dilation
+
+    return binary_dilation(mask, iterations=iterations) & ~mask
+
+
+def test_harmonic_inpaint_obeys_maximum_principle_where_biharmonic_overshoots():
+    # Smooth "sky" trend plus genuine per-pixel scatter (the real-world
+    # regime: rim values carry real point-to-point gradient/noise, not a
+    # perfectly flat plateau) with a large hole. This is the failure mode
+    # identified in the investigation: skimage's biharmonic inpainting
+    # matches boundary value AND slope with no maximum principle, so for a
+    # large hole it can extrapolate past the bounds set by its own rim; the
+    # exact harmonic solve is a weighted average of its boundary and can
+    # never do so.
+    rng = np.random.default_rng(20)
+    ny, nx = 80, 80
+    yy, xx = np.mgrid[0:ny, 0:nx]
+    trend = 100.0 + 0.1 * xx - 0.05 * yy
+    data = trend + rng.normal(0.0, 1.5, size=(ny, nx))
+    mask = np.zeros((ny, nx), dtype=bool)
+    mask[15:65, 15:65] = True
+
+    rim = _local_rim(mask)
+    lo, hi = data[rim].min(), data[rim].max()
+
+    filled_h = harmonic_inpaint(data.copy(), mask)
+    filled_b = np.asarray(inpaint.inpaint_biharmonic(data.copy(), mask), dtype=np.float64)
+
+    # Harmonic: strictly bounded (to numerical CG tolerance) by the local rim.
+    assert filled_h[mask].max() <= hi + 1e-4
+    assert filled_h[mask].min() >= lo - 1e-4
+
+    # Biharmonic: on this same input, it overshoots that same rim range by a
+    # clear margin (this is the artefact being fixed).
+    overshoot = max(0.0, filled_b[mask].max() - hi, lo - filled_b[mask].min())
+    assert overshoot > 0.5
+
+
+def test_harmonic_inpaint_matches_dense_laplace_solve():
+    # Small frame, a few holes (none touching the frame border, so all are
+    # ordinary interior Dirichlet problems) -- solve the identical discrete
+    # 5-point Laplacian system independently with a dense direct solve and
+    # check harmonic_inpaint agrees to ~1e-6.
+    rng = np.random.default_rng(7)
+    ny, nx = 40, 40
+    data = rng.normal(50.0, 5.0, size=(ny, nx))
+    mask = np.zeros((ny, nx), dtype=bool)
+    mask[5:10, 5:9] = True
+    mask[20:26, 15:22] = True
+    mask[30:33, 30:36] = True
+
+    filled = harmonic_inpaint(data.copy(), mask)
+
+    invalid = mask
+    coords = np.argwhere(invalid)
+    n = coords.shape[0]
+    id_map = -np.ones((ny, nx), dtype=np.int64)
+    id_map[invalid] = np.arange(n)
+    A_dense = np.zeros((n, n))
+    b = np.zeros(n)
+    for k, (y, x) in enumerate(coords):
+        deg = 0
+        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            yn, xn = y + dy, x + dx
+            if not (0 <= yn < ny and 0 <= xn < nx):
+                continue
+            deg += 1
+            if invalid[yn, xn]:
+                A_dense[k, id_map[yn, xn]] -= 1.0
+            else:
+                b[k] += data[yn, xn]
+        A_dense[k, k] += deg
+    sol_dense = np.linalg.solve(A_dense, b)
+
+    np.testing.assert_allclose(filled[invalid], sol_dense, atol=1e-6, rtol=1e-6)
+
+
+def test_harmonic_inpaint_isolated_component_uses_frame_median_no_nan():
+    # A wholly-invalid array has no valid pixel anywhere for the mask to
+    # reach (the pathological "isolated" case the docstring calls out) --
+    # every masked pixel is dropped from the linear system and filled with
+    # the frame median of valid pixels, which here is 0.0 since there are
+    # none. Must not raise, divide-by-zero, or leave any NaN/inf behind.
+    image = np.full((10, 10), 12345.0)
+    mask = np.ones((10, 10), dtype=bool)
+
+    out = harmonic_inpaint(image, mask)
+
+    assert np.isfinite(out).all()
+    np.testing.assert_array_equal(out, 0.0)
+
+
+def test_smooth_bkg_decomposed_fill_method_dispatch():
+    rng = np.random.default_rng(1)
+    data = rng.normal(loc=100.0, scale=0.05, size=(24, 24))
+    mask = np.zeros((24, 24), dtype=bool)
+    mask[9:15, 9:15] = True
+    data[mask] = np.nan
+    outlier_rc = (8, 12)
+    data[outlier_rc] = 1.0e4
+
+    default_result = smooth_bkg_decomposed(
+        data.copy(), gauss_smooth=0.0, boundary_k=8, boundary_sigma=3.0, boundary_rim_width=1
+    )
+    harmonic_result = smooth_bkg_decomposed(
+        data.copy(), gauss_smooth=0.0, boundary_k=8, boundary_sigma=3.0, boundary_rim_width=1,
+        fill_method="harmonic",
+    )
+    np.testing.assert_array_equal(default_result, harmonic_result)
+
+    biharmonic_result = smooth_bkg_decomposed(
+        data.copy(), gauss_smooth=0.0, boundary_k=8, boundary_sigma=3.0, boundary_rim_width=1,
+        fill_method="biharmonic",
+    )
+
+    # Reproduce the exact pre-existing biharmonic code path by hand and
+    # check bit-for-bit agreement.
+    invalid_mask = np.isnan(data)
+    safe_invalid_mask = sanitize_boundary_outliers(
+        np.nan_to_num(data, nan=0.0), invalid_mask, k=8, sigma_thresh=3.0, rim_width=1
+    )
+    fill_input = data.copy()
+    fill_input[safe_invalid_mask] = np.nan
+    expected_biharmonic = np.asarray(
+        inpaint.inpaint_biharmonic(np.nan_to_num(fill_input, nan=0.0), safe_invalid_mask),
+        dtype=np.float64,
+    )
+    np.testing.assert_array_equal(biharmonic_result, expected_biharmonic)
+
+    # The two fill methods actually differ here (otherwise this test would
+    # not be exercising anything real).
+    assert not np.array_equal(harmonic_result, biharmonic_result)
+
+    with pytest.raises(ValueError):
+        smooth_bkg_decomposed(data.copy(), fill_method="not_a_real_method")
 
 
 def _full_frame_sep_mask(obj, lap_sub, lap_err, noise):
