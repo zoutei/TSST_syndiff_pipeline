@@ -1,0 +1,35 @@
+# Single-FFI scene fit recipe (scene_fit flags). PROVISIONAL, 2026-09-30.
+# Decisions: dev/paper/paper1_single_ffi/MODEL_FREEZE.md; migration plan §2b
+# (doc/forward_epsf_wcs_migration_plan_20260930.md).
+# Run: python -m syndiff_pipeline.forward_model.recipe paper1_provisional -- --scene-dir ... --out-dir ...
+#      --init-params-file ... --colour-file <ccd>_u.csv
+scene_fit:
+  # A3 colour model (D1-D4): global8 colour terms, global colour gauge, tess-point optical axis
+  chroma-model: global8
+  colour-gauge: global
+  chroma-axis: tesspoint
+  # plain L2 likelihood (Huber delta huge), no star rejection (D7)
+  huber-delta: 1.0e6
+  reject-every: 0
+  # ePSF regularisers; fine-neighbour prior OFF, AK soft prior ON (user 2026-09-30):
+  # per-node 7x7 local-polynomial residual penalty (prior_bakeoff_20260930 arm lp7s)
+  lambda-lap: 1.0e-2
+  lambda-pixel-lap: 1.0e-2
+  lambda-fine-nbr: 0
+  lambda-local-poly: 3.0e8
+  local-poly-window: 7
+  # brightness-dependent width (D9): one global b, isotropic blur ~ peak charge per 2-s read,
+  # started at the measured value (bfwidth_20260929), trainable
+  bright-width: lin
+  bright-width-init: 0.8e-3
+  # one constant background for the whole scene, solved exactly with the fluxes (user 2026-09-30)
+  bg-cheb-order: 0
+  # schedule; the "early stop" rule is the convergence test (loss flat to 1e-5 over 200 steps),
+  # not held-out early stopping (D16b)
+  steps-per-stage: 300,3000,2000
+  lr-per-stage: 1e-3,3e-4,1e-4
+  epsf-lr-scale: 2.5
+  chroma-lr-scale: 10
+  early-stop-patience: 200
+  early-stop-tol: 1.0e-5
+  checkpoint-every: 20
