@@ -103,3 +103,34 @@ def test_fit_runs_subprocess_with_env(tmp_path, monkeypatch):
     (cfg.stage_dir("fit") / "DONE").unlink()
     F.run_fit(cfg, "boot")
     assert "--resume" in seen["cmd"]
+
+
+def test_prior_guard_accepts_the_dataset_recipe(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert cfg.fit.recipe == "paper1_dataset"
+    assert F.check_prior_flags(cfg) == {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0}
+
+
+def test_prior_guard_refuses_extra_flag_override(tmp_path):
+    cfg = _cfg(tmp_path, fit={"recipe": "paper1_dataset", "extra_flags": ["--lambda-fine-nbr", "1e8"]})
+    with pytest.raises(ValueError, match="overrides"):
+        F.check_prior_flags(cfg)
+
+
+def test_prior_guard_refuses_missing_or_wrong_recipe_values(tmp_path, monkeypatch):
+    import syndiff_pipeline.forward_model.recipe as RC
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(RC, "recipe_argv", lambda name: ["--lambda-lap", "0.01", "--lambda-local-poly", "3e8"])
+    with pytest.raises(ValueError, match="explicitly"):
+        F.check_prior_flags(cfg)
+    monkeypatch.setattr(RC, "recipe_argv", lambda name: ["--lambda-fine-nbr", "1e8", "--lambda-local-poly", "3e8",
+                                                         "--local-poly-window", "7"])
+    with pytest.raises(ValueError, match="required"):
+        F.check_prior_flags(cfg)
+
+
+def test_run_fit_refuses_before_launch(tmp_path, monkeypatch):
+    cfg = _cfg(tmp_path, fit={"recipe": "paper1_dataset", "extra_flags": ["--local-poly-window=5"]})
+    monkeypatch.setattr(F, "submit", lambda sub: pytest.fail("must not submit"))
+    with pytest.raises(ValueError, match="overrides"):
+        F.run_fit(cfg, "boot", condor=True)

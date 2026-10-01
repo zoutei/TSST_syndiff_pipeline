@@ -23,6 +23,35 @@ from .condor import job_env, stage_argv, submit, write_submit
 from .config import ChainConfig, is_done, mark_done, write_provenance
 
 
+# ePSF prior flags that must come EXPLICITLY from the recipe file: scene_fit's code defaults on 648c0bc are the old
+# moment-blind fine-neighbour prior (1e8), so a recipe without them would silently fall back to it.
+PRIOR_FLAGS = ("lambda-fine-nbr", "lambda-local-poly", "local-poly-window")
+# Values the Paper 1 dataset recipe must carry: arm lp7s (prior_bakeoff_20260930), user 2026-09-30.
+RECIPE_PRIORS = {"paper1_dataset": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0}}
+
+
+def check_prior_flags(cfg: ChainConfig) -> dict[str, float]:
+    """Refuse to launch unless every ``PRIOR_FLAGS`` key is set in the recipe file itself, is not overridden by
+    ``fit.extra_flags``, and (for recipes in ``RECIPE_PRIORS``) has the required value. Returns the resolved values."""
+    from syndiff_pipeline.forward_model.recipe import recipe_argv
+
+    argv = recipe_argv(cfg.fit.recipe)
+    flags = {argv[i][2:]: argv[i + 1] for i in range(len(argv) - 1) if argv[i].startswith("--")
+             and not argv[i + 1].startswith("--")}
+    missing = [k for k in PRIOR_FLAGS if k not in flags]
+    if missing:
+        raise ValueError(f"recipe {cfg.fit.recipe!r} does not set {missing} explicitly; scene_fit would fall back to "
+                         "its code defaults (moment-blind fine-neighbour prior)")
+    overridden = [k for k in PRIOR_FLAGS if any(f == f"--{k}" or f.startswith(f"--{k}=") for f in cfg.fit.extra_flags)]
+    if overridden:
+        raise ValueError(f"fit.extra_flags overrides recipe prior flags {overridden}")
+    got = {k: float(flags[k]) for k in PRIOR_FLAGS}
+    want = RECIPE_PRIORS.get(cfg.fit.recipe)
+    if want is not None and got != want:
+        raise ValueError(f"recipe {cfg.fit.recipe!r} prior flags {got} != required {want}")
+    return got
+
+
 def fit_dirs(cfg: ChainConfig, which: str, warm: bool = False) -> tuple[Path, Path]:
     """(scene_dir, out_dir)."""
     if which == "boot":
@@ -57,6 +86,7 @@ def run_fit(cfg: ChainConfig, which: str = "boot", *, warm: bool = False, force:
             condor: bool = False) -> Path:
     scene_dir, out = fit_dirs(cfg, which, warm)
     stage = "fit" if which == "boot" else "refit"
+    priors = check_prior_flags(cfg)  # before any launch, Condor or local
     if is_done(out) and not force:
         print(f"[{stage}] already done: {out}")
         return out
@@ -77,7 +107,8 @@ def run_fit(cfg: ChainConfig, which: str = "boot", *, warm: bool = False, force:
     write_provenance(out, cfg, {"scene_bundle": scene_dir / "scene_bundle.npz", "scene_meta": scene_dir / "scene_meta.json",
                                 "colour_file": cfg.inputs.colour_file,
                                 **({} if warm else {"init_params": cfg.need("inputs.init_params")}),
-                                "argv": {"cmd": cmd, "resume": resume}})
+                                "argv": {"cmd": cmd, "resume": resume},
+                                "priors": {"value": {"recipe": cfg.fit.recipe, **priors}}})
     print(f"[{stage}] {' '.join(cmd)}")
     subprocess.run(cmd, check=True, env=env, cwd=cfg.code.forward_model_root)
     if not (out / "DONE").exists():
