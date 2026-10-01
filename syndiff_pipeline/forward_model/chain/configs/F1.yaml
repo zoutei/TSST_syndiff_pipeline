@@ -1,0 +1,33 @@
+# Paper 1 dataset chain config, field F1 (schema: ../CONTRACT.md).
+field: F1
+scc: {sector: 24, camera: 2, ccd: 2}
+stem: tess2020120182919-s0024-2-2
+unseen_stem: tess2020121015919-s0024-2-2
+data_root: /astro/armin/koji/syndiff/data
+out_root: /astro/armin/koji/syndiff/dev_runs/paper_dataset_20261001/F1
+code:
+  sha: null                     # null -> git HEAD of forward_model_root at run time; pin for production
+  forward_model_root: /home/kshukawa/syndiff_pipeline/.claude/worktrees/forward-model
+inputs:
+  colour_file: /astro/armin/koji/syndiff/dev_runs/chroma_v2_20260928/colour/F1_s24c2k2_u.csv
+  source_scene: /home/kshukawa/syndiff_pipeline/dev/forward_epsf_wcs/output/runs/sffi_colour_20260924/scenes/F1_s24c2k2
+  exclusion_csv: null   # TODO: dev_runs/exclusion_20261001/<SCC>_exclude_v1min.csv (the 44-star seam list is NOT used for the dataset)
+  strap_mask: false   
+  bootstrap_mapping: null       # TODO: header-WCS F=4 mapping dir (.../oversampling_4); `mapping --header-wcs` can build it
+  band_cells: null              # null -> out_root/perband/band_cells
+  adopted_weights: /astro/armin/koji/syndiff/dev_runs/bandpass_rizy_20260929/weights_oof/ADOPTED_WEIGHTS.json
+  init_params: /astro/armin/koji/syndiff/dev_runs/heldout_harness_20260929/init/F1_xsec/params_init.npz
+fit:
+  recipe: paper1_dataset
+  extra_flags: []
+kernels: {source: k_sigma, kernel_bright_q: 0.0}
+mask: {bit2_radius: null}
+condor:
+  request_cpus: {fit: 16, mapping: 48, f03: 8}
+  request_memory_mb: {fit: 16000, mapping: 64000, f03: 80000}
+reference:                      # read-only products for the WCS/mapping gates (optional; {scc} = SCC data dir)
+  old_store: "{scc}/single_ffi_epsf_test/wcs/scene_g8_static_v1"
+  tvwcs_store: "{scc}/wcs/temporal_cheb5_bspline_v1"
+  old_mapping: "{scc}/single_ffi_epsf_test/mapping/oversampling_4"
+  c5_fit: /home/kshukawa/syndiff_pipeline/dev/forward_epsf_wcs/output/runs/sffi_colour_20260924/runs/F1_C5_g8_globalgauge/out
+  w3_wcs_offset_npz: /astro/armin/koji/syndiff/dev_runs/perband_ccd_20260929/kernels/wcs_offset_a3_vs_template.npz

@@ -1,0 +1,29 @@
+# Paper 1 dataset chain config, field C1 (schema: ../CONTRACT.md).
+field: C1
+scc: {sector: 24, camera: 1, ccd: 2}
+stem: tess2020118235919-s0024-1-2
+unseen_stem: null
+data_root: /astro/armin/koji/syndiff/data
+out_root: /astro/armin/koji/syndiff/dev_runs/paper_dataset_20261001/C1
+code:
+  sha: null                     # null -> git HEAD of forward_model_root at run time; pin for production
+  forward_model_root: /home/kshukawa/syndiff_pipeline/.claude/worktrees/forward-model
+inputs:
+  colour_file: /astro/armin/koji/syndiff/dev_runs/chroma_v2_20260928/colour/s0024c1k2_u.csv
+  source_scene: null   # TODO: source scene dir (stars/stamps/roles/valid)
+  exclusion_csv: null   # TODO: dev_runs/exclusion_20261001/<SCC>_exclude_v1min.csv (source_id; demoted to role 2)
+  strap_mask: false   
+  bootstrap_mapping: null       # TODO: header-WCS F=4 mapping dir (.../oversampling_4); `mapping --header-wcs` can build it
+  band_cells: null              # null -> out_root/perband/band_cells
+  adopted_weights: /astro/armin/koji/syndiff/dev_runs/bandpass_rizy_20260929/weights_oof/ADOPTED_WEIGHTS.json
+  init_params: null   # TODO: leak-free init params_init.npz
+fit:
+  recipe: paper1_dataset
+  extra_flags: []
+kernels: {source: k_sigma, kernel_bright_q: 0.0}
+mask: {bit2_radius: null}
+condor:
+  request_cpus: {fit: 16, mapping: 48, f03: 8}
+  request_memory_mb: {fit: 16000, mapping: 64000, f03: 80000}
+reference:                      # TODO: optional gate references (old_store, tvwcs_store, old_mapping, c5_fit); gates needing them are skipped when null
+  tvwcs_store: null             # no temporal WCS store exists for this SCC

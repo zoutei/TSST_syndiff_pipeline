@@ -52,7 +52,7 @@ SKIP_TESTS = {
 }
 
 # production-only files inside forward_model/ that a re-cut must not delete
-PRESERVE = {"recipes", "recipe.py"}
+PRESERVE = {"recipes", "recipe.py", "chain"}
 
 COLAB_SCRIPTS = ["transcode_bundle_tiered.py", "slice_bundle_frames.py", "upload_to_gdrive.py",
                  "colab_run_irreg_fullccd_chunk10.py", "pack_colab_train.sh", "measure_vram_sweep.sh"]
