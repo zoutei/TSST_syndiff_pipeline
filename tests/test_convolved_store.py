@@ -47,7 +47,7 @@ def test_convolved_recipe_defaults():
     assert recipe["psf_sigma"] == vs.DEFAULT_PSF_SIGMA == 40.0
     assert recipe["radius"] == vs.DEFAULT_RADIUS == 470
     assert recipe["mode"] == "constant"
-    assert recipe["padding"] == "same_projection_only_v2"  # v2 padding mode (seam fix, intended)
+    assert recipe["padding"] == "same_projection_only_v3"  # v3: one writer for vertical overlaps (intended)
 
 
 def test_convolved_recipe_padding_is_fixed_unless_explicitly_overridden():
@@ -56,7 +56,7 @@ def test_convolved_recipe_padding_is_fixed_unless_explicitly_overridden():
     from types import SimpleNamespace
 
     recipe = vs.convolved_recipe(SimpleNamespace(padding="cross_projection"))
-    assert recipe["padding"] == "same_projection_only_v2"  # v2 padding mode (seam fix, intended)
+    assert recipe["padding"] == "same_projection_only_v3"  # v3: one writer for vertical overlaps (intended)
     # ... but explicit keyword overrides win, for forward-compat testing.
     recipe2 = vs.convolved_recipe(padding="future_mode")
     assert recipe2["padding"] == "future_mode"

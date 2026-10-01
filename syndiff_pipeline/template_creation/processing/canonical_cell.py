@@ -1,7 +1,7 @@
 """The canonical same-projection convolved PS1 cell, defined once.
 
 A canonical cell is the PSF-blurred, same-projection-only padded image of one
-PS1 skycell (``convolved_store``, padding mode ``same_projection_only_v2``).
+PS1 skycell (``convolved_store``, padding mode ``same_projection_only_v3``).
 Before this module, three code paths built it three different ways (the
 sliding-row snapshot, the per-skycell sparse path, and the investigation
 replicas), and the stored pixels depended on the publishing run's row order
@@ -27,6 +27,19 @@ Geometry (all in one projection's "master row" frame):
   R-1, rows ``[PAD + H - EE, H + 2 PAD)`` from row R+1, column for column. A
   missing adjacent row leaves that pad NaN (it is never copied from a NaN
   buffer over the cell's own rows: that was the blanked-top-strip bug).
+- One writer for vertical overlaps (v3): cell rows ``[EE, EFFECTIVE_OVERLAP)``
+  of row R also come from row R-1, but only in the master columns where row
+  R-1 has a placed cell. Rows R-1 and R share a 480-px strip (R-1's cell rows
+  ``[H - 480, H)`` = R's ``[0, 480)``); with the copy, both canonical cells
+  hold row R-1's pixels there, as the left cell supplies a horizontal
+  overlap. Before v3 each kept its own pixels, which differ (cell-local star
+  removal, different PS1 stack content), and downsample ownership boundaries
+  inside the strip cut those features in half (dev_runs/spike_diag_20261001).
+  A column with no placed R-1 cell keeps the cell's own pixels, and row
+  R-1's master takes row R's strip there (its top-pad copy): wherever two
+  rows overlap, the strip has exactly one writer, R-1 if it has a cell, else R.
+  Every same-projection canonical cell is then a crop of one projection image,
+  so overlapping cells agree exactly on their shared sky.
 - NaN -> 0, Gaussian blur (``convolution_utils.apply_gaussian_convolution``,
   truncated at ``radius``), NaN restored, cell region cropped.
 
@@ -84,6 +97,21 @@ def cell_source_x_start(x: int, present_xs: Iterable[int]) -> int:
     return EFFECTIVE_OVERLAP if (int(x) - 1) in {int(v) for v in present_xs} else 0
 
 
+def placed_columns_mask(
+    placed_xs: Iterable[int], anchor_x: int, cell_width: int, col0: int, ncols: int
+) -> np.ndarray:
+    """Boolean mask over master columns ``[col0, col0 + ncols)``: True where a
+    placed cell of the row writes (the union of ``[x0, x0 + W)``; with the
+    left-neighbour rule that is exactly the written span)."""
+    mask = np.zeros(int(ncols), dtype=bool)
+    for x in placed_xs:
+        t0 = cell_master_x0(int(x), anchor_x, cell_width) - int(col0)
+        a, b = max(t0, 0), min(t0 + int(cell_width), int(ncols))
+        if b > a:
+            mask[a:b] = True
+    return mask
+
+
 def master_row_width(metadata: Mapping, cell_width: int) -> int:
     """Width of a master row array that holds every cell of the projection at one anchor."""
     span = projection_span_cells(metadata)
@@ -125,23 +153,72 @@ def place_row_cells(
     return placed
 
 
+def apply_bottom_from_previous(
+    current: np.ndarray,
+    previous: np.ndarray,
+    cell_height: int,
+    previous_columns: np.ndarray,
+) -> None:
+    """Bottom pad of ``current`` (row R) from ``previous`` (row R-1, same
+    columns), plus the one-writer strip: cell rows ``[EE, EFFECTIVE_OVERLAP)``
+    from ``previous`` where ``previous_columns`` (row R-1's placed columns) is
+    True. Row ``i`` of ``current`` is row ``i + H - CELL_OVERLAP`` of
+    ``previous``; only ``previous``'s rows ``[H - 480, PAD + H - EE)`` are read
+    (its own cell rows, never its pads)."""
+    if previous_columns is None or previous_columns.shape != (current.shape[1],):
+        raise ValueError("previous_columns must be a bool mask over current's columns")
+    shift = int(cell_height) - CELL_OVERLAP
+    current[:PAD_SIZE + EDGE_EXCLUSION] = previous[shift:PAD_SIZE + shift + EDGE_EXCLUSION]
+    src = previous[PAD_SIZE + shift + EDGE_EXCLUSION:PAD_SIZE + shift + EFFECTIVE_OVERLAP]
+    current[PAD_SIZE + EDGE_EXCLUSION:PAD_SIZE + EFFECTIVE_OVERLAP, previous_columns] = src[:, previous_columns]
+
+
+def apply_top_from_following(
+    current: np.ndarray,
+    following: np.ndarray,
+    cell_height: int,
+    current_columns: np.ndarray,
+    following_columns: np.ndarray,
+) -> None:
+    """Top pad of ``current`` (row R) from ``following`` (row R+1): current's
+    rows ``[PAD + H - EE, H + 2 PAD)`` from following's rows
+    ``[PAD + EFFECTIVE_OVERLAP, 2 PAD + CELL_OVERLAP)``. Where row R has no
+    placed cell but row R+1 does, the shared strip (current's rows
+    ``[PAD + H - 470, PAD + H - EE)``) also comes from ``following``: row R+1
+    is the only writer of that sky.
+
+    Reads only ``following``'s rows ``>= PAD + EE`` in columns where row R is
+    not placed, and rows ``>= PAD + EFFECTIVE_OVERLAP`` elsewhere, which
+    :func:`apply_bottom_from_previous` never writes into ``following``: the two
+    copies between a row pair commute."""
+    for m in (current_columns, following_columns):
+        if m is None or m.shape != (current.shape[1],):
+            raise ValueError("row column masks must be bool masks over current's columns")
+    h = int(cell_height)
+    current[h - EDGE_EXCLUSION + PAD_SIZE:] = following[PAD_SIZE + EFFECTIVE_OVERLAP:2 * PAD_SIZE + CELL_OVERLAP]
+    only_following = following_columns & ~current_columns
+    if only_following.any():
+        src = following[PAD_SIZE + EDGE_EXCLUSION:PAD_SIZE + EFFECTIVE_OVERLAP]
+        current[PAD_SIZE + h - EFFECTIVE_OVERLAP:PAD_SIZE + h - EDGE_EXCLUSION, only_following] = src[:, only_following]
+
+
 def apply_cross_row(
     current: np.ndarray,
     previous: Optional[np.ndarray],
     following: Optional[np.ndarray],
     cell_height: int,
+    *,
+    current_columns: Optional[np.ndarray] = None,
+    previous_columns: Optional[np.ndarray] = None,
+    following_columns: Optional[np.ndarray] = None,
 ) -> None:
-    """Fill ``current``'s bottom pad from ``previous`` and top pad from
-    ``following`` (column-aligned master arrays of rows R-1 and R+1). A ``None``
-    neighbour row leaves that pad untouched (NaN)."""
+    """Both cross-row copies for row R (see the module docstring). A ``None``
+    neighbour row leaves that side untouched (NaN pad, own strip). The column
+    masks (each row's placed columns) are required for the sides used."""
     if previous is not None:
-        current[:PAD_SIZE + EDGE_EXCLUSION] = previous[
-            cell_height - CELL_OVERLAP:PAD_SIZE + cell_height - CELL_OVERLAP + EDGE_EXCLUSION
-        ]
+        apply_bottom_from_previous(current, previous, cell_height, previous_columns)
     if following is not None:
-        current[cell_height - EDGE_EXCLUSION + PAD_SIZE:] = following[
-            PAD_SIZE + CELL_OVERLAP - EDGE_EXCLUSION:2 * PAD_SIZE + CELL_OVERLAP
-        ]
+        apply_top_from_following(current, following, cell_height, current_columns, following_columns)
 
 
 def _row_and_x(metadata: Mapping, cell_name: str) -> tuple[int, int]:
@@ -213,16 +290,20 @@ def canonical_cell_image(
     w, h = int(metadata["cell_width"]), int(metadata["cell_height"])
     c0, c1 = cell_window_columns(metadata, cell_name)
 
-    def row_window(r: int) -> Optional[np.ndarray]:
+    def row_window(r: int) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         cells = metadata["rows"].get(r)
         if not cells:
-            return None
+            return None, None
         out = np.full((h + 2 * PAD_SIZE, c1 - c0), np.nan, dtype=np.float32)
-        place_row_cells(out, cells, fetch_image, anchor_x=anchor, cell_width=w, col0=c0)
-        return out
+        placed = set(place_row_cells(out, cells, fetch_image, anchor_x=anchor, cell_width=w, col0=c0))
+        xs = [int(x) for name, x in cells if name in placed]
+        return out, placed_columns_mask(xs, anchor, w, c0, c1 - c0)
 
-    current = row_window(row_id)
-    apply_cross_row(current, row_window(row_id - 1), row_window(row_id + 1), h)
+    current, current_columns = row_window(row_id)
+    previous, previous_columns = row_window(row_id - 1)
+    following, following_columns = row_window(row_id + 1)
+    apply_cross_row(current, previous, following, h, current_columns=current_columns,
+                    previous_columns=previous_columns, following_columns=following_columns)
     nan_mask = np.isnan(current)
     current[nan_mask] = 0.0
     convolved = convolution_utils.apply_gaussian_convolution(current, sigma=psf_sigma, radius=int(radius))

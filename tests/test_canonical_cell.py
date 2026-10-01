@@ -321,3 +321,140 @@ def test_combined_publish_refuses_without_projection_catalog(tmp_path):
         "skycell_id": "skycell.9999.011", "combined_image": np.zeros((4, 4), np.float32),
         "combined_mask": np.zeros((4, 4), np.uint16), "headers_data": {}, "removed_stars": []})
     assert info is None
+
+
+# ---------------------------------------------------------------------------
+# v3: one writer for vertical overlaps (dev_runs/spike_diag_20261001)
+# ---------------------------------------------------------------------------
+
+
+def _global_offsets(md):
+    """(row0, col0) of each cell in one projection-wide frame: rows and columns
+    advance by (size - CELL_OVERLAP)."""
+    return {n: (int(r) * (H - cc.CELL_OVERLAP), int(x) * (W - cc.CELL_OVERLAP))
+            for r, cells in md["rows"].items() for n, x in cells}
+
+
+def _overlap_pairs(md):
+    off = _global_offsets(md)
+    names = sorted(off)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            (ra, ca), (rb, cb) = off[a], off[b]
+            r0, r1 = max(ra, rb), min(ra, rb) + H
+            c0, c1 = max(ca, cb), min(ca, cb) + W
+            if r1 > r0 and c1 > c0:
+                yield (a, (slice(r0 - ra, r1 - ra), slice(c0 - ca, c1 - ca)),
+                       b, (slice(r0 - rb, r1 - rb), slice(c0 - cb, c1 - cb)), ra != rb)
+
+
+def test_overlapping_cells_agree_on_shared_sky():
+    """Every same-projection canonical cell is a crop of one projection image:
+    any two cells hold the same convolved pixels where they overlap, in rows
+    (horizontal), between rows (vertical, the v3 change) and diagonally. The
+    synthetic cells' own pixels differ everywhere (independent noise), as real
+    cells do where star removal or the PS1 stack differs."""
+    md, imgs = _metadata(), _images()
+    ref = {n: cc.canonical_cell_image(n, md, imgs.get, SIGMA, RADIUS) for n in imgs}
+    n_vertical = 0
+    for a, sa, b, sb, vertical in _overlap_pairs(md):
+        assert not np.allclose(imgs[a][sa], imgs[b][sb], equal_nan=True)  # inputs disagree
+        np.testing.assert_array_equal(np.isnan(ref[a][sa]), np.isnan(ref[b][sb]), err_msg=f"{a}/{b}")
+        np.testing.assert_allclose(ref[a][sa], ref[b][sb], rtol=0, atol=1e-5, equal_nan=True, err_msg=f"{a}/{b}")
+        n_vertical += vertical
+    assert n_vertical >= 4
+
+
+def test_vertical_strip_comes_from_lower_row():
+    """Row R's shared strip holds row R-1's pixels (checked before blur, radius 0)."""
+    md, imgs = _metadata(), _images()
+    upper = cc.canonical_cell_image("skycell.9999.011", md, imgs.get, 1e-6, 0)  # row 1, x=1
+    lower = imgs["skycell.9999.001"]                                         # row 0, x=1
+    strip = slice(cc.EDGE_EXCLUSION, cc.EFFECTIVE_OVERLAP)
+    lower_rows = slice(H - cc.CELL_OVERLAP + cc.EDGE_EXCLUSION, H - cc.CELL_OVERLAP + cc.EFFECTIVE_OVERLAP)
+    cols = slice(5, cc.EFFECTIVE_OVERLAP)  # inside 001, left of 002's columns
+    np.testing.assert_allclose(upper[strip, cols], lower[lower_rows, cols], rtol=0, atol=1e-5, equal_nan=True)
+
+
+def test_missing_lower_neighbour_keeps_own_strip():
+    """Row 0 has no x=0 cell: 9999.010 (row 1, x=0) keeps its own pixels in the
+    strip where nothing lies below (not NaN, not another cell's pixels)."""
+    md, imgs = _metadata(), _images()
+    out = cc.canonical_cell_image("skycell.9999.010", md, imgs.get, 1e-6, 0)
+    strip = slice(cc.EDGE_EXCLUSION, cc.EFFECTIVE_OVERLAP)
+    cols = slice(5, W - cc.CELL_OVERLAP - 5)  # x=0 columns left of the x=1 cell
+    np.testing.assert_allclose(out[strip, cols], imgs["skycell.9999.010"][strip, cols], rtol=0, atol=1e-5)
+
+
+def test_cross_row_copies_need_column_masks():
+    cur = np.zeros((H + 2 * cc.PAD_SIZE, 10), np.float32)
+    with pytest.raises(ValueError):
+        cc.apply_cross_row(cur, cur.copy(), None, H)
+    with pytest.raises(ValueError):
+        cc.apply_cross_row(cur, None, cur.copy(), H)
+
+
+# Real-data regression on the paper dataset's F2 cells (s0020 c3 k3), skipped
+# when that data is absent. The combined cells are the published ones (fixed
+# inputs); the canonical images are recomputed with this code.
+_PAPER = "/astro/armin/koji/syndiff/dev_runs/paper_dataset_20261001"
+_D13 = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
+
+
+def _paper_case(names):
+    import os
+
+    import pandas as pd
+
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        production_combined_recipe, seed_band_cache_from_combined_store)
+
+    root = f"{_PAPER}/data_root"
+    lst = f"{root}/s0020/c3/k3/mapping/oversampling_1/tess_s0020_3_3_master_skycells_list.csv"
+    if not os.path.exists(lst):
+        pytest.skip("paper dataset not available")
+    df = pd.read_csv(lst)
+    recipe = production_combined_recipe({"remove_saturated_stars": True, "enable_saturation_correction": False,
+                                         "band_weights": _D13})
+    out = {}
+    for n in names:
+        md = cc.metadata_for_cell(df, n)
+        needed = [n, *cc.canonical_neighbour_names(md, n)]
+        cache = seed_band_cache_from_combined_store(root, needed, recipe)
+        if any(k not in cache for k in needed):
+            pytest.skip(f"combined inputs of {n} missing")
+        fetch = lambda k, c=cache: None if k not in c else np.asarray(c[k]["combined_image"], np.float32)
+        out[n] = (cc.canonical_cell_image(n, md, fetch, 40.0, 470), cache[n]["headers_data"])
+    return out
+
+
+def _box_at(img, headers, ra, dec, half=40):
+    from astropy.io import fits
+    from astropy.wcs import WCS
+
+    h = headers["r"] if "r" in headers else next(iter(headers.values()))
+    x, y = WCS(fits.Header.fromstring(h)).all_world2pix([[ra, dec]], 0)[0]
+    xi, yi = int(round(x)), int(round(y))
+    return img[yi - half:yi + half + 1, xi - half:xi + half + 1].astype(np.float64)
+
+
+def test_paper_f2_vertical_spike_star_is_whole_in_both_cells():
+    """F2 spike (1253,711): 2611.013 (row 1) kept a T 13.8 star that 2611.023
+    (row 2) zeroed as a bright star's catalog_neighbor. The v2 canonical cells
+    held 7649 vs 92 there (81x81 box); v3 cells both hold the lower row's star."""
+    cells = _paper_case(["skycell.2611.013", "skycell.2611.023"])
+    ra, dec = 225.46428, 76.76520
+    a = _box_at(*cells["skycell.2611.013"], ra, dec)
+    b = _box_at(*cells["skycell.2611.023"], ra, dec)
+    assert a.sum() > 5000
+    np.testing.assert_allclose(b, a, rtol=0, atol=1e-6 * np.abs(a).max())
+
+
+@pytest.mark.xfail(strict=True, reason="known limitation: cross-projection overlaps are different PS1 stacks "
+                                       "(2611.091 removed the T=13.31 star via its own saturation flags)")
+def test_paper_f2_cross_projection_pair_agrees():
+    cells = _paper_case(["skycell.2611.091", "skycell.2612.098"])
+    ra, dec = 231.662963, 79.751358
+    a = _box_at(*cells["skycell.2612.098"], ra, dec)
+    b = _box_at(*cells["skycell.2611.091"], ra, dec)
+    np.testing.assert_allclose(b, a, rtol=0, atol=1e-3 * np.abs(a).max())

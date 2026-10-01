@@ -61,7 +61,14 @@ KIND = "convolved_skycell"
 #    anchor, clean same-projection snapshot with no cross-projection patches,
 #    no blanked top strip) and the neighbour set Merkled in as extra inputs
 #    (``doc/seam_neighbour_fix_plan_20260930.md`` §2.1-2.2).
-CONVOLVED_RECIPE_SCHEMA_VERSION = 2
+# 3: one writer for vertical overlaps: row R-1 supplies cell rows
+#    [0, EFFECTIVE_OVERLAP) of row R wherever it has a placed cell, mirroring
+#    the left-neighbour rule. Before, cells of rows R and R+1 kept their own
+#    pixels in their shared 480-px strip and disagreed there (star removal and
+#    PS1 stack content are cell-local), and downsample ownership boundaries
+#    cut those features (/astro/armin/koji/syndiff/dev_runs/spike_diag_20261001).
+#    Combined cells are unchanged.
+CONVOLVED_RECIPE_SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Store location (decision #14): all three PS1 stores live under the
@@ -93,7 +100,7 @@ DEFAULT_MODE = "constant"
 # Not a tunable — part of the recipe identity (plan §13 decision #4): the
 # canonical cell is padded by same-projection neighbors only. Recorded in
 # the recipe so a future padding-strategy change re-fingerprints downstream.
-PADDING_MODE = "same_projection_only_v2"
+PADDING_MODE = "same_projection_only_v3"
 
 # Relative tolerance for "same pixels" when a publish meets an existing payload
 # under the same fingerprint (float32 round-off is ~1e-7 of peak).
