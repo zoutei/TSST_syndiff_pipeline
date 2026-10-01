@@ -247,19 +247,32 @@ def advance_sliding_window(state: ProcessingState) -> None:
     gc.collect()
 
 
-def _cross_row_pair(current: np.ndarray, following: np.ndarray, cell_height: int) -> None:
-    """Top pad of ``current`` from ``following`` and bottom pad of ``following``
-    from ``current`` (same geometry as ``canonical_cell.apply_cross_row``)."""
-    from syndiff_pipeline.template_creation.processing.canonical_cell import apply_cross_row
+def _cross_row_pair(
+    current: np.ndarray,
+    following: np.ndarray,
+    cell_height: int,
+    current_columns: np.ndarray,
+    following_columns: np.ndarray,
+) -> None:
+    """Top pad (and, where only the following row has a cell, the shared strip)
+    of ``current`` from ``following``; bottom pad and one-writer strip of
+    ``following`` from ``current`` in ``current_columns``. Same geometry as
+    ``canonical_cell.apply_cross_row``; the two copies commute."""
+    from syndiff_pipeline.template_creation.processing.canonical_cell import (
+        apply_bottom_from_previous,
+        apply_top_from_following,
+    )
 
-    # Order matters only for the overlap-free row ranges below, so the two
-    # copies are independent: current's top pad comes from following's cell
-    # rows, following's bottom pad from current's cell rows.
-    bottom_of_following = current[
-        cell_height - CELL_OVERLAP:PAD_SIZE + cell_height - CELL_OVERLAP + EDGE_EXCLUSION
-    ].copy()
-    apply_cross_row(current, None, following, cell_height)
-    following[:PAD_SIZE + EDGE_EXCLUSION] = bottom_of_following
+    apply_top_from_following(current, following, cell_height, current_columns, following_columns)
+    apply_bottom_from_previous(following, current, cell_height, current_columns)
+
+
+def _row_columns(cell_locations: dict, width: int) -> np.ndarray:
+    """Master columns written by a row's placed cells (``assemble_row_from_bundles`` positions)."""
+    mask = np.zeros(int(width), dtype=bool)
+    for x_start, x_end, _, _ in cell_locations.values():
+        mask[max(0, int(x_start)):min(int(width), int(x_end))] = True
+    return mask
 
 
 def apply_cross_row_padding(state: ProcessingState, config: MasterArrayConfig) -> None:
@@ -278,9 +291,12 @@ def apply_cross_row_padding(state: ProcessingState, config: MasterArrayConfig) -
         return
     if int(state.next_row_id) != int(state.current_row_id) + 1:
         return
-    _cross_row_pair(state.current_array, state.next_array, config.cell_height)
+    width = state.current_array.shape[1]
+    columns = _row_columns(state.cell_locations, width)
+    next_columns = _row_columns(state.next_cell_locations, width)
+    _cross_row_pair(state.current_array, state.next_array, config.cell_height, columns, next_columns)
     if state.clean_current is not None:
-        _cross_row_pair(state.clean_current, state.clean_next, config.cell_height)
+        _cross_row_pair(state.clean_current, state.clean_next, config.cell_height, columns, next_columns)
 
 
 def extract_cell_results(convolved_array: np.ndarray, cell_positions: dict) -> dict[str, np.ndarray]:
