@@ -212,3 +212,12 @@ def test_guard_refuses_broken_swapped_data():
     z["data"][1, 4] = np.nan
     with pytest.raises(ValueError):
         SC.guard_swapped_data(z, "x")
+
+
+def test_negative_outlier_mask_demotes_only_touched_stamps():
+    from syndiff_pipeline.forward_model.chain import scene as SC
+    z, meta = _toy_scene()
+    z["valid"][1, 12] = False                  # stamp 1 already has an invalid centre (not this step's business)
+    z["data"][0, 3] = -1000.0
+    s = SC.mask_negative_outliers(z, meta)
+    assert s["n_demoted"] == 0 and list(z["role"]) == [0, 0, 0]

@@ -201,7 +201,8 @@ def mask_negative_outliers(z: dict, meta: dict, nsigma: float = NEG_SIGMA_MASK) 
     n_core_valid = (valid & core[None]).sum(1)
     centre_ok = valid[:, (S * S) // 2]
     role0 = np.asarray(z["role"]).copy()
-    dem = (role0 != 2) & ((n_core_valid < int(meta["min_core_valid"])) | ~centre_ok)
+    touched = (valid0 & st).any(1)   # only stars whose stamp this step masked can be demoted by it
+    dem = touched & (role0 != 2) & ((n_core_valid < int(meta["min_core_valid"])) | ~centre_ok)
     role = role0.copy()
     role[dem] = 2
     z["valid"], z["role"] = valid, role.astype(np.asarray(z["role"]).dtype)
