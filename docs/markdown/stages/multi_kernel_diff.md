@@ -193,6 +193,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `tessreduce_boundary_k` | 15 | KNN neighbors for boundary sigma-clip |
 | `tessreduce_boundary_sigma` | 3.0 | Boundary sigma-clip threshold |
 | `tessreduce_boundary_rim_width` | 1 | Dilation width defining the mask boundary rim |
+| `tessreduce_star_mask_pad_px` | 0 | Grow the catalogue star masks (bits 1\|2) by a disk of this radius before excluding them from the background fit. The mask circles end inside the star's PSF wing, so with 0 the gap fill is solved from rim pixels that carry the wing and lifts the background under every masked star (≈0.1–0.3 e⁻/s at T 10–13 on S24 C2K2; `dev_runs/localbg_20260930`). |
 | `output` | `kernel_fit` | Artifact directory label |
 | `hp_*` | HotpantsParams | Round 1 uses stage `hp_bgo`; rounds 2 and 3 force `bgo=0` internally |
 
@@ -212,6 +213,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `inputs.convolved` | Convolved-templates label |
 | `tessreduce_smooth_gauss` / `tessreduce_anomaly_gauss` / `tessreduce_qe_spline_degree` / `tessreduce_qe_spline_smooth_mult` | Same robust-TESSreduce knobs as `kernel_fit` (shared estimator) |
 | `tessreduce_boundary_k` / `tessreduce_boundary_sigma` / `tessreduce_boundary_rim_width` | Boundary sigma-clip knobs (same defaults as `kernel_fit`) |
+| `tessreduce_star_mask_pad_px` | Star-mask padding for the background fit (same meaning and default as `kernel_fit`) |
 | `output.diffs` / `output.phot_bkg` | e.g. `ks_d` (background-subtracted), `ks_b` (background plane) |
 
 ---

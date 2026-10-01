@@ -422,6 +422,7 @@ KERNEL_FIT_ALLOWED = frozenset(
         "tessreduce_boundary_k",
         "tessreduce_boundary_sigma",
         "tessreduce_boundary_rim_width",
+        "tessreduce_star_mask_pad_px",
     }
     | _KERNEL_HP_KEYS
 )
@@ -448,6 +449,7 @@ BACKGROUND_ESTIMATE_ALLOWED = frozenset(
         "tessreduce_boundary_k",
         "tessreduce_boundary_sigma",
         "tessreduce_boundary_rim_width",
+        "tessreduce_star_mask_pad_px",
     }
 )
 
@@ -919,6 +921,9 @@ class KernelFitParams:
     tessreduce_boundary_k: int = 15
     tessreduce_boundary_sigma: float = 3.0
     tessreduce_boundary_rim_width: int = 1
+    # Grow catalogue star masks (bits 1|2) by this many px before excluding them from the background fit, so the
+    # gap fill is not solved from rim pixels that still carry the star's PSF wing (0 = previous behaviour).
+    tessreduce_star_mask_pad_px: int = 0
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
@@ -960,6 +965,9 @@ class BackgroundEstimateParams:
     tessreduce_boundary_k: int = 15
     tessreduce_boundary_sigma: float = 3.0
     tessreduce_boundary_rim_width: int = 1
+    # Grow catalogue star masks (bits 1|2) by this many px before excluding them from the background fit, so the
+    # gap fill is not solved from rim pixels that still carry the star's PSF wing (0 = previous behaviour).
+    tessreduce_star_mask_pad_px: int = 0
 
 
 def _merge_step_params(cls: Type[T], step_dict: dict) -> T:

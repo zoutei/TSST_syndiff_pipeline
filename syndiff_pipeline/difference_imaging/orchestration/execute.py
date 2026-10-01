@@ -1432,6 +1432,7 @@ def run_config_pipeline(
                 tessreduce_boundary_k=ks_params.tessreduce_boundary_k,
                 tessreduce_boundary_sigma=ks_params.tessreduce_boundary_sigma,
                 tessreduce_boundary_rim_width=ks_params.tessreduce_boundary_rim_width,
+                tessreduce_star_mask_pad_px=ks_params.tessreduce_star_mask_pad_px,
                 diffs_dir=diff_dir,
                 diffs_label=diffs_l,
                 bkg_dir=bkg_dir,
