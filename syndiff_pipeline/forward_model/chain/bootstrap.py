@@ -195,8 +195,12 @@ def step_bkg(*, ffi_path: Path, lane_root: Path, stem: str, out_dir: Path, fill_
 
 # ---------------------------------------------------------------------------------------------- step 2: template
 def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping_dir: Path, data_root: Path,
-                  work: Path, n_jobs: int = 16) -> dict:
+                  work: Path, band_weights: dict | None, n_jobs: int = 16) -> dict:
     """Header-WCS F=4 remap + production field downsample for the single science frame.
+
+    ``band_weights`` are the r,i,z,y weights the combined store was built with (the chain's
+    ``perband.paths.chain_band_weights``).  They enter the combined recipe, so the downsample loads only cells of that
+    recipe; ``None`` means the production defaults.  Passing the wrong set makes every cell a miss, never a substitute.
 
     ``mapping_dir`` is the ``.../oversampling_4`` header-WCS mapping built from this very frame (reference == frame)."""
     from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
@@ -229,8 +233,10 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
     (work / "remap_result.json").write_text(json.dumps(res_remap, indent=2, default=str) + "\n")
 
     t1 = time.time()
-    recipe = production_combined_recipe({"remove_saturated_stars": True, "enable_saturation_correction": False},
-                                        data_root=priv, sector=sector, camera=camera, ccd=ccd)
+    recipe_cfg = {"remove_saturated_stars": True, "enable_saturation_correction": False}
+    if band_weights is not None:
+        recipe_cfg["band_weights"] = {b: float(band_weights[b]) for b in ("r", "i", "z", "y")}
+    recipe = production_combined_recipe(recipe_cfg, data_root=priv, sector=sector, camera=camera, ccd=ccd)
     template_root = work / "templates" / f"oversampling_{OVERSAMPLING}"
     res_ds = run_field_downsample_scc(
         sector=sector, camera=camera, ccd=ccd, data_root=priv, event_dir=work, mapping_root=mapping_dir,
@@ -241,7 +247,9 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
         progress_path=work / "downsample_progress.json")
     t_ds = time.time() - t1
     (work / "downsample_result.json").write_text(json.dumps(res_ds, indent=2, default=str) + "\n")
+    from syndiff_pipeline.template_creation.processing.combined_store import combined_recipe_id
     res = dict(step="template", template_root=str(template_root), mapping=str(master[0]), combined_recipe=recipe,
+               combined_recipe_id=combined_recipe_id(recipe),
                seconds_remap=t_remap, seconds_downsample=t_ds, drift_source="point_ffi_wcs")
     (work / "step_template.json").write_text(json.dumps(res, indent=1, default=str) + "\n")
     return res
@@ -361,6 +369,7 @@ def run_stage(cfg, step: str = "all", *, lane_override: str | Path | None = None
     F=1 lane (``lane_dir``).  ``bkg`` regenerates ks_b locally (needs the lane's tmpl_conv + frame offsets; used by the
     dry run), and ``local_bkg=True`` makes ``hotpants`` read that local ks_b instead of the lane's."""
     from syndiff_pipeline.forward_model.chain.config import mark_done, write_provenance
+    from syndiff_pipeline.forward_model.chain.perband.paths import chain_band_weights
 
     sd = cfg.stage_dir("bootstrap")
     sd.mkdir(parents=True, exist_ok=True)
@@ -377,7 +386,8 @@ def run_stage(cfg, step: str = "all", *, lane_override: str | Path | None = None
                               star_mask_pad_px=bk.star_mask_pad_px)
     if step in ("template", "all"):
         out["template"] = step_template(sector=s.sector, camera=s.camera, ccd=s.ccd, ffi_path=ffi, mapping_dir=mapping,
-                                        data_root=cfg.data_root, work=sd, n_jobs=int(os.environ.get("BOOTSTRAP_NJOBS", 16)))
+                                        data_root=cfg.data_root, work=sd, band_weights=chain_band_weights(cfg),
+                                        n_jobs=int(os.environ.get("BOOTSTRAP_NJOBS", 16)))
     if step in ("hotpants", "all"):
         ks_b = local_ks_b if local_bkg else lane / "ks_b" / f"{cfg.stem}_ks_b.fits.fz"
         check_lane(lane, cfg.stem, ks_b)
