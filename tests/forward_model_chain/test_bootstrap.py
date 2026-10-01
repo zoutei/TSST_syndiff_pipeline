@@ -1,4 +1,6 @@
 """Fast synthetic tests for forward_model.chain.bootstrap (no /astro access)."""
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -127,3 +129,24 @@ def test_star_mask_pad_forwarded_only_when_nonzero(monkeypatch):
     assert seen["star_mask_pad_px"] == 3
     with pytest.raises(ValueError):
         bs.estimate_ks_b(a, a, np.zeros((4, 4), np.int16), star_mask_pad_px=-1)
+
+
+def test_lane_dir_resolution_and_check(tmp_path):
+    class In: lane_dir = None
+    class Cfg:
+        inputs = In()
+        raw = {}
+        out_root = tmp_path
+    c = Cfg()
+    assert bs.lane_dir(c) == tmp_path / "lane_f1"
+    assert bs.lane_dir(c, "/x/y") == Path("/x/y")
+    c.inputs.lane_dir = tmp_path / "L"
+    assert bs.lane_dir(c) == tmp_path / "L"
+    lane = tmp_path / "L"
+    (lane / "ks_b").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError) as e:
+        bs.check_lane(lane, "stem")
+    assert "shared_mask" in str(e.value) and "substamp_stars" in str(e.value) and "ks_b" in str(e.value)
+    for f in ("shared_mask.fits.fz", "hotpants_substamp_stars.csv", "ks_b/stem_ks_b.fits.fz"):
+        (lane / f).write_bytes(b"")
+    assert set(bs.check_lane(lane, "stem")) == {"shared_mask", "substamp_stars", "ks_b"}
