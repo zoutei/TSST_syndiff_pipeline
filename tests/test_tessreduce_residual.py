@@ -397,3 +397,28 @@ def test_extra_exclude_follows_linear_pad_like_the_residual_mask():
     assert np.array_equal(ex_p[pad:-pad, pad:-pad], ex) and ex_p[:pad].all() and ex_p[:, :pad].all()
     fit = _fit_mask(mask_p, 0, ex_p)
     assert not fit[pad + 20, pad + 30] and fit.shape == ex_p.shape
+
+
+def test_star_wing_exclusion_follows_field_mode_padding():
+    # kernel_fit pads the background-fit exclusion with the same pairing as the residual mask; in field mode
+    # (MappingGrid) the science crop sits inside the template support and every fabricated pixel is excluded.
+    from syndiff_pipeline.common.mapping_grid import MappingGrid
+    from syndiff_pipeline.difference_imaging.stages.hotpants import _pair_hotpants_inputs
+
+    grid = MappingGrid.from_ffi_shape(2048, 2048)
+    sshape = grid.science_ffi_bounds()["shape"]
+    tshape = grid.template_ffi_bounds()["shape"]
+    ex = star_wing_exclusion(sshape, np.array([100.0]), np.array([200.0]), np.array([10.0]), [[13.0, 9]])
+    sci = np.zeros(sshape)
+    tmpl = np.zeros(tshape)
+    _, _, _, ex_p, _ = _pair_hotpants_inputs(sci, tmpl, sci, ex, grid, 0)
+    ex_p = np.asarray(ex_p, dtype=bool)
+    assert ex_p.shape == tuple(tshape)
+    ys, xs = grid.science_slice_native()
+    np.testing.assert_array_equal(ex_p[ys, xs], ex)
+    pad = np.ones(tshape, bool)
+    pad[ys, xs] = False
+    assert ex_p[pad].all()
+    mask = np.zeros(tshape, dtype=np.int16)
+    fit = _fit_mask(mask, extra_exclude=ex_p)
+    assert not fit[pad].any() and fit[ys, xs].sum() == (~ex).sum()
