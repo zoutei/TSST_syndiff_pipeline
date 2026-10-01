@@ -354,6 +354,14 @@ def run_kernel_fit(
         _, _, _, residual_mask, _ = _pair_hotpants_inputs(
             raw_ffi, raw_template, raw_err, residual_mask, mapping_grid, linear_pad
         )
+        if tessreduce_extra_exclude is not None:
+            # The background-fit exclusion (crop-shaped, from the lane catalogue) must follow the residual mask
+            # onto the padded Hotpants support; pad pixels are excluded (True), as in the mask contract.
+            _, _, _, tessreduce_extra_exclude, _ = _pair_hotpants_inputs(
+                raw_ffi, raw_template, raw_err, np.asarray(tessreduce_extra_exclude, dtype=bool),
+                mapping_grid, linear_pad,
+            )
+            tessreduce_extra_exclude = np.asarray(tessreduce_extra_exclude, dtype=bool)
 
     if ffi.shape != np.asarray(hotpants_mask).shape:
         raise ValueError(

@@ -377,3 +377,23 @@ def test_fit_mask_extra_exclude_and_estimator_wing_lift():
     fixed, _, _ = estimate_tessreduce_residual_background(image, mask, extra_exclude=disk)
     assert lifted[40, 40] - 1.0 > 0.05
     assert abs(fixed[40, 40] - 1.0) < 0.5 * (lifted[40, 40] - 1.0)
+
+
+def test_extra_exclude_follows_linear_pad_like_the_residual_mask():
+    """kernel_fit pads the residual mask to the Hotpants support (linear mode: constant True margin); the
+    star-wing exclusion must be padded the same way or _fit_mask rejects it (2048 vs 2064 on the paper lanes)."""
+    import numpy as np
+    from syndiff_pipeline.difference_imaging.stages.hotpants import _pair_hotpants_inputs
+    from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import _fit_mask, star_wing_exclusion
+
+    n, pad = 64, 8
+    sci = np.zeros((n, n)); err = np.ones((n, n)); tmpl = np.zeros((n + 2 * pad, n + 2 * pad))
+    mask = np.zeros((n, n), dtype=np.int16)
+    ex = star_wing_exclusion((n, n), np.array([30.0]), np.array([20.0]), np.array([9.0]), [[13.0, 5]])
+    _, _, _, mask_p, _ = _pair_hotpants_inputs(sci, tmpl, err, mask, None, pad)
+    _, _, _, ex_p, _ = _pair_hotpants_inputs(sci, tmpl, err, ex, None, pad)
+    ex_p = np.asarray(ex_p, dtype=bool)
+    assert ex_p.shape == np.asarray(mask_p).shape == (n + 2 * pad, n + 2 * pad)
+    assert np.array_equal(ex_p[pad:-pad, pad:-pad], ex) and ex_p[:pad].all() and ex_p[:, :pad].all()
+    fit = _fit_mask(mask_p, 0, ex_p)
+    assert not fit[pad + 20, pad + 30] and fit.shape == ex_p.shape
