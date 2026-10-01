@@ -187,6 +187,9 @@ def run_gridded_photometry(
     cfg: StampQaConfig | None = None,
     fix_xy: bool = False,
     compute_stamp_chi2: bool = True,
+    mask: np.ndarray | None = None,
+    error: np.ndarray | None = None,
+    xy_bounds: float | None = None,
 ) -> tuple[pd.DataFrame, np.ndarray | None]:
     """PSFPhotometry on a GriddedPSFModel; simultaneous SourceGrouper groups.
 
@@ -196,6 +199,11 @@ def run_gridded_photometry(
       If True, hold each source at init (x, y) and fit flux only.
   compute_stamp_chi2
       Stamp QA scores (norm / chi2); skip for light-curve baselines.
+  mask, error
+      Optional boolean bad-pixel mask (True = ignore) and 1-sigma error image passed to
+      ``PSFPhotometry`` (both default None: unchanged behaviour).
+  xy_bounds
+      Max allowed |x_fit - x_init|, |y_fit - y_init| in px (``PSFPhotometry(xy_bounds=...)``); None = unbounded.
 
   Returns ``(table, model_image)``. ``model_image`` is ``None`` when there are
   no stars or when ``compute_stamp_chi2`` is False.
@@ -229,8 +237,14 @@ def run_gridded_photometry(
         aperture_radius=float(cfg.aperture_radius),
         grouper=SourceGrouper(min_separation=float(cfg.grouper_min_separation)),
         local_bkg_estimator=None,
+        xy_bounds=None if xy_bounds is None else float(xy_bounds),
     )
-    result = phot(np.asarray(image, dtype=np.float64), init_params=init)
+    result = phot(
+        np.asarray(image, dtype=np.float64),
+        mask=None if mask is None else np.asarray(mask, dtype=bool),
+        error=None if error is None else np.asarray(error, dtype=np.float64),
+        init_params=init,
+    )
     tbl = result if hasattr(result, "colnames") else result.to_table()
     df = tbl.to_pandas()
 
