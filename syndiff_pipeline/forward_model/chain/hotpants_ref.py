@@ -1,4 +1,4 @@
-"""Stage ``hotpants``: the F=4 oversampling-aware Hotpants ko=2 baseline on the band-sum template ``T_sum``.
+"""Stage ``hotpants``: the F=4 oversampling-aware Hotpants baseline (production recipe: ko=4, connected_regions) on the band-sum template ``T_sum``.
 
 Port of e2e ``hotpants/hp_build.py`` (+ ``hp_job.sh``): HOTPANTS stage of the minbg_tvwcs_f4 recipe, unchanged except
 that the template is ``perband/band_templates/T_sum.npy`` (full OS4 grid incl. padding; cast float64 -> float32 -> float64
@@ -26,7 +26,8 @@ import numpy as np
 from .config import is_done, mark_done, write_provenance
 from .perband.paths import chain_paths
 
-HP_KWARGS = dict(hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=2, hp_bgo=0,
+# ko 4 + connected_regions = the 09-08 decided production recipe (was the SN2020hvq ko 2 grid copy until 2026-10-01)
+HP_KWARGS = dict(hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=0, stamp_mode="connected_regions",
                  hp_nstampx=10, hp_nstampy=10, hp_nss=100, hp_ngauss=3, hp_deg_fixe=[6, 4, 2],
                  hp_kf_spread_mask1=0.0, hp_ks=3.0, hp_kfm=0.75, hp_fitthresh=5.0, hp_stat_sig=3.0,
                  hp_force_convolve="t", hp_normalize="t", write_convolved=True, write_bkg=True,
