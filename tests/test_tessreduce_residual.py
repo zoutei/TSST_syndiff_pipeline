@@ -10,6 +10,8 @@ from skimage import restoration as inpaint
 from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
     _accumulate_sep_object_mask,
     _fit_mask,
+    parse_star_wing_radii,
+    star_wing_exclusion,
     _qe_spline_map,
     _sep_object_stamp_slices,
     estimate_tessreduce_residual_background,
@@ -328,3 +330,50 @@ def test_star_mask_pad_removes_wing_lift_under_masked_star():
     padded, _, _ = estimate_tessreduce_residual_background(image, mask, star_mask_pad_px=8)
     assert lifted[40, 40] - 1.0 > 0.05
     assert abs(padded[40, 40] - 1.0) < 0.5 * (lifted[40, 40] - 1.0)
+
+
+def test_star_wing_exclusion_radius_by_magnitude():
+    radii = [[9.0, 5], [12.0, 3], [13.0, 1]]
+    x = np.array([10.0, 30.0, 50.0, 70.0])
+    y = np.array([10.0, 10.0, 10.0, 10.0])
+    t = np.array([8.5, 9.0, 12.5, 13.0])   # 9.0 falls in the 12.0 row; 13.0 is past the last mag_hi -> no disk
+    ex = star_wing_exclusion((21, 81), x, y, t, radii)
+    yy, xx = np.mgrid[:21, :81]
+    want = np.zeros((21, 81), bool)
+    for xi, r in ((10, 5), (30, 3), (50, 1)):
+        want |= (xx - xi) ** 2 + (yy - 10) ** 2 <= r * r
+    np.testing.assert_array_equal(ex, want)
+
+
+def test_star_wing_exclusion_clips_at_edges_and_skips_nan():
+    ex = star_wing_exclusion((10, 10), np.array([0.0, np.nan, -3.0]), np.array([0.0, 5.0, -3.0]),
+                             np.array([10.0, 10.0, 10.0]), [[11.0, 4]])
+    yy, xx = np.mgrid[:10, :10]
+    want = (xx ** 2 + yy ** 2 <= 16) | ((xx + 3) ** 2 + (yy + 3) ** 2 <= 16)
+    np.testing.assert_array_equal(ex, want)
+
+
+@pytest.mark.parametrize("bad", [[], [[10.0, 5], [9.0, 3]], [[10.0, 0]], [[10.0, 2.5]], [[10.0]]])
+def test_parse_star_wing_radii_rejects_bad_tables(bad):
+    with pytest.raises(ValueError):
+        parse_star_wing_radii(bad)
+
+
+def test_fit_mask_extra_exclude_and_estimator_wing_lift():
+    mask = np.zeros((21, 21), dtype=np.uint8)
+    extra = np.zeros((21, 21), bool)
+    extra[5:8, 5:8] = True
+    np.testing.assert_array_equal(_fit_mask(mask, extra_exclude=extra), ~extra)
+    with pytest.raises(ValueError):
+        _fit_mask(mask, extra_exclude=np.zeros((5, 5), bool))
+    # same wing-lift case as the pad test: a magnitude-sized disk past the wing removes the lift
+    n = 81
+    yy, xx = np.mgrid[:n, :n]
+    r = np.hypot(yy - 40, xx - 40)
+    image = 1.0 + 2.0 * np.exp(-r / 2.5)
+    mask = np.where(r <= 6, 2, 0).astype(np.uint8)
+    lifted, _, _ = estimate_tessreduce_residual_background(image, mask)
+    disk = star_wing_exclusion((n, n), np.array([40.0]), np.array([40.0]), np.array([9.0]), [[13.0, 14]])
+    fixed, _, _ = estimate_tessreduce_residual_background(image, mask, extra_exclude=disk)
+    assert lifted[40, 40] - 1.0 > 0.05
+    assert abs(fixed[40, 40] - 1.0) < 0.5 * (lifted[40, 40] - 1.0)
