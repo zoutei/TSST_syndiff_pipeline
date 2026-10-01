@@ -160,3 +160,21 @@ def test_template_recipe_uses_chain_band_weights():
     d13 = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
     assert combined_recipe_id(production_combined_recipe({**base, "band_weights": d13})) == "e17a198a4942aa2d"
     assert combined_recipe_id(production_combined_recipe(base)) != "e17a198a4942aa2d"
+
+
+def test_private_data_root_links_mapping(tmp_path):
+    """The downsample resolves the master skycells list under data_root; the private root must expose the mapping."""
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+    src = tmp_path / "data"
+    (src / "ps1_skycells_zarr" / "ps1_convolved.zarr").mkdir(parents=True)
+    m = tmp_path / "map" / "oversampling_4"
+    m.mkdir(parents=True)
+    want = scc_mapping_master_skycells_csv(tmp_path / "priv", 20, 3, 3, oversampling_factor=4)
+    (m / want.name).write_text("NAME\n")
+    priv = bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=m)
+    assert scc_mapping_master_skycells_csv(priv, 20, 3, 3, oversampling_factor=4).is_file()
+    bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=m)   # idempotent
+    other = tmp_path / "map2" / "oversampling_4"
+    other.mkdir(parents=True)
+    with pytest.raises(FileExistsError):
+        bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=other)
