@@ -2,7 +2,9 @@
 
 One science frame per field.  Outputs (all under ``cfg.stage_dir("bootstrap")``)::
 
-    bkg/<stem>_ks_b.fits.fz            ks_b regenerated with the CURRENT default gap fill (harmonic, 70cba3c)
+    bkg/<stem>_ks_b.fits.fz            OPTIONAL local ks_b regeneration (step ``bkg``; dry run only). Real runs read ks_b,
+                                       shared_mask and the substamp stars from the F=1 lane dir (``inputs.lane_dir``,
+                                       default out_root/lane_f1) built by the lane stage.
     data_priv/                         private data_root (symlinks to read-only inputs) so nothing under data_root is written
     remap/oversampling_4/              field remap store (header WCS, single frame)
     templates/oversampling_4/          band-combined F=4 field template store (+ materialised FITS)
@@ -18,6 +20,7 @@ reads the combined/convolved PS1 store in ``<data_root>/ps1_skycells_zarr`` (wha
 
 Numerics follow ``dev_runs/e2e_f1_20260930/s12_bootstrap/scripts/{build,finish}.py`` unless noted.
 Run:  ``python -m syndiff_pipeline.forward_model.chain.bootstrap --config F.yaml --step {bkg,template,hotpants,all,submit}``
+(``all`` = template + hotpants.)
 """
 
 from __future__ import annotations
@@ -331,47 +334,71 @@ def step_hotpants(*, ffi_path: Path, stem: str, lane_root: Path, ks_b_path: Path
 
 
 # ---------------------------------------------------------------------------------------------- config wiring
-def _lane_root(cfg) -> Path:
-    lane = ((cfg.raw or {}).get("bootstrap") or {}).get("lane", DEFAULT_LANE)
-    return cfg.scc_root / lane
+def lane_dir(cfg, override: str | Path | None = None) -> Path:
+    """The F=1 linear lane supplying ks_b/, shared_mask.fits.fz, hotpants_substamp_stars.csv (and tmpl_conv/ for the
+    optional ``bkg`` step).  Order: explicit override, ``cfg.inputs.lane_dir``, default ``out_root/lane_f1``
+    (built by the lane stage from scratch on the pinned SHA)."""
+    if override:
+        return Path(override)
+    v = getattr(cfg.inputs, "lane_dir", None) or ((cfg.raw or {}).get("inputs") or {}).get("lane_dir")
+    return Path(v) if v else cfg.out_root / "lane_f1"
 
 
-def run_stage(cfg, step: str = "all") -> dict:
-    """Run bootstrap step(s) for a loaded ``ChainConfig``.  ``all`` writes provenance + DONE."""
+def check_lane(lane: Path, stem: str, ks_b: Path | None = None) -> dict:
+    """Fail early (with every missing path listed) if the lane lacks what the OS-aware Hotpants needs."""
+    need = {"shared_mask": lane / "shared_mask.fits.fz", "substamp_stars": lane / "hotpants_substamp_stars.csv",
+            "ks_b": ks_b or lane / "ks_b" / f"{stem}_ks_b.fits.fz"}
+    missing = [f"{k}: {v}" for k, v in need.items() if not Path(v).is_file()]
+    if missing:
+        raise FileNotFoundError("F=1 lane incomplete (lane stage not run?):\n  " + "\n  ".join(missing))
+    return need
+
+
+def run_stage(cfg, step: str = "all", *, lane_override: str | Path | None = None, local_bkg: bool = False) -> dict:
+    """Run bootstrap step(s) for a loaded ``ChainConfig``.
+
+    ``all`` = template + hotpants (writes provenance + DONE): the background is NOT regenerated, it is read from the
+    F=1 lane (``lane_dir``).  ``bkg`` regenerates ks_b locally (needs the lane's tmpl_conv + frame offsets; used by the
+    dry run), and ``local_bkg=True`` makes ``hotpants`` read that local ks_b instead of the lane's."""
     from syndiff_pipeline.forward_model.chain.config import mark_done, write_provenance
 
     sd = cfg.stage_dir("bootstrap")
     sd.mkdir(parents=True, exist_ok=True)
     ffi = cfg.ffi_path()
-    lane = _lane_root(cfg)
+    lane = lane_dir(cfg, lane_override)
     s = cfg.scc
     mapping = Path(cfg.need("inputs.bootstrap_mapping"))
+    master = None
     out: dict = {}
-    if step in ("bkg", "all"):
-        bk = (cfg.raw or {}).get("bootstrap_background") or (cfg.raw or {}).get("background") or {}
-        out["bkg"] = step_bkg(ffi_path=ffi, lane_root=lane, stem=cfg.stem, out_dir=sd / "bkg",
-                              fill_method=str(bk.get("fill", "harmonic")),
-                              star_mask_pad_px=int(bk.get("star_mask_pad_px", 0)))
+    local_ks_b = sd / "bkg" / f"{cfg.stem}_ks_b.fits.fz"
+    if step == "bkg":
+        bk = cfg.background
+        out["bkg"] = step_bkg(ffi_path=ffi, lane_root=lane, stem=cfg.stem, out_dir=sd / "bkg", fill_method=bk.fill,
+                              star_mask_pad_px=bk.star_mask_pad_px)
     if step in ("template", "all"):
         out["template"] = step_template(sector=s.sector, camera=s.camera, ccd=s.ccd, ffi_path=ffi, mapping_dir=mapping,
                                         data_root=cfg.data_root, work=sd, n_jobs=int(os.environ.get("BOOTSTRAP_NJOBS", 16)))
     if step in ("hotpants", "all"):
+        ks_b = local_ks_b if local_bkg else lane / "ks_b" / f"{cfg.stem}_ks_b.fits.fz"
+        check_lane(lane, cfg.stem, ks_b)
         master = sorted(mapping.glob(f"tess_s{s.sector:04d}_{s.camera}_{s.ccd}_master_pixels2skycells_os4.fits*"))[0]
-        out["hotpants"] = step_hotpants(ffi_path=ffi, stem=cfg.stem, lane_root=lane, ks_b_path=sd / "bkg" / f"{cfg.stem}_ks_b.fits.fz",
-                                        template_root=sd / "templates" / "oversampling_4", mapping_master=master, out_dir=sd / "diff")
+        out["hotpants"] = step_hotpants(ffi_path=ffi, stem=cfg.stem, lane_root=lane, ks_b_path=ks_b,
+                                        template_root=sd / "templates" / "oversampling_4", mapping_master=master,
+                                        out_dir=sd / "diff")
     if step == "all":
-        write_provenance(sd, cfg, {"ffi": ffi, "shared_mask": lane / "shared_mask.fits.fz",
-                                   "substamp_stars": lane / "hotpants_substamp_stars.csv",
+        write_provenance(sd, cfg, {"ffi": ffi, "ks_b": ks_b, "shared_mask": lane / "shared_mask.fits.fz",
+                                   "substamp_stars": lane / "hotpants_substamp_stars.csv", "lane_dir": {"value": str(lane)},
                                    "mapping_master": master, "steps": json.loads(json.dumps(out, default=str))})
         mark_done(sd)
     return out
 
 
-def submit_template(cfg, step: str = "template") -> str:
-    """Write + submit the Condor job for the heavy step (``template`` by default; ``all`` runs everything on one node)."""
+def submit_template(cfg, step: str = "template", extra: list[str] | None = None) -> str:
+    """Write + submit the Condor job for a step (``template`` by default; ``all`` runs template + hotpants on one node)."""
     from syndiff_pipeline.forward_model.chain import condor
 
-    argv = ["python", "-m", "syndiff_pipeline.forward_model.chain.bootstrap", "--config", str(cfg.config_path), "--step", step]
+    argv = ["python", "-m", "syndiff_pipeline.forward_model.chain.bootstrap", "--config", str(cfg.config_path),
+            "--step", step, *(extra or [])]
     sub = condor.write_submit(cfg, "bootstrap", argv, tag=f"bootstrap_{step}", **TEMPLATE_RESOURCES)
     return condor.submit(sub)
 
@@ -380,15 +407,20 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--config", required=True)
     ap.add_argument("--step", default="all", choices=["bkg", "template", "hotpants", "all", "submit"])
+    ap.add_argument("--submit-step", default="template", choices=["bkg", "template", "hotpants", "all"],
+                    help="with --step submit: which step the Condor job runs")
+    ap.add_argument("--lane-dir", default=None, help="override inputs.lane_dir (default out_root/lane_f1)")
+    ap.add_argument("--local-bkg", action="store_true", help="hotpants reads bootstrap/bkg/ks_b (dry run) instead of the lane's")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from syndiff_pipeline.forward_model.chain.config import load_config
 
     cfg = load_config(a.config)
+    extra = (["--lane-dir", a.lane_dir] if a.lane_dir else []) + (["--local-bkg"] if a.local_bkg else [])
     if a.step == "submit":
-        print(submit_template(cfg))
+        print(submit_template(cfg, a.submit_step, extra))
         return 0
-    print(json.dumps(run_stage(cfg, a.step), indent=1, default=str))
+    print(json.dumps(run_stage(cfg, a.step, lane_override=a.lane_dir, local_bkg=a.local_bkg), indent=1, default=str))
     return 0
 
 
