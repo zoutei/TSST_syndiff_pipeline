@@ -113,13 +113,25 @@ def convolved_template_for_frame(lane_root: Path, stem: str) -> Path:
     return Path(lookup_convolved_path(table, dx, dy))
 
 
-def make_private_data_root(priv: Path, data_root: Path, sector: int, camera: int, ccd: int, ffi_path: Path) -> Path:
+def make_private_data_root(priv: Path, data_root: Path, sector: int, camera: int, ccd: int, ffi_path: Path,
+                           mapping_dir: Path | None = None) -> Path:
     """Private data_root: symlinks to read-only inputs, own bookkeeping and ffi_list, so the stage writes nothing
-    under the production ``data_root``.  Idempotent."""
+    under the production ``data_root``.  Idempotent.
+
+    ``mapping_dir`` (``.../oversampling_<F>``) is linked as ``<scc>/mapping/oversampling_<F>``: the downsample reads the
+    master skycells list from ``data_root`` (``scc_mapping_master_skycells_csv``), and the schema-v2 convolved
+    fingerprint includes each cell's neighbour set from that list, so without it every cell is a miss."""
     priv = Path(priv)
     scc_src = Path(data_root) / f"s{sector:04d}" / f"c{camera}" / f"k{ccd}"
     scc = priv / f"s{sector:04d}" / f"c{camera}" / f"k{ccd}"
     scc.mkdir(parents=True, exist_ok=True)
+    if mapping_dir is not None:
+        dst = scc / "mapping" / Path(mapping_dir).name
+        dst.parent.mkdir(exist_ok=True)
+        if dst.is_symlink() and Path(os.readlink(dst)) != Path(mapping_dir):
+            raise FileExistsError(f"{dst} links to {os.readlink(dst)}, not {mapping_dir}")
+        if not dst.is_symlink():
+            dst.symlink_to(Path(mapping_dir))
     for name in ("catalogs", "ffi", "wcs"):
         if (scc_src / name).exists() and not (scc / name).exists():
             (scc / name).symlink_to(scc_src / name)
@@ -210,7 +222,11 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
     from syndiff_pipeline.template_creation.processing.field_remap import run_field_remap_scc
 
     work = Path(work)
-    priv = make_private_data_root(work / "data_priv", data_root, sector, camera, ccd, ffi_path)
+    priv = make_private_data_root(work / "data_priv", data_root, sector, camera, ccd, ffi_path, mapping_dir=mapping_dir)
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+    csv = scc_mapping_master_skycells_csv(priv, sector, camera, ccd, oversampling_factor=OVERSAMPLING)
+    if not csv.is_file():
+        raise FileNotFoundError(f"master skycells list {csv} missing: the downsample cannot resolve canonical cells")
     ffi_in = work / "ffi"
     ffi_in.mkdir(parents=True, exist_ok=True)
     link = ffi_in / Path(ffi_path).name
