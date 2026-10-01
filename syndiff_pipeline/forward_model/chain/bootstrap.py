@@ -44,8 +44,9 @@ DEFAULT_LANE = "diff_linear"  # old lane providing tmpl_conv (OS1 linear convolv
 SCIENCE_BOUNDS = dict(x_min=44, x_max=2092, y_min=0, y_max=2048, shape=(2048, 2048))
 OVERSAMPLING = 4
 PSF_SIGMA = 40.0
-HP_RECIPE = dict(  # config/pipeline_sn2020hvq_tvwcs_os4.yaml, as in finish.py
-    hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=2, hp_bgo=0, hp_nstampx=10, hp_nstampy=10, hp_nss=100,
+HP_RECIPE = dict(  # config/pipeline_sn2020hvq_tvwcs_os4.yaml, as in finish.py, except the 09-08 decision: kernel
+    # spatial order 4 (not 2; 6 diverges at native) with connected_regions stamps (paper dataset ko trial 2026-10-01)
+    hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=0, stamp_mode="connected_regions", hp_nstampx=10, hp_nstampy=10, hp_nss=100,
     hp_ngauss=3, hp_deg_fixe=[6, 4, 2], hp_kf_spread_mask1=0.0, hp_ks=3.0, hp_kfm=0.75, hp_fitthresh=5.0,
     hp_stat_sig=3.0, hp_force_convolve="t", hp_normalize="t", write_convolved=True, write_bkg=True,
     write_stamps=False, write_kernel_solutions=True,

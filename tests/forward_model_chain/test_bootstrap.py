@@ -106,7 +106,7 @@ def test_estimate_ks_b_harmonic_vs_biharmonic_smooth_sky():
 
 def test_hp_recipe_matches_reference_values():
     r = bs.HP_RECIPE
-    assert r["hp_ko"] == 2 and r["hp_bgo"] == 0 and r["hp_nss"] == 100
+    assert r["hp_ko"] == 4 and r["stamp_mode"] == "connected_regions" and r["hp_bgo"] == 0 and r["hp_nss"] == 100
     assert r["hp_sigma_gauss"] == [0.752, 1.88, 3.76]
     assert (r["hp_nstampx"], r["hp_nstampy"]) == (10, 10)
     assert r["write_kernel_solutions"] is True
