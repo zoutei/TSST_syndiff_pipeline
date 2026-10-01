@@ -138,6 +138,10 @@ def make_private_data_root(priv: Path, data_root: Path, sector: int, camera: int
     for name in ("ffi_list.parquet", "ffi_list.csv"):
         if (scc_src / name).is_file() and not (scc / name).exists():
             shutil.copy2(scc_src / name, scc / name)
+    # top-level catalogs: the Gaia projection catalogues (catalogs/gaia_projections/...) are per-cell inputs of the
+    # schema-v2 combined fingerprint, so without them no stored cell resolves
+    if (Path(data_root) / "catalogs").exists() and not (priv / "catalogs").exists():
+        (priv / "catalogs").symlink_to(Path(data_root) / "catalogs")
     zsrc = Path(data_root) / "ps1_skycells_zarr"
     zdst = priv / "ps1_skycells_zarr"
     zdst.mkdir(exist_ok=True)
@@ -206,6 +210,27 @@ def step_bkg(*, ffi_path: Path, lane_root: Path, stem: str, out_dir: Path, fill_
 
 
 # ---------------------------------------------------------------------------------------------- step 2: template
+def preflight_store(data_root: Path, master_csv: Path, band_weights: dict | None) -> list[str]:
+    """Names in the master skycells list with no canonical convolved cell for the chain's recipe under ``data_root``
+    (the same resolver the downsample uses), so a miss fails in seconds instead of after the remap."""
+    import pandas as pd
+    from syndiff_pipeline.template_creation.processing.combined_store import production_combined_recipe
+    from syndiff_pipeline.template_creation.processing.field_downsample import _discover_shared_convolved_fp
+
+    cfg = {"remove_saturated_stars": True, "enable_saturation_correction": False}
+    if band_weights is not None:
+        cfg["band_weights"] = {b: float(band_weights[b]) for b in ("r", "i", "z", "y")}
+    recipe = production_combined_recipe(cfg)
+    df = pd.read_csv(master_csv).set_index("NAME", drop=False)
+    missing = []
+    for name in sorted(set(df.index.astype(str))):
+        projection, cell = name.rsplit(".", 1)
+        if _discover_shared_convolved_fp(data_root, projection, cell, psf_sigma=PSF_SIGMA, combined_recipe=recipe,
+                                         mapping_df=df) is None:
+            missing.append(name)
+    return missing
+
+
 def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping_dir: Path, data_root: Path,
                   work: Path, band_weights: dict | None, n_jobs: int = 16) -> dict:
     """Header-WCS F=4 remap + production field downsample for the single science frame.
@@ -227,6 +252,10 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
     csv = scc_mapping_master_skycells_csv(priv, sector, camera, ccd, oversampling_factor=OVERSAMPLING)
     if not csv.is_file():
         raise FileNotFoundError(f"master skycells list {csv} missing: the downsample cannot resolve canonical cells")
+    missing = preflight_store(priv, csv, band_weights)
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} listed cells have no recipe-matched canonical convolved cell under "
+                                f"{priv} (first: {missing[:5]}); refusing before the remap")
     ffi_in = work / "ffi"
     ffi_in.mkdir(parents=True, exist_ok=True)
     link = ffi_in / Path(ffi_path).name
