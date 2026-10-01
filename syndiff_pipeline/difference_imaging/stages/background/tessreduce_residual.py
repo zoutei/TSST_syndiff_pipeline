@@ -50,6 +50,9 @@ log = logging.getLogger(__name__)
 
 FAINT_CAT = 32
 STRAP_BIT = 4
+# Catalogue star masks whose surroundings still carry the star's own PSF wing (bit 1 BRIGHT_CAT crosses, bit 2
+# SAT_CROSS circles); see ``star_mask_pad_px``.
+STAR_MASK_BITS = 1 | 2
 
 # Notebook defaults for the boundary KNN sigma-clip (s50_robust variant).
 BOUNDARY_CLIP_K = 15
@@ -57,12 +60,18 @@ BOUNDARY_CLIP_SIGMA = 3.0
 BOUNDARY_CLIP_RIM_WIDTH = 1
 
 
-def _fit_mask(mask: np.ndarray) -> np.ndarray:
+def _fit_mask(mask: np.ndarray, star_mask_pad_px: int = 0) -> np.ndarray:
     m = np.asarray(mask)
     if m.ndim == 3:
         m = m[0]
     m = m.astype(np.int64, copy=False)
-    return (m == 0) | (m == FAINT_CAT)
+    fit = (m == 0) | (m == FAINT_CAT)
+    if star_mask_pad_px > 0:
+        r = int(star_mask_pad_px)
+        yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+        disk = (xx * xx + yy * yy) <= r * r
+        fit &= ~binary_dilation((m & STAR_MASK_BITS) != 0, structure=disk)
+    return fit
 
 
 def sanitize_boundary_outliers(
@@ -527,6 +536,7 @@ def estimate_tessreduce_residual_background(
     boundary_sigma: float = BOUNDARY_CLIP_SIGMA,
     boundary_rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
     fill_method: str = "harmonic",
+    star_mask_pad_px: int = 0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Notebook ``run_tessreduce_variant`` (``biharmonic_robust``) arithmetic
     for one input frame.
@@ -537,11 +547,17 @@ def estimate_tessreduce_residual_background(
     boundary before gap-filling (see ``sanitize_boundary_outliers``).
     ``fill_method`` (``"harmonic"`` default, or ``"biharmonic"`` for the
     legacy behaviour) is forwarded to ``smooth_bkg_decomposed``.
+
+    ``star_mask_pad_px`` (default 0 = unchanged) grows the catalogue star masks (bits 1|2) by a disk of that radius
+    before they are excluded from the fit. The mask circles end inside the star's PSF wing (bit-2 radii 9/8/7/6 px
+    for T 8-10/10-11/11-12/12-13), so without padding the fill is solved from rim pixels that still carry the wing,
+    which lifts the background under every masked star (localbg_20260930). The padding only shrinks the set of fit
+    pixels; every later step (anomaly repair, residual surface) takes its exclusion from the same fit mask.
     """
     flux = np.asarray(residual, dtype=np.float64)
     if flux.ndim != 2:
         raise ValueError(f"residual background expects 2-D image, got {flux.shape}")
-    fit = _fit_mask(mask)
+    fit = _fit_mask(mask, star_mask_pad_px)
     if fit.shape != flux.shape:
         raise ValueError(f"mask shape {fit.shape} != residual shape {flux.shape}")
     bkgmask = np.where(fit, 1.0, np.nan)

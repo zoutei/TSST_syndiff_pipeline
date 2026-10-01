@@ -394,6 +394,7 @@ def run_kernel_fit(
             boundary_k=params.tessreduce_boundary_k,
             boundary_sigma=params.tessreduce_boundary_sigma,
             boundary_rim_width=params.tessreduce_boundary_rim_width,
+            star_mask_pad_px=int(params.tessreduce_star_mask_pad_px),
         )
 
     def _background_subtracted_convolved(hp_result: dict) -> np.ndarray:
@@ -509,6 +510,7 @@ def run_kernel_fit(
         "tessreduce_boundary_k": int(params.tessreduce_boundary_k),
         "tessreduce_boundary_sigma": float(params.tessreduce_boundary_sigma),
         "tessreduce_boundary_rim_width": int(params.tessreduce_boundary_rim_width),
+        "tessreduce_star_mask_pad_px": int(params.tessreduce_star_mask_pad_px),
         "reference_kernel_sum": float(reference_kernel_sum),
     }
     with open(meta_path, "w", encoding="utf-8") as fh:
