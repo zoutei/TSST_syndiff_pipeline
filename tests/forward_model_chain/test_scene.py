@@ -173,3 +173,42 @@ def test_run_scene_requires_source(tmp_path):
     cfg = C.config_from_dict(raw_config(tmp_path))
     with pytest.raises(C.ConfigError, match="source_scene"):
         S.run_scene(cfg, "boot")
+
+
+def _toy_scene(n=3, S=5):
+    import numpy as np
+    z = {"stamp": np.int32(S), "data": np.ones((n, S * S), np.float32), "noise": np.ones((n, S * S), np.float32),
+         "valid": np.ones((n, S * S), bool), "role": np.zeros(n, np.int8), "source_id": np.arange(n, dtype=np.int64)}
+    z["uid"] = np.arange(n * S * S, dtype=np.int32).reshape(n, S * S)
+    z["uid"][1, 0] = z["uid"][0, 0]           # stamps 0 and 1 share union pixel 0
+    meta = {"core_radius": 1.0, "min_core_valid": 5}
+    return z, meta
+
+
+def test_negative_outlier_mask_masks_shared_pixels_and_demotes_on_core():
+    import numpy as np
+    from syndiff_pipeline.forward_model.chain import scene as SC
+    z, meta = _toy_scene()
+    z["data"][0, 0] = -1000.0                  # corner pixel of stamp 0 (shared with stamp 1): mask, no demotion
+    z["data"][2, 12] = -1000.0                 # centre of stamp 2: masked -> centre invalid -> role 2
+    s = SC.mask_negative_outliers(z, meta, nsigma=300)
+    assert not z["valid"][0, 0] and not z["valid"][1, 0] and not z["valid"][2, 12]
+    assert z["valid"].sum() == 3 * 25 - 3 and list(z["role"]) == [0, 0, 2]
+    assert s["n_union_px_masked"] == 2 and s["n_demoted"] == 1 and meta["n_roles"]["nuisance"] == 1
+    z2, meta2 = _toy_scene()
+    z2["data"][0, 3] = -200.0                  # above the threshold: untouched
+    assert SC.mask_negative_outliers(z2, meta2)["n_stamp_px_masked"] == 0 and z2["valid"].all()
+
+
+def test_guard_refuses_broken_swapped_data():
+    import numpy as np
+    import pytest
+    from syndiff_pipeline.forward_model.chain import scene as SC
+    z, _ = _toy_scene()
+    SC.guard_swapped_data(z, "x")
+    z["data"][1, 4] = 1e10
+    with pytest.raises(ValueError, match="refusing"):
+        SC.guard_swapped_data(z, "x")
+    z["data"][1, 4] = np.nan
+    with pytest.raises(ValueError):
+        SC.guard_swapped_data(z, "x")
