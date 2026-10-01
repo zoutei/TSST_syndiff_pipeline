@@ -167,12 +167,14 @@ def test_private_data_root_links_mapping(tmp_path):
     from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
     src = tmp_path / "data"
     (src / "ps1_skycells_zarr" / "ps1_convolved.zarr").mkdir(parents=True)
+    (src / "catalogs" / "gaia_projections").mkdir(parents=True)
     m = tmp_path / "map" / "oversampling_4"
     m.mkdir(parents=True)
     want = scc_mapping_master_skycells_csv(tmp_path / "priv", 20, 3, 3, oversampling_factor=4)
     (m / want.name).write_text("NAME\n")
     priv = bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=m)
     assert scc_mapping_master_skycells_csv(priv, 20, 3, 3, oversampling_factor=4).is_file()
+    assert (priv / "catalogs" / "gaia_projections").is_dir()
     bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=m)   # idempotent
     other = tmp_path / "map2" / "oversampling_4"
     other.mkdir(parents=True)
