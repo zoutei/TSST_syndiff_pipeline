@@ -350,3 +350,38 @@ class TestFootprintRadiusAndSelection:
     def test_empty_catalog(self):
         out = select_catalog_for_cell(pd.DataFrame(), _cell_wcs(0), (CELL, CELL))
         assert len(out) == 0
+
+
+class TestCentreWithoutFootprint:
+    """Real-data cases from dev_runs/seamfix_validate_20261001 (2486.097, 2486.096)."""
+
+    def test_nan_saturated_core_star_removed(self):
+        # T~7 star whose saturated core PS1 masks as NaN out to 16 px: its centre
+        # has no footprint, the halo ring around the hole does.
+        size, c = 300, 150
+        data = (_gauss((size, size), c, c, 3000.0, 12.0) + 0.0).astype(np.float32)
+        yy, xx = np.mgrid[0:size, 0:size]
+        data[np.hypot(xx - c, yy - c) < 16] = np.nan
+        unc = np.full_like(data, 0.1)
+        cat = pd.DataFrame([_row(float(c), float(c), 7.1, in_cell=True)])
+        out, recs = remove_background(data.copy(), unc, remove_saturated_stars=True,
+                                      gaia_catalog_pixels=cat, convention=REMOVAL_CONVENTION)
+        ring = (np.hypot(xx - c, yy - c) >= 16) & (np.hypot(xx - c, yy - c) < 40)
+        assert np.nansum(np.abs(out[ring])) == 0.0
+        assert any(r["removal_reason"] == "catalog_bright_star" for r in recs)
+
+    def test_border_star_with_saturated_island_removes_halo(self):
+        # Star centred on the NaN border whose own pixel is a saturated-flag
+        # island: its halo component (separate from the island) must go too.
+        size = 300
+        data = _gauss((size, size), size - 1.5, 150, 800.0, 8.0).astype(np.float32)
+        data[:, -3:] = np.nan
+        unc = np.full_like(data, 0.1)
+        mask = np.zeros(data.shape, np.uint16)
+        mask[148:153, -3:] = 0x0020 | 0x1000
+        cat = pd.DataFrame([_row(size - 1.5, 150.0, 11.4, in_cell=True)])
+        out, _ = remove_background(data.copy(), unc, mask=mask, remove_saturated_stars=True,
+                                   gaia_catalog_pixels=cat, convention=REMOVAL_CONVENTION)
+        halo = np.zeros(data.shape, bool)
+        halo[130:171, size - 25:size - 3] = True
+        assert np.nansum(np.abs(out[halo])) == 0.0

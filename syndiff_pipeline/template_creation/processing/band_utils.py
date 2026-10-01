@@ -794,6 +794,54 @@ def _offcell_lookup(x: float, y: float, valid: np.ndarray):
     return None
 
 
+def _nearest_valid(x: float, y: float, valid: np.ndarray, rmax: float):
+    """Nearest ``valid`` pixel to ``(x, y)`` within ``rmax`` px, or ``None``.
+
+    For in-cell stars whose centre has no footprint: a saturated core PS1 masks
+    as NaN (a T = 7 star's core in 2486.097 is NaN out to ~16 px), or a centre on
+    the masked border."""
+    h, w = valid.shape
+    r = int(np.ceil(rmax))
+    xi, yi = int(np.clip(round(x), 0, w - 1)), int(np.clip(round(y), 0, h - 1))
+    y0, y1, x0, x1 = max(0, yi - r), min(h, yi + r + 1), max(0, xi - r), min(w, xi + r + 1)
+    win = valid[y0:y1, x0:x1]
+    if not win.any():
+        return None
+    from scipy import ndimage
+
+    dist, (iy, ix) = ndimage.distance_transform_edt(~win, return_indices=True)
+    cy, cx = yi - y0, xi - x0
+    if dist[cy, cx] > rmax:
+        return None
+    return int(ix[cy, cx]) + x0, int(iy[cy, cx]) + y0
+
+
+def _light_falls_inward(img: np.ndarray, comp: np.ndarray, look: tuple[int, int], step: tuple[int, int]) -> bool:
+    """True when the component's light decreases going into the cell from the
+    lookup pixel along the inward normal ``step``: the signature of a halo whose
+    star is outside. An unrelated source near the edge brightens inward.
+
+    Mean over a 9-px-wide strip perpendicular to the normal, first 5 px vs
+    px 11-15 inward; only finite component pixels count.
+    """
+    h, w = img.shape
+    lx, ly = look
+    sx, sy = step
+    px, py = -sy, sx  # perpendicular direction
+    vals = []
+    for d in range(16):
+        acc = []
+        for t in range(-4, 5):
+            xx, yy = lx + sx * d + px * t, ly + sy * d + py * t
+            if 0 <= xx < w and 0 <= yy < h and comp[yy, xx] and np.isfinite(img[yy, xx]):
+                acc.append(float(img[yy, xx]))
+        vals.append(np.mean(acc) if acc else np.nan)
+    near, far = np.nanmean(vals[:5]), np.nanmean(vals[11:])
+    if not np.isfinite(near):
+        return False
+    return (not np.isfinite(far)) or near > far
+
+
 def _row_record(cat: pd.DataFrame, i: int, label: int, reason: str) -> dict:
     """Removed-star record for catalogue row ``i`` (positional)."""
     row = next(cat.iloc[[i]].itertuples(index=False))
@@ -868,18 +916,27 @@ def _remove_background_footprint_v1(
 
             # Decide off-cell acceptance first, on the pre-removal image, so
             # zeroing for one star cannot change another's peak test.
-            accepted: dict[int, int] = {}
+            accepted: dict[int, set[int]] = {}
             peak_cache: dict[int, tuple[int, int]] = {}
             valid_lookup = finite_in & (labels > 0)
             for i in candidates:
                 if in_cell[i]:
-                    lab = _label_at(i)
-                    if lab == 0:
-                        # Centre on the masked border (or SEP's dead zone next
-                        # to it): use the nearest valid footprint pixel inward.
-                        look = _offcell_lookup(cpx[i], cpy[i], valid_lookup)
-                        lab = int(labels[look[1], look[0]]) if look is not None else 0
-                    accepted[int(i)] = lab
+                    xi = int(np.clip(round(cpx[i]), 0, w - 1))
+                    yi = int(np.clip(round(cpy[i]), 0, h - 1))
+                    own = int(labels[yi, xi])
+                    labs = {own} if own > 0 else set()
+                    if own == 0 or not finite_in[yi, xi]:
+                        # Centre without a usable footprint: NaN-masked
+                        # saturated core, the masked border, or SEP's dead zone
+                        # next to it (a border pixel's label may be only its
+                        # saturated-pixel island, not the halo). Also take the
+                        # nearest finite footprint pixel.
+                        near_px = _nearest_valid(
+                            cpx[i], cpy[i], valid_lookup, min(float(star_footprint_radius(ctm[i])), 100.0)
+                        )
+                        if near_px is not None:
+                            labs.add(int(labels[near_px[1], near_px[0]]))
+                    accepted[int(i)] = labs
                     continue
                 x, y, t = cpx[i], cpy[i], ctm[i]
                 look = _offcell_lookup(x, y, valid_lookup)
@@ -891,8 +948,13 @@ def _remove_background_footprint_v1(
                     continue
                 if np.hypot(lx - x, ly - y) > float(star_footprint_radius(t)):
                     continue  # guard (a): lookup too far from the star
-                # guard (b): halo light rises toward the facing edge, so the
-                # component's brightest finite pixel lies near that edge.
+                # guard (b): the light at the lookup is the star's halo entering
+                # through the facing edge -- either the component's brightest
+                # finite pixel lies within _EDGE_BAND_PX of the lookup along the
+                # inward normal (measured from the first valid pixel, since
+                # PS1's NaN border is several px wide), or the component's light
+                # falls going inward from the lookup. An unrelated source near
+                # the edge peaks inside and brightens inward.
                 if lab not in peak_cache:
                     sl = slices[lab - 1]
                     sub = np.where(
@@ -902,37 +964,32 @@ def _remove_background_footprint_v1(
                     k = np.unravel_index(int(np.argmax(sub)), sub.shape)
                     peak_cache[lab] = (k[1] + sl[1].start, k[0] + sl[0].start)
                 qx, qy = peak_cache[lab]
-                near = False
-                for side in _facing_sides(x, y, h, w):
-                    if ((side == "left" and qx < _EDGE_BAND_PX)
-                            or (side == "right" and qx >= w - _EDGE_BAND_PX)
-                            or (side == "bottom" and qy < _EDGE_BAND_PX)
-                            or (side == "top" and qy >= h - _EDGE_BAND_PX)):
-                        near = True
-                        break
-                if near:
-                    accepted[int(i)] = lab
+                step = (1 if x < 0 else (-1 if x >= w else 0), 1 if y < 0 else (-1 if y >= h else 0))
+                depth = max(abs(qx - lx) if step[0] else 0, abs(qy - ly) if step[1] else 0)
+                if depth <= _EDGE_BAND_PX or _light_falls_inward(data, labels == lab, (lx, ly), step):
+                    accepted[int(i)] = {lab}
 
             for i in candidates:
-                lab = accepted.get(int(i), 0)
+                labs = sorted(v for v in accepted.get(int(i), set()) if v > 0)
                 x, y = cpx[i], cpy[i]
-                if lab <= 0:
+                if not labs:
                     continue
 
-                # Zero component ∩ disc(480 px) around the star centre.
-                sl = slices[lab - 1]
-                y0 = max(sl[0].start, int(np.floor(y - _CELL_OVERLAP_PX)))
-                y1 = min(sl[0].stop, int(np.ceil(y + _CELL_OVERLAP_PX)) + 1)
-                x0 = max(sl[1].start, int(np.floor(x - _CELL_OVERLAP_PX)))
-                x1 = min(sl[1].stop, int(np.ceil(x + _CELL_OVERLAP_PX)) + 1)
-                if y1 > y0 and x1 > x0:
-                    yy, xx = np.ogrid[y0:y1, x0:x1]
-                    disc = (yy - y) ** 2 + (xx - x) ** 2 <= float(_CELL_OVERLAP_PX) ** 2
-                    sub = data[y0:y1, x0:x1]
-                    sub[(labels[y0:y1, x0:x1] == lab) & disc] = 0
-                removed_labels.add(lab)
+                # Zero each component ∩ disc(480 px) around the star centre.
+                for lab in labs:
+                    sl = slices[lab - 1]
+                    y0 = max(sl[0].start, int(np.floor(y - _CELL_OVERLAP_PX)))
+                    y1 = min(sl[0].stop, int(np.ceil(y + _CELL_OVERLAP_PX)) + 1)
+                    x0 = max(sl[1].start, int(np.floor(x - _CELL_OVERLAP_PX)))
+                    x1 = min(sl[1].stop, int(np.ceil(x + _CELL_OVERLAP_PX)) + 1)
+                    if y1 > y0 and x1 > x0:
+                        yy, xx = np.ogrid[y0:y1, x0:x1]
+                        disc = (yy - y) ** 2 + (xx - x) ** 2 <= float(_CELL_OVERLAP_PX) ** 2
+                        sub = data[y0:y1, x0:x1]
+                        sub[(labels[y0:y1, x0:x1] == lab) & disc] = 0
+                    removed_labels.add(lab)
                 bright_recorded.add(int(i))
-                removed.append(_row_record(cat, int(i), lab, "catalog_bright_star"))
+                removed.append(_row_record(cat, int(i), labs[0], "catalog_bright_star"))
 
             if removed_labels:
                 logger.info(

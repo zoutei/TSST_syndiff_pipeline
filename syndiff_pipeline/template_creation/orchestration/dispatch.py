@@ -450,6 +450,7 @@ def _execute_template_stage(
             remove_saturated_stars=pp.remove_saturated_stars,
             catalog_path=pp.catalog_path,
             bright_star_mag_threshold=pp.bright_star_mag_threshold,
+            band_weights=pp.band_weights,
             use_shared_convolved_store=use_shared_convolved_store,
             write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
             oversampling_factor=mp.oversampling_factor,
