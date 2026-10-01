@@ -186,6 +186,23 @@ class ChainConfig:
         """Pinned sha, else git HEAD of ``code.forward_model_root`` (``"unknown"`` if not a git checkout)."""
         return self.code.sha or _git_head(self.code.forward_model_root)
 
+    def check_code_sha(self) -> None:
+        """With ``code.sha`` pinned, refuse to run unless ``forward_model_root`` is at that commit with a clean
+        package tree (otherwise ``code_sha()`` would record a sha the running code does not have)."""
+        if not self.code.sha:
+            return
+        root = self.code.forward_model_root
+        head = _git_head(root)
+        if head != self.code.sha:
+            raise ConfigError(f"code.sha {self.code.sha} pinned but {root} is at {head}")
+        try:
+            dirty = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--", "syndiff_pipeline"],
+                                            text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception as e:  # noqa: BLE001
+            raise ConfigError(f"cannot check {root} for local changes: {e}")
+        if dirty:
+            raise ConfigError(f"code.sha pinned but {root}/syndiff_pipeline has local changes:\n{dirty}")
+
 
 # ---------------------------------------------------------------------- loading
 def _jsonable(o: Any) -> Any:

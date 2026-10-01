@@ -126,3 +126,23 @@ def test_large_file_gets_no_sha(tmp_path, monkeypatch):
     f.write_bytes(b"0123456789")
     rec = C._describe(f)
     assert "sha256" not in rec and rec["size"] == 10 and "mtime" in rec
+
+
+def test_check_code_sha(tmp_path):
+    import subprocess
+    repo = tmp_path / "repo"
+    (repo / "syndiff_pipeline").mkdir(parents=True)
+    (repo / "syndiff_pipeline" / "a.py").write_text("x = 1\n")
+    g = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(g + ["add", "."], check=True)
+    subprocess.run(g + ["commit", "-qm", "c"], check=True)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    mk = lambda sha: C.config_from_dict(raw_config(tmp_path, code={"sha": sha, "forward_model_root": str(repo)}))
+    mk(None).check_code_sha()                       # unpinned: no check
+    mk(head).check_code_sha()
+    with pytest.raises(C.ConfigError, match="is at"):
+        mk("0" * 40).check_code_sha()
+    (repo / "syndiff_pipeline" / "a.py").write_text("x = 2\n")
+    with pytest.raises(C.ConfigError, match="local changes"):
+        mk(head).check_code_sha()

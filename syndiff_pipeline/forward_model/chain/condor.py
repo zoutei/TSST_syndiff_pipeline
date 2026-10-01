@@ -16,6 +16,9 @@ from .config import ChainConfig
 WRAPPER_REL = "syndiff_pipeline/common/orchestration/condor_wrapper.sh"
 
 # stage -> key into condor.request_cpus / request_memory_mb
+# execute hosts that match but cannot reconnect (jobs hang there; 2026-10-01)
+AVOID_HOSTS = ("plscience11",)
+
 RESOURCE_KEY = {"fit": "fit", "refit": "fit", "mapping": "mapping", "contrib": "f03"}
 
 
@@ -67,6 +70,7 @@ getenv = false
 should_transfer_files = NO
 request_cpus = {cpus}
 request_memory = {mem}
+requirements = {" && ".join(f'(Machine =!= "{h}.stsci.edu")' for h in AVOID_HOSTS) or "True"}
 batch_name = {cfg.field}_{tag}
 output = {logs_dir}/{tag}.out
 error = {logs_dir}/{tag}.err

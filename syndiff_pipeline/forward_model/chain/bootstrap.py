@@ -426,6 +426,7 @@ def main(argv=None) -> int:
     from syndiff_pipeline.forward_model.chain.config import load_config
 
     cfg = load_config(a.config)
+    cfg.check_code_sha()
     extra = (["--lane-dir", a.lane_dir] if a.lane_dir else []) + (["--local-bkg"] if a.local_bkg else [])
     if a.step == "submit":
         print(submit_template(cfg, a.submit_step, extra))
