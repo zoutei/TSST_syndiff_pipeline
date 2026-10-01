@@ -174,10 +174,17 @@ def plan_ps1_process_launch(
             projection, _cell = parsed
             by_projection.setdefault(projection, []).append(cell_name)
 
+        # Schema v2: whether a cell is canonical depends on its neighbour set
+        # in this SCC's mapping list, so classify with that list's metadata.
+        from syndiff_pipeline.template_creation.processing.canonical_cell import metadata_for_cell
+        from syndiff_pipeline.template_creation.processing.csv_utils import load_csv_data
+
+        mapping_df = load_csv_data(str(target_mapping_csv))
         missing_cells: set[str] = set(unparsed)
         for projection, cell_names in by_projection.items():
             missing_cells |= classify_projection_missing_cells(
-                data_root, projection, cell_names, combined_recipe, convolved_recipe_dict
+                data_root, projection, cell_names, combined_recipe, convolved_recipe_dict,
+                metadata=metadata_for_cell(mapping_df, cell_names[0]),
             )
     except Exception as exc:
         return Ps1ProcessLaunchPlan(

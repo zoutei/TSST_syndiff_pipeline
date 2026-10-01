@@ -315,6 +315,7 @@ def _discover_shared_convolved_fp(
     *,
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
+    mapping_df: Any = None,
 ) -> str | None:
     """Return a published fingerprint dirname under the shared store, or None.
 
@@ -331,28 +332,43 @@ def _discover_shared_convolved_fp(
     pointer and directory mtime are not provenance, and must never select a
     different star-removal/saturation recipe.  The compatibility fallback is
     retained only for callers that genuinely provide no recipe context.
+
+    Schema v2: the canonical cell's fingerprint also includes its neighbour
+    set, which depends on *this* consumer's mapping list, so ``mapping_df``
+    (the SCC's master skycells CSV, any index) is required with a recipe. A
+    cell another run published with a different neighbour set is a miss here,
+    never a silent substitute.
     """
     from syndiff_pipeline.common.scc_paths import ps1_convolved_zarr_path
-    from syndiff_pipeline.template_creation.processing.combined_store import (
-        resolve_combined_fingerprint_for_recipe,
-    )
     from syndiff_pipeline.template_creation.processing.convolved_store import (
         convolved_recipe as _convolved_recipe_fn,
-        resolve_convolved_fingerprint_for_recipe,
         resolve_current_convolved_ref,
     )
 
     if psf_sigma is not None and combined_recipe is not None:
-        combined_fp = resolve_combined_fingerprint_for_recipe(
-            data_root, projection, cell, combined_recipe
-        )
-        if combined_fp is not None:
-            recipe = _convolved_recipe_fn(psf_sigma=psf_sigma)
-            fp = resolve_convolved_fingerprint_for_recipe(
-                data_root, projection, cell, recipe, combined_fp
+        if mapping_df is None:
+            log.error(
+                "field_downsample: no mapping list for %s/%s; the canonical neighbour set "
+                "(part of the convolved fingerprint) is unknown, refusing to guess",
+                projection,
+                cell,
             )
-            if fp is not None:
-                return fp
+            return None
+        from syndiff_pipeline.template_creation.processing.canonical_cell import (
+            metadata_for_cell,
+            resolve_canonical_convolved_fp,
+        )
+
+        name = f"{projection}.{cell}"
+        fp = resolve_canonical_convolved_fp(
+            data_root,
+            name,
+            metadata_for_cell(mapping_df, name),
+            combined_recipe,
+            _convolved_recipe_fn(psf_sigma=psf_sigma),
+        )
+        if fp is not None:
+            return fp
 
         log.error(
             "field_downsample: exact shared convolved artifact missing for %s/%s; "
@@ -398,8 +414,13 @@ def _try_load_shared_convolved_arrays(
     skycell_df: Any = None,
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
+    mapping_df: Any = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load ``(image, mask)`` from the shared convolved store, or ``None``.
+
+    ``mapping_df`` (or ``skycell_df``) is the consumer's mapping list, needed
+    to resolve the schema-v2 canonical fingerprint (neighbour set). Pass
+    ``mapping_df`` alone to get the *uncorrected* canonical cell.
 
     Uses ``convolved_store.try_load_convolved_cell`` after discovering a
     published fingerprint. Same-projection canonical cells load successfully
@@ -430,6 +451,7 @@ def _try_load_shared_convolved_arrays(
     projection, cell = parsed
     fp = _discover_shared_convolved_fp(
         data_root, projection, cell, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
+        mapping_df=mapping_df if mapping_df is not None else skycell_df,
     )
     if fp is None:
         return None
@@ -482,6 +504,7 @@ def _convolved_skycell_available(payload: dict[str, Any], skycell: str) -> bool:
                 cell,
                 psf_sigma=payload.get("psf_sigma"),
                 combined_recipe=payload.get("combined_recipe"),
+                mapping_df=payload.get("skycell_df"),
             ) is not None:
                 return True
         # A shared-store L5 run is provenance-qualified.  Do not accept an

@@ -461,6 +461,7 @@ def load_padding_aware_convolved_cell(
 
     canonical = _try_load_shared_convolved_arrays(
         data_root, skycell, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
+        mapping_df=skycell_df,
     )
     if canonical is None:
         return None

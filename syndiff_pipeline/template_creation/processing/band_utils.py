@@ -15,6 +15,19 @@ from astropy.io import fits
 
 logger = logging.getLogger(__name__)
 
+REMOVAL_CONVENTION_LEGACY = "segment_v0"
+REMOVAL_CONVENTION = "footprint_v1"
+
+# PS1 skycells overlap their neighbours by this many pixels, so no star
+# footprint that matters can extend further than this.
+_CELL_OVERLAP_PX = 480
+# PS1 NaN-masks the outermost row/column, which belongs to no segment.
+_EDGE_LOOKUP_INSET = 10  # = EDGE_EXCLUSION: max inward steps past the masked edge
+# An off-cell star's component must peak within this many px of the facing edge.
+_EDGE_BAND_PX = 13
+# Extra reach (px) beyond R(T) when selecting off-cell catalogue stars.
+_SELECT_MARGIN_PX = 10
+
 
 def compute_tess_mag(
     g: np.ndarray,
@@ -248,7 +261,7 @@ def combine_masks(masks_data: dict[str, np.ndarray]) -> np.ndarray:
     return combined
 
 
-def process_skycell_bands(bands_data: dict[str, np.ndarray], masks_data: dict[str, np.ndarray] = None, weights_data: dict[str, np.ndarray] = None, headers_data: dict[str, str] = None, headers_weight_data: dict[str, str] = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def process_skycell_bands(bands_data: dict[str, np.ndarray], masks_data: dict[str, np.ndarray] = None, weights_data: dict[str, np.ndarray] = None, headers_data: dict[str, str] = None, headers_weight_data: dict[str, str] = None, band_weights: dict[str, float] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Process single skycell: combine bands and masks with variance propagation.
 
     Args:
@@ -256,12 +269,18 @@ def process_skycell_bands(bands_data: dict[str, np.ndarray], masks_data: dict[st
         masks_data: Dictionary of mask arrays (optional)
         weights_data: Dictionary of variance arrays (optional)
         headers_data: Dictionary of FITS header strings (optional)
+        band_weights: Band combination weights ``{"r", "i", "z", "y"}`` from the
+            combined recipe. ``None`` uses the production defaults. Callers that
+            publish to the combined store must pass the recipe's weights: the
+            recipe (and so the fingerprint) records them, and before this
+            argument existed they were never applied.
 
     Returns:
         Tuple of (combined_image, combined_mask_uint16, combined_uncert)
     """
+    weights = None if band_weights is None else [float(band_weights[b]) for b in ("r", "i", "z", "y")]
     # Combine bands with proper flux conversion using headers and variance maps
-    combined_image, combined_uncert = combine_rizy_bands(bands_data, headers_data=headers_data, bands_weights=weights_data, headers_weight_data=headers_weight_data)
+    combined_image, combined_uncert = combine_rizy_bands(bands_data, weights=weights, headers_data=headers_data, bands_weights=weights_data, headers_weight_data=headers_weight_data)
 
     # Combine masks if provided
     combined_mask = None
@@ -376,7 +395,7 @@ def catalog_segment_assignments(
     return cat_df
 
 
-def remove_background(
+def _remove_background_segment_v0(
     data: np.ndarray,
     uncert: np.ndarray = None,
     sigma: float = 2.5,
@@ -386,7 +405,9 @@ def remove_background(
     gaia_catalog_pixels=None,
     bright_star_mag_threshold: float = 13.0,
 ) -> tuple[np.ndarray, list[dict]]:
-    """Remove background from image using SEP, with optional catalog-based segment removal.
+    """Legacy (``segment_v0``) background/star removal, kept bit-identical.
+
+    Removes only the single SEP segment under each in-cell catalogue star.
 
     Args:
         data: Input image array (modified in-place).
@@ -653,3 +674,366 @@ def _make_star_record(row, seg_id: int, reason: str) -> dict:
         "segment_id": seg_id,
         "removal_reason": reason,
     }
+
+
+# ----------------------------------------------------------------------------
+# footprint_v1 removal convention
+# ----------------------------------------------------------------------------
+
+
+def star_footprint_radius(tess_mag):
+    """Radius (PS1 px) within which a star's halo is removed.
+
+    ``R(T) = min(480, 160 * 10**(-0.2 * min(T - 10, 0)))``: a constant 160 px
+    for T >= 10, growing for brighter stars, capped at the 480 px cell overlap.
+    Measured p99 footprint radius of T 8-13 stars is <= 138 px.
+    """
+    t = np.asarray(tess_mag, dtype=np.float64)
+    r = np.minimum(
+        float(_CELL_OVERLAP_PX),
+        160.0 * 10.0 ** (-0.2 * np.minimum(t - 10.0, 0.0)),
+    )
+    if r.ndim == 0:
+        return float(r)
+    return r
+
+
+def select_catalog_for_cell(
+    gaia_catalog: pd.DataFrame,
+    wcs,
+    cell_shape: tuple,
+    *,
+    bright_star_mag_threshold: float = 13.0,
+) -> pd.DataFrame:
+    """Project a catalogue onto a cell and keep in-cell plus nearby bright stars.
+
+    Keeps every star inside the cell (any magnitude) and T < threshold stars
+    centred outside the cell but within ``R(T) + 10`` px of it, since their
+    halos reach into the cell.  Adds ``pixel_x``, ``pixel_y``, ``tess_mag``
+    and ``in_cell``.
+    """
+    if gaia_catalog is None or len(gaia_catalog) == 0:
+        return pd.DataFrame()
+    from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
+
+    h, w = cell_shape
+    ra = gaia_catalog["ra"].to_numpy(dtype=np.float64)
+    dec = gaia_catalog["dec"].to_numpy(dtype=np.float64)
+    px, py = world_ra_dec_to_pixel(wcs, ra, dec)
+    px = np.asarray(px, dtype=np.float64)
+    py = np.asarray(py, dtype=np.float64)
+
+    n = len(gaia_catalog)
+    nan = np.full(n, np.nan)
+    g = gaia_catalog["phot_g_mean_mag"].to_numpy(dtype=np.float64)
+    bp = (
+        gaia_catalog["phot_bp_mean_mag"].to_numpy(dtype=np.float64)
+        if "phot_bp_mean_mag" in gaia_catalog.columns else nan
+    )
+    rp = (
+        gaia_catalog["phot_rp_mean_mag"].to_numpy(dtype=np.float64)
+        if "phot_rp_mean_mag" in gaia_catalog.columns else nan
+    )
+    tmag = compute_tess_mag(g, bp, rp)
+
+    finite = np.isfinite(px) & np.isfinite(py)
+    in_cell = finite & (px >= 0) & (px < w) & (py >= 0) & (py < h)
+    dx = np.maximum(np.maximum(-px, px - (w - 1)), 0.0)
+    dy = np.maximum(np.maximum(-py, py - (h - 1)), 0.0)
+    dist = np.hypot(dx, dy)
+    with np.errstate(invalid="ignore"):
+        bright = tmag < bright_star_mag_threshold
+        near = bright & (dist <= star_footprint_radius(tmag) + _SELECT_MARGIN_PX)
+    keep = in_cell | (finite & near)
+
+    result = gaia_catalog[keep].copy().reset_index(drop=True)
+    result["pixel_x"] = px[keep]
+    result["pixel_y"] = py[keep]
+    result["tess_mag"] = tmag[keep]
+    result["in_cell"] = in_cell[keep]
+    return result
+
+
+def _facing_sides(px: float, py: float, h: int, w: int) -> list[str]:
+    """Cell sides a star outside the cell faces (light enters through them)."""
+    sides = []
+    if px < 0:
+        sides.append("left")
+    if px >= w:
+        sides.append("right")
+    if py < 0:
+        sides.append("bottom")
+    if py >= h:
+        sides.append("top")
+    return sides
+
+
+def _offcell_lookup(x: float, y: float, valid: np.ndarray):
+    """Nearest in-cell ``valid`` pixel to an off-cell star, or ``None``.
+
+    ``valid`` = finite pixel that belongs to a footprint component.  Clips the
+    star position onto the cell, then steps inward along the normal(s) of the
+    edge(s) it was clipped to, up to ``_EDGE_LOOKUP_INSET`` steps.  Stepping
+    past non-component pixels matters because PS1 NaN-masks the outer row and
+    SEP leaves a ~2 px dead zone next to NaNs.
+    """
+    h, w = valid.shape
+    # Step inward from any edge within the inset, not only for off-cell stars:
+    # an in-cell star centred on the PS1-masked border has no valid own pixel.
+    sx = 1 if x < _EDGE_LOOKUP_INSET else (-1 if x > w - 1 - _EDGE_LOOKUP_INSET else 0)
+    sy = 1 if y < _EDGE_LOOKUP_INSET else (-1 if y > h - 1 - _EDGE_LOOKUP_INSET else 0)
+    lx = int(np.clip(round(x), 0, w - 1))
+    ly = int(np.clip(round(y), 0, h - 1))
+    for _ in range(_EDGE_LOOKUP_INSET + 1):
+        if not (0 <= lx < w and 0 <= ly < h):
+            return None
+        if valid[ly, lx]:
+            return lx, ly
+        lx += sx
+        ly += sy
+    return None
+
+
+def _row_record(cat: pd.DataFrame, i: int, label: int, reason: str) -> dict:
+    """Removed-star record for catalogue row ``i`` (positional)."""
+    row = next(cat.iloc[[i]].itertuples(index=False))
+    return _make_star_record(row, label, reason)
+
+
+def _remove_background_footprint_v1(
+    data: np.ndarray,
+    uncert,
+    sigma: float,
+    sigma_mask: float,
+    mask,
+    remove_saturated_stars: bool,
+    gaia_catalog_pixels,
+    bright_star_mag_threshold: float,
+) -> tuple[np.ndarray, list[dict]]:
+    """``footprint_v1`` removal: zero whole 8-connected star footprints.
+
+    A footprint is a connected component of (SEP segments | bright-core mask |
+    saturated pixels), so a halo SEP split into several segments is removed
+    as one.  Off-cell bright stars are removed too when their halo enters
+    the cell (see :func:`remove_background`).
+    """
+    from scipy import ndimage
+
+    removed: list[dict] = []
+    try:
+        sep_result = build_sep_background_segmentation(
+            data, uncert, sigma=sigma, sigma_mask=sigma_mask,
+            close_bright_mask=remove_saturated_stars,
+        )
+        segmap = sep_result.segmap
+        bright = sep_result.mask_bright_stars
+
+        finite_in = np.isfinite(data)  # PS1-masked (NaN) pixels, before zeroing
+        data[np.logical_and(segmap == 0, ~bright)] = 0
+        if not remove_saturated_stars:
+            return data, removed
+
+        h, w = data.shape
+        if mask is None:
+            mask_sat = np.zeros(data.shape, dtype=bool)
+        else:
+            mask_wide = np.asarray(mask).astype(np.int64, copy=False)
+            mask_sat = ((mask_wide & 0x0020) != 0) & ((mask_wide & 0x1000) != 0)
+
+        footprint = (segmap > 0) | bright | mask_sat
+        labels, _ = ndimage.label(footprint, structure=np.ones((3, 3), dtype=int))
+        slices = ndimage.find_objects(labels)
+
+        has_catalog = gaia_catalog_pixels is not None and len(gaia_catalog_pixels) > 0
+        cat = None
+        removed_labels: set[int] = set()
+        bright_recorded: set[int] = set()  # positional row indices
+        inside = np.zeros(0, dtype=bool)
+        cpx = cpy = ctm = np.zeros(0)
+
+        def _label_at(i: int) -> int:
+            return int(labels[int(np.clip(round(cpy[i]), 0, h - 1)),
+                              int(np.clip(round(cpx[i]), 0, w - 1))])
+
+        if has_catalog:
+            cat = gaia_catalog_pixels.reset_index(drop=True)
+            cpx = cat["pixel_x"].to_numpy(dtype=np.float64)
+            cpy = cat["pixel_y"].to_numpy(dtype=np.float64)
+            ctm = cat["tess_mag"].to_numpy(dtype=np.float64)
+            finite = np.isfinite(cpx) & np.isfinite(cpy)
+            inside = finite & (cpx >= 0) & (cpx < w) & (cpy >= 0) & (cpy < h)
+            in_cell = cat["in_cell"].to_numpy(dtype=bool) if "in_cell" in cat.columns else inside
+            with np.errstate(invalid="ignore"):
+                candidates = np.flatnonzero(finite & (ctm < bright_star_mag_threshold))
+
+            # Decide off-cell acceptance first, on the pre-removal image, so
+            # zeroing for one star cannot change another's peak test.
+            accepted: dict[int, int] = {}
+            peak_cache: dict[int, tuple[int, int]] = {}
+            valid_lookup = finite_in & (labels > 0)
+            for i in candidates:
+                if in_cell[i]:
+                    lab = _label_at(i)
+                    if lab == 0:
+                        # Centre on the masked border (or SEP's dead zone next
+                        # to it): use the nearest valid footprint pixel inward.
+                        look = _offcell_lookup(cpx[i], cpy[i], valid_lookup)
+                        lab = int(labels[look[1], look[0]]) if look is not None else 0
+                    accepted[int(i)] = lab
+                    continue
+                x, y, t = cpx[i], cpy[i], ctm[i]
+                look = _offcell_lookup(x, y, valid_lookup)
+                if look is None:
+                    continue
+                lx, ly = look
+                lab = int(labels[ly, lx])
+                if lab <= 0:
+                    continue
+                if np.hypot(lx - x, ly - y) > float(star_footprint_radius(t)):
+                    continue  # guard (a): lookup too far from the star
+                # guard (b): halo light rises toward the facing edge, so the
+                # component's brightest finite pixel lies near that edge.
+                if lab not in peak_cache:
+                    sl = slices[lab - 1]
+                    sub = np.where(
+                        (labels[sl] == lab) & finite_in[sl],
+                        np.asarray(data[sl], dtype=np.float64), -np.inf,
+                    )
+                    k = np.unravel_index(int(np.argmax(sub)), sub.shape)
+                    peak_cache[lab] = (k[1] + sl[1].start, k[0] + sl[0].start)
+                qx, qy = peak_cache[lab]
+                near = False
+                for side in _facing_sides(x, y, h, w):
+                    if ((side == "left" and qx < _EDGE_BAND_PX)
+                            or (side == "right" and qx >= w - _EDGE_BAND_PX)
+                            or (side == "bottom" and qy < _EDGE_BAND_PX)
+                            or (side == "top" and qy >= h - _EDGE_BAND_PX)):
+                        near = True
+                        break
+                if near:
+                    accepted[int(i)] = lab
+
+            for i in candidates:
+                lab = accepted.get(int(i), 0)
+                x, y = cpx[i], cpy[i]
+                if lab <= 0:
+                    continue
+
+                # Zero component ∩ disc(480 px) around the star centre.
+                sl = slices[lab - 1]
+                y0 = max(sl[0].start, int(np.floor(y - _CELL_OVERLAP_PX)))
+                y1 = min(sl[0].stop, int(np.ceil(y + _CELL_OVERLAP_PX)) + 1)
+                x0 = max(sl[1].start, int(np.floor(x - _CELL_OVERLAP_PX)))
+                x1 = min(sl[1].stop, int(np.ceil(x + _CELL_OVERLAP_PX)) + 1)
+                if y1 > y0 and x1 > x0:
+                    yy, xx = np.ogrid[y0:y1, x0:x1]
+                    disc = (yy - y) ** 2 + (xx - x) ** 2 <= float(_CELL_OVERLAP_PX) ** 2
+                    sub = data[y0:y1, x0:x1]
+                    sub[(labels[y0:y1, x0:x1] == lab) & disc] = 0
+                removed_labels.add(lab)
+                bright_recorded.add(int(i))
+                removed.append(_row_record(cat, int(i), lab, "catalog_bright_star"))
+
+            if removed_labels:
+                logger.info(
+                    f"[Band] footprint_v1 catalog removal: {len(removed_labels)} "
+                    f"footprints zeroed (T < {bright_star_mag_threshold})"
+                )
+                for i in np.flatnonzero(inside):
+                    if int(i) in bright_recorded:
+                        continue
+                    lab = _label_at(i)
+                    if lab in removed_labels:
+                        removed.append(_row_record(cat, int(i), lab, "catalog_neighbor"))
+            else:
+                logger.info("[Band] footprint_v1: no catalog-based removals")
+
+        # Saturation pass, on whole footprints.
+        if mask is None:
+            logger.warning("[Band] Saturated-star removal requested but no mask was provided.")
+        else:
+            try:
+                sat_labels = [
+                    int(v) for v in np.unique(labels[mask_sat])
+                    if v > 0 and int(v) not in removed_labels
+                ]
+                for lab in sat_labels:
+                    sl = slices[lab - 1]
+                    comp = labels[sl] == lab
+                    stars = [int(i) for i in np.flatnonzero(inside) if _label_at(i) == lab]
+                    if stars:
+                        for i in stars:
+                            removed.append(_row_record(cat, i, lab, "quality_flag_star"))
+                    else:
+                        fv = np.nan_to_num(np.asarray(data[sl], dtype=np.float64))[comp]
+                        ys, xs = np.nonzero(comp)
+                        total = float(fv.sum())
+                        if total > 0:
+                            cx = float((xs * fv).sum() / total) + sl[1].start
+                            cy = float((ys * fv).sum() / total) + sl[0].start
+                        else:
+                            cx = float(xs.mean()) + sl[1].start
+                            cy = float(ys.mean()) + sl[0].start
+                        removed.append({
+                            "source_id": -1,
+                            "ra": float("nan"),
+                            "dec": float("nan"),
+                            "pixel_x": float("nan"),
+                            "pixel_y": float("nan"),
+                            "tess_mag": float("nan"),
+                            "phot_g_mean_mag": float("nan"),
+                            "phot_bp_mean_mag": float("nan"),
+                            "phot_rp_mean_mag": float("nan"),
+                            "seg_centroid_x": cx,
+                            "seg_centroid_y": cy,
+                            "seg_flux": total,
+                            "segment_id": lab,
+                            "removal_reason": "quality_flag_no_star",
+                        })
+                    data[sl][comp] = 0
+                if sat_labels:
+                    logger.info(
+                        f"[Band] Quality-flag removal: {len(sat_labels)} additional "
+                        f"footprints zeroed (sat+starcore bits)"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[Band] Quality-flag removal failed; continuing with catalog-only results: {e}"
+                )
+    except Exception as e:
+        logging.error(f"[Band] SEP extraction failed: {e}")
+        return data, removed
+    return data, removed
+
+
+def remove_background(
+    data: np.ndarray,
+    uncert: np.ndarray = None,
+    sigma: float = 2.5,
+    sigma_mask: float = 50,
+    mask: np.ndarray = None,
+    remove_saturated_stars: bool = True,
+    gaia_catalog_pixels=None,
+    bright_star_mag_threshold: float = 13.0,
+    convention: str = REMOVAL_CONVENTION,
+) -> tuple[np.ndarray, list[dict]]:
+    """Remove background and bright-star light from a skycell image.
+
+    ``convention="segment_v0"`` is the legacy single-segment removal;
+    ``"footprint_v1"`` (default) removes whole connected footprints, including
+    those of bright stars centred just outside the cell.  Use
+    :func:`select_catalog_for_cell` to build ``gaia_catalog_pixels`` for the
+    new convention.  See :func:`_remove_background_segment_v0` for the record
+    schema (``segment_id`` is the component label under ``footprint_v1``).
+    """
+    if convention == REMOVAL_CONVENTION_LEGACY:
+        return _remove_background_segment_v0(
+            data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
+            gaia_catalog_pixels, bright_star_mag_threshold,
+        )
+    if convention == REMOVAL_CONVENTION:
+        return _remove_background_footprint_v1(
+            data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
+            gaia_catalog_pixels, bright_star_mag_threshold,
+        )
+    raise ValueError(f"Unknown removal convention: {convention!r}")

@@ -189,6 +189,11 @@ def create_master_array_wcs(metadata: dict, config, current_row_id: int) -> WCS:
     crval2 = float(first_cell.get("CRVAL2", 0.0))
     crpix1 = float(first_cell.get("CRPIX1", 0.0))
     crpix2 = float(first_cell.get("CRPIX2", 0.0))
+    # Master column 0 sits at the projection anchor (canonical_cell), not at
+    # this row's first cell: shift by the grid columns between them.
+    from syndiff_pipeline.template_creation.processing.canonical_cell import projection_anchor_x
+
+    crpix1 += (int(first_cell["x"]) - projection_anchor_x(metadata)) * (config.cell_width - CELL_OVERLAP)
 
     cd = _get_cd_matrix(first_cell)
 
@@ -293,8 +298,12 @@ def ordered_cross_projection_placements(
     if row_id not in metadata["rows"]:
         return []
     current_projection = projection_identity(metadata["projection"])
+    from syndiff_pipeline.template_creation.processing.canonical_cell import projection_anchor_x
+
     row_cells = sorted(metadata["rows"][row_id], key=lambda item: int(item[1]))
     names = [str(item[0]) for item in row_cells]
+    x_of = {str(name): int(x) for name, x in row_cells}
+    anchor_x = projection_anchor_x(metadata)
     row_position = determine_row_position(row_id, all_row_ids)
     cell_positions = analyze_cell_positions(names)
     row_df = df[
@@ -338,7 +347,11 @@ def ordered_cross_projection_placements(
                     source_skycell=source,
                     source_projection=source_projection,
                     recipient_skycell=recipient,
-                    recipient_index=names.index(recipient),
+                    # Grid slot relative to the projection anchor -- the same
+                    # rule the assembler places cells by (canonical_cell),
+                    # not the position in this row's list (wrong for a row
+                    # with an x gap or a row starting right of the anchor).
+                    recipient_index=x_of[recipient] - anchor_x,
                     location=location,
                     priority=len(placements),
                 ))
@@ -382,9 +395,10 @@ def _load_padding_source_once(
         # This mirrors the existing producer fallback exactly.  Failure is
         # intentionally fatal to the row: silently omitting a required source
         # produces a valid-looking but flux-deficient template.
+        from syndiff_pipeline.template_creation.processing.band_utils import REMOVAL_CONVENTION
         from syndiff_pipeline.template_creation.processing.ps1_process import (
             _load_skycell_raw_bands,
-            project_gaia_to_skycell,
+            select_removal_catalog,
         )
 
         bands, masks, weights, headers, headers_weight = _load_skycell_raw_bands(
@@ -392,14 +406,24 @@ def _load_padding_source_once(
         )
         if not bands:
             raise RuntimeError(f"no source data for required padding cell {placement.source_skycell}")
-        data, mask, uncert = process_skycell_bands(bands, masks, weights, headers, headers_weight)
+        data, mask, uncert = process_skycell_bands(
+            bands, masks, weights, headers, headers_weight,
+            band_weights=ingest_config.get("band_weights"),
+        )
         gaia_catalog_pixels = None
-        if remove_saturated_stars and gaia_catalog is not None:
-            gaia_catalog_pixels = project_gaia_to_skycell(gaia_catalog, source_wcs, data.shape)
+        if remove_saturated_stars:
+            # Same selection, convention and no-catalogue guard as every other
+            # producer of a combined cell (ps1_process.process_single_cell).
+            gaia_catalog_pixels = select_removal_catalog(
+                gaia_catalog, next(iter(headers.values())), data.shape,
+                skycell_id=placement.source_skycell,
+                bright_star_mag_threshold=bright_star_mag_threshold,
+            )
         data, _ = remove_background(
             data, uncert, mask=mask, remove_saturated_stars=remove_saturated_stars,
             gaia_catalog_pixels=gaia_catalog_pixels,
             bright_star_mag_threshold=bright_star_mag_threshold,
+            convention=REMOVAL_CONVENTION,
         )
     return exclude_edge_pixels(data, EDGE_EXCLUSION), source_wcs
 
