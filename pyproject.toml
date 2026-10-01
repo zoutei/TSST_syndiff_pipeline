@@ -39,6 +39,15 @@ docs = [
   "astropy",
 ]
 
+# Forward-modelled ePSF/WCS scene fit (syndiff_pipeline.forward_model). Versions = the syndiff env as of
+# 2026-09-30; tess-point supplies tess_stars2px (optical axis), tesswcs the WCS helpers.
+forward = [
+  "jax>=0.9.2",
+  "optax>=0.2.8",
+  "tess-point>=0.9.3",
+  "tesswcs",
+]
+
 [project.scripts]
 syndiff = "syndiff_pipeline.cli:main"
 
@@ -64,6 +73,8 @@ namespaces = false
 
 [tool.setuptools.package-data]
 "syndiff_pipeline.common.orchestration" = ["condor_wrapper.sh"]
+"syndiff_pipeline.forward_model" = ["recipes/*.yaml"]
+"syndiff_pipeline.forward_model.scripts" = ["*.sh"]
 "syndiff_pipeline.resources" = [
   "skycell_wcs.csv",
   "README.md",
