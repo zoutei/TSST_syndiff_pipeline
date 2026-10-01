@@ -150,3 +150,13 @@ def test_lane_dir_resolution_and_check(tmp_path):
     for f in ("shared_mask.fits.fz", "hotpants_substamp_stars.csv", "ks_b/stem_ks_b.fits.fz"):
         (lane / f).write_bytes(b"")
     assert set(bs.check_lane(lane, "stem")) == {"shared_mask", "substamp_stars", "ks_b"}
+
+
+def test_template_recipe_uses_chain_band_weights():
+    """The D13 weights through bootstrap's recipe path give the dataset store's recipe id (e17a198a), the production
+    defaults do not: a weight mix-up can only miss cells, never load a wrong-weight template."""
+    from syndiff_pipeline.template_creation.processing.combined_store import combined_recipe_id, production_combined_recipe
+    base = {"remove_saturated_stars": True, "enable_saturation_correction": False}
+    d13 = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
+    assert combined_recipe_id(production_combined_recipe({**base, "band_weights": d13})) == "e17a198a4942aa2d"
+    assert combined_recipe_id(production_combined_recipe(base)) != "e17a198a4942aa2d"
