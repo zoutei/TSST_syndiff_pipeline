@@ -195,3 +195,129 @@ def test_band_weights_config_validation_and_recipe():
         Ps1ProcessStageParams(band_weights={"r": 1.0, "i": 1.0, "z": 1.0})
     with pytest.raises(ValueError):
         Ps1ProcessStageParams(band_weights={"r": 1.0, "i": 1.0, "z": 1.0, "y": 0.0})
+
+
+def _fake_projection_catalog(data_root, projection="9999"):
+    """Write only what the fingerprint reads: the projection catalogue's meta file."""
+    import json
+
+    from syndiff_pipeline.template_creation.processing import gaia_projection_catalog as gpc
+
+    path = gpc.projection_catalog_path(data_root, projection)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = path.with_name(path.name + ".meta.json")
+    meta.write_text(json.dumps({"content_sha256": "ab" * 32, "scheme": gpc.GAIA_PROJECTION_SCHEME}))
+
+
+def _mapping_df():
+    import pandas as pd
+
+    rows = [{"NAME": n, "projection": 9999, "y": r, "x": x, "NAXIS1": W, "NAXIS2": H}
+            for r, cells in ROWS.items() for n, x in cells]
+    return pd.DataFrame(rows)
+
+
+def test_end_to_end_store_publish_resolve_and_spot_check(tmp_path):
+    """Combined publish (coordinator helper) -> row-path canonical publish (real
+    function) -> reader resolves the v2 fingerprint from its own mapping list ->
+    spot check recomputes identical pixels. A reader with a different mapping
+    list does not resolve it, and different pixels under the same fingerprint raise."""
+    from syndiff_pipeline.template_creation.orchestration.stage_params import Ps1ProcessStageParams
+    from syndiff_pipeline.template_creation.processing import convolved_store
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        expected_combined_fingerprint,
+        production_combined_recipe,
+    )
+    from syndiff_pipeline.template_creation.processing.field_downsample import _discover_shared_convolved_fp
+
+    data_root = tmp_path / "data"
+    _fake_projection_catalog(data_root)
+    md, imgs = _metadata(), _images()
+    df = _mapping_df()
+    crecipe = production_combined_recipe(Ps1ProcessStageParams())
+    vrecipe = convolved_store.convolved_recipe(psf_sigma=SIGMA, radius=RADIUS)
+    masks = {n: np.zeros((H, W), np.uint16) for n in imgs}
+    for n, im in imgs.items():
+        info = pp.publish_combined_result(str(data_root), crecipe, {
+            "skycell_id": n, "combined_image": im, "combined_mask": masks[n],
+            "headers_data": {}, "removed_stars": []})
+        assert info is not None
+
+    config = pp.create_master_array_config(md)
+    state = pp.initialize_processing_state(config)
+    state.clean_current = np.full_like(state.current_array, np.nan)
+    state.clean_next = np.full_like(state.next_array, np.nan)
+    row_ids = sorted(md["rows"])
+
+    def bundles(r):
+        return [{"skycell_id": n, "x_coord": x, "combined_image": imgs[n], "combined_mask": masks[n]}
+                for n, x in md["rows"][r]]
+
+    for i, r in enumerate(row_ids):
+        nxt = row_ids[i + 1] if i + 1 < len(row_ids) else None
+        if state.current_row_id != r:
+            pos, m = pp.assemble_row_from_bundles(state.current_array, bundles(r), config)
+            state.cell_locations.update(pos)
+            state.current_masks.update(m)
+            state.cell_metadata.update({n: {"headers_data": {}, "removed_stars": []} for n in pos})
+            state.current_placed = set(pos)
+            state.current_row_id = r
+            np.copyto(state.clean_current, state.current_array)
+        if nxt is not None:
+            pos, m = pp.assemble_row_from_bundles(state.next_array, bundles(nxt), config)
+            state.next_cell_locations.update(pos)
+            state.next_masks.update(m)
+            state.next_cell_metadata.update({n: {"headers_data": {}, "removed_stars": []} for n in pos})
+            state.next_placed = set(pos)
+            state.next_row_id = nxt
+            np.copyto(state.clean_next, state.next_array)
+        else:
+            state.next_array.fill(np.nan)
+            state.clean_next.fill(np.nan)
+            state.next_row_id = None
+        pp.apply_cross_row_padding(state, config)
+        pp._publish_canonical_convolved_snapshot(state, "9999", SIGMA, str(data_root), crecipe, vrecipe, metadata=md)
+        state.current_array[:, :PAD_JUNK] = 1e6  # cross-projection patches (step 4)
+        state.next_array[:, :PAD_JUNK] = 1e6
+        if nxt is not None:
+            pp.advance_sliding_window(state)
+
+    fps = {}
+    for n in imgs:
+        projection, cell = n.rsplit(".", 1)
+        fps[n] = cc.resolve_canonical_convolved_fp(data_root, n, md, crecipe, vrecipe)
+        assert fps[n] is not None, n
+        # the downsample reader without the mapping list refuses (neighbour set unknown)
+        assert _discover_shared_convolved_fp(data_root, projection, cell, psf_sigma=SIGMA,
+                                             combined_recipe=crecipe) is None
+
+    checks = cc.spot_check_cells(data_root, sorted(imgs), df, crecipe, vrecipe)
+    assert [c["status"] for c in checks] == ["ok"] * len(imgs), checks
+    assert max(c["max_rel"] for c in checks) <= 1e-6
+
+    # a reader whose mapping list lacks 012 must not resolve 011's stored cell
+    reduced = df[df.NAME != "skycell.9999.012"].reset_index(drop=True)
+    md_reduced = cc.metadata_for_cell(reduced, "skycell.9999.011")
+    assert cc.resolve_canonical_convolved_fp(data_root, "skycell.9999.011", md_reduced, crecipe, vrecipe) is None
+
+    # different pixels under an existing fingerprint raise
+    n = "skycell.9999.011"
+    projection, cell = n.rsplit(".", 1)
+    stored = convolved_store.try_load_convolved_cell(data_root, projection, cell, fps[n])
+    with pytest.raises(convolved_store.ConvolvedFingerprintConflict):
+        convolved_store.publish_convolved_cell(
+            data_root, projection, cell, convolved_image=stored["convolved_image"] * 1.01,
+            convolved_mask=stored["convolved_mask"], headers_data={}, removed_stars=[], recipe=vrecipe,
+            combined_fingerprint=expected_combined_fingerprint(data_root, projection, cell, crecipe),
+            extra_input_fingerprints=cc.neighbour_input_fingerprints(data_root, n, md, crecipe))
+
+
+def test_combined_publish_refuses_without_projection_catalog(tmp_path):
+    from syndiff_pipeline.template_creation.orchestration.stage_params import Ps1ProcessStageParams
+    from syndiff_pipeline.template_creation.processing.combined_store import production_combined_recipe
+
+    crecipe = production_combined_recipe(Ps1ProcessStageParams())
+    info = pp.publish_combined_result(str(tmp_path), crecipe, {
+        "skycell_id": "skycell.9999.011", "combined_image": np.zeros((4, 4), np.float32),
+        "combined_mask": np.zeros((4, 4), np.uint16), "headers_data": {}, "removed_stars": []})
+    assert info is None

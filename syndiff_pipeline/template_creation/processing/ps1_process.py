@@ -949,6 +949,46 @@ def catalog_cone_prefilter(
     return gaia_catalog.loc[keep].reset_index(drop=True)
 
 
+def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[dict]:
+    """Publish one freshly combined, star-removed cell to the shared combined
+    store under exactly the fingerprint readers resolve
+    (``combined_store.combined_input_fingerprints``: raw PS1 token plus, for v2
+    recipes, the projection Gaia catalogue). If that fingerprint is undefined
+    (catalogue missing) nothing is published. Best-effort like every store
+    publish here; also selects it as the cell's current artifact."""
+    from syndiff_pipeline.template_creation.processing import combined_store
+
+    parsed = combined_store._projection_and_cell(result["skycell_id"])
+    if parsed is None:
+        return None
+    projection, cell = parsed
+    inputs = combined_store.combined_input_fingerprints(data_root, projection, cell, recipe)
+    if inputs is None:
+        logger.error(
+            "[ProcessCoordinator] combined fingerprint of %s undefined (projection Gaia "
+            "catalogue missing); not publishing it",
+            result["skycell_id"],
+        )
+        return None
+    info = combined_store.publish_combined_cell(
+        data_root,
+        projection,
+        cell,
+        combined_image=result["combined_image"],
+        combined_mask=result["combined_mask"],
+        headers_data=result.get("headers_data"),
+        removed_stars=result.get("removed_stars"),
+        recipe=recipe,
+        input_fingerprints=inputs,
+        producer="ps1_process",
+    )
+    if info is not None and info.get("fingerprint"):
+        # Defense-in-depth (plan Phase 1): select this run's own recipe as
+        # "current" for this cell. Never overrides recipe-matched resolution.
+        combined_store.update_current_pointer(data_root, projection, cell, info["fingerprint"])
+    return info
+
+
 def process_coordinator(
     combined_raw_queue: _thread_queue.Queue,
     combined_cell_queue: _thread_queue.Queue,
@@ -990,47 +1030,10 @@ def process_coordinator(
     """
     _publish_combined = None
     if combined_store_data_root is not None and combined_store_recipe is not None:
-        from syndiff_pipeline.template_creation.processing import combined_store
-        from syndiff_pipeline.template_creation.processing.combined_store import (
-            _projection_and_cell,
-            publish_combined_cell,
-            raw_skycell_input_fingerprint,
-        )
 
         def _publish_combined(result: dict) -> Optional[dict]:
-            parsed = _projection_and_cell(result["skycell_id"])
-            if parsed is None:
-                return None
-            projection, cell = parsed
-            # Same helper, same (data_root, projection, cell) shape as the
-            # seed-lookup path in seed_band_cache_from_combined_store, so the
-            # two sides stay symmetric (a lookup only ever hits a fingerprint
-            # this call site actually published under).
-            raw_fp = raw_skycell_input_fingerprint(combined_store_data_root, projection, cell)
-            info = publish_combined_cell(
-                combined_store_data_root,
-                projection,
-                cell,
-                combined_image=result["combined_image"],
-                combined_mask=result["combined_mask"],
-                headers_data=result.get("headers_data"),
-                removed_stars=result.get("removed_stars"),
-                recipe=combined_store_recipe,
-                input_fingerprints=[raw_fp],
-                producer="ps1_process",
-            )
-            if info is not None and info.get("fingerprint"):
-                # Defense-in-depth (plan Phase 1): select this run's own
-                # recipe as "current" for this cell. Readers that check the
-                # pointer (e.g. padding_correction, when no recipe context of
-                # their own is available) then never fall back to
-                # newest-mtime among possibly-unrelated published recipes.
-                # This never overrides recipe-matched resolution -- it is
-                # only ever a secondary/fallback selection mechanism.
-                combined_store.update_current_pointer(
-                    combined_store_data_root, projection, cell, info["fingerprint"],
-                )
-            return info
+            return publish_combined_result(combined_store_data_root, combined_store_recipe, result)
+
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
     if band_cache is None:
         band_cache = {}
