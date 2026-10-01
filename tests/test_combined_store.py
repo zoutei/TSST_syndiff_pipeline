@@ -627,3 +627,19 @@ def test_local_fallback_publish_is_atomic_and_leaves_only_tmp_on_interrupted_wri
     assert len(tmp_siblings) == 1
     assert tmp_siblings[0].is_dir()
     assert siblings == tmp_siblings  # nothing else landed under skycell/000/
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "KNOWN ISSUE (found 10-01 by the dataset run, dev_runs/paper_dataset_20261001/equiv_stream_zarr): "
+    "_raw_skycell_version_token is called with projection 'skycell.PPPP' and cell 'CCC', but the raw zarr is "
+    "keyed '{PPPP}/skycell.PPPP.CCC', so the token is always {'status': 'missing'} and raw re-downloads never "
+    "change combined fingerprints. Proposed fix (later; it changes every combined fingerprint, so it must ship "
+    "with a schema bump): resolve the group dir as root / projection_id / f'skycell.{projection_id}.{cell}'."
+))
+def test_raw_version_token_sees_existing_raw_cell(tmp_path):
+    group = tmp_path / "ps1_skycells_zarr" / "ps1_skycells.zarr" / "2434" / "skycell.2434.050"
+    group.mkdir(parents=True)
+    (group / ".zgroup").write_text("{}")
+    from syndiff_pipeline.template_creation.processing import combined_store as cs
+
+    assert cs._raw_skycell_version_token(tmp_path, "skycell.2434", "050")["status"] == "present"
