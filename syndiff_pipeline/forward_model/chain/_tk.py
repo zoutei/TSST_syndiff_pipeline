@@ -241,14 +241,25 @@ def run_match(target, C, noise, mask, ko: int, stars, out_dir: Path | None = Non
 
 
 # ------------------------------------------------------------------ output
-def write_fits(path: Path, primary, pairs):
-    """pairs: [(array, header)]; lossless GZIP_1 + exact round-trip assert (as finish.py)."""
+def write_fz(path, primary, pairs) -> Path:
+    """Write ``[(array, header)]`` as ``.fits.fz`` the PRODUCTION way (common/fits_io: plain FITS -> ``fpack -g -q 0``,
+    i.e. lossless GZIP with ZQUANTIZ='NONE', which DS9/CFITSIO read; astropy CompImageHDU(quantize_level=0) writes
+    ZQUANTIZ='NO_DITHER', which DS9 mis-decodes as ~1e10). Asserts an exact round trip and ZQUANTIZ='NONE' on every
+    float HDU."""
+    from syndiff_pipeline.common.fits_io import write_hdul_fits
+
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    hdus = [fits.PrimaryHDU(header=primary)]
-    for arr, hdr in pairs:
-        hdus.append(fits.CompImageHDU(data=arr, header=hdr, compression_type="GZIP_1", quantize_level=0))
-    fits.HDUList(hdus).writeto(path, overwrite=True, checksum=True)
-    with fits.open(path) as chk:
+    hdus = [fits.PrimaryHDU(header=primary)] + [fits.ImageHDU(data=np.asarray(arr), header=hdr) for arr, hdr in pairs]
+    out = Path(write_hdul_fits(path, fits.HDUList(hdus)))
+    with fits.open(out) as chk, fits.open(out, disable_image_compression=True) as raw:
         for i, (arr, _) in enumerate(pairs, 1):
-            assert np.array_equal(chk[i].data, arr, equal_nan=True), (path, i)
+            assert np.array_equal(chk[i].data, np.asarray(arr), equal_nan=True), (out, i)
+            if np.asarray(arr).dtype.kind == "f":
+                assert raw[i].header.get("ZQUANTIZ") == "NONE", (out, i, raw[i].header.get("ZQUANTIZ"))
+    return out
+
+
+def write_fits(path: Path, primary, pairs):
+    """pairs: [(array, header)]; production lossless fpack (``write_fz``) + exact round-trip assert (as finish.py)."""
+    write_fz(path, primary, pairs)

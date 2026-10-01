@@ -365,17 +365,12 @@ def step_hotpants(*, ffi_path: Path, stem: str, lane_root: Path, ks_b_path: Path
     primary.add_history("Bootstrap: single-FFI F4 header-WCS template, harmonic ks_b; native-grid output.")
     (out_dir / "hp_d").mkdir(parents=True, exist_ok=True)
     out = out_dir / "hp_d" / f"{stem}_hp_d.fits.fz"
-    hdus = [fits.PrimaryHDU(header=primary)]
-    for key, hdr in zip(["diff", "noise", "mask"], headers):
-        hdus.append(fits.CompImageHDU(data=trimmed(key), header=hdr, compression_type="GZIP_1", quantize_level=0))
-    fits.HDUList(hdus).writeto(out, overwrite=True, checksum=True)
+    from ._tk import write_fz  # production fpack writer (ZQUANTIZ NONE; DS9-readable), exact round trip asserted
+
+    write_fz(out, primary, [(trimmed(key), hdr) for key, hdr in zip(["diff", "noise", "mask"], headers)])
     for key, label in [("convolved", "hp_c"), ("bkg", "hp_b")]:
         if res.get(key) is not None:
-            dest = out_dir / label / f"{stem}_{label}.fits.fz"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            fits.HDUList([fits.PrimaryHDU(header=primary), fits.CompImageHDU(
-                data=trimmed(key), header=headers[0], compression_type="GZIP_1", quantize_level=0)]).writeto(
-                dest, overwrite=True, checksum=True)
+            write_fz(out_dir / label / f"{stem}_{label}.fits.fz", primary, [(trimmed(key), headers[0])])
     if res.get("kernel_params_arrays"):
         (out_dir / "hp_d_kernels").mkdir(parents=True, exist_ok=True)
         np.savez_compressed(out_dir / "hp_d_kernels" / f"{stem}_kernel.npz", **res["kernel_params_arrays"])
