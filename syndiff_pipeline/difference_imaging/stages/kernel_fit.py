@@ -188,6 +188,7 @@ def run_kernel_fit(
     data_root: Optional[str] = None,
     ccd: Optional[int] = None,
     template_dir: Optional[str] = None,
+    tessreduce_extra_exclude: Optional[np.ndarray] = None,
 ) -> KernelFitResult:
     """
     Fit PSF kernel on angle-ranked min-background FFI through a 3-round
@@ -395,6 +396,7 @@ def run_kernel_fit(
             boundary_sigma=params.tessreduce_boundary_sigma,
             boundary_rim_width=params.tessreduce_boundary_rim_width,
             star_mask_pad_px=int(params.tessreduce_star_mask_pad_px),
+            extra_exclude=tessreduce_extra_exclude,
         )
 
     def _background_subtracted_convolved(hp_result: dict) -> np.ndarray:
@@ -511,6 +513,7 @@ def run_kernel_fit(
         "tessreduce_boundary_sigma": float(params.tessreduce_boundary_sigma),
         "tessreduce_boundary_rim_width": int(params.tessreduce_boundary_rim_width),
         "tessreduce_star_mask_pad_px": int(params.tessreduce_star_mask_pad_px),
+        "tessreduce_star_wing_radii": params.tessreduce_star_wing_radii,
         "reference_kernel_sum": float(reference_kernel_sum),
     }
     with open(meta_path, "w", encoding="utf-8") as fh:

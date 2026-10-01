@@ -60,7 +60,11 @@ BOUNDARY_CLIP_SIGMA = 3.0
 BOUNDARY_CLIP_RIM_WIDTH = 1
 
 
-def _fit_mask(mask: np.ndarray, star_mask_pad_px: int = 0) -> np.ndarray:
+def _fit_mask(
+    mask: np.ndarray,
+    star_mask_pad_px: int = 0,
+    extra_exclude: np.ndarray | None = None,
+) -> np.ndarray:
     m = np.asarray(mask)
     if m.ndim == 3:
         m = m[0]
@@ -71,7 +75,67 @@ def _fit_mask(mask: np.ndarray, star_mask_pad_px: int = 0) -> np.ndarray:
         yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
         disk = (xx * xx + yy * yy) <= r * r
         fit &= ~binary_dilation((m & STAR_MASK_BITS) != 0, structure=disk)
+    if extra_exclude is not None:
+        ex = np.asarray(extra_exclude, dtype=bool)
+        if ex.shape != fit.shape:
+            raise ValueError(f"extra_exclude shape {ex.shape} != mask shape {fit.shape}")
+        fit &= ~ex
     return fit
+
+
+def parse_star_wing_radii(radii) -> tuple[np.ndarray, np.ndarray]:
+    """Validate a ``[[mag_hi, radius_px], ...]`` table (``mag_hi`` strictly increasing, radius >= 1)."""
+    rows = [tuple(r) for r in (radii or [])]
+    if not rows or any(len(r) != 2 for r in rows):
+        raise ValueError(f"star wing radii must be a non-empty list of [mag_hi, radius_px] pairs, got {radii!r}")
+    mag_hi = np.array([float(r[0]) for r in rows])
+    rad = np.array([int(r[1]) for r in rows])
+    if np.any(np.diff(mag_hi) <= 0):
+        raise ValueError(f"star wing radii: mag_hi must be strictly increasing, got {mag_hi.tolist()}")
+    if np.any(rad < 1) or np.any(rad != np.array([float(r[1]) for r in rows])):
+        raise ValueError(f"star wing radii: radius_px must be integers >= 1, got {[r[1] for r in rows]}")
+    return mag_hi, rad
+
+
+def star_wing_exclusion(
+    shape: tuple[int, int],
+    x: np.ndarray,
+    y: np.ndarray,
+    tess_mag: np.ndarray,
+    radii,
+) -> np.ndarray:
+    """Pixels to drop from the background fit: a disk around every catalogue star, sized by magnitude.
+
+    ``radii`` is ``[[mag_hi, radius_px], ...]`` with ``mag_hi`` increasing; a star with ``tess_mag < mag_hi`` of the
+    first matching row gets that radius, stars at or fainter than the last ``mag_hi`` get none. ``x``/``y`` are
+    crop-local 0-based pixel positions (the lane's ``gaia_catalog_pipeline.csv``). The disks are centred on the star:
+    the bright side of the TESS wing flips with radius (toward the optical axis inside ~7 px, away beyond ~11 px), and a
+    shifted disk tested no better on S24 C2K2 (dev_runs/maskfoot_20261001).
+    """
+    mag_hi, rad = parse_star_wing_radii(radii)
+    ny, nx = int(shape[0]), int(shape[1])
+    out = np.zeros((ny, nx), dtype=bool)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    t = np.asarray(tess_mag, dtype=float)
+    k = np.searchsorted(mag_hi, t, side="right")
+    ok = np.isfinite(x) & np.isfinite(y) & np.isfinite(t) & (k < len(mag_hi))
+    for xi, yi, r in zip(x[ok], y[ok], rad[k[ok]]):
+        i0, i1 = max(0, int(np.floor(yi - r))), min(ny, int(np.ceil(yi + r)) + 1)
+        j0, j1 = max(0, int(np.floor(xi - r))), min(nx, int(np.ceil(xi + r)) + 1)
+        if i1 <= i0 or j1 <= j0:
+            continue
+        yy, xx = np.ogrid[i0:i1, j0:j1]
+        out[i0:i1, j0:j1] |= (xx - xi) ** 2 + (yy - yi) ** 2 <= r * r
+    return out
+
+
+def star_wing_exclusion_from_catalog(catalog_csv: str, shape: tuple[int, int], radii) -> np.ndarray:
+    """``star_wing_exclusion`` for the stars of a lane catalogue CSV (columns ``x``, ``y``, ``tess_mag``)."""
+    import pandas as pd
+
+    cat = pd.read_csv(catalog_csv, usecols=["x", "y", "tess_mag"])
+    return star_wing_exclusion(shape, cat["x"].to_numpy(), cat["y"].to_numpy(), cat["tess_mag"].to_numpy(), radii)
 
 
 def sanitize_boundary_outliers(
@@ -537,6 +601,7 @@ def estimate_tessreduce_residual_background(
     boundary_rim_width: int = BOUNDARY_CLIP_RIM_WIDTH,
     fill_method: str = "harmonic",
     star_mask_pad_px: int = 0,
+    extra_exclude: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Notebook ``run_tessreduce_variant`` (``biharmonic_robust``) arithmetic
     for one input frame.
@@ -553,11 +618,14 @@ def estimate_tessreduce_residual_background(
     for T 8-10/10-11/11-12/12-13), so without padding the fill is solved from rim pixels that still carry the wing,
     which lifts the background under every masked star (localbg_20260930). The padding only shrinks the set of fit
     pixels; every later step (anomaly repair, residual surface) takes its exclusion from the same fit mask.
+
+    ``extra_exclude`` (bool, mask-shaped; default None = unchanged) drops further pixels from the fit, e.g. the
+    magnitude-sized star disks of ``star_wing_exclusion`` (stage key ``tessreduce_star_wing_radii``).
     """
     flux = np.asarray(residual, dtype=np.float64)
     if flux.ndim != 2:
         raise ValueError(f"residual background expects 2-D image, got {flux.shape}")
-    fit = _fit_mask(mask, star_mask_pad_px)
+    fit = _fit_mask(mask, star_mask_pad_px, extra_exclude)
     if fit.shape != flux.shape:
         raise ValueError(f"mask shape {fit.shape} != residual shape {flux.shape}")
     bkgmask = np.where(fit, 1.0, np.nan)

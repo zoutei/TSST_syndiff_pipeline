@@ -423,6 +423,7 @@ KERNEL_FIT_ALLOWED = frozenset(
         "tessreduce_boundary_sigma",
         "tessreduce_boundary_rim_width",
         "tessreduce_star_mask_pad_px",
+        "tessreduce_star_wing_radii",
     }
     | _KERNEL_HP_KEYS
 )
@@ -450,6 +451,7 @@ BACKGROUND_ESTIMATE_ALLOWED = frozenset(
         "tessreduce_boundary_sigma",
         "tessreduce_boundary_rim_width",
         "tessreduce_star_mask_pad_px",
+        "tessreduce_star_wing_radii",
     }
 )
 
@@ -924,6 +926,11 @@ class KernelFitParams:
     # Grow catalogue star masks (bits 1|2) by this many px before excluding them from the background fit, so the
     # gap fill is not solved from rim pixels that still carry the star's PSF wing (0 = previous behaviour).
     tessreduce_star_mask_pad_px: int = 0
+    # Magnitude-sized disks dropped from the background fit pixels: [[mag_hi, radius_px], ...] (mag_hi increasing; a
+    # star with tess_mag < mag_hi of the first matching row gets that radius). None = previous behaviour. The stage
+    # reads the stars from {lane_root}/gaia_catalog_pipeline.csv. Recommended (S24 C2K2 wing < 0.1 e-/s at the disk
+    # edge, dev_runs/maskfoot_20261001): see docs/markdown/stages/multi_kernel_diff.md.
+    tessreduce_star_wing_radii: Optional[list] = None
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
@@ -968,6 +975,11 @@ class BackgroundEstimateParams:
     # Grow catalogue star masks (bits 1|2) by this many px before excluding them from the background fit, so the
     # gap fill is not solved from rim pixels that still carry the star's PSF wing (0 = previous behaviour).
     tessreduce_star_mask_pad_px: int = 0
+    # Magnitude-sized disks dropped from the background fit pixels: [[mag_hi, radius_px], ...] (mag_hi increasing; a
+    # star with tess_mag < mag_hi of the first matching row gets that radius). None = previous behaviour. The stage
+    # reads the stars from {lane_root}/gaia_catalog_pipeline.csv. Recommended (S24 C2K2 wing < 0.1 e-/s at the disk
+    # edge, dev_runs/maskfoot_20261001): see docs/markdown/stages/multi_kernel_diff.md.
+    tessreduce_star_wing_radii: Optional[list] = None
 
 
 def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
