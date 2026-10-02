@@ -16,7 +16,7 @@ Activate `syndiff`, set `PYTHONPATH` to this checkout, and commit owned changes 
 
 First inspect `condor_q --global -submitter kshukawa` and record the owning scheduler and GlobalJobId. Do not assume scheduler identity from our current host or a cluster number. The existing template_v3_C1 job is an ad-hoc Condor job, not a daemon-supervised submission. Quiesce only its verified job before resuming; preserve all outputs and logs. The new entry point independently refuses to run if the old batch is still visible globally or the global query is incomplete/fails.
 
-The prepared C1 job rechecks OS4 completeness, runs the missing OS1 pass with native recipe-aware reuse, then native downsample and F4 template construction. It uses the existing v3 data root for cached cells/native template output, but writes new stage records and the F4 template under the recovery run. Check the removed-star CSV before/after the OS1 pass and preserve the full OS4 record if the smaller mapping replaces it with an incomplete subset. This aggregate bookkeeping check remains a manual acceptance step, not an implemented repair. Inspect expected FITS, manifest and image checks before accepting recovery.
+The prepared C1 job rechecks OS4 completeness, runs the missing OS1 pass with native recipe-aware reuse, then native downsample and F4 template construction. It uses the existing v3 data root for cached cells/native template output, but writes new stage records and the F4 template under the recovery run. Check the removed-star CSV before/after the OS1 pass and preserve the full OS4 record if the smaller mapping replaces it with an incomplete subset. The continuation saves both CSV generations and unions complete cell/source records, preserving associations from both grids. Inspect expected FITS, manifest and image checks before accepting recovery.
 
 ## F1 probe boundary
 
@@ -26,6 +26,6 @@ It reuses the OLD F1 fitted mapping and band cells read-only, but uses v3 convol
 
 ## Execution status
 
-The global queue query and elevated command execution are blocked by repeated automatic approval-service timeouts despite explicit user approval. Source integration, syntax checks, read-only inventory and the tests above completed inside the sandbox. Neither recovery nor memory-probe job has been submitted. No old job or launcher was killed or released. No merge into the live branch was performed.
+Execution access was restored by the user on October 2. Global inventory confirms old C1 job plscience4.stsci.edu#1586.0#1790905800. Source integration, syntax checks, read-only inventory and the tests above completed inside the sandbox. Neither recovery nor memory-probe job has been submitted. No old job or launcher was killed or released. No merge into the live branch was performed.
 
 Conclusion: source and staged preparation tools are ready for execution review; C1 needs six OS1 variants rather than a full OS4 rebuild. Recovery is incomplete until scheduler access, execution and final product checks succeed.
