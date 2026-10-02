@@ -4,11 +4,17 @@ import argparse,csv,datetime as dt,json,subprocess,sys,shutil
 from pathlib import Path
 from common import CODE,V3,check_code,inventory
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--out',type=Path,required=True);p.add_argument('--sha',required=True);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('--out',type=Path,required=True);p.add_argument('--sha',required=True);p.add_argument('--queue-receipt',type=Path,required=True);a=p.parse_args()
     check_code(a.sha)
-    q=subprocess.run(['condor_q','-global','-constraint','Owner == "kshukawa" && JobBatchName == "template_v3_C1"','-af','GlobalJobId'],text=True,capture_output=True,timeout=60)
-    if q.returncode or q.stderr.strip() or q.stdout.strip():
-        raise SystemExit(f'Cannot establish old C1 job absent globally: {q.stdout} {q.stderr}')
+    # Compute-node credentials cannot query every scheduler. The submit host
+    # performs the same global check and supplies its exact, recent result.
+    receipt=json.loads(a.queue_receipt.read_text())
+    expected=['condor_q','--global','-constraint','Owner == "kshukawa" && JobBatchName == "template_v3_C1"','-af','GlobalJobId']
+    assert receipt['command']==expected and receipt['returncode']==0
+    assert not receipt['stdout'].strip() and not receipt['stderr'].strip()
+    assert receipt['code_sha']==a.sha and Path(receipt['out']).resolve()==a.out.resolve()
+    age=(dt.datetime.now(dt.timezone.utc)-dt.datetime.fromisoformat(receipt['checked_at'])).total_seconds()
+    assert 0<=age<=900,('global queue receipt expired',age)
     out=a.out/'C1';before=inventory(4)
     (out/'os4_before.json').write_text(json.dumps(before,indent=2));assert not before['missing'],before
     (out/'os1_before.json').write_text(json.dumps(inventory(1),indent=2))
