@@ -20,7 +20,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_creation.processing.band_utils import (
-    REMOVAL_CONVENTION,
+    REMOVAL_CONVENTION_FOOTPRINT as REMOVAL_CONVENTION,  # this file tests footprint_v1 (production is starmodel_v1)
     REMOVAL_CONVENTION_LEGACY,
     build_sep_background_segmentation,
     remove_background,

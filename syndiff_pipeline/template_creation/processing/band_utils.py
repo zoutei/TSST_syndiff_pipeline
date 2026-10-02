@@ -16,7 +16,13 @@ from astropy.io import fits
 logger = logging.getLogger(__name__)
 
 REMOVAL_CONVENTION_LEGACY = "segment_v0"
-REMOVAL_CONVENTION = "footprint_v1"
+REMOVAL_CONVENTION_FOOTPRINT = "footprint_v1"
+REMOVAL_CONVENTION_STARMODEL = "starmodel_v1"
+# Production convention. footprint_v1 zeroes a bright star's whole 8-connected
+# footprint and with it every faint source chained to the halo: a hole in the
+# template at each removed star (dev_runs/removal_hole_20261001). starmodel_v1
+# is the candidate fix; it has not passed acceptance yet (same README).
+REMOVAL_CONVENTION = REMOVAL_CONVENTION_FOOTPRINT
 
 # PS1 skycells overlap their neighbours by this many pixels, so no star
 # footprint that matters can extend further than this.
@@ -1063,6 +1069,222 @@ def _remove_background_footprint_v1(
     return data, removed
 
 
+def _radial_star_model(img: np.ndarray, x: float, y: float, rmax: int, bin_px: int) -> tuple:
+    """Azimuthal running-median profile of ``img`` around ``(x, y)`` out to ``rmax``.
+
+    Returns ``(window, model, profile)``: the window slices, the model image
+    over it (0 outside ``rmax``) and the binned profile. The median over each
+    ``bin_px``-wide ring ignores NaN and the neighbours that cover a minority of
+    the ring, so it is the star's own halo; the outermost ring's level is
+    subtracted (no sky pedestal is removed) and the profile is clipped at 0.
+    """
+    h, w = img.shape
+    y0, y1 = max(0, int(np.floor(y - rmax))), min(h, int(np.ceil(y + rmax)) + 1)
+    x0, x1 = max(0, int(np.floor(x - rmax))), min(w, int(np.ceil(x + rmax)) + 1)
+    nb = int(rmax) // int(bin_px) + 1
+    if y1 <= y0 or x1 <= x0:
+        return (slice(0, 0), slice(0, 0)), np.zeros((0, 0)), np.zeros(nb)
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    rr = np.hypot(xx - x, yy - y)
+    b = np.minimum((rr // bin_px).astype(np.int64), nb)
+    v = np.asarray(img[y0:y1, x0:x1], dtype=np.float64)
+    ok = np.isfinite(v) & (b < nb)
+    bs, vs = b[ok], v[ok]
+    order = np.argsort(bs, kind="stable")
+    bs, vs = bs[order], vs[order]
+    cuts = np.searchsorted(bs, np.arange(nb + 1))
+    prof = np.full(nb, np.nan)
+    for k in range(nb):
+        seg = vs[cuts[k]:cuts[k + 1]]
+        if seg.size >= 8:
+            prof[k] = np.median(seg)
+    good = np.isfinite(prof)
+    if not good.any():
+        return (slice(y0, y1), slice(x0, x1)), np.zeros((y1 - y0, x1 - x0)), np.zeros(nb)
+    prof = np.interp(np.arange(nb), np.flatnonzero(good), prof[good])
+    outer = prof[max(0, nb - max(1, 30 // int(bin_px))):].mean()
+    prof = np.clip(prof - outer, 0.0, None)
+    model = np.where(b < nb, prof[np.minimum(b, nb - 1)], 0.0)
+    return (slice(y0, y1), slice(x0, x1)), model, prof
+
+
+def _remove_background_starmodel_v1(
+    data: np.ndarray,
+    uncert,
+    sigma: float,
+    sigma_mask: float,
+    mask,
+    remove_saturated_stars: bool,
+    gaia_catalog_pixels,
+    bright_star_mag_threshold: float,
+    *,
+    core_nsigma: float = 20.0,
+    fill_core: bool = False,
+    zero_halo_fragments: bool | str = False,
+) -> tuple[np.ndarray, list[dict]]:
+    """``starmodel_v1`` removal: subtract each bright star, keep its neighbours.
+
+    ``footprint_v1`` zeroed a bright star's whole 8-connected footprint, which
+    also deleted every faint source chained to its halo, so the template held a
+    hole at each removed star (dev_runs/removal_hole_20261001). Here:
+
+    1. For every catalogue star with ``T < bright_star_mag_threshold`` whose
+       centre lies within ``R(T) + 10`` px of the cell (in or off the cell), a
+       radial running-median model of its halo (out to 480 px) is subtracted,
+       brightest first, each from the residual of the previous ones.
+    2. The residual is background-zeroed exactly as everywhere else (SEP
+       segments on the residual; pixels outside segments -> 0), so faint
+       sources on the halo stay.
+    3. The core, where the model exceeds ``core_nsigma`` times the local noise
+       (the radial model cannot follow the PSF structure there; saturated and
+       NaN pixels inside are included), is set to 0 (default), or with
+       ``fill_core=True`` to the local faint-source level (mean of the zeroed
+       residual over the ring core..core+200 px). Filling overshot the core by
+       +0.04..+0.06 on all three test sets (the ring next to the core still
+       holds residual halo), so it is off.
+    4. Saturation-flagged footprints with no bright catalogue star are zeroed as
+       in ``footprint_v1`` (``quality_flag_*`` records).
+    """
+    from scipy import ndimage
+
+    removed: list[dict] = []
+    img = np.asarray(data, dtype=np.float32)
+    if not remove_saturated_stars:
+        return _remove_background_footprint_v1(
+            img, uncert, sigma, sigma_mask, mask, False, None, bright_star_mag_threshold)
+    h, w = img.shape
+    resid = img.astype(np.float64)
+    cores: list[tuple] = []
+    cat = None
+    if gaia_catalog_pixels is not None and len(gaia_catalog_pixels) > 0:
+        cat = gaia_catalog_pixels.reset_index(drop=True)
+        tm = cat["tess_mag"].to_numpy(dtype=np.float64)
+        px = cat["pixel_x"].to_numpy(dtype=np.float64)
+        py = cat["pixel_y"].to_numpy(dtype=np.float64)
+        with np.errstate(invalid="ignore"):
+            cand = np.flatnonzero(np.isfinite(px) & np.isfinite(py) & (tm < bright_star_mag_threshold))
+        unc = np.asarray(uncert, dtype=np.float64) if uncert is not None else None
+        for i in cand[np.argsort(tm[cand], kind="stable")]:
+            x, y = px[i], py[i]
+            reach = float(star_footprint_radius(tm[i])) + _SELECT_MARGIN_PX
+            if not (-reach <= x < w + reach and -reach <= y < h + reach):
+                continue
+            win, model, prof = _radial_star_model(resid, x, y, _CELL_OVERLAP_PX, 3)
+            if model.size == 0:
+                continue
+            resid[win] -= model
+            if unc is not None:
+                sub = unc[win]
+                noise = float(np.nanmedian(sub[np.isfinite(sub) & (sub > 0)])) if np.any(np.isfinite(sub) & (sub > 0)) else np.nan
+            else:
+                noise = np.nan
+            if not np.isfinite(noise) or noise <= 0:
+                noise = 1.4826 * float(np.nanmedian(np.abs(resid[win] - np.nanmedian(resid[win]))))
+            above = np.flatnonzero(prof > core_nsigma * noise)
+            r_core = (int(above.max()) + 1) * 3 if above.size else 0
+            cores.append((int(i), x, y, r_core))
+            removed.append(_row_record(cat, int(i), -1, "catalog_bright_star"))
+    resid = resid.astype(np.float32)
+    # Background zeroing on the residual, exactly as everywhere else.
+    sep_result = build_sep_background_segmentation(
+        resid, uncert, sigma=sigma, sigma_mask=sigma_mask, close_bright_mask=True)
+    segmap, bright = sep_result.segmap, sep_result.mask_bright_stars
+    out = resid.copy()
+    out[np.logical_and(segmap == 0, ~bright)] = 0
+    finite_in = np.isfinite(img)
+
+    core_mask = np.zeros((h, w), dtype=bool)
+    core_windows = []
+    for i, x, y, r_core in cores:
+        if r_core <= 0:
+            continue
+        rr_max = r_core + 200
+        y0, y1 = max(0, int(np.floor(y - rr_max))), min(h, int(np.ceil(y + rr_max)) + 1)
+        x0, x1 = max(0, int(np.floor(x - rr_max))), min(w, int(np.ceil(x + rr_max)) + 1)
+        if y1 <= y0 or x1 <= x0:
+            continue
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        rr = np.hypot(xx - x, yy - y)
+        core = rr < r_core
+        if core.any():
+            core_mask[y0:y1, x0:x1] |= core
+            core_windows.append((y0, y1, x0, x1, core, rr >= r_core))
+
+    # Saturation pass (footprint_v1 rule) for saturated footprints that are
+    # not a modelled bright star's core: uncatalogued or T >= threshold stars.
+    if mask is not None:
+        mw = np.asarray(mask).astype(np.int64, copy=False)
+        mask_sat = ((mw & 0x0020) != 0) & ((mw & 0x1000) != 0)
+        labels, _ = ndimage.label((segmap > 0) | bright | mask_sat, structure=np.ones((3, 3), dtype=int))
+        sat_labels = set(np.unique(labels[mask_sat]).tolist()) - {0}
+        sat_labels -= set(np.unique(labels[core_mask]).tolist())
+        if sat_labels:
+            slices = ndimage.find_objects(labels)
+            for lab in sorted(sat_labels):
+                sl = slices[lab - 1]
+                comp = labels[sl] == lab
+                ys, xs = np.nonzero(comp)
+                fv = np.nan_to_num(np.asarray(out[sl], dtype=np.float64))[comp]
+                total = float(fv.sum())
+                cx = float((xs * fv).sum() / total) + sl[1].start if total > 0 else float(xs.mean()) + sl[1].start
+                cy = float((ys * fv).sum() / total) + sl[0].start if total > 0 else float(ys.mean()) + sl[0].start
+                removed.append({
+                    "source_id": -1, "ra": float("nan"), "dec": float("nan"),
+                    "pixel_x": float("nan"), "pixel_y": float("nan"), "tess_mag": float("nan"),
+                    "phot_g_mean_mag": float("nan"), "phot_bp_mean_mag": float("nan"),
+                    "phot_rp_mean_mag": float("nan"), "seg_centroid_x": cx, "seg_centroid_y": cy,
+                    "seg_flux": total, "segment_id": int(lab), "removal_reason": "quality_flag_no_star",
+                })
+                out[sl][comp] = 0
+
+    # Halo fragments left by the radial model (diffraction spikes, asymmetric
+    # wings): a residual segment within R(T) of a modelled star whose brightest
+    # pixel lies on its edge facing the star (within 3 px of its nearest pixel),
+    # and which holds no catalogue source, is the star's light -> 0. A real
+    # source peaks inside its own segment and is kept.
+    if zero_halo_fragments and cores:
+        seg_slices = ndimage.find_objects(segmap)
+        src_segs: set[int] = set()
+        if cat is not None:
+            bright_ids = {i for i, *_ in cores}
+            keep_rows = [j for j in range(len(cat)) if j not in bright_ids]
+            sx = cat["pixel_x"].to_numpy(dtype=np.float64)[keep_rows]
+            sy = cat["pixel_y"].to_numpy(dtype=np.float64)[keep_rows]
+            ok = np.isfinite(sx) & np.isfinite(sy) & (sx >= 0) & (sx < w) & (sy >= 0) & (sy < h)
+            src_segs = set(np.unique(segmap[sy[ok].round().astype(int).clip(0, h - 1),
+                                            sx[ok].round().astype(int).clip(0, w - 1)]).tolist()) - {0}
+        for i, x, y, _r in cores:
+            reach = float(star_footprint_radius(tm[i]))
+            y0, y1 = max(0, int(np.floor(y - reach))), min(h, int(np.ceil(y + reach)) + 1)
+            x0, x1 = max(0, int(np.floor(x - reach))), min(w, int(np.ceil(x + reach)) + 1)
+            if y1 <= y0 or x1 <= x0:
+                continue
+            for s in np.unique(segmap[y0:y1, x0:x1]):
+                if s == 0 or s in src_segs or seg_slices[s - 1] is None:
+                    continue
+                sl = seg_slices[s - 1]
+                m = segmap[sl] == s
+                ys, xs = np.nonzero(m)
+                ys, xs = ys + sl[0].start, xs + sl[1].start
+                d = np.hypot(xs - x, ys - y)
+                if d.min() > reach:
+                    continue
+                if zero_halo_fragments == "uncatalogued":
+                    out[ys, xs] = 0  # no catalogue source in it: treated as the star's residual light
+                    continue
+                vals = np.nan_to_num(resid[ys, xs])
+                if d[int(np.argmax(vals))] < d.min() + 3:
+                    out[ys, xs] = 0
+
+    # Core: local faint-source level (or 0), measured outside every core.
+    for y0, y1, x0, x1, core, ring in core_windows:
+        sub = out[y0:y1, x0:x1]
+        ring = ring & finite_in[y0:y1, x0:x1] & ~core_mask[y0:y1, x0:x1]
+        level = float(np.nanmean(sub[ring])) if (fill_core and ring.any()) else 0.0
+        sub[core] = level
+    return out, removed
+
+
 def remove_background(
     data: np.ndarray,
     uncert: np.ndarray = None,
@@ -1088,7 +1310,12 @@ def remove_background(
             data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
             gaia_catalog_pixels, bright_star_mag_threshold,
         )
-    if convention == REMOVAL_CONVENTION:
+    if convention == REMOVAL_CONVENTION_STARMODEL:
+        return _remove_background_starmodel_v1(
+            data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
+            gaia_catalog_pixels, bright_star_mag_threshold,
+        )
+    if convention == REMOVAL_CONVENTION_FOOTPRINT:
         return _remove_background_footprint_v1(
             data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
             gaia_catalog_pixels, bright_star_mag_threshold,

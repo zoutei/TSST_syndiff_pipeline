@@ -401,28 +401,45 @@ _PAPER = "/astro/armin/koji/syndiff/dev_runs/paper_dataset_20261001"
 _D13 = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
 
 
+_PAPER_COMBINED_RECIPE_ID = "e17a198a4942aa2d"  # the dataset's published combined cells (D13, footprint_v1)
+
+
+def _paper_combined(root, name):
+    """The dataset's published combined cell via its current pointer, checked to be recipe e17a198a (fixed
+    inputs: production now mints a different combined recipe, so it cannot resolve these cells)."""
+    import json
+    import os
+
+    from syndiff_pipeline.template_creation.processing.combined_store import try_load_combined_cell
+
+    projection, cell = name.rsplit(".", 1)
+    ptr = f"{root}/ps1_skycells_zarr/ps1_combined.zarr/{projection}/{cell}/current.json"
+    if not os.path.exists(ptr):
+        return None
+    with open(ptr) as fh:
+        cur = json.load(fh)
+    if cur.get("recipe_id") != _PAPER_COMBINED_RECIPE_ID:
+        return None
+    return try_load_combined_cell(root, projection, cell, cur["fingerprint"])
+
+
 def _paper_case(names):
     import os
 
     import pandas as pd
-
-    from syndiff_pipeline.template_creation.processing.combined_store import (
-        production_combined_recipe, seed_band_cache_from_combined_store)
 
     root = f"{_PAPER}/data_root"
     lst = f"{root}/s0020/c3/k3/mapping/oversampling_1/tess_s0020_3_3_master_skycells_list.csv"
     if not os.path.exists(lst):
         pytest.skip("paper dataset not available")
     df = pd.read_csv(lst)
-    recipe = production_combined_recipe({"remove_saturated_stars": True, "enable_saturation_correction": False,
-                                         "band_weights": _D13})
     out = {}
     for n in names:
         md = cc.metadata_for_cell(df, n)
         needed = [n, *cc.canonical_neighbour_names(md, n)]
-        cache = seed_band_cache_from_combined_store(root, needed, recipe)
+        cache = {k: c for k in needed if (c := _paper_combined(root, k)) is not None}
         if any(k not in cache for k in needed):
-            pytest.skip(f"combined inputs of {n} missing")
+            pytest.fail(f"combined inputs of {n} missing: {[k for k in needed if k not in cache]}")
         fetch = lambda k, c=cache: None if k not in c else np.asarray(c[k]["combined_image"], np.float32)
         out[n] = (cc.canonical_cell_image(n, md, fetch, 40.0, 470), cache[n]["headers_data"])
     return out
