@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 from syndiff_pipeline.template_creation.processing.removal_ledger.catalogues import fetch_ps1_cone
+from syndiff_pipeline.template_creation.processing.removal_ledger.catalogues import fetch_gaia_box
 
 
 class Response:
@@ -44,3 +45,12 @@ def test_truncated_or_repeated_page_cannot_publish(tmp_path,bad):
 def test_missing_required_metadata_rejected(tmp_path):
     api=SimpleNamespace(get=lambda *a,**k:Response([dict(name='objID',datatype='long')]))
     with pytest.raises(ValueError,match='schema'):fetch_ps1_cone(tmp_path,10.,20.,.1,session=api)
+
+
+def test_gaia_count_mismatch_cannot_publish(tmp_path,monkeypatch):
+    from syndiff_pipeline.template_creation.processing import pancakes
+    monkeypatch.setattr('requests.post',lambda *a,**k:Response(2))
+    monkeypatch.setattr(pancakes,'_fetch_flathub_numpy',lambda *a,**k:None)
+    monkeypatch.setattr(pancakes,'_structured_array_to_gaia_dataframe',lambda a:pd.DataFrame({'source_id':[123]}))
+    with pytest.raises(ValueError,match='count mismatch'):fetch_gaia_box(tmp_path,10,11,20,21)
+    assert not list(tmp_path.glob('*/manifest.json'))

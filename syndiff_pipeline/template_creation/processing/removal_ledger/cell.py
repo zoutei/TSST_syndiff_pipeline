@@ -120,7 +120,7 @@ class CellLedger:
         self.replay_verified = expected is not None
         self.output_digest = array_digest(result)
 
-    def associate_centres(self, sources, *, support_radius_px=None):
+    def associate_centres(self, sources, *, support_radius_px=None, support_radius_column=None):
         """Associate catalogue centres and declared circular support with operations.
 
         A radius is a documented candidate-support convention, not a measurement
@@ -133,7 +133,7 @@ class CellLedger:
         src = sources.copy().reset_index(drop=True)
         src["centre_status"] = "outside"
         src["centre_changed_stage"] = 0
-        src["support_status"] = "unknown" if support_radius_px is None else "candidate_circle"
+        src["support_status"] = "unknown" if support_radius_px is None and support_radius_column is None else "candidate_circle"
         links = []
         supports = {r["operation"]: self.support(r["operation"]) for r in self.regions}
         statuses = ["outside"] * len(src)
@@ -152,7 +152,8 @@ class CellLedger:
                     "centre_removed" if ch in (2,3) else "background_zeroed" if ch==1 else
                     "selected_no_finite_change" if st else "unaffected")
                 stages[source_index] = ch
-            radius = 0.0 if support_radius_px is None else float(support_radius_px)
+            chosen_radius = (getattr(row,support_radius_column) if support_radius_column else support_radius_px)
+            radius = 0.0 if chosen_radius is None else float(chosen_radius)
             if radius < 0 or not np.isfinite(radius): raise ValueError("Invalid support radius")
             for region in self.regions:
                 if region["reason"] == "background" and not inside: continue
@@ -161,7 +162,7 @@ class CellLedger:
                 mask=supports[region["operation"]]
                 centre_hit=bool(inside and x0<=ix<x0+mask.shape[1] and y0<=iy<y0+mask.shape[0] and mask[iy-y0,ix-x0])
                 count=0;support_count=None
-                if support_radius_px is not None:
+                if chosen_radius is not None:
                     lo_x=max(x0,int(np.floor(x-radius)));hi_x=min(x0+mask.shape[1],int(np.ceil(x+radius))+1)
                     lo_y=max(y0,int(np.floor(y-radius)));hi_y=min(y0+mask.shape[0],int(np.ceil(y+radius))+1)
                     if lo_x<hi_x and lo_y<hi_y:
@@ -172,7 +173,7 @@ class CellLedger:
                 if not centre_hit and not count:continue
                 links.append(dict(source_key=row.source_key,region_id=region["region_id"],reason=region["reason"],
                                   centre_in_support=centre_hit,candidate_overlap_pixels=count,
-                                  support_radius_px=support_radius_px,support_in_region_bbox_pixels=support_count,
+                                  support_radius_px=chosen_radius,support_in_region_bbox_pixels=support_count,
                                   association_status="centre_membership" if centre_hit else "possible_partial_support",
                                   stellar_flux_change=None))
         src["centre_status"] = statuses
@@ -180,13 +181,19 @@ class CellLedger:
         return src, pd.DataFrame(links, columns=["source_key","region_id","reason","centre_in_support",
             "candidate_overlap_pixels","support_radius_px","support_in_region_bbox_pixels","association_status","stellar_flux_change"])
 
-    def publish(self, root, *, sources=None, associations=None, catalogue_manifests=(), metadata=None):
+    def publish(self, root, *, sources=None, associations=None, catalogue_manifests=(), metadata=None, extra_tables=None):
         if self.output_digest is None: raise ValueError("Ledger not validated")
         params=dict(schema=SCHEMA_VERSION,implementation=IMPLEMENTATION,identity=self.identity,input_digest=self.input_digest,
                     output_digest=self.output_digest,catalogues=list(catalogue_manifests),metadata=metadata or {})
         # Tables participate in the ledger identity, independently of image IDs.
         for key,table in (("sources",sources),("associations",associations)):
             params[key+"_digest"]=None if table is None else hashlib.sha256(table.to_json(orient="table",index=False).encode()).hexdigest()
+        extra_tables = extra_tables or {}
+        for name,table in extra_tables.items():
+            if not name.replace('_','').isalnum() or name in ('sources','associations','regions'):
+                raise ValueError('Unsafe or reserved table name')
+        params['extra_tables']={name:hashlib.sha256(table.to_json(orient='table',index=False).encode()).hexdigest()
+                                for name,table in sorted(extra_tables.items())}
         key=hashlib.sha256(json.dumps(params,sort_keys=True).encode()).hexdigest()[:24]
         root=Path(root);root.mkdir(parents=True,exist_ok=True);dest=root/key
         with FileLock(str(root/(key+".lock"))):
@@ -202,6 +209,7 @@ class CellLedger:
                 np.savez_compressed(tmp/'geometry.npz',**arrays)
                 if sources is not None:sources.to_parquet(tmp/'sources.parquet',index=False)
                 if associations is not None:associations.to_parquet(tmp/'associations.parquet',index=False)
+                for name,table in extra_tables.items():table.to_parquet(tmp/(name+'.parquet'),index=False)
                 params.update(fingerprint=key,shape=list(self.shape),status="complete_cell_pixels",
                               source_accounting_status="not_supplied" if sources is None else "catalogue_scoped",
                               replay_verified=self.replay_verified,
@@ -221,6 +229,23 @@ def validate_published(path):
     for name,digest in m['files'].items():
         if Path(name).name!=name or file_digest(path/name)!=digest:raise ValueError("Corrupt ledger payload")
     return m
+
+
+def recover_segmentation_union(raw, background_suppressed):
+    """Recover saved SEP-union information only when it is identifiable.
+
+    Outside the union the stage writes zero; inside it leaves the original
+    pixel unchanged, including NaN. An originally zero pixel is ambiguous and
+    must not be guessed: use a saved union or replay SEP for that cell instead.
+    """
+    if raw.shape != background_suppressed.shape:raise ValueError('Shape mismatch')
+    if np.any(raw == 0):raise ValueError('Originally zero pixels make union recovery ambiguous')
+    if np.isinf(raw).any() or np.isinf(background_suppressed).any():raise ValueError('Infinite input unsupported')
+    union=background_suppressed != 0  # NaN != 0 preserves kept invalid pixels.
+    predicted=np.where(union,raw,0)
+    if not np.array_equal(predicted,background_suppressed,equal_nan=True):
+        raise ValueError('Cache is not pure background zeroing')
+    return union
 
 
 def replay_cell(raw, uncert, mask, trigger_catalogue, identity, *, expected=None, cached_union=None,

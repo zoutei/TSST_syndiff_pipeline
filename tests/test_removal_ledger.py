@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 from syndiff_pipeline.template_creation.processing.removal_ledger.cell import replay_cell, exact_id, validate_published
 from syndiff_pipeline.template_creation.processing import band_utils as bu
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import recover_segmentation_union
 
 
 IDENTITY=dict(cell='skycell.0001.001',combined_fingerprint='fixture')
@@ -90,3 +91,13 @@ def test_live_sep_and_cached_path_identical():
     sep=bu.build_sep_background_segmentation(raw,uncert,close_bright_mask=True)
     other,_,_=replay_cell(raw,None,mask,catalogue,IDENTITY,cached_union=(sep.segmap>0)|sep.mask_bright_stars,expected=expected)
     np.testing.assert_array_equal(other,expected)
+
+
+def test_background_cache_union_recovery_is_identifiable_or_rejected():
+    raw=np.array([[1.,np.nan],[2.,np.nan]])
+    union=np.array([[True,True],[False,False]])
+    np.testing.assert_array_equal(recover_segmentation_union(raw,np.where(union,raw,0)),union)
+    with pytest.raises(ValueError,match='ambiguous'):
+        recover_segmentation_union(np.array([[0.]]),np.array([[0.]]))
+    with pytest.raises(ValueError,match='pure background'):
+        recover_segmentation_union(np.array([[1.]]),np.array([[2.]]))

@@ -124,28 +124,38 @@ def read_catalogue(path):
 def fetch_gaia_box(root, ra_min, ra_max, dec_min, dec_max, *, endpoint=None):
     """Flathub DR3 positional query, with no magnitude or RP/BP requirement.
 
-    Flathub's array result is not paginated by this interface. Its coverage and
-    row count are explicit; no claim about astrophysical survey completeness.
+    Flathub's array result is checked against its independent count endpoint
+    before and after download. No claim about astrophysical completeness.
     """
     from ..pancakes import _fetch_flathub_numpy, _structured_array_to_gaia_dataframe, GAIA_CATALOG_COLUMNS, DEFAULT_FLATHUB_ENDPOINT
     if not (0<=ra_min<ra_max<360 and -90<=dec_min<dec_max<=90):raise ValueError('Split RA-wrap boxes before querying')
     query=dict(ra=[float(ra_min),float(ra_max)],dec=[float(dec_min),float(dec_max)])
-    request=dict(endpoint=endpoint or DEFAULT_FLATHUB_ENDPOINT,query=query,schema=1,catalogue='gaiadr3',photometric_cuts=None)
+    request=dict(endpoint=endpoint or DEFAULT_FLATHUB_ENDPOINT,query=query,schema=2,catalogue='gaiadr3',photometric_cuts=None)
     key=hashlib.sha256(json.dumps(request,sort_keys=True).encode()).hexdigest()[:24]
     root=Path(root);root.mkdir(parents=True,exist_ok=True);dest=root/key
     with FileLock(str(root/(key+'.lock'))):
         if dest.exists():return read_catalogue(dest)
         temp=Path(tempfile.mkdtemp(prefix='.gaia-',dir=root))
         try:
+            import flathub
+            filters=flathub.Filters(ra=(ra_min,ra_max),dec=(dec_min,dec_max))
+            def count():
+                response=requests.post(request['endpoint'].rstrip('/')+'/gaiadr3/count',json=filters.json(),timeout=90)
+                response.raise_for_status()
+                result=response.json()
+                if isinstance(result,bool) or not isinstance(result,int) or result<0:raise ValueError('Invalid Gaia query count')
+                return result
+            expected=count()
             arr=_fetch_flathub_numpy('gaiadr3',list(GAIA_CATALOG_COLUMNS),endpoint=request['endpoint'],
                 ra=(ra_min,ra_max),dec=(dec_min,dec_max))
             table=_structured_array_to_gaia_dataframe(arr)
+            if len(table)!=expected or count()!=expected:raise ValueError('Gaia query count mismatch or changed catalogue')
             if table.source_id.duplicated().any():raise ValueError('Duplicate Gaia IDs in response')
             table['source_id']=table.source_id.astype('string')
             table.to_parquet(temp/'catalogue.parquet',index=False)
-            manifest=dict(request,key=key,status='complete',rows=len(table),
+            manifest=dict(request,key=key,status='complete',rows=len(table),expected_rows=expected,
                 catalogue_sha256=file_digest(temp/'catalogue.parquet'),
-                caveat='Complete returned bbox query; Flathub npy endpoint, no per-page count endpoint. No magnitude/RP cuts.')
+                caveat='Complete returned bbox query, independently count-checked before and after download. No magnitude/RP cuts; no claim about survey completeness.')
             (temp/'manifest.json').write_text(json.dumps(manifest,indent=2,sort_keys=True))
             os.replace(temp,dest)
         except BaseException:shutil.rmtree(temp,ignore_errors=True);raise
