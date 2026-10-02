@@ -863,6 +863,9 @@ def _remove_background_footprint_v1(
     remove_saturated_stars: bool,
     gaia_catalog_pixels,
     bright_star_mag_threshold: float,
+    *,
+    segmentation=None,
+    recorder=None,
 ) -> tuple[np.ndarray, list[dict]]:
     """``footprint_v1`` removal: zero whole 8-connected star footprints.
 
@@ -875,7 +878,7 @@ def _remove_background_footprint_v1(
 
     removed: list[dict] = []
     try:
-        sep_result = build_sep_background_segmentation(
+        sep_result = segmentation if segmentation is not None else build_sep_background_segmentation(
             data, uncert, sigma=sigma, sigma_mask=sigma_mask,
             close_bright_mask=remove_saturated_stars,
         )
@@ -883,7 +886,10 @@ def _remove_background_footprint_v1(
         bright = sep_result.mask_bright_stars
 
         finite_in = np.isfinite(data)  # PS1-masked (NaN) pixels, before zeroing
-        data[np.logical_and(segmap == 0, ~bright)] = 0
+        background_support = np.logical_and(segmap == 0, ~bright)
+        if recorder is not None:
+            recorder.observe(data, background_support, reason="background", component=0)
+        data[background_support] = 0
         if not remove_saturated_stars:
             return data, removed
 
@@ -896,6 +902,8 @@ def _remove_background_footprint_v1(
 
         footprint = (segmap > 0) | bright | mask_sat
         labels, _ = ndimage.label(footprint, structure=np.ones((3, 3), dtype=int))
+        if recorder is not None:
+            recorder.labels = labels
         slices = ndimage.find_objects(labels)
 
         has_catalog = gaia_catalog_pixels is not None and len(gaia_catalog_pixels) > 0
@@ -992,7 +1000,11 @@ def _remove_background_footprint_v1(
                         yy, xx = np.ogrid[y0:y1, x0:x1]
                         disc = (yy - y) ** 2 + (xx - x) ** 2 <= float(_CELL_OVERLAP_PX) ** 2
                         sub = data[y0:y1, x0:x1]
-                        sub[(labels[y0:y1, x0:x1] == lab) & disc] = 0
+                        support = (labels[y0:y1, x0:x1] == lab) & disc
+                        if recorder is not None:
+                            recorder.observe(sub, support, reason="catalog", component=lab,
+                                             origin=(y0, x0), trigger=_row_record(cat, int(i), lab, "catalog_bright_star"))
+                        sub[support] = 0
                     removed_labels.add(lab)
                 bright_recorded.add(int(i))
                 removed.append(_row_record(cat, int(i), labs[0], "catalog_bright_star"))
@@ -1053,6 +1065,9 @@ def _remove_background_footprint_v1(
                             "segment_id": lab,
                             "removal_reason": "quality_flag_no_star",
                         })
+                    if recorder is not None:
+                        recorder.observe(data[sl], comp, reason="saturation", component=lab,
+                                         origin=(sl[0].start, sl[1].start))
                     data[sl][comp] = 0
                 if sat_labels:
                     logger.info(
@@ -1060,10 +1075,14 @@ def _remove_background_footprint_v1(
                         f"footprints zeroed (sat+starcore bits)"
                     )
             except Exception as e:
+                if recorder is not None:
+                    raise
                 logger.warning(
                     f"[Band] Quality-flag removal failed; continuing with catalog-only results: {e}"
                 )
     except Exception as e:
+        if recorder is not None:
+            raise
         logging.error(f"[Band] SEP extraction failed: {e}")
         return data, removed
     return data, removed
