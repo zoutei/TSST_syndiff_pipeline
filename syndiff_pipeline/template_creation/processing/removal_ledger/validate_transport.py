@@ -13,6 +13,7 @@ from astropy.wcs import FITSFixedWarning
 from .. import canonical_cell, combined_store
 from .transport import transport_cell,bin_regmap
 from .cell import file_digest
+from .field_operator import FrozenFieldOperator
 
 
 def main():
@@ -61,8 +62,34 @@ def main():
     res['report'].update(binned_max_residual=float(abs(paired-delta).max()),
                          binned_integrated_residual=float((paired-delta).sum()),
                          binned_deleted_flux=float(delta.sum()))
+    # The simple regmap diagnostic above is not the final L5 operator: real
+    # inter-skycell rim patches also apply at zero shift. Verify the real sparse
+    # contribution, including those patches and historical float32 narrowing.
+    field=FrozenFieldOperator(ctx)
+    assignment,assignment_meta=field.assignment(a.cell)
+    bins=[field.bin(assignment,plane,mask) for plane in [res['before'],res['after'],res['transported']]]
+    baseline_check=field.verify_published_contribution(a.cell,bins[1])
+    if not baseline_check['exact']:raise RuntimeError('Frozen L5 contribution mismatch')
+    if any(b is None for b in bins):raise RuntimeError('Empty L5 test contribution')
+    if not all(np.array_equal(bins[0][0],b[0]) for b in bins[1:]):raise RuntimeError('Counterfactual L5 support changed')
+    bv,av,dv=[b[1] for b in bins]
+    residual=bv-av-dv
+    # Conservative convolution-plus-binning roundoff bound at final precision.
+    bound=8*np.finfo(np.float32).eps*(abs(bv)+abs(av)+abs(dv))+1e-8
+    l5_passed=bool(np.all(abs(residual)<=bound))
+    res['report']['actual_l5']=dict(assignment=assignment_meta,provenance=field.provenance,
+        published_contribution=baseline_check,closure_passed=l5_passed,
+        max_absolute_residual=float(abs(residual).max()),integrated_residual=float(residual.sum()),
+        integrated_deleted_signal=float(dv.sum()),
+        allowance='8*float32_eps*(abs(before)+abs(after)+abs(delta))+1e-8')
     out=a.out/'transport'/a.cell;out.mkdir(parents=True,exist_ok=True)
     (out/'report.json').write_text(json.dumps(res['report'],indent=2))
+    np.savez_compressed(out/'actual_l5.npz',indices=bins[0][0],before=bv,after=av,transported=dv,residual=residual,bound=bound)
+    pd.DataFrame([dict(source_cell=a.cell,recipient_cell=a.cell,group_id=0,
+        operation_scope='all explicit removals in this source cell',
+        status='scoped_contribution_validated' if l5_passed else 'failed',
+        signed_flux_change=float(dv.sum()),source_fingerprint=inputs[a.cell]['fingerprint'],
+        mapping_sha256=field.provenance['master_sha256'])]).to_parquet(out/'template_contributions.parquet',index=False)
     # Diagnostic previews preserve absolute images and the measured differences.
     def reduce(x,f=8):
         h,w=x.shape;h=h//f*f;w=w//f*f
@@ -72,6 +99,7 @@ def main():
     print(json.dumps(res['report'],indent=2),flush=True)
     if not res['report']['closure_passed']:raise RuntimeError('Transport closure failed')
     if not res['report']['published_exact']:raise RuntimeError('Historical reconstruction differs from published pixels')
+    if not l5_passed:raise RuntimeError('Actual L5 closure failed')
 
 
 if __name__=='__main__':main()

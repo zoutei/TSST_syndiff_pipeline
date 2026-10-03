@@ -2,9 +2,9 @@ import json
 import numpy as np
 import pandas as pd
 import pytest
-from syndiff_pipeline.template_creation.processing.removal_ledger.cell import replay_cell, exact_id, validate_published
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import replay_cell, exact_id, validate_published,CellLedger
 from syndiff_pipeline.template_creation.processing import band_utils as bu
-from syndiff_pipeline.template_creation.processing.removal_ledger.cell import recover_segmentation_union
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import recover_segmentation_union,explicit_deleted_image
 
 
 IDENTITY=dict(cell='skycell.0001.001',combined_fingerprint='fixture')
@@ -29,7 +29,14 @@ def test_cached_union_uses_no_sep_and_records_actual_cap(monkeypatch,tmp_path):
     assert not ((links.source_key=='gaia:456') & (links.reason=='catalog')).any()
     path=ledger.publish(tmp_path,sources=source,associations=links)
     assert validate_published(path)['status']=='complete_cell_pixels'
+    deleted=explicit_deleted_image(path,result)
+    assert deleted[7,100]==1 and deleted[7,900]==0
+    np.testing.assert_array_equal(np.nan_to_num(np.where(union,raw,0)),np.nan_to_num(result)+deleted)
     assert ledger.publish(tmp_path,sources=source,associations=links)==path
+    reused=CellLedger.from_published(path)
+    reused_sources,reused_links=reused.associate_centres(sources)
+    pd.testing.assert_frame_equal(source,reused_sources)
+    pd.testing.assert_frame_equal(links,reused_links)
     with open(path/'regions.parquet','ab') as f:f.write(b'corrupt')
     with pytest.raises(ValueError,match='Corrupt'):validate_published(path)
 

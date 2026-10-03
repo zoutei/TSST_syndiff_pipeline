@@ -34,7 +34,9 @@ def gaia_sources(table,wcs,*,epoch_year=None):
             moved=sky.apply_space_motion(Time(epoch_year,format='jyear'))
             out.loc[good,'ra']=moved.ra.deg;out.loc[good,'dec']=moved.dec.deg
         out['position_status']=np.where(good,'proper_motion_propagated','missing_motion_unpropagated')
-    out['position_epoch_year']=2016. if epoch_year is None else epoch_year
+    out['position_epoch_year']=2016. if epoch_year is None else np.where(good,epoch_year,2016.)
+    out['requested_image_epoch_year']=epoch_year
+    out['coordinate_role']='catalogue astrometry; pixel coordinates may be separately calibrated to the PS1 image'
     out['pixel_x'],out['pixel_y']=wcs.all_world2pix(out.ra.values,out.dec.values,0)
     return out
 
@@ -52,6 +54,7 @@ def ps1_sources(table,wcs):
     stackok=np.isfinite(ra)&np.isfinite(dec)&(abs(dec)<=90)
     out['ra']=np.where(stackok,ra,meanra);out['dec']=np.where(stackok,dec,meandec)
     out['position_status']=np.where(stackok,'stack_measurement','mean_fallback')
+    out['coordinate_role']='PS1 stack astrometry (mixed epochs) or flagged mean-position fallback'
     out['pixel_x'],out['pixel_y']=wcs.all_world2pix(out.ra.values,out.dec.values,0)
     out['split_object_measurements']=out.ps1_obj_id.map(out.ps1_obj_id.value_counts())
     return out

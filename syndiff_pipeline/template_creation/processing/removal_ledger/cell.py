@@ -52,6 +52,15 @@ def exact_id(value):
     return None if out == "-1" else out
 
 
+def table_digest(table):
+    """Hash lossless Arrow values/schema, not rounded JSON floating-point text."""
+    import pyarrow as pa
+    data=pa.Table.from_pandas(table,preserve_index=False)
+    sink=pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink,data.schema) as writer:writer.write_table(data)
+    return hashlib.sha256(sink.getvalue()).hexdigest()
+
+
 class CellLedger:
     def __init__(self, raw, identity):
         if np.asarray(raw).ndim != 2: raise ValueError("2D cell required")
@@ -69,6 +78,23 @@ class CellLedger:
         self.labels = None
         self.output_digest = None
         self.replay_verified = False
+        self.capture_implementation = IMPLEMENTATION
+
+    @classmethod
+    def from_published(cls,path):
+        """Reuse verified pixel accounting for catalogue-only refreshes; no SEP."""
+        path=Path(path);m=validate_published(path)
+        obj=cls.__new__(cls)
+        obj.identity=m['identity'];obj.shape=tuple(m['shape']);obj.input_digest=m['input_digest']
+        obj.output_digest=m['output_digest'];obj.replay_verified=m['replay_verified']
+        obj.capture_implementation=m.get('capture_implementation',m['implementation'])
+        obj.prefix=hashlib.sha256(json.dumps(obj.identity,sort_keys=True).encode()).hexdigest()[:24]
+        obj.regions=pd.read_parquet(path/'regions.parquet').to_dict('records')
+        with np.load(path/'geometry.npz') as z:
+            obj.selected_stage=z['selected_stage'];obj.changed_stage=z['changed_stage'];obj.changed_operation=z['changed_operation']
+            obj.labels=z['footprint_labels'] if 'footprint_labels' in z.files else None
+            obj.geometry={k:z[k] for k in z.files if k not in ('selected_stage','changed_stage','changed_operation','footprint_labels')}
+        return obj
 
     def observe(self, before, support, *, reason, component, origin=(0, 0), trigger=None):
         mask = np.asarray(support, dtype=bool)
@@ -97,8 +123,21 @@ class CellLedger:
                    signed_flux_change=float(vals.sum()), absolute_flux_change=float(np.abs(vals).sum()),
                    trigger_gaia_id=exact_id(triggers.get("source_id")),
                    trigger_ra=triggers.get("ra"), trigger_dec=triggers.get("dec"))
+        if reason!='background' and mask.any():
+            yy,xx=np.nonzero(mask)
+            weight=np.maximum(np.nan_to_num(before[mask],nan=0.,posinf=0.,neginf=0.),0).astype(float)
+            total=float(weight.sum())
+            row.update(centroid_x=float(x+(np.dot(xx,weight)/total if total>0 else xx.mean())),
+                       centroid_y=float(y+(np.dot(yy,weight)/total if total>0 else yy.mean())),
+                       centroid_kind='positive_image_flux' if total>0 else 'support_area',
+                       attribution_status='not_deblended_into_individual_source_fluxes')
         self.regions.append(row)
         self.geometry[f"support_{n}"] = np.packbits(mask.ravel())
+        if reason != 'background':
+            # Preserve the actual deleted signal for later seam transport without
+            # another raw download. Background noise is not duplicated wholesale;
+            # its exact support, statistics and original-input hash are retained.
+            self.geometry[f"deleted_values_{n}"] = np.asarray(before[changed]).copy()
 
     def support(self, operation):
         row = self.regions[operation-1]
@@ -140,7 +179,9 @@ class CellLedger:
         stages = np.zeros(len(src), dtype=np.uint8)
         for source_index, row in enumerate(src.itertuples(index=False)):
             x, y = float(row.pixel_x), float(row.pixel_y)
-            if not np.isfinite(x+y): continue
+            if not np.isfinite(x+y):
+                statuses[source_index]='unlocalized'
+                continue
             ix, iy = int(np.rint(x)), int(np.rint(y))
             inside = 0 <= x < self.shape[1] and 0 <= y < self.shape[0]
             # Match historical rounding only for in-cell centres; never map an
@@ -183,16 +224,16 @@ class CellLedger:
 
     def publish(self, root, *, sources=None, associations=None, catalogue_manifests=(), metadata=None, extra_tables=None):
         if self.output_digest is None: raise ValueError("Ledger not validated")
-        params=dict(schema=SCHEMA_VERSION,implementation=IMPLEMENTATION,identity=self.identity,input_digest=self.input_digest,
+        params=dict(schema=SCHEMA_VERSION,implementation=IMPLEMENTATION,capture_implementation=self.capture_implementation,identity=self.identity,input_digest=self.input_digest,
                     output_digest=self.output_digest,catalogues=list(catalogue_manifests),metadata=metadata or {})
         # Tables participate in the ledger identity, independently of image IDs.
         for key,table in (("sources",sources),("associations",associations)):
-            params[key+"_digest"]=None if table is None else hashlib.sha256(table.to_json(orient="table",index=False).encode()).hexdigest()
+            params[key+"_digest"]=None if table is None else table_digest(table)
         extra_tables = extra_tables or {}
         for name,table in extra_tables.items():
             if not name.replace('_','').isalnum() or name in ('sources','associations','regions'):
                 raise ValueError('Unsafe or reserved table name')
-        params['extra_tables']={name:hashlib.sha256(table.to_json(orient='table',index=False).encode()).hexdigest()
+        params['extra_tables']={name:table_digest(table)
                                 for name,table in sorted(extra_tables.items())}
         key=hashlib.sha256(json.dumps(params,sort_keys=True).encode()).hexdigest()[:24]
         root=Path(root);root.mkdir(parents=True,exist_ok=True);dest=root/key
@@ -211,6 +252,8 @@ class CellLedger:
                 if associations is not None:associations.to_parquet(tmp/'associations.parquet',index=False)
                 for name,table in extra_tables.items():table.to_parquet(tmp/(name+'.parquet'),index=False)
                 params.update(fingerprint=key,shape=list(self.shape),status="complete_cell_pixels",
+                              explicit_deleted_signal_saved=True,background_pixel_values_saved=False,
+                              template_accounting_status='not_computed',
                               source_accounting_status="not_supplied" if sources is None else "catalogue_scoped",
                               replay_verified=self.replay_verified,
                               files={p.name:file_digest(p) for p in tmp.iterdir()})
@@ -226,6 +269,9 @@ def validate_published(path):
     m=json.loads((path/'manifest.json').read_text())
     if m.get('schema') != SCHEMA_VERSION or m.get('status') != 'complete_cell_pixels':
         raise ValueError("Incomplete/unknown ledger schema")
+    required={'geometry.npz','regions.parquet'}
+    if m.get('source_accounting_status')!='not_supplied':required|={'sources.parquet','associations.parquet'}
+    if not required<=set(m.get('files',{})):raise ValueError('Incomplete ledger member list')
     for name,digest in m['files'].items():
         if Path(name).name!=name or file_digest(path/name)!=digest:raise ValueError("Corrupt ledger payload")
     return m
@@ -246,6 +292,46 @@ def recover_segmentation_union(raw, background_suppressed):
     if not np.array_equal(predicted,background_suppressed,equal_nan=True):
         raise ValueError('Cache is not pure background zeroing')
     return union
+
+
+def explicit_deleted_image(path, after, *, operations=None):
+    """Reconstruct a ledger's measured explicit deletion, with no SEP/raw fetch."""
+    path=Path(path);manifest=validate_published(path)
+    if not manifest.get('explicit_deleted_signal_saved'):raise ValueError('Ledger lacks explicit signal values')
+    if array_digest(after)!=manifest['output_digest']:raise ValueError('Wrong post-removal image')
+    regions=pd.read_parquet(path/'regions.parquet')
+    delta=np.zeros(after.shape,dtype=after.dtype)
+    with np.load(path/'geometry.npz') as z:
+        owners=z['changed_operation']
+        for row in regions.itertuples():
+            if row.reason=='background':continue
+            if operations is not None and row.operation not in operations:continue
+            sl=np.s_[row.y0:row.y0+row.height,row.x0:row.x0+row.width]
+            selected=owners[sl]==row.operation
+            values=z[f'deleted_values_{row.operation}']
+            if len(values)!=int(selected.sum()):raise ValueError('Deletion signal/geometry mismatch')
+            delta[sl][selected]=values
+    return delta
+
+
+def attach_unmatched_components(ledger,sources,associations,wcs):
+    """Unmatched components keep their own image identities and sky positions."""
+    known=set(associations.region_id) if len(associations) else set()
+    extra=[];links=[]
+    for region in ledger.regions:
+        if region['reason']=='background' or region['region_id'] in known or 'centroid_x' not in region:continue
+        x,y=region['centroid_x'],region['centroid_y'];ra,dec=wcs.all_pix2world(x,y,0)
+        key='component:'+region['region_id']
+        extra.append(dict(source_key=key,entity_key=key,canonical_entity_key=key,catalogue='image_component',
+            source_type='pixel_component_not_identified_star',pixel_x=x,pixel_y=y,ra=float(ra),dec=float(dec),
+            centre_status='component_record',identity_status='unmatched_image_component',
+            support_status='exact_operation_support',centroid_kind=region['centroid_kind']))
+        links.append(dict(source_key=key,region_id=region['region_id'],reason=region['reason'],
+            centre_in_support=None,candidate_overlap_pixels=region['support_pixels'],support_radius_px=None,
+            association_status='exact_component_identity',stellar_flux_change=None))
+    if extra:sources=pd.concat([sources,pd.DataFrame(extra)],ignore_index=True)
+    if links:associations=pd.concat([associations,pd.DataFrame(links)],ignore_index=True)
+    return sources,associations
 
 
 def replay_cell(raw, uncert, mask, trigger_catalogue, identity, *, expected=None, cached_union=None,
