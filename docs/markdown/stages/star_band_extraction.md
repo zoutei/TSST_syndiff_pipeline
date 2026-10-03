@@ -109,3 +109,47 @@ They include the fitted neighbour covariance, but not uncertainty in those fixed
 inputs. Two epochs demonstrate repeated extraction, not full-sector precision.
 Validate variability through any learned calibration and compare independent
 profiles before claiming temporal or absolute photometric accuracy.
+
+## Preparing transported components
+
+The runtime producer is also available in the main package:
+
+```bash
+syndiff star prepare-band --manifest /absolute/path/prepare_manifest.json
+# A bounded worker can select one or more targets:
+syndiff star prepare-band --manifest /absolute/path/prepare_manifest.json \
+  --target-index 123 --target-index 456
+```
+
+The manifest supplies `targets_csv`, `prepared_components_dir`, and a
+`template_snapshot` object. Targets additionally require PS1 `raMean,decMean`
+and approximate full-FFI `x_ffi,y_ffi` for window placement. Photometry still
+uses the fitted positions in the profile product, not these approximate centres.
+
+Snapshot fields are `operator_version`, `mapping_dir`, `master_filename`,
+`skycell_list`, `band_cells_dir`, `publisher_lists`, `contribution_dir`,
+`regmap_pattern` (containing `{skycell}`), `kernel_npz`, `adopted_weights_json`,
+`store_weights`, `psf_sigma`, `blur_radius`, and `mask_cache_dir`.
+The implemented, tested version is `publisher_row_v1`, the row/padding operator
+used by the saved demonstration. Other versions are rejected until their own
+operator closure is established; a newer store must not silently inherit an
+older operator.
+
+Frozen mask caches are keyed to band-image content and recipe. The explicit
+`mask_resolution: legacy_archive_image_match` option can recover historical masks
+from `historical_store_root`: it requires one matching recipe whose combined image
+agrees with the saved band sum. It never selects by modification time or a current
+pointer. `data_root` identifies the producing storage tree for padding metadata.
+
+The producer replays the recorded publisher row, cross-projection padding,
+registration, ignored PS1 pixel bit 12, source-position kernel interpolation,
+fit-specific colour offsets and band-weight rescaling. A finite-support Gaussian
+optimization reproduces the full convolution, including its boundary convention.
+Outputs retain the band templates, global oversampled origin, kernel offsets and
+source-component records. Cached preparation does not certify the input model.
+
+The present source-isolation policy selects retained connected components. A
+component can contain multiple sources and must then be jointly modelled or
+flagged. A zero component is recorded separately; it is not proof by itself that
+a complete stellar PSF was erased. Runs are process-isolated because the inherited
+padding implementation uses a temporary module-level loader.

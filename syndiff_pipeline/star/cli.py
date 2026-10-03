@@ -252,6 +252,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    prepare = sub.add_parser("prepare-band", help="Replay target components from a frozen template snapshot")
+    prepare.add_argument("--manifest", required=True)
+    prepare.add_argument("--target-index", type=int, action="append", default=None)
+
     band = sub.add_parser("extract-band", help="Extract targets from frozen per-band products")
     band.add_argument("--manifest", required=True, help="Versioned per-band extraction manifest")
 
@@ -352,6 +356,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "prepare-band":
+        from syndiff_pipeline.star.band_transport import prepare
+        records = prepare(args.manifest, args.target_index)
+        print(f"Prepared {len(records)} target components")
+        return 0
     if args.command == "extract-band":
         from syndiff_pipeline.star.band_photometry import main as band_main
         return band_main(["--manifest", args.manifest])

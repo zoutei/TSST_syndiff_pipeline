@@ -1,6 +1,6 @@
 # Host-star light curves (`syndiff star`)
 
-For saved per-band forward-model products, use [`syndiff star extract-band`](stages/star_band_extraction.md). This separate manifest-driven path supports exact transported-component add-back and joint target/neighbour photometry.
+For saved per-band forward-model products, use [`syndiff star prepare-band` and `extract-band`](stages/star_band_extraction.md). This separate manifest-driven path supports exact transported-component add-back and joint target/neighbour photometry.
 
 Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants (and therefore has no Hotpants `stamp_mode`).
 
