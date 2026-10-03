@@ -25,6 +25,9 @@ def test_manifest_two_epochs_preserves_signed_flux_and_identity(tmp_path):
     tr = tmp_path / "transport"
     tr.mkdir()
     np.savez(tr / "0000.npz", addback_unscaled=7 * p, bounds=[5, 26, 5, 26])
+    tr_second = tmp_path / "transport_second"
+    tr_second.mkdir()
+    np.savez(tr_second / "0000.npz", addback_unscaled=5 * p, bounds=[5, 26, 5, 26])
     mask = np.zeros((31, 31), np.int32)
     mask[15, 15] = 1
     fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(mask)]).writeto(
@@ -33,7 +36,7 @@ def test_manifest_two_epochs_preserves_signed_flux_and_identity(tmp_path):
     frames = []
     for k, flux in enumerate([5.0, -3.0]):
         a = np.full((31, 31), 2.0)
-        a[5:26, 5:26] += (flux - 14) * p
+        a[5:26, 5:26] += (flux - (14 if k == 0 else 10)) * p
         f = tmp_path / f"f{k}.fits"
         fits.HDUList(
             [fits.PrimaryHDU(), fits.ImageHDU(a), fits.ImageHDU(np.ones_like(a))]
@@ -49,6 +52,8 @@ def test_manifest_two_epochs_preserves_signed_flux_and_identity(tmp_path):
                 scale=2.0,
             )
         )
+    frames[1]["transport_dirs"] = [str(tr_second)]
+    frames[1]["flux_zero_point"] = 21.0
     cfg = dict(
         schema_version=1,
         artifact_state="provisional",
@@ -65,7 +70,10 @@ def test_manifest_two_epochs_preserves_signed_flux_and_identity(tmp_path):
     record = run(path)
     d = pd.read_csv(tmp_path / "out/measurements.csv")
     np.testing.assert_allclose(d.flux, [5.0, -3.0], atol=1e-12)
-    np.testing.assert_allclose(d.raw_flux, [-9.0, -17.0], atol=1e-12)
+    np.testing.assert_allclose(d.raw_flux, [-9.0, -13.0], atol=1e-12)
+    np.testing.assert_allclose(
+        d.expected_flux, 10 ** (0.4 * (np.array([20.0, 21.0]) - 18.0))
+    )
     assert np.isnan(d.measured_mag.iloc[1])
     assert (d.status == "ok").all()
     assert (d.artifact_state == "provisional").all()

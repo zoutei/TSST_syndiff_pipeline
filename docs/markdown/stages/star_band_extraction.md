@@ -70,7 +70,7 @@ A frame specifies `id`, preferably `time_btjd`, `difference_fits`, `noise_fits`,
 `physical_mask_fits`, and either `scale_image` (NumPy/FITS) or scalar `scale`.
 Defaults are difference/mask HDU 1 and noise HDU 2. `noise_origin_xy` maps the
 science crop into the raw noise image. Optional per-frame `profiles_npz` and
-`neighbour_profiles_npz` override the defaults. Set `reference_profile_reused`
+`neighbour_profiles_npz`, `transport_dirs`, and `flux_zero_point` override the defaults. Use frame-specific transported components when its template, mapping or kernels differ. Set `reference_profile_reused`
 when a frame deliberately reuses the reference profile; this flag is retained
 in the measurements. Optional `raw_science_fits` and `background_fits` add a
 joint-fit control without PS1 add-back, using the same pixels and source basis.
@@ -97,7 +97,7 @@ The target component must reproduce the actual template generation. In particula
 
 `measurements.csv` contains every requested target/epoch, including failures,
 signed fluxes, conditional uncertainties, profile support, neighbour counts,
-fit statistics, additive flux closure and optional raw-image controls.
+fit statistics, additive flux closure and optional raw-image controls. The `condition` column is the target uncertainty inflation from projecting out nuisance columns, not the condition number of the whole design matrix.
 `lightcurves/<objID>.csv` groups the same records per target;
 `batch_manifest.csv` counts each target's statuses. `stamps.npz` retains data,
 add-back, model, residual and optional raw-control planes, plus accepted pixels.

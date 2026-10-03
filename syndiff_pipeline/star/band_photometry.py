@@ -83,6 +83,8 @@ def run(manifest_path):
     profiles_cache = {}
     neighbours_cache = {}
     for frame in cfg["frames"]:
+        zp = float(frame.get("flux_zero_point", cfg["flux_zero_point"]))
+        transport_dirs = frame.get("transport_dirs", cfg["transport_dirs"])
         pf = frame.get("profiles_npz", cfg["profiles_npz"])
         if pf not in profiles_cache:
             loaded = _npz(pf)
@@ -164,7 +166,7 @@ def run(manifest_path):
             ):
                 if hasattr(row, name):
                     rec[name] = getattr(row, name)
-            paths = [Path(root) / f"{k:04d}.npz" for root in cfg["transport_dirs"]]
+            paths = [Path(root) / f"{k:04d}.npz" for root in transport_dirs]
             path = next((p for p in paths if p.is_file()), None)
             if path is None:
                 rec["status"] = "no_transport"
