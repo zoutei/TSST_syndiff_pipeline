@@ -252,6 +252,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    band = sub.add_parser("extract-band", help="Extract targets from frozen per-band products")
+    band.add_argument("--manifest", required=True, help="Versioned per-band extraction manifest")
+
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--site", required=True, help="Site config directory")
     common.add_argument(
@@ -349,6 +352,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "extract-band":
+        from syndiff_pipeline.star.band_photometry import main as band_main
+        return band_main(["--manifest", args.manifest])
     if args.command == "submit":
         return cmd_submit(args)
     if args.command == "run":

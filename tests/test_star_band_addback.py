@@ -2,7 +2,7 @@ import numpy as np
 from types import SimpleNamespace
 from scipy.signal import fftconvolve
 from syndiff_pipeline.star.band_addback import convolve_target_patch,native_patch,restore_target,fit_flux
-from syndiff_pipeline.forward_model.chain._tk import convolve_blended,block_sum
+
 
 
 def test_patch_matches_independent_full_image_operator_across_nodes():
@@ -14,8 +14,14 @@ def test_patch_matches_independent_full_image_operator_across_nodes():
     result,org=convolve_target_patch(a,ks,nx,ny,origin_os=origin,grid=g)
     actual=native_patch(result,org,grid=g,bounds_sci=(0,24,0,24))
     whole=np.zeros((4,160,160));whole[:,37:50,39:56]=a
-    expected=sum(convolve_blended(whole[b],ks[b],g,nx,ny,workers=1) for b in range(4))
-    expected=block_sum(expected,4)[8:32,8:32]
+    coord=-8+(np.arange(160)+.5)/4-.5
+    expected=np.zeros((160,160))
+    for b in range(4):
+        for iy in range(3):
+            for ix in range(3):
+                weight=np.interp(coord,ny,np.eye(3)[iy])[:,None]*np.interp(coord,nx,np.eye(3)[ix])[None,:]
+                expected+=fftconvolve(whole[b]*weight,ks[b,iy,ix],mode='same')
+    expected=expected.reshape(40,4,40,4).sum((1,3))[8:32,8:32]
     np.testing.assert_allclose(actual,expected,atol=2e-12,rtol=1e-12)
     # Independent with/without-target identity, with nonconstant output scale.
     base=rng.normal(size=actual.shape);scale=1+np.arange(24)[None,:]/24

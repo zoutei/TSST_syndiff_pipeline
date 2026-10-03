@@ -7,7 +7,15 @@ measured amplitude. Origins are explicit global oversampled template indices.
 from __future__ import annotations
 import numpy as np
 from scipy.signal import fftconvolve
-from syndiff_pipeline.forward_model.chain._tk import hat_weights
+def hat_weights(coord, nodes):
+    """Bilinear source-node hats with flat extrapolation, matching the producer."""
+    nodes=np.asarray(nodes,dtype=float);coord=np.asarray(coord,dtype=float)
+    if len(nodes)<2 or np.any(np.diff(nodes)<=0):raise ValueError('Nodes must be strictly increasing')
+    j=np.clip(np.searchsorted(nodes,coord,side='right')-1,0,len(nodes)-2)
+    w=np.clip((coord-nodes[j])/(nodes[j+1]-nodes[j]),0.,1.)
+    hats=np.zeros((len(nodes),coord.size));i=np.arange(coord.size)
+    hats[j,i]+=1-w;hats[j+1,i]+=w
+    return hats
 
 
 def convolve_target_patch(bands, kernels, node_x, node_y, *, origin_os, grid):
