@@ -108,14 +108,15 @@ class Snapshot:
         self.scales = np.asarray(adopted["weights_rizy"]) / self.store_weights
 
     def mask(self, name):
-        dest = self.masks / f"{name}.npz"
-        record = self.masks / f"{name}.json"
         band_path = self.bands / f"{name}.npz"
         digest = hashlib.sha256()
         with band_path.open("rb") as stream:
             for block in iter(lambda: stream.read(1024 * 1024), b""):
                 digest.update(block)
         band_sha = digest.hexdigest()
+        cache_key = f"{name}_{band_sha[:16]}_{self.mask_signature[:16]}"
+        dest = self.masks / f"{cache_key}.npz"
+        record = self.masks / f"{cache_key}.json"
         if dest.exists() and record.exists():
             cached = json.loads(record.read_text())
             if (
@@ -174,7 +175,8 @@ class Snapshot:
         tmp = dest.with_name(dest.stem + f".{os.getpid()}.tmp.npz")
         np.savez_compressed(tmp, mask=mask)
         tmp.replace(dest)
-        record.write_text(
+        record_tmp = record.with_name(record.name + f".{os.getpid()}.tmp")
+        record_tmp.write_text(
             json.dumps(
                 dict(
                     convolved_artifact=str(p),
@@ -187,6 +189,7 @@ class Snapshot:
                 indent=2,
             )
         )
+        record_tmp.replace(record)
         return mask
 
     def seam(self, name, band, get, shape):
@@ -425,7 +428,10 @@ def transport(snapshot, row, output_dir, stamp_half_size=10):
         component_policy="Retained connected component, potentially blended; fit all relevant restored neighbours",
         kernel_delta=ctx.delta.tolist(),
     )
-    (out / f"{idx:04d}.json").write_text(json.dumps(record, indent=2))
+    record_path = out / f"{idx:04d}.json"
+    record_tmp = out / f"{idx:04d}.{os.getpid()}.json.tmp"
+    record_tmp.write_text(json.dumps(record, indent=2))
+    record_tmp.replace(record_path)
     return record
 
 
@@ -467,7 +473,9 @@ def prepare(manifest_path, target_indices=None):
                 Path(cfg["prepared_components_dir"])
                 / f"{int(row.target_index):04d}.json"
             )
-            destination.write_text(json.dumps(record, indent=2))
+            temporary = destination.with_name(destination.name + f".{os.getpid()}.tmp")
+            temporary.write_text(json.dumps(record, indent=2))
+            temporary.replace(destination)
             records.append(record)
     finally:
         convolution_utils.apply_gaussian_convolution = original
