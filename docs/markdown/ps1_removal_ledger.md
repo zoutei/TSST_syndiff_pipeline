@@ -100,7 +100,7 @@ The campaign generator creates owned Condor DAG tasks from the immutable invento
 It does not submit jobs. Jobs check their pinned checkout, preserve atomic outputs,
 have a repeated-failure circuit breaker and a 150-GiB storage floor. Source tasks
 request two CPUs/8 GiB (streamed pilot peak 3.85 GiB); recipient validators request
-two CPUs/16 GiB. Default concurrency is eight source jobs and two validators.
+two CPUs/16 GiB. Default concurrency is eight source jobs and four validators.
 Submitted campaign scripts cannot be repointed to a different code version.
 
 No job control, pipeline merge, template replacement or new removal physics is

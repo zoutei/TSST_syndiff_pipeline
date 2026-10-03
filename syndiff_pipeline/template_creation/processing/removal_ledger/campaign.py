@@ -96,7 +96,7 @@ def worker(out,index,expected_sha):
         raise
 
 
-def prepare(out,fields,code_pin,expected_sha,*,limit=None,max_jobs=8,with_validation=True):
+def prepare(out,fields,code_pin,expected_sha,*,limit=None,max_jobs=8,with_validation=True,validation_jobs=4):
     tasks=task_list(out,fields)
     if limit is not None:tasks=tasks[:limit]
     dest=out/'campaign';dest.mkdir(parents=True,exist_ok=True);(dest/'condor').mkdir(exist_ok=True)
@@ -108,7 +108,7 @@ def prepare(out,fields,code_pin,expected_sha,*,limit=None,max_jobs=8,with_valida
     path=dest/'tasks.json'
     if path.exists() and json.loads(path.read_text())!=tasks:raise ValueError('Refusing to replace a different campaign task list')
     atomic_json(path,tasks)
-    atomic_json(dest/'provenance.json',dict(code_pin=str(code_pin),code_sha=expected_sha,fields=fields,max_jobs=max_jobs,
+    atomic_json(dest/'provenance.json',dict(code_pin=str(code_pin),code_sha=expected_sha,fields=fields,max_jobs=max_jobs,validation_jobs=validation_jobs,
         cpus_per_job=2,memory_mb=8192,measurement='streamed 2528.004 pilot: peak RSS 4038164 KiB; wall 300 s',
         scope='cell ledger backfill; separate final-template validation follows'))
     script=dest/'job.sh'
@@ -137,7 +137,7 @@ error = {dest}/condor/cell_$(task_index).err
 log = {dest}/condor/cell_$(task_index).log
 queue 1
 ''')
-    lines=[f'MAXJOBS ledger {max_jobs}', 'MAXJOBS validation 2']
+    lines=[f'MAXJOBS ledger {max_jobs}', f'MAXJOBS validation {validation_jobs}']
     for i,task in enumerate(tasks):
         node=f'CELL{i:05d}'
         lines += [f'JOB {node} {submit}',f'VARS {node} task_index="{i}"',f'CATEGORY {node} ledger',f'ABORT-DAG-ON {node} 42 RETURN 42']
@@ -222,11 +222,12 @@ def main():
         if name=='prepare':
             q.add_argument('--fields',nargs='+',default=['C4']);q.add_argument('--code-pin',type=Path,required=True)
             q.add_argument('--limit',type=int);q.add_argument('--max-jobs',type=int,default=8)
+            q.add_argument('--validation-jobs',type=int,default=4)
             q.add_argument('--no-validation',action='store_true')
         elif name=='worker':q.add_argument('--index',type=int,required=True)
         else:q.add_argument('--field',required=True);q.add_argument('--cell',required=True)
     a=p.parse_args()
-    if a.command=='prepare':prepare(a.out,a.fields,a.code_pin,a.expected_sha,limit=a.limit,max_jobs=a.max_jobs,with_validation=not a.no_validation)
+    if a.command=='prepare':prepare(a.out,a.fields,a.code_pin,a.expected_sha,limit=a.limit,max_jobs=a.max_jobs,with_validation=not a.no_validation,validation_jobs=a.validation_jobs)
     elif a.command=='worker':raise SystemExit(worker(a.out,a.index,a.expected_sha))
     else:raise SystemExit(validation_worker(a.out,a.field,a.cell,a.expected_sha))
 
