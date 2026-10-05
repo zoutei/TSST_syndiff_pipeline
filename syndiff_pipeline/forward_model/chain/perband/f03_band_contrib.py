@@ -2,7 +2,9 @@
 bin every band through the OS4 regmap.  One Condor job = one chunk of cells (``queue N``, chunk ``k/n``).
 
 Per cell: choose the skycell list whose row-path blur of the combined cell (sum of band cells) reproduces the STORED
-canonical cell best -- candidates in publisher order from ``publisher_lists.json``.  Then per band b:
+canonical cell best -- candidates in publisher order from ``publisher_lists.json``.  Without ``publisher_lists.json``
+(canonical-cell stores, schema v3) the field's own mapping list is the publisher: no search, and
+``list_tries["own"]`` records sum_b blur(C_b) vs the stored canonical cell.  Then per band b:
   canonical_b = perband.blur_cell_row_path(...) with that list's projection metadata
   seam_b      = production padding_correction._location_correction(...) with the COMBINED-cell loader swapped for the
                 band-b cell loader (the correction is linear in the combined images), summed over locations
@@ -111,22 +113,32 @@ def one(cfg, name):
         return name, json.loads(str(np.load(out)["check"]))
     t0 = time.time()
     try:
-        pub = _publisher_lists(P)
+        pub = _publisher_lists(P) if P.publisher_lists.exists() else None
         df = pd.read_csv(P.skylist).set_index("NAME", drop=False)
         proj = str(df.loc[name, "projection"])
         get = band_fetcher(P)
         if get(name) is None:
             return name, {"error": "no band cell"}
         recipe = store_recipe(cfg, chain_band_weights(cfg))
-        stored = _try_load_shared_convolved_arrays(P.data, name, psf_sigma=PSF_SIGMA, combined_recipe=recipe)
+        stored = _try_load_shared_convolved_arrays(P.data, name, psf_sigma=PSF_SIGMA, combined_recipe=recipe,
+                                                   mapping_df=df)
         stored = None if stored is None else np.asarray(stored[0], np.float64)
-        pl = pub["cells"][name]
         tries, md, chosen = {}, None, None
 
         def comb(n):
             c = get(n)
             return None if c is None else PB.sum_bands(c)
-        for key in pl["order"]:
+        # Canonical cells (schema v3): the stored cell is keyed by this mapping list's neighbour set, so the field's
+        # own list IS the publisher; no candidate search (f01b) is needed and a miss is an error, not a fallback.
+        own_list = pub is None
+        order = ["own"] if own_list else pub["cells"][name]["order"]
+        for key in order:
+            if own_list:
+                md2 = extract_projection_metadata(df.reset_index(drop=True), proj)
+                if stored is None:
+                    return name, {"error": "no v3 canonical convolved cell for this mapping list"}
+                md, chosen = md2, key   # checked below on sum_b of the band blurs (= blur of the sum; linear)
+                break
             d2 = pd.read_csv(pub["lists"][key]).set_index("NAME", drop=False) if key not in _LISTDF else _LISTDF[key]
             _LISTDF[key] = d2
             md2 = extract_projection_metadata(d2.reset_index(drop=True), proj)
@@ -145,6 +157,10 @@ def one(cfg, name):
         if blurred is None:
             return name, {"error": "row-path blur returned None"}
         shape = next(iter(blurred.values())).shape
+        if chosen == "own":
+            r = sum(blurred[b].astype(np.float64) for b in BANDS if b in blurred)
+            fin = np.isfinite(r) & np.isfinite(stored)
+            tries["own"] = float(np.abs(r[fin] - stored[fin]).max() / np.nanmax(np.abs(stored))) if fin.any() else 1.0
         seam_flux = {}
         for b in BANDS:
             corr = seam_correction(P, name, b, get, df, shape)
