@@ -1164,6 +1164,7 @@ def run(args):
     if use_floor or smoothed:
         var0 = np.asarray(L.pixel_variance(jnp.asarray(scene.z["noise"])), np.float64)
         model_j = jax.jit(diagnose.model)
+        lossval_j = jax.jit(lambda p_, s_: loss_fn(p_, s_)[0])
         pos_j = jax.jit(diagnose.positions)
         free_mask = np.asarray(scene.role) == ROLE_CONTRIB
         _log(f"stop rule {args.stop_rule}; floor eps={args.model_floor_eps} noise_scale={args.noise_scale}; "
@@ -1171,7 +1172,8 @@ def run(args):
     stage_outcomes = []
 
     def refresh_floor(p, s):
-        """var_eff = (s sigma)^2 + (eps m)^2 from the current model; returns new state and median change."""
+        """var_eff = (s sigma)^2 + (eps m)^2 from the current model. Returns (new state, relative loss jump
+        at fixed params, median sigma_eff change on floor-dominated pixels, median sigma_eff/sigma)."""
         m = np.asarray(model_j(p, s), np.float64)
         ve = args.noise_scale ** 2 * var0 + (args.model_floor_eps * m) ** 2
         prev = np.asarray(s["var_eff"], np.float64) if "var_eff" in s else None
@@ -1183,7 +1185,9 @@ def run(args):
         sel = fl if fl.sum() >= 100 else ok
         chg = (float(np.median(np.abs(np.sqrt(ve[sel] / prev[sel]) - 1.0))) if prev is not None
                else float("inf"))
-        return new_s, chg, float(np.median(np.sqrt(ve[sel] / var0[sel])))
+        l_old, l_new = float(lossval_j(p, s)), float(lossval_j(p, new_s))
+        jump = abs(l_new - l_old) / max(abs(l_old), 1e-12) if prev is not None else float("inf")
+        return new_s, jump, chg, float(np.median(np.sqrt(ve[sel] / var0[sel])))
 
     def hist_event(rec):
         with hist_path.open("a") as fh:
@@ -1206,8 +1210,12 @@ def run(args):
         def stage_loss(p, s, _labels=labels):
             return loss_fn(FIT.stop_grad_frozen_params(p, _labels), s)
 
+        # floor: refreshed every --floor-refresh-every steps (smoothed rule) as part of the iteration. Each refresh
+        # changes the loss scale; its jump at fixed params is subtracted from the stored history so the plateau
+        # test compares like with like. A stage only ends when the last refresh moved the loss < --floor-settle-tol.
+        last_jump = float("inf")
         if use_floor:
-            st, chg, med = refresh_floor(params, st)
+            st, jump, chg, med = refresh_floor(params, st)
             hist_event({"event": "floor_refresh", "stage": stage, "step": 0, "median_sigma_eff_over_sigma": med})
 
         buckets = sorted({v for k, v in labels.items() if k in keys and v != "frozen"})
@@ -1283,6 +1291,14 @@ def run(args):
             # smoothed stop rule (see --stop-rule): plateau of the w-step running mean over lag K AND
             # physical quantities still -> lr decay, after --lr-decays decays the next plateau ends the stage
             plateau_stop = False
+            if smoothed and use_floor and (step - first) % args.floor_refresh_every == 0:
+                l_old = float(lossval_j(params, st))
+                st, last_jump, chg, med = refresh_floor(params, st)
+                offset = float(lossval_j(params, st)) - l_old
+                win = [x + offset for x in win]
+                lv += offset
+                hist_event({"event": "floor_refresh", "stage": stage, "step": step, "loss_jump": last_jump,
+                            "median_rel_change": chg, "median_sigma_eff_over_sigma": med})
             if smoothed:
                 win.append(lv)
                 since += 1
@@ -1305,12 +1321,10 @@ def run(args):
                                     "dpos_mpx": dpos, "dflux": dflux, "lr_mult": lr_mult})
                         if s_rel < args.stop_tol and dpos < args.stop_wcs_mpx and dflux < args.stop_flux_tol:
                             restart = False
-                            if use_floor:
-                                st, chg, med = refresh_floor(params, st)
-                                hist_event({"event": "floor_refresh", "stage": stage, "step": step,
-                                            "median_rel_change": chg, "median_sigma_eff_over_sigma": med})
-                                if chg > args.floor_tol:
-                                    restart = True
+                            if use_floor and last_jump >= args.floor_settle_tol:
+                                restart = True   # weights still moving: not a plateau yet, keep going
+                                hist_event({"event": "floor_not_settled", "stage": stage, "step": step,
+                                            "loss_jump": last_jump})
                             if not restart and n_decay < args.lr_decays:
                                 n_decay += 1
                                 lr_mult *= args.lr_decay
@@ -1555,9 +1569,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fractional model-error floor: var_eff = (noise_scale sigma)^2 + (eps m)^2, m = scene model "
                         "frozen at each refresh (stage start and every plateau); used in flux solve and loss")
     p.add_argument("--noise-scale", type=float, default=1.0, help="multiplies the stored noise in var_eff")
-    p.add_argument("--floor-tol", type=float, default=0.01,
-                   help="a plateau refresh that changes median sigma_eff by more than this restarts the window "
-                        "instead of decaying the lr")
+    p.add_argument("--floor-refresh-every", type=int, default=50,
+                   help="smoothed rule: refresh the floor weights every this many steps")
+    p.add_argument("--floor-settle-tol", type=float, default=1e-4,
+                   help="a stage can only end when the last refresh changed the loss (at fixed params) by less than "
+                        "this relative amount")
     p.add_argument("--penalty-nref", type=float, default=0.0,
                    help="> 0: scale every ePSF penalty by penalty_nref / N_pix so lambda means the same in every "
                         "scene/fold (F1 fold-0 N_pix 1581636 keeps the 10-04 F1 fold-0 balance)")
