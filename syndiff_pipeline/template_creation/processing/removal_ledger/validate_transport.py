@@ -1,5 +1,6 @@
 """Real historical seam validation for a scoped one-cell removal intervention."""
 from __future__ import annotations
+from syndiff_pipeline.template_creation.processing import convolution_utils as _CU
 import argparse
 import importlib.util
 import json
@@ -44,7 +45,9 @@ def main():
         baseline=z['Ibk'];published_pad=z['Ipad'];mask=z['Mpad']
     def before(name):return baseline if name==a.cell else after(name)
     print('Render full-halo before/after/delta for',a.cell,flush=True)
-    res=transport_cell(a.cell,metadata,mapping,before,after,sigma=40.,radius=470,canonical_renderer=old.canonical_cell_image)
+    # The products validated here were blurred with the dask path (before 2026-10-05): reproduce them bit for bit.
+    with _CU.blur_method("dask"):
+        res=transport_cell(a.cell,metadata,mapping,before,after,sigma=40.,radius=470,canonical_renderer=old.canonical_cell_image)
     fin=np.isfinite(published_pad)&np.isfinite(res['after'])
     err=np.where(fin,res['after'].astype(float)-published_pad,0.)
     res['report'].update(scope='Restore explicit removals in one source cell only; all other combined images fixed',
