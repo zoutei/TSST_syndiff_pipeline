@@ -1134,6 +1134,16 @@ def run(args):
         params, _ = BW.set_bright_width(params, "none", None)
         _log("bright_width: warm-start leaf dropped (--bright-width none)")
 
+    if (args.model_floor_eps > 0 or args.noise_scale != 1.0) and args.floor_source == "data":
+        # data-based floor: computed ONCE from the measured pixels, so the weights never feed back on the fluxes
+        # (the model-based refresh oscillates even at fixed params, training_fixes_20261005 irls_fixedparams)
+        v0 = np.asarray(L.pixel_variance(jnp.asarray(scene.z["noise"])), np.float64)
+        d0 = np.clip(np.asarray(scene.z["data"], np.float64), 0.0, None)
+        ve0 = args.noise_scale ** 2 * v0 + (args.model_floor_eps * d0) ** 2
+        st = dict(st, var_eff=jnp.asarray(ve0, jnp.float32))
+        okv = np.asarray(scene.z["valid"]) & np.isfinite(ve0)
+        _log(f"data-based floor eps={args.model_floor_eps} noise_scale={args.noise_scale}: median sigma_eff/sigma "
+             f"{np.median(np.sqrt(ve0[okv] / v0[okv])):.4f}, p99 {np.percentile(np.sqrt(ve0[okv] / v0[okv]), 99):.3f}")
     diag_j = jax.jit(diagnose)
     t0 = time.time()
     f0, chi2_0, _ = diag_j(params, st)
@@ -1160,7 +1170,8 @@ def run(args):
     lrs = [float(s) for s in args.lr_per_stage.split(",")]
     global_step = 0
     smoothed = args.stop_rule == "smoothed"
-    use_floor = args.model_floor_eps > 0 or args.noise_scale != 1.0
+    # use_floor: the MODEL-based floor, refreshed during training. The data-based floor is fixed in st already.
+    use_floor = (args.model_floor_eps > 0 or args.noise_scale != 1.0) and args.floor_source == "model"
     if use_floor or smoothed:
         var0 = np.asarray(L.pixel_variance(jnp.asarray(scene.z["noise"])), np.float64)
         model_j = jax.jit(diagnose.model)
@@ -1571,6 +1582,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fractional model-error floor: var_eff = (noise_scale sigma)^2 + (eps m)^2, m = scene model "
                         "frozen at each refresh (stage start and every plateau); used in flux solve and loss")
     p.add_argument("--noise-scale", type=float, default=1.0, help="multiplies the stored noise in var_eff")
+    p.add_argument("--floor-source", choices=("model", "data"), default="model",
+                   help="m in the floor: 'model' = scene model, refreshed (feeds back on the fluxes; can oscillate); "
+                        "'data' = max(measured pixel, 0), computed once, so the loss stays one fixed function")
     p.add_argument("--floor-refresh-every", type=int, default=50,
                    help="smoothed rule: refresh the floor weights every this many steps")
     p.add_argument("--floor-settle-tol", type=float, default=1e-4,
