@@ -772,6 +772,33 @@ def _diff_lane_root_dir(
     return str(_require_scc_lane_root(cfg))
 
 
+def _star_wing_exclusion_for_stage(
+    cfg: SynDiffConfig,
+    ctx: PipelineInvocationContext,
+    radii,
+    shape: tuple[int, int],
+) -> Optional[np.ndarray]:
+    """Background-fit exclusion disks for ``tessreduce_star_wing_radii`` (None when the key is unset).
+
+    Stars come from the lane catalogue ``{lane_root}/gaia_catalog_pipeline.csv`` (crop-local x, y, tess_mag), written
+    by the ``shared_mask`` stage.
+    """
+    if not radii:
+        return None
+    from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
+        star_wing_exclusion_from_catalog,
+    )
+
+    csv = os.path.join(_diff_lane_root_dir(cfg, ctx), GAIA_CATALOG_PIPELINE_BASENAME)
+    if not os.path.exists(csv):
+        raise FileNotFoundError(
+            f"tessreduce_star_wing_radii needs the lane catalogue {csv!r} (written by the shared_mask stage)."
+        )
+    ex = star_wing_exclusion_from_catalog(csv, tuple(shape), radii)
+    log.info("tessreduce_star_wing_radii: %.3f of the crop excluded from the background fit by star disks", ex.mean())
+    return ex
+
+
 def _diff_stage_dir(
     cfg: SynDiffConfig,
     ctx: PipelineInvocationContext,
@@ -1307,6 +1334,9 @@ def run_config_pipeline(
                 skip_existing=not force_rerun,
                 field_ctx=field_ctx,
                 mask_catalog=mask_catalog,
+                tessreduce_extra_exclude=_star_wing_exclusion_for_stage(
+                    cfg, ctx, kf_params.tessreduce_star_wing_radii, shared_mask.shape
+                ),
                 sector=int(cfg.sector) if cfg.sector is not None else None,
                 camera=int(cfg.camera) if cfg.camera is not None else None,
                 data_root=_infer_data_root(cfg) or None,
@@ -1433,6 +1463,10 @@ def run_config_pipeline(
                 tessreduce_boundary_sigma=ks_params.tessreduce_boundary_sigma,
                 tessreduce_boundary_rim_width=ks_params.tessreduce_boundary_rim_width,
                 tessreduce_star_mask_pad_px=ks_params.tessreduce_star_mask_pad_px,
+                tessreduce_star_wing_radii=ks_params.tessreduce_star_wing_radii,
+                tessreduce_extra_exclude=_star_wing_exclusion_for_stage(
+                    cfg, ctx, ks_params.tessreduce_star_wing_radii, shared_mask.shape
+                ),
                 diffs_dir=diff_dir,
                 diffs_label=diffs_l,
                 bkg_dir=bkg_dir,

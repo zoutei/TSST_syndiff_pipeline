@@ -194,6 +194,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `tessreduce_boundary_sigma` | 3.0 | Boundary sigma-clip threshold |
 | `tessreduce_boundary_rim_width` | 1 | Dilation width defining the mask boundary rim |
 | `tessreduce_star_mask_pad_px` | 0 | Grow the catalogue star masks (bits 1\|2) by a disk of this radius before excluding them from the background fit. The mask circles end inside the star's PSF wing, so with 0 the gap fill is solved from rim pixels that carry the wing and lifts the background under every masked star (≈0.1–0.3 e⁻/s at T 10–13 on S24 C2K2; `dev_runs/localbg_20260930`). |
+| `tessreduce_star_wing_radii` | None | Magnitude-sized disks dropped from the background fit pixels, as `[[mag_hi, radius_px], ...]` (`mag_hi` increasing; a star with `tess_mag < mag_hi` of the first matching row gets that radius; fainter stars get none). Stars come from `{lane_root}/gaia_catalog_pipeline.csv`. Only the background fit changes: the shared mask, Hotpants and the scenes are untouched. Recommended (radius where the fitted TESS wing falls below 0.1 e⁻/s on S24 C2K2, `dev_runs/maskfoot_20261001`): `[[6.15,30],[7.1,25],[7.7,21],[8.45,18],[8.9,16],[9.45,14],[9.8,12],[10.1,11],[10.4,10],[10.85,9],[11.45,8],[12.25,7],[13.0,6]]` with `tessreduce_star_mask_pad_px: 0`. It replaces padding: every star gets a disk sized to its own wing, so bright stars no longer leave a bump while faint stars keep their fit pixels. |
 | `output` | `kernel_fit` | Artifact directory label |
 | `hp_*` | HotpantsParams | Round 1 uses stage `hp_bgo`; rounds 2 and 3 force `bgo=0` internally |
 
@@ -214,6 +215,7 @@ Paths are under `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/` when using SCC fiel
 | `tessreduce_smooth_gauss` / `tessreduce_anomaly_gauss` / `tessreduce_qe_spline_degree` / `tessreduce_qe_spline_smooth_mult` | Same robust-TESSreduce knobs as `kernel_fit` (shared estimator) |
 | `tessreduce_boundary_k` / `tessreduce_boundary_sigma` / `tessreduce_boundary_rim_width` | Boundary sigma-clip knobs (same defaults as `kernel_fit`) |
 | `tessreduce_star_mask_pad_px` | Star-mask padding for the background fit (same meaning and default as `kernel_fit`) |
+| `tessreduce_star_wing_radii` | Magnitude-sized star disks for the background fit (same meaning and default as `kernel_fit`) |
 | `output.diffs` / `output.phot_bkg` | e.g. `ks_d` (background-subtracted), `ks_b` (background plane) |
 
 ---
