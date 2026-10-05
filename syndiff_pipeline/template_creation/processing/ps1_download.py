@@ -60,6 +60,7 @@ import argparse
 import concurrent.futures
 import io
 import logging
+import os
 import queue
 import signal
 import subprocess
@@ -547,6 +548,33 @@ def _skycell_name_parts(skycell_id: str) -> tuple[list[str], str, str]:
     return parts, parts[1], f"skycell.{parts[1]}.{parts[2]}"
 
 
+def _load_complete_skycell_from_zarr(zarr_path: Path, skycell_id: str) -> Optional[tuple[dict, dict, dict, dict, dict]]:
+    """Read one skycell's raw bands, masks, weights and headers from a raw Zarr.
+
+    Returns None unless every band has image, mask, weight and both headers, so
+    a partial store never stands in for a download.
+    """
+    _parts, projection, skycell_name = _skycell_name_parts(skycell_id)
+    try:
+        group = zarr.open(str(zarr_path), mode="r")[projection][skycell_name]
+    except (KeyError, FileNotFoundError, ValueError):
+        return None
+    out: tuple[dict, dict, dict, dict, dict] = ({}, {}, {}, {}, {})
+    for band in _PS1_BANDS:
+        names = (band, f"{band}_mask", f"{band}_wt")
+        if not all(name in group for name in names):
+            return None
+        image, mask, weight = (group[name] for name in names)
+        if "header" not in image.attrs or "header" not in weight.attrs:
+            return None
+        out[0][band] = np.array(image)
+        out[1][band] = np.array(mask)
+        out[2][band] = np.array(weight)
+        out[3][band] = image.attrs["header"]
+        out[4][band] = weight.attrs["header"]
+    return out
+
+
 def fetch_skycell_bands_masks_and_headers(
     skycell_id: str,
     *,
@@ -557,8 +585,22 @@ def fetch_skycell_bands_masks_and_headers(
     """Download/decompress a skycell in memory (no Zarr write).
 
     Returns the same tuple shape as ``zarr_utils.load_skycell_bands_masks_and_headers``.
+
+    Opt-in for the removal-ledger backfill (unset = unchanged behaviour):
+    ``SYNDIFF_RAW_ZARR`` names a raw skycell Zarr to read first; it is used only
+    when all twelve arrays and all eight headers are present, otherwise the
+    cell is downloaded. ``SYNDIFF_PS1_DOWNLOAD_WORKERS`` overrides
+    ``max_workers`` for the download.
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, _ARRAYS_PER_SKYCELL)) as executor:
+    raw_zarr = os.environ.get("SYNDIFF_RAW_ZARR")
+    if raw_zarr and not use_local_files:
+        cached = _load_complete_skycell_from_zarr(Path(raw_zarr), skycell_id)
+        if cached is not None:
+            print(f"{skycell_id} raw_source zarr {raw_zarr}", flush=True)
+            return cached
+        print(f"{skycell_id} raw_source download (not complete in {raw_zarr})", flush=True)
+    workers = int(os.environ.get("SYNDIFF_PS1_DOWNLOAD_WORKERS", max_workers))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(workers, _ARRAYS_PER_SKYCELL)) as executor:
         return _fetch_skycell_with_executor(
             skycell_id,
             use_local_files=use_local_files,
