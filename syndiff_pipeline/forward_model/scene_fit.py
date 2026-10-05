@@ -526,7 +526,7 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
                bg_cheb_order: int = -1,
                stamp_bg: str = "none", stamp_bg_r_in: float = 5.0, stamp_bg_r_out: float = 7.0,
                stamp_bg_clip: float = 3.0, stamp_bg_prior_sigma=None, stamp_bg_nb_frac: float = 0.01,
-               stamp_bg_nb_radius: float = 3.0):
+               stamp_bg_nb_radius: float = 3.0, penalty_nref: float = 0.0):
     """(loss_fn, diagnose), plus ``render_and_solve(params, st) -> (T, f)`` when
     ``return_templates``.
 
@@ -545,6 +545,15 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
     ``st`` may carry ``bg_coef_fixed`` (M,) and/or ``stamp_bg_fixed`` (N,) to hold those terms
     at given values instead of solving them (e.g. to split a model into flux-independent and
     per-star parts). ``diagnose.components(params, st) -> (f, c, b)`` exposes the solve.
+
+    Model-error floor: if ``st`` carries ``var_eff`` (N, S2), it replaces the stored variance in the
+    flux solve and in the loss (both the chi^2 and the 0.5 ln var term). It is state, not a parameter,
+    so no gradient flows through it; ``run`` refreshes it from ``diagnose.model``. ``diagnose`` still
+    reports chi^2_core against the stored variance, so scores stay comparable across noise models.
+
+    ``penalty_nref`` > 0 multiplies every ePSF penalty by penalty_nref / N_pix (N_pix = valid owned
+    pixels of this scene). The data term is a mean over N_pix, so this keeps the penalty's strength
+    relative to the data the same in every scene and fold. 0 = off (penalties unscaled).
     """
     S2 = scene.S * scene.S
     N, U = scene.N, scene.U
@@ -577,6 +586,8 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
     pmask = jnp.asarray(z["pair_mask"], jnp.float32)
     nuis = jnp.asarray(scene.role == ROLE_NUISANCE, jnp.float32)
     core = jnp.asarray(z["core"], jnp.float32)
+    n_pix_static = float(np.sum(np.asarray(z["valid"]) & np.asarray(z["owner"])))
+    pen_fac = float(penalty_nref) / max(n_pix_static, 1.0) if penalty_nref > 0 else 1.0
 
     def templates(params):
         T = jnp.zeros((N, S2), jnp.float32)
@@ -624,7 +635,7 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
         # fluxes are the weighted-L2 optimum, so they are not stationary points of the
         # loss and holding them fixed would drop a real gradient term (measured 4% on
         # wcs_coeff and >10x on epsf_base_raw on the smoke scene).
-        a_ = arrs
+        a_ = dict(arrs, var=st["var_eff"]) if "var_eff" in st else arrs
         phi_, ped_, c_fix, b_fix = phi, ped, None, None
         if use_bg and "bg_coef_fixed" in st:
             c_fix = st["bg_coef_fixed"]
@@ -650,9 +661,10 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
         T = templates(params)
         f, c, b = solve(T, st)
         m = scene_model(T, f, c, b)
-        chi = (data - m) / jnp.sqrt(var)
+        var_l = st["var_eff"] if "var_eff" in st else var
+        chi = (data - m) / jnp.sqrt(var_l)
         pw = valid * owner * st["pix_active_u"][uid]
-        ell = 0.5 * L.huber_rho(chi, huber_delta) + 0.5 * jnp.log(var)
+        ell = 0.5 * L.huber_rho(chi, huber_delta) + 0.5 * jnp.log(var_l)
         data_term = jnp.sum(pw * ell) / jnp.clip(jnp.sum(pw), 1.0, None)
         base = L.decoded_epsf_base(params)
         lap = L.node_smoothness_penalty(base[None])
@@ -662,8 +674,12 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
                 else jnp.zeros((), jnp.float32))
         lpoly = (L.local_poly_penalty(base, local_poly_window, local_poly_orders, local_poly_radii)
                  if lambda_local_poly > 0 else jnp.zeros((), jnp.float32))
-        loss = (data_term + lambda_lap * lap + lambda_pixel * pix_lap + lambda_fine_nbr * fine
-                + lambda_local_poly * lpoly)
+        if penalty_nref > 0:
+            loss = data_term + pen_fac * (lambda_lap * lap + lambda_pixel * pix_lap + lambda_fine_nbr * fine
+                                          + lambda_local_poly * lpoly)
+        else:   # historical expression, kept verbatim so the default path stays bit-identical
+            loss = (data_term + lambda_lap * lap + lambda_pixel * pix_lap + lambda_fine_nbr * fine
+                    + lambda_local_poly * lpoly)
         aux = {"loss": loss, "data_term": data_term, "lap": lap, "pixel_lap": pix_lap,
                "fine_nbr": fine, "local_poly": lpoly, "n_pix": jnp.sum(pw)}
         if use_bg:
@@ -684,7 +700,28 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
     def components(params, st):
         return solve(templates(params), st)
 
+    def model_pixels(params, st):
+        """Scene model (N, S2) in e-/s with the current fluxes; input to the model-error floor."""
+        T = templates(params)
+        f, c, b = solve(T, st)
+        return scene_model(T, f, c, b)
+
+    pos_ctx = [(idx, ctx) for r, idx, ctx in ctxs if r != ROLE_NUISANCE]
+
+    def positions(params):
+        """Detector x, y (px) of every contributor and anchor from the WCS leaf (stop-rule check)."""
+        xs, ys = [], []
+        for idx, ctx in pos_ctx:
+            x_t, y_t = L.CW.eval_all_positions(ctx.x_lin, ctx.y_lin, ctx.cheb_basis, params["wcs_coeff"],
+                                               ctx.wcs_frame_basis, ctx.n_terms)
+            xs.append(jnp.ravel(x_t)); ys.append(jnp.ravel(y_t))
+        return jnp.concatenate(xs), jnp.concatenate(ys)
+
     diagnose.components = components
+    diagnose.model = model_pixels
+    diagnose.positions = positions
+    diagnose.n_pix_static = n_pix_static
+    diagnose.pen_fac = pen_fac
 
     if return_templates:
         def render_and_solve(params, st):
@@ -984,6 +1021,7 @@ def run(args):
         stamp_bg=args.stamp_bg, stamp_bg_r_in=args.stamp_bg_r_in, stamp_bg_r_out=args.stamp_bg_r_out,
         stamp_bg_clip=args.stamp_bg_clip, stamp_bg_prior_sigma=args.stamp_bg_prior_sigma,
         stamp_bg_nb_frac=args.stamp_bg_nb_frac, stamp_bg_nb_radius=args.stamp_bg_nb_radius,
+        penalty_nref=args.penalty_nref,
     )
     loss_fn, diagnose = make_model(scene, **model_kw)
     if args.bg_cheb_order >= 0:
@@ -1121,6 +1159,37 @@ def run(args):
     steps = [int(s) for s in args.steps_per_stage.split(",")]
     lrs = [float(s) for s in args.lr_per_stage.split(",")]
     global_step = 0
+    smoothed = args.stop_rule == "smoothed"
+    use_floor = args.model_floor_eps > 0 or args.noise_scale != 1.0
+    if use_floor or smoothed:
+        var0 = np.asarray(L.pixel_variance(jnp.asarray(scene.z["noise"])), np.float64)
+        model_j = jax.jit(diagnose.model)
+        pos_j = jax.jit(diagnose.positions)
+        free_mask = np.asarray(scene.role) == ROLE_CONTRIB
+        _log(f"stop rule {args.stop_rule}; floor eps={args.model_floor_eps} noise_scale={args.noise_scale}; "
+             f"penalty_nref={args.penalty_nref} (factor {diagnose.pen_fac:.6g}, N_pix {diagnose.n_pix_static:.0f})")
+    stage_outcomes = []
+
+    def refresh_floor(p, s):
+        """var_eff = (s sigma)^2 + (eps m)^2 from the current model; returns new state and median change."""
+        m = np.asarray(model_j(p, s), np.float64)
+        ve = args.noise_scale ** 2 * var0 + (args.model_floor_eps * m) ** 2
+        prev = np.asarray(s["var_eff"], np.float64) if "var_eff" in s else None
+        new_s = dict(s)
+        new_s["var_eff"] = jnp.asarray(ve, jnp.float32)
+        ok = np.asarray(scene.z["valid"]) & np.isfinite(ve) & (ve > 0)
+        # judge the change where the floor matters (floor term > scaled noise term); sky pixels barely move
+        fl = ok & ((args.model_floor_eps * m) ** 2 > args.noise_scale ** 2 * var0)
+        sel = fl if fl.sum() >= 100 else ok
+        chg = (float(np.median(np.abs(np.sqrt(ve[sel] / prev[sel]) - 1.0))) if prev is not None
+               else float("inf"))
+        return new_s, chg, float(np.median(np.sqrt(ve[sel] / var0[sel])))
+
+    def hist_event(rec):
+        with hist_path.open("a") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        _log(f"  event: {rec}")
+
     for stage in range(start_stage, 4):
         n_steps = steps[stage - 1]
         if n_steps <= 0:
@@ -1137,6 +1206,25 @@ def run(args):
         def stage_loss(p, s, _labels=labels):
             return loss_fn(FIT.stop_grad_frozen_params(p, _labels), s)
 
+        if use_floor:
+            st, chg, med = refresh_floor(params, st)
+            hist_event({"event": "floor_refresh", "stage": stage, "step": 0, "median_sigma_eff_over_sigma": med})
+
+        buckets = sorted({v for k, v in labels.items() if k in keys and v != "frozen"})
+
+        @jax.jit
+        def step_fn_smoothed(p, o, s, freeze_wcs, lr_mult):
+            (lv, met), g = jax.value_and_grad(stage_loss, has_aux=True)(p, s)
+            g = dict(g)
+            g["wcs_coeff"] = g["wcs_coeff"] * (1.0 - freeze_wcs)
+            upd, o = opt.update(g, o, p)
+            # Adam's update is linear in its learning rate, so scaling the update IS the lr decay
+            upd = jax.tree_util.tree_map(lambda u: u * lr_mult, upd)
+            p = optax.apply_updates(p, upd)
+            gn = optax.global_norm(g)
+            gb = {bk: optax.global_norm({k: g[k] for k in g if labels.get(k) == bk}) for bk in buckets}
+            return p, o, met, gn, gb
+
         @jax.jit
         def step_fn(p, o, s, freeze_wcs):
             (lv, met), g = jax.value_and_grad(stage_loss, has_aux=True)(p, s)
@@ -1151,13 +1239,20 @@ def run(args):
              f"{sorted(k for k, v in labels.items() if v != 'frozen' and k in keys)}")
         losses: list[float] = []
         last_refresh_changed = None
+        lr_mult, n_decay, reason = 1.0, 0, "cap"
+        win: list[float] = []          # smoothed rule: losses since the last restart
+        snaps: dict[int, tuple] = {}   # smoothed rule: step-since-restart -> (x, y, flux)
+        since = 0
         first = start_step if stage == start_stage else 0
         t_stage = time.time()
         step = first
         while step < n_steps:
             freeze = 1.0 if (stage == 2 and step < args.stage2_freeze_wcs_steps) else 0.0
             ts = time.time()
-            params, opt_state, met, gn = step_fn(params, opt_state, st, freeze)
+            if smoothed:
+                params, opt_state, met, gn, gb = step_fn_smoothed(params, opt_state, st, freeze, lr_mult)
+            else:
+                params, opt_state, met, gn = step_fn(params, opt_state, st, freeze)
             lv = float(met["loss"])
             dt = time.time() - ts
             if not np.isfinite(lv):
@@ -1168,6 +1263,9 @@ def run(args):
                    "pixel_lap": float(met["pixel_lap"]), "fine_nbr": float(met["fine_nbr"]),
                    "local_poly": float(met["local_poly"]), "n_pix": float(met["n_pix"]),
                    "grad_norm": float(gn), "step_s": dt, "t": time.time()}
+            if smoothed:
+                rec["grad_norm_bucket"] = {k: float(v) for k, v in gb.items()}
+                rec["lr_mult"] = lr_mult
             if "bright_width" in params:
                 rec["bright_width_b"] = BW.leaf_to_b(params["bright_width"])
             if args.bg_cheb_order >= 0:
@@ -1182,10 +1280,52 @@ def run(args):
             step += 1
             global_step += 1
 
+            # smoothed stop rule (see --stop-rule): plateau of the w-step running mean over lag K AND
+            # physical quantities still -> lr decay, after --lr-decays decays the next plateau ends the stage
+            plateau_stop = False
+            if smoothed:
+                win.append(lv)
+                since += 1
+                K, w = args.stop_lag, args.stop_window
+                if since % args.stop_check == 0:
+                    f_now, _, _ = diag_j(params, st)
+                    xs, ys = pos_j(params)
+                    snaps[since] = (np.asarray(xs), np.asarray(ys), np.asarray(f_now, np.float64))
+                    for kk in [k for k in snaps if k < since - K]:
+                        del snaps[kk]
+                    if len(win) >= K + w and (since - K) in snaps:
+                        lt, lk = float(np.mean(win[-w:])), float(np.mean(win[-K - w:-K]))
+                        s_rel = (lk - lt) / max(abs(lt), 1e-12)
+                        x0_, y0_, f0_ = snaps[since - K]
+                        x1_, y1_, f1_ = snaps[since]
+                        dpos = float(np.max(np.hypot(x1_ - x0_, y1_ - y0_))) * 1e3
+                        okf = free_mask & np.isfinite(f1_) & np.isfinite(f0_) & (np.abs(f1_) > 0)
+                        dflux = float(np.median(np.abs((f1_[okf] - f0_[okf]) / f1_[okf])))
+                        hist_event({"event": "stop_check", "stage": stage, "step": step, "s_rel": s_rel,
+                                    "dpos_mpx": dpos, "dflux": dflux, "lr_mult": lr_mult})
+                        if s_rel < args.stop_tol and dpos < args.stop_wcs_mpx and dflux < args.stop_flux_tol:
+                            restart = False
+                            if use_floor:
+                                st, chg, med = refresh_floor(params, st)
+                                hist_event({"event": "floor_refresh", "stage": stage, "step": step,
+                                            "median_rel_change": chg, "median_sigma_eff_over_sigma": med})
+                                if chg > args.floor_tol:
+                                    restart = True
+                            if not restart and n_decay < args.lr_decays:
+                                n_decay += 1
+                                lr_mult *= args.lr_decay
+                                hist_event({"event": "lr_decay", "stage": stage, "step": step,
+                                            "lr_mult": lr_mult})
+                                restart = True
+                            if restart:
+                                win, snaps, since = [], {}, 0
+                            else:
+                                plateau_stop, reason = True, "plateau"
+
             # rejection refresh
             converged = False
             p_ = args.early_stop_patience
-            if len(losses) > p_:
+            if not smoothed and len(losses) > p_:
                 rel = abs(losses[-1 - p_] - losses[-1]) / max(abs(losses[-1 - p_]), 1e-12)
                 converged = rel < args.early_stop_tol
             if refresh_due(stage, step, reject_every=args.reject_every, burn_in=args.reject_burn_in,
@@ -1204,7 +1344,7 @@ def run(args):
                 if rstats["n_changed"]:
                     losses = []  # the pixel set changed; loss history is not comparable
                     converged = False
-            if step % args.checkpoint_every == 0 or step == n_steps or converged:
+            if step % args.checkpoint_every == 0 or step == n_steps or converged or plateau_stop:
                 FIT.save_params_npz(out / "params_latest.npz", params)
                 save_state(out / "state_latest.npz", st)
                 prog_path.write_text(json.dumps({"stage": stage, "step": step}))
@@ -1212,10 +1352,19 @@ def run(args):
                     FIT.save_params_npz(out / "checkpoints" / f"params_s{stage}_step{step:05d}.npz",
                                         params)
             if converged:
+                reason = "plateau"
                 _log(f"  early stop at stage {stage} step {step} "
                      f"(rel change < {args.early_stop_tol} over {p_} steps)")
                 break
+            if plateau_stop:
+                _log(f"  plateau stop at stage {stage} step {step} after {n_decay} lr decays")
+                break
         _log(f"stage {stage} done in {(time.time() - t_stage) / 60:.1f} min")
+        outcome = {"stage": stage, "steps": step, "cap": n_steps, "reason": reason,
+                   "converged": reason == "plateau", "lr_mult": lr_mult, "n_lr_decays": n_decay}
+        stage_outcomes.append(outcome)
+        if smoothed or use_floor:
+            hist_event(dict(outcome, event="stage_end"))
         FIT.save_params_npz(out / f"params_stage{stage}.npz", params)
         save_state(out / f"state_stage{stage}.npz", st)
         prog_path.write_text(json.dumps({"stage": stage + 1, "step": 0}))
@@ -1243,7 +1392,10 @@ def run(args):
     save_state(out / "flux_solved.npz", st, extra=extra)
     if "bright_width" in params:
         run_meta["bright_width_model"]["b_final"] = BW.leaf_to_b(params["bright_width"])
-    if "bright_width" in params or args.bg_cheb_order >= 0 or args.stamp_bg != "none":
+    if args.stop_rule == "smoothed" or args.model_floor_eps > 0 or args.noise_scale != 1.0:
+        run_meta["stage_outcomes"] = stage_outcomes
+    if ("bright_width" in params or args.bg_cheb_order >= 0 or args.stamp_bg != "none"
+            or "stage_outcomes" in run_meta):
         (out / "fit_meta.json").write_text(json.dumps(run_meta, indent=1, default=str))
         if "bright_width" in params:
             _log(f"bright_width: b_final={run_meta['bright_width_model']['b_final']:.4g} px^2 per 1e4 e-")
@@ -1384,6 +1536,31 @@ def build_parser() -> argparse.ArgumentParser:
                         "steps. 200 since 2026-09-29 (was 30): with rejection really off, Adam's oscillation "
                         "met the 30-step rule after 37-425 steps and left new colour terms untrained")
     p.add_argument("--early-stop-tol", type=float, default=1e-5)
+    # training fixes 2026-10-05 (dev/forward_epsf_wcs/docs/TRAINING_FIXES_PLAN_20261005.md); all off by default
+    p.add_argument("--stop-rule", choices=("point", "smoothed"), default="point",
+                   help="point: the --early-stop-* two-point rule (historical). smoothed: plateau when the "
+                        "--stop-window running mean of the loss falls by < --stop-tol (relative) over --stop-lag "
+                        "steps AND the WCS moves < --stop-wcs-mpx and contributor fluxes < --stop-flux-tol over the "
+                        "same lag; each plateau multiplies every lr by --lr-decay, after --lr-decays decays the "
+                        "next plateau ends the stage. Stage lengths in --steps-per-stage become safety caps")
+    p.add_argument("--stop-window", type=int, default=50)
+    p.add_argument("--stop-lag", type=int, default=500)
+    p.add_argument("--stop-check", type=int, default=100, help="steps between smoothed-rule checks")
+    p.add_argument("--stop-tol", type=float, default=1e-4)
+    p.add_argument("--stop-wcs-mpx", type=float, default=0.5)
+    p.add_argument("--stop-flux-tol", type=float, default=1e-4)
+    p.add_argument("--lr-decay", type=float, default=0.3)
+    p.add_argument("--lr-decays", type=int, default=2)
+    p.add_argument("--model-floor-eps", type=float, default=0.0,
+                   help="fractional model-error floor: var_eff = (noise_scale sigma)^2 + (eps m)^2, m = scene model "
+                        "frozen at each refresh (stage start and every plateau); used in flux solve and loss")
+    p.add_argument("--noise-scale", type=float, default=1.0, help="multiplies the stored noise in var_eff")
+    p.add_argument("--floor-tol", type=float, default=0.01,
+                   help="a plateau refresh that changes median sigma_eff by more than this restarts the window "
+                        "instead of decaying the lr")
+    p.add_argument("--penalty-nref", type=float, default=0.0,
+                   help="> 0: scale every ePSF penalty by penalty_nref / N_pix so lambda means the same in every "
+                        "scene/fold (F1 fold-0 N_pix 1581636 keeps the 10-04 F1 fold-0 balance)")
     p.add_argument("--log-every", type=int, default=1)
     p.add_argument("--checkpoint-every", type=int, default=20)
     return p
