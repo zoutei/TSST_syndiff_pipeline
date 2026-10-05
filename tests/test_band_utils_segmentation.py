@@ -14,6 +14,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from syndiff_pipeline.template_creation.processing.band_utils import (
+    REMOVAL_CONVENTION_FOOTPRINT,
     SepBackgroundResult,
     build_sep_background_segmentation,
     catalog_segment_assignments,
@@ -171,6 +172,7 @@ class TestRemoveBackgroundRegression:
             remove_saturated_stars=True,
             gaia_catalog_pixels=catalog,
             bright_star_mag_threshold=13.0,
+            convention=REMOVAL_CONVENTION_FOOTPRINT,  # segment-based removal (starmodel_v1: test_band_utils_starmodel)
         )
 
         assert len(removed) == 1

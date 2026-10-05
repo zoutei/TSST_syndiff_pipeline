@@ -138,6 +138,7 @@ def _process_one_frame(task: tuple) -> dict:
         tessreduce_boundary_k=int(p.get("tessreduce_boundary_k", 15)),
         tessreduce_boundary_sigma=float(p.get("tessreduce_boundary_sigma", 3.0)),
         tessreduce_boundary_rim_width=int(p.get("tessreduce_boundary_rim_width", 1)),
+        tessreduce_star_mask_pad_px=int(p.get("tessreduce_star_mask_pad_px", 0)),
     )
 
     write_path: Optional[Path] = None
@@ -266,6 +267,7 @@ def _process_one_frame(task: tuple) -> dict:
             boundary_k=int(p.get("tessreduce_boundary_k", 15)),
             boundary_sigma=float(p.get("tessreduce_boundary_sigma", 3.0)),
             boundary_rim_width=int(p.get("tessreduce_boundary_rim_width", 1)),
+            star_mask_pad_px=int(p.get("tessreduce_star_mask_pad_px", 0)),
         )
         total_bkg = tessreduce_bkg
         diff_final = diff_raw - total_bkg
@@ -425,6 +427,7 @@ def kernel_subtract_loop(
     tessreduce_boundary_k: int = 15,
     tessreduce_boundary_sigma: float = 3.0,
     tessreduce_boundary_rim_width: int = 1,
+    tessreduce_star_mask_pad_px: int = 0,
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
     n_jobs: int = 1,
@@ -501,6 +504,7 @@ def kernel_subtract_loop(
         "tessreduce_boundary_k": int(tessreduce_boundary_k),
         "tessreduce_boundary_sigma": float(tessreduce_boundary_sigma),
         "tessreduce_boundary_rim_width": int(tessreduce_boundary_rim_width),
+        "tessreduce_star_mask_pad_px": int(tessreduce_star_mask_pad_px),
         "diffs_dir": diffs_dir,
         "bkg_dir": bkg_dir,
         "diffs_label": diffs_label,

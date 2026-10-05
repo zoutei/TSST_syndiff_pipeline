@@ -162,6 +162,8 @@ def config_fingerprint(
                 str(pp.bright_star_mag_threshold),
             ]
         )
+        if getattr(pp, "band_weights", None) is not None:
+            parts.append(json.dumps(pp.band_weights, sort_keys=True))
     elif stage == "remap":
         rm = resolved.stages.remap
         mp = resolved.stages.mapping
@@ -1353,9 +1355,17 @@ def _shared_convolved_cell_published(
     shared_root: Path,
     full_skycell_name: str,
     *,
-    combined_recipe: dict | None = None,
-    psf_sigma: float | None = None,
+    canonical_context: dict | None = None,
 ) -> bool:
+    """Is this cell's canonical convolved payload published?
+
+    With ``canonical_context`` (``data_root``, ``mapping_df``,
+    ``combined_recipe``, ``convolved_recipe``) this checks the exact schema-v2
+    fingerprint *this run* must use -- its own combined fingerprint plus its
+    canonical neighbour set from this SCC's mapping list -- never "some
+    fingerprint exists" (a stale or other-run artifact passing the gate is
+    invariant 6). Without it, falls back to the legacy existence probe.
+    """
     from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
 
     parsed = _projection_and_cell(full_skycell_name)
@@ -1363,32 +1373,19 @@ def _shared_convolved_cell_published(
         return False
     projection, cell = parsed
 
-    if combined_recipe is not None and psf_sigma is not None:
-        # Recipe-aware check (preferred): confirm *this run's own recipe* is
-        # actually published, not merely "some fingerprint exists" -- the
-        # shared store is cross-sector/cross-run, so an unrelated recipe can
-        # be published for the same cell without this run's recipe ever
-        # having been produced. See ``combined_store``/``convolved_store``
-        # recipe-matched resolvers and ``docs/markdown/storage_layout.md``.
-        from syndiff_pipeline.template_creation.processing.combined_store import (
-            resolve_combined_fingerprint_for_recipe,
-        )
-        from syndiff_pipeline.template_creation.processing.convolved_store import (
-            convolved_recipe as _convolved_recipe_fn,
-            resolve_convolved_fingerprint_for_recipe,
+    if canonical_context is not None:
+        from syndiff_pipeline.template_creation.processing.canonical_cell import (
+            metadata_for_cell,
+            resolve_canonical_convolved_fp,
         )
 
-        data_root = shared_root.parent.parent
-        combined_fp = resolve_combined_fingerprint_for_recipe(
-            data_root, projection, cell, combined_recipe
-        )
-        if combined_fp is None:
-            return False
-        recipe = _convolved_recipe_fn(psf_sigma=psf_sigma)
-        return (
-            resolve_convolved_fingerprint_for_recipe(data_root, projection, cell, recipe, combined_fp)
-            is not None
-        )
+        return resolve_canonical_convolved_fp(
+            canonical_context["data_root"],
+            full_skycell_name,
+            metadata_for_cell(canonical_context["mapping_df"], full_skycell_name),
+            canonical_context["combined_recipe"],
+            canonical_context["convolved_recipe"],
+        ) is not None
 
     cell_root = shared_root / projection / cell
     if not cell_root.is_dir():
@@ -1402,19 +1399,42 @@ def _shared_convolved_cell_published(
     return False
 
 
+def _canonical_context(resolved: ResolvedTargetConfig) -> dict | None:
+    """Recipes and mapping list ps1_process used for this target, or ``None``
+    if they can't be resolved (the caller then reports missing cells)."""
+    from syndiff_pipeline.template_creation.processing.combined_store import production_combined_recipe
+    from syndiff_pipeline.template_creation.processing.convolved_store import convolved_recipe
+    from syndiff_pipeline.template_creation.processing.csv_utils import load_csv_data
+
+    try:
+        params = resolved.stages.ps1_process
+        t = resolved.target
+        return {
+            "data_root": resolved.data_root,
+            "mapping_df": load_csv_data(str(_mapping_csv_path(resolved))),
+            "combined_recipe": production_combined_recipe(
+                params, data_root=resolved.data_root, sector=t.sector, camera=t.camera, ccd=t.ccd,
+            ),
+            "convolved_recipe": convolved_recipe(psf_sigma=float(getattr(params, "psf_sigma", 40.0))),
+        }
+    except Exception:
+        log.warning("ps1_process verify: could not resolve canonical recipe context", exc_info=True)
+        return None
+
+
 def _count_shared_convolved_cells(
     shared_root: Path,
     expected_names: list[str],
     *,
-    combined_recipe: dict | None = None,
-    psf_sigma: float | None = None,
+    resolved: ResolvedTargetConfig | None = None,
 ) -> tuple[int, list[str]]:
+    context = _canonical_context(resolved) if resolved is not None else None
+    if resolved is not None and context is None:
+        return 0, list(expected_names)
     missing: list[str] = []
     saved = 0
     for name in expected_names:
-        if _shared_convolved_cell_published(
-            shared_root, name, combined_recipe=combined_recipe, psf_sigma=psf_sigma,
-        ):
+        if _shared_convolved_cell_published(shared_root, name, canonical_context=context):
             saved += 1
         else:
             missing.append(name)
@@ -1465,7 +1485,7 @@ def verify_ps1_process(
 
     started = time.monotonic()
     if shared_store:
-        saved, missing = _count_shared_convolved_cells(zarr_path, expected)
+        saved, missing = _count_shared_convolved_cells(zarr_path, expected, resolved=resolved)
     else:
         saved, missing = _count_convolved_data_arrays(zarr_path, expected)
     elapsed = time.monotonic() - started
@@ -2205,7 +2225,7 @@ def collect_stage_artifacts(
         if not zarr_path.exists():
             return len(expected), 0, [str(zarr_path)]
         if ps1_process_uses_shared_convolved_store(resolved):
-            saved, _missing = _count_shared_convolved_cells(zarr_path, expected)
+            saved, _missing = _count_shared_convolved_cells(zarr_path, expected, resolved=resolved)
         else:
             saved, _missing = _count_convolved_data_arrays(zarr_path, expected)
         return len(expected), saved, [str(zarr_path)]

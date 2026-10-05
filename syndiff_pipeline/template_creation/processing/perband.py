@@ -220,15 +220,15 @@ def convolve_band_cells(
     radius: int,
     bands: tuple[str, ...] = BANDS,
 ) -> Optional[dict[str, np.ndarray]]:
-    """Gaussian pre-blur of each band cell exactly as production's whole-row path blurs the
-    combined cell (``blur_cell_row_path``), so ``sum_b`` of the result equals the canonical
-    convolved cell to float32 rounding.
+    """Gaussian pre-blur of each band cell as the canonical cell (schema v3,
+    ``canonical_cell.canonical_cell_image`` via ``blur_cell_row_path``), so ``sum_b`` of the
+    result equals the canonical convolved cell of the combined image to float32 rounding.
 
     Not built on ``ps1_process.convolve_single_skycell`` (the sparse per-cell path): that takes
     neighbour strips from columns/rows [0, radius) of the neighbour, but same-projection cells
     overlap by CELL_OVERLAP = 480 px, so those strips duplicate the centre cell's own edge
     instead of the sky beyond it (2026-09-28: up to 55% of peak vs the canonical cell of
-    skycell.2484.033 within 480 px of its edges; the row path agrees to 8e-8).
+    skycell.2484.033 within 480 px of its edges; the canonical cell agrees to 8e-8).
 
     ``fetch_band_cells(name)`` returns ``{band: C_b}`` for a cell or None (missing -> NaN,
     as in production). Returns ``{band: blurred}``.
@@ -253,45 +253,6 @@ def convolve_band_cells(
     return out
 
 
-def _assemble_row_window(
-    row_cells: list[tuple[str, int]],
-    fetch_image: Callable[[str], Optional[np.ndarray]],
-    col0: int,
-    col1: int,
-    cell_w: int,
-    cell_h: int,
-) -> np.ndarray:
-    """Columns [col0, col1) of production's master row array (``assemble_row_from_bundles``).
-
-    Same placement: cell index = x - (first x in the row); the first cell is written in
-    full, later ones from column EFFECTIVE_OVERLAP on, left to right. Missing cells stay NaN.
-    """
-    from syndiff_pipeline.template_creation.processing.ps1_process import (
-        CELL_OVERLAP, EFFECTIVE_OVERLAP, PAD_SIZE)
-
-    out = np.full((cell_h + 2 * PAD_SIZE, col1 - col0), np.nan, dtype=np.float32)
-    if not row_cells:
-        return out
-    ordered = sorted(row_cells, key=lambda t: int(t[1]))
-    first_x = int(ordered[0][1])
-    for name, x in ordered:
-        idx = int(x) - first_x
-        full = PAD_SIZE + idx * (cell_w - CELL_OVERLAP)
-        src0 = 0 if idx == 0 else EFFECTIVE_OVERLAP
-        t0 = full + src0
-        if t0 + (cell_w - src0) <= col0 or t0 >= col1:
-            continue
-        img = fetch_image(name)
-        if img is None:
-            continue
-        h, w = img.shape
-        a, b = max(t0, col0), min(t0 + (w - src0), col1)
-        if b <= a:
-            continue
-        out[PAD_SIZE:PAD_SIZE + h, a - col0:b - col0] = img[:, src0 + (a - t0):src0 + (b - t0)]
-    return out
-
-
 def blur_cell_row_path(
     cell_name: str,
     metadata: dict,
@@ -299,45 +260,17 @@ def blur_cell_row_path(
     psf_sigma: float,
     radius: int,
 ) -> Optional[np.ndarray]:
-    """Production's whole-row-path blurred cell, computed on a local window.
+    """The canonical cell (schema v3) for one plane (e.g. one band).
 
-    Replicates ``assemble_row_from_bundles`` for rows R-1, R, R+1 (each anchored at its own
-    first x), ``apply_cross_row_padding`` between them (R's bottom pad from R-1, R's top pad
-    from R+1), NaN -> 0, ``apply_gaussian_convolution``, NaN restored, and the cell region of
-    ``extract_cell_results``. The window spans the cell plus PAD_SIZE (>= radius) on each side,
-    so every output pixel sees exactly the inputs the full row array would give it.
-    ``fetch_image(name)`` returns one plane (e.g. one band) for a cell, or None.
+    Delegates to ``canonical_cell.canonical_cell_image``, the single reference geometry
+    (projection-wide x anchor, left-neighbour write rule, one-writer rule for vertical row
+    overlaps), so per-band templates get exactly the canonical cell's geometry and
+    ``sum_b`` of the per-band cells equals the canonical cell of the summed planes.
+    ``fetch_image(name)`` returns one plane for a cell, or None. Returns None if the cell is
+    not in ``metadata`` or its own plane is missing.
     """
-    from syndiff_pipeline.template_creation.processing import convolution_utils
-    from syndiff_pipeline.template_creation.processing.ps1_process import (
-        CELL_OVERLAP, EDGE_EXCLUSION, PAD_SIZE)
+    from syndiff_pipeline.template_creation.processing import canonical_cell
 
-    rows = metadata["rows"]
-    row_of = {n: (r, x) for r, cells in rows.items() for n, x in cells}
-    if cell_name not in row_of:
+    if not any(cell_name == n for cells in metadata["rows"].values() for n, _ in cells):
         return None
-    R, x = row_of[cell_name]
-    cell_w, cell_h = int(metadata["cell_width"]), int(metadata["cell_height"])
-    first_x = min(int(xx) for _, xx in rows[R])
-    full = PAD_SIZE + (int(x) - first_x) * (cell_w - CELL_OVERLAP)
-    col0, col1 = full - PAD_SIZE, full + cell_w + PAD_SIZE
-
-    def row_window(r):
-        cells = rows.get(r, [])
-        if not cells:
-            return np.full((cell_h + 2 * PAD_SIZE, col1 - col0), np.nan, dtype=np.float32)
-        # Adjacent rows are indexed by their own first x; the cross-row copy is column-for-column.
-        return _assemble_row_window(cells, fetch_image, col0, col1, cell_w, cell_h)
-
-    cur = row_window(R)
-    if R - 1 in rows:   # when R-1 was "current" and R "next": next[:PAD+EE] = current[h-OV : PAD+h-OV+EE]
-        prev = row_window(R - 1)
-        cur[:PAD_SIZE + EDGE_EXCLUSION] = prev[cell_h - CELL_OVERLAP:PAD_SIZE + cell_h - CELL_OVERLAP + EDGE_EXCLUSION]
-    if R + 1 in rows:   # current[h-EE+PAD:] = next[PAD+OV-EE : 2PAD+OV]
-        nxt = row_window(R + 1)
-        cur[cell_h - EDGE_EXCLUSION + PAD_SIZE:] = nxt[PAD_SIZE + CELL_OVERLAP - EDGE_EXCLUSION:2 * PAD_SIZE + CELL_OVERLAP]
-    nan_mask = np.isnan(cur)
-    cur[nan_mask] = 0.0
-    conv = convolution_utils.apply_gaussian_convolution(cur, sigma=psf_sigma, radius=radius)
-    conv[nan_mask] = np.nan
-    return np.asarray(conv[PAD_SIZE:PAD_SIZE + cell_h, PAD_SIZE:PAD_SIZE + cell_w]).copy()
+    return canonical_cell.canonical_cell_image(cell_name, metadata, fetch_image, psf_sigma, radius)

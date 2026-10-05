@@ -105,13 +105,18 @@ def test_row_starting_at_global_minimum_still_places_all_cells():
 
 
 def test_row_offset_placement_is_self_consistent_and_in_bounds():
-    """The row-local first cell should use the untrimmed (cell_index == 0)
-    branch, and every placed cell's bounds must fit inside the master array
-    -- the two symptoms of the original bug."""
+    """Projection-anchor rule (seam fix, doc/seam_neighbour_fix_plan_20260930.md):
+    every row is placed at ONE anchor, the projection's minimum x, so a cell
+    lands at PAD + (x - anchor) * (W - CELL_OVERLAP). A row that starts right
+    of the anchor is placed at its true slot (the old per-row anchor put its
+    first cell at PAD_SIZE, misaligning cross-row padding), and every placed
+    cell fits inside the master array."""
     df = _projection_df()
     metadata = pp.extract_projection_metadata(df, "skycell.9999")
     config = pp.create_master_array_config(metadata)
     state = pp.initialize_processing_state(config)
+    anchor = metadata["starting_x"]
+    width = config.cell_width
 
     row1_bundles = [
         _bundle("skycell.9999.15", 5, _cell_image(520, 1.0), np.zeros((520, 520), dtype=np.uint16)),
@@ -124,8 +129,20 @@ def test_row_offset_placement_is_self_consistent_and_in_bounds():
         assert 0 <= x_start < x_end <= state.current_array.shape[1], cell_name
         assert 0 <= y_start < y_end <= state.current_array.shape[0], cell_name
 
-    # The row's own first cell (x_coord=5) should land at PAD_SIZE (the
-    # untrimmed cell_index==0 placement), not further right as if it were
-    # offset from the global minimum (x_coord=0).
-    x_start_first, _, _, _ = positions["skycell.9999.15"]
-    assert x_start_first == pp.PAD_SIZE
+    x_by_cell = {"skycell.9999.15": 5, "skycell.9999.16": 6}
+    for cell_name, x_coord in x_by_cell.items():
+        assert positions[cell_name][0] == pp.PAD_SIZE + (x_coord - anchor) * (width - pp.CELL_OVERLAP)
+    # The row's first cell (x=5, no left neighbour in the row) is NOT at
+    # PAD_SIZE any more: it sits at its true slot to the right of the anchor.
+    assert positions["skycell.9999.15"][0] > pp.PAD_SIZE
+
+    # Pixels: the first cell is written in full; the second (left neighbour
+    # x=5 present) is written from EFFECTIVE_OVERLAP, so the left cell supplies
+    # the shared strip.
+    arr = state.current_array
+    x15, x16 = positions["skycell.9999.15"][0], positions["skycell.9999.16"][0]
+    row = pp.PAD_SIZE + 100
+    assert arr[row, x15] == 1.0
+    assert arr[row, x16 + pp.EFFECTIVE_OVERLAP - 1] == 1.0
+    assert arr[row, x16 + pp.EFFECTIVE_OVERLAP] == 2.0
+    assert np.isnan(arr[row, :x15]).all()

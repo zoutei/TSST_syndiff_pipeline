@@ -80,6 +80,7 @@ PS1_PROCESS_ALLOWED = frozenset(
         "remove_saturated_stars",
         "catalog_path",
         "bright_star_mag_threshold",
+        "band_weights",
         "use_shared_convolved_store",
         "write_per_scc_convolved_zarr",
         "executor",
@@ -294,6 +295,10 @@ class Ps1ProcessStageParams:
     remove_saturated_stars: bool = True
     catalog_path: str | None = None
     bright_star_mag_threshold: float = 13.0
+    # PS1 r/i/z/y combination weights for the combined cells. None = the
+    # production defaults (combined_store.DEFAULT_BAND_WEIGHTS). Recorded in
+    # the combined recipe, so different weights never share stored cells.
+    band_weights: dict[str, float] | None = None
     use_shared_convolved_store: bool = False
     write_per_scc_convolved_zarr: bool = True
     executor: str = "condor"
@@ -326,6 +331,14 @@ class Ps1ProcessStageParams:
                 "stages.ps1_process: use_shared_convolved_store=True requires "
                 "write_per_scc_convolved_zarr=False (hard cut on per-SCC convolved.zarr)"
             )
+        if self.band_weights is not None:
+            weights = dict(self.band_weights)
+            if set(weights) != {"r", "i", "z", "y"} or not all(float(v) > 0 for v in weights.values()):
+                raise ValueError(
+                    "stages.ps1_process.band_weights must have exactly the keys r, i, z, y "
+                    f"with positive values; got {self.band_weights!r}"
+                )
+            self.band_weights = {band: float(weights[band]) for band in ("r", "i", "z", "y")}
         if self.small_job_max_skycells < 0:
             raise ValueError("stages.ps1_process.small_job_max_skycells must be >= 0")
         if self.small_job_request_cpus < 1:

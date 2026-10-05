@@ -56,7 +56,19 @@ KIND = "convolved_skycell"
 # Hand-bumped per decision #5 ("code_version"): bump whenever this producer's
 # algorithm (payload shape, recipe params) changes in a way that should mint
 # new fingerprints for otherwise-identical inputs.
-CONVOLVED_RECIPE_SCHEMA_VERSION = 1
+#
+# 2: canonical cell defined by ``canonical_cell`` (one projection-wide x
+#    anchor, clean same-projection snapshot with no cross-projection patches,
+#    no blanked top strip) and the neighbour set Merkled in as extra inputs
+#    (``doc/seam_neighbour_fix_plan_20260930.md`` §2.1-2.2).
+# 3: one writer for vertical overlaps: row R-1 supplies cell rows
+#    [0, EFFECTIVE_OVERLAP) of row R wherever it has a placed cell, mirroring
+#    the left-neighbour rule. Before, cells of rows R and R+1 kept their own
+#    pixels in their shared 480-px strip and disagreed there (star removal and
+#    PS1 stack content are cell-local), and downsample ownership boundaries
+#    cut those features (/astro/armin/koji/syndiff/dev_runs/spike_diag_20261001).
+#    Combined cells are unchanged.
+CONVOLVED_RECIPE_SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # Store location (decision #14): all three PS1 stores live under the
@@ -88,7 +100,20 @@ DEFAULT_MODE = "constant"
 # Not a tunable — part of the recipe identity (plan §13 decision #4): the
 # canonical cell is padded by same-projection neighbors only. Recorded in
 # the recipe so a future padding-strategy change re-fingerprints downstream.
-PADDING_MODE = "same_projection_only"
+PADDING_MODE = "same_projection_only_v3"
+
+# Relative tolerance for "same pixels" when a publish meets an existing payload
+# under the same fingerprint (float32 round-off is ~1e-7 of peak).
+CONFLICT_RTOL = 1e-6
+
+
+class ConvolvedFingerprintConflict(RuntimeError):
+    """A publish produced different pixels under an already-published fingerprint.
+
+    Raised (never swallowed) because it means the fingerprint does not capture
+    every input the pixels depend on -- the failure mode this store had before
+    schema v2 (neighbour set, catalogue footprint, row order).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +478,7 @@ def skycell_already_canonical(
     convolved_recipe: Mapping,
     *,
     raw_fp: str | None = None,
+    metadata: Mapping | None = None,
 ) -> bool:
     """``True`` iff a *complete* ``convolved_skycell`` payload for
     ``(projection, skycell)`` already exists under the exact recipe chain
@@ -486,12 +512,26 @@ def skycell_already_canonical(
     ``raw_fp`` lets a caller that already computed
     ``raw_skycell_input_fingerprint`` for this cell reuse it (e.g. a hot
     loop resolving many cells per row); otherwise it is recomputed here.
+
+    Schema v2: the convolved fingerprint also Merkles in the cell's canonical
+    neighbour set, which depends on the caller's mapping list, so
+    ``metadata`` (``ps1_process.extract_projection_metadata`` of the caller's
+    list, for this cell's projection) is required. Without it this returns
+    ``False`` (reprocess), never a guess.
     """
     from syndiff_pipeline.template_creation.processing.combined_store import (
-        raw_skycell_input_fingerprint,
         resolve_combined_fingerprint_for_recipe,
     )
+    from syndiff_pipeline.template_creation.processing.canonical_cell import (
+        neighbour_input_fingerprints,
+    )
 
+    if metadata is None:
+        logger.debug(
+            "skycell_already_canonical(%s/%s): no mapping metadata, neighbour set unknown -> not canonical",
+            projection, skycell,
+        )
+        return False
     try:
         combined_fp = resolve_combined_fingerprint_for_recipe(
             data_root, projection, skycell, combined_recipe, raw_fp=raw_fp,
@@ -501,8 +541,14 @@ def skycell_already_canonical(
             # yet -- the convolved cell (keyed on this combined_fp) cannot
             # exist either. Never fabricate an edge to a missing upstream.
             return False
+        nbr = neighbour_input_fingerprints(
+            data_root, f"{projection}.{skycell}", metadata, combined_recipe,
+        )
+        if nbr is None:
+            return False
         convolved_fp = resolve_convolved_fingerprint_for_recipe(
             data_root, projection, skycell, convolved_recipe, combined_fp,
+            extra_input_fingerprints=nbr,
         )
     except Exception:
         logger.warning(
@@ -522,6 +568,8 @@ def classify_projection_missing_cells(
     cell_names: Iterable[str],
     combined_recipe: Mapping,
     convolved_recipe: Mapping,
+    *,
+    metadata: Mapping | None = None,
 ) -> set[str]:
     """Cheap, upfront, per-projection classification for the tiered ingest
     architecture (see ``doc/ps1_process_tiered_ingest_architecture_plan.md``,
@@ -544,6 +592,7 @@ def classify_projection_missing_cells(
         try:
             already_canonical = skycell_already_canonical(
                 data_root, cell_projection, cell, combined_recipe, convolved_recipe,
+                metadata=metadata,
             )
         except Exception:
             logger.warning(
@@ -627,8 +676,8 @@ def publish_convolved_cell(
     ``combined_fingerprint`` is the upstream ``combined_skycell`` artifact's
     fingerprint and is required — it is the Merkle input that ties this
     canonical cell to the exact star-removed image it was convolved from
-    (plan §13). ``extra_input_fingerprints`` is reserved for a future
-    same-projection-neighbor input set; unused today.
+    (plan §13). ``extra_input_fingerprints`` carries the canonical neighbour
+    set (``canonical_cell.neighbour_input_fingerprints``) since schema v2.
 
     Payload: ``{arrays.npz [convolved_image, convolved_mask], headers.json,
     removed_stars.json}`` (headers/removed_stars pass through from the
@@ -647,6 +696,7 @@ def publish_convolved_cell(
         dest_root = final_dir.parent
 
         if _payload_complete(final_dir):
+            _check_no_conflict(final_dir, convolved_image, fp)
             return {"fingerprint": fp, "recipe_id": rid, "dir": final_dir, "already_published": True}
 
         def _write_payload(tmp_dir: Path) -> None:
@@ -682,6 +732,8 @@ def publish_convolved_cell(
             )
 
         return {"fingerprint": fp, "recipe_id": rid, "dir": published_dir, "already_published": False}
+    except ConvolvedFingerprintConflict:
+        raise
     except Exception:
         logger.warning(
             "publish_convolved_cell failed for projection=%s skycell=%s (best-effort, no raise)",
@@ -690,6 +742,29 @@ def publish_convolved_cell(
             exc_info=True,
         )
         return None
+
+
+def _check_no_conflict(final_dir: Path, convolved_image: np.ndarray, fp: str) -> None:
+    """Raise :class:`ConvolvedFingerprintConflict` if ``convolved_image``
+    differs from the published payload by more than ``CONFLICT_RTOL`` of its peak."""
+    try:
+        with np.load(final_dir / _ARRAYS_FILENAME, allow_pickle=False) as z:
+            existing = np.asarray(z["convolved_image"], dtype=np.float64)
+    except Exception:
+        logger.warning("could not read existing payload %s for the conflict check", final_dir, exc_info=True)
+        return
+    new = np.asarray(convolved_image, dtype=np.float64)
+    if existing.shape != new.shape or not np.array_equal(np.isnan(existing), np.isnan(new)):
+        raise ConvolvedFingerprintConflict(f"{final_dir}: shape/NaN pattern differs under fingerprint {fp}")
+    finite = np.isfinite(existing)
+    if not finite.any():
+        return
+    peak = float(np.max(np.abs(existing[finite]))) or 1.0
+    worst = float(np.max(np.abs(existing[finite] - new[finite])))
+    if worst > CONFLICT_RTOL * peak:
+        raise ConvolvedFingerprintConflict(
+            f"{final_dir}: max |difference| {worst:.3g} = {worst / peak:.3g} of peak under fingerprint {fp}"
+        )
 
 
 def try_load_convolved_cell(

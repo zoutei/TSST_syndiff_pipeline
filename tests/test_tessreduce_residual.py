@@ -300,3 +300,31 @@ def test_sep_object_mask_stamp_matches_full_frame():
     np.testing.assert_array_equal(stamp, ref)
     y0, y1, x0, x1 = _sep_object_stamp_slices(40.2, 50.7, 1.4, 1.1, ny, nx)
     assert (y1 - y0) < ny and (x1 - x0) < nx
+
+
+def test_fit_mask_star_pad_grows_only_star_masks():
+    mask = np.zeros((21, 21), dtype=np.uint8)
+    mask[10, 10] = 2          # one SAT_CROSS (bit 2) pixel
+    mask[0:2, :] = 4          # strap rows: not a star mask, must not grow
+    mask[20, 20] = 32         # faint square pixel stays a fit pixel unless inside the pad
+    base = _fit_mask(mask)
+    padded = _fit_mask(mask, star_mask_pad_px=3)
+    yy, xx = np.mgrid[:21, :21]
+    disk = (yy - 10) ** 2 + (xx - 10) ** 2 <= 9
+    np.testing.assert_array_equal(padded, base & ~disk)
+    np.testing.assert_array_equal(_fit_mask(mask, star_mask_pad_px=0), base)
+    assert padded[20, 20] and padded[2, 10] == base[2, 10]
+
+
+def test_star_mask_pad_removes_wing_lift_under_masked_star():
+    # flat sky 1.0 + a star wing that extends past its mask circle: without padding the gap fill is solved
+    # from the wing-carrying rim and the background under the star is lifted; padding past the wing removes it.
+    n = 81
+    yy, xx = np.mgrid[:n, :n]
+    r = np.hypot(yy - 40, xx - 40)
+    image = 1.0 + 2.0 * np.exp(-r / 2.5)
+    mask = np.where(r <= 6, 2, 0).astype(np.uint8)
+    lifted, _, _ = estimate_tessreduce_residual_background(image, mask)
+    padded, _, _ = estimate_tessreduce_residual_background(image, mask, star_mask_pad_px=8)
+    assert lifted[40, 40] - 1.0 > 0.05
+    assert abs(padded[40, 40] - 1.0) < 0.5 * (lifted[40, 40] - 1.0)

@@ -223,19 +223,9 @@ class TestCheckpointAndVerifyResolvers(unittest.TestCase):
             csv_path = mapping_dir / "tess_s0020_1_1_master_skycells_list.csv"
             csv_path.write_text(
                 "NAME,projection,y,x,NAXIS1,NAXIS2\n"
-                "skycell.1111.001,skycell.1111,0,0,32,32\n",
+                "skycell.1111.001,1111,0,0,32,32\n",
                 encoding="utf-8",
             )
-            cell_dir = (
-                data_root
-                / "ps1_skycells_zarr"
-                / "ps1_convolved.zarr"
-                / "skycell.1111"
-                / "001"
-                / "fp0001"
-            )
-            cell_dir.mkdir(parents=True)
-            (cell_dir / "arrays.npz").write_bytes(b"x")
 
             target = Target(
                 sector=20,
@@ -267,6 +257,58 @@ class TestCheckpointAndVerifyResolvers(unittest.TestCase):
                 template_output_base=str(
                     data_root / "s0020" / "c1" / "k1" / "templates" / "oversampling_1"
                 ),
+            )
+            # Schema v2: verify checks the exact fingerprint this SCC's mapping
+            # list implies (own combined fp + canonical neighbour set), so the
+            # cell must be published through the real stores, not as a stray dir.
+            import numpy as np
+
+            from syndiff_pipeline.template_creation.processing import (
+                canonical_cell,
+                combined_store,
+                convolved_store,
+            )
+            from syndiff_pipeline.template_creation.processing.csv_utils import load_csv_data
+            from syndiff_pipeline.template_creation.processing.ps1_process import (
+                extract_projection_metadata,
+            )
+            from tests.seam_helpers import write_projection_catalog
+
+            result_missing = verify_ps1_process(resolved)
+            self.assertFalse(result_missing.ok)  # nothing published yet
+
+            write_projection_catalog(data_root, "1111")
+            crecipe = combined_store.production_combined_recipe(
+                resolved.stages.ps1_process, data_root=str(data_root),
+                sector=20, camera=1, ccd=1,
+            )
+            vrecipe = convolved_store.convolved_recipe(
+                psf_sigma=float(getattr(resolved.stages.ps1_process, "psf_sigma", 40.0))
+            )
+            projection, cell = "skycell.1111", "001"
+            cfp = combined_store.expected_combined_fingerprint(
+                str(data_root), projection, cell, crecipe
+            )
+            combined_store.publish_combined_cell(
+                data_root, projection, cell,
+                combined_image=np.zeros((4, 4), np.float32),
+                combined_mask=np.zeros((4, 4), np.uint16),
+                headers_data={}, removed_stars=[], recipe=crecipe,
+                input_fingerprints=combined_store.combined_input_fingerprints(
+                    str(data_root), projection, cell, crecipe
+                ),
+            )
+            df = load_csv_data(str(csv_path))
+            meta = extract_projection_metadata(df.reset_index(drop=True), "1111")
+            nbr = canonical_cell.neighbour_input_fingerprints(
+                str(data_root), "skycell.1111.001", meta, crecipe
+            )
+            convolved_store.publish_convolved_cell(
+                data_root, projection, cell,
+                convolved_image=np.zeros((4, 4), np.float32),
+                convolved_mask=np.zeros((4, 4), np.uint16),
+                headers_data={}, removed_stars=[], recipe=vrecipe,
+                combined_fingerprint=cfp, extra_input_fingerprints=nbr,
             )
             result = verify_ps1_process(resolved)
             self.assertTrue(result.ok, result.message)

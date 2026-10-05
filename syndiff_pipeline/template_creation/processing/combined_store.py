@@ -58,7 +58,17 @@ KIND = "combined_skycell"
 # Hand-bumped per decision #5 ("code_version"): bump whenever this producer's
 # algorithm (payload shape, recipe params) changes in a way that should mint
 # new fingerprints for otherwise-identical inputs.
-COMBINED_RECIPE_SCHEMA_VERSION = 1
+#
+# 2: bright-star removal decided by sky position, not by cell
+#    (doc/seam_neighbour_fix_plan_20260930.md §2.3): one SCC-independent Gaia
+#    catalogue per PS1 projection (its checksum is a per-cell input
+#    fingerprint), padded-window selection, connected-footprint removal.
+#    v1 cells depended on the publishing SCC's catalogue footprint and are
+#    never resolved by v2 readers.
+COMBINED_RECIPE_SCHEMA_VERSION = 2
+
+# Removal convention recorded in the v2 recipe (``band_utils.REMOVAL_CONVENTION``).
+BRIGHT_STAR_REMOVAL_CONVENTION = "footprint_v1"
 
 # Same "hand-bumped code_version" contract (decision #5), but for the
 # raw_skycell input-fingerprint helper below (bump if the version-token
@@ -268,6 +278,7 @@ def combined_recipe(resolved_or_params: Any = None, **overrides: Any) -> dict:
         "band_weights": dict(_param(resolved_or_params, "band_weights", DEFAULT_BAND_WEIGHTS)),
         "apply_flux_conv": bool(_param(resolved_or_params, "apply_flux_conv", True)),
         "gaia_version": _param(resolved_or_params, "gaia_version", None),
+        "bright_star_removal": _param(resolved_or_params, "bright_star_removal", None),
     }
     recipe.update(overrides)
     return recipe
@@ -662,45 +673,98 @@ def production_combined_recipe(
     Producer and reader must always call this same function so they can
     never disagree.
 
-    ``gaia_version`` is only stamped (rather than fixed at ``"none"``) when
-    saturation handling is actually enabled, mirroring ps1_process's own
-    logic: a catalog-independent config (both flags off) should not mint a
-    new fingerprint just because some unrelated catalog file's mtime moved.
-
-    ``catalog_path`` is almost never set explicitly in production configs --
-    every real caller relies on ``ps1_process.load_gaia_catalog``'s implicit
-    per-SCC default path. Stamping ``gaia_version="none"`` whenever
-    ``catalog_path`` is merely unset (the historical behavior) made every
-    such build indistinguishable from a genuine catalog-load failure, so a
-    single run whose catalog load silently failed could permanently poison
-    the shared, cross-sector/cross-run store for every other SCC requesting
-    the same nominal recipe. When ``data_root``/``sector``/``camera``/``ccd``
-    are supplied (every current caller has them available), an unset
-    ``catalog_path`` resolves to that same implicit default via
-    ``scc_paths.default_gaia_catalog_path`` before stamping, so the
-    fingerprint reflects the catalog that will actually be loaded.
+    Schema v2: ``gaia_version`` names the SCC-independent per-projection
+    catalogue scheme (``gaia_projection_catalog.GAIA_PROJECTION_SCHEME``)
+    whenever saturation handling is enabled, else ``"none"``. Before v2 it
+    stamped the publishing SCC's own catalogue as ``"loaded"``, so cells built
+    from different catalogue footprints shared one fingerprint (proven on
+    2486.086, ``dev_runs/removal_convention_20261001``). ``data_root``/
+    ``sector``/``camera``/``ccd`` and ``catalog_path`` are accepted for call
+    compatibility and no longer affect the recipe.
     """
     enable_saturation_correction = bool(
         _param(ps1_process_config, "enable_saturation_correction", False)
     )
     remove_saturated_stars = bool(_param(ps1_process_config, "remove_saturated_stars", True))
     bright_star_mag_threshold = float(_param(ps1_process_config, "bright_star_mag_threshold", 13.0))
-    catalog_path = _param(ps1_process_config, "catalog_path", None)
-    if catalog_path is None and None not in (data_root, sector, camera, ccd):
-        from syndiff_pipeline.common.scc_paths import default_gaia_catalog_path
-
-        catalog_path = str(default_gaia_catalog_path(data_root, sector, camera, ccd))
-    gaia_version = (
-        gaia_version_stamp(catalog_path)
-        if (enable_saturation_correction or remove_saturated_stars)
-        else "none"
+    band_weights = _param(ps1_process_config, "band_weights", None) or DEFAULT_BAND_WEIGHTS
+    # Schema v2: the catalogue is the SCC-independent per-projection Gaia file
+    # (gaia_projection_catalog), never the SCC's own footprint catalogue, so
+    # data_root/sector/camera/ccd and catalog_path no longer enter the recipe.
+    # The file's identity is a per-cell input fingerprint
+    # (``combined_input_fingerprints``), not a recipe field.
+    from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import (
+        GAIA_PROJECTION_SCHEME,
     )
+
+    uses_catalog = enable_saturation_correction or remove_saturated_stars
     return combined_recipe(
         enable_saturation_correction=enable_saturation_correction,
         remove_saturated_stars=remove_saturated_stars,
         bright_star_mag_threshold=bright_star_mag_threshold,
-        gaia_version=gaia_version,
+        band_weights={band: float(band_weights[band]) for band in ("r", "i", "z", "y")},
+        gaia_version=GAIA_PROJECTION_SCHEME if uses_catalog else "none",
+        bright_star_removal=BRIGHT_STAR_REMOVAL_CONVENTION if remove_saturated_stars else "none",
     )
+
+
+def recipe_uses_projection_catalog(recipe: Mapping) -> bool:
+    """True when ``recipe`` is a v2 recipe whose cells depend on a projection Gaia file."""
+    from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import (
+        GAIA_PROJECTION_SCHEME,
+    )
+
+    return str(recipe.get("gaia_version")) == GAIA_PROJECTION_SCHEME
+
+
+def combined_input_fingerprints(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    recipe: Mapping,
+    *,
+    raw_fp: str | None = None,
+) -> list[str] | None:
+    """Merkle inputs of one ``combined_skycell``: the raw PS1 version token and,
+    for v2 recipes, the checksum of the cell's projection Gaia catalogue.
+
+    Producer (``ps1_process``) and every reader call this one function, so a
+    lookup only ever matches what a publish under the same inputs wrote.
+    Returns ``None`` when the projection catalogue the recipe needs is absent:
+    the fingerprint is then undefined and the caller must treat the cell as
+    missing (``ps1_process`` builds the catalogue before processing).
+    """
+    resolved_raw_fp = raw_fp if raw_fp is not None else raw_skycell_input_fingerprint(
+        data_root, projection, skycell
+    )
+    inputs = [resolved_raw_fp]
+    if recipe_uses_projection_catalog(recipe):
+        from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import (
+            projection_catalog_fingerprint,
+        )
+
+        gaia_fp = projection_catalog_fingerprint(data_root, projection)
+        if gaia_fp is None:
+            return None
+        inputs.append(gaia_fp)
+    return inputs
+
+
+def expected_combined_fingerprint(
+    data_root: str | Path,
+    projection: str,
+    skycell: str,
+    recipe: Mapping,
+    *,
+    raw_fp: str | None = None,
+) -> str | None:
+    """The fingerprint a publish of ``(projection, skycell)`` under ``recipe``
+    gets, whether or not it has been published. ``None`` if undefined (see
+    :func:`combined_input_fingerprints`)."""
+    inputs = combined_input_fingerprints(data_root, projection, skycell, recipe, raw_fp=raw_fp)
+    if inputs is None:
+        return None
+    return combined_fingerprint(projection, skycell, combined_recipe_id(recipe), inputs)
 
 
 # ---------------------------------------------------------------------------
@@ -709,12 +773,10 @@ def production_combined_recipe(
 # registry row "combined_skycell inputs: raw_skycell, source_catalog";
 # decision #6 "raw skycells version on (size, mtime, download_batch_id)").
 #
-# gaia_version (-> source_catalog) is deliberately NOT re-folded in here: it
-# is already threaded into ``combined_recipe``/``combined_recipe_id`` (see
-# ``gaia_version_stamp`` above and its call site in
-# ``run_modern_sliding_window_pipeline``), so it already changes
-# ``combined_fingerprint`` via ``recipe_id_value`` -- adding it again as an
-# input_fingerprint would be redundant, not a second signal.
+# Schema v2: the recipe's ``gaia_version`` names the catalogue *scheme*
+# (``GAIA_PROJECTION_SCHEME``); the catalogue *content* a cell was built from
+# (its projection file's checksum) is a second input fingerprint, added by
+# ``combined_input_fingerprints`` above.
 # ---------------------------------------------------------------------------
 
 
@@ -817,11 +879,9 @@ def resolve_combined_fingerprint_for_recipe(
     recipes for the same skycell); otherwise it is recomputed here.
     """
     try:
-        rid = combined_recipe_id(recipe)
-        resolved_raw_fp = (
-            raw_fp if raw_fp is not None else raw_skycell_input_fingerprint(data_root, projection, skycell)
-        )
-        fp = combined_fingerprint(projection, skycell, rid, [resolved_raw_fp])
+        fp = expected_combined_fingerprint(data_root, projection, skycell, recipe, raw_fp=raw_fp)
+        if fp is None:
+            return None
     except Exception:
         logger.warning(
             "resolve_combined_fingerprint_for_recipe failed for %s/%s (best-effort)",

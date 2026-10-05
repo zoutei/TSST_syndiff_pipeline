@@ -339,6 +339,7 @@ def _location_correction(
     psf_sigma: float,
     kernel_radius: int,
     combined_recipe: Mapping | None = None,
+    fetch_image=None,
 ) -> np.ndarray:
     """Return one location's convolved, recipient-cropped correction.
 
@@ -380,9 +381,9 @@ def _location_correction(
         if source_parsed is None:
             raise PaddingCorrectionError(f"cannot resolve identity of source {neighbor}")
         source_projection, source_cell = source_parsed
-        source_image = _load_combined_image(
+        source_image = (fetch_image(neighbor) if fetch_image is not None else _load_combined_image(
             data_root, source_projection, source_cell, combined_recipe=combined_recipe,
-        )
+        ))
         if source_image is None:
             raise PaddingCorrectionError(
                 f"required combined skycell {neighbor} for {skycell}/{location} is unavailable"
@@ -461,6 +462,7 @@ def load_padding_aware_convolved_cell(
 
     canonical = _try_load_shared_convolved_arrays(
         data_root, skycell, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
+        mapping_df=skycell_df,
     )
     if canonical is None:
         return None

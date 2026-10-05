@@ -13,12 +13,25 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
+from syndiff_pipeline.template_creation.processing import canonical_cell
+from syndiff_pipeline.template_creation.processing.ps1_process import extract_projection_metadata
 from syndiff_pipeline.template_creation.processing import combined_store as cs
 from syndiff_pipeline.template_creation.processing import convolved_store as vs
 
 _PROJECTION = "skycell.1234"
 _CELL = "000"
+_FULL = f"{_PROJECTION}.{_CELL}"
+
+# Schema v2: the convolved fingerprint Merkles in the canonical neighbour set,
+# so every skycell_already_canonical call needs the caller's mapping metadata.
+_META = extract_projection_metadata(
+    pd.DataFrame.from_records(
+        [{"projection": _PROJECTION, "y": 0, "x": 0, "NAME": _FULL, "NAXIS1": 16, "NAXIS2": 16}]
+    ),
+    _PROJECTION,
+)
 
 
 def _publish_combined(tmp_path: Path, recipe: dict) -> str:
@@ -41,7 +54,7 @@ def _publish_combined(tmp_path: Path, recipe: dict) -> str:
     return info["fingerprint"]
 
 
-def _publish_convolved(tmp_path: Path, recipe: dict, combined_fp: str) -> str:
+def _publish_convolved(tmp_path: Path, recipe: dict, combined_fp: str, combined_recipe: dict) -> str:
     rng = np.random.default_rng(1)
     convolved_image = rng.random((16, 16)).astype(np.float32)
     convolved_mask = rng.integers(0, 4, size=(16, 16)).astype(np.uint16)
@@ -55,16 +68,31 @@ def _publish_convolved(tmp_path: Path, recipe: dict, combined_fp: str) -> str:
         removed_stars=[],
         recipe=recipe,
         combined_fingerprint=combined_fp,
+        extra_input_fingerprints=canonical_cell.neighbour_input_fingerprints(
+            tmp_path, _FULL, _META, combined_recipe
+        ),
     )
     assert info is not None
     return info["fingerprint"]
+
+
+def test_not_canonical_without_mapping_metadata(tmp_path: Path):
+    # New v2 behaviour: the neighbour set is unknown without the caller's
+    # mapping metadata, so even a fully published cell is "not canonical".
+    combined_recipe = cs.combined_recipe()
+    convolved_recipe = vs.convolved_recipe()
+    combined_fp = _publish_combined(tmp_path, combined_recipe)
+    _publish_convolved(tmp_path, convolved_recipe, combined_fp, combined_recipe)
+    assert vs.skycell_already_canonical(
+        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe,
+    ) is False
 
 
 def test_not_canonical_when_nothing_published(tmp_path: Path):
     combined_recipe = cs.combined_recipe()
     convolved_recipe = vs.convolved_recipe()
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe,
+        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe, metadata=_META,
     ) is False
 
 
@@ -73,7 +101,7 @@ def test_not_canonical_when_only_combined_published(tmp_path: Path):
     convolved_recipe = vs.convolved_recipe()
     _publish_combined(tmp_path, combined_recipe)
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe,
+        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe, metadata=_META,
     ) is False
 
 
@@ -81,9 +109,9 @@ def test_canonical_when_both_published_under_matching_recipes(tmp_path: Path):
     combined_recipe = cs.combined_recipe()
     convolved_recipe = vs.convolved_recipe()
     combined_fp = _publish_combined(tmp_path, combined_recipe)
-    _publish_convolved(tmp_path, convolved_recipe, combined_fp)
+    _publish_convolved(tmp_path, convolved_recipe, combined_fp, combined_recipe)
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe,
+        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe, metadata=_META,
     ) is True
 
 
@@ -91,14 +119,14 @@ def test_not_canonical_when_combined_recipe_differs(tmp_path: Path):
     published_combined_recipe = cs.combined_recipe()
     convolved_recipe = vs.convolved_recipe()
     combined_fp = _publish_combined(tmp_path, published_combined_recipe)
-    _publish_convolved(tmp_path, convolved_recipe, combined_fp)
+    _publish_convolved(tmp_path, convolved_recipe, combined_fp, published_combined_recipe)
 
     # Caller's own combined recipe differs (e.g. a different gaia_version) --
     # must not be treated as canonical even though *a* convolved payload
     # exists for this cell under a different upstream recipe.
     different_combined_recipe = cs.combined_recipe(gaia_version="dr3-mismatch")
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, different_combined_recipe, convolved_recipe,
+        tmp_path, _PROJECTION, _CELL, different_combined_recipe, convolved_recipe, metadata=_META,
     ) is False
 
 
@@ -106,11 +134,11 @@ def test_not_canonical_when_convolved_recipe_differs(tmp_path: Path):
     combined_recipe = cs.combined_recipe()
     published_convolved_recipe = vs.convolved_recipe()
     combined_fp = _publish_combined(tmp_path, combined_recipe)
-    _publish_convolved(tmp_path, published_convolved_recipe, combined_fp)
+    _publish_convolved(tmp_path, published_convolved_recipe, combined_fp, combined_recipe)
 
     different_convolved_recipe = vs.convolved_recipe(psf_sigma=45.0)
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, combined_recipe, different_convolved_recipe,
+        tmp_path, _PROJECTION, _CELL, combined_recipe, different_convolved_recipe, metadata=_META,
     ) is False
 
 
@@ -118,11 +146,11 @@ def test_raw_fp_shortcut_matches_recomputed_value(tmp_path: Path):
     combined_recipe = cs.combined_recipe()
     convolved_recipe = vs.convolved_recipe()
     combined_fp = _publish_combined(tmp_path, combined_recipe)
-    _publish_convolved(tmp_path, convolved_recipe, combined_fp)
+    _publish_convolved(tmp_path, convolved_recipe, combined_fp, combined_recipe)
 
     raw_fp = cs.raw_skycell_input_fingerprint(tmp_path, _PROJECTION, _CELL)
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe, raw_fp=raw_fp,
+        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe, raw_fp=raw_fp, metadata=_META,
     ) is True
 
 
@@ -135,5 +163,5 @@ def test_never_raises_on_internal_failure(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(cs, "resolve_combined_fingerprint_for_recipe", _boom)
     assert vs.skycell_already_canonical(
-        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe,
+        tmp_path, _PROJECTION, _CELL, combined_recipe, convolved_recipe, metadata=_META,
     ) is False
