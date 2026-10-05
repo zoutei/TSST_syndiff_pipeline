@@ -1319,22 +1319,20 @@ def run(args):
                         dflux = float(np.median(np.abs((f1_[okf] - f0_[okf]) / f1_[okf])))
                         hist_event({"event": "stop_check", "stage": stage, "step": step, "s_rel": s_rel,
                                     "dpos_mpx": dpos, "dflux": dflux, "lr_mult": lr_mult})
-                        if s_rel < args.stop_tol and dpos < args.stop_wcs_mpx and dflux < args.stop_flux_tol:
-                            restart = False
-                            if use_floor and last_jump >= args.floor_settle_tol:
-                                restart = True   # weights still moving: not a plateau yet, keep going
-                                hist_event({"event": "floor_not_settled", "stage": stage, "step": step,
-                                            "loss_jump": last_jump})
-                            if not restart and n_decay < args.lr_decays:
-                                n_decay += 1
-                                lr_mult *= args.lr_decay
-                                hist_event({"event": "lr_decay", "stage": stage, "step": step,
-                                            "lr_mult": lr_mult})
-                                restart = True
-                            if restart:
-                                win, snaps, since = [], {}, 0
-                            else:
-                                plateau_stop, reason = True, "plateau"
+                        # lr decay on a LOSS plateau alone (ReduceLROnPlateau: a stalled or creeping loss at
+                        # full lr is an oscillation the decay damps); the stage ENDS only when the loss is flat,
+                        # WCS / fluxes / floor weights are still, and at least --lr-decays decays have happened.
+                        loss_flat = s_rel < args.stop_tol
+                        floor_ok = (not use_floor) or last_jump < args.floor_settle_tol
+                        phys_ok = dpos < args.stop_wcs_mpx and dflux < args.stop_flux_tol and floor_ok
+                        if loss_flat and phys_ok and n_decay >= args.lr_decays:
+                            plateau_stop, reason = True, "plateau"
+                        elif loss_flat and n_decay < max(args.lr_decays_max, args.lr_decays):
+                            n_decay += 1
+                            lr_mult *= args.lr_decay
+                            hist_event({"event": "lr_decay", "stage": stage, "step": step, "lr_mult": lr_mult,
+                                        "phys_ok": phys_ok, "floor_ok": floor_ok})
+                            win, snaps, since = [], {}, 0
 
             # rejection refresh
             converged = False
@@ -1555,8 +1553,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="point: the --early-stop-* two-point rule (historical). smoothed: plateau when the "
                         "--stop-window running mean of the loss falls by < --stop-tol (relative) over --stop-lag "
                         "steps AND the WCS moves < --stop-wcs-mpx and contributor fluxes < --stop-flux-tol over the "
-                        "same lag; each plateau multiplies every lr by --lr-decay, after --lr-decays decays the "
-                        "next plateau ends the stage. Stage lengths in --steps-per-stage become safety caps")
+                        "same lag. A loss plateau alone multiplies every lr by --lr-decay (at most --lr-decays-max times); the "
+                        "stage ends when all criteria hold after >= --lr-decays decays. Stage lengths in "
+                        "--steps-per-stage become safety caps")
     p.add_argument("--stop-window", type=int, default=50)
     p.add_argument("--stop-lag", type=int, default=500)
     p.add_argument("--stop-check", type=int, default=100, help="steps between smoothed-rule checks")
@@ -1564,7 +1563,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop-wcs-mpx", type=float, default=0.5)
     p.add_argument("--stop-flux-tol", type=float, default=1e-4)
     p.add_argument("--lr-decay", type=float, default=0.3)
-    p.add_argument("--lr-decays", type=int, default=2)
+    p.add_argument("--lr-decays", type=int, default=2, help="lr decays required before a stage may end")
+    p.add_argument("--lr-decays-max", type=int, default=4,
+                   help="most lr decays per stage; after that a stage that never meets the stop criteria runs "
+                        "to its cap and is labelled not converged")
     p.add_argument("--model-floor-eps", type=float, default=0.0,
                    help="fractional model-error floor: var_eff = (noise_scale sigma)^2 + (eps m)^2, m = scene model "
                         "frozen at each refresh (stage start and every plateau); used in flux solve and loss")
