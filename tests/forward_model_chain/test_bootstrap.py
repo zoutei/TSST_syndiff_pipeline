@@ -1,4 +1,6 @@
 """Fast synthetic tests for forward_model.chain.bootstrap (no /astro access)."""
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -104,7 +106,7 @@ def test_estimate_ks_b_harmonic_vs_biharmonic_smooth_sky():
 
 def test_hp_recipe_matches_reference_values():
     r = bs.HP_RECIPE
-    assert r["hp_ko"] == 2 and r["hp_bgo"] == 0 and r["hp_nss"] == 100
+    assert r["hp_ko"] == 4 and r["stamp_mode"] == "connected_regions" and r["hp_bgo"] == 0 and r["hp_nss"] == 100
     assert r["hp_sigma_gauss"] == [0.752, 1.88, 3.76]
     assert (r["hp_nstampx"], r["hp_nstampy"]) == (10, 10)
     assert r["write_kernel_solutions"] is True
@@ -127,3 +129,54 @@ def test_star_mask_pad_forwarded_only_when_nonzero(monkeypatch):
     assert seen["star_mask_pad_px"] == 3
     with pytest.raises(ValueError):
         bs.estimate_ks_b(a, a, np.zeros((4, 4), np.int16), star_mask_pad_px=-1)
+
+
+def test_lane_dir_resolution_and_check(tmp_path):
+    class In: lane_dir = None
+    class Cfg:
+        inputs = In()
+        raw = {}
+        out_root = tmp_path
+    c = Cfg()
+    assert bs.lane_dir(c) == tmp_path / "lane_f1"
+    assert bs.lane_dir(c, "/x/y") == Path("/x/y")
+    c.inputs.lane_dir = tmp_path / "L"
+    assert bs.lane_dir(c) == tmp_path / "L"
+    lane = tmp_path / "L"
+    (lane / "ks_b").mkdir(parents=True)
+    with pytest.raises(FileNotFoundError) as e:
+        bs.check_lane(lane, "stem")
+    assert "shared_mask" in str(e.value) and "substamp_stars" in str(e.value) and "ks_b" in str(e.value)
+    for f in ("shared_mask.fits.fz", "hotpants_substamp_stars.csv", "ks_b/stem_ks_b.fits.fz"):
+        (lane / f).write_bytes(b"")
+    assert set(bs.check_lane(lane, "stem")) == {"shared_mask", "substamp_stars", "ks_b"}
+
+
+def test_template_recipe_uses_chain_band_weights():
+    """The D13 weights through bootstrap's recipe path give the dataset store's recipe id (e17a198a), the production
+    defaults do not: a weight mix-up can only miss cells, never load a wrong-weight template."""
+    from syndiff_pipeline.template_creation.processing.combined_store import combined_recipe_id, production_combined_recipe
+    base = {"remove_saturated_stars": True, "enable_saturation_correction": False}
+    d13 = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
+    assert combined_recipe_id(production_combined_recipe({**base, "band_weights": d13})) == "e17a198a4942aa2d"
+    assert combined_recipe_id(production_combined_recipe(base)) != "e17a198a4942aa2d"
+
+
+def test_private_data_root_links_mapping(tmp_path):
+    """The downsample resolves the master skycells list under data_root; the private root must expose the mapping."""
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+    src = tmp_path / "data"
+    (src / "ps1_skycells_zarr" / "ps1_convolved.zarr").mkdir(parents=True)
+    (src / "catalogs" / "gaia_projections").mkdir(parents=True)
+    m = tmp_path / "map" / "oversampling_4"
+    m.mkdir(parents=True)
+    want = scc_mapping_master_skycells_csv(tmp_path / "priv", 20, 3, 3, oversampling_factor=4)
+    (m / want.name).write_text("NAME\n")
+    priv = bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=m)
+    assert scc_mapping_master_skycells_csv(priv, 20, 3, 3, oversampling_factor=4).is_file()
+    assert (priv / "catalogs" / "gaia_projections").is_dir()
+    bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=m)   # idempotent
+    other = tmp_path / "map2" / "oversampling_4"
+    other.mkdir(parents=True)
+    with pytest.raises(FileExistsError):
+        bs.make_private_data_root(tmp_path / "priv", src, 20, 3, 3, tmp_path / "f.fits", mapping_dir=other)

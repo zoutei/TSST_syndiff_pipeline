@@ -1,4 +1,4 @@
-"""Stage ``hotpants``: the F=4 oversampling-aware Hotpants ko=2 baseline on the band-sum template ``T_sum``.
+"""Stage ``hotpants``: the F=4 oversampling-aware Hotpants baseline (production recipe: ko=4, connected_regions) on the band-sum template ``T_sum``.
 
 Port of e2e ``hotpants/hp_build.py`` (+ ``hp_job.sh``): HOTPANTS stage of the minbg_tvwcs_f4 recipe, unchanged except
 that the template is ``perband/band_templates/T_sum.npy`` (full OS4 grid incl. padding; cast float64 -> float32 -> float64
@@ -26,7 +26,8 @@ import numpy as np
 from .config import is_done, mark_done, write_provenance
 from .perband.paths import chain_paths
 
-HP_KWARGS = dict(hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=2, hp_bgo=0,
+# ko 4 + connected_regions = the 09-08 decided production recipe (was the SN2020hvq ko 2 grid copy until 2026-10-01)
+HP_KWARGS = dict(hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=0, stamp_mode="connected_regions",
                  hp_nstampx=10, hp_nstampy=10, hp_nss=100, hp_ngauss=3, hp_deg_fixe=[6, 4, 2],
                  hp_kf_spread_mask1=0.0, hp_ks=3.0, hp_kfm=0.75, hp_fitthresh=5.0, hp_stat_sig=3.0,
                  hp_force_convolve="t", hp_normalize="t", write_convolved=True, write_bkg=True,
@@ -95,26 +96,20 @@ def build_frame(cfg, stem: str) -> dict:
     primary["TMPL_OS"] = 4
     primary["DIFFLANE"] = f"chain_{P.field}"
     primary["FFISTEM"] = stem
-    primary.add_history(f"forward_model.chain hotpants: ko2 bgo0 F=4 on the band-sum template T_sum; native-grid output.")
+    primary.add_history(f"forward_model.chain hotpants: ko{HP_KWARGS['hp_ko']} {HP_KWARGS.get('stamp_mode', 'grid')} "
+                        f"bgo{HP_KWARGS['hp_bgo']} F=4 on the band-sum template T_sum; native-grid output.")
     out = out_root / "hp_d" / f"{stem}_hp_d.fits.fz"
-    hdus = [fits.PrimaryHDU(header=primary)]
-    for key, hdr in zip(["diff", "noise", "mask"], headers):
-        hdus.append(fits.CompImageHDU(data=trimmed(key), header=hdr, compression_type="GZIP_1", quantize_level=0))
-    fits.HDUList(hdus).writeto(out, overwrite=True, checksum=True)
-    rt, zq = {}, None
-    with fits.open(out, checksum=True) as check:
-        for i, key in enumerate(["diff", "noise", "mask"], 1):
-            assert np.array_equal(check[i].data, trimmed(key), equal_nan=True), key
-            rt[key] = True
-            zq = check[i].header.get("ZQUANTIZ")
+    from ._tk import write_fz  # production fpack writer (ZQUANTIZ NONE); asserts the exact round trip
+
+    write_fz(out, primary, [(trimmed(key), hdr) for key, hdr in zip(["diff", "noise", "mask"], headers)])
+    rt = {key: True for key in ("diff", "noise", "mask")}
+    with fits.open(out, disable_image_compression=True) as raw:
+        zq = raw[1].header.get("ZQUANTIZ")
     extra = {}
     for key, label in [("convolved", "hp_c"), ("bkg", "hp_b")]:
         if res.get(key) is not None:
             dest = out_root / label / f"{stem}_{label}.fits.fz"
-            fits.HDUList([fits.PrimaryHDU(header=primary), fits.CompImageHDU(data=trimmed(key), header=headers[0],
-                          compression_type="GZIP_1", quantize_level=0)]).writeto(dest, overwrite=True, checksum=True)
-            with fits.open(dest) as check:
-                assert np.array_equal(check[1].data, trimmed(key), equal_nan=True), label
+            write_fz(dest, primary, [(trimmed(key), headers[0])])
             extra[label] = dict(path=str(dest), sha256=sha256(dest), round_trip_exact=True)
     if res.get("kernel_params_arrays"):
         dest = out_root / "kernels" / f"{stem}_kernel.npz"
@@ -133,7 +128,7 @@ def build_frame(cfg, stem: str) -> dict:
                median_noise_good=float(np.median(N[good])),
                robust_std_chi=float(1.4826 * np.median(np.abs(chi - np.median(chi)))),
                diff_quantiles_1_16_50_84_99=np.percentile(D[good], [1, 16, 50, 84, 99]).tolist(),
-               round_trip_exact=rt, zquantiz=zq, compression="GZIP_1 quantize_level=0",
+               round_trip_exact=rt, zquantiz=zq, compression="fpack -g -q 0 (common/fits_io)",
                hotpants_seconds=hp_sec, products=extra, code_sha=cfg.code_sha())
     assert good.sum() > 100000 and val["noise_pos_frac_on_mask0"] == 1.0
     (out_root / "validation.json").write_text(json.dumps(val, indent=1) + "\n")

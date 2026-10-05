@@ -107,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
         ap.error(f"unrecognised arguments: {' '.join(rest)}")
     try:
         cfg = load_config(a.config)
+        if a.stage != "status":
+            cfg.check_code_sha()
     except (ConfigError, OSError) as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2

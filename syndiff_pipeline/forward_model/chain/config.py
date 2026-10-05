@@ -72,6 +72,7 @@ class InputsCfg:
     pass2_hp: Mapping[str, Path] | None = None    # optional extra baselines: stem -> hp_d path
     combined_store_weights: str = "production"    # band weights the combined store was built with: production|adopted
     skylist: Path | None = None                   # optional skycell list override (default: from the mapping)
+    lane_dir: Path | None = None                  # F=1 lane (ks_b/, shared_mask, substamp stars); default out_root/lane_f1
 
 
 @dataclass(frozen=True)
@@ -184,6 +185,23 @@ class ChainConfig:
     def code_sha(self) -> str:
         """Pinned sha, else git HEAD of ``code.forward_model_root`` (``"unknown"`` if not a git checkout)."""
         return self.code.sha or _git_head(self.code.forward_model_root)
+
+    def check_code_sha(self) -> None:
+        """With ``code.sha`` pinned, refuse to run unless ``forward_model_root`` is at that commit with a clean
+        package tree (otherwise ``code_sha()`` would record a sha the running code does not have)."""
+        if not self.code.sha:
+            return
+        root = self.code.forward_model_root
+        head = _git_head(root)
+        if head != self.code.sha:
+            raise ConfigError(f"code.sha {self.code.sha} pinned but {root} is at {head}")
+        try:
+            dirty = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--", "syndiff_pipeline"],
+                                            text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception as e:  # noqa: BLE001
+            raise ConfigError(f"cannot check {root} for local changes: {e}")
+        if dirty:
+            raise ConfigError(f"code.sha pinned but {root}/syndiff_pipeline has local changes:\n{dirty}")
 
 
 # ---------------------------------------------------------------------- loading
@@ -315,7 +333,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
 
     ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "bootstrap_mapping",
                                   "band_cells", "adopted_weights", "init_params", "bootstrap_hp_d", "colour_map", "xp_synth",
-                                  "scorer_dir", "pass2_hp", "combined_store_weights", "skylist"}, required=True)
+                                  "scorer_dir", "pass2_hp", "combined_store_weights", "skylist", "lane_dir"}, required=True)
     cmap = ip.get("colour_map")
     if cmap is not None:
         if not isinstance(cmap, dict) or not (set(cmap) == {"a", "b"} or set(cmap) == {"summary_json", "key"}):
@@ -350,6 +368,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         pass2_hp=p2,
         combined_store_weights=csw,
         skylist=_path(ip.get("skylist"), "inputs.skylist"),
+        lane_dir=_path(ip.get("lane_dir"), "inputs.lane_dir"),
     )
     bp = _section(raw, "background", {"fill", "star_mask_pad_px"})
     fill = bp.get("fill", "harmonic")

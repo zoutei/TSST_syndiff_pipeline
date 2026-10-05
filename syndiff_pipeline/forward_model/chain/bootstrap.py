@@ -2,7 +2,9 @@
 
 One science frame per field.  Outputs (all under ``cfg.stage_dir("bootstrap")``)::
 
-    bkg/<stem>_ks_b.fits.fz            ks_b regenerated with the CURRENT default gap fill (harmonic, 70cba3c)
+    bkg/<stem>_ks_b.fits.fz            OPTIONAL local ks_b regeneration (step ``bkg``; dry run only). Real runs read ks_b,
+                                       shared_mask and the substamp stars from the F=1 lane dir (``inputs.lane_dir``,
+                                       default out_root/lane_f1) built by the lane stage.
     data_priv/                         private data_root (symlinks to read-only inputs) so nothing under data_root is written
     remap/oversampling_4/              field remap store (header WCS, single frame)
     templates/oversampling_4/          band-combined F=4 field template store (+ materialised FITS)
@@ -18,6 +20,7 @@ reads the combined/convolved PS1 store in ``<data_root>/ps1_skycells_zarr`` (wha
 
 Numerics follow ``dev_runs/e2e_f1_20260930/s12_bootstrap/scripts/{build,finish}.py`` unless noted.
 Run:  ``python -m syndiff_pipeline.forward_model.chain.bootstrap --config F.yaml --step {bkg,template,hotpants,all,submit}``
+(``all`` = template + hotpants.)
 """
 
 from __future__ import annotations
@@ -41,8 +44,9 @@ DEFAULT_LANE = "diff_linear"  # old lane providing tmpl_conv (OS1 linear convolv
 SCIENCE_BOUNDS = dict(x_min=44, x_max=2092, y_min=0, y_max=2048, shape=(2048, 2048))
 OVERSAMPLING = 4
 PSF_SIGMA = 40.0
-HP_RECIPE = dict(  # config/pipeline_sn2020hvq_tvwcs_os4.yaml, as in finish.py
-    hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=2, hp_bgo=0, hp_nstampx=10, hp_nstampy=10, hp_nss=100,
+HP_RECIPE = dict(  # config/pipeline_sn2020hvq_tvwcs_os4.yaml, as in finish.py, except the 09-08 decision: kernel
+    # spatial order 4 (not 2; 6 diverges at native) with connected_regions stamps (paper dataset ko trial 2026-10-01)
+    hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=0, stamp_mode="connected_regions", hp_nstampx=10, hp_nstampy=10, hp_nss=100,
     hp_ngauss=3, hp_deg_fixe=[6, 4, 2], hp_kf_spread_mask1=0.0, hp_ks=3.0, hp_kfm=0.75, hp_fitthresh=5.0,
     hp_stat_sig=3.0, hp_force_convolve="t", hp_normalize="t", write_convolved=True, write_bkg=True,
     write_stamps=False, write_kernel_solutions=True,
@@ -110,19 +114,35 @@ def convolved_template_for_frame(lane_root: Path, stem: str) -> Path:
     return Path(lookup_convolved_path(table, dx, dy))
 
 
-def make_private_data_root(priv: Path, data_root: Path, sector: int, camera: int, ccd: int, ffi_path: Path) -> Path:
+def make_private_data_root(priv: Path, data_root: Path, sector: int, camera: int, ccd: int, ffi_path: Path,
+                           mapping_dir: Path | None = None) -> Path:
     """Private data_root: symlinks to read-only inputs, own bookkeeping and ffi_list, so the stage writes nothing
-    under the production ``data_root``.  Idempotent."""
+    under the production ``data_root``.  Idempotent.
+
+    ``mapping_dir`` (``.../oversampling_<F>``) is linked as ``<scc>/mapping/oversampling_<F>``: the downsample reads the
+    master skycells list from ``data_root`` (``scc_mapping_master_skycells_csv``), and the schema-v2 convolved
+    fingerprint includes each cell's neighbour set from that list, so without it every cell is a miss."""
     priv = Path(priv)
     scc_src = Path(data_root) / f"s{sector:04d}" / f"c{camera}" / f"k{ccd}"
     scc = priv / f"s{sector:04d}" / f"c{camera}" / f"k{ccd}"
     scc.mkdir(parents=True, exist_ok=True)
+    if mapping_dir is not None:
+        dst = scc / "mapping" / Path(mapping_dir).name
+        dst.parent.mkdir(exist_ok=True)
+        if dst.is_symlink() and Path(os.readlink(dst)) != Path(mapping_dir):
+            raise FileExistsError(f"{dst} links to {os.readlink(dst)}, not {mapping_dir}")
+        if not dst.is_symlink():
+            dst.symlink_to(Path(mapping_dir))
     for name in ("catalogs", "ffi", "wcs"):
         if (scc_src / name).exists() and not (scc / name).exists():
             (scc / name).symlink_to(scc_src / name)
     for name in ("ffi_list.parquet", "ffi_list.csv"):
         if (scc_src / name).is_file() and not (scc / name).exists():
             shutil.copy2(scc_src / name, scc / name)
+    # top-level catalogs: the Gaia projection catalogues (catalogs/gaia_projections/...) are per-cell inputs of the
+    # schema-v2 combined fingerprint, so without them no stored cell resolves
+    if (Path(data_root) / "catalogs").exists() and not (priv / "catalogs").exists():
+        (priv / "catalogs").symlink_to(Path(data_root) / "catalogs")
     zsrc = Path(data_root) / "ps1_skycells_zarr"
     zdst = priv / "ps1_skycells_zarr"
     zdst.mkdir(exist_ok=True)
@@ -191,9 +211,34 @@ def step_bkg(*, ffi_path: Path, lane_root: Path, stem: str, out_dir: Path, fill_
 
 
 # ---------------------------------------------------------------------------------------------- step 2: template
+def preflight_store(data_root: Path, master_csv: Path, band_weights: dict | None) -> list[str]:
+    """Names in the master skycells list with no canonical convolved cell for the chain's recipe under ``data_root``
+    (the same resolver the downsample uses), so a miss fails in seconds instead of after the remap."""
+    import pandas as pd
+    from syndiff_pipeline.template_creation.processing.combined_store import production_combined_recipe
+    from syndiff_pipeline.template_creation.processing.field_downsample import _discover_shared_convolved_fp
+
+    cfg = {"remove_saturated_stars": True, "enable_saturation_correction": False}
+    if band_weights is not None:
+        cfg["band_weights"] = {b: float(band_weights[b]) for b in ("r", "i", "z", "y")}
+    recipe = production_combined_recipe(cfg)
+    df = pd.read_csv(master_csv).set_index("NAME", drop=False)
+    missing = []
+    for name in sorted(set(df.index.astype(str))):
+        projection, cell = name.rsplit(".", 1)
+        if _discover_shared_convolved_fp(data_root, projection, cell, psf_sigma=PSF_SIGMA, combined_recipe=recipe,
+                                         mapping_df=df) is None:
+            missing.append(name)
+    return missing
+
+
 def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping_dir: Path, data_root: Path,
-                  work: Path, n_jobs: int = 16) -> dict:
+                  work: Path, band_weights: dict | None, n_jobs: int = 16) -> dict:
     """Header-WCS F=4 remap + production field downsample for the single science frame.
+
+    ``band_weights`` are the r,i,z,y weights the combined store was built with (the chain's
+    ``perband.paths.chain_band_weights``).  They enter the combined recipe, so the downsample loads only cells of that
+    recipe; ``None`` means the production defaults.  Passing the wrong set makes every cell a miss, never a substitute.
 
     ``mapping_dir`` is the ``.../oversampling_4`` header-WCS mapping built from this very frame (reference == frame)."""
     from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
@@ -203,7 +248,15 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
     from syndiff_pipeline.template_creation.processing.field_remap import run_field_remap_scc
 
     work = Path(work)
-    priv = make_private_data_root(work / "data_priv", data_root, sector, camera, ccd, ffi_path)
+    priv = make_private_data_root(work / "data_priv", data_root, sector, camera, ccd, ffi_path, mapping_dir=mapping_dir)
+    from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+    csv = scc_mapping_master_skycells_csv(priv, sector, camera, ccd, oversampling_factor=OVERSAMPLING)
+    if not csv.is_file():
+        raise FileNotFoundError(f"master skycells list {csv} missing: the downsample cannot resolve canonical cells")
+    missing = preflight_store(priv, csv, band_weights)
+    if missing:
+        raise FileNotFoundError(f"{len(missing)} listed cells have no recipe-matched canonical convolved cell under "
+                                f"{priv} (first: {missing[:5]}); refusing before the remap")
     ffi_in = work / "ffi"
     ffi_in.mkdir(parents=True, exist_ok=True)
     link = ffi_in / Path(ffi_path).name
@@ -226,8 +279,10 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
     (work / "remap_result.json").write_text(json.dumps(res_remap, indent=2, default=str) + "\n")
 
     t1 = time.time()
-    recipe = production_combined_recipe({"remove_saturated_stars": True, "enable_saturation_correction": False},
-                                        data_root=priv, sector=sector, camera=camera, ccd=ccd)
+    recipe_cfg = {"remove_saturated_stars": True, "enable_saturation_correction": False}
+    if band_weights is not None:
+        recipe_cfg["band_weights"] = {b: float(band_weights[b]) for b in ("r", "i", "z", "y")}
+    recipe = production_combined_recipe(recipe_cfg, data_root=priv, sector=sector, camera=camera, ccd=ccd)
     template_root = work / "templates" / f"oversampling_{OVERSAMPLING}"
     res_ds = run_field_downsample_scc(
         sector=sector, camera=camera, ccd=ccd, data_root=priv, event_dir=work, mapping_root=mapping_dir,
@@ -238,7 +293,9 @@ def step_template(*, sector: int, camera: int, ccd: int, ffi_path: Path, mapping
         progress_path=work / "downsample_progress.json")
     t_ds = time.time() - t1
     (work / "downsample_result.json").write_text(json.dumps(res_ds, indent=2, default=str) + "\n")
+    from syndiff_pipeline.template_creation.processing.combined_store import combined_recipe_id
     res = dict(step="template", template_root=str(template_root), mapping=str(master[0]), combined_recipe=recipe,
+               combined_recipe_id=combined_recipe_id(recipe),
                seconds_remap=t_remap, seconds_downsample=t_ds, drift_source="point_ffi_wcs")
     (work / "step_template.json").write_text(json.dumps(res, indent=1, default=str) + "\n")
     return res
@@ -308,17 +365,12 @@ def step_hotpants(*, ffi_path: Path, stem: str, lane_root: Path, ks_b_path: Path
     primary.add_history("Bootstrap: single-FFI F4 header-WCS template, harmonic ks_b; native-grid output.")
     (out_dir / "hp_d").mkdir(parents=True, exist_ok=True)
     out = out_dir / "hp_d" / f"{stem}_hp_d.fits.fz"
-    hdus = [fits.PrimaryHDU(header=primary)]
-    for key, hdr in zip(["diff", "noise", "mask"], headers):
-        hdus.append(fits.CompImageHDU(data=trimmed(key), header=hdr, compression_type="GZIP_1", quantize_level=0))
-    fits.HDUList(hdus).writeto(out, overwrite=True, checksum=True)
+    from ._tk import write_fz  # production fpack writer (ZQUANTIZ NONE; DS9-readable), exact round trip asserted
+
+    write_fz(out, primary, [(trimmed(key), hdr) for key, hdr in zip(["diff", "noise", "mask"], headers)])
     for key, label in [("convolved", "hp_c"), ("bkg", "hp_b")]:
         if res.get(key) is not None:
-            dest = out_dir / label / f"{stem}_{label}.fits.fz"
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            fits.HDUList([fits.PrimaryHDU(header=primary), fits.CompImageHDU(
-                data=trimmed(key), header=headers[0], compression_type="GZIP_1", quantize_level=0)]).writeto(
-                dest, overwrite=True, checksum=True)
+            write_fz(out_dir / label / f"{stem}_{label}.fits.fz", primary, [(trimmed(key), headers[0])])
     if res.get("kernel_params_arrays"):
         (out_dir / "hp_d_kernels").mkdir(parents=True, exist_ok=True)
         np.savez_compressed(out_dir / "hp_d_kernels" / f"{stem}_kernel.npz", **res["kernel_params_arrays"])
@@ -331,47 +383,73 @@ def step_hotpants(*, ffi_path: Path, stem: str, lane_root: Path, ks_b_path: Path
 
 
 # ---------------------------------------------------------------------------------------------- config wiring
-def _lane_root(cfg) -> Path:
-    lane = ((cfg.raw or {}).get("bootstrap") or {}).get("lane", DEFAULT_LANE)
-    return cfg.scc_root / lane
+def lane_dir(cfg, override: str | Path | None = None) -> Path:
+    """The F=1 linear lane supplying ks_b/, shared_mask.fits.fz, hotpants_substamp_stars.csv (and tmpl_conv/ for the
+    optional ``bkg`` step).  Order: explicit override, ``cfg.inputs.lane_dir``, default ``out_root/lane_f1``
+    (built by the lane stage from scratch on the pinned SHA)."""
+    if override:
+        return Path(override)
+    v = getattr(cfg.inputs, "lane_dir", None) or ((cfg.raw or {}).get("inputs") or {}).get("lane_dir")
+    return Path(v) if v else cfg.out_root / "lane_f1"
 
 
-def run_stage(cfg, step: str = "all") -> dict:
-    """Run bootstrap step(s) for a loaded ``ChainConfig``.  ``all`` writes provenance + DONE."""
+def check_lane(lane: Path, stem: str, ks_b: Path | None = None) -> dict:
+    """Fail early (with every missing path listed) if the lane lacks what the OS-aware Hotpants needs."""
+    need = {"shared_mask": lane / "shared_mask.fits.fz", "substamp_stars": lane / "hotpants_substamp_stars.csv",
+            "ks_b": ks_b or lane / "ks_b" / f"{stem}_ks_b.fits.fz"}
+    missing = [f"{k}: {v}" for k, v in need.items() if not Path(v).is_file()]
+    if missing:
+        raise FileNotFoundError("F=1 lane incomplete (lane stage not run?):\n  " + "\n  ".join(missing))
+    return need
+
+
+def run_stage(cfg, step: str = "all", *, lane_override: str | Path | None = None, local_bkg: bool = False) -> dict:
+    """Run bootstrap step(s) for a loaded ``ChainConfig``.
+
+    ``all`` = template + hotpants (writes provenance + DONE): the background is NOT regenerated, it is read from the
+    F=1 lane (``lane_dir``).  ``bkg`` regenerates ks_b locally (needs the lane's tmpl_conv + frame offsets; used by the
+    dry run), and ``local_bkg=True`` makes ``hotpants`` read that local ks_b instead of the lane's."""
     from syndiff_pipeline.forward_model.chain.config import mark_done, write_provenance
+    from syndiff_pipeline.forward_model.chain.perband.paths import chain_band_weights
 
     sd = cfg.stage_dir("bootstrap")
     sd.mkdir(parents=True, exist_ok=True)
     ffi = cfg.ffi_path()
-    lane = _lane_root(cfg)
+    lane = lane_dir(cfg, lane_override)
     s = cfg.scc
     mapping = Path(cfg.need("inputs.bootstrap_mapping"))
+    master = None
     out: dict = {}
-    if step in ("bkg", "all"):
-        bk = (cfg.raw or {}).get("bootstrap_background") or (cfg.raw or {}).get("background") or {}
-        out["bkg"] = step_bkg(ffi_path=ffi, lane_root=lane, stem=cfg.stem, out_dir=sd / "bkg",
-                              fill_method=str(bk.get("fill", "harmonic")),
-                              star_mask_pad_px=int(bk.get("star_mask_pad_px", 0)))
+    local_ks_b = sd / "bkg" / f"{cfg.stem}_ks_b.fits.fz"
+    if step == "bkg":
+        bk = cfg.background
+        out["bkg"] = step_bkg(ffi_path=ffi, lane_root=lane, stem=cfg.stem, out_dir=sd / "bkg", fill_method=bk.fill,
+                              star_mask_pad_px=bk.star_mask_pad_px)
     if step in ("template", "all"):
         out["template"] = step_template(sector=s.sector, camera=s.camera, ccd=s.ccd, ffi_path=ffi, mapping_dir=mapping,
-                                        data_root=cfg.data_root, work=sd, n_jobs=int(os.environ.get("BOOTSTRAP_NJOBS", 16)))
+                                        data_root=cfg.data_root, work=sd, band_weights=chain_band_weights(cfg),
+                                        n_jobs=int(os.environ.get("BOOTSTRAP_NJOBS", 16)))
     if step in ("hotpants", "all"):
+        ks_b = local_ks_b if local_bkg else lane / "ks_b" / f"{cfg.stem}_ks_b.fits.fz"
+        check_lane(lane, cfg.stem, ks_b)
         master = sorted(mapping.glob(f"tess_s{s.sector:04d}_{s.camera}_{s.ccd}_master_pixels2skycells_os4.fits*"))[0]
-        out["hotpants"] = step_hotpants(ffi_path=ffi, stem=cfg.stem, lane_root=lane, ks_b_path=sd / "bkg" / f"{cfg.stem}_ks_b.fits.fz",
-                                        template_root=sd / "templates" / "oversampling_4", mapping_master=master, out_dir=sd / "diff")
+        out["hotpants"] = step_hotpants(ffi_path=ffi, stem=cfg.stem, lane_root=lane, ks_b_path=ks_b,
+                                        template_root=sd / "templates" / "oversampling_4", mapping_master=master,
+                                        out_dir=sd / "diff")
     if step == "all":
-        write_provenance(sd, cfg, {"ffi": ffi, "shared_mask": lane / "shared_mask.fits.fz",
-                                   "substamp_stars": lane / "hotpants_substamp_stars.csv",
+        write_provenance(sd, cfg, {"ffi": ffi, "ks_b": ks_b, "shared_mask": lane / "shared_mask.fits.fz",
+                                   "substamp_stars": lane / "hotpants_substamp_stars.csv", "lane_dir": {"value": str(lane)},
                                    "mapping_master": master, "steps": json.loads(json.dumps(out, default=str))})
         mark_done(sd)
     return out
 
 
-def submit_template(cfg, step: str = "template") -> str:
-    """Write + submit the Condor job for the heavy step (``template`` by default; ``all`` runs everything on one node)."""
+def submit_template(cfg, step: str = "template", extra: list[str] | None = None) -> str:
+    """Write + submit the Condor job for a step (``template`` by default; ``all`` runs template + hotpants on one node)."""
     from syndiff_pipeline.forward_model.chain import condor
 
-    argv = ["python", "-m", "syndiff_pipeline.forward_model.chain.bootstrap", "--config", str(cfg.config_path), "--step", step]
+    argv = ["python", "-m", "syndiff_pipeline.forward_model.chain.bootstrap", "--config", str(cfg.config_path),
+            "--step", step, *(extra or [])]
     sub = condor.write_submit(cfg, "bootstrap", argv, tag=f"bootstrap_{step}", **TEMPLATE_RESOURCES)
     return condor.submit(sub)
 
@@ -380,15 +458,21 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--config", required=True)
     ap.add_argument("--step", default="all", choices=["bkg", "template", "hotpants", "all", "submit"])
+    ap.add_argument("--submit-step", default="template", choices=["bkg", "template", "hotpants", "all"],
+                    help="with --step submit: which step the Condor job runs")
+    ap.add_argument("--lane-dir", default=None, help="override inputs.lane_dir (default out_root/lane_f1)")
+    ap.add_argument("--local-bkg", action="store_true", help="hotpants reads bootstrap/bkg/ks_b (dry run) instead of the lane's")
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     from syndiff_pipeline.forward_model.chain.config import load_config
 
     cfg = load_config(a.config)
+    cfg.check_code_sha()
+    extra = (["--lane-dir", a.lane_dir] if a.lane_dir else []) + (["--local-bkg"] if a.local_bkg else [])
     if a.step == "submit":
-        print(submit_template(cfg))
+        print(submit_template(cfg, a.submit_step, extra))
         return 0
-    print(json.dumps(run_stage(cfg, a.step), indent=1, default=str))
+    print(json.dumps(run_stage(cfg, a.step, lane_override=a.lane_dir, local_bkg=a.local_bkg), indent=1, default=str))
     return 0
 
 
