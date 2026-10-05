@@ -45,6 +45,9 @@ def test_scene_swap_demote_bitwise(tmp_path):
     mine = json.loads((out / "scene_meta.json").read_text())
     for k in ("csv_sha256", "n_listed", "n_matched_in_scene", "n_listed_not_in_scene", "strict"):   # new provenance keys
         mine["demoted"].pop(k)
+    # 6c908e3 added the negative-outlier record after the e2e run; on this scene it must be a no-op.
+    neg = mine.pop("neg_outlier_mask")
+    assert neg["n_demoted"] == 0 and neg["n_stamp_px_masked"] == 0
     assert mine == json.loads((E / "s3_fit/scene/scene_meta.json").read_text())
 
 

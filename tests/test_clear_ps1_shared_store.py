@@ -49,8 +49,8 @@ def _resolved(
     ccd: int = 1,
     mapping_csv_rows: str = (
         "NAME,projection,y,x,NAXIS1,NAXIS2\n"
-        "skycell.1111.001,skycell.1111,0,0,32,32\n"
-        "skycell.1111.002,skycell.1111,0,0,32,32\n"
+        "skycell.1111.001,1111,0,0,32,32\n"
+        "skycell.1111.002,1111,0,1,32,32\n"
     ),
 ) -> ResolvedTargetConfig:
     mapping_dir = (
@@ -145,6 +145,7 @@ class TestClearPs1SharedStore(unittest.TestCase):
             csv_path = Path(str(legacy).replace(".zarr", "_removed_stars.csv"))
             csv_path.write_text("source_id\n1\n", encoding="utf-8")
 
+            before = verify_ps1_process(resolved)
             removed = set(clear_ps1_process_artifacts(resolved))
 
             self.assertEqual(removed, {str(csv_path)})
@@ -155,8 +156,12 @@ class TestClearPs1SharedStore(unittest.TestCase):
             self.assertTrue(legacy.is_dir(), "shared mode must not remove legacy per-SCC zarr")
             self.assertFalse(csv_path.exists())
 
-            result = verify_ps1_process(resolved)
-            self.assertTrue(result.ok, "already-published cells must remain verifiably complete")
+            # Clearing must not change what verify sees. (Since store v2, verify accepts only the
+            # exact canonical fingerprint this run must use, so the placeholder "fp0001" cells
+            # published here are not verifiably complete either before or after; invariant 6.)
+            after = verify_ps1_process(resolved)
+            self.assertFalse(before.ok, "a placeholder fingerprint must not pass the canonical gate")
+            self.assertEqual(after.ok, before.ok)
 
     def test_shared_clear_is_idempotent_no_op(self):
         with tempfile.TemporaryDirectory() as tmp:

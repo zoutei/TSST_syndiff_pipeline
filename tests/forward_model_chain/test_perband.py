@@ -6,6 +6,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+E2E_STALE = pytest.mark.xfail(reason=("input gone: the e2e combined/convolved cells of projection 2484 are no longer in /astro/armin/koji/syndiff/data/ps1_skycells_zarr (checked 2026-10-05); re-pin to the v3 per-band pilot"), strict=False)
+
 from syndiff_pipeline.template_creation.processing import perband as PB
 from syndiff_pipeline.template_creation.processing.combined_store import DEFAULT_BAND_WEIGHTS
 
@@ -233,6 +235,7 @@ def test_f01_select_matches_e2e(tmp_path):
     assert out == json.loads(json.dumps(ref)) or json.loads(json.dumps(out)) == ref
 
 
+@E2E_STALE
 @slow
 def test_f02_band_cell_matches_e2e_bitwise(tmp_path):
     """Rebuild one band cell from the combined store + raw zarr; bitwise equal to the e2e cell; records production weights."""
@@ -251,6 +254,7 @@ def test_f02_band_cell_matches_e2e_bitwise(tmp_path):
     assert chk["max_rel_to_peak"] == old["max_rel_to_peak"] and chk["zeroed_frac"] == old["zeroed_frac"]
 
 
+@E2E_STALE
 @slow
 def test_f03_contrib_matches_e2e_bitwise(tmp_path):
     """Two cells (one plain, one seam-corrected cross-projection) re-run from the e2e band cells + lists: contrib arrays bitwise."""

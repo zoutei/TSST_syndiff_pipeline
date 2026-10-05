@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from syndiff_pipeline.template_creation.processing import combined_store as cs
@@ -110,6 +111,13 @@ def test_combined_discovery_without_recipe_falls_back_to_mtime_with_warning(
     assert fp == wrong["fingerprint"]
 
 
+def _single_cell_mapping() -> pd.DataFrame:
+    return pd.DataFrame(
+        {"NAME": [_SKYCELL], "projection": [_PROJECTION.split(".")[1]], "x": [0], "y": [0],
+         "NAXIS1": [4], "NAXIS2": [4]}
+    )
+
+
 def test_convolved_discovery_prefers_recipe_match_over_newer_wrong_mtime(tmp_path: Path):
     combined_info = _publish_combined(tmp_path, remove_saturated_stars=True)
     correct = _publish_convolved(
@@ -121,14 +129,19 @@ def test_convolved_discovery_prefers_recipe_match_over_newer_wrong_mtime(tmp_pat
     assert correct["fingerprint"] != wrong["fingerprint"]
 
     my_combined_recipe = cs.combined_recipe(remove_saturated_stars=True)
+    # Schema v2: the canonical fingerprint includes the cell's neighbour set from this
+    # consumer's mapping list, so a recipe-qualified lookup needs ``mapping_df``. A list
+    # holding only this cell gives an empty neighbour set, i.e. the fingerprint published above.
+    mapping_df = _single_cell_mapping()
     fp = fd._discover_shared_convolved_fp(
         tmp_path, _PROJECTION, _CELL,
-        psf_sigma=40.0, combined_recipe=my_combined_recipe,
+        psf_sigma=40.0, combined_recipe=my_combined_recipe, mapping_df=mapping_df,
     )
     assert fp == correct["fingerprint"]
 
     loaded = fd._try_load_shared_convolved_arrays(
         tmp_path, _SKYCELL, psf_sigma=40.0, combined_recipe=my_combined_recipe,
+        mapping_df=mapping_df,
     )
     assert loaded is not None
     data, _mask = loaded
