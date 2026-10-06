@@ -64,8 +64,8 @@ class TestFieldModeLoader(unittest.TestCase):
             )
             arr = loader(0)
             self.assertEqual(arr.shape, (3, 4))
-            # mean flux at (1,2) within crop = 6/2 = 3
-            self.assertAlmostEqual(float(arr[1, 2]), 3.0)
+            # Field-mode flux is the raw sum (FLUX_SUM convention, never / COUNT)
+            self.assertAlmostEqual(float(arr[1, 2]), 6.0)
 
     def _write_maybe_load_fixture(
         self,
@@ -119,6 +119,12 @@ class TestFieldModeLoader(unittest.TestCase):
             include_mapping_grid = schema_version >= 3
         if include_mapping_grid:
             payload["mapping_grid"] = grid.to_mapping_dict()
+            # MAPGRID=3 paired-padding contract, as field_downsample writes it
+            recipe = grid.geometry_recipe()
+            for key in ("science_pad_policy", "template_support_bounds_ffi", "pad_native",
+                        "science_slice_native", "science_slice_os"):
+                if key in recipe:
+                    payload[key] = recipe[key]
         (store / "field_mode_assembly.json").write_text(json.dumps(payload))
         pd.DataFrame(
             {
@@ -203,7 +209,7 @@ class TestFieldModeLoader(unittest.TestCase):
             (store / "contribs").mkdir()
             # HR full shape 20x24 = native 10x12 at F=2
             ny, nx = 20, 24
-            # flat index in HR: y=3,x=5 -> 3*24+5 = 77, flux 8 count 2 -> mean 4
+            # flat index in HR: y=3,x=5 -> 3*24+5 = 77, flux sum 8 (count 2 is not divided out)
             write_contrib(
                 store,
                 "skycell.1.1",
@@ -238,7 +244,7 @@ class TestFieldModeLoader(unittest.TestCase):
             )
             arr = loader(0)
             self.assertEqual(arr.shape, (6, 8))
-            self.assertAlmostEqual(float(arr[3, 5]), 4.0)
+            self.assertAlmostEqual(float(arr[3, 5]), 8.0)
 
 
 if __name__ == "__main__":
