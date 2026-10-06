@@ -24,9 +24,11 @@ not part of the combined recipe. Checked bit-exact against paper cell
 skycell.2528.005, with pixel operations identical to the standalone C4 ledger
 (`dev_runs/inline_ledger_check_20261005`).
 
-The standalone campaign modules below remain for historical backfills; use the
-selected source/worktree explicitly and do not change the live editable
-installation to run one.
+The standalone campaign, pilot, catalogue-query and seam-transport validation
+modules described below now live in `tools/removal_ledger_campaign/` (run from the
+repository root, e.g. `python -m tools.removal_ledger_campaign.campaign`); they are
+for historical backfills and tests, not part of the pipeline. Use the selected
+source/worktree explicitly and do not change the live editable installation to run one.
 
 ## Scope and guarantees
 
