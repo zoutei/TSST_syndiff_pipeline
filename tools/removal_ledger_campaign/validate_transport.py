@@ -10,9 +10,9 @@ import pandas as pd
 from astropy.io import fits
 from astropy.wcs import FITSFixedWarning
 
-from .. import canonical_cell, combined_store
+from syndiff_pipeline.template_creation.processing import canonical_cell, combined_store
 from .transport import transport_cell,bin_regmap
-from .cell import file_digest
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import file_digest
 from .field_operator import FrozenFieldOperator
 
 

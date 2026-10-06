@@ -2,8 +2,8 @@ import json
 from types import SimpleNamespace
 import pandas as pd
 import pytest
-from syndiff_pipeline.template_creation.processing.removal_ledger.catalogues import fetch_ps1_cone
-from syndiff_pipeline.template_creation.processing.removal_ledger.catalogues import fetch_gaia_box
+from tools.removal_ledger_campaign.catalogues import fetch_ps1_cone
+from tools.removal_ledger_campaign.catalogues import fetch_gaia_box
 
 
 class Response:

@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 import pytest
-from syndiff_pipeline.template_creation.processing.removal_ledger.campaign import prepare,task_list,update_status
+from tools.removal_ledger_campaign.campaign import prepare,task_list,update_status
 
 
 def setup(out):

@@ -15,11 +15,11 @@ from astropy.io import fits
 from astropy.time import Time
 from astropy.wcs import WCS, FITSFixedWarning
 
-from .cell import replay_cell, file_digest, recover_segmentation_union, validate_published, array_digest, attach_unmatched_components
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import replay_cell, file_digest, recover_segmentation_union, validate_published, array_digest, attach_unmatched_components
 from .catalogues import cell_query_geometry, fetch_ps1_cone, fetch_gaia_box
-from .matching import gaia_sources, ps1_sources, match_gaia_ps1, attach_entities
-from .astrometry import calibrate_image_positions
-from .. import band_utils as bu
+from syndiff_pipeline.template_creation.processing.removal_ledger.matching import gaia_sources, ps1_sources, match_gaia_ps1, attach_entities
+from syndiff_pipeline.template_creation.processing.removal_ledger.astrometry import calibrate_image_positions
+from syndiff_pipeline.template_creation.processing import band_utils as bu
 
 warnings.filterwarnings('ignore',category=FITSFixedWarning)
 RUNS=Path('/astro/armin/koji/syndiff/dev_runs')
@@ -27,7 +27,8 @@ PAPER=RUNS/'paper_dataset_20261001'
 TRACE=RUNS/'epsf_stage_trace_20261002/fields'
 AUDIT=RUNS/'ps1_removal_audit_20261002'
 ATLAS=RUNS/'epsf_atlas_20261001/dip'
-CODE_FILES={p.name:file_digest(p) for p in Path(__file__).parent.glob('*.py')}
+import syndiff_pipeline.template_creation.processing.removal_ledger as _core
+CODE_FILES={p.name:file_digest(p) for d in (Path(__file__).parent,Path(_core.__file__).parent) for p in sorted(d.glob('*.py'))}
 
 
 def inventory(out):
@@ -95,7 +96,7 @@ def _run_cell(field,cell,out,*,catalogues=True,download_raw=False):
         cache=AUDIT/'tables'/f'{cell}_raw.npz'
         with np.load(cache) as z:raw=z['I0'];uncert=z['U0'];mask=z['M0']
     elif download_raw:
-        from ..ps1_download import fetch_skycell_bands_masks_and_headers
+        from syndiff_pipeline.template_creation.processing.ps1_download import fetch_skycell_bands_masks_and_headers
         bands,masks,weights,headers,weight_headers=fetch_skycell_bands_masks_and_headers(cell,max_workers=2)
         if set(bands)!=set('rizy'):raise ValueError('Incomplete original PS1 download')
         raw,mask,uncert=bu.process_skycell_bands(bands,masks,weights,headers,weight_headers,band_weights=record['recipe']['band_weights'])

@@ -11,8 +11,8 @@ import pandas as pd
 from astropy.io import fits
 from astropy.wcs import FITSFixedWarning
 
-from .. import convolved_store as cv
-from .cell import explicit_deleted_image,validate_published,file_digest
+from syndiff_pipeline.template_creation.processing import convolved_store as cv
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import explicit_deleted_image,validate_published,file_digest
 from .field_operator import FrozenFieldOperator
 from .transport import transport_cell,required_inputs
 

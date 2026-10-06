@@ -8,8 +8,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from .. import canonical_cell as cc
-from .. import padding_correction as pc
+from syndiff_pipeline.template_creation.processing import canonical_cell as cc
+from syndiff_pipeline.template_creation.processing import padding_correction as pc
 
 
 def required_inputs(cell,metadata,mapping):
