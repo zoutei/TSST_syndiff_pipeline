@@ -15,7 +15,7 @@ import pandas as pd
 import requests
 from filelock import FileLock
 
-from .cell import file_digest
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import file_digest
 
 PS1_ENDPOINT = "https://catalogs.mast.stsci.edu/api/v0.1/panstarrs/dr2/stack"
 
@@ -127,7 +127,7 @@ def fetch_gaia_box(root, ra_min, ra_max, dec_min, dec_max, *, endpoint=None):
     Flathub's array result is checked against its independent count endpoint
     before and after download. No claim about astrophysical completeness.
     """
-    from ..pancakes import _fetch_flathub_numpy, _structured_array_to_gaia_dataframe, GAIA_CATALOG_COLUMNS, DEFAULT_FLATHUB_ENDPOINT
+    from syndiff_pipeline.template_creation.processing.pancakes import _fetch_flathub_numpy, _structured_array_to_gaia_dataframe, GAIA_CATALOG_COLUMNS, DEFAULT_FLATHUB_ENDPOINT
     if not (0<=ra_min<ra_max<360 and -90<=dec_min<dec_max<=90):raise ValueError('Split RA-wrap boxes before querying')
     query=dict(ra=[float(ra_min),float(ra_max)],dec=[float(dec_min),float(dec_max)])
     request=dict(endpoint=endpoint or DEFAULT_FLATHUB_ENDPOINT,query=query,schema=2,catalogue='gaiadr3',photometric_cuts=None)

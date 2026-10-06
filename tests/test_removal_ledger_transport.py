@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from syndiff_pipeline.template_creation.processing import canonical_cell as cc
-from syndiff_pipeline.template_creation.processing.removal_ledger.transport import transport_cell,bin_regmap,fixed_domain
+from tools.removal_ledger_campaign.transport import transport_cell,bin_regmap,fixed_domain
 
 
 def fixture():

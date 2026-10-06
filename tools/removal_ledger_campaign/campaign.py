@@ -13,7 +13,7 @@ import traceback
 from filelock import FileLock
 
 from .pilot import run_cell, CODE_FILES
-from .cell import validate_published
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import validate_published
 
 
 def atomic_json(path,value):
@@ -120,7 +120,7 @@ export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONDONTWRITEBYTECODE=1
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 export MPLCONFIGDIR='{out}/.matplotlib'
 export XDG_CACHE_HOME='{out}/.cache'
-exec python -m syndiff_pipeline.template_creation.processing.removal_ledger.campaign worker --out '{out}' --index "$1" --expected-sha '{expected_sha}'
+exec python -m tools.removal_ledger_campaign.campaign worker --out '{out}' --index "$1" --expected-sha '{expected_sha}'
 ''');script.chmod(0o755)
     submit=dest/'cell.sub'
     submit.write_text(f'''universe = vanilla
@@ -157,7 +157,7 @@ export PYTHONUNBUFFERED=1 PYTHONFAULTHANDLER=1 PYTHONDONTWRITEBYTECODE=1
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 export MPLCONFIGDIR='{out}/.matplotlib'
 export XDG_CACHE_HOME='{out}/.cache'
-exec python -m syndiff_pipeline.template_creation.processing.removal_ledger.campaign validate --out '{out}' --field "$1" --cell "$2" --expected-sha '{expected_sha}'
+exec python -m tools.removal_ledger_campaign.campaign validate --out '{out}' --field "$1" --cell "$2" --expected-sha '{expected_sha}'
 ''');vscript.chmod(0o755)
         vsub=dest/'validation.sub'
         vsub.write_text(f'''universe = vanilla

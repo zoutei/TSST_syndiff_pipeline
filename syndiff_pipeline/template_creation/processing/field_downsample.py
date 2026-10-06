@@ -1539,19 +1539,23 @@ def run_field_downsample_scc(
     master_map, name_to_id = _master_skycell_id_map(master_path)
     skycell_df: pd.DataFrame | None = None
     if shared_convolved_store and psf_sigma is not None:
-        from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+        from syndiff_pipeline.template_creation.processing.field_remap import _skycell_csv_path
 
-        master_csv_path = scc_mapping_master_skycells_csv(
-            data_root, sector, camera, ccd, oversampling_factor=oversampling_factor,
+        # Read the master skycell list from the same mapping_root the master map
+        # above comes from; rebuilding it from data_root misses mapping trees
+        # that live elsewhere (e.g. the paper chain's private data_root).
+        master_csv_path = _skycell_csv_path(
+            mapping_root, sector, camera, ccd, oversampling_factor=oversampling_factor,
         )
-        if master_csv_path.is_file():
-            skycell_df = pd.read_csv(master_csv_path).set_index("NAME", drop=False)
-        else:
-            log.warning(
-                "field downsample s%04d_%d_%d: master skycells CSV %s not found; "
-                "cross-projection padding correction cannot be applied for this SCC.",
-                sector, camera, ccd, master_csv_path,
+        if not master_csv_path.is_file():
+            # Without it the cross-projection padding correction would be
+            # skipped silently (up to ~50% seam flux deficit): refuse instead.
+            raise FileNotFoundError(
+                f"field downsample s{sector:04d}_{camera}_{ccd}: master skycells CSV "
+                f"{master_csv_path} not found; cross-projection padding correction "
+                "cannot be applied"
             )
+        skycell_df = pd.read_csv(master_csv_path).set_index("NAME", drop=False)
     log.info(
         "Opened %s %s and master map %s (%d skycells) in %.1fs",
         "shared convolved store" if shared_convolved_store else "zarr",

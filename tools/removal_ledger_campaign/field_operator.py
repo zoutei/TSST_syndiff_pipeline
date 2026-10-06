@@ -6,12 +6,12 @@ import pandas as pd
 from astropy.io import fits
 
 from syndiff_pipeline.common.mapping_grid import MappingGrid
-from ..field_remap import load_gid_epoch_index,resolve_l4a_epoch_id,_find_regmap
-from ..field_abutting import abutting_undirected_pairs,l4a_exact_path,load_l4b_rim_side
-from ..field_hybrid_exact import compose_group_hybrid_assignment,shared_abutting_border_tess_ids
-from ..hybrid_regmaps import abutting_rim_ps1_mask
-from ..field_downsample import _as_tess_pixel_ids,_bin_skycell_contrib,_neighbours_by_skycell_id
-from .cell import file_digest
+from syndiff_pipeline.template_creation.processing.field_remap import load_gid_epoch_index,resolve_l4a_epoch_id,_find_regmap
+from syndiff_pipeline.template_creation.processing.field_abutting import abutting_undirected_pairs,l4a_exact_path,load_l4b_rim_side
+from syndiff_pipeline.template_creation.processing.field_hybrid_exact import compose_group_hybrid_assignment,shared_abutting_border_tess_ids
+from syndiff_pipeline.template_creation.processing.hybrid_regmaps import abutting_rim_ps1_mask
+from syndiff_pipeline.template_creation.processing.field_downsample import _as_tess_pixel_ids,_bin_skycell_contrib,_neighbours_by_skycell_id
+from syndiff_pipeline.template_creation.processing.removal_ledger.cell import file_digest
 
 
 class FrozenFieldOperator:
