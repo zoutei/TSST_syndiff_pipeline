@@ -61,6 +61,26 @@ def table_digest(table):
     return hashlib.sha256(sink.getvalue()).hexdigest()
 
 
+def _smallest_uint(a):
+    """Same values in the narrowest unsigned dtype (readers only compare IDs)."""
+    a=np.asarray(a)
+    if a.dtype.kind not in 'ui' or (a.size and a.min()<0):return a
+    top=int(a.max()) if a.size else 0
+    for dt in (np.uint8,np.uint16,np.uint32):
+        if top<=np.iinfo(dt).max:return a.astype(dt,copy=False)
+    return a
+
+
+def _savez_fast(path,arrays,level=1):
+    """``np.savez_compressed`` layout (readable by ``np.load``) at zlib level 1:
+    several times faster than the default level on large label maps."""
+    import io,zipfile
+    with zipfile.ZipFile(path,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=level) as zf:
+        for name,value in arrays.items():
+            buf=io.BytesIO();np.lib.format.write_array(buf,np.asanyarray(value),allow_pickle=False)
+            zf.writestr(name+'.npy',buf.getvalue())
+
+
 class CellLedger:
     def __init__(self, raw, identity):
         if np.asarray(raw).ndim != 2: raise ValueError("2D cell required")
@@ -245,9 +265,9 @@ class CellLedger:
             try:
                 pd.DataFrame(self.regions).to_parquet(tmp/'regions.parquet',index=False)
                 arrays=dict(self.geometry,selected_stage=self.selected_stage,changed_stage=self.changed_stage,
-                            changed_operation=self.changed_operation)
-                if self.labels is not None:arrays['footprint_labels']=self.labels
-                np.savez_compressed(tmp/'geometry.npz',**arrays)
+                            changed_operation=_smallest_uint(self.changed_operation))
+                if self.labels is not None:arrays['footprint_labels']=_smallest_uint(self.labels)
+                _savez_fast(tmp/'geometry.npz',arrays)
                 if sources is not None:sources.to_parquet(tmp/'sources.parquet',index=False)
                 if associations is not None:associations.to_parquet(tmp/'associations.parquet',index=False)
                 for name,table in extra_tables.items():table.to_parquet(tmp/(name+'.parquet'),index=False)

@@ -610,6 +610,69 @@ def select_removal_catalog(
         raise MissingRemovalCatalogError(f"Gaia projection failed for {skycell_id}: {exc}") from exc
 
 
+def _capture_cell_ledger(bundle, gaia_catalog_pixels, convention, *,
+                         remove_saturated_stars, bright_star_mag_threshold):
+    """Removal with the inline ledger recorder; returns ``(image, records, ledger_path)``.
+
+    Raises on any failure; the caller then reruns the unchanged removal. A
+    failure after the pixel capture (catalogue association) still publishes
+    the pixel ledger, with the association error in its metadata.
+    """
+    from syndiff_pipeline.template_creation.processing.removal_ledger import inline as rl
+
+    if convention != band_utils.REMOVAL_CONVENTION_FOOTPRINT:
+        raise ValueError(f"removal ledger supports footprint_v1 only, not {convention!r}")
+    spec = bundle["ledger"]
+    identity = dict(
+        cell=bundle["skycell_id"],
+        combined_fingerprint=spec["combined_fingerprint"],
+        recipe_id=spec.get("recipe_id"),
+        gaia_removal_fingerprint=spec.get("gaia_fingerprint"),
+        producer="ps1_process",
+    )
+    result, removed, ledger, raw = rl.capture_removal(
+        bundle["combined_image"], bundle["combined_uncert"], bundle["combined_mask"],
+        gaia_catalog_pixels, identity,
+        remove_saturated_stars=remove_saturated_stars,
+        bright_star_mag_threshold=bright_star_mag_threshold,
+    )
+    header_str = next(iter(bundle["headers_data"].values()))
+    sources = links = calibration = calibrators = None
+    association_error = None
+    try:
+        sources, links, calibration, calibrators = rl.associate_gaia(
+            ledger, raw, bundle["combined_mask"], header_str, spec.get("gaia_all"),
+        )
+    except Exception as exc:
+        association_error = f"{type(exc).__name__}: {exc}"
+        logger.error(f"[PreProcessor] Ledger association failed for {bundle['skycell_id']}: {exc}")
+    dest = rl.publish_cell_ledger(
+        spec["data_root"], spec["projection"], spec["skycell"], spec["combined_fingerprint"], ledger,
+        sources=sources, associations=links, legacy_records=removed,
+        image_calibration=calibration, calibrators=calibrators,
+        catalogue=dict(store=spec.get("gaia_store"), removal_fingerprint=spec.get("gaia_fingerprint"),
+                       rows_in_cone=None if spec.get("gaia_all") is None else int(len(spec["gaia_all"]))),
+        metadata=dict(association_error=association_error, wcs_header=header_str),
+    )
+    return result, removed, str(dest)
+
+
+def _write_ledger_error(spec, exc) -> None:
+    """Best-effort ``error.json`` where the cell's ledger would have been published."""
+    try:
+        import json as _json
+        from syndiff_pipeline.template_creation.processing.removal_ledger import inline as rl
+
+        d = rl.ledger_fingerprint_dir(spec["data_root"], spec["projection"], spec["skycell"],
+                                      spec["combined_fingerprint"])
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f".error.json.{os.getpid()}"
+        tmp.write_text(_json.dumps(dict(error=f"{type(exc).__name__}: {exc}", time=time.time()), indent=2))
+        os.replace(tmp, d / "error.json")
+    except Exception:
+        logger.warning("could not write ledger error record", exc_info=True)
+
+
 def process_single_cell(bundle: dict) -> dict:
     """Run SEP source extraction on a pre-combined cell in a subprocess.
 
@@ -656,15 +719,34 @@ def process_single_cell(bundle: dict) -> dict:
                 f"[PreProcessor] {len(gaia_catalog_pixels)} Gaia stars selected for {skycell_id}"
             )
 
-        combined_image, removed_stars_list = remove_background(
-            bundle["combined_image"],
-            bundle["combined_uncert"],
-            mask=bundle["combined_mask"],
-            remove_saturated_stars=remove_saturated_stars,
-            gaia_catalog_pixels=gaia_catalog_pixels,
-            bright_star_mag_threshold=bright_star_mag_threshold,
-            convention=bundle.get("removal_convention", band_utils.REMOVAL_CONVENTION),
-        )
+        convention = bundle.get("removal_convention", band_utils.REMOVAL_CONVENTION)
+        combined_image = None
+        ledger_path = None
+        ledger_spec = bundle.get("ledger")
+        if ledger_spec is not None and remove_saturated_stars:
+            try:
+                combined_image, removed_stars_list, ledger_path = _capture_cell_ledger(
+                    bundle, gaia_catalog_pixels, convention,
+                    remove_saturated_stars=remove_saturated_stars,
+                    bright_star_mag_threshold=bright_star_mag_threshold,
+                )
+            except Exception as exc:
+                # The ledger never decides whether a template cell exists:
+                # rerun the unchanged removal below and leave an error record.
+                combined_image = None
+                logger.error(f"[PreProcessor] Removal ledger failed for {skycell_id}: {exc}", exc_info=True)
+                _write_ledger_error(ledger_spec, exc)
+
+        if combined_image is None:
+            combined_image, removed_stars_list = remove_background(
+                bundle["combined_image"],
+                bundle["combined_uncert"],
+                mask=bundle["combined_mask"],
+                remove_saturated_stars=remove_saturated_stars,
+                gaia_catalog_pixels=gaia_catalog_pixels,
+                bright_star_mag_threshold=bright_star_mag_threshold,
+                convention=convention,
+            )
 
         # Records from catalog passes already carry Gaia RA/Dec.
         # Just stamp skycell_id on every record.
@@ -683,6 +765,8 @@ def process_single_cell(bundle: dict) -> dict:
             "combined_mask_shm": mask_desc,
             "headers_data": bundle["headers_data"],
             "removed_stars": removed_stars_list,
+            "ledger_path": ledger_path,
+            "ledger_fingerprint": None if ledger_spec is None else ledger_spec["combined_fingerprint"],
         }
 
         logger.info(f"[PreProcessor] Processed {skycell_id}")
@@ -709,8 +793,14 @@ def ingest_worker(
     combined_store_data_root: str | None = None,
     combined_store_recipe: Any = None,
     stream_loader: StreamSkycellLoader | None = None,
+    catalog_provider: Any = None,
 ):
-    """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode)."""
+    """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode).
+
+    ``catalog_provider`` (a ``ProjectionCatalogPrefetcher``): the tier-2
+    combined-store lookup waits for the cell's projection catalogue first,
+    because the cell fingerprint includes that catalogue's checksum.
+    """
     from pathlib import Path
 
     ingest_label = "Ingest" if ps1_source == "stream" else "Reader"
@@ -753,6 +843,14 @@ def ingest_worker(
                 seed_band_cache_from_combined_store,
             )
 
+            if catalog_provider is not None:
+                try:
+                    from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import projection_id
+
+                    catalog_provider.wait(projection_id(skycell_id))
+                except Exception:
+                    logger.warning("[%s] Gaia catalogue for %s unavailable before store lookup",
+                                   ingest_label, skycell_id, exc_info=True)
             try:
                 hits = seed_band_cache_from_combined_store(
                     combined_store_data_root, [skycell_id], combined_store_recipe
@@ -965,6 +1063,84 @@ def catalog_cone_prefilter(
     return gaia_catalog.loc[keep].reset_index(drop=True)
 
 
+def _cell_removal_catalog(catalog: Any, skycell_id: str, subset: str = "removal") -> Optional[pd.DataFrame]:
+    """The Gaia rows a cell's removal (or ledger, ``subset="all"``) may use.
+
+    ``catalog`` is a ``ProjectionCatalogPrefetcher`` (the cell's own projection
+    file, waiting for its download if needed) or a plain DataFrame (legacy
+    callers and tests). ``None`` when unavailable: the no-catalogue guard in
+    ``select_removal_catalog`` then refuses the cell.
+    """
+    if catalog is None or isinstance(catalog, pd.DataFrame):
+        return catalog
+    from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import projection_id
+
+    try:
+        return catalog.catalog(projection_id(skycell_id), subset)
+    except Exception as exc:
+        logger.error(f"[Catalog] Gaia projection catalogue unavailable for {skycell_id}: {exc}")
+        return None
+
+
+def _removal_catalog_for_cells(catalog: Any, skycell_ids) -> Optional[pd.DataFrame]:
+    """Union (deduplicated on source_id) of the removal catalogues of several cells."""
+    if catalog is None or isinstance(catalog, pd.DataFrame):
+        return catalog
+    from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import projection_id
+
+    frames, seen = [], set()
+    for sid in skycell_ids:
+        pid = projection_id(sid)
+        if pid in seen:
+            continue
+        seen.add(pid)
+        df = _cell_removal_catalog(catalog, sid)
+        if df is not None:
+            frames.append(df)
+    if not frames:
+        return None
+    df = pd.concat(frames, ignore_index=True)
+    has_id = df["source_id"].notna()
+    df = pd.concat([df[has_id].drop_duplicates("source_id", keep="first"), df[~has_id]])
+    return df.sort_values("source_id", kind="mergesort", na_position="last").reset_index(drop=True)
+
+
+def _inject_cell_catalogues(bundle: dict, catalog: Any, *, ledger: bool, data_root, recipe) -> None:
+    """Put the cell's cone-prefiltered removal catalogue (and, with the ledger,
+    the uncut cone plus the ledger spec) into ``bundle``."""
+    skycell_id = bundle["skycell_id"]
+    header_str = next(iter(bundle["headers_data"].values()))
+    shape = bundle["combined_image"].shape
+    removal = _cell_removal_catalog(catalog, skycell_id, "removal")
+    bundle["gaia_catalog"] = None if removal is None else catalog_cone_prefilter(removal, header_str, shape)
+    if not ledger or data_root is None or recipe is None or bundle["gaia_catalog"] is None:
+        return
+    try:
+        from syndiff_pipeline.template_creation.processing import combined_store
+        from syndiff_pipeline.template_creation.processing import gaia_projection_catalog as gpc
+
+        parsed = combined_store._projection_and_cell(skycell_id)
+        if parsed is None:
+            return
+        projection, cell = parsed
+        fp = combined_store.expected_combined_fingerprint(data_root, projection, cell, recipe)
+        if fp is None:
+            return
+        full = _cell_removal_catalog(catalog, skycell_id, "all")
+        bundle["ledger"] = dict(
+            data_root=str(data_root),
+            projection=projection,
+            skycell=cell,
+            combined_fingerprint=fp,
+            recipe_id=combined_store.combined_recipe_id(recipe),
+            gaia_fingerprint=gpc.projection_catalog_fingerprint(data_root, gpc.projection_id(skycell_id)),
+            gaia_store=getattr(gpc, "GAIA_PROJECTION_STORE", None),
+            gaia_all=None if full is None else catalog_cone_prefilter(full, header_str, shape),
+        )
+    except Exception as exc:
+        logger.error(f"[Catalog] Could not prepare removal ledger for {skycell_id}: {exc}", exc_info=True)
+
+
 def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[dict]:
     """Publish one freshly combined, star-removed cell to the shared combined
     store under exactly the fingerprint readers resolve
@@ -998,6 +1174,13 @@ def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[di
         input_fingerprints=inputs,
         producer="ps1_process",
     )
+    ledger_fp = result.get("ledger_fingerprint")
+    if result.get("ledger_path") and info is not None and ledger_fp and info.get("fingerprint") != ledger_fp:
+        logger.error(
+            "[ProcessCoordinator] removal ledger of %s was published under %s but the cell "
+            "was published under %s; the ledger is orphaned",
+            result["skycell_id"], ledger_fp, info.get("fingerprint"),
+        )
     if info is not None and info.get("fingerprint"):
         # Defense-in-depth (plan Phase 1): select this run's own recipe as
         # "current" for this cell. Never overrides recipe-matched resolution.
@@ -1013,10 +1196,11 @@ def process_coordinator(
     band_cache: dict = None,
     band_cache_uses: dict = None,
     pipeline_paused_event: threading.Event = None,
-    gaia_catalog: Optional[pd.DataFrame] = None,
+    gaia_catalog: Any = None,
     bright_star_mag_threshold: float = 13.0,
     combined_store_data_root: Optional[str] = None,
     combined_store_recipe=None,
+    removal_ledger: bool = False,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -1228,10 +1412,11 @@ def process_coordinator(
                 # Inject catalog reference into bundle so process_single_cell
                 # can project Gaia stars to this skycell's pixel frame.
                 if gaia_catalog is not None:
-                    bundle["gaia_catalog"] = catalog_cone_prefilter(
-                        gaia_catalog,
-                        next(iter(bundle["headers_data"].values())),
-                        bundle["combined_image"].shape,
+                    _inject_cell_catalogues(
+                        bundle, gaia_catalog,
+                        ledger=removal_ledger,
+                        data_root=combined_store_data_root,
+                        recipe=combined_store_recipe,
                     )
                 bundle["bright_star_mag_threshold"] = bright_star_mag_threshold
 
@@ -1402,7 +1587,7 @@ def _manually_process_cell(
         gaia_catalog_pixels = None
         if remove_saturated_stars:
             gaia_catalog_pixels = select_removal_catalog(
-                gaia_catalog,
+                _cell_removal_catalog(gaia_catalog, skycell_name),
                 next(iter(headers.values())),
                 combined_image.shape,
                 skycell_id=skycell_name,
@@ -2452,7 +2637,8 @@ def process_row_step_from_queue(
         if enable_saturation_correction and (not remove_saturated_stars) and catalog is not None:
             logger.info(f"[SequentialProcessor] Applying parallel saturation correction for current row {current_row_id}...")
             start_sat = time.time()
-            apply_saturation_to_row(state.current_array, state.current_masks, state.cell_locations, current_row_bundles, catalog)
+            apply_saturation_to_row(state.current_array, state.current_masks, state.cell_locations, current_row_bundles,
+                                    _removal_catalog_for_cells(catalog, [b['skycell_id'] for b in current_row_bundles]))
             logger.info(f"[SequentialProcessor] Saturation correction finished in {time.time() - start_sat:.2f}s")
         if state.clean_current is not None:
             np.copyto(state.clean_current, state.current_array)
@@ -2494,7 +2680,8 @@ def process_row_step_from_queue(
         if enable_saturation_correction and (not remove_saturated_stars) and catalog is not None:
             logger.info(f"[SequentialProcessor] Applying parallel saturation correction for next row {next_row_id}...")
             start_sat = time.time()
-            apply_saturation_to_row(state.next_array, state.next_masks, state.next_cell_locations, next_row_bundles, catalog)
+            apply_saturation_to_row(state.next_array, state.next_masks, state.next_cell_locations, next_row_bundles,
+                                    _removal_catalog_for_cells(catalog, [b['skycell_id'] for b in next_row_bundles]))
             logger.info(f"[SequentialProcessor] Saturation correction finished in {time.time() - start_sat:.2f}s")
         if state.clean_next is not None:
             np.copyto(state.clean_next, state.next_array)
@@ -2628,6 +2815,7 @@ def sequential_processor(
     combined_store_recipe=None,
     convolved_store_recipe=None,
     write_per_scc_convolved_zarr: bool = True,
+    on_projection_done=None,
 ):
     """
     SPEC: This is Stage 3. It iterates through projections sequentially,
@@ -2759,11 +2947,153 @@ def sequential_processor(
             f"[Pipeline] Progress: projection {proj_idx + 1}/{total_projections} "
             f"row {len(row_ids)}/{len(row_ids)}{_overall_suffix()}"
         )
+        if on_projection_done is not None:
+            try:
+                on_projection_done(projection)
+            except Exception:
+                logger.warning("[SequentialProcessor] projection-done hook failed for %s", projection, exc_info=True)
 
     # Shutdown Signal for the saver
     results_queue.put(None)
 
     return all_removed_stars, sorted(produced_skycells)
+
+
+def _projection_catalog_order(projections, padding_sources: dict, row_padding_map: dict) -> list[str]:
+    """Projection IDs in the order the run needs their Gaia catalogues: each run
+    projection, then the projections of the padding cells its rows use."""
+    from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import projection_id
+
+    order: list[str] = []
+
+    def _add(p):
+        pid = projection_id(p)
+        if pid not in order:
+            order.append(pid)
+
+    for p in projections:
+        _add(p)
+        for (proj, _row), cells in sorted((row_padding_map or {}).items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
+            if str(proj) != str(p):
+                continue
+            for cell in sorted(cells):
+                if (padding_sources or {}).get(cell):
+                    _add(padding_sources[cell])
+    for src in (padding_sources or {}).values():
+        _add(src)
+    return order
+
+
+def _catalog_failures(catalog: Any, order: list[str]) -> dict[str, str]:
+    """Projection -> error for catalogue downloads that failed during the run."""
+    if catalog is None or isinstance(catalog, pd.DataFrame):
+        return {}
+    failures = {}
+    for pid in order:
+        try:
+            catalog.wait(pid)
+        except Exception as exc:
+            failures[pid] = f"{type(exc).__name__}: {exc}"
+    return failures
+
+
+class _LedgerProjectionFinisher:
+    """After a projection's rows are done: gather its cells' removal ledgers,
+    fetch PS1 magnitudes for the associated Gaia stars only, and write a
+    per-projection status file. One background worker; joined by ``close``.
+    """
+
+    def __init__(self, data_root, recipe, df: pd.DataFrame, row_padding_map: dict):
+        self.data_root = str(data_root)
+        self.recipe = recipe
+        self.df = df
+        self.row_padding_map = row_padding_map
+        self.pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ledger-ps1")
+        self.futures: dict[str, Any] = {}
+
+    def _cells(self, projection: str) -> list[str]:
+        cells: list[str] = []
+        try:
+            metadata = extract_projection_metadata(self.df, projection)
+            for row in metadata["rows"].values():
+                cells.extend(name for name, _x in row)
+        except Exception:
+            logger.warning("[Ledger] could not list cells of %s", projection, exc_info=True)
+        for (proj, _row), names in self.row_padding_map.items():
+            if str(proj) == str(projection):
+                cells.extend(names)
+        return sorted(set(cells))
+
+    def submit(self, projection) -> None:
+        projection = str(projection)
+        self.futures[projection] = self.pool.submit(self._finish, projection, self._cells(projection))
+
+    def _finish(self, projection: str, cells: list[str]) -> dict:
+        import json as _json
+        from collections import defaultdict
+        from pathlib import Path
+
+        from syndiff_pipeline.template_creation.processing import combined_store
+        from syndiff_pipeline.template_creation.processing import gaia_projection_catalog as gpc
+        from syndiff_pipeline.template_creation.processing.removal_ledger import inline as rl
+
+        ids_by_projection: dict[str, set] = defaultdict(set)
+        with_ledger, missing, errors = 0, [], {}
+        for name in cells:
+            parsed = combined_store._projection_and_cell(name)
+            if parsed is None:
+                continue
+            proj, cell = parsed
+            fp = combined_store.expected_combined_fingerprint(self.data_root, proj, cell, self.recipe)
+            path = None if fp is None else rl.published_ledger(self.data_root, proj, cell, fp)
+            if path is None:
+                missing.append(name)
+                err = None if fp is None else rl.ledger_fingerprint_dir(self.data_root, proj, cell, fp) / "error.json"
+                if err is not None and err.is_file():
+                    try:
+                        errors[name] = _json.loads(err.read_text()).get("error")
+                    except Exception:
+                        errors[name] = "unreadable error.json"
+                continue
+            with_ledger += 1
+            ids_by_projection[gpc.projection_id(name)] |= rl.associated_gaia_ids(path)
+        mags = {}
+        for pid, ids in sorted(ids_by_projection.items()):
+            if not ids:
+                continue
+            table = gpc.ensure_gaia_ps1_mags(self.data_root, pid, sorted(ids))
+            matched = int(table["ps1_match"].sum()) if "ps1_match" in table else None
+            mags[pid] = dict(requested=len(ids), matched=matched)
+        status = dict(projection=projection, cells=len(cells), with_ledger=with_ledger,
+                      missing_ledger=missing, ledger_errors=errors, ps1_mags=mags, time=time.time())
+        out = Path(self.data_root) / rl.LEDGER_STORE / "projection_status"
+        out.mkdir(parents=True, exist_ok=True)
+        dest = out / f"{gpc.projection_id(projection)}.json"
+        tmp = out / f".{dest.name}.{os.getpid()}"
+        tmp.write_text(_json.dumps(status, indent=2))
+        os.replace(tmp, dest)
+        logger.info(f"[Ledger] {projection}: {with_ledger}/{len(cells)} cells with ledger, "
+                    f"{len(missing)} missing, PS1 mags {mags}")
+        return status
+
+    def close(self) -> dict:
+        statuses, failures = {}, {}
+        for projection, fut in self.futures.items():
+            try:
+                statuses[projection] = fut.result()
+            except Exception as exc:
+                failures[projection] = f"{type(exc).__name__}: {exc}"
+                logger.error(f"[Ledger] projection finish failed for {projection}: {exc}")
+        self.pool.shutdown(wait=True)
+        totals = dict(
+            projections=len(self.futures),
+            cells=sum(s["cells"] for s in statuses.values()),
+            with_ledger=sum(s["with_ledger"] for s in statuses.values()),
+            missing_ledger=sum(len(s["missing_ledger"]) for s in statuses.values()),
+            ledger_errors=sum(len(s["ledger_errors"]) for s in statuses.values()),
+            finish_failures=len(failures),
+        )
+        return dict(totals=totals, failures=failures)
 
 
 # --- Main Orchestrator ---
@@ -2791,6 +3121,7 @@ def run_modern_sliding_window_pipeline(
     mapping_csv_path: str | None = None,
     stream_max_inflight_requests: int = 24,
     stream_prefetch_cells: int = 6,
+    removal_ledger: bool = False,
 ):
     """The top-level master orchestrator for the entire pipeline.
 
@@ -2996,26 +3327,29 @@ def run_modern_sliding_window_pipeline(
         except Exception as e:
             logger.warning(f"[Pipeline] Failed to identify padding sources: {e}. Continuing without cache.")
 
+    catalog_order: list[str] = []
     if enable_saturation_correction or remove_saturated_stars:
+        # Per-projection Gaia catalogues are downloaded while the run goes:
+        # only the first projection is awaited here; a background thread
+        # fetches the rest in processing order and every consumer waits for
+        # its own cell's projection. A failed download is reported at the end
+        # of the run (and its cells are refused by the no-catalogue guard).
         from syndiff_pipeline.template_creation.processing.gaia_projection_catalog import (
-            ensure_projection_catalog,
-            load_catalog_for_projections,
-            projection_id,
+            ProjectionCatalogPrefetcher,
         )
 
-        catalog_projections = sorted(
-            {projection_id(p) for p in projections}
-            | {projection_id(p) for p in padding_sources.values()}
-        )
+        catalog_order = _projection_catalog_order(projections, padding_sources, row_padding_map)
+        catalog = ProjectionCatalogPrefetcher(data_root, catalog_order)
+        catalog.start()
         try:
-            for p in catalog_projections:
-                ensure_projection_catalog(data_root, p)
-            catalog = load_catalog_for_projections(data_root, catalog_projections)
+            if catalog_order:
+                catalog.wait(catalog_order[0])
             logger.info(
-                f"[Pipeline] Loaded {len(catalog)} Gaia stars from {len(catalog_projections)} "
-                f"projection catalogues"
+                f"[Pipeline] Gaia projection catalogue {catalog_order[:1]} ready; "
+                f"{max(len(catalog_order) - 1, 0)} more downloading in processing order"
             )
         except Exception as e:
+            catalog.close()
             logger.error(f"[Pipeline] Failed to build/load projection Gaia catalogues (required for "
                          f"remove_saturated_stars/enable_saturation_correction): {e}")
             return {"error": f"Gaia catalog load failed: {e}"}
@@ -3103,6 +3437,13 @@ def run_modern_sliding_window_pipeline(
         t.start()
         band_combiner_threads.append(t)
 
+    ledger_finisher = None
+    if removal_ledger and remove_saturated_stars and combined_store_recipe is not None:
+        ledger_finisher = _LedgerProjectionFinisher(
+            data_root, combined_store_recipe, df, row_padding_map or {}
+        )
+        logger.info("[Pipeline] Removal ledger capture enabled")
+
     process_coordinator_thread = threading.Thread(
         target=process_coordinator,
         args=(combined_raw_queue, combined_cell_queue, cell_buffer, num_source_extractors,
@@ -3112,6 +3453,7 @@ def run_modern_sliding_window_pipeline(
         kwargs={
             "combined_store_data_root": data_root,
             "combined_store_recipe": combined_store_recipe,
+            "removal_ledger": bool(removal_ledger and remove_saturated_stars),
         },
         daemon=True,
     )
@@ -3133,6 +3475,7 @@ def run_modern_sliding_window_pipeline(
                     combined_store_data_root=data_root,
                     combined_store_recipe=combined_store_recipe,
                     stream_loader=stream_loader,
+                    catalog_provider=catalog,
                 )
 
             # --- Part B: per-projection classification (tiered ingest plan) ---
@@ -3296,6 +3639,7 @@ def run_modern_sliding_window_pipeline(
                 combined_store_recipe=combined_store_recipe,
                 convolved_store_recipe=convolved_store_recipe,
                 write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
+                on_projection_done=None if ledger_finisher is None else ledger_finisher.submit,
             )
             # Fast-path manifest accounting: union in cells that were never
             # touched this run because they were already canonical (whole
@@ -3371,6 +3715,14 @@ def run_modern_sliding_window_pipeline(
             if mismatched:
                 return {"error": f"canonical spot check failed for {len(mismatched)} cells: {mismatched}"}
 
+        ledger_summary = None
+        if ledger_finisher is not None:
+            ledger_summary = ledger_finisher.close()
+            logger.info(f"[Pipeline] Removal ledger summary: {ledger_summary['totals']}")
+        catalog_failures = _catalog_failures(catalog, catalog_order)
+        if catalog_failures:
+            return {"error": f"Gaia projection catalogue download failed: {catalog_failures}"}
+
         logger.info("[Pipeline] Pipeline completed successfully!")
 
         # Produced inventory: exact skycells written this run plus the planned
@@ -3394,6 +3746,7 @@ def run_modern_sliding_window_pipeline(
             "expected_skycells": expected_skycells,
             "expected_count": len(expected_skycells),
             "artifacts": [f"{output_path}/{name}_data" for name in produced_skycells],
+            "removal_ledger": ledger_summary,
         }
 
     except Exception:
@@ -3402,6 +3755,8 @@ def run_modern_sliding_window_pipeline(
     finally:
         if stream_loader is not None:
             stream_loader.close()
+        if catalog is not None and not isinstance(catalog, pd.DataFrame):
+            catalog.close()
         _cleanup_child_processes()
 
 
@@ -3433,6 +3788,8 @@ if __name__ == "__main__":
         "--bright-star-mag-threshold", type=float, default=13.0,
         help="Gaia TESS-equivalent magnitude threshold for catalog-based segment removal (default: 13.0)",
     )
+    parser.add_argument("--removal-ledger", action="store_true", default=False,
+                        help="Record the per-cell removal ledger and PS1 mags of associated Gaia stars")
     args = parser.parse_args()
     results = run_modern_sliding_window_pipeline(
         args.sector,
@@ -3445,6 +3802,7 @@ if __name__ == "__main__":
         remove_saturated_stars=args.remove_saturated_stars,
         catalog_path=args.catalog_path,
         bright_star_mag_threshold=args.bright_star_mag_threshold,
+        removal_ledger=args.removal_ledger,
     )
 
     if results.get("status") == "success":

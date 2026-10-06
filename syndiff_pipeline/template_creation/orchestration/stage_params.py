@@ -81,6 +81,7 @@ PS1_PROCESS_ALLOWED = frozenset(
         "catalog_path",
         "bright_star_mag_threshold",
         "band_weights",
+        "removal_ledger",
         "use_shared_convolved_store",
         "write_per_scc_convolved_zarr",
         "executor",
@@ -299,6 +300,11 @@ class Ps1ProcessStageParams:
     # production defaults (combined_store.DEFAULT_BAND_WEIGHTS). Recorded in
     # the combined recipe, so different weights never share stored cells.
     band_weights: dict[str, float] | None = None
+    # Record an exact per-cell removal ledger (pixel operations, saved SEP
+    # result, uncut-Gaia associations) while SEP runs, plus PS1 magnitudes of
+    # the associated Gaia stars per projection. Never changes a template pixel
+    # and is not part of the combined recipe.
+    removal_ledger: bool = False
     use_shared_convolved_store: bool = False
     write_per_scc_convolved_zarr: bool = True
     executor: str = "condor"

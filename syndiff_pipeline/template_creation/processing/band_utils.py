@@ -884,6 +884,9 @@ def _remove_background_footprint_v1(
         )
         segmap = sep_result.segmap
         bright = sep_result.mask_bright_stars
+        if recorder is not None:
+            # Kept so the inline removal ledger can save the SEP result itself.
+            recorder.segmentation = sep_result
 
         finite_in = np.isfinite(data)  # PS1-masked (NaN) pixels, before zeroing
         background_support = np.logical_and(segmap == 0, ~bright)
@@ -1314,6 +1317,7 @@ def remove_background(
     gaia_catalog_pixels=None,
     bright_star_mag_threshold: float = 13.0,
     convention: str = REMOVAL_CONVENTION,
+    recorder=None,
 ) -> tuple[np.ndarray, list[dict]]:
     """Remove background and bright-star light from a skycell image.
 
@@ -1323,7 +1327,13 @@ def remove_background(
     :func:`select_catalog_for_cell` to build ``gaia_catalog_pixels`` for the
     new convention.  See :func:`_remove_background_segment_v0` for the record
     schema (``segment_id`` is the component label under ``footprint_v1``).
+
+    ``recorder`` (a ``removal_ledger.CellLedger``) records every pixel
+    operation; only ``footprint_v1`` supports it. With a recorder, failures
+    raise instead of returning a partly processed image.
     """
+    if recorder is not None and convention != REMOVAL_CONVENTION_FOOTPRINT:
+        raise ValueError(f"Removal ledger capture requires footprint_v1, not {convention!r}")
     if convention == REMOVAL_CONVENTION_LEGACY:
         return _remove_background_segment_v0(
             data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
@@ -1337,6 +1347,6 @@ def remove_background(
     if convention == REMOVAL_CONVENTION_FOOTPRINT:
         return _remove_background_footprint_v1(
             data, uncert, sigma, sigma_mask, mask, remove_saturated_stars,
-            gaia_catalog_pixels, bright_star_mag_threshold,
+            gaia_catalog_pixels, bright_star_mag_threshold, recorder=recorder,
         )
     raise ValueError(f"Unknown removal convention: {convention!r}")

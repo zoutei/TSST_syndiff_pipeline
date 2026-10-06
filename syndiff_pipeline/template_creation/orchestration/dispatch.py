@@ -451,6 +451,7 @@ def _execute_template_stage(
             catalog_path=pp.catalog_path,
             bright_star_mag_threshold=pp.bright_star_mag_threshold,
             band_weights=pp.band_weights,
+            removal_ledger=pp.removal_ledger,
             use_shared_convolved_store=use_shared_convolved_store,
             write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
             oversampling_factor=mp.oversampling_factor,

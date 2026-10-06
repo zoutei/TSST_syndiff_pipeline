@@ -1,9 +1,32 @@
 # PS1 removal ledger (isolated implementation)
 
 This package records pixel operations and catalogue associations without changing
-the `footprint_v1` image algorithm. It is not yet wired into the default pipeline
-or approved for production merge. Use the selected source/worktree explicitly;
-do not change the live editable installation to run a historical backfill.
+the `footprint_v1` image algorithm.
+
+## Inline capture in `ps1_process` (`stages.ps1_process.removal_ledger: true`)
+
+With the flag on, every freshly processed cell records its ledger while SEP runs
+(`removal_ledger/inline.py`): the exact pixel operations through
+`remove_background(recorder=...)`, the SEP result (`segmentation_union`,
+`sep_bright_mask`, `sep_objects` in `geometry.npz`), and Gaia associations from the
+**uncut** per-projection Gaia catalogue (proper motion propagated to the PS1 header
+`MJD-OBS`, image-calibrated, 5 px candidate radius, bright-star halo radius for
+T<13). No bulk PS1 stack catalogue is downloaded. Ledgers are published to
+`{data_root}/ps1_removal_ledger/v1/{projection}/{cell}/{combined_fp}/` with a
+`ledger.json` pointer; a failed capture leaves `error.json` there and the cell is
+produced by the unchanged removal path. When a projection's rows finish, PS1 mean
+magnitudes for the Gaia stars linked to a removal are fetched from the Gaia archive
+cross-match (`gaiadr3.panstarrs1_best_neighbour`) into
+`{data_root}/catalogs/gaia_ps1_best_neighbour/v1/proj_PPPP.parquet`, and
+`ps1_removal_ledger/v1/projection_status/PPPP.json` lists cells without a ledger
+(cache hits, manual path, failures). The flag never changes a template pixel and is
+not part of the combined recipe. Checked bit-exact against paper cell
+skycell.2528.005, with pixel operations identical to the standalone C4 ledger
+(`dev_runs/inline_ledger_check_20261005`).
+
+The standalone campaign modules below remain for historical backfills; use the
+selected source/worktree explicitly and do not change the live editable
+installation to run one.
 
 ## Scope and guarantees
 

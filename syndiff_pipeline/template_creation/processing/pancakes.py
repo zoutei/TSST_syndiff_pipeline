@@ -1862,11 +1862,15 @@ def filter_gaia_dataframe_to_polygon(df, ra_coords, dec_coords):
 
 
 def build_gaia_adql_polygon_query(ra_coords, dec_coords, magnitude_limit, columns=GAIA_CATALOG_COLUMNS):
-    """Build ADQL for a padded FFI polygon query on ``gaiadr3.gaia_source``."""
+    """Build ADQL for a padded FFI polygon query on ``gaiadr3.gaia_source``.
+
+    ``magnitude_limit=None`` omits the RP cut (uncut catalogue).
+    """
     footprint_coords = []
     for ra, dec in zip(ra_coords, dec_coords):
         footprint_coords.extend([ra, dec])
     polygon_str = ",".join(map(str, footprint_coords))
+    rp_clause = "" if magnitude_limit is None else f"AND phot_rp_mean_mag < {magnitude_limit}"
     column_list = ",\n        ".join(columns)
     return f"""
     SELECT
@@ -1877,7 +1881,7 @@ def build_gaia_adql_polygon_query(ra_coords, dec_coords, magnitude_limit, column
         POINT('ICRS', ra, dec),
         POLYGON('ICRS', {polygon_str})
     )
-    AND phot_rp_mean_mag < {magnitude_limit}
+    {rp_clause}
     """
 
 
@@ -1983,13 +1987,17 @@ def _download_gaia_catalog_flathub(
         )
 
     print("📚 Querying Gaia via Flatiron flathub (bbox prefetch + polygon filter)...")
+    filters = {
+        "ra": (ra_min, ra_max),
+        "dec": (float(np.min(dec_coords)), float(np.max(dec_coords))),
+    }
+    if magnitude_limit is not None:
+        filters["phot_rp_mean_mag"] = (0.0, float(magnitude_limit))
     arr = _fetch_flathub_numpy(
         "gaiadr3",
         list(GAIA_CATALOG_COLUMNS),
         endpoint=flathub_endpoint,
-        ra=(ra_min, ra_max),
-        dec=(float(np.min(dec_coords)), float(np.max(dec_coords))),
-        phot_rp_mean_mag=(0.0, float(magnitude_limit)),
+        **filters,
     )
     df = _structured_array_to_gaia_dataframe(arr)
     n_prefetch = len(df)
