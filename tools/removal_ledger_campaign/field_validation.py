@@ -1,5 +1,6 @@
 """Validate every recipient against frozen contributions, using captured signal."""
 from __future__ import annotations
+from syndiff_pipeline.template_creation.processing import convolution_utils as _CU
 import importlib.util
 import json
 import os
@@ -48,7 +49,9 @@ def validate_recipient(out,field,cell):
         ledgers[name]=dict(path=str(ledger),fingerprint=manifest['fingerprint'],combined_fingerprint=record['fingerprint'])
     def before(name):return images[name]+deltas[name] if name in images else None
     def after(name):return images.get(name)
-    result=transport_cell(cell,md,mapping,before,after,sigma=40.,radius=470,canonical_renderer=old.canonical_cell_image)
+    # The products validated here were blurred with the dask path (before 2026-10-05): reproduce them bit for bit.
+    with _CU.blur_method("dask"):
+        result=transport_cell(cell,md,mapping,before,after,sigma=40.,radius=470,canonical_renderer=old.canonical_cell_image)
     projection,sc=cell.rsplit('.',1)
     own=records[cell]['fingerprint']
     nbs=[f'nbr:{n}={records[n]["fingerprint"]}' for n in old.canonical_neighbour_names(md,cell)]

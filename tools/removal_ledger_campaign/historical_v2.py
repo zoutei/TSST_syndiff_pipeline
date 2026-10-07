@@ -225,7 +225,7 @@ def canonical_cell_image(
     apply_cross_row(current, row_window(row_id - 1), row_window(row_id + 1), h)
     nan_mask = np.isnan(current)
     current[nan_mask] = 0.0
-    convolved = convolution_utils.apply_gaussian_convolution(current, sigma=psf_sigma, radius=int(radius))
+    convolved = convolution_utils.apply_gaussian_convolution(current, sigma=psf_sigma, radius=int(radius), method="dask")
     convolved[nan_mask] = np.nan
     return np.asarray(convolved[PAD_SIZE:PAD_SIZE + h, PAD_SIZE:PAD_SIZE + w], dtype=np.float32).copy()
 
