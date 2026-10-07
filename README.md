@@ -64,8 +64,10 @@ SynDiff relies on two customized libraries that are **not** satisfied by the sto
 
 The diff stage uses **[pyhotpants](https://github.com/zoutei/pyhotpants)** — a Python/C wrapper around HOTPANTS for Alard–Lupton kernel-matching subtraction. The PyPI package is **`hotpants`** (not `pyhotpants`):
 
-1. **Default:** `pip install -e .` installs `hotpants>=0.1.1` from PyPI automatically.
-2. **From source:** `pip install git+https://github.com/zoutei/pyhotpants`
+1. **Required version:** `hotpants>=0.2.0` (its connected-region stamps honour the input mask, which the
+   no-background Hotpants recipe needs). 0.2.0 is not on PyPI yet, so install it from GitHub first:
+   `pip install "git+https://github.com/zoutei/pyhotpants@v0.2.0"`, then `pip install -e .`.
+2. **From source (latest):** `pip install git+https://github.com/zoutei/pyhotpants@main`
 3. **Dev checkout:** clone that repo and either `pip install -e` it, or place a `pyhotpants/` directory where the import fallback in `difference_imaging/stages/hotpants.py` can find it.
 
 Used for: per-frame FFI vs PS1 template differencing, optional second-pass subtraction, polynomial background products.
@@ -91,7 +93,7 @@ The **mapping** (PanCAKES) stage requires a **modified MOCPy** build with `MOC.f
 
 ```bash
 mamba activate syndiff
-pip install -e .    # registers `syndiff`; installs hotpants>=0.1.1
+pip install -e .    # registers `syndiff`; needs hotpants>=0.2.0 (install from GitHub first, see above)
 ```
 
 For full template + diff runs, also install **custom MOCPy** (above) and ensure **TGLC** is on `PYTHONPATH` if using ePSF stages.

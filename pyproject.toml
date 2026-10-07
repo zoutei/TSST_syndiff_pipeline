@@ -10,7 +10,9 @@ readme = "README.md"
 requires-python = ">=3.10"
 license-files = []
 dependencies = [
-  "hotpants>=0.1.1",
+  # 0.2.0 (connected-region stamps honour the input mask) is needed by the no-background Hotpants recipe;
+  # it is not on PyPI yet: pip install "git+https://github.com/zoutei/pyhotpants@v0.2.0" first.
+  "hotpants>=0.2.0",
   "numba>=0.59",
   "scikit-image",
   "sep",
