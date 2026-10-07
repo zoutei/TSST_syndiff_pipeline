@@ -981,6 +981,11 @@ def run(args):
     if getattr(args, "local_poly_hard", 0):
         L.set_local_poly_hard(int(args.local_poly_hard))
     scene = Scene(Path(args.scene_dir))
+    if getattr(args, "anchors_train_epsf", False):
+        # option 3 (training_fixes 2026-10-06): faint WCS anchors also train the ePSF shape (no anchor barrier)
+        n_a = int(np.sum(scene.role == ROLE_ANCHOR))
+        scene.role = np.where(scene.role == ROLE_ANCHOR, ROLE_CONTRIB, scene.role).astype(scene.role.dtype)
+        _log(f"anchors_train_epsf: {n_a} anchors relabelled as ePSF contributors")
     resolve_g8_defaults(args, out)
     g8_extras = g8_extras_tuple(args.chroma_g8_extras, args.chroma_g8_blur_order, args.chroma_g8_no_dil)
     args.chroma_g8_extras = ",".join(g8_extras)                     # fit_meta records what was used
@@ -1134,12 +1139,33 @@ def run(args):
         params, _ = BW.set_bright_width(params, "none", None)
         _log("bright_width: warm-start leaf dropped (--bright-width none)")
 
+    star_w = None
+    if getattr(args, "star_weight_cap_tmag", None) is not None:
+        # option D (training_fixes 2026-10-06): cap each star's total weight at that of a T = cap star by dividing
+        # its stamp's inverse variance by (f_i / f_cap)^2 for stars brighter than the cap; the weighting INSIDE a
+        # star (core vs wing) is unchanged, unlike the per-pixel floor
+        tm = np.asarray(scene.z["tess_mag"], np.float64)
+        star_w = np.where(np.isfinite(tm), np.minimum(1.0, 10.0 ** (0.8 * (tm - args.star_weight_cap_tmag))), 1.0)
+        # one weight per PHYSICAL pixel (its owner star's), identical in every stamp that contains it: per-stamp
+        # weights make the island solve's normal equations inconsistent for overlapping stamps
+        uid_ = np.asarray(scene.z["uid"]); own_ = np.asarray(scene.z["owner"], bool)
+        w_u = np.ones(int(uid_.max()) + 1, np.float64)
+        w_u[uid_[own_]] = np.broadcast_to(star_w[:, None], uid_.shape)[own_]
+        star_w = w_u[uid_]                                             # (N, S2) per-pixel weights
+        _log(f"star weight cap at T={args.star_weight_cap_tmag}: {int(np.sum(np.isfinite(tm) & (tm < args.star_weight_cap_tmag)))} "
+             f"stars down-weighted, min pixel weight {star_w.min():.3g}")
+    if star_w is not None and not ((args.model_floor_eps > 0 or args.noise_scale != 1.0)
+                                   and args.floor_source == "data"):
+        v0 = np.asarray(L.pixel_variance(jnp.asarray(scene.z["noise"])), np.float64)
+        st = dict(st, var_eff=jnp.asarray(v0 / star_w, jnp.float32))
     if (args.model_floor_eps > 0 or args.noise_scale != 1.0) and args.floor_source == "data":
         # data-based floor: computed ONCE from the measured pixels, so the weights never feed back on the fluxes
         # (the model-based refresh oscillates even at fixed params, training_fixes_20261005 irls_fixedparams)
         v0 = np.asarray(L.pixel_variance(jnp.asarray(scene.z["noise"])), np.float64)
         d0 = np.clip(np.asarray(scene.z["data"], np.float64), 0.0, None)
         ve0 = args.noise_scale ** 2 * v0 + (args.model_floor_eps * d0) ** 2
+        if star_w is not None:
+            ve0 = ve0 / star_w
         st = dict(st, var_eff=jnp.asarray(ve0, jnp.float32))
         okv = np.asarray(scene.z["valid"]) & np.isfinite(ve0)
         _log(f"data-based floor eps={args.model_floor_eps} noise_scale={args.noise_scale}: median sigma_eff/sigma "
@@ -1590,6 +1616,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--floor-settle-tol", type=float, default=1e-4,
                    help="a stage can only end when the last refresh changed the loss (at fixed params) by less than "
                         "this relative amount")
+    p.add_argument("--anchors-train-epsf", action="store_true",
+                   help="faint WCS anchors also train the ePSF shape (relabelled as contributors at scene load)")
+    p.add_argument("--star-weight-cap-tmag", type=float, default=None,
+                   help="cap each star's total likelihood weight at that of a star of this Tmag (stamp inverse "
+                        "variance divided by (f/f_cap)^2 for brighter stars); weighting inside a star unchanged")
     p.add_argument("--penalty-nref", type=float, default=0.0,
                    help="> 0: scale every ePSF penalty by penalty_nref / N_pix so lambda means the same in every "
                         "scene/fold (F1 fold-0 N_pix 1581636 keeps the 10-04 F1 fold-0 balance)")
