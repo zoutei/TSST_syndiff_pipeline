@@ -14,7 +14,8 @@
   1. ``build_folds`` (seed/tile/pattern from ``crossfit``) on ``scene_<which>``; per fold, the held tiles' stamp
      pixels are blanked (valid = finite = 0, data 0, noise 1) and an evaluation contract is written. Optionally
      asserted equal to ``crossfit.reference_folds``.
-  2. per fold k (``--fold k``; ``--condor`` submits one job per fold): strict photutils init on the hp_d with the held
+  2. per fold k (``--fold k``; ``--condor`` submits one job per fold; without it each fold still runs in its own
+     process, because two photutils inits in one process do not reproduce): strict photutils init on the hp_d with the held
      tiles blanked and the held tiles in the reject mask -> neighbour fold scene (that init's WCS) -> fit with the
      recipe -> held-out score (``score_oof``; fixed ePSF/WCS, fluxes re-solved on the untouched evaluation scene
      ``nbr_<which>``) -> rasters + residual grids (held-out, in-fold, all).
@@ -343,7 +344,7 @@ def summarise(cfg: ChainConfig, which: str) -> dict:
 def run_folds(cfg: ChainConfig, which: str, *, fold: int | None = None, summarise_only: bool = False,
               force: bool = False, condor: bool = False) -> Path:
     """``folds_<which>``: scenes (+ submit/run every fold), or one fold (``fold``), or the summary."""
-    from .condor import stage_argv, submit, write_submit
+    from .condor import job_env, stage_argv, submit, write_submit
 
     _check(which)
     d = folds_dir(cfg, which)
@@ -362,12 +363,18 @@ def run_folds(cfg: ChainConfig, which: str, *, fold: int | None = None, summaris
     for k in range(cfg.crossfit.n_folds):
         if is_done(fold_paths(cfg, which, k)["eval"]) and not force:
             continue
+        argv = stage_argv(cfg, f"folds_{which}", ["--fold", str(k)] + (["--force"] if force else []))
         if condor:
-            sub = write_submit(cfg, "fit", stage_argv(cfg, f"folds_{which}", ["--fold", str(k)] + (["--force"] if force else [])),
-                               tag=f"folds_{which}_{k}")
+            sub = write_submit(cfg, "fit", argv, tag=f"folds_{which}_{k}")
             print(f"[folds_{which}] fold {k}: {submit(sub)}  ({sub})")
         else:
-            run_fold(cfg, which, k, force=force)
+            # One fresh process per fold, as on Condor: two photutils inits in one process do not reproduce
+            # (e2e_final_recipe_20261007 parity, C1 fold 0: 3 of 7227 WCS candidates differ).
+            import os
+            import subprocess
+            import sys
+            env = {**os.environ, **job_env(cfg, f"folds_{which}_{k}")}
+            subprocess.run([sys.executable, *argv[1:]], check=True, env=env, cwd=cfg.code.forward_model_root)
     if not condor:
         summarise(cfg, which)
     return d
