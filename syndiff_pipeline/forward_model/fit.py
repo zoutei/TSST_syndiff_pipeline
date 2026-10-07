@@ -101,9 +101,13 @@ CHROMA_G8_LEAVES = ("chroma_g8",)  # global 8-parameter colour model (loss.CHROM
 # Brightness-width blur coefficient (bright_width.BRIGHT_WIDTH_LEAVES): trains in the chroma
 # bucket at stage 3 like chroma_g8 (scene_fit can hold it fixed instead).
 BRIGHT_WIDTH_LEAVES = ("bright_width",)
+# CCD colour translation (loss.CHROMA_CCD_SHIFT_LEAF; scene_fit --chroma-ccd-shift frozen0): always frozen. Kept LAST,
+# where the 10-04 closure adapter appended it, so leaf order and results match runs made with the adapter.
+CHROMA_CCD_SHIFT_LEAVES = ("chroma_ccd_shift",)
 ALL_OPTIONAL_LEAVES = (
     OPTIONAL_LEAVES + CHROMA_AFFINE_LEAVES + CHROMA_KURT_LEAVES
     + CHROMA_HALO_LEAVES + CHROMA_IMAGE_LEAVES + CHROMA_G8_LEAVES + BRIGHT_WIDTH_LEAVES
+    + CHROMA_CCD_SHIFT_LEAVES
 )
 ALL_LEAVES = STAGE_LEAVES + ALL_OPTIONAL_LEAVES
 
@@ -273,6 +277,9 @@ def _leaf_labels(
                       *CHROMA_HALO_LEAVES):
                 if k in labels:
                     labels[k] = "frozen"
+    for k in CHROMA_CCD_SHIFT_LEAVES:      # only the frozen-at-zero form exists
+        if k in labels:
+            labels[k] = "frozen"
     return labels
 
 

@@ -1085,6 +1085,12 @@ def run(args):
     params = set_chroma_model(params, args.chroma_model, halo=args.chroma_halo, g8_init=g8_init,
                               g8_extras=g8_extras,
                               g8_source_extras=g8_warm["extras"] if isinstance(g8_warm, dict) else None)
+    if getattr(args, "chroma_ccd_shift", "off") == "frozen0":
+        # A3+2 CCD colour translation held at zero (native form of the 10-04 closure adapter; the leaf changes the
+        # parameter tree, so results differ from a run without it at float level).
+        if args.chroma_model != "global8":
+            raise ValueError("--chroma-ccd-shift frozen0 requires --chroma-model global8")
+        params.setdefault("chroma_ccd_shift", jnp.zeros((2,), dtype=jnp.float32))
     if isinstance(g8_warm, dict):
         _log(f"chroma_g8 kept from {g8_warm['params']} (extras {g8_warm['extras']}, zero-padded "
              f"{g8_warm['padded']}): {np.round(np.asarray(params['chroma_g8']), 6).tolist()}")
@@ -1468,6 +1474,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--epsf-lr-scale", type=float, default=2.5)
     p.add_argument("--chroma-lr-scale", type=float, default=10.0,
                    help="Adam lr multiplier for colour leaves (1.0 is step-limited for global8)")
+    p.add_argument("--chroma-ccd-shift", choices=("off", "frozen0"), default="off",
+                   help="frozen0: add the 2-coefficient CCD colour translation leaf chroma_ccd_shift held at zero "
+                        "(= the 10-04 closure adapter installed with initialize=True, freeze=True; paper1_final)")
     p.add_argument("--chroma-model", choices=("nodes", "global8", "none"), default="global8",
                    help="colour model: node fields (shift+dilation, legacy), the global "
                         "8-parameter model, or none")

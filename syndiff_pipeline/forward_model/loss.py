@@ -830,12 +830,31 @@ def has_chroma_image(params: dict[str, jnp.ndarray]) -> bool:
     return has_chroma(params) and all(k in params for k in CHROMA_IMAGE_LEAVES)
 
 
+CHROMA_CCD_SHIFT_LEAF = "chroma_ccd_shift"  # 2 CCD-pixel colour-translation coefficients (tx, ty)
+
+
 def chroma_slot_terms(
     params: dict[str, jnp.ndarray], ctx: StaticContext, star_occ: jnp.ndarray,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, dict[str, jnp.ndarray]] | None:
     """Colour terms (``_colour_slot_terms``) plus the optional brightness-width blur
-    (``bright_width.merge_slot_terms``: a no-op returning the same object without the leaf)."""
-    return BW.merge_slot_terms(params, ctx, star_occ, _colour_slot_terms(params, ctx, star_occ))
+    (``bright_width.merge_slot_terms``: a no-op returning the same object without the leaf), plus the optional CCD
+    colour translation ``chroma_ccd_shift`` (``(colour - colour_ref) * (tx, ty)`` CCD pixels added to the shifts;
+    absent leaf = unchanged). Native form of the 10-04 closure adapter ``crossfit/adapter/ccd_colour_shift.py``
+    (sha256 49ad6a44...), numerics identical."""
+    base = BW.merge_slot_terms(params, ctx, star_occ, _colour_slot_terms(params, ctx, star_occ))
+    if CHROMA_CCD_SHIFT_LEAF not in params:
+        return base
+    if ctx.chroma_delta is None:
+        raise ValueError("CCD colour translation requires context colour offsets")
+    coeff = params[CHROMA_CCD_SHIFT_LEAF]
+    if coeff.shape != (2,):
+        raise ValueError("chroma_ccd_shift must have shape (2,)")
+    delta = ctx.chroma_delta[star_occ]
+    if base is None:
+        return delta, delta * coeff[0], delta * coeff[1], {}
+    multiplier, sx, sy, fields = base
+    # multiplier is not necessarily delta (brightness merging can replace it).
+    return multiplier, sx + delta * coeff[0], sy + delta * coeff[1], fields
 
 
 def _colour_slot_terms(
