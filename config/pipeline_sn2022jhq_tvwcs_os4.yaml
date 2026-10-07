@@ -8,8 +8,21 @@
 #
 # Submit templates through Hotpants as one scheduler-connected run:
 #   syndiff submit --config config/pipeline_sn2022jhq_tvwcs_os4.yaml \
-#     --scc config/scc_sn2022jhq_s51_s52.csv \
-#     --run-id sn2022jhq_s51_s52_tvwcs_os4_hp_d_20260825
+#     --scc config/scc_sn2022jhq_os4_priority.csv \
+#     --run-id sn2022jhq_os4_priority_<date>
+#
+# config/scc_sn2022jhq_os4_priority.csv lists s51,s52,s54,s50 in that row
+# order -- with the CSV-row-order Condor priority feature, that order is
+# each target's relative priority (first row highest) across every stage.
+# STATUS as of 2026-08-28 (recovery pass, see doc/... recovery plan): s51's
+# prior downsample attempt crashed mid-run from the Target.label() live-edit
+# incident documented in CLAUDE.md invariant 14 -- L5 contribs are on disk
+# but the field-template assembly sidecar was never written, so downsample
+# needs a clean resubmit, not a retry of the old run. s52 has mapping+remap
+# done, needs downsample from scratch. s54/s50 need mapping through hp_d
+# from scratch. s55 is not in that CSV: its wcs/temporal_cheb5_bspline_v1
+# model doesn't exist yet (centroids_r1 was only ~87% complete as of
+# 2026-08-26) -- add it to the CSV once that prerequisite lands.
 config_schema_version: 2
 deployment_file: deployment.yaml
 
@@ -29,8 +42,8 @@ stages:
     wcs_source: temporal_wcs
     temporal_wcs_version: temporal_cheb5_bspline_v1
     skip_download_catalog: false
-    n_threads: 64
-    condor_request_cpus: 64
+    n_threads: 48
+    condor_request_cpus: 48
     condor_request_memory: 80000
     host_stats_min_mem_mb: 80000
     host_stats_max_load15: 20.0
@@ -47,12 +60,12 @@ stages:
     drift_source: per_skycell_temporal_wcs
     rebuild_remap_cache: true
     rebuild_inter_skycell_cache: true
-    n_jobs: 64
+    n_jobs: 48
     # OS4 regmaps do not fit reliably in the available execute-host scratch
     # allocations.  Read them from shared NFS rather than requesting 16 GB of
     # local disk and risking an ENOSPC/fallback cycle.
     stage_regmaps_to_scratch: false
-    condor_request_cpus: 64
+    condor_request_cpus: 48
     condor_request_memory: 250000
     host_stats_min_mem_mb: 250000
     host_stats_max_load15: 20.0
@@ -63,25 +76,29 @@ stages:
     output_store_name: tvwcs
     rebuild_field_store: true
     materialize_fits: false
-    n_jobs: 64
+    n_jobs: 48
     executor: condor
-    condor_request_cpus: 64
+    condor_request_cpus: 48
     condor_request_memory: 250000
     host_stats_min_mem_mb: 250000
     host_stats_max_load15: 20.0
     stage_regmaps_to_scratch: false
 
 resources:
-  # The two SCCs overlap substantially on the sky; serialize expensive shared
-  # work and keep the OS4 memory profile to one active SCC at a time.
+  # Raised 2026-08-28 recovery pass: the pool has plenty of free 64cpu/250GB+
+  # capacity right now (sn2020hvq's template DAG has finished), so let up to
+  # 4 SCCs move through each stage at once. ps1_process stays at 1 -- it
+  # writes to the shared, file-locked PS1 Zarr (CLAUDE.md invariant 12), so
+  # concurrent jobs there just serialize on the lock rather than gaining
+  # anything.
   mapping:
-    max_concurrent: 2
+    max_concurrent: 4
   ps1_process:
     max_concurrent: 1
   remap:
-    max_concurrent: 2
+    max_concurrent: 4
   downsample:
-    max_concurrent: 2
+    max_concurrent: 4
 
 # Diff sub-pipeline policy (folded in verbatim here per schema v2, formerly
 # config/diff_config_sn2022jhq_tvwcs_os4_hp_d.yaml). SN2022jhq sectors 51 and
@@ -151,6 +168,25 @@ diff:
         diffs: hp_d
         convolved: hp_c
         bkg: hp_b
+    - kind: epsf
+      # OS4 hp_d has never had its own ePSF fit (the OS4 pipeline is
+      # deliberately Hotpants-only and reuses the linear lane's background,
+      # but a PSF model fit on the linear diff images is not guaranteed to
+      # still be right here). Fit fresh, same recipe as the linear lane's
+      # epsf_r1 (pipeline_sn2022jhq_template.yaml), reading this lane's own
+      # hp_d. Feeds forced_photometry's temporalwcs method on this lane.
+      inputs:
+        diffs: hp_d
+      output: epsf_r1
+      epsf_mode: orbit_binned
+      tile_nx: 4
+      tile_ny: 4
+      tess_mag_min: 8.0
+      tess_mag_max: 13.0
+      epsf_isolation_min_sep_px: 6.0
+      epsf_isolation_neighbor_mag_max: 13.0
+      resources:
+        n_jobs: null
 
   condor:
     # Keep the split-stage profiles explicit even though this Hotpants-only
@@ -167,7 +203,7 @@ diff:
       host_stats_min_mem_mb: 400000
       host_stats_max_load15: 20.0
     diff:
-      request_cpus: 64
-      request_memory: 80000
-      host_stats_min_mem_mb: 80000
+      request_cpus: 48
+      request_memory: 160000
+      host_stats_min_mem_mb: 160000
       host_stats_max_load15: 20.0

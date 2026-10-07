@@ -1,0 +1,4 @@
+sector,camera,ccd,target_ra,target_dec,target_name,enabled
+23,4,2,251.64525,62.826889,2020hvq,true
+24,2,2,251.64525,62.826889,2020hvq,true
+25,2,2,251.64525,62.826889,2020hvq,true

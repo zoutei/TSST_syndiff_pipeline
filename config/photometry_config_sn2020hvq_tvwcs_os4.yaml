@@ -1,0 +1,56 @@
+# SN2020hvq OS4/tvwcs forced photometry. Own-lane epsf_r1 (freshly fit on
+# this lane's own hp_d). Mirrors photometry_config_sn2022jhq_tvwcs_os4.yaml.
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: sn2020hvq_tvwcs_os4
+  n_jobs: 48
+  pipeline_plots: true
+  max_ffis: null
+  oversampling_factor: 4
+
+paths:
+  output_store_name: tvwcs
+  template_store_name: tvwcs
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_all
+    methods:
+      - name: xyfree
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        fixed_position: false
+        position_source: native_wcs
+
+      - name: ffiwcs
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        position_source: native_wcs
+
+      - name: temporalwcs
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        position_source: temporal_wcs
+        temporal_wcs_version: temporal_cheb5_bspline_v1
+
+condor:
+  request_cpus: 16
+  request_memory: 24000
+  host_stats_min_mem_mb: 24000
+  host_stats_max_load15: 10.0

@@ -1,0 +1,56 @@
+# SN2022jhq aperture forced photometry, temporal-wcs position only, three
+# radii (2/3/4 px) run as three methods within one forced_photometry stage
+# (shares I/O across methods, same pattern as photometry_config_sn2022jhq.yaml's
+# psf methods). Linear lane -- s50/s51/s52/s54 already have hp_d/epsf_r1/
+# temporal_wcs. sky_in/sky_out (5/9 px) fixed across all three radii; the
+# largest target radius (4px) stays clear of the sky annulus inner edge (5px).
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: sn2022jhq_aperture
+  n_jobs: 64
+  pipeline_plots: true
+  max_ffis: null
+
+paths:
+  output_store_name: linear
+  template_store_name: linear
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_all
+    position_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    methods:
+      - name: ap2
+        type: aperture
+        tar_ap: 2
+        sky_in: 5
+        sky_out: 9
+        subtract_sky: true
+
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
+        subtract_sky: true
+
+      - name: ap4
+        type: aperture
+        tar_ap: 4
+        sky_in: 5
+        sky_out: 9
+        subtract_sky: true
+
+condor:
+  request_cpus: 16
+  request_memory: 24000
+  host_stats_min_mem_mb: 24000
+  host_stats_max_load15: 10.0

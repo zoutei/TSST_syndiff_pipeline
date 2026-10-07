@@ -1,0 +1,61 @@
+# SN2020hvq linear-lane forced photometry (s23/24/25/26). No astrometry-
+# refinement stage (skips ATLAS/IRSA credential dependency). temporalwcs
+# added 2026-08-29 once config/pipeline_sn2020hvq_template.yaml's
+# centroids/temporal_wcs stages completed for s23/s24/s25 (s26 still
+# pending as of this edit -- run photometry only for the SCCs that already
+# have wcs/temporal_cheb5_bspline_v1/, add s26 once it lands). Mirrors
+# config/photometry_config_sn2022jhq.yaml's forced_photometry recipe minus
+# the astrometry-refinement piece.
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: sn2020hvq
+  n_jobs: 16
+  pipeline_plots: true
+  max_ffis: null
+
+paths:
+  output_store_name: linear
+  template_store_name: linear
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_all
+    methods:
+      - name: xyfree
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        fixed_position: false
+        position_source: native_wcs
+
+      - name: ffiwcs
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        position_source: native_wcs
+
+      - name: temporalwcs
+        type: psf
+        psf_type: epsf
+        fit_shape: 11
+        aperture_radius: 2
+        psf_grouper_min_separation: 10
+        position_source: temporal_wcs
+        temporal_wcs_version: temporal_cheb5_bspline_v1
+
+condor:
+  request_cpus: 16
+  request_memory: 24000
+  host_stats_min_mem_mb: 24000
+  host_stats_max_load15: 10.0

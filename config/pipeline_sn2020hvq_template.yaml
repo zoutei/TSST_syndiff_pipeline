@@ -1,0 +1,159 @@
+# SN2020hvq linear-lane diff recipe (s23/24/25/26, camera/ccd per
+# config/scc_sn2020hvq.csv), reconstructed 2026-08-28 as a tracked
+# replacement for the untracked config/pipeline_template.yaml this
+# campaign was originally submitted with (run_id
+# sn2020hvq_configunif_smoke_20260827) -- that file (and
+# config/scc_sn2020hvq.csv) are no longer present on disk. The `diff:`
+# block below is copied verbatim from the frozen
+# runs/sn2020hvq_configunif_smoke_20260827/config.yaml so it fingerprint-
+# matches the already-built shared_mask/kernel_fit/background_estimate/
+# hotpants/epsf lane exactly -- do not hand-edit any of those stage blocks
+# without checking WorkspaceConfigMismatchError implications first.
+#
+# `centroids`/`temporal_wcs` are appended here (not present in the
+# original submission) to build the per-SCC temporal-WCS distortion model
+# that OS4 template building needs. Both kinds are structurally exempt
+# from the lane fingerprint (see docs/markdown/config_schema_v2.md), so
+# adding them does not relock or invalidate anything already on disk.
+# Recipe copied from pipeline_sn2022jhq_template.yaml's centroids/
+# temporal_wcs block (same physical model version).
+#
+# Submit with (this run's target-only linear stages are already done, so
+# only these two stages are selected):
+#   syndiff diff submit --config config/pipeline_sn2020hvq_template.yaml \
+#     --scc config/scc_sn2020hvq.csv --stages centroids,temporal_wcs \
+#     --run-id sn2020hvq_centroids_twcs_<date>
+config_schema_version: 2
+deployment_file: deployment.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+
+diff:
+  defaults:
+    n_jobs: 32
+    workspace_run_id: sn2022jhq_v1
+    pipeline_plots: true
+    oversampling_factor: 1
+
+  paths:
+    template_store_name: linear
+    remap_store_name: linear
+    output_store_name: linear
+
+  pipeline:
+    - kind: shared_mask
+    - kind: kernel_fit
+      weighting_factor: 0.5
+      write_debug_fits: true
+      output: kernel_fit
+      hp_sigma_gauss: [0.752, 1.88, 3.76]
+      hp_ko: 2
+      hp_bgo: 3
+      hp_nstampx: 10
+      hp_nstampy: 10
+      hp_nss: 100
+      hp_ngauss: 3
+      hp_deg_fixe: [6, 4, 2]
+      hp_kf_spread_mask1: 0.0
+      hp_ks: 3.0
+      hp_kfm: 0.75
+      hp_fitthresh: 5.0
+      hp_stat_sig: 3.0
+      hp_force_convolve: "t"
+      hp_normalize: "t"
+      write_kernel_params: true
+    - kind: convolved_templates
+      inputs:
+        kernel_fit: kernel_fit
+      output: tmpl_conv
+    - kind: background_estimate
+      inputs:
+        convolved: tmpl_conv
+      background_estimate_n_jobs: 48
+      output:
+        diffs: ks_d
+        phot_bkg: ks_b
+    - kind: hotpants
+      inputs:
+        bkg: ks_b
+      hotpants_n_jobs: 64
+      hp_sigma_gauss: [0.752, 1.88, 3.76]
+      hp_ko: 2
+      hp_bgo: 0
+      hp_nstampx: 10
+      hp_nstampy: 10
+      hp_nss: 100
+      hp_ngauss: 3
+      hp_deg_fixe: [6, 4, 2]
+      hp_kf_spread_mask1: 0.0
+      hp_ks: 3.0
+      hp_kfm: 0.75
+      hp_fitthresh: 5.0
+      hp_stat_sig: 3.0
+      hp_force_convolve: "t"
+      hp_normalize: "t"
+      write_convolved: false
+      write_bkg: true
+      write_stamps: false
+      write_kernel_solutions: true
+      output:
+        diffs: hp_d
+        convolved: hp_c
+        bkg: hp_b
+    - kind: epsf
+      inputs:
+        diffs: hp_d
+      output: epsf_r1
+      epsf_mode: orbit_binned
+      tile_nx: 4
+      tile_ny: 4
+      tess_mag_min: 8.0
+      tess_mag_max: 13.0
+      epsf_isolation_min_sep_px: 6.0
+      epsf_isolation_neighbor_mag_max: 13.0
+      epsf_n_jobs: 64
+    - kind: centroids
+      inputs:
+        diffs: hp_d
+        epsf: epsf_r1
+      output: centroids_r1
+      # Watch actual RSS on the first SCC before trusting this on the rest --
+      # pipeline_sn2022jhq_template.yaml documents this exact knob having
+      # been mis-set from an OOM measured on a different, denser field.
+      # Lowered 64->32 (2026-08-28): a 64-way loky pool multiplies per-worker
+      # import + model-load overhead against already-heavy concurrent NFS
+      # load from other stages; 32 cuts real startup latency without a
+      # meaningful throughput loss.
+      resources:
+        n_jobs: 32
+    - kind: temporal_wcs
+      inputs:
+        centroids: centroids_r1
+        diffs: hp_d
+      output: temporal_wcs
+      version: temporal_cheb5_bspline_v1
+      spatial_basis: chebyshev
+      cheb_degree: 5
+      temporal_basis: bspline
+      spline_degree: 3
+      n_interior_knots: 20
+
+  condor:
+    diff_prep:
+      request_cpus: 4
+      request_memory: 16000
+      host_stats_min_mem_mb: 16000
+      host_stats_max_load15: 200.0
+    background_estimate:
+      request_cpus: 64
+      request_memory: 300000
+      host_stats_min_mem_mb: 300000
+      host_stats_max_load15: 20.0
+    diff:
+      request_cpus: 64
+      request_memory: 80000
+      host_stats_min_mem_mb: 80000
+      host_stats_max_load15: 20.0

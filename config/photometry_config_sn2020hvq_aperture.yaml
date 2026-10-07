@@ -1,0 +1,54 @@
+# SN2020hvq aperture forced photometry, temporal-wcs position only, three
+# radii (2/3/4 px). Linear lane. Only s23/s24/s25 have temporal_wcs as of
+# this config's creation (2026-08-29) -- submit targets_sn2020hvq_twcs_ready.csv
+# for those three; add s26 once its centroids/temporal_wcs finishes.
+deployment_file: deployment.yaml
+
+defaults:
+  photometry_run_id: sn2020hvq_aperture
+  n_jobs: 16
+  pipeline_plots: true
+  max_ffis: null
+
+paths:
+  output_store_name: linear
+  template_store_name: linear
+  inputs:
+    diffs: hp_d
+    epsf: epsf_r1
+
+pipeline:
+  - kind: forced_photometry
+    inputs:
+      diffs: hp_d
+      epsf: epsf_r1
+    output: lc_all
+    position_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    methods:
+      - name: ap2
+        type: aperture
+        tar_ap: 2
+        sky_in: 5
+        sky_out: 9
+        subtract_sky: true
+
+      - name: ap3
+        type: aperture
+        tar_ap: 3
+        sky_in: 5
+        sky_out: 9
+        subtract_sky: true
+
+      - name: ap4
+        type: aperture
+        tar_ap: 4
+        sky_in: 5
+        sky_out: 9
+        subtract_sky: true
+
+condor:
+  request_cpus: 16
+  request_memory: 24000
+  host_stats_min_mem_mb: 24000
+  host_stats_max_load15: 10.0

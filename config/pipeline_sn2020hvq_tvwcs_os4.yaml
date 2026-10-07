@@ -1,0 +1,166 @@
+# SN2020hvq sectors 23/24/25/26: distortion-aware temporal-WCS OS4 field
+# templates. Mirrors config/pipeline_sn2022jhq_tvwcs_os4.yaml's recipe and
+# resource tuning (same cluster, same validated settings) -- see that file's
+# history for why these specific values were chosen:
+#   - mapping: n_threads/condor_request_cpus 48 (not 64) -- the pool
+#     couldn't reliably match a bare 64cpu request under contention.
+#   - hotpants: 8 frame workers x 8 threads, template_cache_max_groups: 1 --
+#     memory-bound (OS4 hp_d RSS runs close to the 80GB request at this
+#     setting; wider parallelism risks OOM, not just diminishing returns).
+#   - epsf: OS4 hp_d has never had its own PSF fit (Hotpants-only diff
+#     reuses the linear lane's background/mask); fit fresh here, same
+#     recipe as the linear lane's epsf_r1, feeding temporalwcs photometry.
+#
+# Prerequisite: all 4 SCCs have wcs/temporal_cheb5_bspline_v1/{frames.parquet,
+# manifest.json} -- completed 2026-08-29 (centroids+temporal_wcs finished for
+# all four under run sn2020hvq_centroids_twcs_20260828).
+#
+# Submit templates through Hotpants as one scheduler-connected run:
+#   syndiff diff submit --config config/pipeline_sn2020hvq_tvwcs_os4.yaml \
+#     --scc config/scc_sn2020hvq.csv \
+#     --stages tess_ffi_download,mapping,ps1_download,ps1_process,remap,downsample,diff_prep,background_estimate,diff \
+#     --run-id sn2020hvq_os4_<date>
+config_schema_version: 2
+deployment_file: deployment.yaml
+
+notifications:
+  enabled: true
+  bot:
+    enabled: true
+
+stages:
+  wcs_grouping:
+    geometry_mode: field
+  mapping:
+    oversampling_factor: 4
+    store_name: tvwcs
+    wcs_source: temporal_wcs
+    temporal_wcs_version: temporal_cheb5_bspline_v1
+    skip_download_catalog: false
+    n_threads: 48
+    condor_request_cpus: 48
+    condor_request_memory: 80000
+    host_stats_min_mem_mb: 80000
+    host_stats_max_load15: 20.0
+  ps1_process:
+    ps1_source: stream
+    use_shared_convolved_store: true
+    write_per_scc_convolved_zarr: false
+    remove_saturated_stars: true
+    enable_saturation_correction: false
+  remap:
+    store_name: tvwcs
+    drift_source: per_skycell_temporal_wcs
+    rebuild_remap_cache: true
+    rebuild_inter_skycell_cache: true
+    n_jobs: 48
+    stage_regmaps_to_scratch: false
+    condor_request_cpus: 48
+    condor_request_memory: 250000
+    host_stats_min_mem_mb: 250000
+    host_stats_max_load15: 20.0
+  downsample:
+    geometry_mode: field
+    oversampling_factor: 4
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+    rebuild_field_store: true
+    materialize_fits: false
+    n_jobs: 48
+    executor: condor
+    condor_request_cpus: 48
+    condor_request_memory: 250000
+    host_stats_min_mem_mb: 250000
+    host_stats_max_load15: 20.0
+    stage_regmaps_to_scratch: false
+
+resources:
+  mapping:
+    max_concurrent: 4
+  ps1_process:
+    max_concurrent: 1
+  remap:
+    max_concurrent: 4
+  downsample:
+    max_concurrent: 4
+
+# Diff sub-pipeline policy, folded in verbatim per schema v2. Hotpants-only:
+# reuses the linear lane's background (ks_b) and shared_mask via lane-local
+# *symlinks* (never copies) -- create these before submitting:
+#   diff_tvwcs/ks_b -> ../diff_linear/ks_b
+#   diff_tvwcs/shared_mask.fits.fz -> ../diff_linear/shared_mask.fits.fz
+#   diff_tvwcs/hotpants_substamp_stars.csv -> ../diff_linear/hotpants_substamp_stars.csv
+# Confirm the crop/manifest shape matches before creating those links.
+diff:
+  defaults:
+    n_jobs: 64
+    workspace_run_id: sn2020hvq_tvwcs_os4_hp_d_v1
+    pipeline_plots: true
+    oversampling_factor: 4
+
+  paths:
+    template_store_name: tvwcs
+    remap_store_name: tvwcs
+    output_store_name: tvwcs
+
+  pipeline:
+    - external_workspaces: [ks_b]
+    - kind: hotpants
+      inputs:
+        bkg: ks_b
+      hotpants_n_jobs: 8
+      hotpants_os_n_jobs: 8
+      template_cache_max_groups: 1
+      hp_sigma_gauss: [0.752, 1.88, 3.76]
+      hp_ko: 2
+      hp_bgo: 0
+      hp_nstampx: 10
+      hp_nstampy: 10
+      hp_nss: 100
+      hp_ngauss: 3
+      hp_deg_fixe: [6, 4, 2]
+      hp_kf_spread_mask1: 0.0
+      hp_ks: 3.0
+      hp_kfm: 0.75
+      hp_fitthresh: 5.0
+      hp_stat_sig: 3.0
+      hp_force_convolve: "t"
+      hp_normalize: "t"
+      write_convolved: false
+      write_bkg: true
+      write_stamps: false
+      write_kernel_solutions: true
+      output:
+        diffs: hp_d
+        convolved: hp_c
+        bkg: hp_b
+    - kind: epsf
+      inputs:
+        diffs: hp_d
+      output: epsf_r1
+      epsf_mode: orbit_binned
+      tile_nx: 4
+      tile_ny: 4
+      tess_mag_min: 8.0
+      tess_mag_max: 13.0
+      epsf_isolation_min_sep_px: 6.0
+      epsf_isolation_neighbor_mag_max: 13.0
+      resources:
+        n_jobs: null
+
+  condor:
+    diff_prep:
+      request_cpus: 64
+      request_memory: 80000
+      host_stats_min_mem_mb: 80000
+      host_stats_max_load15: 20.0
+    background_estimate:
+      request_cpus: 64
+      request_memory: 400000
+      host_stats_min_mem_mb: 400000
+      host_stats_max_load15: 20.0
+    diff:
+      request_cpus: 48
+      request_memory: 160000
+      host_stats_min_mem_mb: 160000
+      host_stats_max_load15: 20.0
