@@ -1145,7 +1145,11 @@ def run(args):
         # its stamp's inverse variance by (f_i / f_cap)^2 for stars brighter than the cap; the weighting INSIDE a
         # star (core vs wing) is unchanged, unlike the per-pixel floor
         tm = np.asarray(scene.z["tess_mag"], np.float64)
-        star_w = np.where(np.isfinite(tm), np.minimum(1.0, 10.0 ** (0.8 * (tm - args.star_weight_cap_tmag))), 1.0)
+        ratio2 = 10.0 ** (-0.8 * (tm - args.star_weight_cap_tmag))          # (f / f_cap)^2
+        if getattr(args, "star_weight_cap_form", "hard") == "smooth":
+            star_w = np.where(np.isfinite(tm), 1.0 / (1.0 + ratio2), 1.0)       # -> 1 faint, (f_cap/f)^2 bright
+        else:
+            star_w = np.where(np.isfinite(tm), np.minimum(1.0, 1.0 / ratio2), 1.0)
         # one weight per PHYSICAL pixel (its owner star's), identical in every stamp that contains it: per-stamp
         # weights make the island solve's normal equations inconsistent for overlapping stamps
         uid_ = np.asarray(scene.z["uid"]); own_ = np.asarray(scene.z["owner"], bool)
@@ -1621,6 +1625,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--star-weight-cap-tmag", type=float, default=None,
                    help="cap each star's total likelihood weight at that of a star of this Tmag (stamp inverse "
                         "variance divided by (f/f_cap)^2 for brighter stars); weighting inside a star unchanged")
+    p.add_argument("--star-weight-cap-form", choices=("hard", "smooth"), default="hard",
+                   help="hard: w = min(1, (f_cap/f)^2); smooth: w = 1 / (1 + (f/f_cap)^2)")
     p.add_argument("--penalty-nref", type=float, default=0.0,
                    help="> 0: scale every ePSF penalty by penalty_nref / N_pix so lambda means the same in every "
                         "scene/fold (F1 fold-0 N_pix 1581636 keeps the 10-04 F1 fold-0 balance)")
