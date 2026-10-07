@@ -24,6 +24,21 @@ not part of the combined recipe. Checked bit-exact against paper cell
 skycell.2528.005, with pixel operations identical to the standalone C4 ledger
 (`dev_runs/inline_ledger_check_20261005`).
 
+**Association revision (`assoc_r2/`).** Right after publishing a cell's ledger, `ps1_process`
+runs `revision.revise_ledger` (through `inline.revise_cell_ledger`) and writes
+`{data_root}/ps1_removal_ledger/v1/{projection}/{cell}/{combined_fp}/assoc_r2/`:
+`regions_r2`, `associations_r2`, `sources_r2`, **`neighbours.parquet`** (the removed-neighbour
+list: `centre_removed`, `enclosed_core_trigger`, and Gaia stars `in_trigger_core`, flagged) and
+`excluded_ps1_only.parquet`, plus `manifest.json` pointing at the parent ledger. Saturated-star
+identity counts a trigger's enclosed zeroed/NaN core (components ≥ `MIN_CORE_PX` = 30 px) as
+identity-only support. The published ledger is never modified; a revision failure writes
+`assoc_r2/error.json` and never fails the cell. Inline ledgers are Gaia-only, so the
+"rows trimmed from `sources`" repair (fix 2) and the PS1-only exclusion have nothing to act on;
+a star linked to a removal only through its PS1 detection (Gaia centre on an unchanged pixel)
+is not listed (1 in 440 neighbours on the 10 C4 cells checked, `dev_runs/main_merge_20261007`).
+The campaign path (`revision.py --root ...`) applies all three fixes to standalone ledgers
+(`dev_runs/ps1_ledger_fix_20261002/assoc_r2_20261006`).
+
 The standalone campaign, pilot, catalogue-query and seam-transport validation
 modules described below now live in `tools/removal_ledger_campaign/` (run from the
 repository root, e.g. `python -m tools.removal_ledger_campaign.campaign`); they are
