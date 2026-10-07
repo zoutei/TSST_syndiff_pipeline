@@ -29,6 +29,9 @@ stages:
     enable_saturation_correction: false
     psf_sigma: 40.0
     projections_limit: null
+    # Exact per-cell PS1 removal ledger + association revision (neighbour list) written while SEP runs
+    # (+2% wall time on C4; never changes a template pixel). Output: {data_root}/ps1_removal_ledger/v1/.
+    removal_ledger: true
     # use_shared_convolved_store: false   # PR5 shared store; operator gate required before enabling
     # write_per_scc_convolved_zarr: true  # must be false when use_shared_convolved_store is true
   downsample:
@@ -56,6 +59,11 @@ resources:
     max_concurrent: 6
   star:
     max_concurrent: 4
+  # Photometry loads hp_d (and often the full diff stack) off NFS per
+  # target; running several concurrently just contends for the same NFS
+  # bandwidth rather than going faster. Keep it serialized.
+  photometry:
+    max_concurrent: 1
 
 scheduler:
   heartbeat_interval_s: 30.0
