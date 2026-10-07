@@ -401,10 +401,11 @@ def build_neighbours(sources, associations_r2, regions_r2, candidates, changed_o
     for r in enc.itertuples():
         if (r.source_key, r.region_id) in trig_pairs:
             enclosed_trigger_keys.add(r.source_key)
-    # Non-trigger sources whose centre lies in a trigger's enclosed (zeroed) core: their light was removed with the
-    # trigger. Kept as real stars (e.g. binaries / close companions), flagged in_trigger_core; PS1-only ones are still
-    # excluded below by the PS1-only rule.
-    enclosed_any_keys = set(enc.source_key)
+    # Non-trigger Gaia stars whose centre lies in a trigger's enclosed (zeroed) core: their light was removed with the
+    # trigger. Kept as real stars (e.g. binaries / close companions), flagged in_trigger_core. Gaia rows only: PS1
+    # detections inside a saturated core are mostly split detections of the trigger itself (C4: 1,103 of 1,303 have
+    # the trigger as their only Gaia candidate), so they are not listed.
+    enclosed_any_keys = {k for k in enc.source_key if str(k).startswith('gaia:')}
     s['link_kind'] = np.where(s.centre_status == 'centre_removed', 'centre_removed',
                               np.where(s.source_key.isin(enclosed_trigger_keys), 'enclosed_core_trigger',
                                        np.where(s.source_key.isin(enclosed_any_keys), 'in_trigger_core', None)))
