@@ -52,6 +52,12 @@ class SccCfg:
 class CodeCfg:
     sha: str | None          # pinned code sha (None -> git HEAD of forward_model_root at provenance time)
     forward_model_root: Path  # checkout whose ``syndiff_pipeline`` the jobs import (PYTHONPATH)
+    # extra import roots placed BEFORE forward_model_root on every job's PYTHONPATH (e.g. a pinned pyhotpants build)
+    pythonpath_extra: tuple[Path, ...] = ()
+
+    @property
+    def pythonpath(self) -> str:
+        return ":".join(str(p) for p in (*self.pythonpath_extra, self.forward_model_root))
 
 
 @dataclass(frozen=True)
@@ -345,14 +351,17 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
     data_root = _path(raw.get("data_root"), "data_root", required=True)
     out_root = _path(raw.get("out_root"), "out_root", required=True)
 
-    cd = _section(raw, "code", {"sha", "forward_model_root"})
+    cd = _section(raw, "code", {"sha", "forward_model_root", "pythonpath_extra"})
     sha = cd.get("sha")
     if sha is not None and not isinstance(sha, str):
         raise ConfigError("code.sha must be a string or null")
     fm_root = _path(cd.get("forward_model_root"), "code.forward_model_root")
     if fm_root is None:  # default: the checkout this module was imported from
         fm_root = Path(__file__).resolve().parents[3]
-    code = CodeCfg(sha, fm_root)
+    extra = cd.get("pythonpath_extra") or []
+    if not isinstance(extra, list):
+        raise ConfigError("code.pythonpath_extra must be a list of absolute paths")
+    code = CodeCfg(sha, fm_root, tuple(_path(e, "code.pythonpath_extra[]", required=True) for e in extra))
 
     ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "bootstrap_mapping",
                                   "band_cells", "adopted_weights", "init_params", "bootstrap_hp_d", "colour_map", "xp_synth",

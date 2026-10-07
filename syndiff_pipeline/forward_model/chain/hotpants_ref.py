@@ -176,8 +176,9 @@ def submit(cfg, stems: Optional[Sequence[str]] = None, *, do_submit: bool = Fals
     for stem in (list(stems) if stems else frames_for(cfg)):
         argv = ["python", "-m", "syndiff_pipeline.forward_model.chain.hotpants_ref", "--config", str(cfg.config_path),
                 "--stem", stem]
-        sub = condor.write_submit(cfg, "hotpants", argv, tag=f"hp_{stem}", request_cpus=8, request_memory_mb=64000,
-                                  omp_threads=4)
+        # mask-honouring connected-region Hotpants peaks at ~63 GB per frame (hpfix_d14_20261007): configurable
+        sub = condor.write_submit(cfg, "hotpants", argv, tag=f"hp_{stem}", request_cpus=cfg.condor.request_cpus.get("hotpants", 8),
+                                  request_memory_mb=cfg.condor.request_memory_mb.get("hotpants", 64000), omp_threads=4)
         subs.append(sub)
         if do_submit:
             print(condor.submit(sub))

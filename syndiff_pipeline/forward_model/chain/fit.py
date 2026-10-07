@@ -97,8 +97,7 @@ def fit_command(cfg: ChainConfig, scene_dir: Path, out_dir: Path, *, warm: bool 
 def run_recipe(cfg: ChainConfig, cmd: list[str], out: Path, tag: str) -> None:
     """Run a recipe argv in the configured checkout; require scene_fit's DONE."""
     env = {**os.environ, **job_env(cfg, tag)}
-    env.pop("PYTHONPATH", None)
-    env["PYTHONPATH"] = str(cfg.code.forward_model_root)
+    env["PYTHONPATH"] = cfg.code.pythonpath
     print(f"[{tag}] {' '.join(cmd)}")
     subprocess.run(cmd, check=True, env=env, cwd=cfg.code.forward_model_root)
     if not (out / "DONE").exists():

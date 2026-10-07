@@ -34,7 +34,7 @@ def _condor_quote(tok: str) -> str:
 def job_env(cfg: ChainConfig, tag: str, omp_threads: int = 4) -> dict[str, str]:
     root = cfg.code.forward_model_root
     return {
-        "PYTHONPATH": str(root),
+        "PYTHONPATH": cfg.code.pythonpath,
         "JAX_PLATFORMS": "cpu",
         "OPENBLAS_NUM_THREADS": "1",
         "OMP_NUM_THREADS": str(omp_threads),
