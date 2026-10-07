@@ -196,6 +196,7 @@ def _hotpants_loky_initializer(
     downsample_fp: Optional[str] = None,
     hotpants_os_n_jobs: Optional[int] = None,
     run_id: Optional[str] = None,
+    fit_exclude: Optional[np.ndarray] = None,
 ) -> None:
     """Hotpants loky initializer (MaskCatalog + cadence lookup + field-mode loader).
 
@@ -247,6 +248,7 @@ def _hotpants_loky_initializer(
         "mapping_grid": _field_mode_mapping_grid(field_mode_context),
         "downsample_fp": downsample_fp,
         "run_id": run_id,
+        "fit_exclude": fit_exclude,
     }
 
 
@@ -290,6 +292,7 @@ def _hotpants_loky_run_task(
         btjd=p.get("btjd_by_product_id", {}).get(product_id),
         mapping_grid=p.get("mapping_grid"),
         run_id=p.get("run_id"),
+        fit_exclude=p.get("fit_exclude"),
     )
 
 
@@ -713,6 +716,10 @@ def build_hotpants_config(
     return HotpantsConfig(**cfg_kwargs)
 
 
+# pyhotpants FLAG_INPUT_MASK: the bit make_input_mask sets for the caller's t_mask / i_mask (globals.h, pure/utils.py).
+_HOTPANTS_FLAG_INPUT_MASK = 0x20
+
+
 def run_hotpants_frame(
     sci_array: np.ndarray,
     sci_err_array: np.ndarray,
@@ -724,8 +731,17 @@ def run_hotpants_frame(
     collect_kernel_params: bool = True,
     oversample: Optional[int] = None,
     use_c_extension: Optional[bool] = None,
+    fit_only_exclude: Optional[np.ndarray] = None,
 ) -> dict:
-    """Run Hotpants on in-memory template/science arrays."""
+    """Run Hotpants on in-memory template/science arrays.
+
+    ``fit_only_exclude`` (bool, ``mask_array``'s shape): extra pixels kept out of the kernel/background fit (stamp
+    gate, region pixels, clipping) but not flagged in the output mask -- e.g. the wing disks of bright stars that are
+    absent from the template (``hp_star_wing_radii``). pyhotpants records the input mask as FLAG_INPUT_MASK (0x20)
+    in the output mask; that bit is cleared again where only ``fit_only_exclude`` set it. The convolution still sets
+    FLAG_OK_CONV (0x40, "kernel footprint touched a flagged pixel, convolution OK") within the kernel radius of those
+    pixels; downstream treats 0x40 as good (``forward_model.chain._tk``: good = mask in {0, 64}).
+    """
     Hotpants, _ = _get_hotpants_classes()
     result = {
         "diff": None,
@@ -758,13 +774,24 @@ def run_hotpants_frame(
         else:
             use_c = bool(use_c_extension)
 
+        base_mask = np.asarray(mask_array) > 0
+        fit_mask = base_mask
+        exclude_only = None
+        if fit_only_exclude is not None:
+            fit_only_exclude = np.asarray(fit_only_exclude, dtype=bool)
+            if fit_only_exclude.shape != base_mask.shape:
+                raise ValueError(
+                    f"fit_only_exclude {fit_only_exclude.shape} does not match mask_array {base_mask.shape}"
+                )
+            fit_mask = base_mask | fit_only_exclude
+            exclude_only = fit_only_exclude & ~base_mask
         hp = Hotpants(
             template_data=np.ascontiguousarray(tmpl_array, dtype=np.float64),
             image_data=np.ascontiguousarray(sci_array, dtype=np.float64),
             t_error=np.zeros(tmpl_array.shape, dtype=np.float64),
             i_error=np.ascontiguousarray(sci_err_array, dtype=np.float64),
             t_mask=np.ascontiguousarray(np.isnan(tmpl_array), dtype=bool),
-            i_mask=np.ascontiguousarray(mask_array > 0, dtype=bool),
+            i_mask=np.ascontiguousarray(fit_mask, dtype=bool),
             star_catalog=np.ascontiguousarray(ref_stars_xy, dtype=np.float64),
             config=hp_config,
             output_header=None,
@@ -777,6 +804,14 @@ def run_hotpants_frame(
         result["convolved"] = res.get("convolved_image")
         result["noise"] = res.get("noise_image")
         result["mask"] = res.get("output_mask")
+        if exclude_only is not None and result["mask"] is not None:
+            out_mask = np.array(result["mask"], copy=True)
+            if out_mask.shape != exclude_only.shape:
+                raise ValueError(
+                    f"fit_only_exclude {exclude_only.shape} does not match the output mask {out_mask.shape}"
+                )
+            out_mask[exclude_only] &= ~_HOTPANTS_FLAG_INPUT_MASK
+            result["mask"] = out_mask
         result["success"] = result["diff"] is not None
         if result["success"] and collect_kernel_params:
             arrays = None
@@ -1173,8 +1208,11 @@ def _process_one_frame(
     output_store_name: Optional[str] = None,
     downsample_fp: Optional[str] = None,
     run_id: Optional[str] = None,
+    fit_exclude: Optional[np.ndarray] = None,
 ):
     """Process one frame.
+
+    ``fit_exclude`` (bool, crop shape): pixels kept out of the Hotpants fit only (see ``run_hotpants_frame``).
 
     ``template_loader`` (field mode): load via ``template_loader(group_id)``
     instead of ``template_path_map``. ``mask_catalog`` / ``btjd`` select the
@@ -1357,6 +1395,16 @@ def _process_one_frame(
             template_cache[group_id] = tmpl_crop
 
     mask_array = np.asarray(_resolve_hotpants_mask_array(mask, mask_catalog, btjd))
+    fit_exclude_paired = None
+    if fit_exclude is not None:
+        fit_exclude = np.asarray(fit_exclude, dtype=bool)
+        if fit_exclude.shape != mask_array.shape:
+            raise ValueError(f"fit_exclude {fit_exclude.shape} does not match the crop mask {mask_array.shape}")
+        # same padding contract as the mask (pad pixels excluded), as kernel_fit does for its exclusion
+        _, _, _, fit_exclude_paired, _ = _pair_hotpants_inputs(
+            sci_crop, tmpl_crop, err_crop, fit_exclude, mapping_grid, linear_pad
+        )
+        fit_exclude_paired = np.asarray(fit_exclude_paired, dtype=bool)
     sci_crop, tmpl_crop, err_crop, mask_array, pad_rows = _pair_hotpants_inputs(
         sci_crop, tmpl_crop, err_crop, mask_array, mapping_grid, linear_pad
     )
@@ -1448,6 +1496,7 @@ def _process_one_frame(
         collect_kernel_params=True,
         oversample=getattr(hp, "oversample", None),
         use_c_extension=getattr(hp, "use_c_extension", None),
+        fit_only_exclude=fit_exclude_paired,
     )
 
     if result["success"]:
@@ -1705,9 +1754,13 @@ def hotpants_loop(
     force_rerun: bool = False,
     field_mode_context: Optional[Any] = None,
     mask_catalog=None,
+    fit_exclude: Optional[np.ndarray] = None,
 ) -> list:
     """
     Run hotpants over all FFIs in parallel.
+
+    ``fit_exclude`` (bool, crop shape, optional): pixels kept out of the Hotpants fit only, not flagged in the
+    output mask (``hp_star_wing_radii`` disks).
 
     If ``workspace_dirs`` is None, use legacy paths: ``diff_r{round_id}/``,
     ``convolved_r{round_id}/``, and ``*_bkg.fits`` sidecars in the diff directory.
@@ -1897,6 +1950,7 @@ def hotpants_loop(
                 mapping_grid=mapping_grid,
                 downsample_fp=prov_downsample_fp,
                 run_id=prov_run_id,
+                fit_exclude=fit_exclude,
             )
 
         results = []
@@ -1937,6 +1991,7 @@ def hotpants_loop(
                 prov_downsample_fp,
                 hotpants_os_n_jobs,
                 prov_run_id,
+                fit_exclude,
             ),
             on_result=_record_progress,
         )

@@ -792,10 +792,10 @@ def _star_wing_exclusion_for_stage(
     csv = os.path.join(_diff_lane_root_dir(cfg, ctx), GAIA_CATALOG_PIPELINE_BASENAME)
     if not os.path.exists(csv):
         raise FileNotFoundError(
-            f"tessreduce_star_wing_radii needs the lane catalogue {csv!r} (written by the shared_mask stage)."
+            f"star wing radii need the lane catalogue {csv!r} (written by the shared_mask stage)."
         )
     ex = star_wing_exclusion_from_catalog(csv, tuple(shape), radii)
-    log.info("tessreduce_star_wing_radii: %.3f of the crop excluded from the background fit by star disks", ex.mean())
+    log.info("star wing radii: %.3f of the crop excluded from the fit by star disks", ex.mean())
     return ex
 
 
@@ -1281,6 +1281,9 @@ def run_config_pipeline(
                 force_rerun=force_rerun,
                 field_mode_context=field_ctx,
                 mask_catalog=mask_catalog,
+                fit_exclude=_star_wing_exclusion_for_stage(
+                    cfg, ctx, hp.hp_star_wing_radii, np.asarray(shared_mask).shape
+                ),
             )
             n_ok = sum(1 for r in results if r.get("success"))
             if n_ok == 0:

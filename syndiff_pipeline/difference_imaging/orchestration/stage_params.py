@@ -217,6 +217,7 @@ HOTPANTS_ALLOWED = frozenset(
         "region_max_bisects",
         "region_weight_cap",
         "hotpants_os_n_jobs",
+        "hp_star_wing_radii",
     }
 )
 
@@ -557,6 +558,11 @@ class HotpantsParams:
     # divided evenly across workers; the single-worker serial path never
     # sets it (matches prior, pre-this-field behavior).
     hotpants_os_n_jobs: Optional[int] = None
+    # Magnitude-sized disks around catalogue stars kept out of the Hotpants FIT only (stamp gate, region pixels,
+    # clipping), not flagged in the output mask: [[mag_hi, radius_px], ...], same table format as
+    # tessreduce_star_wing_radii; stars from {lane_root}/gaia_catalog_pipeline.csv. None = previous behaviour.
+    # Use with hp_bgo: -1 when the science already has its background removed (dev_runs/bkg_offset_20261006).
+    hp_star_wing_radii: Optional[list] = None
 
 
 @dataclass
@@ -1053,6 +1059,19 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
             f"'grid' or 'connected_regions', got {stamp_mode!r}"
         )
     hp.stamp_mode = stamp_mode
+    if int(hp.hp_bgo) < -1:
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] hotpants.hp_bgo must be >= -1 (-1 = no background term), got {hp.hp_bgo!r}"
+        )
+    if hp.hp_star_wing_radii is not None:
+        from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
+            parse_star_wing_radii,
+        )
+
+        try:
+            parse_star_wing_radii(hp.hp_star_wing_radii)
+        except ValueError as exc:
+            raise ValueError(f"pipeline[{pipeline_idx}] hotpants.hp_star_wing_radii: {exc}") from exc
     if "region_weight_cap" in stage and stage["region_weight_cap"] is not None:
         cap = stage["region_weight_cap"]
         if not (isinstance(cap, (list, tuple)) and len(cap) == 2):

@@ -23,11 +23,13 @@ from typing import Optional, Sequence
 
 import numpy as np
 
+from .bootstrap import hotpants_fit_exclusion, lane_star_wing_radii
 from .config import is_done, mark_done, write_provenance
 from .perband.paths import chain_paths
 
 # ko 4 + connected_regions = the 09-08 decided production recipe (was the SN2020hvq ko 2 grid copy until 2026-10-01)
-HP_KWARGS = dict(hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=0, stamp_mode="connected_regions",
+# hp_bgo -1 + the lane's star wing disks kept out of the fit: see bootstrap.HP_RECIPE (dev_runs/bkg_offset_20261006)
+HP_KWARGS = dict(hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=-1, stamp_mode="connected_regions",
                  hp_nstampx=10, hp_nstampy=10, hp_nss=100, hp_ngauss=3, hp_deg_fixe=[6, 4, 2],
                  hp_kf_spread_mask1=0.0, hp_ks=3.0, hp_kfm=0.75, hp_fitthresh=5.0, hp_stat_sig=3.0,
                  hp_force_convolve="t", hp_normalize="t", write_convolved=True, write_bkg=True,
@@ -73,14 +75,18 @@ def build_frame(cfg, stem: str) -> dict:
     maskraw = fits.getdata(scc / "diff_linear/shared_mask.fits.fz", 1)
     mask = HP._resolve_hotpants_mask_array(maskraw, None, None)
     stars = pd.read_csv(scc / "diff_linear/hotpants_substamp_stars.csv")[["x", "y"]].to_numpy(float)
+    radii = lane_star_wing_radii(scc / "diff_linear")
+    fit_ex = hotpants_fit_exclusion(scc / "diff_linear", radii, mask.shape)
+    _, _, _, fit_ex, _ = HP._pair_hotpants_inputs(sci, tmpl, err, fit_ex, grid, 0)
     sci, tmpl, err, mask, pad = HP._pair_hotpants_inputs(sci, tmpl, err, mask, grid, 0)
-    hp = HotpantsParams(**HP_KWARGS)
+    hp = HotpantsParams(**HP_KWARGS, hp_star_wing_radii=radii)
     (out_root / "hotpants_params.json").write_text(json.dumps(asdict(hp), indent=2, default=str) + "\n")
     hcfg = HP.build_hotpants_config(hp, str(out_root / "hp_d"), str(out_root / "hp_c"), stem,
                                     write_stamps=False, sci_shape=sci.shape)
     print(f"HOTPANTS {P.field} {stem}: science {sci.shape}; template {tmpl.shape}; F=4; stars {len(stars)}; pad {pad}", flush=True)
     t0 = time.time()
-    res = HP.run_hotpants_frame(sci, err, tmpl, mask, stars + pad, hcfg, oversample=4, collect_kernel_params=True)
+    res = HP.run_hotpants_frame(sci, err, tmpl, mask, stars + pad, hcfg, oversample=4, collect_kernel_params=True,
+                                fit_only_exclude=np.asarray(fit_ex, dtype=bool))
     if not res["success"]:
         raise RuntimeError(res["error_msg"])
     hp_sec = time.time() - t0

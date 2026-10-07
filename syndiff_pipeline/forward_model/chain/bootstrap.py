@@ -45,8 +45,12 @@ SCIENCE_BOUNDS = dict(x_min=44, x_max=2092, y_min=0, y_max=2048, shape=(2048, 20
 OVERSAMPLING = 4
 PSF_SIGMA = 40.0
 HP_RECIPE = dict(  # config/pipeline_sn2020hvq_tvwcs_os4.yaml, as in finish.py, except the 09-08 decision: kernel
-    # spatial order 4 (not 2; 6 diverges at native) with connected_regions stamps (paper dataset ko trial 2026-10-01)
-    hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=0, stamp_mode="connected_regions", hp_nstampx=10, hp_nstampy=10, hp_nss=100,
+    # spatial order 4 (not 2; 6 diverges at native) with connected_regions stamps (paper dataset ko trial 2026-10-01),
+    # and (10-07) hp_bgo -1: the science is FFI - ks_b, so Hotpants fits no background of its own; with bgo 0 its constant
+    # (+0.07..+0.16 e-/s) was fitted on star substamps and put a negative pedestal on hp_d (dev_runs/bkg_offset_20261006).
+    # The lane's star wing disks are also kept out of the fit (``lane_star_wing_radii``; needs pyhotpants with the
+    # connected-regions input-mask fix).
+    hp_sigma_gauss=[0.752, 1.88, 3.76], hp_ko=4, hp_bgo=-1, stamp_mode="connected_regions", hp_nstampx=10, hp_nstampy=10, hp_nss=100,
     hp_ngauss=3, hp_deg_fixe=[6, 4, 2], hp_kf_spread_mask1=0.0, hp_ks=3.0, hp_kfm=0.75, hp_fitthresh=5.0,
     hp_stat_sig=3.0, hp_force_convolve="t", hp_normalize="t", write_convolved=True, write_bkg=True,
     write_stamps=False, write_kernel_solutions=True,
@@ -55,6 +59,32 @@ TEMPLATE_RESOURCES = dict(request_cpus=16, request_memory_mb=200000)
 
 
 # ---------------------------------------------------------------------------------------------- pure helpers
+def lane_star_wing_radii(lane_root: Path) -> list:
+    """The ``tessreduce_star_wing_radii`` table the lane's ks_b was built with (frozen ``{lane}/diff_config.yaml``).
+
+    Hotpants keeps the same disks out of its fit, so both background-sensitive fits exclude the same bright-star wings.
+    Raises when the lane has no such table (an older lane: rebuild it, or pass the radii explicitly).
+    """
+    import yaml
+
+    path = Path(lane_root) / "diff_config.yaml"
+    cfg = yaml.safe_load(path.read_text())
+    tables = [st.get("tessreduce_star_wing_radii") for st in cfg.get("pipeline") or []
+              if st.get("kind") == "background_estimate" and st.get("tessreduce_star_wing_radii")]
+    if not tables:
+        raise ValueError(f"{path}: background_estimate has no tessreduce_star_wing_radii; cannot set hp_star_wing_radii")
+    return [[float(m), int(r)] for m, r in tables[0]]
+
+
+def hotpants_fit_exclusion(lane_root: Path, radii, shape: tuple) -> np.ndarray:
+    """Crop-shape bool disks of ``radii`` around the lane catalogue stars (``gaia_catalog_pipeline.csv``)."""
+    from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
+        star_wing_exclusion_from_catalog,
+    )
+
+    return star_wing_exclusion_from_catalog(str(Path(lane_root) / "gaia_catalog_pipeline.csv"), tuple(shape), radii)
+
+
 def robust_stats(x: np.ndarray) -> dict:
     """median, 1.4826*MAD, std and n of the finite entries of ``x``."""
     x = np.asarray(x, float)
@@ -334,13 +364,17 @@ def step_hotpants(*, ffi_path: Path, stem: str, lane_root: Path, ks_b_path: Path
     sci = sci - bkg
     mask = HP._resolve_hotpants_mask_array(fits.getdata(Path(lane_root) / "shared_mask.fits.fz"), None, None)
     stars = pd.read_csv(Path(lane_root) / "hotpants_substamp_stars.csv")[["x", "y"]].to_numpy(float)
+    radii = lane_star_wing_radii(lane_root)
+    fit_ex = hotpants_fit_exclusion(lane_root, radii, mask.shape)
+    _, _, _, fit_ex, _ = HP._pair_hotpants_inputs(sci, tmpl, err, fit_ex, grid, 0)
     sci, tmpl, err, mask, pad = HP._pair_hotpants_inputs(sci, tmpl, err, mask, grid, 0)
-    hp = HotpantsParams(**HP_RECIPE)
+    hp = HotpantsParams(**HP_RECIPE, hp_star_wing_radii=radii)
     (out_dir.parent / "hotpants_params.json").write_text(json.dumps(asdict(hp), indent=2, default=str) + "\n")
     cfg = HP.build_hotpants_config(hp, str(out_dir / "hp_d"), str(out_dir / "hp_c"), stem, write_stamps=False,
                                    sci_shape=sci.shape)
     t_run = time.time()
-    res = HP.run_hotpants_frame(sci, err, tmpl, mask, stars + pad, cfg, oversample=OVERSAMPLING, collect_kernel_params=True)
+    res = HP.run_hotpants_frame(sci, err, tmpl, mask, stars + pad, cfg, oversample=OVERSAMPLING, collect_kernel_params=True,
+                                fit_only_exclude=np.asarray(fit_ex, dtype=bool))
     if not res["success"]:
         raise RuntimeError(res["error_msg"])
     t_run = time.time() - t_run
@@ -363,6 +397,7 @@ def step_hotpants(*, ffi_path: Path, stem: str, lane_root: Path, ks_b_path: Path
     primary["DIFFLANE"] = lane_label
     primary["FFISTEM"] = stem
     primary.add_history("Bootstrap: single-FFI F4 header-WCS template, harmonic ks_b; native-grid output.")
+    primary.add_history(f"Hotpants hp_bgo {hp.hp_bgo}; star wing disks kept out of the fit ({float(fit_ex.mean()):.3f} of pixels).")
     (out_dir / "hp_d").mkdir(parents=True, exist_ok=True)
     out = out_dir / "hp_d" / f"{stem}_hp_d.fits.fz"
     from ._tk import write_fz  # production fpack writer (ZQUANTIZ NONE; DS9-readable), exact round trip asserted

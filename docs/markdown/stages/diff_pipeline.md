@@ -142,6 +142,12 @@ Optional YAML (beyond classical `hp_*` keys):
 | `use_c_extension` | auto | Forced off for `F>1` / connected regions |
 | `stamp_mode` | `grid` | `grid` \| `connected_regions` |
 | `region_*` | see guide | Only for `connected_regions` |
+| `hp_bgo` | 3 | Spatial order of Hotpants' own background term; `-1` = no background term (use when the science already has its background removed, e.g. FFI − `ks_b`) |
+| `hp_star_wing_radii` | unset | `[[mag_hi, radius_px], ...]` (same format as `tessreduce_star_wing_radii`): disks around `{lane}/gaia_catalog_pipeline.csv` stars kept out of the Hotpants **fit** (stamp gate, region pixels, clipping) only; not flagged in the output mask except a benign `0x40` (`FLAG_OK_CONV`) halo |
+
+Connected-region stamps honour the stage mask only with pyhotpants that includes the region input-mask fix
+(`FLAG_REGION_EXCLUDE`); older pyhotpants let masked pixels into connected-region fits. Background and evidence for
+`hp_bgo: -1` + `hp_star_wing_radii`: `/astro/armin/koji/syndiff/dev_runs/bkg_offset_20261006/README.md`.
 
 Full tables: [oversampled templates §6](../oversampled_templates.md#6-hotpants-parameter-reference).
 

@@ -12,7 +12,7 @@ from syndiff_pipeline.forward_model.chain import hotpants_ref as HR
 def test_hotpants_params_are_valid_and_match_the_baseline_recipe():
     from syndiff_pipeline.difference_imaging.orchestration.stage_params import HotpantsParams
     hp = HotpantsParams(**HR.HP_KWARGS)
-    assert hp.hp_ko == 4 and hp.stamp_mode == "connected_regions" and hp.hp_bgo == 0 and list(hp.hp_sigma_gauss) == [0.752, 1.88, 3.76]
+    assert hp.hp_ko == 4 and hp.stamp_mode == "connected_regions" and hp.hp_bgo == -1 and list(hp.hp_sigma_gauss) == [0.752, 1.88, 3.76]
     assert hp.write_kernel_solutions and hp.write_convolved and hp.hp_force_convolve == "t"
 
 
