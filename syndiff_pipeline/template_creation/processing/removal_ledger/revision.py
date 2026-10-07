@@ -401,9 +401,15 @@ def build_neighbours(sources, associations_r2, regions_r2, candidates, changed_o
     for r in enc.itertuples():
         if (r.source_key, r.region_id) in trig_pairs:
             enclosed_trigger_keys.add(r.source_key)
+    # Non-trigger sources whose centre lies in a trigger's enclosed (zeroed) core: their light was removed with the
+    # trigger. Kept as real stars (e.g. binaries / close companions), flagged in_trigger_core; PS1-only ones are still
+    # excluded below by the PS1-only rule.
+    enclosed_any_keys = set(enc.source_key)
     s['link_kind'] = np.where(s.centre_status == 'centre_removed', 'centre_removed',
-                              np.where(s.source_key.isin(enclosed_trigger_keys), 'enclosed_core_trigger', None))
+                              np.where(s.source_key.isin(enclosed_trigger_keys), 'enclosed_core_trigger',
+                                       np.where(s.source_key.isin(enclosed_any_keys), 'in_trigger_core', None)))
     s = s[s.link_kind.notna()].copy()
+    s['in_trigger_core'] = s.source_key.isin(enclosed_any_keys) & ~s.source_key.isin(enclosed_trigger_keys)
     if not len(s):
         return s, s.copy()
     is_g = s.catalogue == 'gaia_dr3'
@@ -412,7 +418,7 @@ def build_neighbours(sources, associations_r2, regions_r2, candidates, changed_o
     s['pair_state'] = np.where(is_g, s.source_key.map(gstate), s.entity_key.map(pstate))
     s['pair_state'] = s.pair_state.where(pd.notna(s.pair_state), np.where(is_g, 'gaia_only', 'ps1_only'))
     acc_gaia = s.entity_key.map(gaia_of_ps1)
-    s.loc[~is_g, 'gaia_id'] = acc_gaia[~is_g].str[5:]
+    s.loc[~is_g, "gaia_id"] = acc_gaia[~is_g].map(lambda k: k[5:] if isinstance(k, str) else None)
     s['gaia_candidate_ids'] = np.where(is_g, s.gaia_id, s.entity_key.map(gaia_ids_of_ps1))
     ps1_only = (~is_g) & (s.pair_state == 'ps1_only')
     # region of the removed pixel: owner of the centre pixel when known, else first centre/enclosed link
@@ -447,7 +453,7 @@ def build_neighbours(sources, associations_r2, regions_r2, candidates, changed_o
     keep_cols = ['field', 'cell', 'canonical_entity', 'gaia_id', 'gaia_candidate_ids', 'ps1_entity', 'source_key', 'catalogue',
                  'ra', 'dec', 'pixel_x', 'pixel_y', 'phot_g_mean_mag', 'phot_bp_mean_mag', 'phot_rp_mean_mag', 'tess_mag',
                  'rPSFMag', 'iPSFMag', 'zPSFMag', 'yPSFMag', 'centre_status', 'link_kind', 'region_id', 'association_status',
-                 'n_regions_linked', 'is_region_trigger', 'pair_state', 'identity_status', 'coordinate_role', 'n_rows_merged']
+                 'n_regions_linked', 'is_region_trigger', 'in_trigger_core', 'pair_state', 'identity_status', 'coordinate_role', 'n_rows_merged']
     keep_cols = [c for c in keep_cols if c in s.columns]
     out = s[~s._ps1only][keep_cols].reset_index(drop=True)
     ex = s[s._ps1only][keep_cols].copy().reset_index(drop=True)

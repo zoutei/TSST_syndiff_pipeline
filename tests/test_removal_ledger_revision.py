@@ -173,3 +173,23 @@ def test_speckle_holes_in_porous_support_are_not_enclosed_cores():
     _, links = rv.enclosed_links(regions, lambda r: sup, comb, sel, src, shape)
     assert links.source_index.tolist() == [0]
     assert links.core_component_px.iloc[0] == 100
+
+
+def test_non_trigger_gaia_in_trigger_core_is_kept_and_flagged():
+    cand = pd.DataFrame(dict(gaia_key=['gaia:7'], ps1_entity_key=['ps1:70'], ps1_obj_id=['70'], status=['ambiguous']))
+    core = dict(centre_status='selected_no_finite_change', pixel_x=5., pixel_y=5., ra=1., dec=2.)
+    src = _src([dict(source_key='gaia:111', entity_key='gaia:111', catalogue='gaia_dr3', phot_g_mean_mag=8., phot_bp_mean_mag=8.5,
+                     phot_rp_mean_mag=7.5, **core),                                                           # the trigger
+                dict(source_key='gaia:7', entity_key='gaia:7', catalogue='gaia_dr3', phot_g_mean_mag=9., phot_bp_mean_mag=9.5,
+                     phot_rp_mean_mag=8.5, **core),                                                           # companion in the core
+                dict(source_key='ps1det:z', entity_key='ps1:99', catalogue='ps1_dr2_stack', **core)])         # PS1-only in the core
+    st = rv.STATUS_ENCLOSED
+    assoc = pd.DataFrame(dict(source_key=['gaia:111', 'gaia:7', 'ps1det:z'], region_id=['p:1'] * 3,
+                              reason=['catalog'] * 3, association_status=[st] * 3))
+    regions = pd.DataFrame(dict(region_id=['p:1'], trigger_declared=['111'], trigger_centre_evidence=['enclosed_core']))
+    nb, ex = rv.build_neighbours(src, assoc, regions, cand, lambda s: np.ones(len(s), int), 'cell', 'F')
+    kinds = dict(zip(nb.canonical_entity, nb.link_kind))
+    assert kinds == {'gaia:111': 'enclosed_core_trigger', 'gaia:7': 'in_trigger_core'}
+    flags = dict(zip(nb.canonical_entity, nb.in_trigger_core))
+    assert flags == {'gaia:111': False, 'gaia:7': True}
+    assert list(ex.canonical_entity) == ['ps1:99']                                # PS1-only stays excluded
