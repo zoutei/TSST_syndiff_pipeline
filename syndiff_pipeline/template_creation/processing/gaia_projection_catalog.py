@@ -5,8 +5,11 @@ cannot be tied to one TESS SCC footprint.  Instead one catalogue per PS1
 projection (all cells of a projection share CRVAL/CDELT/PC) covers the union
 of its cells plus a 600 px margin, and is independent of any SCC.
 
-Layout: ``{data_root}/catalogs/gaia_projections/{GAIA_PROJECTION_SCHEME}/proj_{PPPP}.parquet``
-with a ``.meta.json`` beside it.
+Layout: ``{data_root}/catalogs/gaia_projections/{GAIA_PROJECTION_STORE}/proj_{PPPP}.parquet``
+with a ``.meta.json`` beside it.  The store holds the **uncut** catalogue;
+``removal_subset`` recovers exactly the RP < 18 rows of the legacy
+``gaia_dr3_projection_rp18_v1`` store, whose fingerprints are inherited when the
+content matches.
 """
 
 from __future__ import annotations
@@ -17,6 +20,9 @@ import json
 import logging
 import os
 import re
+import threading
+import time
+from collections import deque
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -26,6 +32,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 GAIA_PROJECTION_SCHEME = "gaia_dr3_projection_rp18_v1"
+GAIA_PROJECTION_STORE = "gaia_dr3_projection_all_v1"
+GAIA_REMOVAL_RP_LIMIT = 18.0
 GAIA_RELEASE = "gaiadr3"
 GAIA_MAGNITUDE_LIMIT = 18.0
 # Margin around the projection's cells. Must exceed the largest padded-window
@@ -37,7 +45,8 @@ DEFAULT_MARGIN_PX = 600
 _REQUIRED_COLUMNS = ("ra", "dec", "phot_g_mean_mag", "phot_bp_mean_mag", "phot_rp_mean_mag")
 
 # downloader(ra_coords, dec_coords, magnitude_limit) -> DataFrame of Gaia rows
-Downloader = Callable[[np.ndarray, np.ndarray, float], pd.DataFrame]
+# (magnitude_limit is None for the uncut store)
+Downloader = Callable[[np.ndarray, np.ndarray, Optional[float]], pd.DataFrame]
 
 
 def projection_id(name_or_projection) -> str:
@@ -50,11 +59,27 @@ def projection_id(name_or_projection) -> str:
 
 
 def projection_catalog_path(data_root, projection) -> Path:
-    """Parquet path of the catalogue for ``projection`` under ``data_root``."""
+    """Parquet path of the (uncut) catalogue for ``projection`` under ``data_root``."""
+    return (
+        Path(data_root) / "catalogs" / "gaia_projections" / GAIA_PROJECTION_STORE
+        / f"proj_{projection_id(projection)}.parquet"
+    )
+
+
+def legacy_projection_catalog_path(data_root, projection) -> Path:
+    """Parquet path of the legacy RP<18 catalogue (``GAIA_PROJECTION_SCHEME`` store)."""
     return (
         Path(data_root) / "catalogs" / "gaia_projections" / GAIA_PROJECTION_SCHEME
         / f"proj_{projection_id(projection)}.parquet"
     )
+
+
+def removal_subset(df: pd.DataFrame) -> pd.DataFrame:
+    """Rows with ``phot_rp_mean_mag < 18`` (NaN excluded), sorted by source_id."""
+    out = df[df["phot_rp_mean_mag"].to_numpy(dtype=float) < GAIA_REMOVAL_RP_LIMIT]
+    if "source_id" in out.columns:
+        out = out.sort_values("source_id", kind="mergesort")
+    return out.reset_index(drop=True)
 
 
 def _meta_path(parquet_path: Path) -> Path:
@@ -170,6 +195,33 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _read_catalog(path: Path) -> pd.DataFrame:
+    df = pd.read_parquet(path)
+    if "source_id" in df.columns:
+        df["source_id"] = pd.to_numeric(df["source_id"], errors="coerce").astype("Int64")
+    missing = [c for c in _REQUIRED_COLUMNS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Catalog {path} missing required columns: {missing}")
+    return df
+
+
+def _legacy_inheritance(data_root, pid: str, removal_hash: str) -> Optional[tuple[str, Path]]:
+    """Legacy meta hash to inherit, if the legacy file's removal content matches."""
+    legacy = legacy_projection_catalog_path(data_root, pid)
+    legacy_meta = _meta_path(legacy)
+    if not (legacy.is_file() and legacy_meta.is_file()):
+        return None
+    try:
+        with open(legacy_meta, encoding="utf-8") as fh:
+            legacy_hash = str(json.load(fh)["content_sha256"])
+        legacy_df = _read_catalog(legacy)
+        if content_sha256(removal_subset(legacy_df)) != removal_hash:
+            return None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    return legacy_hash, legacy
+
+
 def ensure_projection_catalog(
     data_root,
     projection,
@@ -179,7 +231,7 @@ def ensure_projection_catalog(
     downloader: Optional[Downloader] = None,
     margin_px: float = DEFAULT_MARGIN_PX,
 ) -> Path:
-    """Return the projection catalogue path, downloading it once if absent.
+    """Return the uncut projection catalogue path, downloading it once if absent.
 
     An existing parquet + meta pair is never rewritten.  Writes are atomic
     and serialised with an ``fcntl`` lock so concurrent runs download once.
@@ -200,8 +252,8 @@ def ensure_projection_catalog(
 
             ra, dec = projection_footprint_polygon(pid, margin_px=margin_px)
             dl = downloader or _default_downloader(backend, gaia_credentials_file, path)
-            logger.info(f"[GaiaProj] Downloading Gaia catalogue for projection {pid}")
-            df = dl(ra, dec, GAIA_MAGNITUDE_LIMIT)
+            logger.info(f"[GaiaProj] Downloading uncut Gaia catalogue for projection {pid}")
+            df = dl(ra, dec, None)
 
             from syndiff_pipeline.template_creation.processing import pancakes
 
@@ -219,56 +271,71 @@ def ensure_projection_catalog(
             df.to_parquet(tmp, index=False)
             os.replace(tmp, path)
 
+            # Hashes come from the file as read back, never the in-memory frame.
+            back = _read_catalog(path)
+            full_hash = content_sha256(back)
+            removal_hash = content_sha256(removal_subset(back))
+            inherited = _legacy_inheritance(data_root, pid, removal_hash)
+
             meta_doc = {
                 "scheme": GAIA_PROJECTION_SCHEME,
+                "scheme_store": GAIA_PROJECTION_STORE,
                 "projection": pid,
                 "release": GAIA_RELEASE,
-                "magnitude_limit": GAIA_MAGNITUDE_LIMIT,
+                "magnitude_limit": None,
                 "margin_px": float(margin_px),
                 "polygon_ra": [float(v) for v in ra],
                 "polygon_dec": [float(v) for v in dec],
-                "n_rows": int(len(df)),
-                "content_sha256": content_sha256(df),
+                "n_rows": int(len(back)),
+                "n_removal_rows": int(len(removal_subset(back))),
+                "content_sha256": full_hash,
+                "full_content_sha256": full_hash,
+                "removal_content_sha256": removal_hash,
+                "removal_fingerprint_sha256": inherited[0] if inherited else removal_hash,
                 "file_sha256": _sha256_file(path),
             }
+            if inherited:
+                meta_doc["fingerprint_inherited_from"] = str(inherited[1])
             meta_tmp = meta.with_name(meta.name + f".tmp{os.getpid()}")
             with open(meta_tmp, "w", encoding="utf-8") as fh:
                 json.dump(meta_doc, fh, indent=2, sort_keys=True)
             os.replace(meta_tmp, meta)
-            logger.info(f"[GaiaProj] Projection {pid}: {len(df)} stars -> {path}")
+            logger.info(f"[GaiaProj] Projection {pid}: {len(back)} stars -> {path}")
         finally:
             fcntl.flock(lock_fh, fcntl.LOCK_UN)
     return path
 
 
-def load_projection_catalog(data_root, projection) -> pd.DataFrame:
-    """Load a projection catalogue; raises ``FileNotFoundError`` if absent."""
+def load_projection_catalog(data_root, projection, *, subset: str = "removal") -> pd.DataFrame:
+    """Load a projection catalogue (``subset`` = ``"removal"`` RP<18 or ``"all"``).
+
+    Raises ``FileNotFoundError`` if absent.
+    """
+    if subset not in ("removal", "all"):
+        raise ValueError(f"subset must be 'removal' or 'all'; got {subset!r}")
     path = projection_catalog_path(data_root, projection)
     if not path.is_file():
         raise FileNotFoundError(f"Gaia projection catalogue not found: {path}")
-    df = pd.read_parquet(path)
-    if "source_id" in df.columns:
-        df["source_id"] = pd.to_numeric(df["source_id"], errors="coerce").astype("Int64")
-    missing = [c for c in _REQUIRED_COLUMNS if c not in df.columns]
-    if missing:
-        raise ValueError(f"Catalog {path} missing required columns: {missing}")
-    return df
+    df = _read_catalog(path)
+    return removal_subset(df) if subset == "removal" else df
 
 
 def projection_catalog_fingerprint(data_root, projection) -> Optional[str]:
-    """``"{scheme}:{content_sha256[:24]}"`` from the meta file, or ``None`` if absent."""
+    """``"{scheme}:{removal_fingerprint_sha256[:24]}"`` from the new-store meta, or
+    ``None`` if absent (no fallback to the legacy store)."""
     meta = _meta_path(projection_catalog_path(data_root, projection))
     try:
         with open(meta, encoding="utf-8") as fh:
             doc = json.load(fh)
-        return f"{GAIA_PROJECTION_SCHEME}:{str(doc['content_sha256'])[:24]}"
+        h = doc.get("removal_fingerprint_sha256") or doc["content_sha256"]
+        return f"{GAIA_PROJECTION_SCHEME}:{str(h)[:24]}"
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
 
-def load_catalog_for_projections(data_root, projections: Iterable) -> pd.DataFrame:
+def load_catalog_for_projections(data_root, projections: Iterable, *, subset: str = "removal") -> pd.DataFrame:
     """Concatenate several projection catalogues, de-duplicated on ``source_id``."""
-    frames = [load_projection_catalog(data_root, p) for p in dict.fromkeys(projection_id(p) for p in projections)]
+    frames = [load_projection_catalog(data_root, p, subset=subset) for p in dict.fromkeys(projection_id(p) for p in projections)]
     if not frames:
         return pd.DataFrame()
     df = pd.concat(frames, ignore_index=True)
@@ -277,3 +344,224 @@ def load_catalog_for_projections(data_root, projections: Iterable) -> pd.DataFra
         df = pd.concat([df[has_id].drop_duplicates("source_id", keep="first"), df[~has_id]])
         df = df.sort_values("source_id", kind="mergesort", na_position="last")
     return df.reset_index(drop=True)
+
+
+
+class ProjectionCatalogPrefetcher:
+    """Ensure projection catalogues on one background thread, in ``order``.
+
+    ``wait(p)`` blocks until ``p`` is ensured (re-raising its error); a
+    projection not yet queued is put at the *front* of the queue.  Errors are
+    per projection.
+    """
+
+    def __init__(self, data_root, order: Iterable, *, ensure: Callable = None, **ensure_kwargs):
+        self.data_root = data_root
+        self._ensure = ensure or ensure_projection_catalog
+        self._kwargs = ensure_kwargs
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._pending: deque = deque(dict.fromkeys(projection_id(p) for p in order))
+        self._events: dict[str, threading.Event] = {p: threading.Event() for p in self._pending}
+        self._results: dict[str, Path] = {}
+        self._errors: dict[str, BaseException] = {}
+        self._cache: dict[tuple[str, str], pd.DataFrame] = {}
+        self._closed = False
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> "ProjectionCatalogPrefetcher":
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="gaia-prefetch", daemon=True)
+                self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while True:
+            with self._cv:
+                while not self._pending and not self._closed:
+                    self._cv.wait()
+                if self._closed:
+                    return
+                pid = self._pending.popleft()
+            try:
+                result = self._ensure(self.data_root, pid, **self._kwargs)
+                with self._lock:
+                    self._results[pid] = Path(result)
+            except BaseException as exc:  # noqa: BLE001 - reported per projection
+                logger.warning(f"[GaiaProj] prefetch of projection {pid} failed: {exc}")
+                with self._lock:
+                    self._errors[pid] = exc
+            self._events[pid].set()
+
+    def wait(self, projection, timeout: Optional[float] = None) -> Path:
+        pid = projection_id(projection)
+        with self._cv:
+            if pid not in self._events:
+                if self._closed:
+                    raise RuntimeError("prefetcher is closed")
+                self._events[pid] = threading.Event()
+                self._pending.appendleft(pid)
+                self._cv.notify_all()
+            ev = self._events[pid]
+        if self._thread is None:
+            self.start()
+        if not ev.wait(timeout):
+            raise TimeoutError(f"Gaia catalogue for projection {pid} not ready after {timeout}s")
+        with self._lock:
+            if pid in self._errors:
+                raise self._errors[pid]
+            return self._results[pid]
+
+    def catalog(self, projection, subset: str = "removal") -> pd.DataFrame:
+        pid = projection_id(projection)
+        self.wait(pid)
+        key = (pid, subset)
+        with self._lock:
+            if key not in self._cache:
+                self._cache[key] = load_projection_catalog(self.data_root, pid, subset=subset)
+            return self._cache[key]
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout=30)
+        # Release anything still waiting.
+        with self._lock:
+            for pid, ev in self._events.items():
+                if not ev.is_set():
+                    self._errors.setdefault(pid, RuntimeError("prefetcher closed before projection was ensured"))
+                    ev.set()
+
+
+# ---------------------------------------------------------------------------
+# Gaia DR3 -> PS1 best-neighbour magnitudes
+# ---------------------------------------------------------------------------
+
+GAIA_TAP_URL = "https://gea.esac.esa.int/tap-server/tap"
+PS1_MAGS_VERSION = "v1"
+PS1_MAGS_CHUNK = 500
+_PS1_BANDS = ("g", "r", "i", "z", "y")
+PS1_MAGS_COLUMNS = (
+    "source_id", "ps1_obj_id", "angular_distance", "number_of_neighbours", "number_of_mates",
+    *(f"{b}_mean_psf_mag" for b in _PS1_BANDS),
+    *(f"{b}_mean_psf_mag_error" for b in _PS1_BANDS),
+    "obj_info_flag", "quality_flag", "ps1_match",
+)
+PS1_MAGS_QUERY_TEMPLATE = (
+    "SELECT b.source_id, b.original_ext_source_id AS ps1_obj_id, b.angular_distance, "
+    "b.number_of_neighbours, b.number_of_mates, "
+    + ", ".join(f"p.{b}_mean_psf_mag, p.{b}_mean_psf_mag_error" for b in _PS1_BANDS)
+    + ", p.obj_info_flag, p.quality_flag "
+    "FROM gaiadr3.panstarrs1_best_neighbour AS b "
+    "JOIN gaiadr2.panstarrs1_original_valid AS p ON p.obj_id = b.original_ext_source_id "
+    "WHERE b.source_id IN ({ids})"
+)
+
+
+def ps1_mags_path(data_root, projection) -> Path:
+    return (
+        Path(data_root) / "catalogs" / "gaia_ps1_best_neighbour" / PS1_MAGS_VERSION
+        / f"proj_{projection_id(projection)}.parquet"
+    )
+
+
+def _tap_fetch(ids: list) -> pd.DataFrame:
+    """Query the Gaia archive TAP service for one chunk of source_ids."""
+    import pyvo
+
+    query = PS1_MAGS_QUERY_TEMPLATE.format(ids=",".join(str(int(i)) for i in ids))
+    svc = pyvo.dal.TAPService(GAIA_TAP_URL)
+    try:
+        res = svc.run_sync(query)
+    except Exception as exc:
+        logger.warning(f"[GaiaPS1] run_sync failed ({exc}); trying run_async")
+        res = svc.run_async(query)
+    return res.to_table().to_pandas()
+
+
+def _normalise_ps1_frame(df: pd.DataFrame) -> pd.DataFrame:
+    out = pd.DataFrame(index=range(len(df)))
+    for col in PS1_MAGS_COLUMNS:
+        if col == "ps1_match":
+            continue
+        if col in df.columns:
+            out[col] = df[col].reset_index(drop=True)
+        else:
+            out[col] = np.nan
+    for col in ("source_id", "ps1_obj_id", "obj_info_flag", "quality_flag", "number_of_neighbours", "number_of_mates"):
+        out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+    out["ps1_match"] = out["ps1_obj_id"].notna()
+    return out[list(PS1_MAGS_COLUMNS)]
+
+
+def ensure_gaia_ps1_mags(data_root, projection, source_ids, *, fetch: Optional[Callable] = None) -> pd.DataFrame:
+    """PS1 best-neighbour magnitudes for ``source_ids``, cached per projection.
+
+    Only IDs not yet cached are fetched (chunks of 500); IDs with no match are
+    cached with null PS1 columns and ``ps1_match=False``.  Returns the rows for
+    the requested IDs.  Source IDs stay int64 throughout.
+    """
+    pid = projection_id(projection)
+    ids = np.unique(np.asarray([int(i) for i in source_ids], dtype=np.int64))
+    path = ps1_mags_path(data_root, pid)
+    meta = _meta_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fetch = fetch or _tap_fetch
+
+    def _cached() -> Optional[pd.DataFrame]:
+        if not path.is_file():
+            return None
+        d = pd.read_parquet(path)
+        d["source_id"] = pd.to_numeric(d["source_id"], errors="coerce").astype("Int64")
+        return d
+
+    cached = _cached()
+    if cached is not None and set(ids.tolist()) <= set(cached["source_id"].astype("int64").tolist()):
+        return cached[cached["source_id"].isin(ids.tolist())].reset_index(drop=True)
+
+    with open(path.with_name(path.name + ".lock"), "w") as lock_fh:
+        fcntl.flock(lock_fh, fcntl.LOCK_EX)
+        try:
+            cached = _cached()  # re-read under the lock
+            have = set(cached["source_id"].astype("int64").tolist()) if cached is not None else set()
+            todo = [int(i) for i in ids if int(i) not in have]
+            frames = [cached] if cached is not None else []
+            if todo:
+                for k in range(0, len(todo), PS1_MAGS_CHUNK):
+                    chunk = todo[k:k + PS1_MAGS_CHUNK]
+                    got = _normalise_ps1_frame(pd.DataFrame(fetch(chunk)))
+                    got = got.drop_duplicates("source_id", keep="first")
+                    got = got[got["source_id"].isin(chunk)]
+                    missing = sorted(set(chunk) - set(got["source_id"].astype("int64").tolist()))
+                    if missing:
+                        nm = _normalise_ps1_frame(pd.DataFrame({"source_id": pd.array(missing, dtype="Int64")}))
+                        got = pd.concat([got, nm], ignore_index=True)
+                    frames.append(got)
+                full = pd.concat(frames, ignore_index=True)
+                full = full.drop_duplicates("source_id", keep="last").sort_values("source_id", kind="mergesort")
+                full = full.reset_index(drop=True)
+                tmp = path.with_name(path.name + f".tmp{os.getpid()}")
+                full.to_parquet(tmp, index=False)
+                os.replace(tmp, path)
+                meta_doc = {
+                    "projection": pid,
+                    "version": PS1_MAGS_VERSION,
+                    "n_rows": int(len(full)),
+                    "n_matched": int(full["ps1_match"].sum()),
+                    "query_template": PS1_MAGS_QUERY_TEMPLATE,
+                    "service_url": GAIA_TAP_URL,
+                    "chunk_size": PS1_MAGS_CHUNK,
+                    "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+                mtmp = meta.with_name(meta.name + f".tmp{os.getpid()}")
+                with open(mtmp, "w", encoding="utf-8") as fh:
+                    json.dump(meta_doc, fh, indent=2, sort_keys=True)
+                os.replace(mtmp, meta)
+                cached = full
+        finally:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
+    return cached[cached["source_id"].isin(ids.tolist())].reset_index(drop=True)
