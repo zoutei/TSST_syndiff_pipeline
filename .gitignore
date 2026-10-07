@@ -8,6 +8,9 @@ config/irsa_config/
 config/atlas_config/
 .agents/
 .claude/
+# Agent instructions: local only, like .claude/skills
+CLAUDE.md
+AGENTS.md
 .claude_plans
 .codex/
 .jax_cache_diag/
