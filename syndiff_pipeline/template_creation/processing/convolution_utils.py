@@ -1,9 +1,12 @@
 """
 Simple convolution utilities for TESS PSF application.
 
-The truncated Gaussian pre-blur is computed by a real FFT by default (``method="fft"``). It is the same operator as
-``scipy.ndimage.gaussian_filter(mode="constant", cval=cval, truncate=radius / sigma)``, which the chunked dask-image
-path (``method="dask"``, the implementation before 2026-10-05) also computes:
+The truncated Gaussian pre-blur has two implementations of the same operator,
+``scipy.ndimage.gaussian_filter(mode="constant", cval=cval, truncate=radius / sigma)``: the chunked dask-image path
+(``method="dask"``, the default, used for every production product) and a real FFT (``method="fft"``, opt-in via
+``method=``, ``blur_method("fft")`` or env ``SYNDIFF_BLUR_METHOD=fft``; added 2026-10-05). The FFT is not bit-identical to
+dask and the blur method is not part of the convolved-store fingerprint, so do not mix the two within one store.
+Both compute:
 
 * kernel: the separable, normalised 1-D Gaussian ``exp(-x^2 / 2 sigma^2)`` on ``|x| <= int(radius + 0.5)``
   (scipy's ``lw = int(truncate * sigma + 0.5)``), applied along both axes;
@@ -32,8 +35,8 @@ _METHOD_OVERRIDE: list[str] = []
 
 @contextlib.contextmanager
 def blur_method(method: str):
-    """Force the default method inside this block (e.g. ``"dask"`` to reproduce products made before 2026-10-05
-    bit for bit). An explicit ``method=`` argument still wins."""
+    """Force the default method inside this block (e.g. ``"fft"`` to opt in). An explicit ``method=`` argument
+    still wins."""
     if method not in BLUR_METHODS:
         raise ValueError(f"method={method!r}; expected one of {BLUR_METHODS}")
     _METHOD_OVERRIDE.append(method)
@@ -46,7 +49,7 @@ def blur_method(method: str):
 def _default_method() -> str:
     if _METHOD_OVERRIDE:
         return _METHOD_OVERRIDE[-1]
-    m = os.environ.get("SYNDIFF_BLUR_METHOD", "fft").strip().lower()
+    m = os.environ.get("SYNDIFF_BLUR_METHOD", "dask").strip().lower()
     if m not in BLUR_METHODS:
         raise ValueError(f"SYNDIFF_BLUR_METHOD={m!r}; expected one of {BLUR_METHODS}")
     return m
@@ -132,8 +135,8 @@ def apply_gaussian_convolution(
             Production PS1 mosaics use the default ``np.nan`` for masked gaps;
             isolated star cutouts should pass ``0.0`` so tight cutouts do not
             lose flux to NaN contamination at the edges.
-        method: ``"fft"`` (default, or env ``SYNDIFF_BLUR_METHOD``) or ``"dask"`` (the chunked dask-image
-            ``gaussian_filter`` used before 2026-10-05; use it to reproduce older products bit for bit).
+        method: ``"dask"`` (default, or env ``SYNDIFF_BLUR_METHOD``; the chunked dask-image ``gaussian_filter``
+            that built every production product) or ``"fft"`` (opt-in, same operator, ~50x less CPU, not bit-identical).
         workers: FFT threads (default env ``SYNDIFF_FFT_WORKERS``, else 1). The dask path ignores it.
 
     Returns:

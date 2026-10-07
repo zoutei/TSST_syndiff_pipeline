@@ -75,3 +75,13 @@ def test_fft_exact_zero_outside_support():
     out = CU.apply_gaussian_convolution(img, sigma=2.0, radius=8, cval=0.0, method="fft")
     assert (out[40:, :] == 0).all() and (out[:, 50:] == 0).all()
     assert out[22, 31] > 0
+
+
+def test_default_method_is_dask(monkeypatch):
+    """Production default is the dask path (decision D2, 2026-10-07); FFT is opt-in."""
+    monkeypatch.delenv("SYNDIFF_BLUR_METHOD", raising=False)
+    assert CU._default_method() == "dask"
+    with CU.blur_method("fft"):
+        assert CU._default_method() == "fft"
+    monkeypatch.setenv("SYNDIFF_BLUR_METHOD", "fft")
+    assert CU._default_method() == "fft"

@@ -389,7 +389,7 @@ def one_projection_cell(cfg, name, cache: "BandCache", df, ctx: dict):
                    xproj=xproj, seam_flux=seam_flux, bands=sorted(bands_done), list_chosen="own",
                    list_tries={"own": float(d0.max() / pk0) if d0.size and pk0 > 0 else 1.0},
                    no_production_cell=False, seam_source_not_in_store=False, maps=[MODEL], mode="projection",
-                   blur_impl=os.environ.get("SYNDIFF_BLUR_METHOD", "fft"))
+                   blur_impl=os.environ.get("SYNDIFF_BLUR_METHOD", "dask"))
         chk["seconds"] = time.time() - t0
         P.contrib.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(".tmp.npz")
