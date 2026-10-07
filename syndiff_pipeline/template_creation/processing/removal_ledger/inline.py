@@ -24,6 +24,7 @@ LEDGER_STORE = Path("ps1_removal_ledger") / "v1"
 ACCOUNTING_RADIUS_PX = 5.0
 SOURCE_WINDOW_PX = 600.0
 POINTER_NAME = "ledger.json"
+REVISION_DIR = "assoc_r2"
 
 
 def ledger_fingerprint_dir(data_root, projection, skycell, combined_fingerprint) -> Path:
@@ -147,6 +148,21 @@ def publish_cell_ledger(data_root, projection, skycell, combined_fingerprint, le
     tmp = fp_dir / f".{POINTER_NAME}.{os.getpid()}"
     tmp.write_text(json.dumps(dict(ledger=str(dest), fingerprint=dest.name), indent=2))
     os.replace(tmp, pointer)
+    return dest
+
+
+def revise_cell_ledger(data_root, projection, skycell, combined_fingerprint, ledger_path, combined_image) -> Path:
+    """Run the association revision (``revision.revise_ledger``) on a just-published inline ledger.
+
+    Output goes to ``{ledger_fingerprint_dir}/assoc_r2/`` (the published ledger itself stays immutable):
+    saturated-core identity, the removed-neighbour list (``neighbours.parquet``) and the PS1-only exclusions.
+    ``combined_image`` is the cell's post-removal combined image, as stored in the combined store.
+    """
+    from . import revision
+
+    dest = ledger_fingerprint_dir(data_root, projection, skycell, combined_fingerprint) / REVISION_DIR
+    revision.revise_ledger(Path(ledger_path), np.asarray(combined_image), dest,
+                           field=str(projection), cell=str(skycell))
     return dest
 
 

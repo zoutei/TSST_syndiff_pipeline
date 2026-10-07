@@ -478,16 +478,37 @@ def process_cell(root, field, rec, out, force=False):
         m = json.loads(mpath.read_text())
         if m.get('parent_manifest_sha256') == parent_sha and m.get('code_sha256') == CODE_SHA:
             return m['summary']
+    with np.load(Path(rec['directory']) / 'arrays.npz') as z:
+        combined = z['combined_image']
+    return revise_ledger(L, combined, dest, field=field, cell=cell, catalogue_directory=rec['directory'],
+                         start=start)
+
+
+def revise_ledger(L, combined, dest, *, field, cell, catalogue_directory=None, start=None):
+    """Revise one published ledger ``L`` given its cell's stored (post-removal) ``combined`` image.
+
+    Writes the revision tables and ``manifest.json`` into ``dest`` and returns the summary. Fix 2 (rows referenced
+    but trimmed from ``sources``) needs the PS1-stack candidate table and the cell's catalogue cache
+    (``catalogue_directory``); an inline ``ps1_process`` ledger is Gaia-only, so it has neither and fix 2 is skipped
+    (its associations reference only rows already in ``sources``). Fixes 1 and 3 always run.
+    """
+    start = time.monotonic() if start is None else start
+    L = Path(L)
+    dest = Path(dest)
+    parent_sha = sha256_file(L / 'manifest.json')
     dest.mkdir(parents=True, exist_ok=True)
+    mpath = dest / 'manifest.json'
     pm = json.loads((L / 'manifest.json').read_text())
     shape = tuple(pm['shape'])
     sources = pd.read_parquet(L / 'sources.parquet')
     assoc = pd.read_parquet(L / 'associations.parquet')
     regions = pd.read_parquet(L / 'regions.parquet')
-    cand = pd.read_parquet(L / 'gaia_ps1_candidates.parquet')
+    cand_path = L / 'gaia_ps1_candidates.parquet'
+    have_cand = cand_path.is_file()
+    cand = pd.read_parquet(cand_path) if have_cand else pd.DataFrame(
+        {'gaia_key': pd.Series(dtype=object), 'ps1_entity_key': pd.Series(dtype=object),
+         'status': pd.Series(dtype=object)})
     before_integrity = integrity(sources, cand, assoc, regions)
-    with np.load(Path(rec['directory']) / 'arrays.npz') as z:
-        combined = z['combined_image']
     with np.load(L / 'geometry.npz') as geom:
         selected = geom['selected_stage']
         changed = geom['changed_stage']
@@ -495,8 +516,11 @@ def process_cell(root, field, rec, out, force=False):
         supports = {int(r.operation): unpack_support(geom, r._asdict()) for r in regions.itertuples()
                     if r.reason != 'background'}
     # fix 2
-    added, selfcheck = pull_missing(sources, cand, assoc, regions, pm, rec['directory'], shape)
-    added = classify_added_centres(added, selected, changed, shape)
+    if have_cand and catalogue_directory is not None:
+        added, selfcheck = pull_missing(sources, cand, assoc, regions, pm, catalogue_directory, shape)
+        added = classify_added_centres(added, selected, changed, shape)
+    else:
+        added, selfcheck = sources.iloc[0:0].copy(), None
     sources['row_origin'] = 'original'
     added['row_origin'] = 'pair_reference_outside_margin'
     sources_r2 = pd.concat([sources, added], ignore_index=True)

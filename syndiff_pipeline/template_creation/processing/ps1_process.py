@@ -654,6 +654,22 @@ def _capture_cell_ledger(bundle, gaia_catalog_pixels, convention, *,
                        rows_in_cone=None if spec.get("gaia_all") is None else int(len(spec["gaia_all"]))),
         metadata=dict(association_error=association_error, wcs_header=header_str),
     )
+    if sources is not None:
+        # Association revision (saturated-core identity + removed-neighbour list); never fails the cell.
+        try:
+            rl.revise_cell_ledger(spec["data_root"], spec["projection"], spec["skycell"],
+                                  spec["combined_fingerprint"], dest, result)
+        except Exception as exc:
+            logger.error(f"[PreProcessor] Ledger association revision failed for {bundle['skycell_id']}: {exc}")
+            try:
+                import json as _json
+                d = rl.ledger_fingerprint_dir(spec["data_root"], spec["projection"], spec["skycell"],
+                                              spec["combined_fingerprint"]) / rl.REVISION_DIR
+                d.mkdir(parents=True, exist_ok=True)
+                (d / "error.json").write_text(_json.dumps(dict(error=f"{type(exc).__name__}: {exc}",
+                                                              time=time.time()), indent=2))
+            except Exception:
+                logger.warning("could not write revision error record", exc_info=True)
     return result, removed, str(dest)
 
 
