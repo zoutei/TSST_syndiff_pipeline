@@ -134,7 +134,13 @@ def compare_fits(fits: Mapping[str, str | Path], pairs: Sequence[tuple[str, str,
             bg=[(float(np.ravel(x["f"]["bg_coef"])[0]) if x["f"] is not None and "bg_coef" in x["f"] else None) for x in (a, c)])
         rr = None
         if a["f"] is not None and c["f"] is not None:
-            fa, fc = a["f"]["flux"], c["f"]["flux"]
+            # fits trained on neighbour scenes (chain/neighbours.py) carry the added Gaia neighbours AFTER the original
+            # scene stars (original rows unchanged), and boot/refit may add different numbers: compare the prefix
+            n0 = len(role)
+            for x in (a, c):
+                if "source_id" in x["f"] and not np.array_equal(np.asarray(x["f"]["source_id"])[:n0], sc["source_id"]):
+                    raise ValueError("flux_solved source_id prefix does not match the comparison scene")
+            fa, fc = a["f"]["flux"][:n0], c["f"]["flux"][:n0]
             ok = (fc > 0) & (fa > 0) & np.isfinite(fa) & np.isfinite(fc) & (role != 2)
             rr = fa / fc - 1
             fb = {}
