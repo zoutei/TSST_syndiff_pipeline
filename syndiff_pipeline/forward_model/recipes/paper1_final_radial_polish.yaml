@@ -1,0 +1,31 @@
+# CONTINUATION recipes (colour-radial-20261008). Start from a CONVERGED paper1_final fit, e.g.
+#   --init-params-file <field>/fits/foldK/params.npz   (its fit_meta.json beside it gives the A3 extras; the new extras are
+#   zero-padded, so step 0 reproduces the A3 loss) with the same --scene-dir / --colour-file as the original fit, and the
+#   CCD-adapter install of launch_final.py. The whole schedule is ONE stage: steps-per-stage 0,0,N skips the WCS-only
+#   and ePSF-only stages (stage 3 trains ePSF base, modes, w(t) and the colour vector; fluxes are solved in closed form).
+#   --freeze-wcs holds wcs_coeff fixed in every stage.
+# Short final check: shift unfrozen. Start from the frozen-shift arm's params.npz (its fit_meta carries the radial extras and knots).
+role: "POLISH: as paper1_final_radial_frozenshift but the colour shift is UNFROZEN (WCS still frozen); short final check, run after the frozen-shift arm from ITS params"
+scene_fit:
+  chroma-model: global8
+  colour-gauge: global
+  chroma-axis: tesspoint
+  chroma-radial-mode: add
+  chroma-g8-drop: blur,dil,kurt
+  freeze-wcs: true
+  chroma-g8-extras: dil_r,sq0,sq1,q1_0,q1_x,q1_y,q2_0,q2_x,q2_y,rb1_0,rb1_r,rb2_0,rb2_r,rb3_0,rb3_r,rb4_0,rb4_r,rb5_0,rb5_r,rq1,rq2,rq3,rq4,rq5,rc1,rc2,rc3
+  huber-delta: 1.0e6
+  reject-every: 0
+  lambda-lap: 1.0e-2
+  lambda-pixel-lap: 1.0e-2
+  lambda-fine-nbr: 0
+  lambda-local-poly: 3.0e8
+  local-poly-window: 7
+  lr-per-stage: 1e-3,3e-4,1e-4
+  epsf-lr-scale: 2.5
+  chroma-lr-scale: 10
+  stop-rule: smoothed
+  steps-per-stage: 0,0,3000
+  star-weight-cap-tmag: 10.5
+  anchors-train-epsf: true
+  checkpoint-every: 100

@@ -89,7 +89,7 @@ def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz
         chroma_axis=axis, lambda_fine_nbr=meta.get("lambda_fine_nbr", 0.0),
         fine_nbr_mode=meta.get("fine_nbr_mode") or "plain",
         chroma_g8_gauge=meta.get("chroma_g8_gauge", "mean"), chroma_g8_no_dil=bool(meta.get("chroma_g8_no_dil", False)),
-        chroma_g8_extras=extras, delta2_mean=d2)
+        chroma_g8_extras=extras, delta2_mean=d2, **SF.meta_colour_kwargs(meta))
     pp = fit_out / params_name
     for alt in ("params.npz", "params_latest.npz"):     # a running fit has only params_latest.npz
         if not pp.exists():

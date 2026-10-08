@@ -48,7 +48,7 @@ def own_templates(meta, scene, params):
                                 bool(meta.get("chroma_g8_no_dil", False)))
     ctxs = scene.contexts(cref, chroma_axis=axis, chroma_g8_gauge=meta.get("chroma_g8_gauge", "mean"),
                           chroma_g8_no_dil=bool(meta.get("chroma_g8_no_dil", False)), chroma_g8_extras=extras,
-                          delta2_mean=d2)
+                          delta2_mean=d2, **SF.meta_colour_kwargs(meta))
     S2 = scene.S * scene.S
     T = np.zeros((scene.N, S2), np.float32)
     for _, idx, ctx in ctxs:
