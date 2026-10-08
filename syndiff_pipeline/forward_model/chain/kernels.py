@@ -157,10 +157,10 @@ def slot_ctx(A, x, y, delta, node_x, node_y):
         chroma_delta=jnp.atleast_1d(jnp.asarray(delta, jnp.float64)),
         chroma_axis=A["axis"], x_lin=x, y_lin=y, chroma_g8_extras=A["extras"],
         chroma_g8_gauge=A["gauge"], chroma_g8_no_dil=False, chroma_delta2_mean=A["d2mean"],
-        chroma_coma_knots=(EM.parse_radial_knots(A["meta"]["chroma_coma_knots"]) if A["meta"].get("chroma_coma_knots") else None),
-        chroma_radial_mode=(A["meta"].get("chroma_radial_mode") or "mult"),
-        chroma_g8_drop=L.g8_drop_tuple(A["meta"].get("chroma_g8_drop") or ""),
-        chroma_radial_knots=(EM.parse_radial_knots(A["meta"]["chroma_radial_knots"]) if A["meta"].get("chroma_radial_knots") else None),
+        chroma_coma_knots=(EM.parse_radial_knots(A["meta"]["chroma_coma_knots"]) if (A.get("meta") or {}).get("chroma_coma_knots") else None),
+        chroma_radial_mode=((A.get("meta") or {}).get("chroma_radial_mode") or "mult"),
+        chroma_g8_drop=L.g8_drop_tuple((A.get("meta") or {}).get("chroma_g8_drop") or ""),
+        chroma_radial_knots=(EM.parse_radial_knots(A["meta"]["chroma_radial_knots"]) if (A.get("meta") or {}).get("chroma_radial_knots") else None),
         node_x=jnp.asarray(node_x, jnp.float64), node_y=jnp.asarray(node_y, jnp.float64))
 
 
@@ -578,9 +578,9 @@ def run_k01(cfg, A=None) -> dict:
     cref = sc.colour_ref()
     d2 = sc.delta2_mean(cref)
     out.update(colour_source=sc.colour_source, colour_ref_recomputed=cref, colour_ref_fit_meta=A["cref"],
-               delta2_recomputed=d2, delta2_fit_meta=A["meta"].get("chroma_delta2_mean"))
+               delta2_recomputed=d2, delta2_fit_meta=(A.get("meta") or {}).get("chroma_delta2_mean"))
     assert abs(cref - A["cref"]) < 1e-9, (cref, A["cref"])
-    if A["meta"].get("chroma_delta2_mean") is not None:
+    if (A.get("meta") or {}).get("chroma_delta2_mean") is not None:
         assert abs(d2 - A["d2mean"]) < 1e-9
     c = sc.colour[sc.z["star_bundle_index"]]
     train = (sc.role != SF.ROLE_NUISANCE) & np.isfinite(c)
@@ -780,7 +780,7 @@ def run_k02(cfg, A=None) -> dict:
         field=P.field, model=MODEL, sector=P.sector, camera=P.camera, ccd=P.ccd, frame_stem=P.stem,
         model_path=str(A["model_dir"]), model_params=str(A["model_dir"] / "params.npz"),
         model_code=prov, model_code_sha=prov["sha"],
-        model_trained_with=A["meta"].get("started", "see fit_meta.json"),
+        model_trained_with=(A.get("meta") or {}).get("started", "see fit_meta.json"),
         local_poly_hard=A["local_poly_hard"], kernel_bright_q=A["kernel_q"], bright_width=A["bw"],
         chromatic_kernels=str(CK.__file__),
         scene_dir=str(P.scene_dir), colour_kind="u", colour_file=str(A["colour_file"]),
