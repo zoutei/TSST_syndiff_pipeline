@@ -401,6 +401,11 @@ def build_neighbours(sources, associations_r2, regions_r2, candidates, changed_o
     for r in enc.itertuples():
         if (r.source_key, r.region_id) in trig_pairs:
             enclosed_trigger_keys.add(r.source_key)
+    # Triggers whose centre lies in their own region's exact support but whose centre pixel had no finite value to
+    # remove (centre_status selected_no_finite_change, not centre_removed): about half of all triggers. They are
+    # removed stars, so they are listed too.
+    support_trigger_keys = {'gaia:' + str(r.trigger_declared) for r in trig.itertuples()
+                            if r.trigger_centre_evidence == 'support'}
     # Non-trigger Gaia stars whose centre lies in a trigger's enclosed (zeroed) core: their light was removed with the
     # trigger. Kept as real stars (e.g. binaries / close companions), flagged in_trigger_core. Gaia rows only: PS1
     # detections inside a saturated core are mostly split detections of the trigger itself (C4: 1,103 of 1,303 have
@@ -408,9 +413,11 @@ def build_neighbours(sources, associations_r2, regions_r2, candidates, changed_o
     enclosed_any_keys = {k for k in enc.source_key if str(k).startswith('gaia:')}
     s['link_kind'] = np.where(s.centre_status == 'centre_removed', 'centre_removed',
                               np.where(s.source_key.isin(enclosed_trigger_keys), 'enclosed_core_trigger',
-                                       np.where(s.source_key.isin(enclosed_any_keys), 'in_trigger_core', None)))
+                                       np.where(s.source_key.isin(support_trigger_keys), 'support_trigger',
+                                                np.where(s.source_key.isin(enclosed_any_keys), 'in_trigger_core', None))))
     s = s[s.link_kind.notna()].copy()
-    s['in_trigger_core'] = s.source_key.isin(enclosed_any_keys) & ~s.source_key.isin(enclosed_trigger_keys)
+    s['in_trigger_core'] = (s.source_key.isin(enclosed_any_keys) & ~s.source_key.isin(enclosed_trigger_keys)
+                            & ~s.source_key.isin(support_trigger_keys))
     if not len(s):
         return s, s.copy()
     is_g = s.catalogue == 'gaia_dr3'
