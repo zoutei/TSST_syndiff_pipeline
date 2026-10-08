@@ -284,3 +284,38 @@ def test_cli_parses_new_stages(tmp_path):
     assert a.summarise is True
     for s in ("init_boot", "init_final", "nbr_boot", "folds_final"):
         assert s in CLI.ALL_STAGES and s in C.STAGES
+
+
+# ---------------------------------------------------------------- verified-ledger neighbour source (assoc_r2)
+def test_config_assoc_r2_source(tmp_path):
+    cat = tmp_path / "gaia.csv"; cat.write_text("source_id,ra,dec,pmra,pmdec\n")
+    cfg = _cfg(tmp_path, neighbours={"ledger": str(tmp_path / "n.parquet"), "tmax": 17, "source": "assoc_r2",
+                                     "gaia_catalog": str(cat)})
+    assert cfg.neighbours.source == "assoc_r2" and cfg.neighbours.gaia_catalog == cat and not cfg.neighbours.gate_override
+    assert _cfg(tmp_path, neighbours={"ledger": str(tmp_path / "c.csv")}).neighbours.source == "candidates"
+    for bad in ({"source": "assoc_r2"},                                              # no gaia_catalog
+                {"source": "assoc_r2", "gaia_catalog": str(cat), "gate_override": True},
+                {"source": "foo"}):
+        with pytest.raises(C.ConfigError):
+            _cfg(tmp_path, neighbours={"ledger": str(tmp_path / "n.parquet"), **bad})
+
+
+def test_assoc_r2_table(tmp_path):
+    import pandas as pd
+    big = 4611686018427387905                       # > 2**53: must survive exactly (no float64 round trip)
+    t = pd.DataFrame({"gaia_id": [str(big), "17", None], "ra": [10.0, 20.0, 30.0], "dec": [1.0, 2.0, 3.0],
+                      "tess_mag": [12.0, 16.5, np.nan], "phot_g_mean_mag": [12.5, 17.0, np.nan],
+                      "phot_bp_mean_mag": [13.0, 17.6, np.nan], "phot_rp_mean_mag": [12.0, 16.4, np.nan],
+                      "canonical_entity": ["a", "b", "c"], "link_kind": ["centre_removed", "enclosed_core_trigger", "x"],
+                      "is_region_trigger": [False, True, False], "in_trigger_core": [False, False, False]})
+    t.to_parquet(tmp_path / "n.parquet")
+    pd.DataFrame({"source_id": [big], "ra": [10.001], "dec": [1.001], "pmra": [5.0], "pmdec": [-3.0]}).to_csv(
+        tmp_path / "gaia.csv", index=False)
+    rows, info = NB.assoc_r2_table(tmp_path / "n.parquet", tmp_path / "gaia.csv")
+    assert info == dict(n_rows=3, n_gaia_rows=2, n_without_gaia=1, n_not_in_gaia_catalogue=1,
+                        gaia_catalog=str(tmp_path / "gaia.csv"))
+    r = rows.set_index("source_id")
+    assert big in r.index and 17 in r.index and rows.source_id.dtype == np.int64
+    assert (r.loc[big, "ra"], r.loc[big, "dec"], r.loc[big, "pmra"]) == (10.001, 1.001, 5.0)   # catalogue astrometry
+    assert (r.loc[17, "ra"], r.loc[17, "dec"]) == (20.0, 2.0) and np.isnan(r.loc[17, "pmra"])  # table fallback, no pm
+    assert np.isclose(r.loc[big, "bp_rp"], 1.0) and (rows.ref_epoch == 2016.0).all()

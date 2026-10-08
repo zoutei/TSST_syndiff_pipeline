@@ -96,12 +96,22 @@ class FitCfg:
     init: str = "static"
 
 
+NEIGHBOUR_SOURCES = ("candidates", "assoc_r2")
+
+
 @dataclass(frozen=True)
 class NeighboursCfg:
-    """Gaia neighbours added to the training/evaluation scenes as nuisances (chain/neighbours.py)."""
+    """Gaia neighbours added to the training/evaluation scenes as nuisances (chain/neighbours.py).
+
+    ``source``: ``candidates`` = gaia_neighbour_joint_fit_20261002 ``candidates.csv`` (removal unverified; needs
+    ``gate_override``); ``assoc_r2`` = the verified removal-ledger table ``neighbours.parquet``
+    (ps1_ledger_fix_20261002/assoc_r2_20261006, removal_ledger/revision.py), Gaia rows only, astrometry from
+    ``gaia_catalog`` by source_id."""
     ledger: Path
     tmax: float = 17.0
     gate_override: bool = False
+    source: str = "candidates"
+    gaia_catalog: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -423,13 +433,21 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
 
     neighbours = None
     if raw.get("neighbours") is not None:
-        nb = _section(raw, "neighbours", {"ledger", "tmax", "gate_override"})
+        nb = _section(raw, "neighbours", {"ledger", "tmax", "gate_override", "source", "gaia_catalog"})
         tmax = nb.get("tmax", 17.0)
         if isinstance(tmax, bool) or not isinstance(tmax, (int, float)) or not 0 < tmax < 30:
             raise ConfigError(f"neighbours.tmax must be a magnitude in (0, 30), got {tmax!r}")
+        src = nb.get("source", "candidates")
+        if src not in NEIGHBOUR_SOURCES:
+            raise ConfigError(f"neighbours.source must be one of {NEIGHBOUR_SOURCES}, got {src!r}")
+        gate = _bool(nb.get("gate_override", False), "neighbours.gate_override")
+        gcat = _path(nb.get("gaia_catalog"), "neighbours.gaia_catalog")
+        if src == "assoc_r2" and gate:
+            raise ConfigError("neighbours.gate_override is for the unverified candidates list; assoc_r2 removals are verified")
+        if src == "assoc_r2" and gcat is None:
+            raise ConfigError("neighbours.source assoc_r2 needs neighbours.gaia_catalog (epoch-2016 astrometry + proper motion)")
         neighbours = NeighboursCfg(ledger=_path(nb.get("ledger"), "neighbours.ledger", required=True),
-                                   tmax=float(tmax), gate_override=_bool(nb.get("gate_override", False),
-                                                                         "neighbours.gate_override"))
+                                   tmax=float(tmax), gate_override=gate, source=src, gaia_catalog=gcat)
     xp = _section(raw, "crossfit", {"n_folds", "seed", "tile", "pattern", "reference_folds"})
     pattern = xp.get("pattern", "diagonal")
     if pattern not in ("diagonal", "group"):

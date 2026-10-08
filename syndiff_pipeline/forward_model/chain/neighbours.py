@@ -290,7 +290,37 @@ def write_scene(scene_dir, rows, out_dir, *, params_file=None, colour_file=None)
 
 
 # ---------------------------------------------------------------------- candidate selection
-def candidate_rows(ledger, full_scene, tmax: float, gate_override: bool):
+VERIFIED_NOTE = "verified removal ledger (assoc_r2, removal_ledger/revision.py); no gate override"
+
+
+def assoc_r2_table(ledger, gaia_catalog) -> tuple["pd.DataFrame", dict]:
+    """The verified removal-ledger neighbour table as builder rows (``source_id, ra, dec, pmra, pmdec, ref_epoch,
+    tess_mag, bp_rp``). Gaia rows only (PS1-only rows have no Gaia T). Astrometry: the field Gaia catalogue by
+    source_id (DR3 epoch 2016 + proper motion; the table's own ra/dec are not plain epoch-2016 Gaia positions, median
+    0.04 arcsec off on F1); rows outside the catalogue keep the table ra/dec with no proper motion (counted).
+    ``tess_mag`` and the Gaia photometry come from the table."""
+    import pandas as pd
+
+    t = pd.read_parquet(ledger)
+    g = t[t["gaia_id"].notna()].copy()
+    g["source_id"] = g["gaia_id"].astype(str).str.strip().astype("int64")   # exact: never via float64
+    if g["source_id"].duplicated().any():
+        raise ValueError(f"{ledger}: duplicate gaia_id rows")
+    cat = pd.read_csv(gaia_catalog, usecols=["source_id", "ra", "dec", "pmra", "pmdec"], dtype={"source_id": "int64"})
+    m = g.drop(columns=["ra", "dec"]).merge(cat, on="source_id", how="left")
+    fb = m["ra"].isna().to_numpy()
+    m.loc[fb, "ra"] = g.set_index("source_id").loc[m.loc[fb, "source_id"], "ra"].to_numpy()
+    m.loc[fb, "dec"] = g.set_index("source_id").loc[m.loc[fb, "source_id"], "dec"].to_numpy()
+    m["ref_epoch"] = 2016.0
+    m["bp_rp"] = m["phot_bp_mean_mag"] - m["phot_rp_mean_mag"]
+    info = dict(n_rows=int(len(t)), n_gaia_rows=int(len(g)), n_without_gaia=int(len(t) - len(g)),
+                n_not_in_gaia_catalogue=int(fb.sum()), gaia_catalog=str(gaia_catalog))
+    keep = ["source_id", "ra", "dec", "pmra", "pmdec", "ref_epoch", "tess_mag", "bp_rp", "phot_g_mean_mag",
+            "phot_bp_mean_mag", "phot_rp_mean_mag", "canonical_entity", "link_kind", "is_region_trigger", "in_trigger_core"]
+    return m[keep], info
+
+
+def candidate_rows(ledger, full_scene, tmax: float, gate_override: bool, source: str = "candidates", gaia_catalog=None):
     """Ledger rows with ``tess_mag <= tmax``, finite position, not already in ``full_scene``; ``tess_flux`` on the
     scene's own flux scale (median zero point of ``log10 f + 0.4 T`` over its stars)."""
     import pandas as pd
@@ -300,11 +330,21 @@ def candidate_rows(ledger, full_scene, tmax: float, gate_override: bool):
     tf, tm = sc0.z["tess_flux"].astype(float), sc0.z["tess_mag"].astype(float)
     ok = np.isfinite(tf) & (tf > 0) & np.isfinite(tm)
     zp = float(np.median(np.log10(tf[ok]) + 0.4 * tm[ok]))
-    cand = pd.read_csv(ledger, dtype={"source_id": "int64"})
+    if source == "assoc_r2":
+        cand, _ = assoc_r2_table(ledger, gaia_catalog)
+    elif source == "candidates":
+        cand = pd.read_csv(ledger, dtype={"source_id": "int64"})
+    else:
+        raise ValueError(f"unknown neighbour source {source!r}")
     rows = cand[(cand.tess_mag <= tmax) & np.isfinite(cand.ra) & np.isfinite(cand.dec)].drop_duplicates("source_id").copy()
     rows = rows[~rows.source_id.isin(sc0.z["source_id"])].reset_index(drop=True)
     rows["tess_flux"] = 10 ** (zp - 0.4 * rows.tess_mag.to_numpy(float))
-    if gate_override:
+    if source == "assoc_r2":
+        if gate_override:
+            raise ValueError("gate_override is not used with the verified assoc_r2 ledger")
+        rows["full_positive_allowed"] = True         # every row is a verified removal
+        rows["removal_evidence"] = VERIFIED_NOTE
+    elif gate_override:
         rows["full_positive_allowed"] = True
         rows["gate_override"] = GATE_OVERRIDE_NOTE
     return rows, zp
@@ -323,18 +363,26 @@ def support_filter(scene, rows, wcs_params, colour_file):
     return rows[(u["valid"][uid].sum(1) > 0)].reset_index(drop=True)
 
 
-def build(scene_dir, out_dir, *, full_scene, ledger, tmax, gate_override, wcs_params, colour_file) -> dict:
+def build(scene_dir, out_dir, *, full_scene, ledger, tmax, gate_override, wcs_params, colour_file,
+          source: str = "candidates", gaia_catalog=None) -> dict:
     """Neighbour scene for ``scene_dir`` (the full scene or one fold scene of it); candidates are selected against
     ``full_scene`` so every fold sees the same candidate list."""
     from syndiff_pipeline.forward_model import scene_fit as SF
 
-    rows, zp = candidate_rows(ledger, full_scene, tmax, gate_override)
+    rows, zp = candidate_rows(ledger, full_scene, tmax, gate_override, source, gaia_catalog)
     r = support_filter(SF.Scene(scene_dir), rows, wcs_params, colour_file)
     meta = write_scene(scene_dir, r, out_dir, params_file=str(wcs_params), colour_file=colour_file)
     if gate_override:
         meta["gate_override"] = GATE_OVERRIDE_NOTE
     meta["placement_wcs"] = str(wcs_params)
-    meta["neighbours"] = dict(ledger=str(ledger), tmax=float(tmax), gate_override=bool(gate_override))
+    meta["neighbours"] = dict(ledger=str(ledger), ledger_sha256=sha256(ledger), source=source, tmax=float(tmax),
+                              gate_override=bool(gate_override),
+                              gaia_catalog=None if gaia_catalog is None else str(gaia_catalog),
+                              gaia_catalog_sha256=None if gaia_catalog is None else sha256(gaia_catalog))
+    if source == "assoc_r2":
+        meta["neighbours"]["removal_evidence"] = VERIFIED_NOTE
+        meta["neighbours"]["n_added_in_trigger_core"] = int(r["in_trigger_core"].fillna(False).astype(bool).sum())
+        meta["neighbours"]["n_added_triggers"] = int(r["is_region_trigger"].fillna(False).astype(bool).sum())
     (Path(out_dir) / "scene_meta.json").write_text(json.dumps(meta, indent=2))
     return dict(scene=str(scene_dir), wcs=str(wcs_params), zp=zp, n_candidates=int(len(rows)), n_added=int(len(r)),
                 n_total=meta["n_stars"], max_island=meta["max_island"], tiers=meta["tiers"])

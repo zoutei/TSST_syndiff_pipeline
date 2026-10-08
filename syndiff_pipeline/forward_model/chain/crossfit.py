@@ -94,12 +94,15 @@ def run_nbr(cfg: ChainConfig, which: str, force: bool = False) -> Path:
             (stage / f).unlink(missing_ok=True)
     (stage / "DONE").unlink(missing_ok=True)
     log = NB.build(scene, stage, full_scene=scene, ledger=nb.ledger, tmax=nb.tmax, gate_override=nb.gate_override,
-                   wcs_params=init / "params_init.npz", colour_file=cfg.inputs.colour_file)
+                   wcs_params=init / "params_init.npz", colour_file=cfg.inputs.colour_file, source=nb.source,
+                   gaia_catalog=nb.gaia_catalog)
     (stage / "build.json").write_text(json.dumps(log, indent=2))
     print(f"[nbr_{which}] {log}")
     write_provenance(stage, cfg, {"scene_bundle": scene / "scene_bundle.npz", "ledger": nb.ledger,
                                   "placement_wcs": init / "params_init.npz",
-                                  "neighbours": {"value": {"tmax": nb.tmax, "gate_override": nb.gate_override,
+                                  **({"gaia_catalog": nb.gaia_catalog} if nb.gaia_catalog else {}),
+                                  "neighbours": {"value": {"source": nb.source, "tmax": nb.tmax,
+                                                           "gate_override": nb.gate_override,
                                                            "n_added": log["n_added"]}}})
     mark_done(stage)
     return stage
@@ -242,7 +245,7 @@ def run_fold(cfg: ChainConfig, which: str, k: int, force: bool = False) -> Path:
                     (fp["nbr"] / f).unlink(missing_ok=True)
             log = NB.build(fp["scene"], fp["nbr"], full_scene=cfg.stage_dir(f"scene_{which}"), ledger=nb.ledger,
                            tmax=nb.tmax, gate_override=nb.gate_override, wcs_params=io / "params_init.npz",
-                           colour_file=cfg.inputs.colour_file)
+                           colour_file=cfg.inputs.colour_file, source=nb.source, gaia_catalog=nb.gaia_catalog)
             (fp["nbr"] / "build.json").write_text(json.dumps(log, indent=2))
         scene = fp["nbr"]
     # fit
