@@ -692,14 +692,15 @@ G8_EXTRA_NAMES = ("blur_r", "blur_r2", "dil_r", "astig0", "astig_r", "sq0", "sq1
 
 # Round A3 colour fields that --chroma-g8-drop can remove from the render.
 G8_DROPPABLE = ("blur", "dil", "kurt")
-_RADIAL_EXTRA_RE = re.compile(r"^(?:rb(\d+)_(0|r)|rq(\d+)|rc(\d+))$")
+_RADIAL_EXTRA_RE = re.compile(r"^(?:rb(\d+)_(0|r|r2)|rq(\d+)|rc(\d+)(?:_(r|r2))?|rcq(\d+))$")
 
 
 def parse_radial_extra(name: str):
     """``(kind, j, sub)`` for a radial-family extra name, else None.
 
-    kind 'rb' (colour-linear profile; sub '0' constant or 'r' axis-distance slope), 'rq' (quadratic in
-    colour) or 'rc' (coma); j is the 1-based B-spline index."""
+    kind 'rb' (colour-linear radial profile; sub '0' constant, 'r' axis-distance slope, 'r2' its square), 'rq'
+    (quadratic in colour, radial), 'rc' (coma; sub '0' constant, 'r', 'r2') or 'rcq' (coma, quadratic in colour);
+    j is the 1-based bump index."""
     m = _RADIAL_EXTRA_RE.match(name)
     if not m:
         return None
@@ -707,7 +708,9 @@ def parse_radial_extra(name: str):
         return "rb", int(m.group(1)), m.group(2)
     if m.group(3):
         return "rq", int(m.group(3)), None
-    return "rc", int(m.group(4)), None
+    if m.group(6):
+        return "rcq", int(m.group(6)), None
+    return "rc", int(m.group(4)), m.group(5) or "0"
 
 
 def is_valid_g8_extra(name: str) -> bool:
@@ -716,7 +719,7 @@ def is_valid_g8_extra(name: str) -> bool:
     p = parse_radial_extra(name)
     if p is None:
         return False
-    return 1 <= p[1] <= (EM.n_coma_basis() if p[0] == "rc" else EM.n_radial_basis())
+    return 1 <= p[1] <= (EM.n_coma_basis() if p[0] in ("rc", "rcq") else EM.n_radial_basis())
 
 
 def g8_drop_tuple(drop) -> tuple:
@@ -805,10 +808,11 @@ def has_chroma_g8(params: dict[str, jnp.ndarray]) -> bool:
 def _radial_family_fields(radial, ctx, delta, r, nx, ny):
     """Per-slot weight vectors of the radial B-spline colour family (raw-P gauge only).
 
-    ``rad{j}_raw``: radial generator (additive or P0-weighted, EM.radial_generator); weight sum of delta (rb{j}_0 + rb{j}_r r) and
-    (delta^2 - <delta^2>) rq{j}. ``radc{j}_a_raw`` / ``radc{j}_b_raw``: generators gauge(P0 B_j cos/sin theta)
-    with weights delta rc{j} nx and delta rc{j} ny, (nx, ny) the unit vector toward the optical axis, i.e.
-    delta rc{j} cos(phi) / sin(phi). Fields are created only for the j that have an extra present."""
+    ``rad{j}_raw``: radial generator (additive or P0-weighted, EM.radial_generator); weight = delta (rb{j}_0 +
+    rb{j}_r r + rb{j}_r2 r^2) + (delta^2 - <delta^2>) rq{j}. ``radc{j}_a_raw`` / ``radc{j}_b_raw``: coma generators
+    (P0 C_j X / Y, Gram-Schmidt off P0, dP0/dx, dP0/dy) with weights c_j nx and c_j ny, (nx, ny) the unit vector
+    toward the optical axis (cos phi, sin phi), c_j = delta (rc{j} + rc{j}_r r + rc{j}_r2 r^2) + (delta^2 - <delta^2>)
+    rcq{j}. Fields are created only for the j that have an extra present."""
     if ctx.chroma_g8_gauge != "raw":
         raise ValueError("the radial colour family (rb*/rq*/rc* extras) needs chroma_g8_gauge='raw'")
     knots = getattr(ctx, "chroma_radial_knots", None)
@@ -821,13 +825,17 @@ def _radial_family_fields(radial, ctx, delta, r, nx, ny):
     for name, val in radial.items():
         kind, j, sub = parse_radial_extra(name)
         if kind == "rb":
-            w = delta * (val if sub == "0" else val * r)
+            w = delta * (val if sub == "0" else val * r if sub == "r" else val * r * r)
             rad[j] = w if j not in rad else rad[j] + w
         elif kind == "rq":
             w = (delta * delta - ctx.chroma_delta2_mean) * val
             rad[j] = w if j not in rad else rad[j] + w
-        else:
-            coma[j] = delta * val
+        elif kind == "rcq":
+            w = (delta * delta - ctx.chroma_delta2_mean) * val
+            coma[j] = w if j not in coma else coma[j] + w
+        else:   # rc: delta * (rc0 + rc_r r + rc_r2 r^2)
+            w = delta * (val if sub == "0" else val * r if sub == "r" else val * r * r)
+            coma[j] = w if j not in coma else coma[j] + w
     out = {}
     for j in sorted(rad):
         out[f"rad{j}_raw"] = rad[j]

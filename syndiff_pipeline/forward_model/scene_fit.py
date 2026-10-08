@@ -1063,7 +1063,7 @@ def run(args):
     radial_mode = EM.set_radial_mode(args.chroma_radial_mode)       # recorded in fit_meta; a warm start must match
     if any(L.parse_radial_extra(e) for e in g8_extras):
         bad_j = [e for e in g8_extras if L.parse_radial_extra(e) and L.parse_radial_extra(e)[1] >
-                 (EM.n_coma_basis() if L.parse_radial_extra(e)[0] == "rc" else EM.n_radial_basis())]
+                 (EM.n_coma_basis() if L.parse_radial_extra(e)[0] in ("rc", "rcq") else EM.n_radial_basis())]
         if bad_j:
             raise ValueError(f"extras {bad_j} exceed the {EM.n_radial_basis()} radial / {EM.n_coma_basis()} coma "
                              f"bumps of knots {radial_knots} / {coma_knots}")

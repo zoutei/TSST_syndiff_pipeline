@@ -498,3 +498,55 @@ def test_add_mode_equals_ring_minus_psf_projection_and_has_no_pedestal():
             assert abs(coef[1] - c_ring[1]) <= 1e-4 * abs(c_ring[1]) + 1e-9, (j, coef[1], c_ring[1])   # = the ring's own
             if j <= 2:
                 assert abs(coef[1]) < 0.05 * np.abs(g).max()
+
+
+# ------------------------------------------------------------------ full colour law (rb_r2, rc_r, rc_r2, rcq)
+
+FULL = ("rb1_r2", "rb2_r2", "rc1_r", "rc1_r2", "rcq1", "rc2_r", "rcq2")
+
+
+def test_full_law_names_parse():
+    assert L.parse_radial_extra("rb2_r2") == ("rb", 2, "r2")
+    assert L.parse_radial_extra("rc3_r") == ("rc", 3, "r") and L.parse_radial_extra("rc3_r2") == ("rc", 3, "r2")
+    assert L.parse_radial_extra("rc3") == ("rc", 3, "0") and L.parse_radial_extra("rcq2") == ("rcq", 2, None)
+    assert all(L.is_valid_g8_extra(n) for n in FULL)
+    assert not L.is_valid_g8_extra("rcq4") and not L.is_valid_g8_extra("rc4_r") and not L.is_valid_g8_extra("rb6_r2")
+    assert L.parse_radial_extra("rcq") is None and L.parse_radial_extra("rc1_r3") is None
+
+
+def test_full_law_weight_formulas():
+    ctx = _fake_ctx(extras=A3 + FULL + ("rb1_0", "rc1")); occ = jnp.arange(60)
+    vals = dict(rb1_r2=0.02, rb2_r2=-0.03, rc1_r=0.04, rc1_r2=-0.05, rcq1=0.06, rc2_r=0.07, rcq2=-0.08, rb1_0=0.01, rc1=0.09)
+    names = A3 + FULL + ("rb1_0", "rc1")
+    c = jnp.asarray(A3_VALS + [vals[n] for n in FULL + ("rb1_0", "rc1")], jnp.float32)
+    f = L._chroma_g8_slot_terms({"chroma_g8": c}, ctx, occ)[3]
+    d = np.asarray(ctx.chroma_delta); x, y = np.asarray(ctx.x_lin), np.asarray(ctx.y_lin)
+    vx, vy = AXIS[0] - x, AXIS[1] - y
+    rr = np.hypot(vx, vy); r = rr / 1000.0; nx, ny = vx / rr, vy / rr
+    q = d * d - 0.2
+    np.testing.assert_allclose(np.asarray(f["rad1_raw"]), d * (0.01 + 0.02 * r * r), rtol=1e-4, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(f["rad2_raw"]), d * (-0.03) * r * r, rtol=1e-4, atol=1e-7)
+    c1 = d * (0.09 + 0.04 * r - 0.05 * r * r) + 0.06 * q
+    c2 = d * 0.07 * r - 0.08 * q
+    np.testing.assert_allclose(np.asarray(f["radc1_a_raw"]), c1 * nx, rtol=1e-4, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(f["radc1_b_raw"]), c1 * ny, rtol=1e-4, atol=1e-7)
+    np.testing.assert_allclose(np.asarray(f["radc2_a_raw"]), c2 * nx, rtol=1e-4, atol=1e-7)
+    assert set(k for k in f if k.startswith("rad")) == {"rad1_raw", "rad2_raw", "radc1_a_raw", "radc1_b_raw", "radc2_a_raw", "radc2_b_raw"}
+
+
+def test_full_law_absent_identical_jaxpr_zero_match_and_warm_start_pad():
+    fx = _fixture()
+    ctx = _g8_ctx(fx["ctx"], A3 + NEW); p = _g8_params(fx["params"], A3_VALS + [0.01] * len(NEW))
+    j0 = str(jax.make_jaxpr(lambda q: _loss(fx, q, ctx))(p))
+    ctx_same = L.replace(ctx, chroma_g8_extras=tuple(A3 + NEW))
+    assert str(jax.make_jaxpr(lambda q: _loss(fx, q, ctx_same))(p)) == j0
+    ctxf = _g8_ctx(fx["ctx"], A3 + NEW + FULL)
+    pz = _g8_params(fx["params"], A3_VALS + [0.01] * len(NEW) + [0.0] * len(FULL))
+    np.testing.assert_allclose(float(_loss(fx, pz, ctxf)), float(_loss(fx, p, ctx)), rtol=1e-6)
+    new = SF.carry_g8(p["chroma_g8"], A3 + NEW, A3 + NEW + FULL)
+    assert new.shape == (17 + len(NEW) + len(FULL),) and not new[17 + len(NEW):].any()
+    # each new coefficient has a nonzero gradient
+    pn = _g8_params(fx["params"], A3_VALS + [0.01] * len(NEW) + [0.004] * len(FULL))
+    g = np.asarray(jax.grad(lambda q: _loss(fx, q, ctxf))(pn)["chroma_g8"])
+    for i, n in enumerate(FULL):
+        assert abs(g[17 + len(NEW) + i]) > 0, n
