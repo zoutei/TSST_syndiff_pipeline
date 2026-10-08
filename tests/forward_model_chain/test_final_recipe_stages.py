@@ -319,3 +319,13 @@ def test_assoc_r2_table(tmp_path):
     assert (r.loc[big, "ra"], r.loc[big, "dec"], r.loc[big, "pmra"]) == (10.001, 1.001, 5.0)   # catalogue astrometry
     assert (r.loc[17, "ra"], r.loc[17, "dec"]) == (20.0, 2.0) and np.isnan(r.loc[17, "pmra"])  # table fallback, no pm
     assert np.isclose(r.loc[big, "bp_rp"], 1.0) and (rows.ref_epoch == 2016.0).all()
+
+
+def test_assoc_r2_table_catalogue_without_pm(tmp_path):
+    import pandas as pd
+    pd.DataFrame({"gaia_id": ["5"], "ra": [1.0], "dec": [2.0], "tess_mag": [15.0], "phot_g_mean_mag": [15.5],
+                  "phot_bp_mean_mag": [16.0], "phot_rp_mean_mag": [15.0], "canonical_entity": ["a"], "link_kind": ["centre_removed"],
+                  "is_region_trigger": [False], "in_trigger_core": [False]}).to_parquet(tmp_path / "n.parquet")
+    pd.DataFrame({"source_id": [5], "ra": [1.0001], "dec": [2.0001]}).to_csv(tmp_path / "gaia.csv", index=False)
+    rows, info = NB.assoc_r2_table(tmp_path / "n.parquet", tmp_path / "gaia.csv")
+    assert info["n_not_in_gaia_catalogue"] == 0 and rows.ra.iloc[0] == 1.0001 and np.isnan(rows.pmra.iloc[0])

@@ -306,7 +306,12 @@ def assoc_r2_table(ledger, gaia_catalog) -> tuple["pd.DataFrame", dict]:
     g["source_id"] = g["gaia_id"].astype(str).str.strip().astype("int64")   # exact: never via float64
     if g["source_id"].duplicated().any():
         raise ValueError(f"{ledger}: duplicate gaia_id rows")
-    cat = pd.read_csv(gaia_catalog, usecols=["source_id", "ra", "dec", "pmra", "pmdec"], dtype={"source_id": "int64"})
+    cols = set(pd.read_csv(gaia_catalog, nrows=0).columns)
+    cat = pd.read_csv(gaia_catalog, usecols=["source_id", "ra", "dec"] + [c for c in ("pmra", "pmdec") if c in cols],
+                      dtype={"source_id": "int64"})
+    for c in ("pmra", "pmdec"):         # some field catalogues carry no proper motion (C1); their scenes do not propagate
+        if c not in cat:
+            cat[c] = np.nan
     m = g.drop(columns=["ra", "dec"]).merge(cat, on="source_id", how="left")
     fb = m["ra"].isna().to_numpy()
     m.loc[fb, "ra"] = g.set_index("source_id").loc[m.loc[fb, "source_id"], "ra"].to_numpy()
