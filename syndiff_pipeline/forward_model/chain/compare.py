@@ -47,7 +47,9 @@ def _load(d):
     m = json.load(open(f"{d}/fit_meta.json")) if os.path.exists(f"{d}/fit_meta.json") else {}
     bwm = m.get("bright_width_model") or {}
     b = float(np.ravel(p["bright_width"])[0]) * float(bwm.get("leaf_unit", 1e-3)) if "bright_width" in p else 0.0
-    return dict(p=p, f=f, loss=h[-1]["loss"] if h else np.nan, data_term=h[-1].get("data_term", np.nan) if h else np.nan,
+    # the smoothed stop rule appends event rows (stage_end, lr cuts) without a loss: use the last row that has one
+    hl = [r for r in h if "loss" in r]
+    return dict(p=p, f=f, loss=hl[-1]["loss"] if hl else np.nan, data_term=hl[-1].get("data_term", np.nan) if hl else np.nan,
                 b=b, qref=float(bwm.get("q_ref", 0.0)))
 
 
