@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import jax
@@ -447,7 +448,7 @@ def test_add_and_mult_generators_differ_and_add_ignores_p0_scale():
     np.testing.assert_allclose(np.asarray(a), np.asarray(a2))
     # additive profile reaches the wings where P0 is tiny
     ring = np.asarray(EM._radial_grid_consts(int(P.shape[-1]), EM.get_radial_knots())[0][3]) > 0.05
-    assert float(jnp.abs(a[0, 0])[ring].max()) > 100 * float(jnp.abs(m[0, 0])[ring].max())
+    assert float(jnp.abs(a[0, 0])[ring].max()) > 1.5 * float(jnp.abs(m[0, 0])[ring].max())
 
 
 def test_coma_knots_independent_of_radial_knots():
@@ -463,3 +464,37 @@ def test_coma_knots_independent_of_radial_knots():
             EM.radial_coma_generator(P, 3, "a")
     finally:
         EM.set_radial_knots(old_r); EM.set_coma_knots(old_c)
+
+
+def _ring_minus_psf_projection(P, j):
+    """Independent float64 numpy: gauge of rb.py's  ring_j / sum(ring_j) - P0 / sum(P0)  (P0-orthogonal complement)."""
+    P = np.asarray(P, np.float64)[0, 0]
+    B = EM._radial_grid_consts(P.shape[-1], EM.get_radial_knots())[0][j - 1].astype(np.float64)
+    x = B / B.sum() - P / P.sum()
+    wg = np.asarray(EM.canonical_mode_weight_grid(P.shape[-1]), np.float64)
+    return x - (np.sum(x * wg * P) / np.sum(wg * P * P)) * P
+
+
+def test_add_mode_equals_ring_minus_psf_projection_and_has_no_pedestal():
+    EM.set_radial_mode("add")
+    nodes = [_node_field()]
+    real = Path("/astro/armin/koji/syndiff/dev_runs/paper1_final_fits_20261007/F1/fits/fold0/params.npz")
+    if real.exists():
+        from syndiff_pipeline.forward_model import fit as FIT
+        raw = FIT.load_params_npz(real)["epsf_base_raw"]
+        nodes.append(EM.decode_epsf_base(jnp.asarray(raw))[3:4, 3:4])
+    for P in nodes:
+        wg = np.asarray(EM.canonical_mode_weight_grid(P.shape[-1]), np.float64)
+        for j in range(1, 6):
+            g = np.asarray(EM.chroma_radial_field_raw(P, j), np.float64)[0, 0]
+            ref = _ring_minus_psf_projection(P, j)
+            assert np.abs(g - ref).max() <= 1e-5 * np.abs(ref).max(), j
+            # no uniform pedestal beyond the ring's own mean: LS fit of the generator by {P0, const} under the weight grid
+            A = np.stack([np.asarray(P, np.float64)[0, 0].ravel(), np.ones(g.size)], 1) * np.sqrt(wg.ravel())[:, None]
+            coef = np.linalg.lstsq(A, g.ravel() * np.sqrt(wg.ravel()), rcond=None)[0]
+            ring = EM._radial_grid_consts(P.shape[-1], EM.get_radial_knots())[0][j - 1]
+            ring = ring / ring.sum()
+            c_ring = np.linalg.lstsq(A, ring.ravel() * np.sqrt(wg.ravel()), rcond=None)[0]
+            assert abs(coef[1] - c_ring[1]) <= 1e-4 * abs(c_ring[1]) + 1e-9, (j, coef[1], c_ring[1])   # = the ring's own
+            if j <= 2:
+                assert abs(coef[1]) < 0.05 * np.abs(g).max()

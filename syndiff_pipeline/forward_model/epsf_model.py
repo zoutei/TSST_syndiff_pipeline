@@ -2057,8 +2057,8 @@ def chroma_shear_field_raw(node_field, *, weight_grid=None):
 # Generators for the named chroma_g8 extras rb{j}_0 / rb{j}_r / rq{j} (radial profile) and rc{j} (coma); see
 # loss._chroma_g8_slot_terms. Reference definition: dev_runs/colour_shoulder_20261008/step0_projection/code/rb.py.
 #
-#   radial, mode 'add' (default): G_j = gauge( (B_j(rho) - mean_nodegrid(B_j)) / sum_nodegrid(B_j) )   ADDITIVE, flux-neutral,
-#                                 unit-flux normalised (coefficient 1 = the whole PSF flux moved into bump j)
+#   radial, mode 'add' (default): G_j = gauge( B_j/sum(B_j) - P0/sum(P0) )   ADDITIVE ring, flux-neutral by subtracting the
+#                                 PSF (not a uniform sheet), unit-flux normalised (coefficient 1 = the whole PSF flux)
 #   radial, mode 'mult'         : G_j = gauge( P0 (B_j(rho) - m_j) ),  m_j = sum(P0 B_j) / sum(P0)
 #   coma (always multiplicative): G^c_ja = gauge_c( P0 C_j(rho) rho cos(theta) ) = P0 C_j X,  G^c_jb = ... Y
 # gauge = ``_gauge_off_raw_base`` (project off P0 in the canonical weight metric); gauge_c = Gram-Schmidt off P0,
@@ -2168,15 +2168,19 @@ def _radial_grid_consts(g_size: int, knots: tuple):
 
 
 def radial_generator(node_field: jnp.ndarray, j: int) -> jnp.ndarray:
-    """Ungauged flux-neutral radial profile, j = 1-based: ``(B_j - mean(B_j)) / sum(B_j)`` (add) or ``P0 (B_j - m_j)`` (mult)."""
+    """Ungauged flux-neutral radial profile, j = 1-based: ``B_j/sum(B_j) - P0/sum(P0)`` (add) or ``P0 (B_j - m_j)`` (mult)."""
     B, _, _ = _radial_grid_consts(int(node_field.shape[-1]), _RADIAL_KNOTS)
     if not 1 <= j <= B.shape[0]:
         raise ValueError(f"radial basis index {j} outside 1..{B.shape[0]} for knots {_RADIAL_KNOTS}")
     Bj = jnp.asarray(B[j - 1], node_field.dtype)
     if _RADIAL_MODE == "add":
-        # unit flux: B_j / sum(B_j) over the node grid minus the uniform 1/G^2, so a coefficient of 1 moves the whole PSF
-        # flux into (out of) bump j; typical fitted values are ppt (as in rb.py's ring_j / sum(ring_j) - T)
-        return jnp.broadcast_to((Bj - jnp.mean(Bj)) / (jnp.sum(Bj) + 1e-12), node_field.shape)
+        # unit-flux ring minus the PSF shape (as rb.py: ring_j / sum(ring_j) * sum(T) - T): flux neutrality comes from
+        # subtracting P0, NOT a uniform sheet (which would be a colour x background term). The P0 term carries no
+        # gradient and is removed again by the P0 projection of the gauge; it is kept for exact flux neutrality.
+        # A coefficient of 1 moves the whole PSF flux into bump j (fitted values are ppt).
+        ring = jnp.asarray(B[j - 1] / (np.sum(B[j - 1]) + 1e-12), node_field.dtype)
+        ref = jax.lax.stop_gradient(node_field)
+        return ring - ref / (jnp.sum(ref, axis=(-2, -1), keepdims=True) + 1e-12)
     m = jnp.sum(node_field * Bj, axis=(-2, -1), keepdims=True) / (jnp.sum(node_field, axis=(-2, -1), keepdims=True) + 1e-12)
     return node_field * (Bj - m)
 
