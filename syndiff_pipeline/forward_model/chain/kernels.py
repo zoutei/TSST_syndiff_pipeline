@@ -505,6 +505,72 @@ def eps_rule(E_nodes, sig, M=23, N=63, log=print):
     return eps, tri, rms_best, table
 
 
+# Kernel-sum gate (dev_runs/kernel_sum_gate_20261008). The eps rule scores a 63-subcell, sum-normalised kernel, so it
+# cannot see light the 127-subcell "dc" product kernel loses past its box edge; at eps <= 3e-6 the Wiener ringing can
+# overflow the box (perband_v3 F2 node (3,2): sum K1 = 0.0106 instead of 0).  A node whose product kernels lose more
+# than TRUNC_TOL takes the next eps/tri of its own rule table (rms order) that keeps every loss within TRUNC_TOL; all
+# other nodes keep the rule's eps/tri, so their kernels are unchanged.  Thresholds calibrated on perband_v3 F1/F2/S22/C1/C4.
+N_FULL = 255                                  # near-full FFT plane (npad 256): reference sum for the truncation loss
+TRUNC_TOL = 5e-3                              # max |sum K^NK - sum K^N_FULL| for K0, K1 and K_achrom
+SUM_TOL = dict(K0=3e-3, K1=5e-3, mix=5e-3, Kach=3e-3)   # |sum K0 - 1|, |sum K1|, max_x |sum(K0 + x K1) - 1|, |sum Kach - 1|
+MIX_X = (-0.4, 0.9)                           # colour coordinate x of real star mixtures (training colour range)
+
+
+def truncation_loss(E, sigma, eps, with_tri, n_kernel=NK) -> float:
+    """sum of the n_kernel "dc" kernel minus the sum of the same kernel on the near-full FFT plane."""
+    kw = dict(with_tri=bool(with_tri), normalize="dc")
+    return float(CK.fourier_kernel(E, sigma, float(eps), n_kernel=n_kernel, **kw).sum()
+                 - CK.fourier_kernel(E, sigma, float(eps), n_kernel=N_FULL, **kw).sum())
+
+
+def truncation_aware_eps(eps, tri, table, sig, E_sets, tol=TRUNC_TOL, log=print):
+    """Per node: keep the rule's (eps, tri) unless a kernel of any grid in ``E_sets`` (each (nr, nc, g, g)) loses more
+    than ``tol`` to truncation; then take the first (eps, tri) of the node's rule table, in rms order, that does not.
+    -> (eps, tri, changes, max_loss) with ``max_loss`` (nr, nc) the largest |loss| at the adopted (eps, tri)."""
+    eps = np.array(eps, float)
+    tri = np.array(tri, bool)
+    nr, nc = eps.shape
+    changes, max_loss = [], np.zeros((nr, nc))
+
+    def losses(i, j, e, t):
+        return [truncation_loss(E[i, j], sig[i, j], e, t) for E in E_sets]
+
+    for i in range(nr):
+        for j in range(nc):
+            ls = losses(i, j, eps[i, j], tri[i, j])
+            if max(abs(v) for v in ls) <= tol:
+                max_loss[i, j] = max(abs(v) for v in ls)
+                continue
+            for e, t, rms in sorted(table[f"{i},{j}"], key=lambda r: r[2]):
+                ls2 = losses(i, j, e, t)
+                if max(abs(v) for v in ls2) <= tol:
+                    changes.append(dict(node=[i, j], eps_rule=float(eps[i, j]), tri_rule=bool(tri[i, j]),
+                                        loss_rule=ls, eps=float(e), tri=bool(t), loss=ls2, rms=float(rms)))
+                    log(f"node {i},{j}: eps {eps[i, j]:.0e} tri={bool(tri[i, j])} loses {ls} past the "
+                        f"{NK}-subcell box -> eps {e:.0e} tri={bool(t)} (rms {rms:.3e}, loss {ls2})")
+                    eps[i, j], tri[i, j] = e, t
+                    max_loss[i, j] = max(abs(v) for v in ls2)
+                    break
+            else:
+                raise RuntimeError(f"kernel node {i},{j}: no eps/tri in the rule table keeps the truncation loss "
+                                   f"within {tol:g} (rule eps {eps[i, j]:g}: {ls})")
+    return eps, tri, changes, max_loss
+
+
+def kernel_sum_gate(K0, K1, Kach, max_loss) -> dict:
+    """Per-node sum checks of the product kernels; raises if any exceeds SUM_TOL / TRUNC_TOL."""
+    s0, s1, sa = (np.asarray(K).sum(axis=(-2, -1)) for K in (K0, K1, Kach))
+    mix = np.maximum(np.abs(s0 + MIX_X[0] * s1 - 1), np.abs(s0 + MIX_X[1] * s1 - 1))
+    vals = dict(K0=np.abs(s0 - 1), K1=np.abs(s1), mix=mix, Kach=np.abs(sa - 1), trunc=np.asarray(max_loss))
+    tols = dict(SUM_TOL, trunc=TRUNC_TOL)
+    out = dict(tolerances=tols, mix_x=list(MIX_X), max={k: float(v.max()) for k, v in vals.items()})
+    bad = {k: [[int(i), int(j)] for i, j in zip(*np.where(v > tols[k]))] for k, v in vals.items()}
+    bad = {k: v for k, v in bad.items() if v}
+    if bad:
+        raise RuntimeError(f"kernel-sum gate FAIL (nodes per check): {bad}; maxima {out['max']}")
+    return out
+
+
 def run_k_sigma(cfg, A=None, do_eps: bool = True) -> dict:
     """Sigma_G per node from this fit's WCS + the mapping's skycell TAN headers, and the Phase A eps/tri rule on the
     model's E(c_ref).  -> ``kernels/kin.npz`` (+ ``kin.json``)."""
@@ -753,9 +819,15 @@ def run_k02(cfg, A=None) -> dict:
     kin_src = dict(sigma_G=str(KD / "kin.npz"), sigma_G_meta=json.loads(str(ks["meta"])), eps_tri=str(KD / "kin.npz"),
                    note="sigma_G from this model's own WCS + mapping skycell TAN headers; eps/tri = Phase A rule on E(c_ref)")
     kin_src["sigma_G_meta"] = {k: v for k, v in kin_src["sigma_G_meta"].items() if k not in ("eps", "tri", "rms_best")}
+    eps, tri, eps_changes, max_loss = truncation_aware_eps(eps, tri, json.loads(str(ks["table"])), sig, (P0, P1, E0))
     Kb = CK.band_kernels(E_bands, sig, eps, tri, n_kernel=NK)
     K0 = CK.band_kernels(P0[None], sig, eps, tri, n_kernel=NK)[0]
     K1 = CK.band_kernels(P1[None], sig, eps, tri, n_kernel=NK)[0]
+    Kach = CK.band_kernels(E0[None], sig, eps, tri, n_kernel=NK)[0]
+    gate = dict(kernel_sum_gate(K0, K1, Kach, max_loss), eps_changes=eps_changes,
+                eps_rule_source=str(KD / "kin.npz"),
+                note="eps/tri here = kin.npz rule, except eps_changes (truncation-aware fallback, kernel_sum_gate_20261008)")
+    print(json.dumps(dict(gate, eps_changes=len(eps_changes)), indent=1))
     lin_k = max(float(np.abs(Kb[i] - (K0 + delta_b[i] * K1)).max()) for i in range(4))
     ksum = Kb.sum(axis=(-2, -1))
     K0c = K0[:, :, 32:95, 32:95]
@@ -793,7 +865,7 @@ def run_k02(cfg, A=None) -> dict:
         shift_representation="colour shift applied as band-limited Fourier shift of the recentred grid (W3 shift_repr.json)",
         mapping=str(P.mapping_dir), kernel_inputs=kin_src, n_kernel=NK, normalize="dc", band_order=list(BANDS),
         axes="K_bands (band, node row=y, node col=x, N, N) OS4 subcells; node_x/node_y science-local px",
-        linearisation_errors=linerr, kernel_checks=kchk, lstsq_sums=lsum,
+        linearisation_errors=linerr, kernel_checks=kchk, kernel_sum_gate=gate, lstsq_sums=lsum,
         render_validation=str(KD / "validate.json"),
         created=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
@@ -801,7 +873,6 @@ def run_k02(cfg, A=None) -> dict:
              node_x=nx, node_y=ny, sigma_G_tess=sig, eps=eps, tri=tri, meta=json.dumps(meta))
     np.savez(KD / "band_epsf_aux.npz", E0=E0, Eq=Eq, T1=T1, shift=shift, cq=cq, dq=dq, xq=xq, err_ls=err_ls,
              err_tan=err_tan, err_ach=err_ach, rms_ls=rms_ls, dcen=dcen, dtr=dtr, dcen_ach=dcen_ach, dtr_ach=dtr_ach)
-    Kach = CK.band_kernels(E0[None], sig, eps, tri, n_kernel=NK)[0]
     ksa = Kach.sum(axis=(-2, -1))
     am = dict(meta, note="Achromatic control: 127-subcell kernel of the star PSF at its colour reference E(c_ref) "
                          "(delta = 0), dc normalisation, same sigma_G/eps/tri.",

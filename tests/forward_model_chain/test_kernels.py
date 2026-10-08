@@ -203,3 +203,40 @@ def test_k03_mixture_matches_e2e(tmp_path):
     ref = json.loads((KE / "mixture_error_a3.json").read_text())
     assert out["summary"] == ref["summary"] and out["colour_check"] == ref["colour_check"]
     BF.arrays_equal(kd / "mixture_error_stars.npz", KE / "mixture_error_stars_a3.npz")
+
+
+def test_truncation_aware_eps_keeps_passing_nodes_and_falls_back_on_overflow():
+    """Nodes within tolerance keep the rule's eps/tri; a node over it takes the first rms-ordered table entry within it."""
+    P0, P1, sig, eps, tri = _nodes()
+    table = {f"{i},{j}": [[1e-8, True, 1.0], [1e-2, True, 2.0], [1e-3, bool(tri[i, j]), 3.0]]
+             for i in range(NR) for j in range(NC)}
+    l_rule = max(abs(K.truncation_loss(E[i, j], sig[i, j], eps[i, j], tri[i, j])) for E in (P0, P1)
+                 for i in range(NR) for j in range(NC))
+    e2, t2, ch, ml = K.truncation_aware_eps(eps, tri, table, sig, (P0, P1), tol=max(l_rule, 1e-12) * 10)
+    assert ch == [] and np.array_equal(e2, eps) and np.array_equal(t2, tri) and ml.shape == (NR, NC)
+    eps_bad = eps.copy()
+    eps_bad[1, 0] = 1e-8
+    lb = max(abs(K.truncation_loss(E[1, 0], sig[1, 0], 1e-8, tri[1, 0])) for E in (P0, P1))
+    l2 = max(abs(K.truncation_loss(E[1, 0], sig[1, 0], 1e-2, True)) for E in (P0, P1))
+    if not lb > l2:
+        pytest.skip("synthetic node does not overflow at eps=1e-8")
+    tol = 0.5 * (lb + l2)
+    e3, t3, ch3, _ = K.truncation_aware_eps(eps_bad, tri, table, sig, (P0, P1), tol=tol)
+    assert [c["node"] for c in ch3] == [[1, 0]] and e3[1, 0] == 1e-2 and t3[1, 0]
+    m = np.ones_like(eps, bool)
+    m[1, 0] = False
+    assert np.array_equal(e3[m], eps_bad[m]) and np.array_equal(t3[m], tri[m])
+    with pytest.raises(RuntimeError, match="no eps/tri"):
+        K.truncation_aware_eps(eps_bad, tri, table, sig, (P0, P1), tol=0.0)
+
+
+def test_kernel_sum_gate_passes_unit_kernels_and_flags_bad_node():
+    k = np.zeros((NR, NC, 5, 5))
+    k[..., 2, 2] = 1.0
+    z = np.zeros_like(k)
+    out = K.kernel_sum_gate(k, z, k, np.zeros((NR, NC)))
+    assert out["max"]["K0"] == 0.0 and out["max"]["trunc"] == 0.0
+    z2 = z.copy()
+    z2[1, 1, 0, 0] = 0.0106                                       # the perband_v3 F2 (3,2) sum K1
+    with pytest.raises(RuntimeError, match=r"'K1': \[\[1, 1\]\]"):
+        K.kernel_sum_gate(k, z2, k, np.zeros((NR, NC)))
