@@ -23,9 +23,10 @@ import yaml
 
 # Stage directories under out_root (CONTRACT.md).
 STAGES: tuple[str, ...] = (
-    "bootstrap", "scene_boot", "fit", "wcs", "mapping", "perband", "kernels", "hotpants",
-    "final", "score", "scene_final", "refit", "compare",
+    "bootstrap", "scene_boot", "init_boot", "nbr_boot", "fit", "folds_boot", "wcs", "mapping", "perband", "kernels",
+    "hotpants", "final", "score", "scene_final", "init_final", "nbr_final", "refit", "folds_final", "compare",
 )
+FIT_INITS = ("static", "photutils")
 KERNEL_SOURCES = ("k_sigma", "phasea")
 # TESS FFI geometry: science pixels start at FFI column 44, row 0; 2048 x 2048.
 SCIENCE_ORIGIN_FFI = (44, 0)
@@ -51,6 +52,12 @@ class SccCfg:
 class CodeCfg:
     sha: str | None          # pinned code sha (None -> git HEAD of forward_model_root at provenance time)
     forward_model_root: Path  # checkout whose ``syndiff_pipeline`` the jobs import (PYTHONPATH)
+    # extra import roots placed BEFORE forward_model_root on every job's PYTHONPATH (e.g. a pinned pyhotpants build)
+    pythonpath_extra: tuple[Path, ...] = ()
+
+    @property
+    def pythonpath(self) -> str:
+        return ":".join(str(p) for p in (*self.pythonpath_extra, self.forward_model_root))
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,7 @@ class InputsCfg:
     exclusion_csv: Path | None = None
     exclusion_strict: bool = False       # True: every listed source_id must be in the scene (old e2e assert)
     strap_mask: bool = False
+    defect_mask: Path | None = None      # crop-local 2048^2 uint8 (HDU 1), nonzero = defect; final image + scene_final
     bootstrap_mapping: Path | None = None
     band_cells: Path | None = None
     adopted_weights: Path | None = None
@@ -85,6 +93,36 @@ class BackgroundCfg:
 class FitCfg:
     recipe: str = "paper1_dataset"
     extra_flags: tuple[str, ...] = ()
+    # static: ``inputs.init_params`` for fit and refit (historical); photutils: ``init_boot`` / ``init_final``
+    init: str = "static"
+
+
+NEIGHBOUR_SOURCES = ("candidates", "assoc_r2")
+
+
+@dataclass(frozen=True)
+class NeighboursCfg:
+    """Gaia neighbours added to the training/evaluation scenes as nuisances (chain/neighbours.py).
+
+    ``source``: ``candidates`` = gaia_neighbour_joint_fit_20261002 ``candidates.csv`` (removal unverified; needs
+    ``gate_override``); ``assoc_r2`` = the verified removal-ledger table ``neighbours.parquet``
+    (ps1_ledger_fix_20261002/assoc_r2_20261006, removal_ledger/revision.py), Gaia rows only, astrometry from
+    ``gaia_catalog`` by source_id."""
+    ledger: Path
+    tmax: float = 17.0
+    gate_override: bool = False
+    source: str = "candidates"
+    gaia_catalog: Path | None = None
+
+
+@dataclass(frozen=True)
+class CrossfitCfg:
+    """Strict K-fold held-out checks (chain/crossfit.py); defaults = the 10-04 closure folds."""
+    n_folds: int = 5
+    seed: int = 20260929
+    tile: int = 128
+    pattern: str = "diagonal"
+    reference_folds: Path | None = None   # optional folds.npz the rebuilt folds must equal
 
 
 @dataclass(frozen=True)
@@ -131,6 +169,8 @@ class ChainConfig:
     reference: ReferenceCfg
     wcs_version: str
     background: BackgroundCfg = field(default_factory=BackgroundCfg)
+    neighbours: NeighboursCfg | None = None
+    crossfit: CrossfitCfg = field(default_factory=CrossfitCfg)
     config_path: Path | None = None
     raw: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -288,7 +328,7 @@ def _resources(sec: Mapping, key: str, defaults: Mapping[str, int]) -> dict[str,
 
 
 _TOP = {"field", "scc", "stem", "unseen_stem", "data_root", "out_root", "code", "inputs", "fit", "kernels",
-        "mask", "condor", "reference", "wcs_version", "background"}
+        "mask", "condor", "reference", "wcs_version", "background", "neighbours", "crossfit"}
 
 
 def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) -> ChainConfig:
@@ -322,16 +362,19 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
     data_root = _path(raw.get("data_root"), "data_root", required=True)
     out_root = _path(raw.get("out_root"), "out_root", required=True)
 
-    cd = _section(raw, "code", {"sha", "forward_model_root"})
+    cd = _section(raw, "code", {"sha", "forward_model_root", "pythonpath_extra"})
     sha = cd.get("sha")
     if sha is not None and not isinstance(sha, str):
         raise ConfigError("code.sha must be a string or null")
     fm_root = _path(cd.get("forward_model_root"), "code.forward_model_root")
     if fm_root is None:  # default: the checkout this module was imported from
         fm_root = Path(__file__).resolve().parents[3]
-    code = CodeCfg(sha, fm_root)
+    extra = cd.get("pythonpath_extra") or []
+    if not isinstance(extra, list):
+        raise ConfigError("code.pythonpath_extra must be a list of absolute paths")
+    code = CodeCfg(sha, fm_root, tuple(_path(e, "code.pythonpath_extra[]", required=True) for e in extra))
 
-    ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "bootstrap_mapping",
+    ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "defect_mask", "bootstrap_mapping",
                                   "band_cells", "adopted_weights", "init_params", "bootstrap_hp_d", "colour_map", "xp_synth",
                                   "scorer_dir", "pass2_hp", "combined_store_weights", "skylist", "lane_dir"}, required=True)
     cmap = ip.get("colour_map")
@@ -357,6 +400,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         exclusion_csv=_path(ip.get("exclusion_csv"), "inputs.exclusion_csv"),
         exclusion_strict=_bool(ip.get("exclusion_strict", False), "inputs.exclusion_strict"),
         strap_mask=_bool(ip.get("strap_mask", False), "inputs.strap_mask"),
+        defect_mask=_path(ip.get("defect_mask"), "inputs.defect_mask"),
         bootstrap_mapping=_path(ip.get("bootstrap_mapping"), "inputs.bootstrap_mapping"),
         band_cells=_path(ip.get("band_cells"), "inputs.band_cells"),
         adopted_weights=_path(ip.get("adopted_weights"), "inputs.adopted_weights"),
@@ -376,7 +420,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         raise ConfigError(f"background.fill must be harmonic|biharmonic, got {fill!r}")
     background = BackgroundCfg(fill=fill, star_mask_pad_px=_int(bp.get("star_mask_pad_px", 0), "background.star_mask_pad_px", 0, 64))
 
-    fp = _section(raw, "fit", {"recipe", "extra_flags"})
+    fp = _section(raw, "fit", {"recipe", "extra_flags", "init"})
     recipe = fp.get("recipe", "paper1_dataset")
     if not isinstance(recipe, str) or not recipe:
         raise ConfigError("fit.recipe must be a recipe name")
@@ -384,7 +428,36 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
     if not isinstance(flags, list) or not all(isinstance(f, (str, int, float)) and not isinstance(f, bool)
                                               for f in flags):
         raise ConfigError("fit.extra_flags must be a list of strings (scene_fit argv tokens)")
-    fit = FitCfg(recipe, tuple(str(f) for f in flags))
+    finit = fp.get("init", "static")
+    if finit not in FIT_INITS:
+        raise ConfigError(f"fit.init must be one of {FIT_INITS}, got {finit!r}")
+    fit = FitCfg(recipe, tuple(str(f) for f in flags), finit)
+
+    neighbours = None
+    if raw.get("neighbours") is not None:
+        nb = _section(raw, "neighbours", {"ledger", "tmax", "gate_override", "source", "gaia_catalog"})
+        tmax = nb.get("tmax", 17.0)
+        if isinstance(tmax, bool) or not isinstance(tmax, (int, float)) or not 0 < tmax < 30:
+            raise ConfigError(f"neighbours.tmax must be a magnitude in (0, 30), got {tmax!r}")
+        src = nb.get("source", "candidates")
+        if src not in NEIGHBOUR_SOURCES:
+            raise ConfigError(f"neighbours.source must be one of {NEIGHBOUR_SOURCES}, got {src!r}")
+        gate = _bool(nb.get("gate_override", False), "neighbours.gate_override")
+        gcat = _path(nb.get("gaia_catalog"), "neighbours.gaia_catalog")
+        if src == "assoc_r2" and gate:
+            raise ConfigError("neighbours.gate_override is for the unverified candidates list; assoc_r2 removals are verified")
+        if src == "assoc_r2" and gcat is None:
+            raise ConfigError("neighbours.source assoc_r2 needs neighbours.gaia_catalog (epoch-2016 astrometry + proper motion)")
+        neighbours = NeighboursCfg(ledger=_path(nb.get("ledger"), "neighbours.ledger", required=True),
+                                   tmax=float(tmax), gate_override=gate, source=src, gaia_catalog=gcat)
+    xp = _section(raw, "crossfit", {"n_folds", "seed", "tile", "pattern", "reference_folds"})
+    pattern = xp.get("pattern", "diagonal")
+    if pattern not in ("diagonal", "group"):
+        raise ConfigError(f"crossfit.pattern must be diagonal|group, got {pattern!r}")
+    crossfit = CrossfitCfg(n_folds=_int(xp.get("n_folds", 5), "crossfit.n_folds", 2, 20),
+                           seed=_int(xp.get("seed", 20260929), "crossfit.seed", 0, 2**31 - 1),
+                           tile=_int(xp.get("tile", 128), "crossfit.tile", 16, 1024), pattern=pattern,
+                           reference_folds=_path(xp.get("reference_folds"), "crossfit.reference_folds"))
 
     kp = _section(raw, "kernels", {"source", "kernel_bright_q"})
     src = kp.get("source", "k_sigma")
@@ -417,7 +490,8 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
 
     return ChainConfig(field=label, scc=scc, stem=stem, unseen_stem=unseen, data_root=data_root, out_root=out_root,
                        code=code, inputs=inputs, fit=fit, kernels=kernels, mask=mask, condor=condor,
-                       reference=reference, wcs_version=ver, background=background, config_path=config_path,
+                       reference=reference, wcs_version=ver, background=background, neighbours=neighbours,
+                       crossfit=crossfit, config_path=config_path,
                        raw=dict(raw))
 
 

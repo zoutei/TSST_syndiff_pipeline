@@ -127,10 +127,12 @@ def model_image(cfg, variant: str, *, workers: int = 8, store_w: Optional[Mappin
 
 
 def scene_stars(cfg):
-    """The fit scene's stars as the Tmag<13 exclusion table (science-local ``cx, cy``)."""
+    """The fit scene's stars as the Tmag<13 exclusion table (science-local ``cx, cy``). Added Gaia neighbours
+    (``is_added``, chain/neighbours.py) are not part of it, so the final image is the same with or without them."""
     import pandas as pd
     z = np.load(chain_paths(cfg).scene_dir / "scene_bundle.npz", allow_pickle=True)
-    return pd.DataFrame(dict(source_id=z["source_id"], tmag=z["tess_mag"], x=z["cx"], y=z["cy"]))
+    keep = ~z["is_added"] if "is_added" in z.files else np.ones(len(z["source_id"]), bool)
+    return pd.DataFrame(dict(source_id=z["source_id"][keep], tmag=z["tess_mag"][keep], x=z["cx"][keep], y=z["cy"][keep]))
 
 
 def final_image(target, C, noise, mask, stars, ko: int = 2, out_dir: Optional[Path] = None):
@@ -180,7 +182,11 @@ def run(cfg, variants: Optional[Sequence[str]] = None, workers: int = 8, force: 
     if all((P.final / s / v / "hp_d" / f"{s}_hp_d.fits.fz").is_file() for s in P.frames for v in VARIANTS):
         write_provenance(stage, cfg, {"band_templates": P.band_templates / "sum_check.json",
                                       "kernels": P.kernels / "band_epsf.npz", "adopted_weights": cfg.inputs.adopted_weights,
-                                      "store_band_weights": store_weights(cfg)})
+                                      "store_band_weights": store_weights(cfg),
+                                      # inputs.defect_mask reaches the match selection and the output mask through the
+                                      # Hotpants reference mask plane (hotpants_ref.DEFECT_BIT)
+                                      **({"defect_mask": cfg.inputs.defect_mask}
+                                         if getattr(cfg.inputs, "defect_mask", None) is not None else {})})
         mark_done(stage)
     return stage
 

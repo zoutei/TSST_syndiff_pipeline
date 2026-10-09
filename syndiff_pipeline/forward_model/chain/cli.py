@@ -24,7 +24,8 @@ from pathlib import Path
 
 from .config import STAGES, ChainConfig, ConfigError, is_done, load_config
 
-OWN_STAGES = ("scene_boot", "scene_final", "fit", "refit", "wcs", "mapping", "gates", "compare", "status")
+OWN_STAGES = ("scene_boot", "scene_final", "init_boot", "init_final", "nbr_boot", "nbr_final", "fit", "refit",
+              "folds_boot", "folds_final", "wcs", "mapping", "gates", "compare", "status")
 DISPATCH = {  # CLI stage -> module under forward_model.chain
     "select": "perband.select", "lists": "perband.lists", "band_cells": "perband.band_cells",
     "contrib": "perband.contrib", "reduce": "perband.reduce", "kernels": "kernels",
@@ -94,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--header-wcs", action="store_true", help="mapping: bootstrap mapping on the FFI header WCS (no fitted store)")
     ap.add_argument("--warm", action="store_true", help="refit: warm continuation from the calibration fit (refit/warm)")
     ap.add_argument("--hp-d", default=None, help="scene_boot/scene_final: hp_d image to swap into the scene")
+    ap.add_argument("--fold", type=int, default=None, help="folds_boot/folds_final: run only this fold (a Condor job)")
+    ap.add_argument("--summarise", action="store_true", help="folds_boot/folds_final: write the summary only")
     ap.add_argument("--fit", action="append", default=[], metavar="NAME=DIR", help="compare: extra fit dir (repeatable)")
     ap.add_argument("--pair", action="append", default=[], type=_parse_pair, metavar="TEST:REF[:label]",
                     help="compare: extra pair (repeatable)")
@@ -122,6 +125,17 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 from .scene import run_scene
                 run_scene(cfg, s.split("_")[1], hp_d=a.hp_d, force=a.force)
+        elif s in ("init_boot", "init_final", "nbr_boot", "nbr_final"):
+            if a.condor:
+                _generic_condor(cfg, s, [], a.force)
+            else:
+                from .crossfit import run_init, run_nbr
+                (run_init if s.startswith("init") else run_nbr)(cfg, s.split("_")[1], force=a.force)
+        elif s in ("folds_boot", "folds_final"):
+            from .crossfit import require_photutils_init, run_folds
+            require_photutils_init(cfg)
+            run_folds(cfg, s.split("_")[1], fold=a.fold, summarise_only=a.summarise, force=a.force,
+                      condor=a.condor and a.fold is None)
         elif s in ("fit", "refit"):
             from .fit import run_fit
             run_fit(cfg, "boot" if s == "fit" else "refit", warm=a.warm, force=a.force, condor=a.condor)

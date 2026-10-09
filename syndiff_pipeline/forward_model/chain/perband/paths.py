@@ -124,7 +124,9 @@ class ChainPaths:
 
     @property
     def scene_dir(self) -> Path:
-        """Scene the calibration fit was trained on (stage scene_boot)."""
+        """Scene the calibration fit was trained on: ``nbr_boot`` when neighbours are configured, else ``scene_boot``."""
+        if opt(self.cfg, "neighbours", None) is not None:
+            return Path(self.cfg.stage_dir("nbr_boot"))
         return Path(self.cfg.stage_dir("scene_boot"))
 
     @property

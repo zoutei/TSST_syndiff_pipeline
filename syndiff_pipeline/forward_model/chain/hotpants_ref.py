@@ -45,6 +45,29 @@ def sha256(p) -> str:
     return h.hexdigest()
 
 
+# Output-mask bit for ``inputs.defect_mask`` pixels (saturation bleed, bad columns). Above every pyhotpants flag
+# (highest 0x8000), so the final match (accepts 0 / 0x40 only), the scorer and scene builders all reject it.
+DEFECT_BIT = 0x10000
+
+
+def load_defect_mask(cfg, shape) -> np.ndarray | None:
+    """Boolean crop-local defect map from ``inputs.defect_mask`` (HDU 1, nonzero = defect), or None if unset."""
+    from astropy.io import fits
+    p = getattr(cfg.inputs, "defect_mask", None)
+    if p is None:
+        return None
+    d = np.asarray(fits.getdata(p, 1)) != 0
+    assert d.shape == tuple(shape), (d.shape, shape)
+    return d
+
+
+def apply_defect_bit(mask: np.ndarray, defect: np.ndarray | None) -> np.ndarray:
+    """Hotpants output mask with ``DEFECT_BIT`` set on defect pixels (unchanged if ``defect`` is None)."""
+    if defect is None:
+        return mask
+    return (np.asarray(mask).astype(np.int64) | np.where(defect, DEFECT_BIT, 0)).astype(np.int32)
+
+
 def build_frame(cfg, stem: str) -> dict:
     """Run Hotpants for one frame; returns the validation dict (also written to ``validation.json``)."""
     P = chain_paths(cfg)
@@ -77,6 +100,9 @@ def build_frame(cfg, stem: str) -> dict:
     stars = pd.read_csv(scc / "diff_linear/hotpants_substamp_stars.csv")[["x", "y"]].to_numpy(float)
     radii = lane_star_wing_radii(scc / "diff_linear")
     fit_ex = hotpants_fit_exclusion(scc / "diff_linear", radii, mask.shape)
+    defect = load_defect_mask(cfg, sci.shape)
+    if defect is not None:                       # defects never constrain the kernel
+        fit_ex = np.asarray(fit_ex, bool) | defect
     _, _, _, fit_ex, _ = HP._pair_hotpants_inputs(sci, tmpl, err, fit_ex, grid, 0)
     sci, tmpl, err, mask, pad = HP._pair_hotpants_inputs(sci, tmpl, err, mask, grid, 0)
     hp = HotpantsParams(**HP_KWARGS, hp_star_wing_radii=radii)
@@ -107,7 +133,9 @@ def build_frame(cfg, stem: str) -> dict:
     out = out_root / "hp_d" / f"{stem}_hp_d.fits.fz"
     from ._tk import write_fz  # production fpack writer (ZQUANTIZ NONE); asserts the exact round trip
 
-    write_fz(out, primary, [(trimmed(key), hdr) for key, hdr in zip(["diff", "noise", "mask"], headers)])
+    planes = {key: trimmed(key) for key in ("diff", "noise", "mask")}
+    planes["mask"] = apply_defect_bit(planes["mask"], defect)
+    write_fz(out, primary, [(planes[key], hdr) for key, hdr in zip(["diff", "noise", "mask"], headers)])
     rt = {key: True for key in ("diff", "noise", "mask")}
     with fits.open(out, disable_image_compression=True) as raw:
         zq = raw[1].header.get("ZQUANTIZ")
@@ -121,7 +149,7 @@ def build_frame(cfg, stem: str) -> dict:
         dest = out_root / "kernels" / f"{stem}_kernel.npz"
         np.savez_compressed(dest, **res["kernel_params_arrays"])
         extra["kernels"] = dict(path=str(dest), sha256=sha256(dest))
-    D, N, M = trimmed("diff"), trimmed("noise"), trimmed("mask")
+    D, N, M = planes["diff"], planes["noise"], planes["mask"]
     good = (M == 0) & np.isfinite(D) & (N > 0)
     g0 = M == 0
     chi = D[good] / N[good]
@@ -135,7 +163,9 @@ def build_frame(cfg, stem: str) -> dict:
                robust_std_chi=float(1.4826 * np.median(np.abs(chi - np.median(chi)))),
                diff_quantiles_1_16_50_84_99=np.percentile(D[good], [1, 16, 50, 84, 99]).tolist(),
                round_trip_exact=rt, zquantiz=zq, compression="fpack -g -q 0 (common/fits_io)",
-               hotpants_seconds=hp_sec, products=extra, code_sha=cfg.code_sha())
+               hotpants_seconds=hp_sec, products=extra, code_sha=cfg.code_sha(),
+               defect_mask=None if defect is None else dict(path=str(cfg.inputs.defect_mask), sha256=sha256(cfg.inputs.defect_mask),
+                                                           n_px=int(defect.sum()), bit=DEFECT_BIT))
     assert good.sum() > 100000 and val["noise_pos_frac_on_mask0"] == 1.0
     (out_root / "validation.json").write_text(json.dumps(val, indent=1) + "\n")
     print("COMPLETED", out, json.dumps({k: val[k] for k in ("good_pixels", "robust_std_chi", "median_noise_good")}), flush=True)
@@ -176,8 +206,9 @@ def submit(cfg, stems: Optional[Sequence[str]] = None, *, do_submit: bool = Fals
     for stem in (list(stems) if stems else frames_for(cfg)):
         argv = ["python", "-m", "syndiff_pipeline.forward_model.chain.hotpants_ref", "--config", str(cfg.config_path),
                 "--stem", stem]
-        sub = condor.write_submit(cfg, "hotpants", argv, tag=f"hp_{stem}", request_cpus=8, request_memory_mb=64000,
-                                  omp_threads=4)
+        # mask-honouring connected-region Hotpants peaks at ~63 GB per frame (hpfix_d14_20261007): configurable
+        sub = condor.write_submit(cfg, "hotpants", argv, tag=f"hp_{stem}", request_cpus=cfg.condor.request_cpus.get("hotpants", 8),
+                                  request_memory_mb=cfg.condor.request_memory_mb.get("hotpants", 64000), omp_threads=4)
         subs.append(sub)
         if do_submit:
             print(condor.submit(sub))

@@ -88,3 +88,16 @@ def test_run_compare_requires_fits(tmp_path):
     cfg = C.config_from_dict(raw_config(tmp_path))
     with pytest.raises(FileNotFoundError):
         K.run_compare(cfg)
+
+
+def test_load_skips_event_rows_without_loss(tmp_path):
+    """The smoothed stop rule ends history.jsonl with event rows (stage_end) that carry no loss."""
+    import json
+    import numpy as np
+    from syndiff_pipeline.forward_model.chain import compare as CMP
+    np.savez(tmp_path / "params.npz", wcs_coeff=np.zeros((4, 1)))
+    rows = [{"stage": 3, "step": 10, "loss": 2.5, "data_term": 2.0},
+            {"stage": 3, "steps": 10, "event": "stage_end", "reason": "plateau"}]
+    (tmp_path / "history.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    d = CMP._load(tmp_path)
+    assert d["loss"] == 2.5 and d["data_term"] == 2.0

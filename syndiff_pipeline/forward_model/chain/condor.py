@@ -17,7 +17,8 @@ WRAPPER_REL = "syndiff_pipeline/common/orchestration/condor_wrapper.sh"
 
 # stage -> key into condor.request_cpus / request_memory_mb
 # execute hosts that match but cannot reconnect (jobs hang there; 2026-10-01)
-AVOID_HOSTS = ("plscience11",)
+# plscience4/5: jobs stalled before Python start; plscience8: overloaded (2026-10-05..07, training_fixes / hpfix_d14)
+AVOID_HOSTS = ("plscience11", "plscience4", "plscience5", "plscience8")
 
 RESOURCE_KEY = {"fit": "fit", "refit": "fit", "mapping": "mapping", "contrib": "f03"}
 
@@ -33,7 +34,7 @@ def _condor_quote(tok: str) -> str:
 def job_env(cfg: ChainConfig, tag: str, omp_threads: int = 4) -> dict[str, str]:
     root = cfg.code.forward_model_root
     return {
-        "PYTHONPATH": str(root),
+        "PYTHONPATH": cfg.code.pythonpath,
         "JAX_PLATFORMS": "cpu",
         "OPENBLAS_NUM_THREADS": "1",
         "OMP_NUM_THREADS": str(omp_threads),

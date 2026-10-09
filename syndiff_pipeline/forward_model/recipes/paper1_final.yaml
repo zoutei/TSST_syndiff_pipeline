@@ -13,6 +13,8 @@ scene_fit:
   chroma-model: global8
   colour-gauge: global
   chroma-axis: tesspoint
+  # A3+2 CCD colour translation held at zero (the 10-04 adapter, now native; it changes results at float level)
+  chroma-ccd-shift: frozen0
   huber-delta: 1.0e6
   reject-every: 0
   lambda-lap: 1.0e-2

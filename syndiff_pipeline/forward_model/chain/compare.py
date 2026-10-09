@@ -47,7 +47,9 @@ def _load(d):
     m = json.load(open(f"{d}/fit_meta.json")) if os.path.exists(f"{d}/fit_meta.json") else {}
     bwm = m.get("bright_width_model") or {}
     b = float(np.ravel(p["bright_width"])[0]) * float(bwm.get("leaf_unit", 1e-3)) if "bright_width" in p else 0.0
-    return dict(p=p, f=f, loss=h[-1]["loss"] if h else np.nan, data_term=h[-1].get("data_term", np.nan) if h else np.nan,
+    # the smoothed stop rule appends event rows (stage_end, lr cuts) without a loss: use the last row that has one
+    hl = [r for r in h if "loss" in r]
+    return dict(p=p, f=f, loss=hl[-1]["loss"] if hl else np.nan, data_term=hl[-1].get("data_term", np.nan) if hl else np.nan,
                 b=b, qref=float(bwm.get("q_ref", 0.0)))
 
 
@@ -132,7 +134,13 @@ def compare_fits(fits: Mapping[str, str | Path], pairs: Sequence[tuple[str, str,
             bg=[(float(np.ravel(x["f"]["bg_coef"])[0]) if x["f"] is not None and "bg_coef" in x["f"] else None) for x in (a, c)])
         rr = None
         if a["f"] is not None and c["f"] is not None:
-            fa, fc = a["f"]["flux"], c["f"]["flux"]
+            # fits trained on neighbour scenes (chain/neighbours.py) carry the added Gaia neighbours AFTER the original
+            # scene stars (original rows unchanged), and boot/refit may add different numbers: compare the prefix
+            n0 = len(role)
+            for x in (a, c):
+                if "source_id" in x["f"] and not np.array_equal(np.asarray(x["f"]["source_id"])[:n0], sc["source_id"]):
+                    raise ValueError("flux_solved source_id prefix does not match the comparison scene")
+            fa, fc = a["f"]["flux"][:n0], c["f"]["flux"][:n0]
             ok = (fc > 0) & (fa > 0) & np.isfinite(fa) & np.isfinite(fc) & (role != 2)
             rr = fa / fc - 1
             fb = {}
