@@ -405,6 +405,8 @@ def run_kernel_fit(
             boundary_rim_width=params.tessreduce_boundary_rim_width,
             star_mask_pad_px=int(params.tessreduce_star_mask_pad_px),
             extra_exclude=tessreduce_extra_exclude,
+            **({} if params.tessreduce_residual_exclude_percentile is None
+               else {"residual_exclude_percentile": params.tessreduce_residual_exclude_percentile}),
         )
 
     def _background_subtracted_convolved(hp_result: dict) -> np.ndarray:
@@ -529,6 +531,11 @@ def run_kernel_fit(
                 "tessreduce_faint_star_bp_rp_min": params.tessreduce_faint_star_bp_rp_min,
             }
             if params.tessreduce_faint_star_radii
+            else {}
+        ),
+        **(
+            {"tessreduce_residual_exclude_percentile": params.tessreduce_residual_exclude_percentile}
+            if params.tessreduce_residual_exclude_percentile is not None
             else {}
         ),
         "reference_kernel_sum": float(reference_kernel_sum),

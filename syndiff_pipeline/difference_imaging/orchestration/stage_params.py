@@ -428,6 +428,7 @@ KERNEL_FIT_ALLOWED = frozenset(
         "tessreduce_faint_star_radii",
         "tessreduce_faint_star_tmag_min",
         "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
     }
     | _KERNEL_HP_KEYS
 )
@@ -459,6 +460,7 @@ BACKGROUND_ESTIMATE_ALLOWED = frozenset(
         "tessreduce_faint_star_radii",
         "tessreduce_faint_star_tmag_min",
         "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
     }
 )
 
@@ -950,10 +952,14 @@ class KernelFitParams:
     tessreduce_faint_star_radii: Optional[list] = None
     tessreduce_faint_star_tmag_min: Optional[float] = None
     tessreduce_faint_star_bp_rp_min: Optional[float] = None
+    # exclude_percentile of the residual-surface Background2D (None = photutils default 10, unchanged); (0, 100].
+    # Raises the box-validity floor so a low fit fraction cannot leave only a few boxes (ks_b level instability).
+    tessreduce_residual_exclude_percentile: Optional[float] = None
     _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = (
         "tessreduce_faint_star_radii",
         "tessreduce_faint_star_tmag_min",
         "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
     )
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
@@ -1011,10 +1017,14 @@ class BackgroundEstimateParams:
     tessreduce_faint_star_radii: Optional[list] = None
     tessreduce_faint_star_tmag_min: Optional[float] = None
     tessreduce_faint_star_bp_rp_min: Optional[float] = None
+    # exclude_percentile of the residual-surface Background2D (None = photutils default 10, unchanged); (0, 100].
+    # Raises the box-validity floor so a low fit fraction cannot leave only a few boxes (ks_b level instability).
+    tessreduce_residual_exclude_percentile: Optional[float] = None
     _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = (
         "tessreduce_faint_star_radii",
         "tessreduce_faint_star_tmag_min",
         "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
     )
 
 
@@ -1416,6 +1426,11 @@ def validate_faint_star_keys(params: Any, pipeline_idx: int, kind: str) -> None:
     import math
 
     where = f"pipeline[{pipeline_idx}] {kind}"
+    pct = params.tessreduce_residual_exclude_percentile
+    if pct is not None:
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not (0.0 < float(pct) <= 100.0):
+            raise ValueError(f"{where}.tessreduce_residual_exclude_percentile must be a number in (0, 100] or null, got {pct!r}")
+        params.tessreduce_residual_exclude_percentile = float(pct)
     radii = params.tessreduce_faint_star_radii
     tmin = params.tessreduce_faint_star_tmag_min
     bprp = params.tessreduce_faint_star_bp_rp_min

@@ -154,3 +154,53 @@ def test_golden_red_floor5_mask_matches_ksb_stability_record():
     gold = np.load(GOLD)
     assert gold.shape == shape
     assert np.array_equal(wing | faint, gold), int(((wing | faint) != gold).sum())
+
+
+# ---- tessreduce_residual_exclude_percentile ---------------------------------------------------------------------
+
+def _synthetic_frame():
+    rng = np.random.default_rng(3)
+    yy, xx = np.mgrid[0:80, 0:80]
+    img = 0.02 * xx + 0.5 * np.sin(yy / 9.0) + rng.normal(0, 0.3, (80, 80))
+    mask = np.zeros((80, 80), dtype=np.int32)
+    mask[20:40, 20:40] = 1
+    mask[:, ::7] |= 4
+    return img, mask
+
+
+def test_residual_exclude_percentile_unset_is_bit_identical_and_set_changes(monkeypatch):
+    from syndiff_pipeline.difference_imaging.stages.background import tessreduce_residual as TR
+
+    img, mask = _synthetic_frame()
+    seen = []
+    orig = TR.Background2D
+
+    def spy(*a, **k):
+        if "fill_value" in k:  # the residual-surface call (other Background2D calls fix exclude_percentile=50)
+            seen.append(k.get("exclude_percentile", "absent"))
+        return orig(*a, **k)
+
+    monkeypatch.setattr(TR, "Background2D", spy)
+    base, _, _ = TR.estimate_tessreduce_residual_background(img, mask)
+    n_unset = len(seen)
+    assert set(seen) == {"absent"}
+    again, _, _ = TR.estimate_tessreduce_residual_background(img, mask, residual_exclude_percentile=None)
+    assert np.array_equal(base, again)
+    seen.clear()
+    got, _, _ = TR.estimate_tessreduce_residual_background(img, mask, residual_exclude_percentile=50.0)
+    assert seen == [50.0] * n_unset and n_unset >= 1
+    assert not np.array_equal(base, got)
+
+
+@pytest.mark.parametrize("kind,parse", [("background_estimate", sp.parse_background_estimate),
+                                        ("kernel_fit", sp.parse_kernel_fit)])
+def test_residual_exclude_percentile_params(kind, parse):
+    assert parse({"kind": kind}, 0).tessreduce_residual_exclude_percentile is None
+    assert parse({"kind": kind, "tessreduce_residual_exclude_percentile": 50}, 0).tessreduce_residual_exclude_percentile == 50.0
+    for bad in (0, -1, 101, "x", float("nan"), True):
+        with pytest.raises(ValueError, match="exclude_percentile"):
+            parse({"kind": kind, "tessreduce_residual_exclude_percentile": bad}, 0)
+    p0 = parse({"kind": kind}, 0)
+    p1 = parse({"kind": kind, "tessreduce_residual_exclude_percentile": 50}, 0)
+    assert "exclude_percentile" not in repr(provenance_glue.diff_recipe("diff_image", p0)["params"])
+    assert "exclude_percentile" in repr(provenance_glue.diff_recipe("diff_image", p1)["params"])

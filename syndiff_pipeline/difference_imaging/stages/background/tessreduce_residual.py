@@ -407,7 +407,8 @@ def _block_sigma(resid: np.ndarray, box: int, valid_mask: np.ndarray) -> np.ndar
     return sigma
 
 
-def _fit_residual_bkg(residual: np.ndarray, exclude_mask: np.ndarray, res_box: int, n_sigma: float = 5.0) -> np.ndarray:
+def _fit_residual_bkg(residual: np.ndarray, exclude_mask: np.ndarray, res_box: int, n_sigma: float = 5.0,
+                      exclude_percentile: Optional[float] = None) -> np.ndarray:
     """Exact notebook residual-surface implementation."""
     if (~exclude_mask).sum() < 4:
         return np.zeros_like(residual)
@@ -415,11 +416,13 @@ def _fit_residual_bkg(residual: np.ndarray, exclude_mask: np.ndarray, res_box: i
     med = np.nanmedian(finite) if finite.size else 0.0
     std = np.nanstd(finite) if finite.size else 0.0
     transient = exclude_mask | (np.abs(residual - med) > 5 * std)
+    # photutils' default exclude_percentile (10) is passed implicitly; only an explicit value is forwarded.
+    bg_kwargs = {} if exclude_percentile is None else {"exclude_percentile": float(exclude_percentile)}
     try:
         corr = Background2D(residual, box_size=res_box, filter_size=3,
                             sigma_clip=SigmaClip(sigma=3.0, maxiters=5),
                             bkg_estimator=MedianBackground(), mask=transient,
-                            fill_value=0.0).background
+                            fill_value=0.0, **bg_kwargs).background
     except Exception:
         valid = residual[~transient]
         corr = np.full_like(residual, np.nanmedian(valid) if valid.size else 0.0)
@@ -547,7 +550,7 @@ def _accumulate_sep_object_mask(
         sep_mask[y0:y1, x0:x1] |= dist <= true_r
 
 
-def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: np.ndarray, mask: np.ndarray, *, gauss_smooth: float = 2.0, n_sigma: float = 5.0, force_anomaly_repair: bool = False) -> np.ndarray:
+def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: np.ndarray, mask: np.ndarray, *, gauss_smooth: float = 2.0, n_sigma: float = 5.0, force_anomaly_repair: bool = False, residual_exclude_percentile: Optional[float] = None) -> np.ndarray:
     """Notebook ``fix_bkg_frame_decomposed`` production path.
 
     Background2D / inpaint still run on the full CCD. SEP detections only
@@ -620,7 +623,8 @@ def fix_bkg_frame_decomposed(bkg_i: np.ndarray, flux_i: np.ndarray, bkgmask_i: n
             confirmed = smooth_mask & ((np.abs(frame - fine) > n_sigma * _block_sigma(frame - fine, 4, valid)) & valid)
             frame[binary_dilation(confirmed, structure=disk) & valid] = fine[binary_dilation(confirmed, structure=disk) & valid]
     gaussian = gaussian_filter(frame, sigma=2.0 if is_high_bkg else gauss_smooth)
-    return gaussian + _fit_residual_bkg(flux_i - gaussian, np.isnan(bkgmask_i), max(4, min(20, min(ny, nx)//2)), n_sigma)
+    return gaussian + _fit_residual_bkg(flux_i - gaussian, np.isnan(bkgmask_i), max(4, min(20, min(ny, nx)//2)), n_sigma,
+                                          residual_exclude_percentile)
 
 
 def estimate_tessreduce_residual_background(
@@ -638,6 +642,7 @@ def estimate_tessreduce_residual_background(
     fill_method: str = "harmonic",
     star_mask_pad_px: int = 0,
     extra_exclude: np.ndarray | None = None,
+    residual_exclude_percentile: Optional[float] = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Notebook ``run_tessreduce_variant`` (``biharmonic_robust``) arithmetic
     for one input frame.
@@ -657,6 +662,10 @@ def estimate_tessreduce_residual_background(
 
     ``extra_exclude`` (bool, mask-shaped; default None = unchanged) drops further pixels from the fit, e.g. the
     magnitude-sized star disks of ``star_wing_exclusion`` (stage key ``tessreduce_star_wing_radii``).
+
+    ``residual_exclude_percentile`` (float in (0, 100]; default None = photutils' default 10, bit-identical to before)
+    is forwarded as ``exclude_percentile`` to the residual-surface ``Background2D`` only when set (stage key
+    ``tessreduce_residual_exclude_percentile``).
     """
     flux = np.asarray(residual, dtype=np.float64)
     if flux.ndim != 2:
@@ -676,6 +685,7 @@ def estimate_tessreduce_residual_background(
     pre_qe = fix_bkg_frame_decomposed(
         smooth, flux, bkgmask, mask, gauss_smooth=anomaly_gauss,
         force_anomaly_repair=force_anomaly_repair,
+        residual_exclude_percentile=residual_exclude_percentile,
     )
     qe = _qe_spline_map(flux, pre_qe, mask, degree=qe_spline_degree, smooth_mult=qe_spline_smooth_mult)
     return pre_qe * qe, pre_qe, qe

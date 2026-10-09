@@ -143,6 +143,7 @@ def _process_one_frame(task: tuple) -> dict:
         tessreduce_faint_star_radii=p.get("tessreduce_faint_star_radii"),
         tessreduce_faint_star_tmag_min=p.get("tessreduce_faint_star_tmag_min"),
         tessreduce_faint_star_bp_rp_min=p.get("tessreduce_faint_star_bp_rp_min"),
+        tessreduce_residual_exclude_percentile=p.get("tessreduce_residual_exclude_percentile"),
     )
 
     write_path: Optional[Path] = None
@@ -273,6 +274,8 @@ def _process_one_frame(task: tuple) -> dict:
             boundary_rim_width=int(p.get("tessreduce_boundary_rim_width", 1)),
             star_mask_pad_px=int(p.get("tessreduce_star_mask_pad_px", 0)),
             extra_exclude=p.get("tessreduce_extra_exclude"),
+            **({} if p.get("tessreduce_residual_exclude_percentile") is None
+               else {"residual_exclude_percentile": float(p["tessreduce_residual_exclude_percentile"])}),
         )
         total_bkg = tessreduce_bkg
         diff_final = diff_raw - total_bkg
@@ -437,6 +440,7 @@ def kernel_subtract_loop(
     tessreduce_faint_star_radii: Optional[list] = None,
     tessreduce_faint_star_tmag_min: Optional[float] = None,
     tessreduce_faint_star_bp_rp_min: Optional[float] = None,
+    tessreduce_residual_exclude_percentile: Optional[float] = None,
     tessreduce_extra_exclude: Optional[np.ndarray] = None,
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
@@ -519,6 +523,7 @@ def kernel_subtract_loop(
         "tessreduce_faint_star_radii": tessreduce_faint_star_radii,
         "tessreduce_faint_star_tmag_min": tessreduce_faint_star_tmag_min,
         "tessreduce_faint_star_bp_rp_min": tessreduce_faint_star_bp_rp_min,
+        "tessreduce_residual_exclude_percentile": tessreduce_residual_exclude_percentile,
         "tessreduce_extra_exclude": tessreduce_extra_exclude,
         "diffs_dir": diffs_dir,
         "bkg_dir": bkg_dir,

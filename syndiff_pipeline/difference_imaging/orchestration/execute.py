@@ -1511,6 +1511,7 @@ def run_config_pipeline(
                 tessreduce_faint_star_radii=ks_params.tessreduce_faint_star_radii,
                 tessreduce_faint_star_tmag_min=ks_params.tessreduce_faint_star_tmag_min,
                 tessreduce_faint_star_bp_rp_min=ks_params.tessreduce_faint_star_bp_rp_min,
+                tessreduce_residual_exclude_percentile=ks_params.tessreduce_residual_exclude_percentile,
                 tessreduce_extra_exclude=_background_exclusion_for_stage(
                     cfg, ctx, ks_params, shared_mask.shape
                 ),
