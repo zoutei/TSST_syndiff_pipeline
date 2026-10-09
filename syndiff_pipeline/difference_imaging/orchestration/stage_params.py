@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field, fields
-from typing import Any, FrozenSet, List, Literal, Optional, Type, TypeVar, Union
+from typing import Any, ClassVar, FrozenSet, List, Literal, Optional, Type, TypeVar, Union
 
 
 T = TypeVar("T")
@@ -425,6 +425,10 @@ KERNEL_FIT_ALLOWED = frozenset(
         "tessreduce_boundary_rim_width",
         "tessreduce_star_mask_pad_px",
         "tessreduce_star_wing_radii",
+        "tessreduce_faint_star_radii",
+        "tessreduce_faint_star_tmag_min",
+        "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
     }
     | _KERNEL_HP_KEYS
 )
@@ -453,6 +457,10 @@ BACKGROUND_ESTIMATE_ALLOWED = frozenset(
         "tessreduce_boundary_rim_width",
         "tessreduce_star_mask_pad_px",
         "tessreduce_star_wing_radii",
+        "tessreduce_faint_star_radii",
+        "tessreduce_faint_star_tmag_min",
+        "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
     }
 )
 
@@ -937,6 +945,22 @@ class KernelFitParams:
     # reads the stars from {lane_root}/gaia_catalog_pipeline.csv. Recommended (S24 C2K2 wing < 0.1 e-/s at the disk
     # edge, dev_runs/maskfoot_20261001): see docs/markdown/stages/multi_kernel_diff.md.
     tessreduce_star_wing_radii: Optional[list] = None
+    # Colour-selected faint-star disks, also excluded from the background fit only (OFF when radii is None): stars with
+    # tess_mag >= tmag_min and (bp_rp_min is None or phot_bp_mean_mag - phot_rp_mean_mag >= bp_rp_min) get a disk from
+    # the [[mag_hi, radius_px], ...] table (same format as tessreduce_star_wing_radii). The three keys are left out of
+    # the recipe fingerprint while unset (_RECIPE_OMIT_WHEN_NONE). Validated recipe "red_floor5": docs/markdown/stages/diff_pipeline.md.
+    tessreduce_faint_star_radii: Optional[list] = None
+    tessreduce_faint_star_tmag_min: Optional[float] = None
+    tessreduce_faint_star_bp_rp_min: Optional[float] = None
+    # exclude_percentile of the residual-surface Background2D (None = photutils default 10, unchanged); (0, 100].
+    # Raises the box-validity floor so a low fit fraction cannot leave only a few boxes (ks_b level instability).
+    tessreduce_residual_exclude_percentile: Optional[float] = None
+    _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = (
+        "tessreduce_faint_star_radii",
+        "tessreduce_faint_star_tmag_min",
+        "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
+    )
     sci_fwhm: float = 1.88
     hp_sigma_gauss: Optional[list] = None
     hp_ko: int = 2
@@ -986,6 +1010,22 @@ class BackgroundEstimateParams:
     # reads the stars from {lane_root}/gaia_catalog_pipeline.csv. Recommended (S24 C2K2 wing < 0.1 e-/s at the disk
     # edge, dev_runs/maskfoot_20261001): see docs/markdown/stages/multi_kernel_diff.md.
     tessreduce_star_wing_radii: Optional[list] = None
+    # Colour-selected faint-star disks, also excluded from the background fit only (OFF when radii is None): stars with
+    # tess_mag >= tmag_min and (bp_rp_min is None or phot_bp_mean_mag - phot_rp_mean_mag >= bp_rp_min) get a disk from
+    # the [[mag_hi, radius_px], ...] table (same format as tessreduce_star_wing_radii). The three keys are left out of
+    # the recipe fingerprint while unset (_RECIPE_OMIT_WHEN_NONE). Validated recipe "red_floor5": docs/markdown/stages/diff_pipeline.md.
+    tessreduce_faint_star_radii: Optional[list] = None
+    tessreduce_faint_star_tmag_min: Optional[float] = None
+    tessreduce_faint_star_bp_rp_min: Optional[float] = None
+    # exclude_percentile of the residual-surface Background2D (None = photutils default 10, unchanged); (0, 100].
+    # Raises the box-validity floor so a low fit fraction cannot leave only a few boxes (ks_b level instability).
+    tessreduce_residual_exclude_percentile: Optional[float] = None
+    _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = (
+        "tessreduce_faint_star_radii",
+        "tessreduce_faint_star_tmag_min",
+        "tessreduce_faint_star_bp_rp_min",
+        "tessreduce_residual_exclude_percentile",
+    )
 
 
 def _merge_step_params(cls: Type[T], step_dict: dict) -> T:
@@ -1381,6 +1421,44 @@ def kernel_fit_params_to_hotpants(kf: KernelFitParams) -> HotpantsParams:
     )
 
 
+def validate_faint_star_keys(params: Any, pipeline_idx: int, kind: str) -> None:
+    """Validate the colour-selected faint-star background exclusion keys (all unset = off)."""
+    import math
+
+    where = f"pipeline[{pipeline_idx}] {kind}"
+    pct = params.tessreduce_residual_exclude_percentile
+    if pct is not None:
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)) or not (0.0 < float(pct) <= 100.0):
+            raise ValueError(f"{where}.tessreduce_residual_exclude_percentile must be a number in (0, 100] or null, got {pct!r}")
+        params.tessreduce_residual_exclude_percentile = float(pct)
+    radii = params.tessreduce_faint_star_radii
+    tmin = params.tessreduce_faint_star_tmag_min
+    bprp = params.tessreduce_faint_star_bp_rp_min
+    if radii is None:
+        if tmin is not None or bprp is not None:
+            raise ValueError(
+                f"{where}: tessreduce_faint_star_tmag_min / tessreduce_faint_star_bp_rp_min need "
+                "tessreduce_faint_star_radii"
+            )
+        return
+    from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import parse_star_wing_radii
+
+    try:
+        parse_star_wing_radii(radii)
+    except ValueError as exc:
+        raise ValueError(f"{where}.tessreduce_faint_star_radii: {exc}") from exc
+    if tmin is None:
+        raise ValueError(f"{where}: tessreduce_faint_star_tmag_min is required when tessreduce_faint_star_radii is set")
+    for name, v in (("tessreduce_faint_star_tmag_min", tmin), ("tessreduce_faint_star_bp_rp_min", bprp)):
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(float(v)):
+            raise ValueError(f"{where}.{name} must be a finite number or null, got {v!r}")
+    params.tessreduce_faint_star_tmag_min = float(tmin)
+    if bprp is not None:
+        params.tessreduce_faint_star_bp_rp_min = float(bprp)
+
+
 def parse_kernel_fit(stage: dict, pipeline_idx: int) -> KernelFitParams:
     """Parse kernel fit.
     
@@ -1393,7 +1471,9 @@ def parse_kernel_fit(stage: dict, pipeline_idx: int) -> KernelFitParams:
     -------
     KernelFitParams"""
     validate_stage_keys(stage, pipeline_idx, "kernel_fit", KERNEL_FIT_ALLOWED)
-    return _merge_dataclass(KernelFitParams, stage)
+    kf = _merge_dataclass(KernelFitParams, stage)
+    validate_faint_star_keys(kf, pipeline_idx, "kernel_fit")
+    return kf
 
 
 def parse_convolved_templates(
@@ -1433,6 +1513,7 @@ def parse_background_estimate(stage: dict, pipeline_idx: int) -> BackgroundEstim
     if "background_estimate_n_jobs" in stage:
         v = stage["background_estimate_n_jobs"]
         ks.background_estimate_n_jobs = None if v is None else int(v)
+    validate_faint_star_keys(ks, pipeline_idx, "background_estimate")
     ks = apply_stage_resources(stage, ks, pipeline_idx, "background_estimate")
     return ks
 

@@ -168,6 +168,25 @@ algebraically subtracts. Full guide: [multi_kernel_diff.md](multi_kernel_diff.md
 Artifacts land under `diff_{lane}/` (e.g. `kernel_fit/kernel_r2.npz`, convolved
 templates, `ks_d` / `ks_b`).
 
+Background-fit star exclusions (TESSreduce residual estimator; `kernel_fit` and `background_estimate`; they change only
+which pixels the background is fitted on, never the shared mask, Hotpants or the scenes). Stars come from
+`{lane}/gaia_catalog_pipeline.csv`:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `tessreduce_star_wing_radii` | unset | `[[mag_hi, radius_px], ...]` magnitude-sized disks around every catalogue star (see [multi_kernel_diff.md](multi_kernel_diff.md)) |
+| `tessreduce_faint_star_radii` | unset (off) | Same table format, applied only to the stars selected by the two keys below; the exclusion is the union with the wing disks |
+| `tessreduce_faint_star_tmag_min` | required with the radii | Stars with `tess_mag` < this get no faint disk |
+| `tessreduce_faint_star_bp_rp_min` | `null` | When set, only stars with finite `phot_bp_mean_mag - phot_rp_mean_mag` >= this value (NaN colour is not selected; the catalogue needs both columns) |
+| `tessreduce_residual_exclude_percentile` | unset | Float in (0, 100]; forwarded as `exclude_percentile` to the residual-surface `Background2D` (photutils default 10 when unset, bit-identical to before). At a low fit fraction only a handful of 20-px boxes survive and the `ks_b` level becomes unstable (F2/C4, `dev_runs/ksb_stability_20261008/fields/diag/README.md`); 50 fixes it |
+
+With all the optional keys above unset nothing changes, including the diff-image recipe fingerprint (the keys enter it only
+when set). Validated recipe `red_floor5` (S24 C2K2 F1, record
+`/astro/armin/koji/syndiff/dev_runs/ksb_stability_20261008/README.md`):
+`tessreduce_faint_star_radii: [[13.5, 7], [14.0, 6], [14.5, 5], [16.0, 5]]`, `tessreduce_faint_star_tmag_min: 13`,
+`tessreduce_faint_star_bp_rp_min: 1.2`, on top of the wing table of the lane. Golden test:
+`tests/test_tessreduce_faint_star_exclusion.py` rebuilds the F1 mask exactly.
+
 ### `background_temporal_smoothing` (`stages/background/pipeline.py`)
 
 Unified background cube (spatial photutils, temporal Savitzky–Golay, strap correction). See [background.md](background.md). Writes `stack.npz`/`stack.npy` and optional per-frame FITS.

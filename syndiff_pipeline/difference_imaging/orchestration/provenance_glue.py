@@ -210,7 +210,12 @@ def _asdict_any(obj: Any) -> dict:
     from typing import Mapping
 
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return dataclasses.asdict(obj)
+        out = dataclasses.asdict(obj)
+        # Optional keys that must not perturb the recipe id while unset (see KernelFitParams).
+        for key in getattr(type(obj), "_RECIPE_OMIT_WHEN_NONE", ()):
+            if out.get(key) is None:
+                out.pop(key, None)
+        return out
     if isinstance(obj, Mapping):
         return dict(obj)
     raise TypeError(

@@ -1,0 +1,44 @@
+# Manual extra masks, OR-ed into the static shared mask of the matching SCC (see docs/markdown/masking.md).
+# Coordinates are FULL-FFI 0-based science-array pixels (not crop-local); ranges are [min, max).
+# Default bit is EDGE (8) for every kind; `bit: sat_cross` (2) is the other choice. `reason` is required.
+#
+# masks:
+#   - sector: 24
+#     camera: 2
+#     ccd: 2
+#     regions:
+#       - {kind: column, x: 1067, reason: "bad column"}                       # full length
+#       - {kind: column, x: 468, y: [0, 2048], reason: "bad column"}
+#       - {kind: rect, x: [780, 798], y: [450, 756], bit: sat_cross, reason: "saturation bleed"}
+#       - {kind: circle, x: 100.5, y: 200.5, r: 6, reason: "hot spot"}
+version: 1
+masks:
+  # Found 2026-10-09 (dev_runs/ksb_stability_20261008/rollout/README.md): whole columns 2.5-360 e-/s below their
+  # neighbours along the full height; F2 bleed of the star at full-FFI (788, 590) beyond the saturation cross.
+  - sector: 24
+    camera: 2
+    ccd: 2
+    regions:
+      - {kind: column, x: 468, reason: "bad column, ~-6 e-/s vs neighbours, full height (crop x 424)"}
+      - {kind: column, x: 1067, reason: "bad column, -140..0 e-/s vs neighbours, full height (crop x 1023)"}
+  - sector: 20
+    camera: 3
+    ccd: 3
+    regions:
+      - {kind: column, x: 1156, reason: "bad column, ~-3 e-/s vs neighbours, full height (crop x 1112); also seen in S22 c3k3"}
+      - {kind: rect, x: [782, 795], y: [450, 756], bit: sat_cross, reason: "saturation bleed y 462-743 of the star at crop (744,590), +-3 px x / +-12 px y; shared-mask cross covers only y~495-690"}
+  - sector: 22
+    camera: 3
+    ccd: 3
+    regions:
+      - {kind: column, x: 1156, reason: "bad column, ~-2.5 e-/s vs neighbours, full height (crop x 1112); same column as S20 c3k3"}
+  - sector: 24
+    camera: 1
+    ccd: 2
+    regions:
+      - {kind: column, x: 91, reason: "bad column, ~-2.7 e-/s vs neighbours, full height (crop x 47)"}
+  - sector: 23
+    camera: 4
+    ccd: 2
+    regions:
+      - {kind: column, x: 680, reason: "bad column, ~-6 e-/s vs neighbours, full height (crop x 636)"}

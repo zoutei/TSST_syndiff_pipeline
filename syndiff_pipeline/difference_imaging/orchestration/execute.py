@@ -799,6 +799,47 @@ def _star_wing_exclusion_for_stage(
     return ex
 
 
+def _background_exclusion_for_stage(
+    cfg: SynDiffConfig,
+    ctx: PipelineInvocationContext,
+    params,
+    shape: tuple[int, int],
+) -> Optional[np.ndarray]:
+    """Background-fit exclusion = wing disks | colour-selected faint-star disks (None when neither key is set).
+
+    ``params`` is a ``KernelFitParams``/``BackgroundEstimateParams``. Hotpants ``fit_exclude`` does not use this.
+    """
+    ex = _star_wing_exclusion_for_stage(cfg, ctx, params.tessreduce_star_wing_radii, shape)
+    faint_radii = getattr(params, "tessreduce_faint_star_radii", None)
+    if not faint_radii:
+        return ex
+    from syndiff_pipeline.difference_imaging.stages.background.tessreduce_residual import (
+        faint_star_exclusion_from_catalog,
+    )
+
+    csv = os.path.join(_diff_lane_root_dir(cfg, ctx), GAIA_CATALOG_PIPELINE_BASENAME)
+    if not os.path.exists(csv):
+        raise FileNotFoundError(
+            f"faint-star radii need the lane catalogue {csv!r} (written by the shared_mask stage)."
+        )
+    fx = faint_star_exclusion_from_catalog(
+        csv,
+        tuple(shape),
+        faint_radii,
+        params.tessreduce_faint_star_tmag_min,
+        params.tessreduce_faint_star_bp_rp_min,
+    )
+    out = fx if ex is None else (ex | fx)
+    log.info(
+        "faint-star radii: %.3f of the crop excluded by faint-star disks (tmag>=%s, bp_rp>=%s); %.3f total",
+        fx.mean(),
+        params.tessreduce_faint_star_tmag_min,
+        params.tessreduce_faint_star_bp_rp_min,
+        out.mean(),
+    )
+    return out
+
+
 def _diff_stage_dir(
     cfg: SynDiffConfig,
     ctx: PipelineInvocationContext,
@@ -1337,8 +1378,8 @@ def run_config_pipeline(
                 skip_existing=not force_rerun,
                 field_ctx=field_ctx,
                 mask_catalog=mask_catalog,
-                tessreduce_extra_exclude=_star_wing_exclusion_for_stage(
-                    cfg, ctx, kf_params.tessreduce_star_wing_radii, shared_mask.shape
+                tessreduce_extra_exclude=_background_exclusion_for_stage(
+                    cfg, ctx, kf_params, shared_mask.shape
                 ),
                 sector=int(cfg.sector) if cfg.sector is not None else None,
                 camera=int(cfg.camera) if cfg.camera is not None else None,
@@ -1467,8 +1508,12 @@ def run_config_pipeline(
                 tessreduce_boundary_rim_width=ks_params.tessreduce_boundary_rim_width,
                 tessreduce_star_mask_pad_px=ks_params.tessreduce_star_mask_pad_px,
                 tessreduce_star_wing_radii=ks_params.tessreduce_star_wing_radii,
-                tessreduce_extra_exclude=_star_wing_exclusion_for_stage(
-                    cfg, ctx, ks_params.tessreduce_star_wing_radii, shared_mask.shape
+                tessreduce_faint_star_radii=ks_params.tessreduce_faint_star_radii,
+                tessreduce_faint_star_tmag_min=ks_params.tessreduce_faint_star_tmag_min,
+                tessreduce_faint_star_bp_rp_min=ks_params.tessreduce_faint_star_bp_rp_min,
+                tessreduce_residual_exclude_percentile=ks_params.tessreduce_residual_exclude_percentile,
+                tessreduce_extra_exclude=_background_exclusion_for_stage(
+                    cfg, ctx, ks_params, shared_mask.shape
                 ),
                 diffs_dir=diff_dir,
                 diffs_label=diffs_l,

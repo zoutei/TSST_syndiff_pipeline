@@ -49,6 +49,16 @@ def _resolve_ps1_count_crop(
     return load_template_count_cropped(template_path, crop_bounds)
 
 
+def _apply_manual(mask: np.ndarray, crop_bounds: dict, settings: Any) -> np.ndarray:
+    """OR the SCC's manual regions (``settings.manual_masks``) into the static mask; no-op when there are none."""
+    regions = getattr(settings, "manual_masks", None)
+    if not regions:
+        return mask
+    from syndiff_pipeline.difference_imaging.masking.manual import apply_manual_masks
+
+    return apply_manual_masks(mask, crop_bounds, regions)
+
+
 def _write_shared_mask_fits(
     mask: np.ndarray,
     output_dir: str | Path,
@@ -236,6 +246,8 @@ def make_shared_mask(
                 int(no_ps1.sum()),
                 int(ps1_min_hit_count),
             )
+
+    mask = _apply_manual(mask, crop_bounds, mask_settings)
 
     if output_dir:
         _write_shared_mask_fits(
@@ -451,6 +463,7 @@ def build_static_mask(
         mask = paint_tns_bit(mask, tns_table, crop_bounds)
 
     mask = mask.astype(np.int16)
+    mask = _apply_manual(mask, crop_bounds, settings)
     if output_dir is not None:
         _write_shared_mask_fits(
             mask,
