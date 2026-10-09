@@ -88,3 +88,23 @@ def test_run_scene_applies_defect_mask_to_final_only(tmp_path):
     zb = np.load(b / "scene_bundle.npz")
     zf = np.load(f / "scene_bundle.npz")
     assert zb["valid"].sum() - zf["valid"].sum() == 10
+
+
+def test_mask_defects_demotes_only_stars_it_touched(tmp_path):
+    """A star that already fails the core rule but whose stamp the defect map misses keeps its role (run3_rf5 bug:
+    313 untouched F1 stars were demoted when the defect step re-applied the rule to every star)."""
+    src = tmp_path / "src"
+    make_scene(src)
+    z, meta = S._load(src)
+    v = z["valid"].copy()
+    v[1, :] = False                                       # star 1 (cx=14) already fails the rule, role 1
+    z["valid"] = v
+    role1 = int(z["role"][1])
+    assert role1 != 2
+    summ = S.mask_defects(z, meta, _defect_file(tmp_path / "d.fits.fz"))   # column 8: stars 0 and 4 only
+    assert z["role"][1] == role1 and summ["n_demoted"] == 2
+    assert sorted(meta["defect_mask"]["demoted_source_ids"]) == [1000, 1004]
+    z2, meta2 = S._load(src)
+    z2["valid"] = v.copy()
+    S.mask_defects(z2, meta2, _defect_file(tmp_path / "e.fits.fz", cols=()))   # empty map: nothing changes
+    assert z2["role"][1] == role1 and meta2["defect_mask"]["n_demoted"] == 0

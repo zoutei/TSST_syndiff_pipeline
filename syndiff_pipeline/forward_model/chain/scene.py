@@ -118,9 +118,11 @@ def strap_flags(meta: dict) -> np.ndarray:
     return (m & STRAP_BIT) != 0
 
 
-def _mask_pixels(z: dict, meta: dict, flags: np.ndarray):
+def _mask_pixels(z: dict, meta: dict, flags: np.ndarray, touched_only: bool = False):
     """valid &= ~flags at each stamp pixel (crop-local map), then scene_export's demotion rule (core pixels <
-    ``min_core_valid`` or centre invalid -> role 2). Updates ``z`` and ``meta['n_roles']``; returns (stats, demoted)."""
+    ``min_core_valid`` or centre invalid -> role 2). ``touched_only``: only stars whose stamp this step masked can be
+    demoted (otherwise any star already failing the rule is demoted too). Updates ``z`` and ``meta['n_roles']``;
+    returns (stats, demoted)."""
     S = int(z["stamp"])
     h = S // 2
     k = np.arange(S * S)
@@ -138,6 +140,8 @@ def _mask_pixels(z: dict, meta: dict, flags: np.ndarray):
     centre_ok = valid[:, (S * S) // 2]
     role0 = z["role"].copy()
     dem = (role0 != 2) & ((n_core_valid < int(meta["min_core_valid"])) | ~centre_ok)
+    if touched_only:
+        dem &= (valid0 & st).any(1)
     role = role0.copy()
     role[dem] = 2
     z["valid"] = valid
@@ -172,7 +176,7 @@ def mask_defects(z: dict, meta: dict, defect_mask: Path | str) -> dict:
     from astropy.io import fits
 
     flags = np.asarray(fits.getdata(defect_mask, 1)) != 0
-    stats, dem = _mask_pixels(z, meta, flags)
+    stats, dem = _mask_pixels(z, meta, flags, touched_only=True)   # never re-demote stars this step did not touch
     meta["defect_mask"] = dict(path=os.path.abspath(defect_mask), date=_dt.date.today().isoformat(),
                                sha256=hashlib.sha256(Path(defect_mask).read_bytes()).hexdigest(),
                                n_defect_px=int(flags.sum()), **stats, demoted_source_ids=z["source_id"][dem].tolist())
