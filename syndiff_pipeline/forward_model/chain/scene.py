@@ -118,21 +118,17 @@ def strap_flags(meta: dict) -> np.ndarray:
     return (m & STRAP_BIT) != 0
 
 
-def mask_straps(z: dict, meta: dict, src_dir: Path | str = "", strap: np.ndarray | None = None,
-                reason: str = "strap columns biased in the difference image") -> dict:
-    """valid &= ~strap at each stamp pixel, then scene_export's demotion rule. No-op if already masked."""
-    if meta.get("straps_masked"):
-        return {"skipped": "scene already has straps_masked=true"}
-    if strap is None:
-        strap = strap_flags(meta)
+def _mask_pixels(z: dict, meta: dict, flags: np.ndarray):
+    """valid &= ~flags at each stamp pixel (crop-local map), then scene_export's demotion rule (core pixels <
+    ``min_core_valid`` or centre invalid -> role 2). Updates ``z`` and ``meta['n_roles']``; returns (stats, demoted)."""
     S = int(z["stamp"])
     h = S // 2
     k = np.arange(S * S)
     px = z["cx"][:, None] + (k % S - h)[None]
     py = z["cy"][:, None] + (k // S - h)[None]
-    inarr = (px >= 0) & (px < strap.shape[1]) & (py >= 0) & (py < strap.shape[0])
+    inarr = (px >= 0) & (px < flags.shape[1]) & (py >= 0) & (py < flags.shape[0])
     st = np.zeros_like(inarr)
-    st[inarr] = strap[py[inarr], px[inarr]]
+    st[inarr] = flags[py[inarr], px[inarr]]
     valid0 = np.asarray(z["valid"], bool)
     valid = valid0 & ~st
     off = np.arange(S) - h
@@ -146,15 +142,41 @@ def mask_straps(z: dict, meta: dict, src_dir: Path | str = "", strap: np.ndarray
     role[dem] = 2
     z["valid"] = valid
     z["role"] = role
-    meta["straps_masked"] = True
-    meta["masked_bits"] = sorted(set(meta["masked_bits"]) | {STRAP_BIT})
     meta["n_roles"] = {"contrib": int((role == 0).sum()), "anchor": int((role == 1).sum()),
                        "nuisance": int((role == 2).sum())}
+    stats = dict(n_stamp_px_masked=int((valid0 & st).sum()), frac_valid_removed=float((valid0 & st).sum() / valid0.sum()),
+                 n_demoted=int(dem.sum()))
+    return stats, dem
+
+
+def mask_straps(z: dict, meta: dict, src_dir: Path | str = "", strap: np.ndarray | None = None,
+                reason: str = "strap columns biased in the difference image") -> dict:
+    """valid &= ~strap at each stamp pixel, then scene_export's demotion rule. No-op if already masked."""
+    if meta.get("straps_masked"):
+        return {"skipped": "scene already has straps_masked=true"}
+    if strap is None:
+        strap = strap_flags(meta)
+    stats, dem = _mask_pixels(z, meta, strap)
+    meta["straps_masked"] = True
+    meta["masked_bits"] = sorted(set(meta["masked_bits"]) | {STRAP_BIT})
     meta["strap_mask"] = dict(source_scene=str(src_dir), date=_dt.date.today().isoformat(), reason=reason,
-                              n_stamp_px_masked=int((valid0 & st).sum()),
-                              frac_valid_removed=float((valid0 & st).sum() / valid0.sum()),
-                              n_demoted=int(dem.sum()), demoted_source_ids=z["source_id"][dem].tolist())
+                              **stats, demoted_source_ids=z["source_id"][dem].tolist())
     return {k_: v for k_, v in meta["strap_mask"].items() if k_ != "demoted_source_ids"}
+
+
+def mask_defects(z: dict, meta: dict, defect_mask: Path | str) -> dict:
+    """``inputs.defect_mask`` (crop-local uint8, HDU 1, nonzero = saturation bleed / bad column): valid &= ~defect,
+    then the demotion rule. Recorded in ``meta['defect_mask']``."""
+    import hashlib
+
+    from astropy.io import fits
+
+    flags = np.asarray(fits.getdata(defect_mask, 1)) != 0
+    stats, dem = _mask_pixels(z, meta, flags)
+    meta["defect_mask"] = dict(path=os.path.abspath(defect_mask), date=_dt.date.today().isoformat(),
+                               sha256=hashlib.sha256(Path(defect_mask).read_bytes()).hexdigest(),
+                               n_defect_px=int(flags.sum()), **stats, demoted_source_ids=z["source_id"][dem].tolist())
+    return {k_: v for k_, v in meta["defect_mask"].items() if k_ != "demoted_source_ids"}
 
 
 # hp_d pixels more negative than this many sigma are not a star (stars are positive in hp_d: T<13 are removed from the
@@ -218,9 +240,10 @@ def mask_negative_outliers(z: dict, meta: dict, nsigma: float = NEG_SIGMA_MASK) 
 
 # ---------------------------------------------------------------------- composed
 def build_scene(src_dir: str | Path, out_dir: str | Path, hp_d: str | Path | None = None,
-                exclusion_csv: str | Path | None = None, strap_mask: bool = False, exclusion_strict: bool = False) -> dict:
-    """swap (if ``hp_d``; then guard + negative-outlier mask) -> demote (if csv) -> strap mask (if flag); writes
-    ``out_dir``. Returns a summary dict."""
+                exclusion_csv: str | Path | None = None, strap_mask: bool = False, exclusion_strict: bool = False,
+                defect_mask: str | Path | None = None) -> dict:
+    """swap (if ``hp_d``; then guard + negative-outlier mask) -> demote (if csv) -> strap mask (if flag) -> defect
+    mask (if given); writes ``out_dir``. Returns a summary dict."""
     z, meta = _load(Path(src_dir))
     summ: dict = {}
     if hp_d is not None:
@@ -232,6 +255,8 @@ def build_scene(src_dir: str | Path, out_dir: str | Path, hp_d: str | Path | Non
         summ["demoted"] = {k: meta["demoted"][k] for k in ("n_listed", "n_matched_in_scene", "n_listed_not_in_scene")}
     if strap_mask:
         summ["strap_mask"] = mask_straps(z, meta, src_dir=Path(src_dir))
+    if defect_mask is not None:
+        summ["defect_mask"] = mask_defects(z, meta, defect_mask)
     _save(Path(out_dir), z, meta)
     summ["n_roles"] = meta["n_roles"]
     return summ
@@ -261,14 +286,18 @@ def run_scene(cfg: ChainConfig, which: str, hp_d: str | Path | None = None, forc
         else:
             hp_d = find_hp_d(cfg.stage_dir("final"), cfg.stem)
     (stage / "DONE").unlink(missing_ok=True)
+    # the defect mask belongs to the final image (the bootstrap image predates it): scene_final only
+    defect = getattr(cfg.inputs, "defect_mask", None) if which == "final" else None
     summ = build_scene(src, stage, hp_d=hp_d, exclusion_csv=cfg.inputs.exclusion_csv, strap_mask=cfg.inputs.strap_mask,
-                       exclusion_strict=cfg.inputs.exclusion_strict)
+                       exclusion_strict=cfg.inputs.exclusion_strict, defect_mask=defect)
     print(f"[scene_{which}] {summ}")
     ins = {"source_scene_bundle": Path(src) / "scene_bundle.npz", "source_scene_meta": Path(src) / "scene_meta.json",
            "hp_d": hp_d}
     if cfg.inputs.exclusion_csv:
         ins["exclusion_csv"] = cfg.inputs.exclusion_csv     # path + sha256 (small file)
         ins["exclusion_counts"] = {"strict": cfg.inputs.exclusion_strict, **summ["demoted"]}
+    if defect is not None:
+        ins["defect_mask"] = defect
     write_provenance(stage, cfg, ins)
     mark_done(stage)
     return stage
