@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -64,6 +64,10 @@ class MaskSettings:
     shared: SharedMaskSettings = field(default_factory=SharedMaskSettings)
     tns: TnsMaskSettings = field(default_factory=TnsMaskSettings)
     asteroids: AsteroidMaskSettings = field(default_factory=AsteroidMaskSettings)
+    # Manual extra-mask file (masking/manual.py); None = {site_dir}/manual_masks.yaml when present.
+    manual_mask_file: Optional[str] = None
+    # Validated regions of this SCC, attached by generate_shared_mask_catalog (never read from YAML).
+    manual_masks: Optional[list] = None
 
 
 def _merge_dataclass(cls, data: dict | None, *, defaults: Any = None):
@@ -104,11 +108,13 @@ def mask_settings_from_dict(raw: dict | None) -> MaskSettings:
         raise ValueError(
             f"faint_maglim ({shared.faint_maglim}) must be >= bright_maglim ({shared.bright_maglim})"
         )
+    mmf = raw.get("manual_mask_file")
     return MaskSettings(
         geometry_file=str(geo) if geo else None,
         shared=shared,
         tns=tns,
         asteroids=asteroids,
+        manual_mask_file=str(mmf) if mmf else None,
     )
 
 
@@ -176,17 +182,20 @@ def apply_stage_overrides(
         shared.strapsize = int(strapsize)
     if ps1_min_hit_count is not None:
         shared.ps1_min_hit_count = int(ps1_min_hit_count)
-    return MaskSettings(
-        geometry_file=settings.geometry_file,
-        shared=shared,
-        tns=settings.tns,
-        asteroids=settings.asteroids,
-    )
+    return replace(settings, shared=shared)
 
 
 def mask_settings_to_dict(settings: MaskSettings) -> dict[str, Any]:
     """Serialize for freeze YAML (omit code-default URLs)."""
     d = asdict(settings)
+    # Manual-mask keys enter the dict (and so the shared_mask recipe) only when set.
+    mm = d.pop("manual_masks", None)
+    if not d.get("manual_mask_file"):
+        d.pop("manual_mask_file", None)
+    if mm:
+        from syndiff_pipeline.difference_imaging.masking.manual import regions_for_recipe
+
+        d["manual_masks"] = regions_for_recipe(mm)
     if d.get("tns", {}).get("download_url") == DEFAULT_TNS_PUBLIC_ZIP_URL:
         d["tns"].pop("download_url", None)
     if d.get("asteroids", {}).get("orbit_times_url") == DEFAULT_TESS_ORBIT_TIMES_URL:
@@ -199,7 +208,9 @@ def write_mask_settings(settings: MaskSettings, path: str | Path) -> Path:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(mask_settings_to_dict(settings), fh, sort_keys=False, default_flow_style=False)
+        d = mask_settings_to_dict(settings)
+        d.pop("manual_masks", None)  # frozen separately as {lane}/manual_masks.yaml
+        yaml.safe_dump(d, fh, sort_keys=False, default_flow_style=False)
     return path.resolve()
 
 

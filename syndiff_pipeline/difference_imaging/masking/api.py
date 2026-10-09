@@ -80,6 +80,21 @@ def generate_shared_mask_catalog(
         strapsize=strapsize,
         ps1_min_hit_count=ps1_min_hit_count,
     )
+    from dataclasses import replace
+
+    from syndiff_pipeline.difference_imaging.masking.manual import (
+        freeze_manual_masks,
+        load_manual_regions,
+        resolve_manual_mask_path,
+    )
+
+    manual_path = resolve_manual_mask_path(settings.manual_mask_file, site_dir)
+    if manual_path is not None:
+        regions = load_manual_regions(manual_path, sector, camera, ccd)
+        if regions:
+            settings = replace(settings, manual_masks=regions)
+            freeze_manual_masks(regions, lane_root, sector, camera, ccd)
+            log.info("manual masks: %d region(s) for s%04d c%d k%d from %s", len(regions), sector, camera, ccd, manual_path)
     write_mask_settings(settings, lane_root / "mask_settings.yaml")
 
     tns_table = None

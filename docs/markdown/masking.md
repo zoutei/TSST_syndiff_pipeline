@@ -95,6 +95,36 @@ Two freeze locations (do not confuse them):
 - `runs/{run_id}/mask_settings.yaml` — on submit, a copy of the **site** sibling
   only (audit trail; not post-override effective settings).
 
+## Manual extra masks (`manual_masks.yaml`)
+
+Hand-listed bad columns, rectangles and circles per SCC, OR-ed into the static shared mask (both `style` paths) before
+`shared_mask.fits` is written. Default file `config/manual_masks.yaml` (`{site_dir}/manual_masks.yaml`); override with
+`manual_mask_file:` in `mask_settings.yaml` (relative paths resolve under the site dir). No file, or no entry for the
+SCC: the mask and its recipe id are bit-identical to before.
+
+```yaml
+version: 1
+masks:
+  - sector: 24
+    camera: 2
+    ccd: 2
+    regions:
+      - {kind: column, x: 1067, reason: "bad column"}
+      - {kind: column, x: 468, y: [0, 2048], reason: "..."}
+      - {kind: rect, x: [780, 798], y: [450, 756], bit: sat_cross, reason: "saturation bleed"}
+      - {kind: circle, x: 100.5, y: 200.5, r: 6, reason: "..."}
+```
+
+* Coordinates are **full-FFI 0-based** science-array pixels (the frame of `crop_bounds`), ranges `[min, max)`; the
+  crop-local position is `x - x_min`, `y - y_min`. Parts outside the crop are clipped. A column's `y` defaults to its
+  full length; `x` may also be `[min, max)`. A circle covers pixels with `(x-cx)^2 + (y-cy)^2 <= r^2`.
+* `bit` defaults to `edge` (8, an unusable detector pixel masked by every consumer); `sat_cross` (2) is the only other
+  choice.
+* Strict validation: unknown keys or kinds, a missing `reason`, bad ranges or a non-positive radius raise `ValueError`
+  naming the entry. Entries for other SCCs are ignored (their `regions` are not parsed).
+* The SCC's entries are frozen as `{lane}/manual_masks.yaml` (chmod 444), the pixel count per region is logged, and the
+  regions enter the `shared_mask` recipe fingerprint (as `manual_masks`) only when present.
+
 ## Artifacts
 
 | Artifact | Location |

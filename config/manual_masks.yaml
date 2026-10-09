@@ -1,0 +1,15 @@
+# Manual extra masks, OR-ed into the static shared mask of the matching SCC (see docs/markdown/masking.md).
+# Coordinates are FULL-FFI 0-based science-array pixels (not crop-local); ranges are [min, max).
+# Default bit is EDGE (8) for every kind; `bit: sat_cross` (2) is the other choice. `reason` is required.
+#
+# masks:
+#   - sector: 24
+#     camera: 2
+#     ccd: 2
+#     regions:
+#       - {kind: column, x: 1067, reason: "bad column"}                       # full length
+#       - {kind: column, x: 468, y: [0, 2048], reason: "bad column"}
+#       - {kind: rect, x: [780, 798], y: [450, 756], bit: sat_cross, reason: "saturation bleed"}
+#       - {kind: circle, x: 100.5, y: 200.5, r: 6, reason: "hot spot"}
+version: 1
+masks: []
