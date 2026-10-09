@@ -67,6 +67,7 @@ class InputsCfg:
     exclusion_csv: Path | None = None
     exclusion_strict: bool = False       # True: every listed source_id must be in the scene (old e2e assert)
     strap_mask: bool = False
+    defect_mask: Path | None = None      # crop-local 2048^2 uint8 (HDU 1), nonzero = defect; final image + scene_final
     bootstrap_mapping: Path | None = None
     band_cells: Path | None = None
     adopted_weights: Path | None = None
@@ -373,7 +374,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         raise ConfigError("code.pythonpath_extra must be a list of absolute paths")
     code = CodeCfg(sha, fm_root, tuple(_path(e, "code.pythonpath_extra[]", required=True) for e in extra))
 
-    ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "bootstrap_mapping",
+    ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "defect_mask", "bootstrap_mapping",
                                   "band_cells", "adopted_weights", "init_params", "bootstrap_hp_d", "colour_map", "xp_synth",
                                   "scorer_dir", "pass2_hp", "combined_store_weights", "skylist", "lane_dir"}, required=True)
     cmap = ip.get("colour_map")
@@ -399,6 +400,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         exclusion_csv=_path(ip.get("exclusion_csv"), "inputs.exclusion_csv"),
         exclusion_strict=_bool(ip.get("exclusion_strict", False), "inputs.exclusion_strict"),
         strap_mask=_bool(ip.get("strap_mask", False), "inputs.strap_mask"),
+        defect_mask=_path(ip.get("defect_mask"), "inputs.defect_mask"),
         bootstrap_mapping=_path(ip.get("bootstrap_mapping"), "inputs.bootstrap_mapping"),
         band_cells=_path(ip.get("band_cells"), "inputs.band_cells"),
         adopted_weights=_path(ip.get("adopted_weights"), "inputs.adopted_weights"),

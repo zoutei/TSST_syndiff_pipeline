@@ -182,7 +182,11 @@ def run(cfg, variants: Optional[Sequence[str]] = None, workers: int = 8, force: 
     if all((P.final / s / v / "hp_d" / f"{s}_hp_d.fits.fz").is_file() for s in P.frames for v in VARIANTS):
         write_provenance(stage, cfg, {"band_templates": P.band_templates / "sum_check.json",
                                       "kernels": P.kernels / "band_epsf.npz", "adopted_weights": cfg.inputs.adopted_weights,
-                                      "store_band_weights": store_weights(cfg)})
+                                      "store_band_weights": store_weights(cfg),
+                                      # inputs.defect_mask reaches the match selection and the output mask through the
+                                      # Hotpants reference mask plane (hotpants_ref.DEFECT_BIT)
+                                      **({"defect_mask": cfg.inputs.defect_mask}
+                                         if getattr(cfg.inputs, "defect_mask", None) is not None else {})})
         mark_done(stage)
     return stage
 
