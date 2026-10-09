@@ -196,3 +196,24 @@ def test_non_trigger_gaia_in_trigger_core_is_kept_and_flagged():
     assert flags == {'gaia:111': False, 'gaia:7': True}
     assert list(ex.canonical_entity) == []                                        # PS1 rows in a core are not listed at all
     assert 'ps1:71' not in set(nb.canonical_entity)                               # trigger's split detection not a neighbour
+
+
+def test_trigger_with_centre_in_support_but_no_finite_change_is_listed():
+    cand = pd.DataFrame(dict(gaia_key=['gaia:222'], ps1_entity_key=['ps1:22'], ps1_obj_id=['22'],
+                             status=['accepted_unique_calibrated']))
+    nochange = dict(centre_status='selected_no_finite_change', pixel_x=5., pixel_y=5., ra=1., dec=2.)
+    src = _src([dict(source_key='gaia:222', entity_key='gaia:222', catalogue='gaia_dr3', phot_g_mean_mag=11., phot_bp_mean_mag=11.5,
+                     phot_rp_mean_mag=10.5, **nochange),                                                      # trigger, centre in support
+                dict(source_key='ps1det:p', entity_key='ps1:22', catalogue='ps1_dr2_stack',
+                     **{**nochange, 'centre_status': 'centre_removed'}),                                      # its accepted PS1 detection
+                dict(source_key='gaia:333', entity_key='gaia:333', catalogue='gaia_dr3', phot_g_mean_mag=16., phot_bp_mean_mag=16.5,
+                     phot_rp_mean_mag=15.5, **nochange)])                                                     # non-trigger, not removed
+    assoc = pd.DataFrame(dict(source_key=['gaia:222', 'ps1det:p', 'gaia:333'], region_id=['p:1'] * 3,
+                              reason=['catalog'] * 3, association_status=['centre_membership'] * 3))
+    regions = pd.DataFrame(dict(region_id=['p:1'], trigger_declared=['222'], trigger_centre_evidence=['support']))
+    nb, ex = rv.build_neighbours(src, assoc, regions, cand, lambda s: np.ones(len(s), int), 'cell', 'F')
+    assert list(nb.canonical_entity) == ['gaia:222']                              # trigger listed; PS1 detection merged into it
+    row = nb.iloc[0]
+    assert row.link_kind == 'support_trigger' and row.source_key == 'gaia:222' and not row.in_trigger_core
+    assert row.n_rows_merged == 2
+    assert 'gaia:333' not in set(nb.canonical_entity)                             # a non-trigger needs a removed centre
