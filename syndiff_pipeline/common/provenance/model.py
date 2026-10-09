@@ -280,7 +280,12 @@ assert set(KIND_REGISTRY) == set(ALL_KINDS)
 def _asdict(obj: Any) -> dict:
     """``dataclasses.asdict`` for a stage-params dataclass, or pass through a dict."""
     if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-        return dataclasses.asdict(obj)
+        out = dataclasses.asdict(obj)
+        # Optional keys that must not perturb the recipe id while unset (see KernelFitParams).
+        for key in getattr(type(obj), "_RECIPE_OMIT_WHEN_NONE", ()):
+            if out.get(key) is None:
+                out.pop(key, None)
+        return out
     if isinstance(obj, Mapping):
         return dict(obj)
     raise TypeError(f"expected a dataclass instance or Mapping, got {type(obj)!r}")

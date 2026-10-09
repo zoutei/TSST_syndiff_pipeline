@@ -140,6 +140,9 @@ def _process_one_frame(task: tuple) -> dict:
         tessreduce_boundary_rim_width=int(p.get("tessreduce_boundary_rim_width", 1)),
         tessreduce_star_mask_pad_px=int(p.get("tessreduce_star_mask_pad_px", 0)),
         tessreduce_star_wing_radii=p.get("tessreduce_star_wing_radii"),
+        tessreduce_faint_star_radii=p.get("tessreduce_faint_star_radii"),
+        tessreduce_faint_star_tmag_min=p.get("tessreduce_faint_star_tmag_min"),
+        tessreduce_faint_star_bp_rp_min=p.get("tessreduce_faint_star_bp_rp_min"),
     )
 
     write_path: Optional[Path] = None
@@ -431,6 +434,9 @@ def kernel_subtract_loop(
     tessreduce_boundary_rim_width: int = 1,
     tessreduce_star_mask_pad_px: int = 0,
     tessreduce_star_wing_radii: Optional[list] = None,
+    tessreduce_faint_star_radii: Optional[list] = None,
+    tessreduce_faint_star_tmag_min: Optional[float] = None,
+    tessreduce_faint_star_bp_rp_min: Optional[float] = None,
     tessreduce_extra_exclude: Optional[np.ndarray] = None,
     bkg_dir: Optional[str] = None,
     bkg_label: Optional[str] = None,
@@ -510,6 +516,9 @@ def kernel_subtract_loop(
         "tessreduce_boundary_rim_width": int(tessreduce_boundary_rim_width),
         "tessreduce_star_mask_pad_px": int(tessreduce_star_mask_pad_px),
         "tessreduce_star_wing_radii": tessreduce_star_wing_radii,
+        "tessreduce_faint_star_radii": tessreduce_faint_star_radii,
+        "tessreduce_faint_star_tmag_min": tessreduce_faint_star_tmag_min,
+        "tessreduce_faint_star_bp_rp_min": tessreduce_faint_star_bp_rp_min,
         "tessreduce_extra_exclude": tessreduce_extra_exclude,
         "diffs_dir": diffs_dir,
         "bkg_dir": bkg_dir,

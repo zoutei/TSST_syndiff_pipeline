@@ -522,6 +522,15 @@ def run_kernel_fit(
         "tessreduce_boundary_rim_width": int(params.tessreduce_boundary_rim_width),
         "tessreduce_star_mask_pad_px": int(params.tessreduce_star_mask_pad_px),
         "tessreduce_star_wing_radii": params.tessreduce_star_wing_radii,
+        **(
+            {
+                "tessreduce_faint_star_radii": params.tessreduce_faint_star_radii,
+                "tessreduce_faint_star_tmag_min": params.tessreduce_faint_star_tmag_min,
+                "tessreduce_faint_star_bp_rp_min": params.tessreduce_faint_star_bp_rp_min,
+            }
+            if params.tessreduce_faint_star_radii
+            else {}
+        ),
         "reference_kernel_sum": float(reference_kernel_sum),
     }
     with open(meta_path, "w", encoding="utf-8") as fh:

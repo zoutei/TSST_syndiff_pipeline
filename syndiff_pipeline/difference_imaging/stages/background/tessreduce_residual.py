@@ -34,6 +34,7 @@ restore the previous behaviour for comparison.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 from copy import deepcopy
 
 import numpy as np
@@ -136,6 +137,41 @@ def star_wing_exclusion_from_catalog(catalog_csv: str, shape: tuple[int, int], r
 
     cat = pd.read_csv(catalog_csv, usecols=["x", "y", "tess_mag"])
     return star_wing_exclusion(shape, cat["x"].to_numpy(), cat["y"].to_numpy(), cat["tess_mag"].to_numpy(), radii)
+
+
+def faint_star_exclusion_from_catalog(
+    catalog_csv: str,
+    shape: tuple[int, int],
+    radii,
+    tmag_min: float,
+    bp_rp_min: Optional[float] = None,
+) -> np.ndarray:
+    """Disks around faint (optionally red) catalogue stars, dropped from the background fit.
+
+    Selection first: ``tess_mag >= tmag_min`` and, when ``bp_rp_min`` is not None, a finite
+    ``phot_bp_mean_mag - phot_rp_mean_mag >= bp_rp_min`` (NaN colour is not selected). The selected stars then get the
+    ``[[mag_hi, radius_px], ...]`` disks of ``star_wing_exclusion``. Columns: ``x``, ``y``, ``tess_mag`` and, for the
+    colour cut, ``phot_bp_mean_mag``/``phot_rp_mean_mag``.
+    """
+    import pandas as pd
+
+    parse_star_wing_radii(radii)
+    cols = ["x", "y", "tess_mag"]
+    if bp_rp_min is not None:
+        cols += ["phot_bp_mean_mag", "phot_rp_mean_mag"]
+        header = list(pd.read_csv(catalog_csv, nrows=0).columns)
+        missing = [c for c in cols if c not in header]
+        if missing:
+            raise ValueError(f"{catalog_csv}: faint-star colour cut (bp_rp_min={bp_rp_min}) needs columns {missing}")
+    cat = pd.read_csv(catalog_csv, usecols=cols)
+    t = cat["tess_mag"].to_numpy(dtype=float)
+    sel = np.isfinite(t) & (t >= float(tmag_min))
+    if bp_rp_min is not None:
+        c = cat["phot_bp_mean_mag"].to_numpy(dtype=float) - cat["phot_rp_mean_mag"].to_numpy(dtype=float)
+        sel &= np.isfinite(c) & (c >= float(bp_rp_min))
+    return star_wing_exclusion(
+        shape, cat["x"].to_numpy()[sel], cat["y"].to_numpy()[sel], t[sel], radii
+    )
 
 
 def sanitize_boundary_outliers(
