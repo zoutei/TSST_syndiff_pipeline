@@ -17,7 +17,7 @@ from syndiff_pipeline.forward_model import scene_fit as SF
 
 jax.config.update("jax_platform_name", "cpu")
 
-@pytest.fixture(autouse=True, params=["add", "mult"])
+@pytest.fixture(autouse=True, params=["add", "mult", "add@7.0"])
 def radial_mode(request):
     """Run every test in both radial modes (the mode is a trace-time module constant)."""
     old = EM.get_radial_mode()
@@ -550,3 +550,69 @@ def test_full_law_absent_identical_jaxpr_zero_match_and_warm_start_pad():
     g = np.asarray(jax.grad(lambda q: _loss(fx, q, ctxf))(pn)["chroma_g8"])
     for i, n in enumerate(FULL):
         assert abs(g[17 + len(NEW) + i]) > 0, n
+
+
+def test_outer_taper_window_and_mode_parsing():
+    """'add@R': bumps unchanged inside the last knot, cos^2 fade to exactly 0 at R, C1 at both ends; bad strings raise."""
+    assert EM.parse_radial_mode("add") == ("add", None)
+    assert EM.parse_radial_mode("add@7.0") == ("add", 7.0)
+    assert EM.parse_radial_mode("mult@6.5") == ("mult", 6.5)
+    for bad in ("add@", "add@x", "add@-1", "foo@7", "foo"):
+        with pytest.raises(ValueError):
+            EM.parse_radial_mode(bad)
+    kn = EM.RADIAL_KNOTS_DEFAULT
+    rho = np.linspace(0, 10, 2001)
+    B0 = EM.radial_bspline_basis(rho, kn)
+    Bt = EM.radial_bspline_basis(rho, kn, taper=7.0)
+    inner = rho <= kn[-1]
+    np.testing.assert_array_equal(Bt[:, inner], B0[:, inner])
+    assert np.all(Bt[:, rho >= 7.0] == 0)
+    w = EM.radial_taper(rho, kn[-1], 7.0)
+    assert np.all(np.diff(w) <= 1e-15) and w[0] == 1 and w[-1] == 0
+    dw = np.diff(w) / np.diff(rho)
+    assert abs(dw[np.searchsorted(rho, kn[-1])]) < 1e-2 and abs(dw[np.searchsorted(rho, 7.0) - 1]) < 1e-2
+    with pytest.raises(ValueError):
+        EM.radial_bspline_basis(rho, kn, taper=5.0)          # taper inside the last knot
+    a = SF.build_parser().parse_args(["--scene-dir", "s", "--out-dir", "o", "--chroma-radial-mode", "add@7.0"])
+    assert a.chroma_radial_mode == "add@7.0"
+    with pytest.raises(SystemExit):
+        SF.build_parser().parse_args(["--scene-dir", "s", "--out-dir", "o", "--chroma-radial-mode", "add@x"])
+
+
+def test_taper_removes_far_stamp_pedestal_of_outer_bump():
+    """With the taper the last radial generator carries no light beyond R (before gauging); without it, it does."""
+    G = 61
+    P = jnp.asarray(np.exp(-0.5 * (np.hypot(*np.meshgrid(EM._coord_np(G), EM._coord_np(G))) / 0.8) ** 2))
+    r = np.hypot(*np.meshgrid(EM._coord_np(G), EM._coord_np(G)))
+    old = EM.get_radial_mode()
+    try:
+        J = EM.n_radial_basis()
+        EM.set_radial_mode("add"); g0 = np.asarray(EM.radial_generator(P, J))
+        EM.set_radial_mode("add@7.0"); gt = np.asarray(EM.radial_generator(P, J))
+    finally:
+        EM.set_radial_mode(old)
+    far = r >= 7.0
+    if far.any():
+        assert np.abs(g0[far]).max() > 1e-6
+        assert np.abs(gt[far]).max() < 1e-9 + np.abs(np.asarray(P)[far] / float(np.sum(P))).max()
+
+
+def test_six_knot_extras_valid_from_ctx_with_default_global_knots():
+    """A 6-knot fit evaluated in a fresh process (global knots still the 5-knot default): the context's knots must be
+    applied before the extras names are validated, so rb6_* / rq6 are accepted (bug found by the STEP 1 smoke run)."""
+    old_k = EM.get_radial_knots()
+    try:
+        EM.set_radial_knots(EM.RADIAL_KNOTS_DEFAULT)
+        ex = A3 + ("rb6_0", "rb6_r", "rb6_r2", "rq6")
+        ctx = _fake_ctx(extras=ex)
+        ctx.chroma_radial_knots = EM.parse_radial_knots("0,0.35,0.7,1.5,3.0,5.5")
+        c = jnp.asarray(A3_VALS + [0.01, 0.0, 0.0, 0.0], jnp.float32)
+        f = L._chroma_g8_slot_terms({"chroma_g8": c}, ctx, jnp.arange(60))[3]
+        assert "rad6_raw" in f
+        assert EM.n_radial_basis() == 6
+        EM.set_radial_knots(EM.RADIAL_KNOTS_DEFAULT)
+        ctx.chroma_radial_knots = None                       # without the context knots rb6 is out of range
+        with pytest.raises(ValueError):
+            L._chroma_g8_slot_terms({"chroma_g8": c}, ctx, jnp.arange(60))
+    finally:
+        EM.set_radial_knots(old_k)

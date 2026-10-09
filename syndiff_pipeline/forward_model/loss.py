@@ -805,6 +805,17 @@ def has_chroma_g8(params: dict[str, jnp.ndarray]) -> bool:
     return all(k in params for k in CHROMA_G8_LEAVES)
 
 
+def _apply_ctx_radial_consts(ctx) -> None:
+    """Set the trace-time radial knots, radial mode (incl. taper) and coma knots from ``ctx`` (None = keep current).
+    Must run before any extras-name validation: the number of valid rb{j}/rq{j} names depends on the knots."""
+    knots = getattr(ctx, "chroma_radial_knots", None)
+    EM.set_radial_knots(EM.get_radial_knots() if knots is None else knots)   # trace-time constant
+    mode = getattr(ctx, "chroma_radial_mode", None)
+    EM.set_radial_mode(EM.get_radial_mode() if mode is None else mode)
+    ck = getattr(ctx, "chroma_coma_knots", None)
+    EM.set_coma_knots(EM.get_coma_knots() if ck is None else ck)
+
+
 def _radial_family_fields(radial, ctx, delta, r, nx, ny):
     """Per-slot weight vectors of the radial B-spline colour family (raw-P gauge only).
 
@@ -815,12 +826,7 @@ def _radial_family_fields(radial, ctx, delta, r, nx, ny):
     rcq{j}. Fields are created only for the j that have an extra present."""
     if ctx.chroma_g8_gauge != "raw":
         raise ValueError("the radial colour family (rb*/rq*/rc* extras) needs chroma_g8_gauge='raw'")
-    knots = getattr(ctx, "chroma_radial_knots", None)
-    EM.set_radial_knots(EM.get_radial_knots() if knots is None else knots)   # trace-time constant
-    mode = getattr(ctx, "chroma_radial_mode", None)
-    EM.set_radial_mode(EM.get_radial_mode() if mode is None else mode)
-    ck = getattr(ctx, "chroma_coma_knots", None)
-    EM.set_coma_knots(EM.get_coma_knots() if ck is None else ck)
+    _apply_ctx_radial_consts(ctx)
     rad, coma = {}, {}
     for name, val in radial.items():
         kind, j, sub = parse_radial_extra(name)
@@ -876,6 +882,7 @@ def _chroma_g8_slot_terms(params, ctx, star_occ):
         if int(c.shape[0]) != 8 + len(extras):
             raise ValueError(f"chroma_g8 has {int(c.shape[0])} values, extras {extras} need {8 + len(extras)}")
         x = dict(zip(extras, (c[8 + i] for i in range(len(extras)))))
+        _apply_ctx_radial_consts(ctx)          # the valid rb{j}/rq{j}/rc{j} range depends on the context's knots
         unknown = {n for n in x if not is_valid_g8_extra(n)}
         if unknown:
             raise ValueError(f"unknown chroma_g8 extras {sorted(unknown)}")

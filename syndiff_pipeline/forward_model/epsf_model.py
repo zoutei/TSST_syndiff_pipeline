@@ -2112,16 +2112,45 @@ def get_coma_knots() -> tuple:
 
 
 # Radial mode (trace-time constant): 'add' or 'mult' (above). Applies to the radial profiles only; coma is always mult.
+# Optional outer taper (2026-10-09, branch colour-rf5-20261009): '<mode>@R' (e.g. 'add@7.0') multiplies every radial
+# bump by w(rho) = 1 for rho <= k_last, cos^2(pi/2 (rho - k_last)/(R - k_last)) for k_last < rho < R, 0 beyond R
+# (C1-continuous), so the plateau beyond the last knot fades to zero by R px instead of acting as a colour-dependent
+# pedestal over the whole stamp. R must exceed the last radial knot. No '@' = no taper (the 10-08 behaviour).
 RADIAL_MODES = ("mult", "add")
 _RADIAL_MODE = "add"
 
 
+def parse_radial_mode(mode: str) -> tuple:
+    """``(base, taper)`` for a radial mode string: base in RADIAL_MODES, taper a float radius in px or None."""
+    base, sep, tail = str(mode).partition("@")
+    if base not in RADIAL_MODES:
+        raise ValueError(f"radial mode must be one of {RADIAL_MODES}, optionally '@<taper radius px>', got {mode!r}")
+    if not sep:
+        return base, None
+    try:
+        taper = float(tail)
+    except ValueError:
+        raise ValueError(f"radial mode taper must be a number of px, got {mode!r}") from None
+    if not np.isfinite(taper) or taper <= 0:
+        raise ValueError(f"radial mode taper must be a positive radius in px, got {mode!r}")
+    return base, taper
+
+
+def radial_mode_arg(mode: str) -> str:
+    """argparse type for --chroma-radial-mode: validates and returns the string unchanged."""
+    import argparse
+    try:
+        parse_radial_mode(mode)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return str(mode)
+
+
 def set_radial_mode(mode: str) -> str:
     global _RADIAL_MODE
-    if mode not in RADIAL_MODES:
-        raise ValueError(f"radial mode must be one of {RADIAL_MODES}, got {mode!r}")
-    _RADIAL_MODE = mode
-    return mode
+    parse_radial_mode(mode)
+    _RADIAL_MODE = str(mode)
+    return _RADIAL_MODE
 
 
 def get_radial_mode() -> str:
@@ -2141,11 +2170,25 @@ def _bspline3(s):
     return np.where(a < 1, 2 / 3 - a ** 2 + a ** 3 / 2, np.where(a < 2, (2 - a) ** 3 / 6, 0.0))
 
 
-def radial_bspline_basis(rho, knots=None) -> np.ndarray:
-    """Warped-coordinate cubic B-spline bumps ``(J, *rho.shape)`` (numpy); see the section comment."""
+def radial_taper(rho, k_last: float, taper) -> np.ndarray:
+    """Outer window w(rho) of the radial bumps (see the radial-mode comment); all ones when ``taper`` is None."""
+    rho = np.asarray(rho, dtype=np.float64)
+    if taper is None:
+        return np.ones_like(rho)
+    if taper <= k_last:
+        raise ValueError(f"radial taper radius {taper} px must exceed the last radial knot {k_last} px")
+    t = np.clip((rho - k_last) / (taper - k_last), 0.0, 1.0)
+    return np.where(t >= 1.0, 0.0, np.cos(0.5 * np.pi * t) ** 2)      # exact zero at and beyond R
+
+
+def radial_bspline_basis(rho, knots=None, taper=None) -> np.ndarray:
+    """Warped-coordinate cubic B-spline bumps ``(J, *rho.shape)`` (numpy); see the section comment.
+    ``taper`` (px or None) applies the outer window ``radial_taper``."""
     kn = np.asarray(parse_radial_knots(_RADIAL_KNOTS if knots is None else knots), dtype=np.float64)
-    s = np.interp(np.asarray(rho, dtype=np.float64), kn, np.arange(len(kn)))
-    return np.stack([_bspline3(s - j) for j in range(len(kn))])
+    rho = np.asarray(rho, dtype=np.float64)
+    s = np.interp(rho, kn, np.arange(len(kn)))
+    w = radial_taper(rho, float(kn[-1]), taper)
+    return np.stack([_bspline3(s - j) * w for j in range(len(kn))])
 
 
 _RADIAL_GRID_CACHE: dict = {}
@@ -2157,23 +2200,24 @@ def _coord_np(g_size: int) -> np.ndarray:
     return (np.arange(int(g_size), dtype=np.float64) - node_center_for_grid(int(g_size))) / OVERSAMPLE
 
 
-def _radial_grid_consts(g_size: int, knots: tuple):
-    """(basis (J, G, G), X (1, G), Y (G, 1)) numpy constants for knots ``knots`` on the G x G node grid."""
-    key = (g_size, knots)
+def _radial_grid_consts(g_size: int, knots: tuple, taper=None):
+    """(basis (J, G, G), X (1, G), Y (G, 1)) numpy constants for knots ``knots`` (and outer taper) on the G x G grid."""
+    key = (g_size, knots, taper)
     if key not in _RADIAL_GRID_CACHE:
         ax = _coord_np(g_size)
         X, Y = ax[None, :], ax[:, None]
-        _RADIAL_GRID_CACHE[key] = (radial_bspline_basis(np.hypot(X, Y), knots), X, Y)
+        _RADIAL_GRID_CACHE[key] = (radial_bspline_basis(np.hypot(X, Y), knots, taper), X, Y)
     return _RADIAL_GRID_CACHE[key]
 
 
 def radial_generator(node_field: jnp.ndarray, j: int) -> jnp.ndarray:
     """Ungauged flux-neutral radial profile, j = 1-based: ``B_j/sum(B_j) - P0/sum(P0)`` (add) or ``P0 (B_j - m_j)`` (mult)."""
-    B, _, _ = _radial_grid_consts(int(node_field.shape[-1]), _RADIAL_KNOTS)
+    base, taper = parse_radial_mode(_RADIAL_MODE)
+    B, _, _ = _radial_grid_consts(int(node_field.shape[-1]), _RADIAL_KNOTS, taper)
     if not 1 <= j <= B.shape[0]:
         raise ValueError(f"radial basis index {j} outside 1..{B.shape[0]} for knots {_RADIAL_KNOTS}")
     Bj = jnp.asarray(B[j - 1], node_field.dtype)
-    if _RADIAL_MODE == "add":
+    if base == "add":
         # unit-flux ring minus the PSF shape (as rb.py: ring_j / sum(ring_j) * sum(T) - T): flux neutrality comes from
         # subtracting P0, NOT a uniform sheet (which would be a colour x background term). The P0 term carries no
         # gradient and is removed again by the P0 projection of the gauge; it is kept for exact flux neutrality.

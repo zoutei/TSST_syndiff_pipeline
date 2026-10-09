@@ -1049,6 +1049,12 @@ def run(args):
     resolve_g8_defaults(args, out)
     g8_extras = g8_extras_tuple(args.chroma_g8_extras, args.chroma_g8_blur_order, args.chroma_g8_no_dil)
     args.chroma_g8_extras = ",".join(g8_extras)                     # fit_meta records what was used
+    # knots/mode first: the valid rb{j}/rq{j}/rc{j} names depend on them (a 6-knot run has rb6_*)
+    radial_knots = EM.set_radial_knots(args.chroma_radial_knots)    # trace-time constant for rb*/rq*/rc* extras
+    args.chroma_radial_knots = ",".join(repr(v) for v in radial_knots)
+    coma_knots = EM.set_coma_knots(args.chroma_coma_knots)
+    args.chroma_coma_knots = ",".join(repr(v) for v in coma_knots)
+    radial_mode = EM.set_radial_mode(args.chroma_radial_mode)       # recorded in fit_meta; a warm start must match
     bad_extras = [e for e in g8_extras if not L.is_valid_g8_extra(e)]
     if bad_extras:
         raise ValueError(f"unknown --chroma-g8-extras {bad_extras}")
@@ -1056,11 +1062,6 @@ def run(args):
     args.chroma_g8_drop = ",".join(g8_drop)                         # fit_meta records what was used
     g8_freeze = g8_freeze_mask(args.chroma_g8_freeze, g8_extras)
     args.chroma_g8_freeze = ",".join(n.strip() for n in args.chroma_g8_freeze.split(",") if n.strip())
-    radial_knots = EM.set_radial_knots(args.chroma_radial_knots)    # trace-time constant for rb*/rq*/rc* extras
-    args.chroma_radial_knots = ",".join(repr(v) for v in radial_knots)
-    coma_knots = EM.set_coma_knots(args.chroma_coma_knots)
-    args.chroma_coma_knots = ",".join(repr(v) for v in coma_knots)
-    radial_mode = EM.set_radial_mode(args.chroma_radial_mode)       # recorded in fit_meta; a warm start must match
     if any(L.parse_radial_extra(e) for e in g8_extras):
         bad_j = [e for e in g8_extras if L.parse_radial_extra(e) and L.parse_radial_extra(e)[1] >
                  (EM.n_coma_basis() if L.parse_radial_extra(e)[0] in ("rc", "rcq") else EM.n_radial_basis())]
@@ -1612,10 +1613,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "(j = 1..len(knots)); default 0.8,2.2,5.0. Coma is always multiplicative (P0 C_j rho cos/sin "
                         "theta, then Gram-Schmidt off P0, dP0/dx, dP0/dy). Recorded in fit_meta; a warm start with "
                         "radial extras must match.")
-    p.add_argument("--chroma-radial-mode", choices=EM.RADIAL_MODES, default=None,
+    p.add_argument("--chroma-radial-mode", type=EM.radial_mode_arg, default=None,
                    help="form of the RADIAL profiles (rb*/rq*): 'add' (default for new runs) = additive B_j(rho) - "
                         "mean(B_j) projected off P0; 'mult' = P0-weighted P0 (B_j - m_j). The coma (rc*) is always "
-                        "multiplicative. Recorded in fit_meta.json; a warm start with radial extras must match.")
+                        "multiplicative. Optional '@R' (e.g. 'add@7.0') tapers every radial bump to zero between the "
+                        "last radial knot and R px (cos^2 window) instead of the constant plateau. Recorded in "
+                        "fit_meta.json; a warm start with radial extras must match.")
     p.add_argument("--chroma-g8-freeze", default=None,
                    help="comma list of chroma_g8 slots to hold at their starting (warm-start) values: base names "
                         "s0,s1,s2,k0,k1,b,eps,t and any --chroma-g8-extras name (e.g. sq0,sq1). Their gradient is "
