@@ -110,6 +110,7 @@ def main(argv=None):
     np.savez(o / "params_init.npz", **out)
     meta = {"chroma_g8_gauge": dm.get("chroma_g8_gauge", "raw"), "chroma_g8_extras": dm.get("chroma_g8_extras", ""),
             "chroma_g8_blur_order": dm.get("chroma_g8_blur_order", 0), "chroma_g8_no_dil": dm.get("chroma_g8_no_dil", False),
+            "chroma_g8_drop": dm.get("chroma_g8_drop", ""), "chroma_radial_knots": dm.get("chroma_radial_knots"),
             "crossfit_init": dict(route=a.route, donor_fit=str(donor), donor_scene=dm["scene_dir"],
                                   donor_frame=dm.get("scene_meta", {}).get("frame_stem"),
                                   target_scene=a.scene_dir, target_frame=scene_meta.get("frame_stem"),

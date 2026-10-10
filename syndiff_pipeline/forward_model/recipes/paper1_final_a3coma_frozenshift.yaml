@@ -1,0 +1,31 @@
+# CONTINUATION recipes (colour-radial-20261008). Start from a CONVERGED paper1_final fit, e.g.
+#   --init-params-file <field>/fits/foldK/params.npz   (its fit_meta.json beside it gives the A3 extras; the new extras are
+#   zero-padded, so step 0 reproduces the A3 loss) with the same --scene-dir / --colour-file as the original fit, and the
+#   CCD-adapter install of launch_final.py. The whole schedule is ONE stage: steps-per-stage 0,0,N skips the WCS-only
+#   and ePSF-only stages (stage 3 trains ePSF base, modes, w(t) and the colour vector; fluxes are solved in closed form).
+#   --freeze-wcs holds wcs_coeff fixed in every stage.
+# A3 as is + coma rc1..rc3 only, warm start, shift and WCS frozen. Compare against paper1_final_continue (control).
+role: "ISOLATES COMA: A3 round terms kept, shift (s0,s1,s2,sq0,sq1) and WCS frozen, only rc1..rc3 added (no rb extras); warm start from a converged paper1_final fit"
+scene_fit:
+  chroma-model: global8
+  colour-gauge: global
+  chroma-axis: tesspoint
+  chroma-radial-mode: add
+  chroma-g8-freeze: s0,s1,s2,sq0,sq1
+  freeze-wcs: true
+  chroma-g8-extras: dil_r,sq0,sq1,q1_0,q1_x,q1_y,q2_0,q2_x,q2_y,rc1,rc2,rc3
+  huber-delta: 1.0e6
+  reject-every: 0
+  lambda-lap: 1.0e-2
+  lambda-pixel-lap: 1.0e-2
+  lambda-fine-nbr: 0
+  lambda-local-poly: 3.0e8
+  local-poly-window: 7
+  lr-per-stage: 1e-3,3e-4,1e-4
+  epsf-lr-scale: 2.5
+  chroma-lr-scale: 10
+  stop-rule: smoothed
+  steps-per-stage: 0,0,20000
+  star-weight-cap-tmag: 10.5
+  anchors-train-epsf: true
+  checkpoint-every: 100

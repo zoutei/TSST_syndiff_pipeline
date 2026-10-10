@@ -2051,6 +2051,256 @@ def chroma_shear_field_raw(node_field, *, weight_grid=None):
     return _gauge_off_raw_base(shear_generator(node_field), node_field, weight_grid)
 
 
+# ---------------------------------------------------------------------------
+# Colour radial-profile family (2026-10-08, branch colour-radial-20261008).
+#
+# Generators for the named chroma_g8 extras rb{j}_0 / rb{j}_r / rq{j} (radial profile) and rc{j} (coma); see
+# loss._chroma_g8_slot_terms. Reference definition: dev_runs/colour_shoulder_20261008/step0_projection/code/rb.py.
+#
+#   radial, mode 'add' (default): G_j = gauge( B_j/sum(B_j) - P0/sum(P0) )   ADDITIVE ring, flux-neutral by subtracting the
+#                                 PSF (not a uniform sheet), unit-flux normalised (coefficient 1 = the whole PSF flux)
+#   radial, mode 'mult'         : G_j = gauge( P0 (B_j(rho) - m_j) ),  m_j = sum(P0 B_j) / sum(P0)
+#   coma (always multiplicative): G^c_ja = gauge_c( P0 C_j(rho) rho cos(theta) ) = P0 C_j X,  G^c_jb = ... Y
+# gauge = ``_gauge_off_raw_base`` (project off P0 in the canonical weight metric); gauge_c = Gram-Schmidt off P0,
+# dP0/dx, dP0/dy (the shift owns the first-order centroid). rho = physical-px radius on the oversampled node grid
+# (``_phys_xy``), theta the stamp azimuth in detector x/y (x along the last axis). The factor rho makes the coma
+# generator smooth at rho = 0.
+#
+# Bases: "bumps in a warped coordinate" as in rb.py: with knots k_0 < ... < k_{J-1} (J >= 2) the warped coordinate is
+# s(rho) = np.interp(rho, knots, arange(J)) (so the knots are equidistant in s and s CLAMPS outside [k_0, k_{J-1}]),
+# and B_j(rho) = bspline3(s - j), j = 0..J-1, with bspline3 the centred cubic B-spline (support |s - j| < 2, peak 2/3).
+# There are J bumps, indexed j = 1..J in the extras names (rb1 = the bump at k_0). Beyond the last knot the bumps keep
+# their end values (a constant plateau: B_J = 2/3, B_{J-1} = 1/6, others 0), and likewise inside the first knot, so
+# corners (rho > 5.5 px) and the star centre behave. The bumps do NOT sum to 1 near the ends (unlike a clamped basis).
+# Defaults: radial knots 0, 0.7, 1.5, 3.0, 5.5 px (J = 5); coma knots 0.8, 2.2, 5.0 px (K = 3).
+RADIAL_KNOTS_DEFAULT = (0.0, 0.7, 1.5, 3.0, 5.5)
+COMA_KNOTS_DEFAULT = (0.8, 2.2, 5.0)
+_RADIAL_KNOTS = RADIAL_KNOTS_DEFAULT
+_COMA_KNOTS = COMA_KNOTS_DEFAULT
+
+
+def parse_radial_knots(knots) -> tuple:
+    """Knots as a validated tuple of floats (accepts a 'a,b,c' string or a sequence)."""
+    if isinstance(knots, str):
+        knots = [v for v in knots.replace(" ", "").split(",") if v]
+    k = tuple(float(v) for v in knots)
+    if len(k) < 2 or any(b <= a for a, b in zip(k, k[1:])) or k[0] < 0:
+        raise ValueError(f"radial knots must be >= 0, strictly increasing and at least 2 long, got {k}")
+    return k
+
+
+def set_radial_knots(knots) -> tuple:
+    """Set the trace-time knot vector of the radial profiles (idempotent)."""
+    global _RADIAL_KNOTS
+    _RADIAL_KNOTS = parse_radial_knots(knots)
+    return _RADIAL_KNOTS
+
+
+def get_radial_knots() -> tuple:
+    return _RADIAL_KNOTS
+
+
+def set_coma_knots(knots) -> tuple:
+    """Set the trace-time knot vector of the coma profiles (idempotent)."""
+    global _COMA_KNOTS
+    _COMA_KNOTS = parse_radial_knots(knots)
+    return _COMA_KNOTS
+
+
+def get_coma_knots() -> tuple:
+    return _COMA_KNOTS
+
+
+# Radial mode (trace-time constant): 'add' or 'mult' (above). Applies to the radial profiles only; coma is always mult.
+# Optional outer taper (2026-10-09, branch colour-rf5-20261009): '<mode>@R' (e.g. 'add@7.0') multiplies every radial
+# bump by w(rho) = 1 for rho <= k_last, cos^2(pi/2 (rho - k_last)/(R - k_last)) for k_last < rho < R, 0 beyond R
+# (C1-continuous), so the plateau beyond the last knot fades to zero by R px instead of acting as a colour-dependent
+# pedestal over the whole stamp. R must exceed the last radial knot. No '@' = no taper (the 10-08 behaviour).
+RADIAL_MODES = ("mult", "add")
+_RADIAL_MODE = "add"
+
+
+def parse_radial_mode(mode: str) -> tuple:
+    """``(base, taper)`` for a radial mode string: base in RADIAL_MODES, taper a float radius in px or None."""
+    base, sep, tail = str(mode).partition("@")
+    if base not in RADIAL_MODES:
+        raise ValueError(f"radial mode must be one of {RADIAL_MODES}, optionally '@<taper radius px>', got {mode!r}")
+    if not sep:
+        return base, None
+    try:
+        taper = float(tail)
+    except ValueError:
+        raise ValueError(f"radial mode taper must be a number of px, got {mode!r}") from None
+    if not np.isfinite(taper) or taper <= 0:
+        raise ValueError(f"radial mode taper must be a positive radius in px, got {mode!r}")
+    return base, taper
+
+
+def radial_mode_arg(mode: str) -> str:
+    """argparse type for --chroma-radial-mode: validates and returns the string unchanged."""
+    import argparse
+    try:
+        parse_radial_mode(mode)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+    return str(mode)
+
+
+def set_radial_mode(mode: str) -> str:
+    global _RADIAL_MODE
+    parse_radial_mode(mode)
+    _RADIAL_MODE = str(mode)
+    return _RADIAL_MODE
+
+
+def get_radial_mode() -> str:
+    return _RADIAL_MODE
+
+
+def n_radial_basis(knots=None) -> int:
+    return len(_RADIAL_KNOTS if knots is None else parse_radial_knots(knots))
+
+
+def n_coma_basis(knots=None) -> int:
+    return len(_COMA_KNOTS if knots is None else parse_radial_knots(knots))
+
+
+def _bspline3(s):
+    a = np.abs(s)
+    return np.where(a < 1, 2 / 3 - a ** 2 + a ** 3 / 2, np.where(a < 2, (2 - a) ** 3 / 6, 0.0))
+
+
+def radial_taper(rho, k_last: float, taper) -> np.ndarray:
+    """Outer window w(rho) of the radial bumps (see the radial-mode comment); all ones when ``taper`` is None."""
+    rho = np.asarray(rho, dtype=np.float64)
+    if taper is None:
+        return np.ones_like(rho)
+    if taper <= k_last:
+        raise ValueError(f"radial taper radius {taper} px must exceed the last radial knot {k_last} px")
+    t = np.clip((rho - k_last) / (taper - k_last), 0.0, 1.0)
+    return np.where(t >= 1.0, 0.0, np.cos(0.5 * np.pi * t) ** 2)      # exact zero at and beyond R
+
+
+def radial_bspline_basis(rho, knots=None, taper=None) -> np.ndarray:
+    """Warped-coordinate cubic B-spline bumps ``(J, *rho.shape)`` (numpy); see the section comment.
+    ``taper`` (px or None) applies the outer window ``radial_taper``."""
+    kn = np.asarray(parse_radial_knots(_RADIAL_KNOTS if knots is None else knots), dtype=np.float64)
+    rho = np.asarray(rho, dtype=np.float64)
+    s = np.interp(rho, kn, np.arange(len(kn)))
+    w = radial_taper(rho, float(kn[-1]), taper)
+    return np.stack([_bspline3(s - j) * w for j in range(len(kn))])
+
+
+_RADIAL_GRID_CACHE: dict = {}
+
+
+def _coord_np(g_size: int) -> np.ndarray:
+    """``node_coord_1d`` in pure numpy: these constants are first built inside jit traces, where a jax array
+    cannot be converted (TracerArrayConversionError)."""
+    return (np.arange(int(g_size), dtype=np.float64) - node_center_for_grid(int(g_size))) / OVERSAMPLE
+
+
+def _radial_grid_consts(g_size: int, knots: tuple, taper=None):
+    """(basis (J, G, G), X (1, G), Y (G, 1)) numpy constants for knots ``knots`` (and outer taper) on the G x G grid."""
+    key = (g_size, knots, taper)
+    if key not in _RADIAL_GRID_CACHE:
+        ax = _coord_np(g_size)
+        X, Y = ax[None, :], ax[:, None]
+        _RADIAL_GRID_CACHE[key] = (radial_bspline_basis(np.hypot(X, Y), knots, taper), X, Y)
+    return _RADIAL_GRID_CACHE[key]
+
+
+def radial_generator(node_field: jnp.ndarray, j: int) -> jnp.ndarray:
+    """Ungauged flux-neutral radial profile, j = 1-based: ``B_j/sum(B_j) - P0/sum(P0)`` (add) or ``P0 (B_j - m_j)`` (mult)."""
+    base, taper = parse_radial_mode(_RADIAL_MODE)
+    B, _, _ = _radial_grid_consts(int(node_field.shape[-1]), _RADIAL_KNOTS, taper)
+    if not 1 <= j <= B.shape[0]:
+        raise ValueError(f"radial basis index {j} outside 1..{B.shape[0]} for knots {_RADIAL_KNOTS}")
+    Bj = jnp.asarray(B[j - 1], node_field.dtype)
+    if base == "add":
+        # unit-flux ring minus the PSF shape (as rb.py: ring_j / sum(ring_j) * sum(T) - T): flux neutrality comes from
+        # subtracting P0, NOT a uniform sheet (which would be a colour x background term). The P0 term carries no
+        # gradient and is removed again by the P0 projection of the gauge; it is kept for exact flux neutrality.
+        # A coefficient of 1 moves the whole PSF flux into bump j (fitted values are ppt).
+        ring = jnp.asarray(B[j - 1] / (np.sum(B[j - 1]) + 1e-12), node_field.dtype)
+        ref = jax.lax.stop_gradient(node_field)
+        return ring - ref / (jnp.sum(ref, axis=(-2, -1), keepdims=True) + 1e-12)
+    m = jnp.sum(node_field * Bj, axis=(-2, -1), keepdims=True) / (jnp.sum(node_field, axis=(-2, -1), keepdims=True) + 1e-12)
+    return node_field * (Bj - m)
+
+
+def radial_coma_generator(node_field: jnp.ndarray, j: int, which: str) -> jnp.ndarray:
+    """Ungauged coma partner ``P0 C_j(rho) rho cos(theta) = P0 C_j X`` ('a') or ``P0 C_j Y`` ('b'); always
+    multiplicative, with the coma knots. The factor rho keeps it smooth at rho = 0."""
+    B, X, Y = _radial_grid_consts(int(node_field.shape[-1]), _COMA_KNOTS)
+    if not 1 <= j <= B.shape[0]:
+        raise ValueError(f"coma basis index {j} outside 1..{B.shape[0]} for coma knots {_COMA_KNOTS}")
+    if which not in ("a", "b"):
+        raise ValueError(f"coma partner must be 'a' or 'b', got {which!r}")
+    return node_field * jnp.asarray(B[j - 1] * (X if which == "a" else Y), node_field.dtype)
+
+
+def chroma_radial_field_raw(node_field, j, *, weight_grid=None):
+    return _gauge_off_raw_base(radial_generator(node_field, j), node_field, weight_grid)
+
+
+def _orthogonalize_off_shift(raw, node_field, weight_grid=None):
+    """Gram-Schmidt ``raw`` against P0, dP0/dx, dP0/dy (in that order) in the canonical weight metric.
+
+    The colour shift moves light along ``n . grad P0 = P0'(rho) cos(theta - phi)``, which for a near-round P0
+    is almost inside the coma span ``P0 C_j(rho) rho cos(theta)``; projecting the coma off BOTH gradients (both
+    components, since P0 is not exactly round) leaves the shift as sole owner of the first-order centroid."""
+    if weight_grid is None:
+        weight_grid = canonical_mode_weight_grid(int(node_field.shape[-1]))
+    ref = jax.lax.stop_gradient(node_field)
+    px, py = _grad_phys(ref)
+    basis = []
+    for v in (ref, px, py):
+        for b in basis:
+            v = v - (jnp.sum(v * weight_grid * b, axis=(-2, -1), keepdims=True)
+                     / (jnp.sum(weight_grid * b * b, axis=(-2, -1), keepdims=True) + 1e-30)) * b
+        basis.append(v)
+    out = raw
+    for b in basis:
+        out = out - (jnp.sum(out * weight_grid * b, axis=(-2, -1), keepdims=True)
+                     / (jnp.sum(weight_grid * b * b, axis=(-2, -1), keepdims=True) + 1e-30)) * b
+    return out
+
+
+def chroma_radial_coma_field_raw(node_field, j, which, *, weight_grid=None):
+    return _orthogonalize_off_shift(radial_coma_generator(node_field, j, which), node_field, weight_grid)
+
+
+def colour_radial_degeneracy(node_field, *, knots=None, weight_grid=None):
+    """Weighted cosine matrix between the round A3 terms / shift and the radial-family generators.
+
+    ``node_field`` is one ePSF node (G, G). Returns ``(row_names, col_names, M)`` with rows blur, dil, kurt,
+    shift_x, shift_y (raw-P gauged, as rendered) and columns rad1..J, radc1a..radcK{b} (as rendered, current
+    knots and mode); entries are ``<a, b>_w / (|a| |b|)`` with the canonical weight grid."""
+    old = get_radial_knots()
+    if knots is not None:
+        set_radial_knots(knots)
+    try:
+        P = jnp.asarray(node_field)
+        wg = canonical_mode_weight_grid(int(P.shape[-1])) if weight_grid is None else weight_grid
+        rows = {"blur": chroma_blur_field_raw(P), "dil": chroma_dilation_field_raw(P),
+                "kurt": chroma_kurt_plain_field_raw(P),
+                "shift_x": _gauge_off_raw_base(_displacement_generator(P, 1.0, 0.0), P),
+                "shift_y": _gauge_off_raw_base(_displacement_generator(P, 0.0, 1.0), P)}
+        cols = {}
+        for j in range(1, n_radial_basis() + 1):
+            cols[f"rad{j}"] = chroma_radial_field_raw(P, j)
+        for j in range(1, n_coma_basis() + 1):
+            for w in "ab":
+                cols[f"radc{j}{w}"] = chroma_radial_coma_field_raw(P, j, w)
+        dot = lambda a, b: float(jnp.sum(a * b * wg))
+        M = np.array([[dot(a, b) / (np.sqrt(dot(a, a) * dot(b, b)) + 1e-30) for b in cols.values()]
+                      for a in rows.values()])
+        return list(rows), list(cols), M
+    finally:
+        set_radial_knots(old)
+
+
 def chroma_kurt_field(
     node_field: jnp.ndarray, *, weight_grid: jnp.ndarray | None = None
 ) -> jnp.ndarray:

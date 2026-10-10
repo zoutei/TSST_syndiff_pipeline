@@ -166,7 +166,9 @@ class Scene:
         return (float(np.asarray(xy).ravel()[0]), float(np.asarray(xy).ravel()[1]))
 
     def contexts(self, colour_ref, chroma_axis=None, chroma_g8_gauge="mean", chroma_g8_no_dil=False,
-                 chroma_g8_extras=(), delta2_mean=0.0, bright_q=None, bright_q_ref=0.0):
+                 chroma_g8_extras=(), delta2_mean=0.0, bright_q=None, bright_q_ref=0.0,
+                 chroma_g8_drop=(), chroma_radial_knots=None, chroma_radial_mode=None,
+                 chroma_coma_knots=None):
         """One homogeneous square-path context per role (K=1 groups).
 
         ``colour_ref`` and ``delta2_mean`` are floats or per-role dicts. ``bright_q`` is the
@@ -212,6 +214,10 @@ class Scene:
                 chroma_g8_gauge=chroma_g8_gauge,
                 chroma_g8_no_dil=chroma_g8_no_dil,
                 chroma_g8_extras=chroma_g8_extras,
+                chroma_g8_drop=chroma_g8_drop,
+                chroma_radial_knots=chroma_radial_knots,
+                chroma_radial_mode=chroma_radial_mode,
+                chroma_coma_knots=chroma_coma_knots,
                 chroma_delta2_mean=(delta2_mean[r] if isinstance(delta2_mean, dict) else delta2_mean),
             )
             if bq is not None:
@@ -520,6 +526,7 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
                local_poly_radii=L.LOCAL_POLY_RADII_PX,
                chroma_g8_gauge: str = "mean",
                chroma_g8_no_dil: bool = False, chroma_g8_extras=(), delta2_mean=0.0,
+               chroma_g8_drop=(), chroma_radial_knots=None, chroma_radial_mode=None, chroma_coma_knots=None,
                bright_q=None, bright_q_ref: float = 0.0, return_templates: bool = False,
                bright_width: str = "none", bright_width_q_file=None, bright_width_q_ref: float = 0.0,
                bright_width_gen_per_dsigma: float = BW.GEN_PER_DSIGMA,
@@ -571,6 +578,8 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
         raise ValueError(f"unknown stamp_bg {stamp_bg!r}")
     ctxs = scene.contexts(colour_ref, chroma_axis=chroma_axis, chroma_g8_gauge=chroma_g8_gauge,
                           chroma_g8_no_dil=chroma_g8_no_dil, chroma_g8_extras=chroma_g8_extras,
+                          chroma_g8_drop=chroma_g8_drop, chroma_radial_knots=chroma_radial_knots,
+                          chroma_radial_mode=chroma_radial_mode, chroma_coma_knots=chroma_coma_knots,
                           delta2_mean=delta2_mean, bright_q=bright_q, bright_q_ref=bright_q_ref)
     tiers = scene.tier_tables()
     z = scene.z
@@ -847,6 +856,19 @@ def resolve_g8_defaults(args, out: Path) -> None:
         args.chroma_g8_gauge = meta.get("chroma_g8_gauge", "mean") if meta else G8_DEFAULT_GAUGE
     if args.chroma_g8_extras is None:
         args.chroma_g8_extras = meta.get("chroma_g8_extras", "") if meta else G8_DEFAULT_EXTRAS
+    # radial colour family: a resume keeps the run's drop list and knots
+    if getattr(args, "chroma_g8_drop", None) is None:
+        args.chroma_g8_drop = (meta.get("chroma_g8_drop") or "") if meta else ""
+    if getattr(args, "chroma_g8_freeze", None) is None:
+        args.chroma_g8_freeze = (meta.get("chroma_g8_freeze") or "") if meta else ""
+    if getattr(args, "chroma_radial_mode", None) is None:
+        args.chroma_radial_mode = (meta.get("chroma_radial_mode") or "mult") if meta else "add"   # pre-mode resumes were 'mult'
+    if getattr(args, "chroma_coma_knots", None) is None:
+        args.chroma_coma_knots = (meta.get("chroma_coma_knots") if meta else None) \
+            or ",".join(repr(v) for v in EM.COMA_KNOTS_DEFAULT)
+    if getattr(args, "chroma_radial_knots", None) is None:
+        args.chroma_radial_knots = (meta.get("chroma_radial_knots") if meta else None) \
+            or ",".join(repr(v) for v in EM.RADIAL_KNOTS_DEFAULT)
     # fine-neighbour coupling: a resumed pre-2026-09-29 run (no key) keeps "plain"
     if args.fine_nbr_mode is None:
         args.fine_nbr_mode = meta.get("fine_nbr_mode", "plain") if meta else L.FINE_NBR_MODE_DEFAULT
@@ -864,6 +886,43 @@ def resolve_g8_defaults(args, out: Path) -> None:
         args.bright_width_train = meta.get("bright_width_train", True)
         if args.bright_width_train is None:
             args.bright_width_train = True
+
+
+G8_BASE_NAMES = ("s0", "s1", "s2", "k0", "k1", "b", "eps", "t")
+
+
+def g8_freeze_mask(freeze, extras) -> np.ndarray | None:
+    """Boolean (8 + len(extras),) mask of the chroma_g8 slots named in ``freeze`` (base names s0,s1,s2,k0,k1,b,eps,t
+    or any extras name), or None when nothing is frozen. Unknown names raise."""
+    names = [v.strip() for v in (freeze.split(",") if isinstance(freeze, str) else freeze) if v.strip()]
+    if not names:
+        return None
+    slots = list(G8_BASE_NAMES) + list(extras)
+    bad = [n for n in names if n not in slots]
+    if bad:
+        raise ValueError(f"--chroma-g8-freeze names {bad} are not chroma_g8 slots {slots}")
+    m = np.zeros(len(slots), bool)
+    for n in names:
+        m[slots.index(n)] = True
+    return m
+
+
+def freeze_g8_slots(params: dict, mask) -> dict:
+    """stop_gradient on the masked chroma_g8 slots: their gradient is exactly zero, so Adam (fresh state per stage)
+    never moves them and they stay bit-identical to the warm start."""
+    if mask is None or "chroma_g8" not in params:
+        return params
+    c = params["chroma_g8"]
+    return dict(params, chroma_g8=jnp.where(jnp.asarray(mask), jax.lax.stop_gradient(c), c))
+
+
+def meta_colour_kwargs(meta: dict) -> dict:
+    """make_model / Scene.contexts keywords for the radial-family colour options recorded in a fit_meta.json
+    (older fits have neither key: nothing dropped, default knots)."""
+    return dict(chroma_g8_drop=meta.get("chroma_g8_drop") or "",
+                chroma_radial_knots=meta.get("chroma_radial_knots") or None,
+                chroma_radial_mode=meta.get("chroma_radial_mode") or None,
+                chroma_coma_knots=meta.get("chroma_coma_knots") or None)
 
 
 def g8_extras_tuple(extras: str, blur_order: int = 0, no_dil: bool = False) -> tuple:
@@ -896,6 +955,7 @@ def warm_start_source(args) -> dict | None:
     m = json.loads(meta_path.read_text())
     return {"params": str(params_path), "fit_meta": str(meta_path),
             "gauge": m.get("chroma_g8_gauge", "mean"),
+            "radial_knots": m.get("chroma_radial_knots"), "radial_mode": m.get("chroma_radial_mode"), "coma_knots": m.get("chroma_coma_knots"),
             "extras": g8_extras_tuple(m.get("chroma_g8_extras", ""),
                                       int(m.get("chroma_g8_blur_order", 0)),
                                       bool(m.get("chroma_g8_no_dil", False)))}
@@ -989,6 +1049,27 @@ def run(args):
     resolve_g8_defaults(args, out)
     g8_extras = g8_extras_tuple(args.chroma_g8_extras, args.chroma_g8_blur_order, args.chroma_g8_no_dil)
     args.chroma_g8_extras = ",".join(g8_extras)                     # fit_meta records what was used
+    # knots/mode first: the valid rb{j}/rq{j}/rc{j} names depend on them (a 6-knot run has rb6_*)
+    radial_knots = EM.set_radial_knots(args.chroma_radial_knots)    # trace-time constant for rb*/rq*/rc* extras
+    args.chroma_radial_knots = ",".join(repr(v) for v in radial_knots)
+    coma_knots = EM.set_coma_knots(args.chroma_coma_knots)
+    args.chroma_coma_knots = ",".join(repr(v) for v in coma_knots)
+    radial_mode = EM.set_radial_mode(args.chroma_radial_mode)       # recorded in fit_meta; a warm start must match
+    bad_extras = [e for e in g8_extras if not L.is_valid_g8_extra(e)]
+    if bad_extras:
+        raise ValueError(f"unknown --chroma-g8-extras {bad_extras}")
+    g8_drop = L.g8_drop_tuple(args.chroma_g8_drop)
+    args.chroma_g8_drop = ",".join(g8_drop)                         # fit_meta records what was used
+    g8_freeze = g8_freeze_mask(args.chroma_g8_freeze, g8_extras)
+    args.chroma_g8_freeze = ",".join(n.strip() for n in args.chroma_g8_freeze.split(",") if n.strip())
+    if any(L.parse_radial_extra(e) for e in g8_extras):
+        bad_j = [e for e in g8_extras if L.parse_radial_extra(e) and L.parse_radial_extra(e)[1] >
+                 (EM.n_coma_basis() if L.parse_radial_extra(e)[0] in ("rc", "rcq") else EM.n_radial_basis())]
+        if bad_j:
+            raise ValueError(f"extras {bad_j} exceed the {EM.n_radial_basis()} radial / {EM.n_coma_basis()} coma "
+                             f"bumps of knots {radial_knots} / {coma_knots}")
+        if args.chroma_g8_gauge != "raw":
+            raise ValueError("the radial colour family needs --chroma-g8-gauge raw")
     if args.colour_file:
         colour_counts = scene.use_colour_file(args.colour_file)
     else:
@@ -1022,6 +1103,7 @@ def run(args):
         local_poly_radii=tuple(float(v) for v in args.local_poly_radii.split(",")),
         chroma_g8_gauge=args.chroma_g8_gauge,
         chroma_g8_no_dil=args.chroma_g8_no_dil, chroma_g8_extras=g8_extras, delta2_mean=delta2_mean,
+        chroma_g8_drop=g8_drop, chroma_radial_knots=radial_knots, chroma_radial_mode=radial_mode, chroma_coma_knots=coma_knots,
         bg_cheb_order=args.bg_cheb_order,
         stamp_bg=args.stamp_bg, stamp_bg_r_in=args.stamp_bg_r_in, stamp_bg_r_out=args.stamp_bg_r_out,
         stamp_bg_clip=args.stamp_bg_clip, stamp_bg_prior_sigma=args.stamp_bg_prior_sigma,
@@ -1082,6 +1164,20 @@ def run(args):
                 raise ValueError(f"warm start {g8_warm['params']} has chroma_g8 gauge "
                                  f"{g8_warm['gauge']!r}, this run asks for {args.chroma_g8_gauge!r}")
             g8_warm["padded"] = list(g8_extras[len(g8_warm["extras"]):])
+            wk = g8_warm.get("radial_knots")
+            if any(L.parse_radial_extra(e) for e in g8_warm["extras"]) or wk:
+                if wk is None or EM.parse_radial_knots(wk) != radial_knots:
+                    raise ValueError(f"warm start {g8_warm['params']} was trained with radial knots {wk}, this run "
+                                     f"uses {radial_knots}; pass --chroma-radial-knots {wk}")
+                wc = g8_warm.get("coma_knots")
+                if any(L.parse_radial_extra(e) for e in g8_warm["extras"]) and (
+                        wc is None or EM.parse_radial_knots(wc) != coma_knots):
+                    raise ValueError(f"warm start {g8_warm['params']} was trained with coma knots {wc}, this run "
+                                     f"uses {coma_knots}; pass --chroma-coma-knots {wc}")
+                wm = g8_warm.get("radial_mode")
+                if any(L.parse_radial_extra(e) for e in g8_warm["extras"]) and (wm or "mult") != radial_mode:
+                    raise ValueError(f"warm start {g8_warm['params']} was trained with --chroma-radial-mode {wm or 'mult'}, "
+                                     f"this run uses {radial_mode}")
     params = set_chroma_model(params, args.chroma_model, halo=args.chroma_halo, g8_init=g8_init,
                               g8_extras=g8_extras,
                               g8_source_extras=g8_warm["extras"] if isinstance(g8_warm, dict) else None)
@@ -1245,17 +1341,17 @@ def run(args):
         n_steps = steps[stage - 1]
         if n_steps <= 0:
             continue
-        labels = FIT._leaf_labels(stage, freeze_wcs=False, param_keys=keys)
+        labels = FIT._leaf_labels(stage, freeze_wcs=bool(args.freeze_wcs), param_keys=keys)
         if "bright_width" in labels and not args.bright_width_train:
             # fixed b: stop-gradient here, so its bucket's Adam update is exactly zero
             labels["bright_width"] = "frozen"
         opt = FIT.make_stage_optimizer(stage, lrs[stage - 1], epsf_lr_scale=args.epsf_lr_scale,
                                        param_keys=keys, chroma_lr_scale=args.chroma_lr_scale,
-                                       grad_clip=args.grad_clip)
+                                       grad_clip=args.grad_clip, freeze_wcs=bool(args.freeze_wcs))
         opt_state = opt.init(params)
 
         def stage_loss(p, s, _labels=labels):
-            return loss_fn(FIT.stop_grad_frozen_params(p, _labels), s)
+            return loss_fn(freeze_g8_slots(FIT.stop_grad_frozen_params(p, _labels), g8_freeze), s)
 
         # floor: refreshed every --floor-refresh-every steps (smoothed rule) as part of the iteration. Each refresh
         # changes the loss scale; its jump at fixed params is subtracted from the stored history so the plateau
@@ -1502,6 +1598,34 @@ def build_parser() -> argparse.ArgumentParser:
                         "q1_0/x/y, q2_0/x/y (colour elongation planes in CCD X, Y), dilp_x, dilp_y")
     p.add_argument("--chroma-g8-no-dil", action="store_true",
                    help="global8 without the dilation term (blur and dilation are ~95%% collinear)")
+    p.add_argument("--chroma-g8-drop", default=None,
+                   help="comma list of round A3 colour fields to REMOVE from the render: blur, dil, kurt "
+                        "(default none). Their coefficients stay in the vector but are inert (zero gradient), so "
+                        "checkpoints keep their layout. Generalises --chroma-g8-no-dil.")
+    p.add_argument("--chroma-radial-knots", default=None,
+                   help="knots (px, comma list, >= 2) of the warped-coordinate cubic B-spline bumps behind the radial "
+                        "colour extras rb{j}_0, rb{j}_r (colour-linear profile, amplitude a0 + a1 r) and rq{j} "
+                        "(quadratic in colour): J = len(knots) bumps, j = 1..J, B_j = bspline3(s(rho) - (j-1)) with s "
+                        "the piecewise-linear map knots -> 0..J-1 (constant plateau beyond the last knot). Default "
+                        "0,0.7,1.5,3.0,5.5. Recorded in fit_meta.json; a warm start with radial extras must match.")
+    p.add_argument("--chroma-coma-knots", default=None,
+                   help="knots (px, comma list) of the warped-coordinate bumps behind the coma extras rc{j} "
+                        "(j = 1..len(knots)); default 0.8,2.2,5.0. Coma is always multiplicative (P0 C_j rho cos/sin "
+                        "theta, then Gram-Schmidt off P0, dP0/dx, dP0/dy). Recorded in fit_meta; a warm start with "
+                        "radial extras must match.")
+    p.add_argument("--chroma-radial-mode", type=EM.radial_mode_arg, default=None,
+                   help="form of the RADIAL profiles (rb*/rq*): 'add' (default for new runs) = additive B_j(rho) - "
+                        "mean(B_j) projected off P0; 'mult' = P0-weighted P0 (B_j - m_j). The coma (rc*) is always "
+                        "multiplicative. Optional '@R' (e.g. 'add@7.0') tapers every radial bump to zero between the "
+                        "last radial knot and R px (cos^2 window) instead of the constant plateau. Recorded in "
+                        "fit_meta.json; a warm start with radial extras must match.")
+    p.add_argument("--chroma-g8-freeze", default=None,
+                   help="comma list of chroma_g8 slots to hold at their starting (warm-start) values: base names "
+                        "s0,s1,s2,k0,k1,b,eps,t and any --chroma-g8-extras name (e.g. sq0,sq1). Their gradient is "
+                        "stop_gradient-ed, so Adam never moves them (bit-identical to the warm start). Recorded in fit_meta.")
+    p.add_argument("--freeze-wcs", action="store_true",
+                   help="hold wcs_coeff fixed in every stage (its leaf is labelled frozen: no gradient, no update). "
+                        "Pair with --steps-per-stage 0,0,N to continue a converged fit with the WCS fixed.")
     p.add_argument("--chroma-g8-init", default="",
                    help="starting values [s0,s1,s2,k0,k1,b,eps,t] followed by one value per "
                         "--chroma-g8-extras entry (17 values with the A3 defaults)")

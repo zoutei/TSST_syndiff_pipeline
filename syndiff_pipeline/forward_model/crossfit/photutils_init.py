@@ -452,6 +452,7 @@ def build_photutils_init(*, scene_dir, hp_d, out, fold: int | None = None, n_fol
     fm = {"chroma_g8_gauge": dm.get("chroma_g8_gauge", G8_DEFAULT_GAUGE),
           "chroma_g8_extras": dm.get("chroma_g8_extras", G8_DEFAULT_EXTRAS),
           "chroma_g8_blur_order": dm.get("chroma_g8_blur_order", 0), "chroma_g8_no_dil": dm.get("chroma_g8_no_dil", False),
+          "chroma_g8_drop": dm.get("chroma_g8_drop", ""), "chroma_radial_knots": dm.get("chroma_radial_knots"),
           "crossfit_init": dict(
               route="photutils", target_scene=str(scene_dir), target_frame=meta.get("frame_stem"),
               hp_d=str(Path(hp_d).resolve()), mask=mask_desc, frac_rejected=float(reject.mean()),

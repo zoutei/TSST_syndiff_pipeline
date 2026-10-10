@@ -46,7 +46,8 @@ def main(argv=None) -> None:
     args = SF.build_parser().parse_args(full)
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     (Path(args.out_dir) / "recipe.json").write_text(
-        json.dumps({"recipe": a.recipe, "argv": full}, indent=1))
+        json.dumps({"recipe": a.recipe, "argv": full,
+                                                    "role": yaml.safe_load((RECIPE_DIR / f"{a.recipe}.yaml").read_text()).get("role")}, indent=1))
     SF.run(args)
 
 

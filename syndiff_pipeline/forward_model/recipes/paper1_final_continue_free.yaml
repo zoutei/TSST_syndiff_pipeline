@@ -1,0 +1,36 @@
+# Control: A3 unchanged, shift and WCS free, warm start from a converged paper1_final fit, single stage 3 (see paper1_final_radial_frozenshift).
+# Paper 1 FINAL training recipe (scene_fit flags), user 2026-10-07: "declare that we have finalized the recipe".
+# = paper1_dataset (A3 colour model, plain L2, no rejection, 7x7 local-poly penalty 3e8, same learning rates)
+#   + smoothed convergence rule (stop only at a true plateau, with learning-rate cuts)
+#   + per-star weight cap at Tmag 10.5 (one weight per physical pixel, from its owner star)
+#   + anchors train the ePSF (anchors relabelled as contributors).
+# Scene side (not a flag): the training and evaluation scenes include the recorded-but-omitted Gaia neighbours
+# with Tmag <= 17 as nuisance sources (flux solved, weak catalogue prior).
+# Evidence: /astro/armin/koji/syndiff/dev_runs/training_fixes_20261005/README.md (run v8_nbr17_D105_E: held-out core
+# chi2 0.54-0.56x the plateau baseline on F1/F2 fold 0, optical-axis bullseye 2.5x smaller, T8-9 memorisation gap ~1).
+# Run: python -m syndiff_pipeline.forward_model.recipe paper1_final -- --scene-dir ... --out-dir ...
+#      --init-params-file ... --colour-file <ccd>_u.csv
+role: "CONTROL for the free arms (jointwarm, a3rb): A3 continuation with nothing frozen beyond the baseline (shift and WCS free as in paper1_final), warm start, one stage"
+scene_fit:
+  chroma-model: global8
+  colour-gauge: global
+  chroma-axis: tesspoint
+  huber-delta: 1.0e6
+  reject-every: 0
+  lambda-lap: 1.0e-2
+  lambda-pixel-lap: 1.0e-2
+  lambda-fine-nbr: 0
+  lambda-local-poly: 3.0e8
+  local-poly-window: 7
+  lr-per-stage: 1e-3,3e-4,1e-4
+  epsf-lr-scale: 2.5
+  chroma-lr-scale: 10
+  # convergence: smoothed rule (50-step running mean over a 500-step lag, tol 1e-4; WCS move < 0.5 mpx and median
+  # flux change < 1e-4 per 500 steps; lr x0.3 on a loss plateau, stop after >= 2 cuts, at most 4); the step counts
+  # are caps only
+  stop-rule: smoothed
+  steps-per-stage: 0,0,20000
+  # memorisation levers
+  star-weight-cap-tmag: 10.5
+  anchors-train-epsf: true
+  checkpoint-every: 100

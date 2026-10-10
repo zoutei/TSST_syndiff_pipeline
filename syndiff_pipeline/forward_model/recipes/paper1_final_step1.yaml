@@ -1,0 +1,35 @@
+# STEP 1 (2026-10-09, branch colour-rf5-20261009; ePSF model orchestrator, user-approved; core term chosen from step A):
+# one degeneracy-clean colour basis, trained FRESH from the per-fold init exactly like paper1_final (same schedule).
+#  - FULL colour law of paper1_final_radial_full_drop: radial ADDITIVE rb{j}_0/_r/_r2 + rq{j}, coma rc{k}/_r/_r2 + rcq{k};
+#  - A3 round colour fields blur, dilation, kurtosis DROPPED (degenerate with the radial rings, |cos| 0.85-0.97);
+#  - shift FREE (s0..s2, sq0, sq1 train); trefoil and the elongation planes q1_*, q2_* kept;
+#  - radial knots unchanged (0, 0.7, 1.5, 3, 5.5 px; step A: an inner RADIAL bump gains nothing, the red core residual is
+#    m=1), outer taper: radial bumps fade to 0 between 5.5 and 7 px ('add@7.0'), no stamp-wide pedestal;
+#  - INNER COMA knot 0.4 px added (coma knots 0.4, 0.8, 2.2, 5.0 -> rc1 = the new inner coma; step A K6);
+#  - CCD colour translation held at zero natively (frozen0), as paper1_final on the rf5 pin.
+role: "STEP1: full law, A3 round colour terms dropped, shift free, radial taper to 0 at 7 px, inner coma knot 0.4 px"
+scene_fit:
+  chroma-model: global8
+  colour-gauge: global
+  chroma-axis: tesspoint
+  chroma-ccd-shift: frozen0
+  chroma-radial-mode: add@7.0
+  chroma-radial-knots: 0,0.7,1.5,3.0,5.5
+  chroma-coma-knots: 0.4,0.8,2.2,5.0
+  chroma-g8-drop: blur,dil,kurt
+  chroma-g8-extras: dil_r,sq0,sq1,q1_0,q1_x,q1_y,q2_0,q2_x,q2_y,rb1_0,rb1_r,rb2_0,rb2_r,rb3_0,rb3_r,rb4_0,rb4_r,rb5_0,rb5_r,rq1,rq2,rq3,rq4,rq5,rc1,rc2,rc3,rc4,rb1_r2,rb2_r2,rb3_r2,rb4_r2,rb5_r2,rc1_r,rc2_r,rc3_r,rc4_r,rc1_r2,rc2_r2,rc3_r2,rc4_r2,rcq1,rcq2,rcq3,rcq4
+  huber-delta: 1.0e6
+  reject-every: 0
+  lambda-lap: 1.0e-2
+  lambda-pixel-lap: 1.0e-2
+  lambda-fine-nbr: 0
+  lambda-local-poly: 3.0e8
+  local-poly-window: 7
+  lr-per-stage: 1e-3,3e-4,1e-4
+  epsf-lr-scale: 2.5
+  chroma-lr-scale: 10
+  stop-rule: smoothed
+  steps-per-stage: 3000,20000,20000
+  star-weight-cap-tmag: 10.5
+  anchors-train-epsf: true
+  checkpoint-every: 100

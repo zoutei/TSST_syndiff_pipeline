@@ -11,6 +11,7 @@ default (hard core-centroid already enforces the gauge).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 
 import jax
@@ -99,6 +100,14 @@ class StaticContext:
     # Named chroma_g8 coefficients appended after the 8 base slots, in order
     # (see G8_EXTRA_NAMES). Empty = legacy rule (len 9/10 -> radial blur terms).
     chroma_g8_extras: tuple = ()
+    # Round A3 colour fields to remove from the render: any of G8_DROPPABLE ("blur", "dil", "kurt").
+    # The coefficients stay in the vector (inert, zero gradient) so checkpoints keep their layout.
+    chroma_g8_drop: tuple = ()
+    # Knots of the radial B-spline family (extras rb*/rq*/rc*); None = epsf_model default at build time.
+    chroma_radial_knots: tuple | None = None
+    chroma_coma_knots: tuple | None = None   # knots of the coma profiles (rc*); None = epsf_model default at build time
+    # 'mult' or 'add' (epsf_model.RADIAL_MODES); None = epsf_model current mode at build time.
+    chroma_radial_mode: str | None = None
     # <delta^2> over the colour-gauge population, subtracted from delta^2 in the quadratic-colour
     # radial shift (extras sq0/sq1) so that term carries no colour-independent shift (the WCS owns that).
     chroma_delta2_mean: float = 0.0
@@ -514,6 +523,10 @@ def build_static_context(
     chroma_g8_no_dil: bool = False,
     chroma_g8_extras: tuple = (),
     chroma_delta2_mean: float = 0.0,
+    chroma_g8_drop=(),
+    chroma_radial_knots=None,
+    chroma_radial_mode=None,
+    chroma_coma_knots=None,
 ) -> StaticContext:
     members_safe = np.clip(groups.members, 0, None)
     ra_j = jnp.asarray(ra, dtype=jnp.float32)
@@ -593,6 +606,12 @@ def build_static_context(
         chroma_g8_no_dil=bool(chroma_g8_no_dil),
         chroma_g8_extras=tuple(chroma_g8_extras),
         chroma_delta2_mean=float(chroma_delta2_mean),
+        chroma_g8_drop=g8_drop_tuple(chroma_g8_drop),
+        chroma_radial_knots=EM.parse_radial_knots(
+            EM.get_radial_knots() if chroma_radial_knots is None else chroma_radial_knots),
+        chroma_radial_mode=(EM.get_radial_mode() if chroma_radial_mode is None else str(chroma_radial_mode)),
+        chroma_coma_knots=EM.parse_radial_knots(
+            EM.get_coma_knots() if chroma_coma_knots is None else chroma_coma_knots),
     )
 
 
@@ -671,6 +690,49 @@ G8_EXTRA_NAMES = ("blur_r", "blur_r2", "dil_r", "astig0", "astig_r", "sq0", "sq1
                   "q2_0", "q2_x", "q2_y", "dilp_x", "dilp_y")
 
 
+# Round A3 colour fields that --chroma-g8-drop can remove from the render.
+G8_DROPPABLE = ("blur", "dil", "kurt")
+_RADIAL_EXTRA_RE = re.compile(r"^(?:rb(\d+)_(0|r|r2)|rq(\d+)|rc(\d+)(?:_(r|r2))?|rcq(\d+))$")
+
+
+def parse_radial_extra(name: str):
+    """``(kind, j, sub)`` for a radial-family extra name, else None.
+
+    kind 'rb' (colour-linear radial profile; sub '0' constant, 'r' axis-distance slope, 'r2' its square), 'rq'
+    (quadratic in colour, radial), 'rc' (coma; sub '0' constant, 'r', 'r2') or 'rcq' (coma, quadratic in colour);
+    j is the 1-based bump index."""
+    m = _RADIAL_EXTRA_RE.match(name)
+    if not m:
+        return None
+    if m.group(1):
+        return "rb", int(m.group(1)), m.group(2)
+    if m.group(3):
+        return "rq", int(m.group(3)), None
+    if m.group(6):
+        return "rcq", int(m.group(6)), None
+    return "rc", int(m.group(4)), m.group(5) or "0"
+
+
+def is_valid_g8_extra(name: str) -> bool:
+    if name in G8_EXTRA_NAMES:
+        return True
+    p = parse_radial_extra(name)
+    if p is None:
+        return False
+    return 1 <= p[1] <= (EM.n_coma_basis() if p[0] in ("rc", "rcq") else EM.n_radial_basis())
+
+
+def g8_drop_tuple(drop) -> tuple:
+    """Validated, sorted tuple from a 'blur,dil,kurt' string or a sequence."""
+    if isinstance(drop, str):
+        drop = [v.strip() for v in drop.split(",") if v.strip()]
+    d = tuple(sorted(set(drop or ())))
+    bad = [v for v in d if v not in G8_DROPPABLE]
+    if bad:
+        raise ValueError(f"unknown chroma_g8 drop {bad}; allowed {G8_DROPPABLE}")
+    return d
+
+
 def _g8_poly(x, names, basis):
     """``sum x[n] * b`` over the extras in ``names`` that are present, or None when none is
     (a trace-time choice, so absent extras add no ops)."""
@@ -743,6 +805,52 @@ def has_chroma_g8(params: dict[str, jnp.ndarray]) -> bool:
     return all(k in params for k in CHROMA_G8_LEAVES)
 
 
+def _apply_ctx_radial_consts(ctx) -> None:
+    """Set the trace-time radial knots, radial mode (incl. taper) and coma knots from ``ctx`` (None = keep current).
+    Must run before any extras-name validation: the number of valid rb{j}/rq{j} names depends on the knots."""
+    knots = getattr(ctx, "chroma_radial_knots", None)
+    EM.set_radial_knots(EM.get_radial_knots() if knots is None else knots)   # trace-time constant
+    mode = getattr(ctx, "chroma_radial_mode", None)
+    EM.set_radial_mode(EM.get_radial_mode() if mode is None else mode)
+    ck = getattr(ctx, "chroma_coma_knots", None)
+    EM.set_coma_knots(EM.get_coma_knots() if ck is None else ck)
+
+
+def _radial_family_fields(radial, ctx, delta, r, nx, ny):
+    """Per-slot weight vectors of the radial B-spline colour family (raw-P gauge only).
+
+    ``rad{j}_raw``: radial generator (additive or P0-weighted, EM.radial_generator); weight = delta (rb{j}_0 +
+    rb{j}_r r + rb{j}_r2 r^2) + (delta^2 - <delta^2>) rq{j}. ``radc{j}_a_raw`` / ``radc{j}_b_raw``: coma generators
+    (P0 C_j X / Y, Gram-Schmidt off P0, dP0/dx, dP0/dy) with weights c_j nx and c_j ny, (nx, ny) the unit vector
+    toward the optical axis (cos phi, sin phi), c_j = delta (rc{j} + rc{j}_r r + rc{j}_r2 r^2) + (delta^2 - <delta^2>)
+    rcq{j}. Fields are created only for the j that have an extra present."""
+    if ctx.chroma_g8_gauge != "raw":
+        raise ValueError("the radial colour family (rb*/rq*/rc* extras) needs chroma_g8_gauge='raw'")
+    _apply_ctx_radial_consts(ctx)
+    rad, coma = {}, {}
+    for name, val in radial.items():
+        kind, j, sub = parse_radial_extra(name)
+        if kind == "rb":
+            w = delta * (val if sub == "0" else val * r if sub == "r" else val * r * r)
+            rad[j] = w if j not in rad else rad[j] + w
+        elif kind == "rq":
+            w = (delta * delta - ctx.chroma_delta2_mean) * val
+            rad[j] = w if j not in rad else rad[j] + w
+        elif kind == "rcq":
+            w = (delta * delta - ctx.chroma_delta2_mean) * val
+            coma[j] = w if j not in coma else coma[j] + w
+        else:   # rc: delta * (rc0 + rc_r r + rc_r2 r^2)
+            w = delta * (val if sub == "0" else val * r if sub == "r" else val * r * r)
+            coma[j] = w if j not in coma else coma[j] + w
+    out = {}
+    for j in sorted(rad):
+        out[f"rad{j}_raw"] = rad[j]
+    for j in sorted(coma):
+        out[f"radc{j}_a_raw"] = coma[j] * nx
+        out[f"radc{j}_b_raw"] = coma[j] * ny
+    return out
+
+
 def _chroma_g8_slot_terms(params, ctx, star_occ):
     """Per-slot terms of the global model; field values are PER-SLOT weight vectors
     (1-D, already multiplied by delta), which the render folds recognise by ndim.
@@ -768,12 +876,14 @@ def _chroma_g8_slot_terms(params, ctx, star_occ):
     # len 10 -> b0 + b1 r + b2 r^2 (2026-09-24). The length is static, so this is
     # resolved at trace time and a checkpoint carries its own model form.
     blur, dil, astig, sq, q1, q2 = c[5], c[6], None, None, None, None
+    radial = {}
     extras = tuple(getattr(ctx, "chroma_g8_extras", ()) or ())
     if extras:
         if int(c.shape[0]) != 8 + len(extras):
             raise ValueError(f"chroma_g8 has {int(c.shape[0])} values, extras {extras} need {8 + len(extras)}")
         x = dict(zip(extras, (c[8 + i] for i in range(len(extras)))))
-        unknown = set(x) - set(G8_EXTRA_NAMES)
+        _apply_ctx_radial_consts(ctx)          # the valid rb{j}/rq{j}/rc{j} range depends on the context's knots
+        unknown = {n for n in x if not is_valid_g8_extra(n)}
         if unknown:
             raise ValueError(f"unknown chroma_g8 extras {sorted(unknown)}")
         blur = blur + x.get("blur_r", 0.0) * r + x.get("blur_r2", 0.0) * r * r
@@ -793,6 +903,7 @@ def _chroma_g8_slot_terms(params, ctx, star_occ):
         dilp = _g8_poly(x, ("dilp_x", "dilp_y"), (X, Y))          # colour round-width plane
         if dilp is not None:
             dil = dil + dilp
+        radial = {n: v for n, v in x.items() if parse_radial_extra(n) is not None}
     else:
         for j in range(1, int(c.shape[0]) - 7):
             blur = blur + c[7 + j] * r ** j
@@ -808,6 +919,12 @@ def _chroma_g8_slot_terms(params, ctx, star_occ):
     }
     if ctx.chroma_g8_no_dil:
         del fields["dilation" + sfx]
+    drop = g8_drop_tuple(getattr(ctx, "chroma_g8_drop", ()))
+    for d_name, f_name in (("blur", "blur"), ("dil", "dilation"), ("kurt", "kurt_plain")):
+        if d_name in drop:
+            fields.pop(f_name + sfx, None)
+    if radial:
+        fields.update(_radial_family_fields(radial, ctx, delta, r, nx, ny))
     if astig is not None:
         # traceless stretch along the direction to the optical axis:
         # cos(2 phi) * aniso + sin(2 phi) * shear, amplitude astig0 + astig_r * r
@@ -918,7 +1035,31 @@ def _colour_slot_terms(
 # ``field_terms`` dict -- shared by both render paths' chroma fold so adding a
 # new generator (e.g. a future higher-order term) means adding one entry here,
 # not touching either renderer's control flow.
-CHROMA_FIELD_GENERATORS = {
+_RAD_NAME_RE = re.compile(r"^rad(\d+)_raw$")
+_RADC_NAME_RE = re.compile(r"^radc(\d+)_(a|b)_raw$")
+
+
+class _GeneratorTable(dict):
+    """Generator dict that also resolves the radial-family names ``rad{j}_raw`` and ``radc{j}_{a|b}_raw``
+    on demand (they depend on the trace-time knot vector, so they are never cached)."""
+
+    def __missing__(self, name):
+        m = _RAD_NAME_RE.match(name) if isinstance(name, str) else None
+        if m:
+            j = int(m.group(1))
+            return lambda node_field, _j=j: EM.chroma_radial_field_raw(node_field, _j)
+        m = _RADC_NAME_RE.match(name) if isinstance(name, str) else None
+        if m:
+            j, which = int(m.group(1)), m.group(2)
+            return lambda node_field, _j=j, _w=which: EM.chroma_radial_coma_field_raw(node_field, _j, _w)
+        raise KeyError(name)
+
+    def __contains__(self, name):
+        return dict.__contains__(self, name) or (
+            isinstance(name, str) and bool(_RAD_NAME_RE.match(name) or _RADC_NAME_RE.match(name)))
+
+
+CHROMA_FIELD_GENERATORS = _GeneratorTable({
     "dilation": EM.chroma_dilation_field,
     "aniso": EM.chroma_aniso_field,
     "shear": EM.chroma_shear_field,
@@ -935,7 +1076,7 @@ CHROMA_FIELD_GENERATORS = {
     "tre_b_raw": EM.chroma_trefoil_b_field_raw,
     "aniso_raw": EM.chroma_aniso_field_raw,
     "shear_raw": EM.chroma_shear_field_raw,
-}
+})
 
 
 def central_crop_stamps(arr: np.ndarray | jnp.ndarray, core: int) -> np.ndarray:
