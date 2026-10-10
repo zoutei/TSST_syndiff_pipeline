@@ -23,7 +23,7 @@ import yaml
 
 # Stage directories under out_root (CONTRACT.md).
 STAGES: tuple[str, ...] = (
-    "bootstrap", "scene_boot", "init_boot", "nbr_boot", "fit", "folds_boot", "wcs", "mapping", "perband", "kernels",
+    "bootstrap", "scene_boot", "init_boot", "nbr_boot", "fit", "folds_boot", "template_shift", "wcs", "mapping", "perband", "kernels",
     "hotpants", "final", "score", "scene_final", "init_final", "nbr_final", "refit", "folds_final", "compare",
 )
 FIT_INITS = ("static", "photutils")
@@ -81,6 +81,11 @@ class InputsCfg:
     combined_store_weights: str = "production"    # band weights the combined store was built with: production|adopted
     skylist: Path | None = None                   # optional skycell list override (default: from the mapping)
     lane_dir: Path | None = None                  # F=1 lane (ks_b/, shared_mask, substamp stars); default out_root/lane_f1
+    # PS1 stack WCS-offset + proper-motion kernel shift (chain/template_shift.py): None = off (kernels unchanged),
+    # "auto" = <out_root>/template_shift/spec.json, else a spec.json path
+    template_shift: str | None = None
+    template_shift_ps1: Path | None = None        # per-skycell PS1 image - header WCS offsets (measure_combined.py JSON)
+    template_shift_gaia: Path | None = None       # dir of Gaia DR3 proj_<p>.parquet with pmra/pmdec
 
 
 @dataclass(frozen=True)
@@ -376,7 +381,8 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
 
     ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "defect_mask", "bootstrap_mapping",
                                   "band_cells", "adopted_weights", "init_params", "bootstrap_hp_d", "colour_map", "xp_synth",
-                                  "scorer_dir", "pass2_hp", "combined_store_weights", "skylist", "lane_dir"}, required=True)
+                                  "scorer_dir", "pass2_hp", "combined_store_weights", "skylist", "lane_dir",
+                                  "template_shift", "template_shift_ps1", "template_shift_gaia"}, required=True)
     cmap = ip.get("colour_map")
     if cmap is not None:
         if not isinstance(cmap, dict) or not (set(cmap) == {"a", "b"} or set(cmap) == {"summary_json", "key"}):
@@ -391,6 +397,9 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         if not isinstance(p2, dict):
             raise ConfigError("inputs.pass2_hp must be a mapping stem -> hp_d path")
         p2 = {str(k): _path(v, f"inputs.pass2_hp.{k}", required=True) for k, v in p2.items()}
+    tsh = ip.get("template_shift")
+    if tsh is not None and str(tsh) != "auto":
+        tsh = str(_path(tsh, "inputs.template_shift", required=True))
     csw = ip.get("combined_store_weights", "production")
     if csw not in ("production", "adopted"):
         raise ConfigError(f"inputs.combined_store_weights must be production|adopted, got {csw!r}")
@@ -413,6 +422,9 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         combined_store_weights=csw,
         skylist=_path(ip.get("skylist"), "inputs.skylist"),
         lane_dir=_path(ip.get("lane_dir"), "inputs.lane_dir"),
+        template_shift=None if tsh is None else str(tsh),
+        template_shift_ps1=_path(ip.get("template_shift_ps1"), "inputs.template_shift_ps1"),
+        template_shift_gaia=_path(ip.get("template_shift_gaia"), "inputs.template_shift_gaia"),
     )
     bp = _section(raw, "background", {"fill", "star_mask_pad_px"})
     fill = bp.get("fill", "harmonic")

@@ -6,6 +6,7 @@ Stages dispatched to the per-band/kernel half (modules imported lazily; a missin
     select -> perband.select        lists -> perband.lists          band_cells -> perband.band_cells
     contrib -> perband.contrib      reduce -> perband.reduce        kernels -> kernels
     hotpants -> hotpants_ref        final -> final                  score -> score
+    template_shift -> template_shift (PS1 stack WCS-offset + proper-motion node shifts, after fit + scene_boot)
 
 Dispatch contract for those modules: ``run(cfg, **kw)`` where ``kw`` may contain ``force`` (bool), ``condor`` (bool)
 and ``args`` (list of extra CLI tokens, e.g. ``contrib`` slice arguments); only the keywords the function accepts are
@@ -29,7 +30,7 @@ OWN_STAGES = ("scene_boot", "scene_final", "init_boot", "init_final", "nbr_boot"
 DISPATCH = {  # CLI stage -> module under forward_model.chain
     "select": "perband.select", "lists": "perband.lists", "band_cells": "perband.band_cells",
     "contrib": "perband.contrib", "reduce": "perband.reduce", "kernels": "kernels",
-    "hotpants": "hotpants_ref", "final": "final", "score": "score",
+    "hotpants": "hotpants_ref", "final": "final", "score": "score", "template_shift": "template_shift",
 }
 ALL_STAGES = OWN_STAGES + tuple(DISPATCH)
 

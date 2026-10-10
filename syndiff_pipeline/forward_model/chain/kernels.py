@@ -48,6 +48,7 @@ from syndiff_pipeline.forward_model import loss as L  # noqa: E402
 from syndiff_pipeline.template_creation.processing import chromatic_kernels as CK  # noqa: E402
 
 from .config import is_done, mark_done, write_provenance  # noqa: E402
+from . import template_shift as TS  # noqa: E402
 from .perband.paths import BANDS, LAM, MODEL, chain_paths, opt  # noqa: E402
 
 WB = np.array([0.238, 0.344, 0.283, 0.135])   # colour-definition band weights (u = sum_b s_b lambda_b): fixed by the fit's colour file
@@ -873,6 +874,14 @@ def run_k02(cfg, A=None) -> dict:
         render_validation=str(KD / "validate.json"),
         created=time.strftime("%Y-%m-%dT%H:%M:%S"),
     )
+    tsp = TS.spec_path(cfg)                     # PS1 stack-offset + PM template shift (None: kernels unchanged)
+    if tsp is not None:
+        ts = TS.load_spec(tsp, nx, ny)
+        K0, K1, Kb, Kach = (TS.apply(K, ts) for K in (K0, K1, Kb, Kach))
+        meta["template_shift"] = dict(path=ts["path"], sha256=ts["sha256"], tx_mpx=ts["tx_mpx"].tolist(), ty_mpx=ts["ty_mpx"].tolist(),
+                                      K0_sum_minmax_after=[float(K0.sum(axis=(-2, -1)).min()), float(K0.sum(axis=(-2, -1)).max())],
+                                      note="K0, K1, K_bands, K_achrom translated by -t per node after the gates (template_shift.py)")
+        print("template shift applied:", ts["path"], "mean t (mpx)", float(ts["tx_mpx"].mean()), float(ts["ty_mpx"].mean()), flush=True)
     np.savez(KD / "band_epsf.npz", K_bands=Kb, K0=K0, K1=K1, P0=P0, P1=P1, E_bands=E_bands, delta_b=delta_b,
              node_x=nx, node_y=ny, sigma_G_tess=sig, eps=eps, tri=tri, meta=json.dumps(meta))
     np.savez(KD / "band_epsf_aux.npz", E0=E0, Eq=Eq, T1=T1, shift=shift, cq=cq, dq=dq, xq=xq, err_ls=err_ls,
@@ -1000,6 +1009,9 @@ def run(cfg, force: bool = False) -> Path:
     for dep in ("fit", "scene_boot", "mapping"):
         if not is_done(cfg.stage_dir(dep)):
             raise FileNotFoundError(f"stage {dep} not done: {cfg.stage_dir(dep)}")
+    tsp = TS.spec_path(cfg)                     # fail before the long stage if the requested spec is missing
+    if tsp is not None and not Path(tsp).is_file():
+        raise FileNotFoundError(f"inputs.template_shift spec not found: {tsp}")
     A = load_model(cfg)
     kernel_dir(cfg)
     run_k_sigma(cfg, A)
@@ -1010,6 +1022,7 @@ def run(cfg, force: bool = False) -> Path:
     write_provenance(stage, cfg, {"fit_params": P.fit_dir / "params.npz", "fit_meta": P.fit_dir / "fit_meta.json",
                                   "scene_meta": P.scene_dir / "scene_meta.json", "colour_file": P.colour_file,
                                   "xp_synth": cfg.inputs.xp_synth, "mapping": P.mapping_dir,
-                                  "kernel_bright_q": {"value": A["kernel_q"]}})
+                                  "kernel_bright_q": {"value": A["kernel_q"]},
+                                  "template_shift": tsp if tsp is not None else {"value": None}})
     mark_done(stage)
     return stage
