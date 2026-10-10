@@ -70,6 +70,26 @@ def configure_model_env(meta: dict) -> dict:
     return want
 
 
+def bright_width_kwargs(meta: dict, fit_out: Path, scene) -> dict:
+    """make_model kwargs for the fit's brightness-width term (bright_width.py), or {} for a fit without it.
+
+    q per base-scene star comes from the fit's own ``bright_width_q.npz`` (written at setup from the warm start), matched
+    by source_id; the fold scene holds every held-out star (as nuisance), so they are all covered. Base-scene stars that
+    the fold scene does not contain get q = 0 (no extra width), and their number is logged. Without this, a fit trained
+    with the term would be scored without it."""
+    form = (meta.get("bright_width_model") or {}).get("form") or meta.get("bright_width") or "none"
+    if form == "none":
+        return {}
+    zq = np.load(Path(fit_out) / "bright_width_q.npz")
+    idx = {int(s): i for i, s in enumerate(np.asarray(zq["source_id"]))}
+    sid = np.asarray(scene.z["source_id"])
+    q = np.array([zq["q"][idx[int(s)]] if int(s) in idx else 0.0 for s in sid], np.float32)
+    miss = int(sum(int(s) not in idx for s in sid))
+    if miss:
+        print(f"score_oof: bright_width q = 0 for {miss} base-scene stars absent from the fit's q file", flush=True)
+    return dict(bright_q=q, bright_q_ref=float(zq["q_ref"]))
+
+
 def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz"):
     meta = json.loads((fit_out / "fit_meta.json").read_text())
     configure_model_env(meta)
@@ -83,13 +103,14 @@ def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz
     axis = tuple(meta["chroma_axis"]) if meta.get("chroma_axis") else None
     extras = SF.g8_extras_tuple(meta.get("chroma_g8_extras", "") or "", int(meta.get("chroma_g8_blur_order", 0) or 0),
                                 bool(meta.get("chroma_g8_no_dil", False)))
+    bw = bright_width_kwargs(meta, fit_out, scene)
     _, diag = SF.make_model(
         scene, colour_ref=cref, huber_delta=meta["huber_delta"], ridge=meta["ridge"],
         prior_kappa=meta["prior_kappa"], lambda_lap=meta["lambda_lap"], lambda_pixel=meta["lambda_pixel_lap"],
         chroma_axis=axis, lambda_fine_nbr=meta.get("lambda_fine_nbr", 0.0),
         fine_nbr_mode=meta.get("fine_nbr_mode") or "plain",
         chroma_g8_gauge=meta.get("chroma_g8_gauge", "mean"), chroma_g8_no_dil=bool(meta.get("chroma_g8_no_dil", False)),
-        chroma_g8_extras=extras, delta2_mean=d2, **SF.meta_colour_kwargs(meta))
+        chroma_g8_extras=extras, delta2_mean=d2, **SF.meta_colour_kwargs(meta), **bw)
     pp = fit_out / params_name
     for alt in ("params.npz", "params_latest.npz"):     # a running fit has only params_latest.npz
         if not pp.exists():
