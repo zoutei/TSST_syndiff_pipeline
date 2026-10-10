@@ -29,7 +29,10 @@ PRIOR_FLAGS = ("lambda-fine-nbr", "lambda-local-poly", "local-poly-window")
 # Values the Paper 1 dataset recipe must carry: arm lp7s (prior_bakeoff_20260930), user 2026-09-30.
 RECIPE_PRIORS = {"paper1_dataset": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0},
                  # final training recipe, user 2026-10-07 (training_fixes_20261005)
-                 "paper1_final": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0}}
+                 "paper1_final": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0},
+                 # run4 (2026-10-09, user-approved via the Paper 1 orchestrator): paper1_final + the STEP 1 radial/coma
+                 # colour law (W3L, colour-rf5-20261009); same priors
+                 "paper1_final_step1": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0}}
 
 
 def check_prior_flags(cfg: ChainConfig) -> dict[str, float]:
