@@ -70,24 +70,40 @@ def configure_model_env(meta: dict) -> dict:
     return want
 
 
-def bright_width_kwargs(meta: dict, fit_out: Path, scene) -> dict:
+def bright_width_kwargs(meta: dict, fit_out: Path, scene, base_kwargs: dict | None = None, params=None) -> dict:
     """make_model kwargs for the fit's brightness-width term (bright_width.py), or {} for a fit without it.
 
-    q per base-scene star comes from the fit's own ``bright_width_q.npz`` (written at setup from the warm start), matched
-    by source_id; the fold scene holds every held-out star (as nuisance), so they are all covered. Base-scene stars that
-    the fold scene does not contain get q = 0 (no extra width), and their number is logged. Without this, a fit trained
-    with the term would be scored without it."""
+    q per base-scene star: the fit's own ``bright_width_q.npz`` (warm-start q, what training used), matched by source_id,
+    where it is > 0. Held-out stars have q = 0 there (their pixels are withheld from the fold scene, so their warm-start
+    flux is 0), and some base-scene stars are absent; for all of those q is computed on the base scene exactly as the fit
+    computes it: q = 2 s x flux x peak fraction from a flux solve WITHOUT the term (``base_kwargs`` = the make_model kwargs
+    of the term-free model, ``params`` = the fit's params), capped at the fit's q_cap. Without base_kwargs/params those
+    stars keep q = 0 (logged). Without this, a fit trained with the term would be scored without it on held-out stars."""
+    from .. import bright_width as BW
     form = (meta.get("bright_width_model") or {}).get("form") or meta.get("bright_width") or "none"
     if form == "none":
         return {}
     zq = np.load(Path(fit_out) / "bright_width_q.npz")
     idx = {int(s): i for i, s in enumerate(np.asarray(zq["source_id"]))}
     sid = np.asarray(scene.z["source_id"])
-    q = np.array([zq["q"][idx[int(s)]] if int(s) in idx else 0.0 for s in sid], np.float32)
-    miss = int(sum(int(s) not in idx for s in sid))
-    if miss:
-        print(f"score_oof: bright_width q = 0 for {miss} base-scene stars absent from the fit's q file", flush=True)
-    return dict(bright_q=q, bright_q_ref=float(zq["q_ref"]))
+    q = np.array([zq["q"][idx[int(s)]] if int(s) in idx else 0.0 for s in sid], np.float64)
+    need = q <= 0
+    if need.any() and base_kwargs is not None and params is not None:
+        p0 = {k: v for k, v in params.items() if k not in BW.BRIGHT_WIDTH_LEAVES}
+        _, diag0, ras0 = SF.make_model(scene, return_templates=True, **base_kwargs)
+        N = scene.N; pix = np.ones(scene.U + 1, np.float32); pix[scene.U] = 0.0
+        st = {"pix_active_u": jnp.asarray(pix), "star_free": jnp.ones((N,), jnp.float32),
+              "f_fixed": jnp.zeros((N,), jnp.float32), "f_prior": jnp.zeros((N,), jnp.float32)}
+        f0, _, _ = jax.jit(diag0)(p0, st); st, _ = SF.update_flux_prior(f0, st, scene)
+        T, f = jax.jit(ras0)(p0, st)
+        qe = BW.peak_charge(np.asarray(f, np.float64), np.asarray(jnp.max(T, axis=1), np.float64))
+        qe = np.where(np.isfinite(qe) & (qe > 0), qe, 0.0)
+        cap = float(json.loads(str(zq["meta"])).get("q_cap", BW.Q_MAX_DEFAULT)) if "meta" in zq.files else BW.Q_MAX_DEFAULT
+        q = np.where(need, np.minimum(qe, cap) if cap > 0 else qe, q)
+        print(f"score_oof: bright_width q computed on the base scene for {int(need.sum())} stars (held-out / absent)", flush=True)
+    elif need.any():
+        print(f"score_oof: bright_width q = 0 for {int(need.sum())} base-scene stars (no base-scene solve requested)", flush=True)
+    return dict(bright_q=q.astype(np.float32), bright_q_ref=float(zq["q_ref"]))
 
 
 def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz"):
@@ -103,14 +119,12 @@ def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz
     axis = tuple(meta["chroma_axis"]) if meta.get("chroma_axis") else None
     extras = SF.g8_extras_tuple(meta.get("chroma_g8_extras", "") or "", int(meta.get("chroma_g8_blur_order", 0) or 0),
                                 bool(meta.get("chroma_g8_no_dil", False)))
-    bw = bright_width_kwargs(meta, fit_out, scene)
-    _, diag = SF.make_model(
-        scene, colour_ref=cref, huber_delta=meta["huber_delta"], ridge=meta["ridge"],
-        prior_kappa=meta["prior_kappa"], lambda_lap=meta["lambda_lap"], lambda_pixel=meta["lambda_pixel_lap"],
-        chroma_axis=axis, lambda_fine_nbr=meta.get("lambda_fine_nbr", 0.0),
-        fine_nbr_mode=meta.get("fine_nbr_mode") or "plain",
-        chroma_g8_gauge=meta.get("chroma_g8_gauge", "mean"), chroma_g8_no_dil=bool(meta.get("chroma_g8_no_dil", False)),
-        chroma_g8_extras=extras, delta2_mean=d2, **SF.meta_colour_kwargs(meta), **bw)
+    kw = dict(colour_ref=cref, huber_delta=meta["huber_delta"], ridge=meta["ridge"],
+              prior_kappa=meta["prior_kappa"], lambda_lap=meta["lambda_lap"], lambda_pixel=meta["lambda_pixel_lap"],
+              chroma_axis=axis, lambda_fine_nbr=meta.get("lambda_fine_nbr", 0.0),
+              fine_nbr_mode=meta.get("fine_nbr_mode") or "plain",
+              chroma_g8_gauge=meta.get("chroma_g8_gauge", "mean"), chroma_g8_no_dil=bool(meta.get("chroma_g8_no_dil", False)),
+              chroma_g8_extras=extras, delta2_mean=d2, **SF.meta_colour_kwargs(meta))
     pp = fit_out / params_name
     for alt in ("params.npz", "params_latest.npz"):     # a running fit has only params_latest.npz
         if not pp.exists():
@@ -118,6 +132,8 @@ def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz
     params = FIT.load_params_npz(pp)
     params = SF.set_chroma_model(params, meta.get("chroma_model", "global8"), halo=bool(meta.get("chroma_halo", False)),
                                  g8_init=None, g8_extras=extras, g8_source_extras=extras) if "chroma_g8" in params else params
+    bw = bright_width_kwargs(meta, fit_out, scene, base_kwargs=kw, params=params)
+    _, diag = SF.make_model(scene, **kw, **bw)
     return meta, scene, jax.jit(diag), params, str(pp)
 
 
