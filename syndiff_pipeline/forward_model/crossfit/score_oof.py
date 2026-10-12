@@ -103,7 +103,11 @@ def bright_width_kwargs(meta: dict, fit_out: Path, scene, base_kwargs: dict | No
         print(f"score_oof: bright_width q computed on the base scene for {int(need.sum())} stars (held-out / absent)", flush=True)
     elif need.any():
         print(f"score_oof: bright_width q = 0 for {int(need.sum())} base-scene stars (no base-scene solve requested)", flush=True)
-    return dict(bright_q=q.astype(np.float32), bright_q_ref=float(zq["q_ref"]))
+    q_ref = float(zq["q_ref"])
+    if form == "onset":   # raw peak charge in the q file; the term sees max(q - q0, 0) (scene_fit.make_model)
+        q0 = float(meta.get("bright_width_q0") or (meta.get("bright_width_model") or {}).get("q0") or 0.0)
+        q, q_ref = BW.onset_q(q, q0), float(BW.onset_q(q_ref, q0))
+    return dict(bright_q=q.astype(np.float32), bright_q_ref=q_ref)
 
 
 def build(fit_out: Path, base_scene: Path, params_name: str = "params_stage3.npz"):

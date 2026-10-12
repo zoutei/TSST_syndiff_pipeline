@@ -89,7 +89,10 @@ def bright_width_info(params, meta, kernel_q):
     if not BW.has_bright_width(params):
         return None
     form = meta.get("bright_width")
-    assert form == "lin", f"params carry a bright_width leaf but fit_meta bright_width={form!r} (need 'lin')"
+    assert form in BW.FORMS and form != "none", f"params carry a bright_width leaf but fit_meta bright_width={form!r}"
+    if form != "lin":   # aniso/quad/onset: the kernel chain renders q = kernel_q; every form's term is 0 at q = q_ref = 0
+        assert float(kernel_q) == 0.0 and float((meta.get("bright_width_model") or {}).get("q_ref", 0.0)) == 0.0, \
+            f"bright_width form {form!r} is only supported in the kernel chain with kernel_q = q_ref = 0"
     bwm = meta.get("bright_width_model") or {}
     q_ref = bwm.get("q_ref")
     qf = Path(meta.get("bright_width_q_file") or bwm.get("q_file") or "")

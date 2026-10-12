@@ -1071,6 +1071,7 @@ CHROMA_FIELD_GENERATORS = _GeneratorTable({
     "tre_b": EM.chroma_trefoil_b_field,
     "kurt_plain_raw": EM.chroma_kurt_plain_field_raw,
     "blur_raw": EM.chroma_blur_field_raw,
+    "blur_xy_raw": EM.chroma_blur_xy_field_raw,
     "dilation_raw": EM.chroma_dilation_field_raw,
     "tre_a_raw": EM.chroma_trefoil_a_field_raw,
     "tre_b_raw": EM.chroma_trefoil_b_field_raw,

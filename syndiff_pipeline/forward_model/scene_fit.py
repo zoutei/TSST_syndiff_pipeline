@@ -529,7 +529,7 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
                chroma_g8_drop=(), chroma_radial_knots=None, chroma_radial_mode=None, chroma_coma_knots=None,
                bright_q=None, bright_q_ref: float = 0.0, return_templates: bool = False,
                bright_width: str = "none", bright_width_q_file=None, bright_width_q_ref: float = 0.0,
-               bright_width_gen_per_dsigma: float = BW.GEN_PER_DSIGMA,
+               bright_width_gen_per_dsigma: float = BW.GEN_PER_DSIGMA, bright_width_q0: float = 0.0,
                bg_cheb_order: int = -1,
                stamp_bg: str = "none", stamp_bg_r_in: float = 5.0, stamp_bg_r_out: float = 7.0,
                stamp_bg_clip: float = 3.0, stamp_bg_prior_sigma=None, stamp_bg_nb_frac: float = 0.01,
@@ -574,6 +574,9 @@ def make_model(scene: Scene, *, colour_ref, huber_delta: float, ridge: float,
             raise ValueError("bright_width='lin' needs bright_width_q_file (or bright_q)")
         bright_q = bright_q_by_source(bright_width_q_file, scene.z["source_id"])
         bright_q_ref = float(bright_width_q_ref)
+        if bright_width == "onset":   # file q is the raw peak charge; the term sees max(q - q0, 0)
+            bright_q = BW.onset_q(bright_q, bright_width_q0)
+            bright_q_ref = float(BW.onset_q(bright_q_ref, bright_width_q0))
     if stamp_bg not in SB.MODES:
         raise ValueError(f"unknown stamp_bg {stamp_bg!r}")
     ctxs = scene.contexts(colour_ref, chroma_axis=chroma_axis, chroma_g8_gauge=chroma_g8_gauge,
@@ -1224,14 +1227,16 @@ def run(args):
             np.savez(qfile, source_id=scene.z["source_id"], q=q, flux=flux_q, peak_fraction=peak_q,
                      q_ref=q_ref, meta=json.dumps(qm))
         loss_fn, diagnose = make_model(scene, **model_kw, bright_width=args.bright_width,
-                                       bright_width_q_file=str(qfile), bright_width_q_ref=q_ref)
+                                       bright_width_q_file=str(qfile), bright_width_q_ref=q_ref,
+                                       bright_width_q0=float(args.bright_width_q0))
         bw_meta.update(
             qm, q_ref=q_ref, trainable=bool(args.bright_width_train), init_source=init_src,
             b_init=BW.leaf_to_b(params["bright_width"]),
             units="b = DeltaSigma (extra blur covariance per axis, px^2) per 1e4 e- per 2-s read",
             leaf_unit=BW.LEAF_UNIT, gen_per_dsigma=BW.GEN_PER_DSIGMA,
             generator=BW.generator_for_gauge(args.chroma_g8_gauge),
-            q_file=str(qfile))
+            q_file=str(qfile), q0=float(args.bright_width_q0))
+        _log(f"bright_width: form {args.bright_width}, q0 {args.bright_width_q0:g}, extra {BW.extra_coeffs(params)}")
         _log(f"bright_width: b_init={bw_meta['b_init']:.4g} px^2/1e4e- ({init_src}), "
              f"q_ref={q_ref:.4g} e- ({bw_meta['q_ref_source'] if 'q_ref_source' in bw_meta else 'resumed'}), "
              f"q source {qm['q_source']}, q median/p99/max {qm['q_median']:.3g}/{qm['q_p99']:.3g}/"
@@ -1419,6 +1424,7 @@ def run(args):
                 rec["lr_mult"] = lr_mult
             if "bright_width" in params:
                 rec["bright_width_b"] = BW.leaf_to_b(params["bright_width"])
+                rec.update({f"{k}_px2": v for k, v in BW.extra_coeffs(params).items()})
             if args.bg_cheb_order >= 0:
                 rec["bg_coef"] = [float(v) for v in np.asarray(met["bg_coef"])]
             if "stamp_bg" in met:
@@ -1547,6 +1553,7 @@ def run(args):
     save_state(out / "flux_solved.npz", st, extra=extra)
     if "bright_width" in params:
         run_meta["bright_width_model"]["b_final"] = BW.leaf_to_b(params["bright_width"])
+        run_meta["bright_width_model"]["extra_final"] = BW.extra_coeffs(params)
     if args.stop_rule == "smoothed" or args.model_floor_eps > 0 or args.noise_scale != 1.0:
         run_meta["stage_outcomes"] = stage_outcomes
     if ("bright_width" in params or args.bg_cheb_order >= 0 or args.stamp_bg != "none"
@@ -1649,6 +1656,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bright-width-qref", type=float, default=None,
                    help="q_ref in e- per read; default = loss-weighted (~S/N^2) mean q of the ePSF "
                         "contributors, computed at setup and recorded in fit_meta.json")
+    p.add_argument("--bright-width-q0", type=float, default=0.0,
+                   help="onset form only: q0 in e- per read; the term is b (max(q - q0, 0) - max(q_ref - q0, 0))")
     p.add_argument("--bright-width-qmax", type=float, default=BW.Q_MAX_DEFAULT,
                    help="cap on q (e- per read), default 2e5 ~ pixel full well (saturated stars); 0 = none")
     p.add_argument("--init-params-file", default=None,

@@ -52,8 +52,16 @@ from __future__ import annotations
 import jax.numpy as jnp
 import numpy as np
 
-BRIGHT_WIDTH_LEAVES = ("bright_width",)
-FORMS = ("none", "lin")
+BRIGHT_WIDTH_LEAVES = ("bright_width", "bright_width_xy", "bright_width_q2")
+# Forms (2026-10-12, bwidth_campaign_20261012). Every form keeps the leaf ``bright_width`` = b; the others add a leaf:
+#   lin    DeltaSigma_xx = DeltaSigma_yy = b u,                       u = (q - q_ref) / Q_UNIT
+#   aniso  DeltaSigma_xx = (b + d) u,  DeltaSigma_yy = (b - d) u,     d = leaf ``bright_width_xy`` (column y: b - d)
+#   quad   DeltaSigma    = b u + c (q^2 - q_ref^2) / Q_UNIT^2,         c = leaf ``bright_width_q2``
+#   onset  DeltaSigma    = b (max(q - q0, 0) - max(q_ref - q0, 0)) / Q_UNIT   (q0 fixed, e- per read; applied to q at
+#          context build by ``onset_q``, so the per-slot weight is the lin one)
+FORMS = ("none", "lin", "aniso", "quad", "onset")
+FORM_EXTRA_LEAF = {"aniso": "bright_width_xy", "quad": "bright_width_q2"}
+XY_FIELD = "blur_xy_raw"   # generator P_xx - P_yy (raw-P gauged): weight w gives DeltaSigma_xx = +2w, DeltaSigma_yy = -2w
 LEAF_UNIT = 1e-3          # leaf 1.0 == 1e-3 px^2 DeltaSigma per Q_UNIT e- per read
 Q_UNIT = 1e4              # e- per 2-s read
 GEN_PER_DSIGMA = 0.5      # blur-generator weight per px^2 of DeltaSigma (per axis)
@@ -82,16 +90,38 @@ def generator_for_gauge(gauge: str) -> str:
     return "blur_raw"
 
 
-def slot_weight(params, ctx, star_occ):
-    """Per-slot blur-generator weight ``0.5 * b * (q - q_ref) / 1e4`` (b in px^2 per 1e4 e-)."""
+def onset_q(q, q0):
+    """Onset form: the effective charge max(q - q0, 0) the lin weight is evaluated at."""
+    return np.clip(np.asarray(q, np.float64) - float(q0), 0.0, None)
+
+
+def _q_slots(ctx, star_occ):
     q = getattr(ctx, "bright_q", None)
     if q is None:
         raise ValueError(
             "params carry the bright_width leaf but the context has no bright_q; build the "
             "context with per-star peak charges (scene_fit does this). Refusing to default it "
             "to zero, which would silently disagree with the fitted model.")
+    return q[star_occ]
+
+
+def slot_weight(params, ctx, star_occ):
+    """Per-slot isotropic blur-generator weight ``0.5 * [b u + c (q^2 - q_ref^2)/1e8]``, u = (q - q_ref)/1e4
+    (b in px^2 per 1e4 e-; c only with the quad leaf)."""
+    q = _q_slots(ctx, star_occ)
     b = params["bright_width"][0] * LEAF_UNIT
-    return (GEN_PER_DSIGMA * b / Q_UNIT) * (q[star_occ] - ctx.bright_q_ref)
+    w = (GEN_PER_DSIGMA * b / Q_UNIT) * (q - ctx.bright_q_ref)
+    if "bright_width_q2" in params:
+        c = params["bright_width_q2"][0] * LEAF_UNIT
+        w = w + (GEN_PER_DSIGMA * c / Q_UNIT ** 2) * (q * q - ctx.bright_q_ref ** 2)
+    return w
+
+
+def slot_weight_xy(params, ctx, star_occ):
+    """Per-slot weight on ``XY_FIELD`` (aniso form): ``0.5 * d * (q - q_ref) / 1e4``."""
+    q = _q_slots(ctx, star_occ)
+    d = params["bright_width_xy"][0] * LEAF_UNIT
+    return (GEN_PER_DSIGMA * d / Q_UNIT) * (q - ctx.bright_q_ref)
 
 
 def merge_slot_terms(params, ctx, star_occ, chroma):
@@ -108,15 +138,18 @@ def merge_slot_terms(params, ctx, star_occ, chroma):
     name = blur_field_name(ctx)
     if chroma is None:
         z = jnp.zeros_like(w)
-        return z, z, z, {name: w}
-    delta, sx, sy, fields = chroma
-    fields = dict(fields)
-    if name in fields:
-        if fields[name].ndim != 1:
-            raise ValueError(f"colour field {name!r} is not a per-slot weight; cannot merge bright_width")
-        fields[name] = fields[name] + w
+        delta, sx, sy, fields = z, z, z, {}
     else:
-        fields[name] = w
+        delta, sx, sy, fields = chroma
+        fields = dict(fields)
+    for nm, ww in ((name, w),) + (((XY_FIELD, slot_weight_xy(params, ctx, star_occ)),)
+                                  if "bright_width_xy" in params else ()):
+        if nm in fields:
+            if fields[nm].ndim != 1:
+                raise ValueError(f"colour field {nm!r} is not a per-slot weight; cannot merge bright_width")
+            fields[nm] = fields[nm] + ww
+        else:
+            fields[nm] = ww
     return delta, sx, sy, fields
 
 
@@ -153,6 +186,10 @@ def set_bright_width(params: dict, form: str, init_leaf: float | None) -> tuple[
     p = {k: v for k, v in params.items() if k not in BRIGHT_WIDTH_LEAVES}
     if form == "none":
         return p, ("dropped warm-start leaf" if has_bright_width(params) else "absent")
+    extra = FORM_EXTRA_LEAF.get(form)
+    if extra is not None:   # second coefficient: warm-start value if the warm start has it, else 0
+        p[extra] = (jnp.asarray(params[extra], jnp.float32).reshape(1) if extra in params
+                    else jnp.zeros((1,), jnp.float32))
     if init_leaf is not None:
         p["bright_width"] = jnp.asarray([float(init_leaf)], jnp.float32)
         return p, "cli"
@@ -161,6 +198,12 @@ def set_bright_width(params: dict, form: str, init_leaf: float | None) -> tuple[
         return p, "warm_start"
     p["bright_width"] = jnp.zeros((1,), jnp.float32)
     return p, "zero"
+
+
+def extra_coeffs(params) -> dict:
+    """The forms' second coefficients in px^2 units (d per 1e4 e-, c per (1e4 e-)^2), for logs/meta."""
+    return {k: float(np.asarray(params[k]).reshape(-1)[0]) * LEAF_UNIT for k in ("bright_width_xy", "bright_width_q2")
+            if k in params}
 
 
 def leaf_to_b(leaf) -> float:

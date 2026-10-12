@@ -32,7 +32,9 @@ RECIPE_PRIORS = {"paper1_dataset": {"lambda-fine-nbr": 0.0, "lambda-local-poly":
                  "paper1_final": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0},
                  # run4 (2026-10-09, user-approved via the Paper 1 orchestrator): paper1_final + the STEP 1 radial/coma
                  # colour law (W3L, colour-rf5-20261009); same priors
-                 "paper1_final_step1": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0}}
+                 "paper1_final_step1": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0},
+                 # W3d brightness campaign test 6 (2026-10-12, not adopted): paper1_final_step1 + lin brightness width
+                 "paper1_final_step1_bw": {"lambda-fine-nbr": 0.0, "lambda-local-poly": 3.0e8, "local-poly-window": 7.0}}
 
 
 def check_prior_flags(cfg: ChainConfig) -> dict[str, float]:

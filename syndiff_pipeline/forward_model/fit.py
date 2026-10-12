@@ -100,7 +100,7 @@ CHROMA_IMAGE_LEAVES = ("chroma_image",)
 CHROMA_G8_LEAVES = ("chroma_g8",)  # global 8-parameter colour model (loss.CHROMA_G8_LEAVES)
 # Brightness-width blur coefficient (bright_width.BRIGHT_WIDTH_LEAVES): trains in the chroma
 # bucket at stage 3 like chroma_g8 (scene_fit can hold it fixed instead).
-BRIGHT_WIDTH_LEAVES = ("bright_width",)
+BRIGHT_WIDTH_LEAVES = ("bright_width", "bright_width_xy", "bright_width_q2")
 # CCD colour translation (loss.CHROMA_CCD_SHIFT_LEAF; scene_fit --chroma-ccd-shift frozen0): always frozen. Kept LAST,
 # where the 10-04 closure adapter appended it, so leaf order and results match runs made with the adapter.
 CHROMA_CCD_SHIFT_LEAVES = ("chroma_ccd_shift",)

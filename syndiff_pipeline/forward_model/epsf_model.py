@@ -1973,6 +1973,14 @@ def blur_generator(node_field: jnp.ndarray) -> jnp.ndarray:
     return jnp.gradient(px, h, axis=-1) + jnp.gradient(py, h, axis=-2)
 
 
+def blur_xy_generator(node_field: jnp.ndarray) -> jnp.ndarray:
+    """Ungauged anisotropic blur ``P_xx - P_yy`` in physical px^-2 (same stencil as ``blur_generator``):
+    a weight w changes the second moments by +2w along detector x and -2w along y (bright_width aniso form)."""
+    px, py = _grad_phys(node_field)
+    h = 1.0 / OVERSAMPLE
+    return jnp.gradient(px, h, axis=-1) - jnp.gradient(py, h, axis=-2)
+
+
 def _displacement_generator(node_field, dx, dy):
     """First-order change of P under the displacement field d: ``-(d . grad P)``."""
     px, py = _grad_phys(node_field)
@@ -2029,6 +2037,10 @@ def chroma_kurt_plain_field_raw(node_field, *, weight_grid=None):
 
 def chroma_blur_field_raw(node_field, *, weight_grid=None):
     return _gauge_off_raw_base(blur_generator(node_field), node_field, weight_grid)
+
+
+def chroma_blur_xy_field_raw(node_field, *, weight_grid=None):
+    return _gauge_off_raw_base(blur_xy_generator(node_field), node_field, weight_grid)
 
 
 def chroma_dilation_field_raw(node_field, *, weight_grid=None):
