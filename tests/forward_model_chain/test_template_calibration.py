@@ -211,6 +211,17 @@ VP = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(VP)
 
 
+@pytest.fixture
+def big_tmp(request):
+    """Scratch dir on /astro (the band templates are ~2.6 GB each; /tmp is too small), removed afterwards."""
+    import shutil
+    d = VP.OUT / "pytest_scratch" / request.node.name.replace("[", "_").replace("]", "")
+    shutil.rmtree(d, ignore_errors=True)
+    d.mkdir(parents=True)
+    yield d
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def _need(field):
     BF.need(VP.RUN4 / field / "perband/cells.json", VP.RUN4 / field / "perband/contrib", VP.RUN4 / field / "perband/band_templates/T_r.npy",
             VP.RUN4 / field / "perband/provenance.json", VP.RUN4 / field / "mapping", VP.FACT / f"factors_{field}_hyb.json",
@@ -219,7 +230,8 @@ def _need(field):
 
 @slow
 @pytest.mark.parametrize("field", ["F1"])
-def test_ones_factors_bitwise_equal_to_run4(tmp_path, field):
+def test_ones_factors_bitwise_equal_to_run4(big_tmp, field):
+    tmp_path = big_tmp
     _need(field)
     VP.reduce_field(field, tmp_path, VP.ones_factors(field, tmp_path / "ones.json"))
     for k in ("T_r", "T_i", "T_z", "T_y", "T_sum", "T_prodpath", "count"):
@@ -230,7 +242,8 @@ def test_ones_factors_bitwise_equal_to_run4(tmp_path, field):
 
 @slow
 @pytest.mark.parametrize("field", ["F1"])
-def test_real_factors_match_reference_tprime(tmp_path, field):
+def test_real_factors_match_reference_tprime(big_tmp, field):
+    tmp_path = big_tmp
     _need(field)
     VP.reduce_field(field, tmp_path, VP.FACT / f"factors_{field}_hyb.json")
     for b in BANDS:
