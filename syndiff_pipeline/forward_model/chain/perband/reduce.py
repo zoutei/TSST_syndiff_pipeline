@@ -17,8 +17,11 @@ def run(cfg, force: bool = False, make_figure: bool = True):
     if summ["missing"] or summ["errors"]:
         raise RuntimeError(f"perband incomplete: {len(summ['missing'])} cells missing, {len(summ['errors'])} with errors "
                            f"(see {P.band_templates / 'sum_check.json'}); not marking the stage done")
-    write_provenance(stage, cfg, {"cells": P.cells_json, "publisher_lists": P.publisher_lists,
-                                  "sum_check": P.band_templates / "sum_check.json",
-                                  "store_weights": P.store_weights_json, "mapping": P.mapping_dir})
+    inputs = {"cells": P.cells_json, "publisher_lists": P.publisher_lists,
+              "sum_check": P.band_templates / "sum_check.json",
+              "store_weights": P.store_weights_json, "mapping": P.mapping_dir}
+    if cfg.template_calibration.mode != "off":
+        inputs["template_calibration_factors"] = cfg.template_calibration.factors
+    write_provenance(stage, cfg, inputs)
     mark_done(stage)
     return stage

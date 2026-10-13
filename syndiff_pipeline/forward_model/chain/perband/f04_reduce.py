@@ -13,9 +13,31 @@ cell has the same set -- a mixed store is an error -- and that it equals the cha
 to compute the adopted-weight rescale ``s_b = w'_b / w_b``.
 
 Port of e2e ``f04_reduce.py`` (single mapping, label ``a3`` in the contrib keys kept).
+
+Optional per-skycell, per-band template calibration (config ``template_calibration``, default ``mode: off`` = the
+behaviour above, byte for byte).  With ``mode: zpcell`` the band templates are re-summed with a calibration factor per
+cell and band,
+
+$$T'_b = \sum_s C_{s,b} / f_{s,b}, \qquad f_{s,b} = \hat M_{s,b}\, R_b / g,$$
+
+where $C_{s,b}$ is the (blurred, OS4) contribution of skycell $s$ to band $b$ stored in ``P.contrib/<cell>.npz``,
+$\hat M_{s,b}$ the measured per-cell, per-band PS1-to-TESS flux ratio, $R_b$ the per-band global ratio and $g$ the
+global normalisation (all from the frozen factor JSON, key ``zpcell[cell][band]``; they enter only through the
+tabulated $f_{s,b}$).  Config::
+
+    template_calibration:
+      mode: zpcell
+      factors: /astro/.../template_zp_factors_v1/factors_{field}_hyb.json    # {field} is substituted
+
+``T_{r,i,z,y}.npy`` and ``T_sum.npy`` (hence the final-stage Hotpants baseline ``hotpants_ref``) are the CALIBRATED
+templates.  ``T_prodpath``, ``count`` and the ``sum_check`` blur/seam comparison use the UNcalibrated band sums (so the
+gate stays meaningful); ``sum_check.json`` gets a ``template_calibration`` block.  The bootstrap template (band-combined
+production store) is NOT calibrated.  A cell with a contrib file but no factor, a field mismatch, or a non-finite or
+non-positive factor raises.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 
 import numpy as np
@@ -58,6 +80,40 @@ def collect_store_weights(P, cfg=None) -> dict:
     return out
 
 
+def load_zpcell_factors(cfg, cells: list[str], contrib_dir) -> tuple[dict, dict]:
+    """Validate and load the zpcell factor file; returns ``({cell: {band: float}}, meta)``."""
+    from ..config import ConfigError
+
+    tc = cfg.template_calibration
+    if tc.factors is None:
+        raise ConfigError("template_calibration.mode is 'zpcell' but template_calibration.factors is unset")
+    raw = tc.factors.read_bytes()
+    doc = json.loads(raw)
+    if doc.get("field") != cfg.field:
+        raise ConfigError(f"template_calibration factors {tc.factors} are for field {doc.get('field')!r}, config field is {cfg.field!r}")
+    if list(doc.get("bands", [])) != list(BANDS):
+        raise ConfigError(f"template_calibration factors bands {doc.get('bands')!r} != {list(BANDS)}")
+    zp = doc["zpcell"]
+    fac, missing = {}, []
+    for name in cells:
+        if not (contrib_dir / f"{name}.npz").exists():
+            continue
+        if name not in zp:
+            missing.append(name)
+            continue
+        f = {b: float(zp[name][b]) for b in BANDS}
+        bad = {b: v for b, v in f.items() if not (np.isfinite(v) and v > 0)}
+        if bad:
+            raise ConfigError(f"template_calibration factor for {name} not finite and > 0: {bad}")
+        fac[name] = f
+    if missing:
+        raise ConfigError(f"template_calibration factors lack {len(missing)} cell(s) that have contributions "
+                          f"(no silent f=1): {missing[:5]}{' ...' if len(missing) > 5 else ''}")
+    meta = dict(mode="zpcell", factors=str(tc.factors), factors_sha256=hashlib.sha256(raw).hexdigest(),
+                reference=doc.get("reference"), global_norm=doc.get("global_norm"), n_cells_calibrated=len(fac))
+    return fac, meta
+
+
 def run(cfg, make_figure: bool = True) -> dict:
     from syndiff_pipeline.common.mapping_grid import load_mapping_grid_from_master
 
@@ -71,6 +127,10 @@ def run(cfg, make_figure: bool = True) -> dict:
     acc = {k: np.zeros(n) for k in KEYS}
     cnt = np.zeros(n)
     cells = json.loads(P.cells_json.read_text())["cells"]
+    cal = cfg.template_calibration.mode == "zpcell" if hasattr(cfg, "template_calibration") else False
+    if cal:
+        fac, cal_meta = load_zpcell_factors(cfg, cells, P.contrib)
+        accT = {b: np.zeros(n) for b in BANDS}       # calibrated band templates; ``acc`` stays the uncalibrated sums
     checks, missing = {}, []
     for name in cells:
         p = P.contrib / f"{name}.npz"
@@ -82,17 +142,20 @@ def run(cfg, make_figure: bool = True) -> dict:
         for k in KEYS:
             if f"{MODEL}_pix_{k}" in z.files:
                 np.add.at(acc[k], z[f"{MODEL}_pix_{k}"], z[f"{MODEL}_sum_{k}"])
+                if cal and k in BANDS:
+                    np.add.at(accT[k], z[f"{MODEL}_pix_{k}"], z[f"{MODEL}_sum_{k}"] / fac[name][k])
         if f"{MODEL}_count" in z.files:
             np.add.at(cnt, z[f"{MODEL}_pix_prod"], z[f"{MODEL}_count"])
     acc = {k: v.reshape(shp) for k, v in acc.items()}
     cnt = cnt.reshape(shp)
+    out = {b: v.reshape(shp) for b, v in accT.items()} if cal else acc      # saved band templates
     for b in BANDS:
-        np.save(bt / f"T_{b}.npy", acc[b])
+        np.save(bt / f"T_{b}.npy", out[b])
     np.save(bt / "T_prodpath.npy", acc["prod"])
     np.save(bt / "count.npy", cnt)
-    np.save(bt / "T_sum.npy", sum(acc[b] for b in BANDS))   # achromatic template = sum of band templates (Hotpants baseline input)
+    np.save(bt / "T_sum.npy", sum(out[b] for b in BANDS))   # achromatic template = sum of band templates (Hotpants baseline input)
     T = acc["prod"]      # no production FLUX_SUM on this mapping: check against the production-path sum
-    S = sum(acc[b] for b in BANDS)
+    S = sum(acc[b] for b in BANDS)      # uncalibrated: the blur/seam gate compares against the production path
     pk = float(np.abs(T).max())
     dS, dP = np.abs(S - T), np.abs(acc["prod"] - T)
     cc = [v for v in checks.values() if "error" not in v]
@@ -110,6 +173,12 @@ def run(cfg, make_figure: bool = True) -> dict:
                                     n_gt_1e5=sum(v["max_rel_to_peak"] > 1e-5 for v in cc),
                                     worst=sorted(((v["max_rel_to_peak"], k) for k, v in checks.items() if "error" not in v))[-15:]),
                 n_xproj=sum(v.get("xproj", False) for v in cc))
+    if cal:
+        fv = {b: np.array([fac[c][b] for c in fac]) for b in BANDS}
+        summ["template_calibration"] = dict(
+            cal_meta, factor_min={b: float(fv[b].min()) for b in BANDS}, factor_median={b: float(np.median(fv[b])) for b in BANDS},
+            factor_max={b: float(fv[b].max()) for b in BANDS},
+            flux_calibrated={b: float(out[b].sum()) for b in BANDS}, flux_uncalibrated={b: float(acc[b].sum()) for b in BANDS})
     (bt / "sum_check.json").write_text(json.dumps(summ, indent=1))
     if make_figure:
         _figure(P, acc, dS, S, pk, cc, summ)

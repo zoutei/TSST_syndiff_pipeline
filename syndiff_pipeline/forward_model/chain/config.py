@@ -136,6 +136,18 @@ class KernelsCfg:
     kernel_bright_q: float = 0.0
 
 
+TEMPLATE_CAL_MODES = ("off", "zpcell")
+
+
+@dataclass(frozen=True)
+class TemplateCalibrationCfg:
+    """Per-skycell, per-band template calibration applied when the per-band templates are summed (perband reduce).
+    ``off`` (default) = production behaviour; ``zpcell`` divides each cell's band contribution by the factor in
+    ``factors`` (JSON, see perband/f04_reduce.py)."""
+    mode: str = "off"
+    factors: Path | None = None
+
+
 @dataclass(frozen=True)
 class MaskCfg:
     bit2_radius: float | None = None
@@ -176,6 +188,7 @@ class ChainConfig:
     background: BackgroundCfg = field(default_factory=BackgroundCfg)
     neighbours: NeighboursCfg | None = None
     crossfit: CrossfitCfg = field(default_factory=CrossfitCfg)
+    template_calibration: TemplateCalibrationCfg = field(default_factory=TemplateCalibrationCfg)
     config_path: Path | None = None
     raw: Mapping[str, Any] = field(default_factory=dict, compare=False, repr=False)
 
@@ -220,6 +233,8 @@ class ChainConfig:
         d = dataclasses.asdict(self)
         d.pop("raw", None)
         d.pop("config_path", None)
+        if self.template_calibration.mode == "off":   # default-off section is not part of the identity (keeps old hashes)
+            d.pop("template_calibration", None)
         return _jsonable(d)
 
     def config_hash(self) -> str:
@@ -333,7 +348,7 @@ def _resources(sec: Mapping, key: str, defaults: Mapping[str, int]) -> dict[str,
 
 
 _TOP = {"field", "scc", "stem", "unseen_stem", "data_root", "out_root", "code", "inputs", "fit", "kernels",
-        "mask", "condor", "reference", "wcs_version", "background", "neighbours", "crossfit"}
+        "mask", "condor", "reference", "wcs_version", "background", "neighbours", "crossfit", "template_calibration"}
 
 
 def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) -> ChainConfig:
@@ -480,6 +495,15 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         raise ConfigError(f"kernels.kernel_bright_q must be a number >= 0, got {q!r}")
     kernels = KernelsCfg(src, float(q))
 
+    tp = _section(raw, "template_calibration", {"mode", "factors"})
+    tmode = tp.get("mode", "off")
+    if tmode not in TEMPLATE_CAL_MODES:
+        raise ConfigError(f"template_calibration.mode must be one of {TEMPLATE_CAL_MODES}, got {tmode!r}")
+    tfac = _path(tp.get("factors"), "template_calibration.factors", required=(tmode == "zpcell"), subst={"field": label})
+    if tmode == "off" and tfac is not None:
+        raise ConfigError("template_calibration.factors is set but template_calibration.mode is 'off'")
+    template_calibration = TemplateCalibrationCfg(tmode, tfac)
+
     mp = _section(raw, "mask", {"bit2_radius"})
     r = mp.get("bit2_radius")
     if r is not None and (isinstance(r, bool) or not isinstance(r, (int, float)) or r <= 0):
@@ -503,7 +527,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
     return ChainConfig(field=label, scc=scc, stem=stem, unseen_stem=unseen, data_root=data_root, out_root=out_root,
                        code=code, inputs=inputs, fit=fit, kernels=kernels, mask=mask, condor=condor,
                        reference=reference, wcs_version=ver, background=background, neighbours=neighbours,
-                       crossfit=crossfit, config_path=config_path,
+                       crossfit=crossfit, template_calibration=template_calibration, config_path=config_path,
                        raw=dict(raw))
 
 
