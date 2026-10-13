@@ -1,4 +1,4 @@
-"""f04: sum the sparse per-cell contributions into full OS4 band templates and check sum_b T_b == production.
+r"""f04: sum the sparse per-cell contributions into full OS4 band templates and check sum_b T_b == production.
 
 Outputs (``perband/band_templates/``): ``T_{r,i,z,y}.npy``, ``T_prodpath.npy``, ``count.npy``, ``T_sum.npy`` (float64,
 full OS4 grid, same orientation as the production template FLUX_SUM), ``sum_check.json``, ``store_weights.json`` and
