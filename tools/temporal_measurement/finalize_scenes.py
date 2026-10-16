@@ -1,5 +1,6 @@
 """Freeze science support (not Hotpants kernel masks) and differential PM before cadence fits."""
 import json
+import jax  # before pandas/pyarrow: avoid the environment native-library import-order conflict
 from pathlib import Path
 import numpy as np
 import pandas as pd
