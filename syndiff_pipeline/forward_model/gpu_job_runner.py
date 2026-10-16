@@ -21,7 +21,7 @@ from typing import cast
 TERMINAL = {"completed", "failed", "stopped"}
 NOTIFY_TERMINAL = {"completed", "failed"}
 EMERGENCY_TERMINAL = {"completed", "failed", "stopped"}
-HISTORY_RE = re.compile(r"stage\s+(\d+)\s+step\s+(\d+).*?loss=([+\-\d.eE]+)")
+HISTORY_RE = re.compile(r"(?:stage\s+|\bs)(\d+)\s+step\s+(\d+).*?loss[= ]([+\-\d.eE]+)")
 STEP_START_RE = re.compile(r"stage\s+(\d+)\s+step\s+(\d+).*starting")
 TRAIN_LOG_STALL_WARN_S = 90.0
 STOP_DRAIN_GRACE_S = 120.0

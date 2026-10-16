@@ -502,7 +502,7 @@ def validate_submit_local(
     entry = manifest.get("bundles", {}).get(archive.name)
     if not entry:
         errors.append("archive is not published; run publish first")
-    if entry and not entry.get("file_id"):
+    if entry and not entry.get("file_id") and entry.get("transport") != "upload":
         errors.append("published archive missing Drive file_id")
     try:
         colab_binary()
@@ -806,6 +806,10 @@ def phase_runtime():
     if done("runtime"):
         return
     packages = list(SPEC.get("pip_packages") or [])
+    if SPEC.get("scene_campaign") and not SPEC.get("use_cpu"):
+        # Colab may preinstall a newer CUDA-13 JAX plugin. It registers the
+        # same PJRT API as our pinned CUDA-12 plugin and cannot coexist.
+        run_logged_phase("remove_cuda13", [sys.executable, "-m", "pip", "uninstall", "-y", "jax-cuda13-plugin", "jax-cuda13-pjrt"])
     run_logged_phase("pip", [sys.executable, "-m", "pip", "install", "-q", *packages])
     mark("runtime")
     log("runtime install complete")
@@ -842,13 +846,17 @@ def phase_preflight():
         raise RuntimeError(f"preflight_jax failed rc={{result.returncode}}")
     if result.stdout:
         log(f"preflight_jax stdout: {{result.stdout[-2000:]}}")
-    run_logged_phase(
-        "gpu_preflight",
-        [
+    preflight_cmd = (
+        [sys.executable, "-m", "syndiff_pipeline.forward_model.colab_scene", "preflight", "--root", "/content/syndiff"]
+        if SPEC.get("scene_campaign") else [
             sys.executable, "-m", "syndiff_pipeline.forward_model.gpu_preflight",
             "--bundle", "/content/syndiff/bundle/fit_bundle.npz",
             "--expect-frames", str(SPEC["expect_frames"]),
-        ],
+        ]
+    )
+    run_logged_phase(
+        "gpu_preflight",
+        preflight_cmd,
         cwd="/content/syndiff",
     )
     probe_out = (JOB / "_preflight_probe.out").read_text(errors="replace") if (JOB / "_preflight_probe.out").is_file() else ""
@@ -1077,6 +1085,13 @@ def validate_runner_proof(
             train_log_ok=train_log_ok,
         )
         if remote_state in ("failed", "stopped", "completed"):
+            if remote_state == "completed" and state.get("kind") == "scene" and (
+                hb_ok and fp_ok and bundle_ok and backend_ok and gpu_ok and train_log_ok
+            ):
+                done_path = local_status.parent / "remote_SCENE_DONE"
+                if colab_download(session, f"/content/jobs/{run_id}/SCENE_DONE", done_path, timeout=30):
+                    proof.update(ok=True, completed_before_proof=True)
+                    return True, proof
             proof["failure"] = f"remote state {remote_state!r}"
             return False, proof
         proc_ok = False

@@ -22,6 +22,10 @@ import zipfile
 import pwd
 from pathlib import Path
 
+# Controllers in isolated checkouts must import their own infrastructure,
+# including when restarted by systemd without the invoking shell's PYTHONPATH.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from syndiff_pipeline.forward_model.colab_submit import (
     SessionExecLock,
     SessionInventory,
@@ -1239,6 +1243,32 @@ def publish(args) -> int:
     print(f"published {output.name}: id={response['id']} sha256={archive_sha}"); return 0
 
 
+def publish_scene(args) -> int:
+    """Publish a pinned scene campaign using the existing Drive/controller path."""
+    from syndiff_pipeline.forward_model.colab_scene import build_scene_archive, validate_archive
+    output = args.archive.resolve()
+    spec = load_json(args.spec.resolve(), {})
+    plan = build_scene_archive(spec, output)
+    validate_archive(output)
+    archive_sha = sha256(output)
+    response = {}
+    if args.transport == "drive":
+        sys.path.insert(0, str(PROJECT / "scripts"))
+        from upload_to_gdrive import upload_file_to_gdrive
+        creds, token = drive_auth_paths()
+        response = upload_file_to_gdrive(output, credentials_file=creds, token_file=token)
+    manifest = load_json(MANIFEST, {"bundles": {}})
+    manifest.setdefault("bundles", {})[output.name] = {
+        "kind": "scene", "transport": args.transport, "file_id": response.get("id"), "sha256": archive_sha,
+        "size": output.stat().st_size, "path": str(output), "spec_path": str(args.spec.resolve()),
+        "published_at": time.time(), "source_commit": plan["source_commit"],
+        "jobs": [j["name"] for j in plan["jobs"]],
+    }
+    atomic_json(MANIFEST, manifest)
+    print(f"published scene campaign {output.name}: {len(plan['jobs'])} jobs sha256={archive_sha}")
+    return 0
+
+
 def job_state(run_id: str) -> tuple[Path, dict]:
     directory = JOBS / run_id
     state = load_json(directory / "controller.json")
@@ -1691,6 +1721,18 @@ def submit(args) -> int:
     entry = manifest.get("bundles", {}).get(args.archive.name)
     if not entry:
         raise SystemExit("archive is not published; run publish first")
+    scene_campaign = entry.get("kind") == "scene"
+    if getattr(args, "command", "submit") == "submit-scene" and not scene_campaign:
+        raise SystemExit("submit-scene requires an archive registered by publish-scene")
+    if scene_campaign:
+        if args.resume:
+            raise SystemExit("scene campaigns require a fresh run ID; package a saved checkpoint to continue a fit")
+        if sha256(args.archive) != entry["sha256"]:
+            raise SystemExit("scene archive differs from its published SHA; publish-scene again")
+        if args.bootstrap_init_params or args.bundle or args.steps_per_stage or args.isolate_stages:
+            raise SystemExit("scene inputs and schedules are frozen in publish-scene --spec; temporal overrides do not apply")
+        args.no_postfit = True  # Scene diagnostics use their own fixed evaluation support.
+        args.expect_frames = 1
     use_cpu = bool(getattr(args, "cpu", False))
     gpu = args.gpu.upper()
     if args.steps_per_stage:
@@ -1736,6 +1778,15 @@ def submit(args) -> int:
     # Persist the default explicitly so every controller records its post-fit
     # policy.  Full runs default to post-fit after any terminal verified sync.
     state["no_postfit"] = bool(args.no_postfit)
+    if scene_campaign:
+        state.update(kind="scene", scene_jobs=entry["jobs"], scene_spec=entry["spec_path"])
+        # Temporal defaults are not the scene recipe. Avoid misleading status
+        # records such as a probe's 5 steps when the packaged arm has 160.
+        for key in ("steps_per_stage", "first_stage", "epsf_lr_scale", "w_lr_scale", "lr_per_stage",
+                    "stamp_chunk", "huber_delta", "lambda_pixel_lap", "lambda_lap", "lambda_smooth_wcs",
+                    "lambda_smooth_w", "stage2_freeze_wcs_steps", "isolate_stages", "reject_mode",
+                    "reject_every", "early_stop_patience", "early_stop_tol"):
+            state.pop(key, None)
     if args.bootstrap_init_params:
         state["bootstrap_init_params"] = str(args.bootstrap_init_params)
         state["bootstrap_sha256"] = bootstrap_sha256
@@ -1898,6 +1949,8 @@ def submit(args) -> int:
             ])
 
         post_grace = float(args.post_terminal_grace_s)
+        if scene_campaign and entry.get("transport") == "upload":
+            run_cmd([colab_binary(), "upload", "-s", session, str(args.archive.resolve()), "/content/bundle.zip"])
         pip_packages = [
             f"jax=={RUNTIME['jax']}" if use_cpu else f"jax[cuda12]=={RUNTIME['jax']}",
             f"optax=={RUNTIME['optax']}",
@@ -1906,6 +1959,8 @@ def submit(args) -> int:
             "google-auth",
             "google-api-python-client",
         ]
+        if scene_campaign:
+            pip_packages += ["PyYAML", "pandas", "scipy", "astropy", "tess-point"]
         if use_cpu:
             jax_backend_assert = (
                 "assert jax.default_backend() in ('cpu', 'gpu'), "
@@ -2033,6 +2088,14 @@ print(jax.__version__, jax.devices(), mem)
             runner_cmd.append("--w-spatial")
         if train_allow_cpu.strip():
             runner_cmd.append(train_allow_cpu.strip())
+        if scene_campaign:
+            # Retain the existing remote supervisor, telemetry, STOP and emergency backup.
+            boundary = runner_cmd.index("--")
+            runner_cmd = runner_cmd[:boundary + 1] + [
+                "python", "-m", "syndiff_pipeline.forward_model.colab_scene", "run",
+                "--root", "/content/syndiff", "--job-dir", paths["job_dir"],
+                "--backend", "cpu" if use_cpu else "gpu",
+            ]
         discord_secret_path = None
         if discord_webhook_url:
             secret_local = directory / f".discord_webhook.{os.getpid()}.tmp"
@@ -2067,6 +2130,7 @@ print(jax.__version__, jax.devices(), mem)
             "expected_gpu": state["gpu"],
             "use_cpu": use_cpu,
             "discord_secret_path": discord_secret_path,
+            "scene_campaign": scene_campaign,
         }
         worker_source = build_provision_worker_source(worker_spec)
         worker_local = directory / "provision_worker.py"
@@ -2252,11 +2316,16 @@ def _has_training_outputs(directory: Path) -> bool:
         (artifacts / "params_stage3.npz").is_file()
         or (artifacts / "params_latest.npz").is_file()
         or any((artifacts / "checkpoints").glob("params_s*_step*.npz"))
+        or any(artifacts.glob("*/params.npz"))
     )
 
 
 def _newest_parameter_artifact(directory: Path) -> str | None:
     artifacts = directory / "artifacts"
+    if (artifacts / "scene_campaign.json").is_file():
+        params = sorted(artifacts.glob("*/params.npz"))
+        if params:
+            return params[-1].relative_to(artifacts).as_posix()
     checkpoints = []
     pattern = re.compile(r"params_s(?P<stage>\d+)_step(?P<step>\d+)\.npz$")
     for path in (artifacts / "checkpoints").glob("params_s*_step*.npz"):
@@ -2356,18 +2425,25 @@ def sync_artifacts_local(run_id: str, *, final: bool = False) -> tuple[bool, lis
             changed_paths = _sync_essential_artifacts(session, run_id, directory, cache)
         atomic_json(directory / "sync_manifest.json", cache)
         return _has_training_outputs(directory) or bool(changed_paths), changed_paths
+    all_ok = True
+    scene_campaign = _state.get("kind") == "scene"
     for rel, remote_info in remote_manifest.items():
+        target = directory / "artifacts" / rel
+        if target.is_file() and cache.get(rel) == remote_info.get("sha256"):
+            continue
         # During training, skip checkpoints already preserved locally, but
         # always fetch newly appearing checkpoint paths before Colab pruning
         # can remove them.  This avoids replaying the full history while
         # retaining every checkpoint observed by the supervisor.
-        if not final and rel not in ESSENTIAL_ARTIFACTS:
+        if not final and rel not in ESSENTIAL_ARTIFACTS and not scene_campaign:
             if not rel.startswith("checkpoints/") or rel in cache:
                 continue
         if _download_artifact(session, run_id, rel, directory, cache, remote_info=remote_info):
             changed_paths.append(rel)
+        elif final:
+            all_ok = False
     atomic_json(directory / "sync_manifest.json", cache)
-    return True, changed_paths
+    return all_ok, changed_paths
 
 
 def upload_artifacts_to_drive(run_id: str, rel_paths: list[str]) -> str | None:
@@ -2435,7 +2511,23 @@ def sync_job(run_id: str, *, final: bool = False) -> bool:
     if final and final_param is None:
         state["final_parameter_error"] = "final sync found no parameter artifact"
         atomic_json(directory / "controller.json", state)
-        return False
+        # Failed scene preflights may have logs but no params; still sync them and end billing.
+        if state.get("kind") != "scene":
+            return False
+    if final and state.get("kind") == "scene":
+        remote = load_json(directory / "remote_status.json", {})
+        if remote.get("state") == "completed":
+            artifacts = directory / "artifacts"
+            if not (artifacts / "SCENE_DONE").is_file() or any(
+                not (artifacts / name / filename).is_file()
+                for name in state["scene_jobs"] for filename in ("params.npz", "DONE", "execution.json")
+            ):
+                state["sync_error"] = "completed scene campaign missing required outputs"
+                atomic_json(directory / "controller.json", state)
+                return False
+        if (directory / "artifacts/scene_campaign.json").is_file():
+            from syndiff_pipeline.forward_model.colab_scene import materialize_results
+            state["scene_results"] = str(materialize_results(directory))
     cache = load_json(directory / "sync_manifest.json", {})
     upload_paths = sorted(cache.keys()) if final else changed_paths
     state.update(sync_state="verified", last_sync_at=time.time(), final_sync=bool(final))
@@ -2990,6 +3082,12 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__); sub = p.add_subparsers(dest="command", required=True)
     d = sub.add_parser("doctor"); d.add_argument("--install", action="store_true"); d.add_argument("--min-disk-gb", type=float, default=2); d.set_defaults(func=doctor)
     pub = sub.add_parser("publish"); pub.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE); pub.add_argument("--archive", type=Path, default=DEFAULT_ZIP); pub.set_defaults(func=publish)
+    ps = sub.add_parser("publish-scene", help="package and publish a pinned scene-fit campaign")
+    ps.add_argument("--spec", type=Path, required=True)
+    ps.add_argument("--archive", type=Path, required=True)
+    ps.add_argument("--transport", choices=("upload", "drive"), default="upload",
+                    help="direct Colab upload (default) or Google Drive delivery")
+    ps.set_defaults(func=publish_scene)
     s = sub.add_parser("submit")
     s.add_argument("--mode", choices=("probe", "full"), required=True)
     s.add_argument("--run-id")
@@ -3085,6 +3183,19 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--keep-vm-on-failure", action="store_true",
                    help="dangerous: leave VM allocated when submit fails (debug only)")
     s.set_defaults(func=submit)
+    ss = sub.add_parser("submit-scene", help="run a published scene campaign; science settings come from its spec")
+    ss.set_defaults(**vars(s.parse_args(["--mode", "full"])))
+    ss.add_argument("--run-id")
+    ss.add_argument("--archive", type=Path, required=True)
+    ss.add_argument("--gpu", choices=("T4", "L4"), default="T4")
+    ss.add_argument("--cpu", action="store_true")
+    ss.add_argument("--min-ram-gb", type=float, default=10)
+    ss.add_argument("--min-available-ram-gb", type=float, default=7)
+    ss.add_argument("--high-mem", action="store_true")
+    ss.add_argument("--post-terminal-grace-s", type=float, default=300)
+    ss.add_argument("--no-supervisor", action="store_true")
+    ss.add_argument("--no-discord", action="store_true")
+    ss.add_argument("--deployment", type=Path, default=DEFAULT_DEPLOYMENT_DIR)
     dg = sub.add_parser("diagnose", help="safe remote snapshot for a run (human or --json)")
     dg.add_argument("run_id", nargs="?")
     dg.add_argument("--json", action="store_true")
