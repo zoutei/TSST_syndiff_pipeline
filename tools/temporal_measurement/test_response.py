@@ -12,8 +12,8 @@ def gaussian(cov,shift):
  return P
 
 def test_independent_integrated_gaussian_response():
- cov=np.array([[.8**2,.12],[.12,1.2**2]]);h=.03
- samples=np.array([gaussian(cov,o*h).ravel() for o in OFF]);A=responses(samples,h)
+ cov=np.array([[.8**2,.12],[.12,1.2**2]]);h=.25
+ samples=np.array([gaussian(cov,o*h).ravel() for o in OFF]);small=np.array([gaussian(cov,o*.03).ravel() for o in OFF[:5]]);wide=np.array([gaussian(cov,o*(2*h)).ravel() for o in OFF]);A=responses(samples,h,small,.03,wide)
  y,x=np.mgrid[-7:8,-7:8];A=np.column_stack([A,np.ones(225),x.ravel(),y.ravel()])
  ds=np.array([[.004,.001],[.001,.006]]);shift=[.01,-.012]
  data=1.003*gaussian(cov+ds,shift).ravel()+1e-5-samples[0]
