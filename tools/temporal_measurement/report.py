@@ -18,6 +18,9 @@ def main():
  # Fixed diagnostics by reference catalogue and native support. No temporal residual clipping.
  good=(role!=2)&(tm>=8.5)&(tm<11.5)&(core.sum(1)>=20)&(flux0>0)
  edges=np.linspace(0,2048,4);cell=np.clip(np.digitize(yy,edges)-1,0,2)*3+np.clip(np.digitize(xx,edges)-1,0,2)
+ scene=np.load(R/'frames/f0602/scene/scene_bundle.npz');island=scene['island'];rng=np.random.default_rng(20261016);halves=rng.integers(0,2,size=int(island.max())+1)[island]
+ assert all(np.sum(good&(halves==h))>100 for h in [0,1])
+ np.savez(R/'inputs/diagnostic_halves.npz',source_id=sid,island=island,half=halves,seed=20261016)
  metrics=[];positions=[];stacks=[];stack_frames=[]
  rref=ref['residual']/np.where(flux0>0,flux0,np.nan)[:,None]
  for frame in available:
@@ -33,7 +36,7 @@ def main():
     if a==0:ax[a,j].set_title(f'T={tm[i]:.2f}\n({ref["cx"][i]},{ref["cy"][i]})',fontsize=8)
     if j==0:ax[a,j].set_ylabel(title)
   fig.colorbar(im,ax=ax[2,:].tolist(),fraction=.015,pad=.02,label='Residual / reference fitted source flux')
-  fig.suptitle(f'FFI {frame} · orbit {int(row.orbit)} · BTJD {row.tmid:.5f}\nNative detector pixels; current radial/coma PSF, simultaneous faint neighbours; shape held fixed, WCS/flux fitted',fontsize=11)
+  fig.suptitle(f'FFI {frame} · orbit {int(row.orbit)} · BTJD {row.tmid:.5f}\nNative prepared pixels after sky/template subtraction; current radial/coma PSF, simultaneous faint neighbours; shape held fixed, WCS/flux fitted',fontsize=11)
   fig.subplots_adjust(top=.86,bottom=.12,wspace=.08,hspace=.08);fig.savefig(FIG/f'native_f{frame:04d}.png',dpi=120);plt.close(fig)
   delta=np.c_[z['x']-xx,z['y']-yy];positions.append(delta)
   norm=z['residual']/np.where(z['flux']>0,z['flux'],np.nan)[:,None]
@@ -42,8 +45,8 @@ def main():
   radial=np.nansum((norm-rref)*weighted*(rr*rr-2),axis=1)
   rec=dict(frame=frame,orbit=int(row.orbit),tmid=float(row.tmid),jitter_trace=float(row.jitter_trace),n_stars=int(good.sum()),dx_median_mpx=float(1e3*np.median(delta[good,0])),dy_median_mpx=float(1e3*np.median(delta[good,1])),residual_radial_diagnostic=float(np.median(radial[good])))
   for h in [0,1]:
-   # Reproducibility split of stars, not an independent WCS fit/validation.
-   g=good&((sid%2)==h);rec[f'radial_half{h}']=float(np.median(radial[g]))
+   # Whole blend-island split: no shared fitted pixels across halves. Common fitted WCS is still conditional.
+   g=good&(halves==h);rec[f'radial_half{h}']=float(np.median(radial[g]))
   metrics.append(rec)
   r=np.load(p/'raster_res_model.npz');index={int(s):i for i,s in enumerate(r['source_id'])};sels=np.array([index[int(s)] for s in sid[good] if int(s) in index])
   with warnings.catch_warnings():
