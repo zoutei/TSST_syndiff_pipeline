@@ -838,6 +838,57 @@ def remote_exec(session: str, script: str, *, timeout: int = 120) -> str:
     return result.stdout
 
 
+def upload_scene_archive(session: str, archive: Path, directory: Path, *,
+                         chunk_bytes: int = 8 << 20, remote_path: str = "/content/bundle.zip") -> None:
+    """Bound Jupyter upload bodies; assemble and checksum before provisioning.
+
+    The source archive is immutable. Temporary local chunks stay in the owned
+    /astro run directory and are removed even on failure. A failed remote
+    assembly never replaces the final archive; normal submit cleanup stops VM.
+    """
+    if chunk_bytes <= 0:
+        raise ValueError("chunk_bytes must be positive")
+    digest = sha256(archive)
+    count = (archive.stat().st_size + chunk_bytes - 1) // chunk_bytes
+    remote_parts = []
+    with tempfile.TemporaryDirectory(prefix="scene-upload-", dir=directory) as scratch:
+        with archive.open("rb") as source:
+            for index in range(count):
+                part = Path(scratch) / f"part-{index:05d}"
+                part.write_bytes(source.read(chunk_bytes))
+                remote = f"{remote_path}.{digest[:16]}.part-{index:05d}"
+                try:
+                    run_cmd([colab_binary(), "upload", "-s", session, str(part), remote],
+                            capture_output=True, timeout=180)
+                except subprocess.CalledProcessError as exc:
+                    detail = redact_secrets(normalize_subprocess_output(exc.stderr))
+                    detail = re.sub(r"colab-runtime-proxy-token=[^\s&]+",
+                                    "colab-runtime-proxy-token=<redacted>", detail)
+                    raise RuntimeError(f"scene chunk {index + 1}/{count} upload failed: {detail[-500:]}") from None
+                remote_parts.append(remote)
+                part.unlink()
+                print(f"scene archive chunk {index + 1}/{count} uploaded", flush=True)
+    script = (
+        "import hashlib, pathlib, shutil\n"
+        f"parts = {remote_parts!r}\n"
+        f"target = pathlib.Path({remote_path!r})\n"
+        "temporary = target.with_name(target.name + '.assembling')\n"
+        "with temporary.open('wb') as out:\n"
+        " for name in parts:\n"
+        "  with open(name, 'rb') as src: shutil.copyfileobj(src, out)\n"
+        "h=hashlib.sha256()\n"
+        "with temporary.open('rb') as src:\n"
+        " for block in iter(lambda: src.read(8 << 20), b''): h.update(block)\n"
+        f"assert h.hexdigest() == {digest!r}, 'archive SHA256 mismatch'\n"
+        "temporary.replace(target)\n"
+        "for name in parts: pathlib.Path(name).unlink()\n"
+        "print('scene archive checksum verified')\n"
+    )
+    remote_exec(session, "python3 -c " + shlex.quote(script), timeout=180)
+    atomic_json(directory / "scene_upload.json", dict(archive=str(archive), sha256=digest,
+                bytes=archive.stat().st_size, chunks=count, chunk_bytes=chunk_bytes, verified=True))
+
+
 def colab_download(session: str, remote_path: str, local_path: Path, *, timeout: int = 180) -> bool:
     local_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = local_path.with_name(local_path.name + f".tmp.{os.getpid()}")
@@ -1950,7 +2001,7 @@ def submit(args) -> int:
 
         post_grace = float(args.post_terminal_grace_s)
         if scene_campaign and entry.get("transport") == "upload":
-            run_cmd([colab_binary(), "upload", "-s", session, str(args.archive.resolve()), "/content/bundle.zip"])
+            upload_scene_archive(session, args.archive.resolve(), directory)
         pip_packages = [
             f"jax=={RUNTIME['jax']}" if use_cpu else f"jax[cuda12]=={RUNTIME['jax']}",
             f"optax=={RUNTIME['optax']}",
