@@ -32,18 +32,28 @@ def prepare(row,out):
   refw=WCS(fits.getheader(rf,1));fw=WCS(hdr)
   yy,xx=np.mgrid[:2048,:2048]
   ra,dec=fw.all_pix2world(xx+44,yy,0);rx,ry=refw.all_world2pix(ra,dec,0);rx-=44
-  seed=np.load(REF/'final/cache/C_band_w.npy')
-  mapped=map_coordinates(seed,[ry,rx],order=3,mode='nearest')
+  seed_path=E/'rf5_data/F1/lane/tmpl_conv/convolved_template_dx0.000_dy0.000.fits.fz'
+  seed=np.asarray(fits.getdata(seed_path),float)
+  isref=stem=='tess2020120182919-s0024-2-2'
+  mapped=seed.copy() if isref else map_coordinates(seed,[ry,rx],order=3,mode='nearest')
   sm=np.asarray(fits.getdata(R/'data_root/s0024/c2/k2/diff_linear/shared_mask.fits.fz'),np.int64)
   if sm.ndim==3:sm=sm[0]
-  ex=np.load('/astro/armin/koji/syndiff/dev_runs/ksb_stability_20261008/rollout/F1/extra_exclude.npy')
-  ex=map_coordinates(ex.astype(float),[ry,rx],order=0,mode='constant',cval=1)>0
+  masks=Path('/astro/armin/koji/syndiff/dev_runs/ksb_stability_20261008/rollout/F1/masks')
+  stars=np.load(masks/'wing.npy')|np.load(masks/'rf5.npy')
+  ex=stars.copy() if isref else map_coordinates(stars.astype(float),[ry,rx],order=0,mode='constant',cval=1)>0
+  ex |= np.load(masks/'badcol.npy')
   ex |= binary_dilation(raw>8e4,structure=np.ones((25,7)))
   t=time.time();b,_,_=TR.estimate_tessreduce_residual_background(raw-mapped,sm,extra_exclude=ex,fill_method='harmonic',residual_exclude_percentile=50)
   write_fz(dest,fits.Header(),[(b,hdr)])
   np.savez_compressed(out/'background_check.npz',raw=raw[::8,::8],seed=mapped[::8,::8],background=b[::8,::8],excluded=ex[::8,::8])
-  (out/'background.json').write_text(json.dumps(dict(seconds=time.time()-t,seed=str(REF/'final/cache/C_band_w.npy'),seed_sha256=sha(REF/'final/cache/C_band_w.npy'),warp='reference header WCS to current header WCS; cubic interpolation of background seed only; native observed pixels untouched',extra='rf5 reference masks warped by nearest-neighbour plus current saturation',fill='harmonic',residual_exclude_percentile=50,background_sha256=sha(dest)),indent=2))
+  (out/'background.json').write_text(json.dumps(dict(seconds=time.time()-t,seed=str(seed_path),seed_sha256=sha(seed_path),warp='reference header WCS to current header WCS; cubic interpolation of background seed only; native observed pixels untouched',extra='stellar wing/rf5 masks move by header WCS; bad columns fixed; saturation from current FFI',fill='harmonic',residual_exclude_percentile=50,background_sha256=sha(dest)),indent=2))
   del raw,mapped,seed,sm,ex,b,rx,ry,xx,yy,ra,dec
+  if isref:
+   baseline=fits.getdata(E/'rf5_data/F1/lane/ks_b'/f'{stem}_ks_b.fits.fz',1)
+   current=fits.getdata(dest,1); delta=current-baseline
+   check=dict(max_abs=float(np.max(np.abs(delta))),rms=float(np.sqrt(np.mean(delta**2))),median=float(np.median(delta)))
+   (out/'reference_background_replay.json').write_text(json.dumps(check,indent=2))
+   if check['max_abs']>1e-4:raise RuntimeError(f'reference background replay failed: {check}')
  cfg=load_config(R/'inputs/chain.yaml')
  hp=R/'chain/hotpants'/stem/'hp_d'/f'{stem}_hp_d.fits.fz'
  if not hp.exists():build_frame(cfg,stem)
