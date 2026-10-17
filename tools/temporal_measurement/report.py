@@ -31,7 +31,7 @@ def main():
    denom=max(float(flux0[i]),1);scale=max(float(np.max(ref['own'][i])/denom),.01)
    for a,(key,title) in enumerate([('data','data'),('model','all-source model'),('residual','data − model')]):
     image=z[key][i].reshape(S,S)/denom;mask=z['valid'][i].reshape(S,S)
-    im=ax[a,j].imshow(np.where(mask,image,np.nan),origin='lower',cmap='RdBu_r' if a==2 else 'gray',vmin=-.02 if a==2 else 0,vmax=.02 if a==2 else scale)
+    im=ax[a,j].imshow(np.where(mask,image,np.nan),origin='lower',cmap='RdBu_r' if a==2 else 'gray',vmin=-.01 if a==2 else 0,vmax=.01 if a==2 else scale)
     ax[a,j].set_xticks([]);ax[a,j].set_yticks([])
     if a==0:ax[a,j].set_title(f'T={tm[i]:.2f}\n({ref["cx"][i]},{ref["cy"][i]})',fontsize=8)
     if j==0:ax[a,j].set_ylabel(title)

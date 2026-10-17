@@ -19,7 +19,7 @@ text+='''<nav><a href="#images">Native images</a><a href="#residuals">Fits and r
 <section id="images"><h2>Exposure selection and actual input images</h2>'''
 text+=fig('exposure_selection.png','Selection uses timing and telemetry before photometric scoring: 12 exposures per orbit, including startups, endpoints, high jitter and adjacent controls. Quality-zero exposures are shown.')
 text+=fig('native_input_stamps.png','Actual native FFI stamps at four selected times. A local annulus is removed for display only. Each row shares the reference-frame peak scale; observed pixels have not been resampled. Click for full resolution.')
-text+='</section><section id="residuals"><h2>Actual fitted images and residuals</h2>'+fit_gallery+'</section><section id="measurements"><h2>Measured changes</h2>'
+text+='</section><section id="residuals"><h2>Actual fitted images and residuals</h2>'+fig('native_gpu_wcs_f0602.png','Reference FFI 602: completed GPU WCS-only stage, fluxes evaluated locally at that checkpoint. Shape is held fixed; this is not the later full-PSF control.')+fit_gallery+'</section><section id="measurements"><h2>Measured changes</h2>'
 text+=fig('wcs_fields.png','Spatial displacement maps relative to FFI 602. These are consistent model-origin positions, conditional on the reference PSF, not absolute astrometric truth.')
 text+=fig('temporal_tracks.png','Descriptive position and residual-shape histories. The star-half comparison checks reproducibility; it is not an independently trained WCS validation.')
 text+=fig('residual_stack_history.png','Underlying residual images and reference differences on a shared colour scale. Rasterization is for display and does not supply additional subpixel information.')
@@ -31,6 +31,7 @@ text+='''</section><section id="method"><h2>Method and limits</h2><table><tr><th
 <p class="small">Durable record: /astro/armin/koji/syndiff/dev_runs/s24_temporal_measurement_20261016/README.md. DAG 7970, plscience3 schedd. This page is a saved checkpoint, not a live scheduler dashboard.</p></section>
 <section><h2>Conclusion at this checkpoint</h2><p>The campaign is measuring the data before selecting a temporal model. Prepared inputs and diagnostics do not yet establish a sufficient WCS/PSF law or a light-curve precision floor. Inspect the native residuals and complete the remaining controls before making that decision.</p></section>
 '''
-if available:text+='''<script>const s=document.getElementById('frame');function update(){document.getElementById('native').src='native_f'+s.value+'.png';const r=document.getElementById('response');r.src='response_f'+s.value+'.png';r.onerror=()=>{r.style.display='none'};r.onload=()=>{r.style.display='block'}}s.addEventListener('change',update);update();</script>'''
+responses=[i for i in available if (OUT/f'response_f{i:04d}.png').exists()]
+if available:text+='<script>const responses='+json.dumps([f'{i:04d}' for i in responses])+';</script>'+'''<script>const s=document.getElementById('frame');function update(){document.getElementById('native').src='native_f'+s.value+'.png';const r=document.getElementById('response');r.parentElement.hidden=!responses.includes(s.value);if(responses.includes(s.value))r.src='response_f'+s.value+'.png'}s.addEventListener('change',update);update();</script>'''
 text+='</body></html>';(OUT/'index.html').write_text(text)
 print(OUT/'index.html',prepared,fitted,exported)
