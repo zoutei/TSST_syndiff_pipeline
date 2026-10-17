@@ -62,18 +62,23 @@ def prepare(row,out):
   src=REF/'nbr_final';z=dict(np.load(src/'scene_bundle.npz'));meta=json.loads((src/'scene_meta.json').read_text())
   swap_data(z,meta,src,hp)
   S=int(z['stamp']);k=np.arange(S*S);x=z['cx'][:,None]+k%S-S//2;y=z['cy'][:,None]+k//S-S//2
-  with fits.open(hp) as h:
-   m=np.asarray(h[3].data); H,W=m.shape; inside=(x>=0)&(x<W)&(y>=0)&(y<H);bad=m[np.clip(y,0,H-1),np.clip(x,0,W-1)]
-  # HP flags 0 / 0x40 accepted by the current final-image chain; preserve inherited scene exclusions.
-  good=inside&((bad==0)|(bad==0x40));uid=z['uid'];kill=np.zeros(int(z['n_union'])+1,bool);kill[uid[~good]]=True;kill[-1]=True
-  z['valid']=z['valid']&~kill[uid]
-  meta.update(frame_stem=stem,frame_btjd=float(row.tmid),temporal_measurement=dict(reference_scene=str(src),image=str(hp),roles='fixed reference roles',valid='reference valid intersect current HP flags; unique-pixel propagation',shape='run5 reference profile until independent shape fit'))
+  from support import science_support
+  from syndiff_pipeline.forward_model import scene_export as SE
+  with fits.open(hp) as h: finite=np.isfinite(h[1].data)&np.isfinite(h[2].data)&(h[2].data>0)
+  with fits.open(row.file) as h: current_raw=np.asarray(h[1].data[:2048,44:2092])
+  defect=fits.getdata('/astro/armin/koji/syndiff/dev_runs/ksb_stability_20261008/rollout/F1/defect_mask.fits.fz',1)!=0
+  defect |= binary_dilation(current_raw>8e4,structure=np.ones((25,7)))
+  mask,mask_source=SE.load_frame_mask(OLD/'diff_linear',data_root=OLD.parents[2],sector=24,camera=2,ccd=2,btjd=row.tmid,shape=finite.shape)
+  z['valid']=science_support(z,mask,finite,defect)
+  meta.update(frame_stem=stem,frame_btjd=float(row.tmid),temporal_measurement=dict(reference_scene=str(src),image=str(hp),roles='fixed reference roles',valid='reference valid intersect native science mask/finite/saturation/defect support; bright cores retained; common-support freeze still required',shape='run5 reference profile until independent shape fit'))
   np.savez(scene/'scene_bundle.npz',**z);(scene/'scene_meta.json').write_text(json.dumps(meta,indent=1))
   (out/'scene_inventory.json').write_text(json.dumps(dict(N=len(z['role']),nuisance=int((z['role']==2).sum()),valid=int(z['valid'].sum()),source_bundle=meta['source_bundle'],source_ids_sha256=hashlib.sha256(z['source_id'].tobytes()).hexdigest(),image_sha256=sha(hp)),indent=2))
  return scene
 
 def fit(scene,out,steps):
  fitout=out/'wcs_fit'
+ if not (R/'inputs/SCENES_FROZEN.json').exists() or 'common_support' not in json.loads((scene/'scene_meta.json').read_text()).get('temporal_measurement',{}):
+  raise RuntimeError('Freeze and verify common science support before fitting')
  if (fitout/'DONE').exists():return
  command=[sys.executable,'-m','syndiff_pipeline.forward_model.recipe','paper1_final_step1','--','--scene-dir',str(scene),'--out-dir',str(fitout),'--init-params-file',str(REF/'refit/params.npz'),'--colour-file','/astro/armin/koji/syndiff/dev_runs/chroma_v2_20260928/colour/F1_s24c2k2_u.csv','--steps-per-stage',f'{steps},0,0','--checkpoint-every','200','--log-every','50']
  (out/'fit_command.json').write_text(json.dumps(command,indent=1));subprocess.run(command,check=True)

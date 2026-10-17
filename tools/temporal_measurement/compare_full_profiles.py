@@ -7,12 +7,14 @@ jax.config.update("jax_enable_x64", True)  # diagnostic model-coordinate arithme
 from dataclasses import replace
 from pathlib import Path
 import json
+import os
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from syndiff_pipeline.forward_model import scene_fit as SF,fit as FIT,loss as L,epsf_model as EM
 R=Path('/astro/armin/koji/syndiff/dev_runs/s24_temporal_measurement_20261016')
+NS=int(os.environ.get('S24_DIAGNOSTIC_PROFILE_OS','4'));NG=15*NS
 def plot(profiles,frames,scene,idx,name,title):
  fig,ax=plt.subplots(len(idx),len(frames),figsize=(max(12,3*len(frames)),2.3*len(idx)),squeeze=False)
  for i in range(len(idx)):
@@ -27,8 +29,8 @@ def plot(profiles,frames,scene,idx,name,title):
 def main():
  frames=[i for i in [602,1,469,1225] if (R/'frames'/f'f{i:04d}'/'full_fit/params.npz').exists()];assert 602 in frames and len(frames)>=2,frames
  scene=SF.Scene(R/'frames/f0602/scene');idx=np.load(R/'inputs/display_sources.npz')['index'];scene.role[:]=2;scene.role[idx]=0
- base=FIT.load_params_npz(R/'frames/f0602/full_fit/params.npz');profiles=[];aligned=[];centres=[];residual_centres=[];offset=(np.arange(4)-1.5)/4
- v=(np.arange(60)-29.5)*.25;X,Y=np.meshgrid(v,v);sigma=.75;w=np.exp(-.5*(X*X+Y*Y)/sigma**2)
+ base=FIT.load_params_npz(R/'frames/f0602/full_fit/params.npz');profiles=[];aligned=[];centres=[];residual_centres=[];offset=(np.arange(NS)-(NS-1)/2)/NS
+ v=(np.arange(NG)-(NG-1)/2)/NS;X,Y=np.meshgrid(v,v);sigma=.75;w=np.exp(-.5*(X*X+Y*Y)/sigma**2)
  for frame in frames:
   fit=R/'frames'/f'f{frame:04d}'/'full_fit';m=json.loads((fit/'fit_meta.json').read_text());scene.use_colour_file(m['colour_file'])
   EM.set_radial_knots(m['chroma_radial_knots']);EM.set_coma_knots(m['chroma_coma_knots']);EM.set_radial_mode(m['chroma_radial_mode']);p=FIT.load_params_npz(fit/'params.npz');p['wcs_coeff']=jnp.asarray(base['wcs_coeff'],jnp.float64)
@@ -37,9 +39,9 @@ def main():
   @jax.jit
   def render(off,centre):return L.forward_model(p,replace(c,stamp_center_x=xe+centre[:,0]+off[0],stamp_center_y=ye+centre[:,1]+off[1]))[0].reshape(len(ids),15,15)
   def sample(centre):
-   ctxcentre=np.zeros_like(centre);ctxcentre[order]=centre;P=np.zeros((len(idx),60,60),np.float32)
+   ctxcentre=np.zeros_like(centre);ctxcentre[order]=centre;P=np.zeros((len(idx),NG,NG),np.float32)
    for iy,dy in enumerate(offset):
-    for ix,dx in enumerate(offset):P[:,iy::4,ix::4]=np.asarray(render(jnp.array([dx,dy],dtype=jnp.float64),jnp.asarray(ctxcentre,dtype=jnp.float64)))[order]
+    for ix,dx in enumerate(offset):P[:,iy::NS,ix::NS]=np.asarray(render(jnp.array([dx,dy],dtype=jnp.float64),jnp.asarray(ctxcentre,dtype=jnp.float64)))[order]
    return P
   centre=np.zeros((len(idx),2));P=sample(centre);profiles.append(P.copy())
   for iteration in range(12):
@@ -49,7 +51,9 @@ def main():
    step=np.linalg.solve(np.eye(2)[None]-M/sigma**2,mu[...,None])[...,0];centre+=np.clip(step,-.2,.2);P=sample(centre)
   aligned.append(P);centres.append(centre);residual_centres.append(mu);print('profile/core origin',frame,'iterations',iteration,'max weighted residual',float(np.max(abs(mu))),flush=True)
  profiles=np.asarray(profiles);aligned=np.asarray(aligned);centres=np.asarray(centres)
- np.savez_compressed(R/'full_profile_comparison.npz',frame=frames,source_id=scene.z['source_id'][idx],profile=profiles,profile_core_aligned=aligned,core_origin=centres,core_origin_residual=np.asarray(residual_centres),core_sigma=sigma,step=.25,coordinate_min=-7.375,coordinate_arithmetic='float64 for diagnostic rendering; fitted model coefficient values unchanged; not production astrometric precision',alignment='common reference WCS/spatial coordinates and explicit-colour render origin; optional Gaussian-window core origin measured from model only')
+ np.savez_compressed(R/('full_profile_comparison.npz' if NS==4 else f'full_profile_comparison_os{NS}.npz'),frame=frames,source_id=scene.z['source_id'][idx],profile=profiles,profile_core_aligned=aligned,core_origin=centres,core_origin_residual=np.asarray(residual_centres),core_sigma=sigma,step=1/NS,coordinate_min=-(NG-1)/(2*NS),coordinate_arithmetic='float64 for diagnostic rendering; fitted model coefficient values unchanged; not production astrometric precision',alignment='common reference WCS/spatial coordinates and explicit-colour render origin; optional Gaussian-window core origin measured from model only')
+ if NS!=4:
+  print('sampling-check complete',NS,frames,flush=True);return
  plot(profiles,frames,scene,idx,'full_profile_differences.png','Independent full single-FFI models: differences at a common explicit render origin')
  plot(aligned,frames,scene,idx,'full_profile_core_aligned.png','Independent full single-FFI models: differences after matching Gaussian-window core origins')
  fig,ax=plt.subplots(1,2,figsize=(12,4))
