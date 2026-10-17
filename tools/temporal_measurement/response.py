@@ -30,10 +30,10 @@ def solve(A,d,sigma,valid):
  if rank<A.shape[1] or cond>1e8:return np.full(A.shape[1],np.nan),cond
  return x/scale,cond
 
-def measure(frame):
- out=R/'frames'/f'f{frame:04d}';meta=json.loads((out/'wcs_fit/fit_meta.json').read_text());z=np.load(out/'native.npz');scene=SF.Scene(out/'scene');scene.use_colour_file(meta['colour_file'])
+def measure(frame,fit_kind='wcs_fit',analysis_subdir=''):
+ root=R/'frames'/f'f{frame:04d}';out=root/analysis_subdir;meta=json.loads((root/fit_kind/'fit_meta.json').read_text());z=np.load(out/'native.npz');scene=SF.Scene(root/'scene');scene.use_colour_file(meta['colour_file'])
  configure_model_env(meta);EM.set_radial_knots(meta['chroma_radial_knots']);EM.set_coma_knots(meta['chroma_coma_knots']);EM.set_radial_mode(meta['chroma_radial_mode'])
- p=FIT.load_params_npz(out/'wcs_fit/params.npz');h=.25
+ p=FIT.load_params_npz(root/fit_kind/'params.npz');h=.25
  ctxs=scene.contexts(meta['colour_ref'],chroma_axis=tuple(meta['chroma_axis']),chroma_g8_gauge=meta['chroma_g8_gauge'],chroma_g8_no_dil=meta.get('chroma_g8_no_dil',False),chroma_g8_extras=SF.g8_extras_tuple(meta['chroma_g8_extras']),delta2_mean=meta['chroma_delta2_mean'],**SF.meta_colour_kwargs(meta))
  S=int(z['stamp']);k=np.arange(S*S);dx=z['cx'][:,None]+k%S-S//2-z['x'][:,None];dy=z['cy'][:,None]+k//S-S//2-z['y'][:,None];rr=np.hypot(dx,dy)
  refrr=np.hypot(z['cx'][:,None]+k%S-S//2-scene.z['x0'][:,None],z['cy'][:,None]+k//S-S//2-scene.z['y0'][:,None])
@@ -71,4 +71,4 @@ def measure(frame):
  np.savez_compressed(out/'shape_response.npz',source_id=z['source_id'][indices],index=indices,coeff=co[:,indices],condition=condition[:,indices],x=z['x'][indices],y=z['y'][indices],tess_mag=z['tess_mag'][indices],colour=z['colour'][indices],h=h,shift_h=.03,predicted_residual=pred[indices],held_shape_over_shift_mse=held[:,indices])
  (out/'shape_response.json').write_text(json.dumps(dict(coefficients=['fractional amplitude','local dx px','local dy px','dSigma_xx px2','dSigma_yy px2','dSigma_xy px2','background/flux','x background gradient/flux','y background gradient/flux'],halves=['all','checkerboard0','checkerboard1'],n_selected=len(indices),n_valid=[int(np.isfinite(co[h,indices,0]).sum()) for h in range(3)],scope='Richardson finite-grid shape response h=0.25/0.5 px, position derivative h=0.03 px; local response of latest chromatic reference profile; source neighbours jointly fit beforehand; not a temporal mode or final astrometric/photometric validation'),indent=2))
 if __name__=='__main__':
- a=argparse.ArgumentParser();a.add_argument('frame',type=int);measure(a.parse_args().frame)
+ a=argparse.ArgumentParser();a.add_argument('frame',type=int);a.add_argument('--fit-kind',default='wcs_fit');a.add_argument('--analysis-subdir',default='');v=a.parse_args();measure(v.frame,v.fit_kind,v.analysis_subdir)
