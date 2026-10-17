@@ -31,7 +31,7 @@ def solve(A,d,sigma,valid):
  return x/scale,cond
 
 def measure(frame,fit_kind='wcs_fit',analysis_subdir=''):
- root=R/'frames'/f'f{frame:04d}';out=root/analysis_subdir;meta=json.loads((root/fit_kind/'fit_meta.json').read_text());z=np.load(out/'native.npz');scene=SF.Scene(root/'scene');scene.use_colour_file(meta['colour_file'])
+ root=R/'frames'/f'f{frame:04d}';out=root/analysis_subdir;meta=json.loads((root/fit_kind/'fit_meta.json').read_text());z=dict(np.load(out/'native.npz'));scene=SF.Scene(root/'scene');scene.use_colour_file(meta['colour_file'])
  configure_model_env(meta);EM.set_radial_knots(meta['chroma_radial_knots']);EM.set_coma_knots(meta['chroma_coma_knots']);EM.set_radial_mode(meta['chroma_radial_mode'])
  p=FIT.load_params_npz(root/fit_kind/'params.npz');h=.25
  ctxs=scene.contexts(meta['colour_ref'],chroma_axis=tuple(meta['chroma_axis']),chroma_g8_gauge=meta['chroma_g8_gauge'],chroma_g8_no_dil=meta.get('chroma_g8_no_dil',False),chroma_g8_extras=SF.g8_extras_tuple(meta['chroma_g8_extras']),delta2_mean=meta['chroma_delta2_mean'],**SF.meta_colour_kwargs(meta))

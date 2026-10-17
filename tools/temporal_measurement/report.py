@@ -12,7 +12,7 @@ R=Path('/astro/armin/koji/syndiff/dev_runs/s24_temporal_measurement_20261016');F
 def main():
  frames=pd.read_csv(R/'inputs/frames.csv');available=[int(i) for i in frames.frame_index if (R/'frames'/f'f{i:04d}'/'native.npz').exists()]
  if 602 not in available:raise RuntimeError('Reference fit not exported yet')
- ref=np.load(R/'frames/f0602/native.npz');sid=ref['source_id'];S=int(ref['stamp']);disp=np.load(R/'inputs/display_sources.npz')['index'];tm=ref['tess_mag'];role=ref['role'];valid=ref['valid'];flux0=ref['flux'];xx=ref['x'];yy=ref['y']
+ ref=dict(np.load(R/'frames/f0602/native.npz'));sid=ref['source_id'];S=int(ref['stamp']);disp=np.load(R/'inputs/display_sources.npz')['index'];tm=ref['tess_mag'];role=ref['role'];valid=ref['valid'];flux0=ref['flux'];xx=ref['x'];yy=ref['y']
  k=np.arange(S*S);dx=ref['cx'][:,None]+k%S-S//2-xx[:,None];dy=ref['cy'][:,None]+k//S-S//2-yy[:,None]
  rr=np.hypot(dx,dy);core=(rr<=3)&valid
  # Fixed diagnostics by reference catalogue and native support. No temporal residual clipping.
@@ -24,7 +24,7 @@ def main():
  metrics=[];positions=[];stacks=[];stack_frames=[]
  rref=ref['residual']/np.where(flux0>0,flux0,np.nan)[:,None]
  for frame in available:
-  row=frames[frames.frame_index==frame].iloc[0];p=R/'frames'/f'f{frame:04d}';z=np.load(p/'native.npz');assert np.array_equal(z['source_id'],sid);assert np.array_equal(z['valid'],valid)
+  row=frames[frames.frame_index==frame].iloc[0];p=R/'frames'/f'f{frame:04d}';z=dict(np.load(p/'native.npz'));assert np.array_equal(z['source_id'],sid);assert np.array_equal(z['valid'],valid)
   # Nine actual source stamps, every frame with the same reference flux scale per row.
   fig,ax=plt.subplots(3,9,figsize=(18,6.6))
   for j,i in enumerate(disp):

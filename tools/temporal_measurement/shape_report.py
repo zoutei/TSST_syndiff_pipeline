@@ -24,12 +24,12 @@ def main():
  for _,row in frames.iterrows():
   p=R/'frames'/f'f{int(row.frame_index):04d}';path=p/'shape_response.npz'
   if not path.exists():continue
-  q=np.load(path);pairs=[(i,lookup[int(s)]) for i,s in enumerate(q['source_id']) if int(s) in lookup];ix,jx=np.array(pairs).T
+  q=dict(np.load(path));pairs=[(i,lookup[int(s)]) for i,s in enumerate(q['source_id']) if int(s) in lookup];ix,jx=np.array(pairs).T
   c=q['coeff'][0,ix]-ref['coeff'][0,jx];ratio=q['held_shape_over_shift_mse'][:,ix]
   ok=np.isfinite(c).all(axis=1);rec=dict(frame=int(row.frame_index),tmid=float(row.tmid),orbit=int(row.orbit),n=int(ok.sum()),trace=float(np.nanmedian(c[ok,3]+c[ok,4])),shear=float(np.nanmedian(c[ok,3]-c[ok,4])),cross=float(np.nanmedian(c[ok,5])),local_dx=float(np.nanmedian(c[ok,1])),local_dy=float(np.nanmedian(c[ok,2])),held_mse_ratio=float(np.nanmedian(ratio)))
   table.append(rec)
   # Actual residual, locally predicted response, and remainder on the same native pixels.
-  z=np.load(p/'native.npz');sel=np.load(R/'inputs/display_sources.npz')['source_id'];qmap={int(s):i for i,s in enumerate(q['source_id'])};zmap={int(s):i for i,s in enumerate(z['source_id'])};show=[int(s) for s in sel if int(s) in qmap]
+  z=dict(np.load(p/'native.npz'));sel=np.load(R/'inputs/display_sources.npz')['source_id'];qmap={int(s):i for i,s in enumerate(q['source_id'])};zmap={int(s):i for i,s in enumerate(z['source_id'])};show=[int(s) for s in sel if int(s) in qmap]
   if show:
    fig,ax=plt.subplots(3,len(show),figsize=(2*len(show),6.3),squeeze=False)
    for j,s in enumerate(show):

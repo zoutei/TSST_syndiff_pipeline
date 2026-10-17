@@ -5,7 +5,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 R=Path('/astro/armin/koji/syndiff/dev_runs/s24_temporal_measurement_20261016')
-p=argparse.ArgumentParser();p.add_argument('native');p.add_argument('output');p.add_argument('title');p.add_argument('--reference');a=p.parse_args();z=np.load(a.native);ref=np.load(a.reference) if a.reference else z;assert np.array_equal(z['source_id'],ref['source_id']);rows=np.load(R/'inputs/display_sources.npz')['index'];S=int(z['stamp'])
+p=argparse.ArgumentParser();p.add_argument('native');p.add_argument('output');p.add_argument('title');p.add_argument('--reference');a=p.parse_args();z=dict(np.load(a.native));ref=dict(np.load(a.reference)) if a.reference else z;assert np.array_equal(z['source_id'],ref['source_id']);rows=np.load(R/'inputs/display_sources.npz')['index'];S=int(z['stamp'])
 fig,ax=plt.subplots(3,len(rows),figsize=(18,6.6))
 for j,i in enumerate(rows):
  den=max(float(ref['flux'][i]),1);v=z['valid'][i].reshape(S,S);peak=max(float(np.max(ref['own'][i])/den),.01)
