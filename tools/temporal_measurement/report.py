@@ -16,7 +16,7 @@ def main():
  k=np.arange(S*S);dx=ref['cx'][:,None]+k%S-S//2-xx[:,None];dy=ref['cy'][:,None]+k//S-S//2-yy[:,None]
  rr=np.hypot(dx,dy);core=(rr<=3)&valid
  # Fixed diagnostics by reference catalogue and native support. No temporal residual clipping.
- good=(role!=2)&(tm>=8.5)&(tm<11.5)&(core.sum(1)>=20)&(flux0>0)
+ good=np.zeros(len(sid),bool);cohort=np.load(R/'frames/f0602/shape_response.npz');good[cohort['index']]=True;good &=flux0>0
  edges=np.linspace(0,2048,4);cell=np.clip(np.digitize(yy,edges)-1,0,2)*3+np.clip(np.digitize(xx,edges)-1,0,2)
  scene=np.load(R/'frames/f0602/scene/scene_bundle.npz');island=scene['island'];rng=np.random.default_rng(20261016);halves=rng.integers(0,2,size=int(island.max())+1)[island]
  assert all(np.sum(good&(halves==h))>100 for h in [0,1])
@@ -57,7 +57,9 @@ def main():
  m=pd.DataFrame(metrics);fig,ax=plt.subplots(2,1,figsize=(12,7),sharex=True)
  ax[0].plot(m.tmid,m.dx_median_mpx,'o-',label='x');ax[0].plot(m.tmid,m.dy_median_mpx,'o-',label='y');ax[0].set_ylabel('Median WCS-origin change [mpx]');ax[0].legend()
  ax[1].plot(m.tmid,m.radial_half0,'o-',label='star half A');ax[1].plot(m.tmid,m.radial_half1,'o-',label='star half B');ax[1].set(xlabel='BTJD',ylabel='Weighted residual radial diagnostic\n[fractional flux × pixel²]');ax[1].legend()
- fig.suptitle('Descriptive measurements relative to FFI 602 — no temporal law fitted\nWCS conditional on reference PSF; radial statistic includes model/sampling/subtraction errors',fontsize=11);fig.tight_layout();fig.savefig(FIG/'temporal_tracks.png',dpi=140);plt.close(fig)
+ gap=(frames.loc[frames.orbit==1,'tstop'].max(),frames.loc[frames.orbit==2,'tstart'].min())
+ for a in ax:a.axvspan(*gap,color='.9',zorder=-5)
+ fig.suptitle('Descriptive measurements relative to FFI 602 — no temporal law fitted\nWCS conditional on reference PSF; grey = orbit gap; lines connect samples only',fontsize=11);fig.tight_layout();fig.savefig(FIG/'temporal_tracks.png',dpi=140);plt.close(fig)
  base=stacks[stack_frames.index(602)];nc=6;nr=int(np.ceil(len(stacks)/nc));fig,ax=plt.subplots(2*nr,nc,figsize=(15,5*nr),squeeze=False)
  for j,frame in enumerate(stack_frames):
   ir,ic=divmod(j,nc)

@@ -9,11 +9,11 @@ import matplotlib.pyplot as plt
 from syndiff_pipeline.forward_model.diagnostics.stacked_temporal_residuals import rasterize_packed_values
 R=Path('/astro/armin/koji/syndiff/dev_runs/s24_temporal_measurement_20261016')
 def main():
- refdir=R/'frames/f0602/gpu_wcs_analysis';highdir=R/'frames/f0469';a=np.load(highdir/'shape_response.npz');b=np.load(refdir/'shape_response.npz');assert np.array_equal(a['source_id'],b['source_id'])
+ refdir=R/'frames/f0602';highdir=R/'frames/f0469';a=np.load(highdir/'shape_response.npz');b=np.load(refdir/'shape_response.npz');assert np.array_equal(a['source_id'],b['source_id'])
  d=a['coeff'][0]-b['coeff'][0];trace=d[:,3]+d[:,4];z=np.load(R/'frames/f0602/scene/scene_bundle.npz');island=z['island'][a['index']];ok=np.isfinite(trace);groups=np.unique(island[ok]);members=[np.flatnonzero(ok&(island==g)) for g in groups];rng=np.random.default_rng(20261016)
  boot=[np.median(trace[np.concatenate([members[j] for j in rng.integers(0,len(members),len(members))])]) for _ in range(400)]
  frames=pd.read_csv(R/'inputs/frames.csv').set_index('frame_index');jitter=float(frames.loc[469,'jitter_trace']-frames.loc[602,'jitter_trace'])
- info=dict(reference='completed GPU WCS-only stage602, CPU flux evaluation',high='CPU WCS-only fit469',n_sources=int(ok.sum()),n_blend_islands=len(groups),trace_median_px2=float(np.median(trace[ok])),trace_cluster_bootstrap95_px2=np.percentile(boot,[2.5,97.5]).tolist(),telemetry_camera_trace_difference_px2=jitter,held_shape_over_shift_median_high=float(np.nanmedian(a['held_shape_over_shift_mse'])),held_shape_over_shift_median_ref=float(np.nanmedian(b['held_shape_over_shift_mse'])),scope='Equivalent local shape response; bootstrap conditional on shared fitted models/WCS/background; mixed-backend reference with matched CPU check pending. Telemetry camera-frame trace is not a full detector-projected covariance law.')
+ info=dict(reference='CPU WCS-only fit602',high='CPU WCS-only fit469',n_sources=int(ok.sum()),n_blend_islands=len(groups),trace_median_px2=float(np.median(trace[ok])),trace_cluster_bootstrap95_px2=np.percentile(boot,[2.5,97.5]).tolist(),telemetry_camera_trace_difference_px2=jitter,held_shape_over_shift_median_high=float(np.nanmedian(a['held_shape_over_shift_mse'])),held_shape_over_shift_median_ref=float(np.nanmedian(b['held_shape_over_shift_mse'])),scope='Equivalent local shape response; bootstrap conditional on shared fitted models/WCS/background; matched CPU reference; GPU-stage reference sensitivity checked separately. Telemetry camera-frame trace is not a full detector-projected covariance law.')
  (R/'pair_measurements.json').write_text(json.dumps(info,indent=2));print(json.dumps(info,indent=2),flush=True)
  allmaps=[];allres=[];ns=[]
  for folder in [refdir,highdir]:
