@@ -100,6 +100,8 @@ Up to 10 representative frames (`select_pipeline_debug_stems`, preferring the sa
 | `psf_grouper_min_separation` | 10 | `SourceGrouper` separation (pixels) |
 | `centroids_max_group_size` | 5 | Hard cap on joint-fit group size (see below) |
 | `centroids_n_jobs` | — | Frame parallelism override |
+| `isolation_criteria` | — (off) | Optional list of `[max_sep_px, min_flux_ratio]`; a candidate is dropped if any catalogue neighbour within `max_sep_px` has `F_j/F_i > min_flux_ratio` (`F = 10**(-0.4 tess_mag)`), per frame. Paper III E5 rule: `[[2.5, 0.03], [4.0, 0.1], [7.0, 0.5]]`. Unset = no cut and unchanged fingerprint. |
+| `isolation_neighbor_mag_max` | 17.0 (when unset) | Faint limit of the neighbour pool (full catalogue, before the `tess_mag_min/max` candidate window) |
 
 `psf_grouper_min_separation` groups nearby stars for a joint PSF fit, but
 `SourceGrouper` has no native size limit — a dense field can produce one

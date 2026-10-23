@@ -269,6 +269,8 @@ CENTROIDS_ALLOWED = frozenset(
         "psf_grouper_min_separation",
         "centroids_max_group_size",
         "centroids_n_jobs",
+        "isolation_criteria",
+        "isolation_neighbor_mag_max",
     }
 )
 
@@ -642,6 +644,20 @@ class CentroidsParams:
     # proximity, never dropped.
     centroids_max_group_size: int = 5
     centroids_n_jobs: Optional[int] = None
+    # Optional star-isolation cut on the fitted candidates (None = no cut, behaviour unchanged).
+    # List of [max_sep_px, min_flux_ratio] pairs: a candidate i is dropped if ANY catalogue
+    # neighbour j with tess_mag < isolation_neighbor_mag_max lies within max_sep_px (science px,
+    # that frame's projected positions) and F_j/F_i > min_flux_ratio, F = 10**(-0.4 tess_mag).
+    # Neighbours come from the FULL catalogue (not narrowed to tess_mag_min/max); only
+    # candidates are dropped. Paper III "E5" rule: [[2.5, 0.03], [4.0, 0.1], [7.0, 0.5]].
+    isolation_criteria: Optional[list] = None
+    # Faint limit of the neighbour pool; None means 17.0. (Optional so that the unset value is
+    # left out of the recipe fingerprint, see _RECIPE_OMIT_WHEN_NONE.)
+    isolation_neighbor_mag_max: Optional[float] = None
+    _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = (
+        "isolation_criteria",
+        "isolation_neighbor_mag_max",
+    )
 
 
 @dataclass
@@ -1172,6 +1188,20 @@ def parse_centroids(stage: dict, pipeline_idx: int) -> CentroidsParams:
             f"pipeline[{pipeline_idx}] centroids: centroids_max_group_size "
             f"must be positive, got {params.centroids_max_group_size!r}"
         )
+    if params.isolation_criteria is not None:
+        crit = params.isolation_criteria
+        try:
+            ok = len(crit) > 0 and all(
+                len(c) == 2 and float(c[0]) > 0 and float(c[1]) >= 0 for c in crit
+            )
+        except (TypeError, ValueError):
+            ok = False
+        if not ok:
+            raise ValueError(
+                f"pipeline[{pipeline_idx}] centroids: isolation_criteria must be a "
+                f"non-empty list of [max_sep_px>0, min_flux_ratio>=0] pairs, got {crit!r}"
+            )
+        params.isolation_criteria = [[float(c[0]), float(c[1])] for c in crit]
     if "centroids_n_jobs" in stage:
         v = stage["centroids_n_jobs"]
         params.centroids_n_jobs = None if v is None else int(v)
