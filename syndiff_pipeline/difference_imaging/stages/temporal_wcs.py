@@ -537,14 +537,15 @@ def _read_frame_table(phot_path: Path, cache_dir: Path | None) -> Table:
 
 
 def _init_temporal_wcs_worker(
-    gaia_df, selector, reference, center, half, poly_degree, min_stars, read_cache_dir=None
+    gaia_df, selector, reference, center, half, poly_degree, min_stars, read_cache_dir=None,
+    apply_proper_motion=False,
 ) -> None:
     """ProcessPoolExecutor initializer: stash per-worker shared state once
     (pickled ``n_jobs`` times at pool start-up, not once per frame)."""
     _TEMPORAL_WCS_WORKER.update(
         gaia_df=gaia_df, selector=selector, reference=reference,
         center=center, half=half, poly_degree=poly_degree, min_stars=min_stars,
-        read_cache_dir=read_cache_dir,
+        read_cache_dir=read_cache_dir, apply_proper_motion=bool(apply_proper_motion),
     )
 
 
@@ -560,7 +561,8 @@ def _fit_one_frame_worker(idx_frame: tuple) -> tuple:
     idx, frame = idx_frame
     w = _TEMPORAL_WCS_WORKER
     phot = _read_frame_table(frame.phot_path, w.get("read_cache_dir"))
-    good = select_good_stars(join_stars(phot, w["gaia_df"]), w["selector"])
+    pm_epoch = frame.epoch_btjd if w.get("apply_proper_motion") else None
+    good = select_good_stars(join_stars(phot, w["gaia_df"], epoch_btjd=pm_epoch), w["selector"])
     row = {"stem": frame.stem, "btjd": float(frame.btjd), "frame_index": idx,
            "n_stars_qc": int(len(good)), "fit_provenance": "predicted",
            "median_residual": np.nan}
@@ -630,7 +632,7 @@ def run_temporal_wcs_all_frames(
     )
     init_args = (
         gaia_df, selector, reference, center, half, int(params.cheb_degree), int(params.min_stars),
-        read_cache_dir,
+        read_cache_dir, bool(getattr(params, "apply_proper_motion", None)),
     )
     if n_jobs > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
@@ -794,6 +796,9 @@ def run_temporal_wcs_all_frames(
             "models": per_model_paths,
         },
     )
+    if getattr(params, "apply_proper_motion", None):
+        # world_to_pixel then expects Gaia positions propagated to the frame epoch.
+        manifest["gaia_proper_motion_applied"] = True
     _atomic_json(model_dir / "manifest.json", manifest)
     _validate_published_artifacts(
         per_dir,

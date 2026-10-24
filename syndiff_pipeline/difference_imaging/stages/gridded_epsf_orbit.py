@@ -37,6 +37,7 @@ from astropy.io import fits
 from astropy.table import Table
 from joblib import delayed
 
+from syndiff_pipeline.common.proper_motion import pm_kwargs
 from syndiff_pipeline.common.download import manifest_basename_from_local
 from syndiff_pipeline.common.ffi_quality import dquality_for_stem, quality_ok_mask
 from syndiff_pipeline.common.joblib_progress import parallel_map_with_optional_tqdm
@@ -484,7 +485,8 @@ def fit_anchor_stacked(
     real_masks = [m for m in window_masks if m is not None]
     union_mask = np.logical_or.reduce(real_masks) if real_masks else None
     gaia_df = gaia_science_xy_for_frame(
-        gaia_base, anchor_ffi_path, ffi_list_df, science_bounds
+        gaia_base, anchor_ffi_path, ffi_list_df, science_bounds,
+        **pm_kwargs(epsf_params),
     )
     star_usage: Optional[dict] = {} if debug_plot_dir else None
     _model, grid_xypos, stack, n_stars = build_gridded_psf_for_frame(
@@ -561,7 +563,10 @@ def fit_anchor_pooled(
             continue
         images.append(img)
         gaia_dfs.append(
-            gaia_science_xy_for_frame(gaia_base, ffi_path, ffi_list_df, science_bounds)
+            gaia_science_xy_for_frame(
+                gaia_base, ffi_path, ffi_list_df, science_bounds,
+                **pm_kwargs(epsf_params),
+            )
         )
         masks.append(mask)
     if not images:

@@ -23,6 +23,7 @@ from astropy.table import Table
 from joblib import delayed
 from photutils.psf import EPSFBuilder, GriddedPSFModel, extract_stars
 
+from syndiff_pipeline.common.proper_motion import pm_kwargs
 from syndiff_pipeline.common.joblib_progress import (
     parallel_map_with_optional_tqdm,
     tqdm_iter,
@@ -1223,7 +1224,8 @@ def _fit_one_frame_task(
 
     try:
         gaia_df = gaia_science_xy_for_frame(
-            gaia_base, ffi_path, ffi_list_df, science_bounds
+            gaia_base, ffi_path, ffi_list_df, science_bounds,
+            **pm_kwargs(epsf_params),
         )
     except Exception as exc:
         log.warning("  ePSF: Gaia projection failed for %s: %s", ffi_stem, exc)

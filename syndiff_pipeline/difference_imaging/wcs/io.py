@@ -9,6 +9,7 @@ import pandas as pd
 from astropy.io import fits
 from astropy.time import Time
 
+from syndiff_pipeline.common.proper_motion import frame_epoch_btjd
 from syndiff_pipeline.common.fits_variants import try_resolve_fits_variant
 from syndiff_pipeline.difference_imaging.stages.centroids import load_centroids_index
 from syndiff_pipeline.difference_imaging.wcs.sci2idl import GAIA_CATALOG_BASENAME
@@ -21,6 +22,8 @@ class FrameRecord:
     hp_d_path: Path
     phot_path: Path
     crop_shape: tuple[int, int]
+    # Mid-exposure BTJD for Gaia proper-motion propagation (NaN = unknown).
+    epoch_btjd: float = float("nan")
 
 
 def btjd_from_header(header: fits.Header) -> float:
@@ -65,6 +68,7 @@ def list_centroid_frames(lane_root: Path) -> list[FrameRecord]:
             FrameRecord(
                 stem=stem,
                 btjd=btjd_from_header(hdr),
+                epoch_btjd=frame_epoch_btjd(hdr),
                 hp_d_path=hp_candidates[0],
                 phot_path=phot_path,
                 crop_shape=(ny, nx),

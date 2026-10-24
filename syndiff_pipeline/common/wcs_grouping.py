@@ -2026,9 +2026,15 @@ def gaia_science_xy_for_frame(
     *,
     ra_col: str = "ra",
     dec_col: str = "dec",
+    apply_proper_motion: bool = False,
 ) -> pd.DataFrame:
     """
     Project Gaia ``ra``/``dec`` to science-array ``x``/``y`` for one FFI.
+
+    With ``apply_proper_motion=True`` the catalogue ``pmra``/``pmdec`` propagate
+    the J2016.0 positions to the frame's mid-exposure epoch first (see
+    ``common.proper_motion``); the output ``ra``/``dec`` are then the propagated
+    values and the raw ones are kept as ``ra_j2016``/``dec_j2016``.
 
     Uses full-FFI WCS from the shared ``ffi_list`` cache (not diff FITS headers),
     then rebases to the science rectangle via *science_bounds*
@@ -2049,6 +2055,15 @@ def gaia_science_xy_for_frame(
         raise KeyError(f"FFI {logical!r} not found in ffi_list index")
     header = header_from_cached_row(ffi_list_df.loc[logical])
     wcs = _header_to_wcs(header)
+    if apply_proper_motion:
+        from syndiff_pipeline.common.proper_motion import (
+            frame_epoch_btjd,
+            propagate_gaia_df,
+        )
+
+        gaia_df = propagate_gaia_df(
+            gaia_df, frame_epoch_btjd(header), ra_col=ra_col, dec_col=dec_col
+        )
     x_ffi, y_ffi = world_ra_dec_to_pixel(
         wcs,
         gaia_df[ra_col].values,

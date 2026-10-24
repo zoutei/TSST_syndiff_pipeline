@@ -28,6 +28,7 @@ from syndiff_pipeline.difference_imaging.stages.per_ffi_wcs_progress import (
     init_progress,
     record_frame_done,
 )
+from syndiff_pipeline.common.proper_motion import frame_epoch_btjd
 from syndiff_pipeline.difference_imaging.wcs.io import (
     FrameRecord,
     btjd_from_header,
@@ -67,6 +68,7 @@ def _init_per_ffi_wcs_worker(
     star_cfg: StarSelectionConfig,
     sip_degree: int,
     skip_stems: set[str] | None = None,
+    apply_proper_motion: bool = False,
 ) -> None:
     """Load shared per-FFI WCS inputs once per loky worker."""
     _WORKER_CTX.clear()
@@ -78,6 +80,7 @@ def _init_per_ffi_wcs_worker(
             "star_cfg": star_cfg,
             "sip_degree": sip_degree,
             "skip_stems": set(skip_stems or ()),
+            "apply_proper_motion": bool(apply_proper_motion),
         }
     )
 
@@ -115,6 +118,7 @@ def list_frames_for_lane(
             FrameRecord(
                 stem=stem,
                 btjd=btjd_from_header(hdr),
+                epoch_btjd=frame_epoch_btjd(hdr),
                 hp_d_path=Path(hp_path),
                 phot_path=phot_path,
                 crop_shape=(ny, nx),
@@ -151,7 +155,8 @@ def _fit_one_frame_task(frame_idx: int, stem: str) -> dict[str, Any]:
         return {**empty, "log": f"{stem}: missing photresults {fr.phot_path}"}
 
     phot = Table.read(fr.phot_path, format="ascii.ecsv")
-    merged = join_stars(phot, gaia)
+    pm_epoch = fr.epoch_btjd if ctx.get("apply_proper_motion") else None
+    merged = join_stars(phot, gaia, epoch_btjd=pm_epoch)
     qc = select_good_stars(merged, star_cfg)
     n_qc = len(qc)
     if n_qc < star_cfg.min_stars:
@@ -288,6 +293,7 @@ def run_per_ffi_wcs_all_frames(
         star_cfg,
         sip_degree,
         skip_stems,
+        bool(getattr(params, "apply_proper_motion", None)),
     )
     _WORKER_CTX = {
         "frames_by_stem": frames_by_stem,
@@ -296,6 +302,7 @@ def run_per_ffi_wcs_all_frames(
         "star_cfg": star_cfg,
         "sip_degree": sip_degree,
         "skip_stems": skip_stems,
+        "apply_proper_motion": bool(getattr(params, "apply_proper_motion", None)),
     }
 
     stems = [f.stem for f in frames]
@@ -398,6 +405,8 @@ def run_per_ffi_wcs_all_frames(
         "audit_artifact": AUDIT_NPZ,
         "n_audit_stars": int(len(star_index.source_id)),
     }
+    if getattr(params, "apply_proper_motion", None):
+        meta["gaia_proper_motion_applied"] = True  # fit sky positions = Gaia J2016.0 + pm to frame epoch
     with open(out / META_JSON, "w", encoding="utf-8") as fh:
         json.dump(meta, fh, indent=2)
         fh.write("\n")

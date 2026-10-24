@@ -22,6 +22,7 @@ from astropy.io import fits
 from astropy.table import Table
 from joblib import delayed
 
+from syndiff_pipeline.common.proper_motion import pm_kwargs
 from syndiff_pipeline.common.joblib_progress import (
     parallel_map_with_optional_tqdm,
     tqdm_iter,
@@ -466,7 +467,8 @@ def write_frame_residual_fits(
 
     try:
         gaia_frame = gaia_science_xy_for_frame(
-            gaia_df, ffi_path, ffi_list_df, science_bounds
+            gaia_df, ffi_path, ffi_list_df, science_bounds,
+            **pm_kwargs(params),
         )
         gaia_frame = _filter_gaia_for_centroids(gaia_frame, params)
     except Exception as exc:
@@ -573,7 +575,8 @@ def _centroids_one_frame_task(
 
     try:
         gaia_frame = gaia_science_xy_for_frame(
-            gaia_base, ffi_path, ffi_list_df, science_bounds
+            gaia_base, ffi_path, ffi_list_df, science_bounds,
+            **pm_kwargs(params),
         )
         gaia_frame = _filter_gaia_for_centroids(gaia_frame, params)
     except Exception as exc:

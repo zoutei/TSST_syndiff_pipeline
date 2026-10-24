@@ -76,9 +76,21 @@ def join_stars(
     gaia: pd.DataFrame,
     *,
     max_sep_px: float = 0.25,
+    epoch_btjd: float | None = None,
 ) -> pd.DataFrame:
+    """Join centroids photometry to the Gaia catalogue.
+
+    With *epoch_btjd* set (opt-in proper motion), the joined ``ra``/``dec`` are
+    the catalogue's J2016.0 positions propagated to that epoch (the raw ones
+    stay in ``ra_j2016``/``dec_j2016``).  Pass it only with the raw catalogue,
+    not with a frame table already built by ``gaia_science_xy_for_frame(...,
+    apply_proper_motion=True)``.
+    """
     df = phot.to_pandas()
-    gcols = [c for c in ("source_id", "ra", "dec", "x", "y") if c in gaia.columns]
+    pm_cols = ("pmra", "pmdec") if epoch_btjd is not None else ()
+    if pm_cols and not set(pm_cols).issubset(gaia.columns):
+        raise ValueError("apply_proper_motion requires pmra/pmdec in the Gaia catalogue")
+    gcols = [c for c in ("source_id", "ra", "dec", "x", "y", *pm_cols) if c in gaia.columns]
     g = gaia[gcols].copy()
     # `phot` (the centroids stage's own output) already carries source_id/ra/
     # dec from ITS OWN Gaia match; drop those before merging so the join
@@ -88,7 +100,7 @@ def join_stars(
     df_bare = df.drop(columns=[c for c in gcols if c in df.columns])
     exact = df_bare.merge(g, left_on=["x_init", "y_init"], right_on=["x", "y"], how="inner")
     if len(exact) > 0:
-        return exact
+        return _propagate_joined(exact, epoch_btjd)
 
     if not {"x", "y", "ra", "dec"}.issubset(g.columns):
         return exact
@@ -111,7 +123,15 @@ def join_stars(
     for col in gcols:
         matched[col] = g_hit[col].to_numpy()
     matched["gaia_match_sep_px"] = dist[keep]
-    return matched
+    return _propagate_joined(matched, epoch_btjd)
+
+
+def _propagate_joined(df: pd.DataFrame, epoch_btjd: float | None) -> pd.DataFrame:
+    if epoch_btjd is None:
+        return df
+    from syndiff_pipeline.common.proper_motion import propagate_gaia_df
+
+    return propagate_gaia_df(df, epoch_btjd)
 
 
 def select_good_stars(df: pd.DataFrame, cfg: StarSelectionConfig) -> pd.DataFrame:

@@ -223,6 +223,7 @@ HOTPANTS_ALLOWED = frozenset(
 
 EPSF_ALLOWED = frozenset(
     {
+        "apply_proper_motion",
         "kind",
         "inputs",
         "output",
@@ -259,6 +260,7 @@ EPSF_ALLOWED = frozenset(
 
 CENTROIDS_ALLOWED = frozenset(
     {
+        "apply_proper_motion",
         "kind",
         "inputs",
         "output",
@@ -276,6 +278,7 @@ CENTROIDS_ALLOWED = frozenset(
 
 PER_FFI_WCS_ALLOWED = frozenset(
     {
+        "apply_proper_motion",
         "kind",
         "inputs",
         "output",
@@ -289,6 +292,7 @@ PER_FFI_WCS_ALLOWED = frozenset(
 
 TEMPORAL_WCS_ALLOWED = frozenset(
     {
+        "apply_proper_motion",
         "kind",
         "inputs",
         "output",
@@ -626,6 +630,11 @@ class EpsfParams:
     epsf_isolation_min_sep_px: Optional[float] = None
     epsf_isolation_neighbor_mag_max: float = 13.0
 
+    # Opt-in (None/False = off, J2016.0 positions as before): propagate Gaia positions to the frame epoch with
+    # pmra/pmdec before projecting/fitting (common/proper_motion.py). None keeps the recipe fingerprint unchanged.
+    apply_proper_motion: Optional[bool] = None
+    _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = ("apply_proper_motion",)
+
 
 @dataclass
 class CentroidsParams:
@@ -654,9 +663,11 @@ class CentroidsParams:
     # Faint limit of the neighbour pool; None means 17.0. (Optional so that the unset value is
     # left out of the recipe fingerprint, see _RECIPE_OMIT_WHEN_NONE.)
     isolation_neighbor_mag_max: Optional[float] = None
+    apply_proper_motion: Optional[bool] = None  # opt-in, see EpsfParams
     _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = (
         "isolation_criteria",
         "isolation_neighbor_mag_max",
+        "apply_proper_motion",
     )
 
 
@@ -668,6 +679,10 @@ class PerFfiWcsParams:
     clip_max_iter: int = 3
     min_stars: int = 50
     per_ffi_wcs_n_jobs: Optional[int] = None
+    # Opt-in (None/False = off, J2016.0 positions as before): propagate Gaia positions to the frame epoch with
+    # pmra/pmdec before projecting/fitting (common/proper_motion.py). None keeps the recipe fingerprint unchanged.
+    apply_proper_motion: Optional[bool] = None
+    _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = ("apply_proper_motion",)
 
 
 @dataclass
@@ -693,6 +708,10 @@ class TemporalWcsParams:
     # (e.g. after a transient failure) benefit most -- a clean first run
     # still pays the ecsv read once to populate the cache.
     enable_read_cache: bool = True
+    # Opt-in (None/False = off, J2016.0 positions as before): propagate Gaia positions to the frame epoch with
+    # pmra/pmdec before projecting/fitting (common/proper_motion.py). None keeps the recipe fingerprint unchanged.
+    apply_proper_motion: Optional[bool] = None
+    _RECIPE_OMIT_WHEN_NONE: ClassVar[tuple] = ("apply_proper_motion",)
 
 
 @dataclass
@@ -1140,6 +1159,16 @@ def parse_hotpants(stage: dict, pipeline_idx: int) -> HotpantsParams:
     return hp
 
 
+def _normalize_apply_pm(params, stage: dict, pipeline_idx: int, kind: str) -> None:
+    """``apply_proper_motion``: strict bool; false is stored as None (fingerprint unchanged)."""
+    v = stage.get("apply_proper_motion")
+    if v is not None and not isinstance(v, bool):
+        raise ValueError(
+            f"pipeline[{pipeline_idx}] {kind}: apply_proper_motion must be a bool, got {v!r}"
+        )
+    params.apply_proper_motion = True if v else None
+
+
 def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
     """Parse epsf.
     
@@ -1155,6 +1184,7 @@ def parse_epsf(stage: dict, pipeline_idx: int) -> EpsfParams:
     params = _merge_dataclass(EpsfParams, stage)
     if params.tess_mag_max is None:
         params = EpsfParams(**{**params.__dict__, "tess_mag_max": 12.95})
+    _normalize_apply_pm(params, stage, pipeline_idx, "epsf")
     if params.epsf_mode not in ("orbit_binned", "per_frame"):
         raise ValueError(
             f"pipeline[{pipeline_idx}] epsf: epsf_mode must be 'orbit_binned' "
@@ -1181,6 +1211,7 @@ def parse_centroids(stage: dict, pipeline_idx: int) -> CentroidsParams:
     """Parse centroids stage parameters."""
     validate_stage_keys(stage, pipeline_idx, "centroids", CENTROIDS_ALLOWED)
     params = _merge_dataclass(CentroidsParams, stage)
+    _normalize_apply_pm(params, stage, pipeline_idx, "centroids")
     if params.tess_mag_max is None:
         params = CentroidsParams(**{**params.__dict__, "tess_mag_max": 12.95})
     if int(params.centroids_max_group_size) < 1:
@@ -1213,6 +1244,7 @@ def parse_per_ffi_wcs(stage: dict, pipeline_idx: int) -> PerFfiWcsParams:
     """Parse per_ffi_wcs stage parameters."""
     validate_stage_keys(stage, pipeline_idx, "per_ffi_wcs", PER_FFI_WCS_ALLOWED)
     params = _merge_dataclass(PerFfiWcsParams, stage)
+    _normalize_apply_pm(params, stage, pipeline_idx, "per_ffi_wcs")
     if "per_ffi_wcs_n_jobs" in stage:
         v = stage["per_ffi_wcs_n_jobs"]
         params.per_ffi_wcs_n_jobs = None if v is None else int(v)
@@ -1224,6 +1256,7 @@ def parse_temporal_wcs(stage: dict, pipeline_idx: int) -> TemporalWcsParams:
     """Parse the production ``temporal_wcs`` stage parameters."""
     validate_stage_keys(stage, pipeline_idx, "temporal_wcs", TEMPORAL_WCS_ALLOWED)
     params = _merge_dataclass(TemporalWcsParams, stage)
+    _normalize_apply_pm(params, stage, pipeline_idx, "temporal_wcs")
     if params.version != "temporal_cheb5_bspline_v1":
         raise ValueError(
             f"pipeline[{pipeline_idx}] temporal_wcs: version must be "
