@@ -11,6 +11,7 @@ Version: 2.0
 
 # Standard library imports
 import argparse
+import dataclasses
 import io
 import json
 import os
@@ -35,6 +36,13 @@ from numba import jit
 from shapely.geometry import Polygon
 from tqdm import tqdm
 
+from syndiff_pipeline.common.ps1_wcs import (
+    PS1_CRPIX_COLUMN,
+    PS1_CRPIX_FITS_KEY,
+    apply_ps1_crpix_convention,
+    ps1_crpix_offset,
+    table_ps1_crpix_offset,
+)
 from syndiff_pipeline.template_creation.processing.downsample import load_cluster_template_job_payload
 
 # Suppress common warnings
@@ -1082,6 +1090,13 @@ def get_ps1_wcs_information(skycell_data):
     header_dict = skycell_data[relevant_keys].to_dict()
 
     ps1_header = fits.Header(header_dict)
+    # CRPIX in the skycell table is already in the corrected (PS1CRPIX) convention;
+    # record the offset in the header so every regmap carries it.
+    if PS1_CRPIX_COLUMN in skycell_data.index:
+        ps1_header[PS1_CRPIX_FITS_KEY] = (
+            float(skycell_data[PS1_CRPIX_COLUMN]),
+            "PS1 CRPIX offset already applied to CRPIX1/2",
+        )
     ps1_data_shape = (int(header_dict["NAXIS2"]), int(header_dict["NAXIS1"]))
 
     temp_wcs = WCS(ps1_header)
@@ -2277,6 +2292,7 @@ def process_tess_image_optimized(
             conv_pad_native=conv_pad,
             oversampling=oversampling_factor,
             mapgrid_version=int(mapgrid_version),
+            ps1_crpix=ps1_crpix_offset(),
         )
     elif int(mapping_grid.oversampling) != int(oversampling_factor):
         raise ValueError(
@@ -2296,7 +2312,13 @@ def process_tess_image_optimized(
     else:
         map_shape = mapping_grid.array_shape_native()
 
-    skycell_wcs_df = pd.read_csv(skycell_wcs_csv)
+    # The bundled table holds raw PS1 (IPP) CRPIX; correct it once here.  The master
+    # CSV written below inherits the corrected values plus the PS1CRPIX marker.
+    skycell_wcs_df = apply_ps1_crpix_convention(pd.read_csv(skycell_wcs_csv))
+    _applied_off = table_ps1_crpix_offset(skycell_wcs_df)
+    if float(mapping_grid.ps1_crpix) != _applied_off:
+        # the grid fingerprint must describe the CRPIX convention actually applied
+        mapping_grid = dataclasses.replace(mapping_grid, ps1_crpix=_applied_off)
 
     # Calculate skycell centers if not present
     if "RA" not in skycell_wcs_df.columns or "DEC" not in skycell_wcs_df.columns:

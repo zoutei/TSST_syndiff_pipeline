@@ -43,6 +43,12 @@ class MappingGrid:
     science_ymin_ffi: int | None = None
     science_xmax_ffi: int | None = None
     science_ymax_ffi: int | None = None
+    # PS1 CRPIX offset baked into the mapping this grid describes (0.0 = legacy
+    # FITS reading, 0.5 = PS1 IPP convention).  Part of the geometry fingerprint
+    # only when non-zero, so legacy artifacts keep their GEOMFP.  Loaders take it
+    # from the artifact (never from the environment), so an old artifact is
+    # always validated against the fingerprint it was written with.
+    ps1_crpix: float = 0.0
 
     def __post_init__(self) -> None:
         if self.ffi_xmax <= self.ffi_xmin:
@@ -199,6 +205,8 @@ class MappingGrid:
                 "top": self.pad_top,
             },
         }
+        if float(self.ps1_crpix) != 0.0:
+            recipe["ps1_crpix"] = float(self.ps1_crpix)
         if self.mapgrid_version == MAPGRID_VERSION:
             native_slice = self.science_slice_native()
             os_slice = self.science_slice_os()
@@ -245,6 +253,7 @@ class MappingGrid:
         conv_pad_native: int = DEFAULT_CONV_PAD_NATIVE,
         oversampling: int = 1,
         mapgrid_version: int = MAPGRID_VERSION,
+        ps1_crpix: float = 0.0,
     ) -> MappingGrid:
         """Build grid from full FFI dimensions and dead-strip defaults."""
         if nx <= 0 or ny <= 0:
@@ -272,6 +281,7 @@ class MappingGrid:
             science_ymin_ffi=symin,
             science_xmax_ffi=sxmax,
             science_ymax_ffi=symax,
+            ps1_crpix=float(ps1_crpix),
         )
 
     @classmethod
@@ -285,6 +295,7 @@ class MappingGrid:
         pad: int = DEFAULT_CONV_PAD_NATIVE,
         oversampling: int = 1,
         mapgrid_version: int = MAPGRID_V3_VERSION,
+        ps1_crpix: float = 0.0,
     ) -> "MappingGrid":
         """Construct paired-padding geometry from half-open science bounds."""
         if mapgrid_version != MAPGRID_V3_VERSION:
@@ -299,6 +310,7 @@ class MappingGrid:
             mapgrid_version=MAPGRID_V3_VERSION,
             science_xmin_ffi=int(x_min), science_ymin_ffi=int(y_min),
             science_xmax_ffi=int(x_max), science_ymax_ffi=int(y_max),
+            ps1_crpix=float(ps1_crpix),
         )
 
     @classmethod
@@ -329,6 +341,7 @@ class MappingGrid:
             science_ymin_ffi=int(block.get("science_ymin", sb.get("y_min"))),
             science_xmax_ffi=int(block.get("science_xmax", sb.get("x_max"))),
             science_ymax_ffi=int(block.get("science_ymax", sb.get("y_max"))),
+            ps1_crpix=float(block.get("ps1_crpix", 0.0)),
         )
         expected = grid.to_mapping_dict()
         for key in (
@@ -392,6 +405,7 @@ class MappingGrid:
             science_ymin_ffi=int(hdr.get("SCIYMIN", 0)),
             science_xmax_ffi=int(hdr.get("SCIXMAX", hdr["XMAX"])),
             science_ymax_ffi=int(hdr.get("SCIYMAX", hdr["YMAX"])),
+            ps1_crpix=float(hdr.get("PS1CRPIX", 0.0)),
         )
         if "COORDFRM" in hdr and str(hdr["COORDFRM"]).strip() != "full_ffi":
             raise MappingGridError("FITS COORDFRM must be full_ffi")
@@ -435,6 +449,8 @@ class MappingGrid:
                 "geometry_fingerprint": self.geometry_fingerprint,
             }
         )
+        if float(self.ps1_crpix) != 0.0:
+            payload["ps1_crpix"] = float(self.ps1_crpix)
         if self.mapgrid_version == MAPGRID_VERSION:
             payload["science_bounds_ffi"] = {
                 "x_min": self.science_xmin, "x_max": self.science_xmax,
@@ -463,6 +479,7 @@ class MappingGrid:
             "SCIYMIN": self.science_ymin,
             "SCIYMAX": self.science_ymax,
             "GEOMFP": self.geometry_fingerprint,
+            "PS1CRPIX": float(self.ps1_crpix),
             "PADL": self.pad_left,
             "PADR": self.pad_right,
             "PADB": self.pad_bottom,

@@ -554,10 +554,32 @@ def verify_mapping(resolved: ResolvedTargetConfig) -> VerifyResult:
             f"Master FITS is not MAPGRID=3 (rebuild mapping): {exc}",
             str(master_path),
         )
+    # PS1 CRPIX convention marker: absent in the CSV = legacy (0.0).  Informational
+    # only; a mismatch with the active convention is a warning, never a failure.
+    from syndiff_pipeline.common.ps1_wcs import (
+        PS1_CRPIX_COLUMN,
+        ps1_crpix_offset,
+        table_ps1_crpix_offset,
+    )
+    import pandas as pd
+
+    try:
+        marker_df = pd.read_csv(csv_path, usecols=lambda c: c == PS1_CRPIX_COLUMN)
+        crpix_off = table_ps1_crpix_offset(marker_df)
+    except Exception as exc:  # unreadable/mixed marker must not fail the stage
+        log.warning("mapping verify: could not read %s from %s: %s", PS1_CRPIX_COLUMN, csv_path, exc)
+        crpix_off = 0.0
+    active_off = ps1_crpix_offset()
+    if crpix_off != active_off:
+        log.warning(
+            "mapping verify: %s was built with PS1CRPIX=%s but the active convention is %s; "
+            "re-run mapping to apply the active convention",
+            csv_path, crpix_off, active_off,
+        )
     return VerifyResult(
         "mapping",
         True,
-        f"MAPGRID=3 master OK (shape={grid.array_shape_os()})",
+        f"MAPGRID=3 master OK (shape={grid.array_shape_os()}, PS1CRPIX={crpix_off})",
         str(master_path),
     )
 

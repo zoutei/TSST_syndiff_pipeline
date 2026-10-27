@@ -90,9 +90,23 @@ def do_mapping(cfg: ChainConfig, mode: str = "fitted", n_threads: int | None = N
         x_right_dead=mp.x_right_dead, y_edge_strip=mp.y_edge_strip,
         template_conv_pad_spare_px=mp.template_conv_pad_spare_px, sci_fwhm=mp.sci_fwhm,
         mapgrid_version=int(mp.mapgrid_version), tess_wcs_override=override)
+    off = _mapping_ps1_crpix_offset(mapdir, cfg)
+    if isinstance(res, dict):
+        res["ps1_crpix_offset"] = off
     res_p.write_text(json.dumps(res, indent=2, default=str) + "\n")
-    _status(man_p, "mapping_complete", mapping_seconds=time.time() - t0)
+    _status(man_p, "mapping_complete", mapping_seconds=time.time() - t0, ps1_crpix_offset=off)
     return res
+
+
+def _mapping_ps1_crpix_offset(mapdir: Path, cfg: ChainConfig) -> float:
+    """PS1 CRPIX offset contained in the produced master skycell CSV (0.0 = legacy / no marker)."""
+    import pandas as pd
+    from syndiff_pipeline.common.ps1_wcs import table_ps1_crpix_offset
+
+    csv = Path(mapdir) / _names(cfg)[1]
+    if not csv.is_file():
+        return 0.0
+    return table_ps1_crpix_offset(pd.read_csv(csv, usecols=lambda c: c == "PS1CRPIX"))
 
 
 def run_mapping(cfg: ChainConfig, mode: str = "fitted", *, force: bool = False, condor: bool = False) -> Path:
@@ -112,7 +126,7 @@ def run_mapping(cfg: ChainConfig, mode: str = "fitted", *, force: bool = False, 
         print(f"[mapping:{mode}] {submit(sub)}  ({sub})")
         return mapdir
     do_mapping(cfg, mode)
-    ins = {"ffi": cfg.ffi_path()}
+    ins = {"ffi": cfg.ffi_path(), "ps1_crpix_offset": {"value": _mapping_ps1_crpix_offset(mapping_out_dir(cfg, mode)[1], cfg)}}
     if mode == "fitted":
         ins["wcs_store_manifest"] = cfg.wcs_store_dir() / "manifest.json"
     write_provenance(stage, cfg, {**ins, "mode": {"value": mode}})
@@ -171,7 +185,7 @@ def mapping_gates(cfg: ChainConfig, *, fit_dir=None, scene_dir=None, mapdir=None
         OLD_MAP = ref.old_mapping
         mo, n2i_o = _master_skycell_id_map(OLD_MAP / MASTER)
         ho = fits.getheader(OLD_MAP / MASTER, 1)
-        geo_keys = [k for k in ho if any(t in k for t in ("XMIN", "XMAX", "YMIN", "YMAX", "PAD", "OVERSAMP", "MAPGRID", "GEOMFP", "COORDFRM"))]
+        geo_keys = [k for k in ho if any(t in k for t in ("XMIN", "XMAX", "YMIN", "YMAX", "PAD", "OVERSAMP", "MAPGRID", "GEOMFP", "COORDFRM", "PS1CRPIX"))]
         geo_diff = {k: (ho.get(k), hn.get(k)) for k in geo_keys if ho.get(k) != hn.get(k)}
         i2n_o = {v: k for k, v in n2i_o.items()}
         lut_o = np.array([i2n_o.get(i, "") for i in range(-1, max(i2n_o) + 1)], dtype=object)

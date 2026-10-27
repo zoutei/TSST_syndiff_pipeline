@@ -89,7 +89,9 @@ def _meta_path(parquet_path: Path) -> Path:
 def _projection_cells(projection: str) -> pd.DataFrame:
     from syndiff_pipeline.template_creation.orchestration.bundled_assets import skycell_wcs_csv
 
-    table = pd.read_csv(skycell_wcs_csv())
+    from syndiff_pipeline.common.ps1_wcs import apply_ps1_crpix_convention
+
+    table = apply_ps1_crpix_convention(pd.read_csv(skycell_wcs_csv()))
     pid = table["NAME"].astype(str).str.extract(r"skycell\.(\d+)\.")[0].str.zfill(4)
     cells = table[pid == projection]
     if cells.empty:
