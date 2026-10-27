@@ -88,6 +88,59 @@ def _tess_epoch(stem: str) -> float:
     return float(Time(f"{s[:4]}:{s[4:7]}:{s[7:9]}:{s[9:11]}:{s[11:13]}", format="yday").jyear)
 
 
+def master_skycell_csv(cfg) -> Path | None:
+    """The master skycell CSV of the mapping this chain uses (``inputs.skylist`` > mapping stage dir > the SCC's
+    production OS4 mapping, the same search order as ``kernels``), or None if none exists."""
+    from .perband.paths import chain_paths
+    P = chain_paths(cfg)
+    cands = [P.skylist]
+    if P.mapping_dir.exists():
+        cands += sorted(P.mapping_dir.glob("*_master_skycells_list_os4.csv"))
+    cands.append(P.scc / "mapping/oversampling_4" / f"tess_s{P.sector:04d}_{P.camera}_{P.ccd}_master_skycells_list_os4.csv")
+    return next((c for c in cands if c.exists()), None)
+
+
+def resolve_crpix_offset(cfg):
+    """(o, master_table or None): the PS1 CRPIX offset already contained in the templates' mapping.
+
+    ``inputs.template_shift_ps1_crpix``: a number overrides; ``auto`` reads ``PS1CRPIX`` of the mapping's master skycell
+    CSV (0.0 for a legacy CSV without the column) and raises if that CSV cannot be located."""
+    import pandas as pd
+    from syndiff_pipeline.common.ps1_wcs import table_ps1_crpix_offset
+    v = cfg.inputs.template_shift_ps1_crpix
+    csv = master_skycell_csv(cfg)
+    df = pd.read_csv(csv) if csv is not None else None
+    if str(v) != "auto":
+        return float(v), df
+    if df is None:
+        raise FileNotFoundError("inputs.template_shift_ps1_crpix = auto but the mapping's master skycell CSV was not found "
+                                f"(looked under {cfg.stage_dir('mapping')} and the SCC mapping); set a number to override")
+    return float(table_ps1_crpix_offset(df)), df
+
+
+def convention_offset_mas(cells, o: float, master=None) -> np.ndarray:
+    """Sky offset (east, north) in mas of ``(o, o)`` PS1 px per skycell: CDELT * 3.6e6 * PC @ (o, o). Rows from the master
+    CSV, else the bundled ``skycell_wcs.csv``; a skycell in neither raises."""
+    import pandas as pd
+    from importlib import resources
+    cols = ["CDELT1", "CDELT2", "PC1_1", "PC1_2", "PC2_1", "PC2_2"]
+    tabs = [] if master is None else [master.drop_duplicates("NAME").set_index("NAME")]
+    out = np.zeros((len(cells), 2))
+    bundled = None
+    for i, c in enumerate(cells):
+        name = c.get("name") or f"skycell.{c['proj']}.{c['cell']}"
+        row = next((t.loc[name] for t in tabs if name in t.index), None)
+        if row is None:
+            if bundled is None:
+                bundled = pd.read_csv(resources.files("syndiff_pipeline") / "resources" / "skycell_wcs.csv").drop_duplicates("NAME").set_index("NAME")
+            if name not in bundled.index:
+                raise KeyError(f"skycell {name} is in neither the master skycell CSV nor the bundled skycell_wcs.csv")
+            row = bundled.loc[name]
+        d1, d2, p11, p12, p21, p22 = (float(row[k]) for k in cols)
+        out[i] = d1 * 3.6e6 * (p11 * o + p12 * o), d2 * 3.6e6 * (p21 * o + p22 * o)
+    return out
+
+
 def compute(cfg) -> dict:
     """Node values of the template offset from this run's fitted WCS (``fit``) and boot scene."""
     import pandas as pd
@@ -110,7 +163,13 @@ def compute(cfg) -> dict:
     x, y = pix(ra, dec)
     x, y = np.asarray(x), np.asarray(y)
     J = np.asarray(KN.jac(pix, ra, dec))                                   # px / arcsec, (east, north)
-    e = np.c_[[c["east_mas"] for c in cells], [c["north_mas"] for c in cells]] / 1e3
+    e_mas = np.c_[[c["east_mas"] for c in cells], [c["north_mas"] for c in cells]].astype(float)
+    crpix_o, master = resolve_crpix_offset(cfg)
+    conv_mas = np.zeros_like(e_mas)
+    if crpix_o != 0.0:   # templates already carry the (o, o) PS1 px convention term: keep only the remainder
+        conv_mas = convention_offset_mas(cells, crpix_o, master)
+        e_mas = e_mas - conv_mas
+    e = e_mas / 1e3
     d_ps1 = np.einsum("nij,nj->ni", J, e) * 1e3                             # mpx
     ins = (x > -150) & (x < 2200) & (y > -150) & (y < 2200)
     if ins.sum() < 10:
@@ -146,7 +205,12 @@ def compute(cfg) -> dict:
     for a in (psx, psy, pmx, pmy):                                          # unsupported nodes -> field mean
         a[~np.isfinite(a)] = np.nanmean(a) if np.isfinite(a).any() else 0.0
     tx, ty = psx + pmx, psy + pmy
+    extra = {}
+    if crpix_o != 0.0:   # recorded (and part of the spec identity) only for a corrected mapping: legacy specs unchanged
+        extra = dict(ps1_crpix_offset=crpix_o,
+                     convention_mean_mas=[float(conv_mas[ins, 0].mean()), float(conv_mas[ins, 1].mean())])
     return dict(
+        **extra,
         field=cfg.field, stem=cfg.stem, node_x=nx_nodes.tolist(), node_y=ny_nodes.tolist(), layout="[iy][ix]",
         tx_mpx=np.round(tx, 4).tolist(), ty_mpx=np.round(ty, 4).tolist(),
         ps1_x_mpx=np.round(psx, 4).tolist(), ps1_y_mpx=np.round(psy, 4).tolist(),
@@ -174,6 +238,8 @@ def run(cfg, force: bool = False) -> Path:
     from .perband.paths import chain_paths
     write_provenance(stage, cfg, {"fit_params": chain_paths(cfg).fit_dir / "params.npz",
                                   "ps1_offsets": cfg.inputs.template_shift_ps1,
-                                  "gaia_dir": {"value": str(cfg.inputs.template_shift_gaia)}})
+                                  "gaia_dir": {"value": str(cfg.inputs.template_shift_gaia)},
+                                  "ps1_crpix_offset": {"value": spec.get("ps1_crpix_offset", 0.0),
+                                                       "convention_mean_mas": spec.get("convention_mean_mas", [0.0, 0.0])}})
     mark_done(stage)
     return stage

@@ -14,6 +14,7 @@ import dataclasses
 import datetime as _dt
 import hashlib
 import json
+import math
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -86,6 +87,8 @@ class InputsCfg:
     template_shift: str | None = None
     template_shift_ps1: Path | None = None        # per-skycell PS1 image - header WCS offsets (measure_combined.py JSON)
     template_shift_gaia: Path | None = None       # dir of Gaia DR3 proj_<p>.parquet with pmra/pmdec
+    # PS1 CRPIX offset (PS1 px) already in the templates' mapping: "auto" = PS1CRPIX of its master skycell CSV, or a number
+    template_shift_ps1_crpix: str | float = "auto"
 
 
 @dataclass(frozen=True)
@@ -235,6 +238,8 @@ class ChainConfig:
         d.pop("config_path", None)
         if self.template_calibration.mode == "off":   # default-off section is not part of the identity (keeps old hashes)
             d.pop("template_calibration", None)
+        if self.inputs.template_shift_ps1_crpix == "auto":   # default knob is not part of the identity either
+            d["inputs"].pop("template_shift_ps1_crpix", None)
         return _jsonable(d)
 
     def config_hash(self) -> str:
@@ -397,7 +402,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
     ip = _section(raw, "inputs", {"colour_file", "source_scene", "exclusion_csv", "exclusion_strict", "strap_mask", "defect_mask", "bootstrap_mapping",
                                   "band_cells", "adopted_weights", "init_params", "bootstrap_hp_d", "colour_map", "xp_synth",
                                   "scorer_dir", "pass2_hp", "combined_store_weights", "skylist", "lane_dir",
-                                  "template_shift", "template_shift_ps1", "template_shift_gaia"}, required=True)
+                                  "template_shift", "template_shift_ps1", "template_shift_gaia", "template_shift_ps1_crpix"}, required=True)
     cmap = ip.get("colour_map")
     if cmap is not None:
         if not isinstance(cmap, dict) or not (set(cmap) == {"a", "b"} or set(cmap) == {"summary_json", "key"}):
@@ -415,6 +420,13 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
     tsh = ip.get("template_shift")
     if tsh is not None and str(tsh) != "auto":
         tsh = str(_path(tsh, "inputs.template_shift", required=True))
+    tcr = ip.get("template_shift_ps1_crpix", "auto")
+    if isinstance(tcr, bool) or not (tcr == "auto" or isinstance(tcr, (int, float))):
+        raise ConfigError(f"inputs.template_shift_ps1_crpix must be 'auto' or a number, got {tcr!r}")
+    if tcr != "auto":
+        tcr = float(tcr)
+        if not math.isfinite(tcr) or abs(tcr) > 5:
+            raise ConfigError(f"inputs.template_shift_ps1_crpix must be finite and |o| <= 5 PS1 px, got {tcr!r}")
     csw = ip.get("combined_store_weights", "production")
     if csw not in ("production", "adopted"):
         raise ConfigError(f"inputs.combined_store_weights must be production|adopted, got {csw!r}")
@@ -440,6 +452,7 @@ def config_from_dict(raw: Mapping[str, Any], config_path: Path | None = None) ->
         template_shift=None if tsh is None else str(tsh),
         template_shift_ps1=_path(ip.get("template_shift_ps1"), "inputs.template_shift_ps1"),
         template_shift_gaia=_path(ip.get("template_shift_gaia"), "inputs.template_shift_gaia"),
+        template_shift_ps1_crpix=tcr,
     )
     bp = _section(raw, "background", {"fill", "star_mask_pad_px"})
     fill = bp.get("fill", "harmonic")
