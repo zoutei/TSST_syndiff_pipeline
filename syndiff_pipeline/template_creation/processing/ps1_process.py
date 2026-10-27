@@ -597,12 +597,13 @@ def select_removal_catalog(
     from astropy.io import fits as afits
     from astropy.wcs import WCS
 
+    from syndiff_pipeline.common.ps1_wcs import ps1_wcs_from_header
     from syndiff_pipeline.template_creation.processing.band_utils import select_catalog_for_cell
 
     if gaia_catalog is None or len(gaia_catalog) == 0:
         raise MissingRemovalCatalogError(f"no Gaia catalogue for {skycell_id}")
     try:
-        wcs = WCS(afits.Header.fromstring(header_str))
+        wcs = ps1_wcs_from_header(header_str)
         return select_catalog_for_cell(
             gaia_catalog, wcs, cell_shape, bright_star_mag_threshold=bright_star_mag_threshold,
         )
@@ -636,6 +637,8 @@ def _capture_cell_ledger(bundle, gaia_catalog_pixels, convention, *,
         remove_saturated_stars=remove_saturated_stars,
         bright_star_mag_threshold=bright_star_mag_threshold,
     )
+    from syndiff_pipeline.common.ps1_wcs import ps1_crpix_offset
+
     header_str = next(iter(bundle["headers_data"].values()))
     sources = links = calibration = calibrators = None
     association_error = None
@@ -652,7 +655,8 @@ def _capture_cell_ledger(bundle, gaia_catalog_pixels, convention, *,
         image_calibration=calibration, calibrators=calibrators,
         catalogue=dict(store=spec.get("gaia_store"), removal_fingerprint=spec.get("gaia_fingerprint"),
                        rows_in_cone=None if spec.get("gaia_all") is None else int(len(spec["gaia_all"]))),
-        metadata=dict(association_error=association_error, wcs_header=header_str),
+        metadata=dict(association_error=association_error, wcs_header=header_str,
+                      ps1_crpix_offset=ps1_crpix_offset()),
     )
     if sources is not None:
         # Association revision (saturated-core identity + removed-neighbour list); never fails the cell.
@@ -1062,8 +1066,10 @@ def catalog_cone_prefilter(
     from astropy.io import fits as afits
     from astropy.wcs import WCS
 
+    from syndiff_pipeline.common.ps1_wcs import ps1_wcs_from_header
+
     h, w = cell_shape
-    wcs = WCS(afits.Header.fromstring(header_str))
+    wcs = ps1_wcs_from_header(header_str)
     corners = np.array([[0, 0], [w - 1, 0], [0, h - 1], [w - 1, h - 1], [(w - 1) / 2, (h - 1) / 2]], float)
     ra, dec = wcs.all_pix2world(corners[:, 0], corners[:, 1], 0)
     ra0, dec0 = np.radians(ra[-1]), np.radians(dec[-1])

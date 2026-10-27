@@ -84,11 +84,12 @@ def associate_gaia(ledger, raw, mask, header_str, gaia_all):
     from astropy.wcs import WCS
 
     from syndiff_pipeline.template_creation.processing import band_utils as bu
+    from syndiff_pipeline.common.ps1_wcs import ps1_wcs_from_header
     from .astrometry import calibrate_image_positions
     from .matching import gaia_sources
 
     header = fits.Header.fromstring(header_str)
-    wcs = WCS(header)
+    wcs = ps1_wcs_from_header(header)
     epoch = float(Time(header["MJD-OBS"], format="mjd").jyear) if "MJD-OBS" in header else None
     if gaia_all is None or len(gaia_all) == 0:
         raise ValueError("No Gaia catalogue rows for ledger association")

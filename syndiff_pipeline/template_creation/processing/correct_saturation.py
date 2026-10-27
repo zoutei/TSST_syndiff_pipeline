@@ -8,6 +8,8 @@ from astropy.modeling import fitting, models
 from astropy.nddata import NDData
 from astropy.table import Table
 from astropy.wcs import WCS
+
+from syndiff_pipeline.common.ps1_wcs import ps1_wcs_from_header
 from photutils.psf import EPSFBuilder, extract_stars
 
 logger = logging.getLogger(__name__)
@@ -297,9 +299,7 @@ def apply_saturation_to_row(data_array, masks, cell_locations, cell_bundles, cat
         leftmost = min(cell_bundles, key=lambda b: b["x_coord"])
         wcs = None
         try:
-            wcs = WCS(leftmost["headers_data"]["i"])
-            if wcs.naxis > 2:
-                wcs = wcs.celestial
+            wcs = ps1_wcs_from_header(leftmost["headers_data"]["i"])
         except Exception:
             logger.warning("Failed to extract WCS from leftmost cell")
 
