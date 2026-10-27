@@ -524,6 +524,8 @@ def _accumulate_sep_object_mask(
     a = float(obj["a"])
     b = float(obj["b"])
     theta = float(obj["theta"])
+    if not (np.isfinite(x) and np.isfinite(y) and np.isfinite(a) and np.isfinite(b)):
+        return  # SEP gives NaN axes for negative-definite noise blobs; mask_ellipse would draw nothing anyway
     y0, y1, x0, x1 = _sep_object_stamp_slices(x, y, a, b, ny, nx)
     if y1 <= y0 or x1 <= x0:
         return
