@@ -197,6 +197,10 @@ def pick_best_angle_ffi(
 ) -> tuple[str, float]:
     """Return ``(absolute ffi path, score)`` for the highest angle-ranked row."""
     table = manifest
+    _forced = os.environ.get("SYNDIFF_MINBG_FFI")
+    if _forced:  # S26 campaign: TESSVectors (HEASARC) unreachable; caller supplies the kernel-fit reference FFI explicitly
+        log.warning("Kernel-fit min-background FFI forced via SYNDIFF_MINBG_FFI=%s", _forced)
+        return _forced, float("nan")
     if sector is not None and camera is not None and _manifest_needs_angle_enrichment(manifest):
         table = ensure_manifest_earth_moon_angles(
             manifest,
