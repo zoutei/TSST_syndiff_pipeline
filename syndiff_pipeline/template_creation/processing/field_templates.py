@@ -299,7 +299,7 @@ def build_field_fits_header(
             # coordinate-frame declaration is intentionally textual.
             # Preserve FITS-compatible strings instead of coercing every
             # value to int.
-            serialized = value if isinstance(value, (str, bool)) else int(value)
+            serialized = value if isinstance(value, (str, bool, float)) else int(value)  # PS1CRPIX is 0.5: int() broke GEOMFP checks
             hdr[key] = (serialized, f"MappingGrid {key}")
     elif roi_bounds is not None:
         x_min, y_min, x_max, y_max = (int(v) for v in roi_bounds)

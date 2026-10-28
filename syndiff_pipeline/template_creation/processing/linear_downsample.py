@@ -733,7 +733,7 @@ def run_linear_downsample_scc(
     # directly from the FITS file instead of falling back to a full-chip
     # guess.
     for key, value in mapping_grid.to_fits_header_updates().items():
-        serialized = value if isinstance(value, (str, bool)) else int(value)
+        serialized = value if isinstance(value, (str, bool, float)) else int(value)  # PS1CRPIX is 0.5: int() broke GEOMFP checks
         syndiff_header[key] = (serialized, f"MappingGrid {key}")
 
     if convolve_from_band_cells:
