@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import time
 import unittest
 import unittest.mock
 from pathlib import Path
@@ -171,8 +172,19 @@ class TestDiffOnlyE2E(unittest.TestCase):
                     _tick_run(state, run_id, ctx)
                     if launch_calls:
                         break
-                for _ in range(4):
+                # Artifact verifies run on a background thread pool, so how many
+                # ticks it takes for the remaining external stages to be applied
+                # depends on machine load: wait on the condition (bounded), not
+                # on a fixed tick count.
+                deadline = time.monotonic() + 60.0
+                while time.monotonic() < deadline:
                     _tick_run(state, run_id, ctx)
+                    if all(
+                        state.get_stage_run(run_id, label, st).status == STATUS_SKIPPED
+                        for st in ("tess_ffi_download", "downsample")
+                    ):
+                        break
+                    time.sleep(0.05)
 
             for stage in ("tess_ffi_download", "downsample"):
                 self.assertEqual(
