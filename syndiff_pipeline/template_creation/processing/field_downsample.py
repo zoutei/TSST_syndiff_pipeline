@@ -587,6 +587,68 @@ def _validate_l5_convolved_completeness(
     return list(skycell_batches or []), []
 
 
+def _validate_l5_band_cell_availability(
+    *,
+    master_skycells: set[str],
+    data_root: str | Path,
+    skycell_df: pd.DataFrame,
+    combined_recipe: Mapping,
+    required_skycells: set[str],
+    skycell_batches: list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]] | None = None,
+) -> tuple[
+    list[tuple[str, dict[tuple[Any, ...], list[tuple[int, int, int]]]]],
+    list[str],
+    set[str],
+]:
+    """Band-cell route's replacement for :func:`_validate_l5_convolved_completeness`.
+
+    Hard gate before any contrib is written: every cell the template reads
+    (``band_cell_store.required_band_cells``: the required skycells, their
+    canonical same-projection neighbours and cross-projection seam sources)
+    must have band cells for ``combined_recipe``, unless ps1_process recorded
+    it absent from PS1 in every band. Raises :class:`L5CompletenessError`
+    naming the missing cells. Returns ``(batches, [], ps1_absent_cells)``.
+    """
+    from syndiff_pipeline.template_creation.processing import band_cell_store
+
+    master = {str(v) for v in master_skycells}
+    required = {str(v) for v in required_skycells}
+    in_csv = {name for name in required & master if name in skycell_df.index}
+    need = band_cell_store.required_band_cells(skycell_df, sorted(in_csv))
+    ps1_absent = {n for n in need if band_cell_store.is_absent_cell(data_root, n)}
+    missing: list[str] = []
+    for name in need:
+        if name in ps1_absent:
+            continue
+        parsed = _projection_and_cell(name)
+        fp = None
+        if parsed is not None:
+            fp = band_cell_store.resolve_band_cells_fingerprint_for_recipe(
+                data_root, parsed[0], parsed[1], combined_recipe
+            )
+        if fp is None:
+            missing.append(name)
+    diagnostics = {
+        "absent_from_master": sorted(required - master),
+        "absent_from_mapping_csv": sorted((required & master) - in_csv),
+        "absent_from_band_store": sorted(missing),
+        "ps1_absent_cells": sorted(ps1_absent),
+        "expected": sorted(need),
+    }
+    if (
+        diagnostics["absent_from_master"]
+        or diagnostics["absent_from_mapping_csv"]
+        or diagnostics["absent_from_band_store"]
+    ):
+        log.error("L5 band-cell availability diagnostics: %s", diagnostics)
+        raise L5CompletenessError(diagnostics)
+    log.info(
+        "L5 band-cell availability: %d cells needed (%d PS1-absent), all present",
+        len(need), len(ps1_absent),
+    )
+    return list(skycell_batches or []), [], ps1_absent
+
+
 def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | None:
     """Shared-store first (when enabled), else legacy flat ``*_data`` zarr keys.
 
@@ -598,6 +660,24 @@ def _load_ps1_skycell_for_l5(skycell: str) -> tuple[np.ndarray, np.ndarray] | No
         raise RuntimeError("L5 worker not initialized; call _init_l5_worker first")
 
     data_root = _L5_WORKER.get("data_root")
+    if bool(_L5_WORKER.get("convolve_from_band_cells")):
+        # Read-time blur from the shared band-cell store (same builder as linear mode). The blur
+        # method is pinned explicitly so one product never mixes dask and FFT (invariant 16).
+        from syndiff_pipeline.template_creation.processing.band_convolve import (
+            load_padding_aware_convolved_cell_from_band_cells,
+        )
+        from syndiff_pipeline.template_creation.processing.convolution_utils import blur_method
+
+        with blur_method(str(_L5_WORKER["blur_method"])):
+            return load_padding_aware_convolved_cell_from_band_cells(
+                data_root,
+                skycell,
+                skycell_df=_L5_WORKER["skycell_df"],
+                psf_sigma=float(_L5_WORKER["psf_sigma"]),
+                combined_recipe=_L5_WORKER["combined_recipe"],
+                band_weights=_L5_WORKER.get("band_weights"),
+            )
+
     if bool(_L5_WORKER.get("shared_convolved_store")) and data_root:
         shared = _try_load_shared_convolved_arrays(
             data_root,
@@ -980,6 +1060,28 @@ def _l5_skycell_batch(
         }
 
     loaded = _load_ps1_skycell_for_l5(skycell)
+    if loaded is None and str(skycell) in (_L5_WORKER.get("ps1_absent_skycells") or ()):
+        # Band-cell route: PS1 has no data for this cell in any band (recorded by ps1_process).
+        # No PS1 coverage = COUNT 0, as in linear mode; empty contribs keep every key present.
+        empty_i = np.array([], dtype=np.int64)
+        empty_f = np.array([], dtype=np.float64)
+        for gid_list in pending.values():
+            for gid, sx_g, sy_g in gid_list:
+                write_contrib(
+                    store, skycell, sx_g, sy_g, indices=empty_i, flux_sum=empty_f,
+                    count=empty_f, mask_count=empty_f, group_id=int(gid),
+                )
+                n_writes += 1
+        return {
+            "skycell": skycell,
+            "n_composite_keys": len(buckets),
+            "n_compose": 0,
+            "n_writes": n_writes,
+            "n_skips": n_skips,
+            "n_nonempty": 0,
+            "n_regmap_opens": 0,
+            "n_zarr_loads": 0,
+        }
     if loaded is None:
         raise L5CompletenessError(
             {
@@ -1290,6 +1392,9 @@ def run_field_downsample_scc(
     mapping_grid=None,
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
+    convolve_from_band_cells: bool = False,
+    band_weights: Mapping | None = None,
+    blur_method: str = "dask",
 ) -> dict[str, Any]:
     """
     Bin sparse contribs into the SCC templates store (L5 only).
@@ -1323,6 +1428,20 @@ def run_field_downsample_scc(
     for the same sky cell, and only a recipe-matched lookup guarantees this
     run reads back the artifact matching its own config rather than
     whichever fingerprint happens to have the newest mtime.
+
+    ``convolve_from_band_cells`` (default off; off = no behaviour, output or
+    fingerprint change): build each skycell's padding-aware convolved cell at
+    read time from the shared UNWEIGHTED band-cell store, exactly as
+    ``linear_downsample`` does (``band_convolve``): plane
+    ``sum_b w_b Z F_b`` in float64, ONE blur (``blur_method``, pinned for the
+    whole product), v3 one-writer canonical cell, cross-projection seam
+    correction. ``band_weights`` = template weights (None = the removal
+    weights recorded in the cells). ``convolved_dir`` is then ignored (the
+    convolved store need not exist) and the L5 convolved-completeness gate is
+    replaced by a band-cell availability check over every cell the template
+    reads (cells, canonical neighbours, seam sources). Cells recorded absent
+    from PS1 give empty contribs. Each skycell is blurred once per run and
+    reused for every composite key / group (skycell-major L5 batches).
     """
     import os as _os
     import time as _time
@@ -1481,10 +1600,33 @@ def run_field_downsample_scc(
 
     from syndiff_pipeline.common.scc_paths import scc_convolved_zarr
 
+    if convolve_from_band_cells:
+        from syndiff_pipeline.template_creation.processing.convolution_utils import BLUR_METHODS
+
+        if psf_sigma is None or combined_recipe is None:
+            raise ValueError("convolve_from_band_cells needs psf_sigma and combined_recipe")
+        if blur_method not in BLUR_METHODS:
+            raise ValueError(f"blur_method={blur_method!r}; expected one of {BLUR_METHODS}")
+        env_method = _os.environ.get("SYNDIFF_BLUR_METHOD")
+        if env_method and env_method.strip().lower() != blur_method:
+            log.warning(
+                "SYNDIFF_BLUR_METHOD=%s ignored: the band-cell field route blurs with the "
+                "configured blur_method=%s for the whole product",
+                env_method, blur_method,
+            )
+        if band_weights is not None:
+            from syndiff_pipeline.template_creation.processing.perband import validate_weights
+
+            band_weights = validate_weights(band_weights, "band_weights")
+
     zarr_path = Path(convolved_dir)
-    shared_convolved_store = _is_shared_convolved_store_path(zarr_path)
+    shared_convolved_store = (
+        False if convolve_from_band_cells else _is_shared_convolved_store_path(zarr_path)
+    )
     legacy_zarr_path: Path | None = None
-    if shared_convolved_store:
+    if convolve_from_band_cells:
+        pass  # cells come from band cells; the convolved store may not exist at all
+    elif shared_convolved_store:
         # Shared store is a directory tree of npz cells, not a zarr Group.
         if not zarr_path.is_dir():
             raise FileNotFoundError(f"shared convolved store not found: {zarr_path}")
@@ -1538,7 +1680,7 @@ def run_field_downsample_scc(
     t_m = _time.perf_counter()
     master_map, name_to_id = _master_skycell_id_map(master_path)
     skycell_df: pd.DataFrame | None = None
-    if shared_convolved_store and psf_sigma is not None:
+    if (shared_convolved_store and psf_sigma is not None) or convolve_from_band_cells:
         from syndiff_pipeline.template_creation.processing.field_remap import _skycell_csv_path
 
         # Read the master skycell list from the same mapping_root the master map
@@ -1558,7 +1700,8 @@ def run_field_downsample_scc(
         skycell_df = pd.read_csv(master_csv_path).set_index("NAME", drop=False)
     log.info(
         "Opened %s %s and master map %s (%d skycells) in %.1fs",
-        "shared convolved store" if shared_convolved_store else "zarr",
+        "band-cell store (read-time blur), ignoring" if convolve_from_band_cells
+        else "shared convolved store" if shared_convolved_store else "zarr",
         zarr_path,
         master_path,
         len(name_to_id),
@@ -1730,6 +1873,25 @@ def run_field_downsample_scc(
         "psf_sigma": psf_sigma,
         "combined_recipe": combined_recipe,
     }
+    template_source: dict[str, Any] | None = None
+    if convolve_from_band_cells:
+        from syndiff_pipeline.template_creation.processing.band_convolve import (
+            band_cell_route_provenance,
+        )
+
+        template_source = band_cell_route_provenance(
+            combined_recipe=combined_recipe,
+            band_weights=band_weights,
+            blur_method=blur_method,
+            psf_sigma=float(psf_sigma),
+        )
+        worker_payload.update(
+            {
+                "convolve_from_band_cells": True,
+                "band_weights": band_weights,
+                "blur_method": str(blur_method),
+            }
+        )
 
     # Validate the complete mapping identity set before any worker can write a
     # contrib.  The batch list may be a strict subset when a stale schedule
@@ -1740,12 +1902,26 @@ def run_field_downsample_scc(
     required_skycells = (
         {str(s) for s in only_skycells} if only_skycells is not None else set(name_to_id)
     )
-    skycell_batches, _skipped_convolved = _validate_l5_convolved_completeness(
-        master_skycells=set(name_to_id),
-        payload=worker_payload,
-        required_skycells=required_skycells,
-        skycell_batches=skycell_batches,
-    )
+    if convolve_from_band_cells:
+        skycell_batches, _skipped_convolved, ps1_absent = _validate_l5_band_cell_availability(
+            master_skycells=set(name_to_id),
+            data_root=data_root,
+            skycell_df=skycell_df,
+            combined_recipe=combined_recipe,
+            required_skycells=required_skycells,
+            skycell_batches=skycell_batches,
+        )
+        worker_payload["ps1_absent_skycells"] = frozenset(ps1_absent)
+        template_source["ps1_absent_skycells"] = sorted(
+            s for s in ps1_absent if s in required_skycells
+        )
+    else:
+        skycell_batches, _skipped_convolved = _validate_l5_convolved_completeness(
+            master_skycells=set(name_to_id),
+            payload=worker_payload,
+            required_skycells=required_skycells,
+            skycell_batches=skycell_batches,
+        )
     n_composite_keys = sum(len(buckets) for _, buckets in skycell_batches)
 
     if progress_file is not None:
@@ -1857,7 +2033,11 @@ def run_field_downsample_scc(
             ccd=int(ccd),
             contribs_dir="contribs",
             groups=list(assignment.groups),
-            provenance=geometry_provenance,
+            provenance=(
+                geometry_provenance
+                if template_source is None
+                else {**geometry_provenance, "template_source": template_source}
+            ),
         ),
     )
     if int(getattr(mapping_grid, "mapgrid_version", 0)) != 3:
@@ -1922,6 +2102,10 @@ def run_field_downsample_scc(
         )
     if _skipped_convolved:
         sidecar["skipped_convolved_skycells"] = list(_skipped_convolved)
+    if template_source is not None:
+        # Only when on, so flag-off sidecars are byte-identical to before.
+        sidecar["zarr_path"] = None
+        sidecar["template_source"] = template_source
     # Infer lane names from path leaves for provenance / A/B bookkeeping.
     from syndiff_pipeline.common.scc_paths import REMAP_SUBDIR, TEMPLATES_SUBDIR
 
@@ -1952,6 +2136,8 @@ def run_field_downsample_scc(
         "remap_root": str(remap_store),
         **geometry_provenance,
     }
+    if template_source is not None:
+        fits_provenance["template_source"] = template_source
     materialized_fits: dict[str, Any] | None = None
     if materialize_fits:
         materialized_fits = materialize_field_fits_for_store(

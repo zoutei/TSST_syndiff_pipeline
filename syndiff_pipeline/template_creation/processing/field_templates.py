@@ -345,6 +345,22 @@ def build_field_fits_header(
                 int(provenance["n_l4b_pair_states"]),
                 "Inter-skycell pair-state cache keys",
             )
+        source = provenance.get("template_source")
+        if source:
+            # Band-cell read-time-blur route only (absent otherwise: headers unchanged).
+            weights = source["band_weights"]
+            for band in ("r", "i", "z", "y"):
+                hdr[f"BANDW{band.upper()}"] = (float(weights[band]), "template band weight")
+            hdr["BANDSRC"] = ("band_cells", "template built from the band-cell store")
+            hdr["CONVBC"] = (True, "convolve_from_band_cells")
+            hdr["BWTMODE"] = ("unweighted", "band store holds unweighted Z*F_b")
+            hdr["BWSRC"] = (str(source["band_weights_source"]), "origin of the band weights")
+            hdr["ZPMODE"] = (str(source.get("zpcell", "off")), "per-cell zp factors")
+            hdr["BLURM"] = (str(source["blur_method"]), "Gaussian pre-blur method")
+            hdr["PSFSIG"] = (float(source["psf_sigma"]), "pre-blur sigma [PS1 px]")
+            hdr["BLURRAD"] = (int(source["kernel_radius"]), "pre-blur radius [PS1 px]")
+            hdr["CANONGEO"] = (str(source["canonical_geometry"]), "canonical cell geometry")
+            hdr["BCRECIPE"] = (str(source["combined_recipe_id"]), "combined recipe id")
     return hdr
 
 

@@ -484,6 +484,13 @@ def downsample_recipe_params(resolved) -> dict:
         from syndiff_pipeline.template_creation.processing.band_convolve import zpcell_factors_identity
 
         params["zpcell_factors"] = zpcell_factors_identity(ds.zpcell_factors_path)
+    from syndiff_pipeline.template_creation.processing.band_convolve import (
+        field_route_fingerprint_params,
+    )
+
+    field_route = field_route_fingerprint_params(resolved)
+    if field_route is not None:
+        params["field_band_route"] = field_route
     return params
 
 

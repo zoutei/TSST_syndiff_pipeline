@@ -155,6 +155,7 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "convolve_from_band_cells",
         "band_weights",
         "zpcell_factors_path",
+        "blur_method",
         "remap_store_name",
         "output_store_name",
     }
@@ -522,6 +523,10 @@ class DownsampleStageParams:
     # JSON ``{cell: {band: f}}`` of per-cell, per-band zpcell factors applied before the blur:
     # plane = sum_b (w_b / f_{s,b}) Z F_b. None = off. Strictly validated, no silent f = 1.
     zpcell_factors_path: str | None = None
+    # Gaussian pre-blur method of the band-cell route in geometry_mode field ("dask" | "fft";
+    # None = "dask"). Pinned for the whole product (invariant 16) and recorded in the fingerprint,
+    # sidecar and FITS headers. Field mode with convolve_from_band_cells only.
+    blur_method: str | None = None
     # INPUT: which remap lane to read; None → inherit stages.remap.store_name
     remap_store_name: str | None = None
     # OUTPUT: which templates lane to write; None → templates/
@@ -545,6 +550,15 @@ class DownsampleStageParams:
             )
         if self.zpcell_factors_path is not None:
             object.__setattr__(self, "zpcell_factors_path", str(self.zpcell_factors_path))
+        if self.blur_method is not None:
+            from syndiff_pipeline.template_creation.processing.convolution_utils import BLUR_METHODS
+
+            if str(self.blur_method) not in BLUR_METHODS:
+                raise ValueError(
+                    f"stages.downsample.blur_method must be one of {BLUR_METHODS}, got {self.blur_method!r}"
+                )
+            if not bool(self.convolve_from_band_cells):
+                raise ValueError("stages.downsample.blur_method needs convolve_from_band_cells: true")
         if (self.band_weights is not None or self.zpcell_factors_path is not None) and not bool(
             self.convolve_from_band_cells
         ):
@@ -635,15 +649,24 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     validate_stage_keys(df, DIFF_ALLOWED, "diff")
     validate_stage_keys(st, STAR_ALLOWED, "star")
     validate_stage_keys(ph, PHOTOMETRY_ALLOWED, "photometry")
+    # same effective rule as dispatch.py / stages.py: downsample.geometry_mode wins, else
+    # wcs_grouping.geometry_mode, else field
+    _geom = str(ds.get("geometry_mode") or wg.get("geometry_mode") or "field").lower()
     if ds.get("convolve_from_band_cells"):
-        # same effective rule as dispatch.py / stages.py: downsample.geometry_mode wins, else
-        # wcs_grouping.geometry_mode, else field
-        _geom = str(ds.get("geometry_mode") or wg.get("geometry_mode") or "field").lower()
-        if _geom != "linear":
+        if _geom not in ("linear", "field"):
             raise ValueError(
-                "stages.downsample.convolve_from_band_cells needs geometry_mode: linear "
-                f"(effective geometry_mode is {_geom!r}; the flag is only implemented for linear mode)"
+                "stages.downsample.convolve_from_band_cells needs geometry_mode linear or field "
+                f"(effective geometry_mode is {_geom!r})"
             )
+        if _geom == "field" and ds.get("zpcell_factors_path") is not None:
+            raise ValueError(
+                "stages.downsample.zpcell_factors_path is only implemented for geometry_mode: linear"
+            )
+    if ds.get("blur_method") is not None and _geom != "field":
+        raise ValueError(
+            "stages.downsample.blur_method is only implemented for geometry_mode: field "
+            f"(effective geometry_mode is {_geom!r}); linear mode blurs with the process default"
+        )
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
     ps1_source = pp.get("ps1_source", "zarr")

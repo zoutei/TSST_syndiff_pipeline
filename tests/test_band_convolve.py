@@ -243,7 +243,7 @@ def test_unset_flags_leave_existing_fingerprints_unchanged():
     assert verify.config_fingerprint(r, "downsample") == PINNED_DOWNSAMPLE_CONFIG_FP
     assert set(model.downsample_recipe_params(r)) == PINNED_DOWNSAMPLE_RECIPE_KEYS
     # band-cell flag alone (no weights/factors) adds exactly the one key it always added
-    on = _resolved(convolve_from_band_cells=True)
+    on = _resolved(geometry_mode="linear", convolve_from_band_cells=True)
     assert set(model.downsample_recipe_params(on)) == PINNED_DOWNSAMPLE_RECIPE_KEYS | {"convolve_from_band_cells"}
 
 
@@ -253,15 +253,15 @@ def test_template_weights_and_factors_enter_downsample_fingerprint(tmp_path):
     from syndiff_pipeline.common.provenance import model
     from syndiff_pipeline.template_creation.orchestration import verify
 
-    base = _resolved(convolve_from_band_cells=True)
-    w = _resolved(convolve_from_band_cells=True, band_weights=D13)
-    w2 = _resolved(convolve_from_band_cells=True, band_weights={**D13, "r": 0.255})
+    base = _resolved(geometry_mode="linear", convolve_from_band_cells=True)
+    w = _resolved(geometry_mode="linear", convolve_from_band_cells=True, band_weights=D13)
+    w2 = _resolved(geometry_mode="linear", convolve_from_band_cells=True, band_weights={**D13, "r": 0.255})
     fp = lambda r: verify.config_fingerprint(r, "downsample")  # noqa: E731
     assert len({fp(base), fp(w), fp(w2)}) == 3
     assert model.downsample_recipe_params(w)["band_weights"] == D13
     f1 = tmp_path / "f1.json"
     f1.write_text(json.dumps({"x": {b: 1.0 for b in perband.BANDS}}))
-    z1 = _resolved(convolve_from_band_cells=True, zpcell_factors_path=str(f1))
+    z1 = _resolved(geometry_mode="linear", convolve_from_band_cells=True, zpcell_factors_path=str(f1))
     fz1 = fp(z1)
     assert fz1 != fp(base) and model.downsample_recipe_params(z1)["zpcell_factors"]["sha256"] != "unreadable"
     f1.write_text(json.dumps({"x": {b: 1.1 for b in perband.BANDS}}))  # content change -> new fingerprint
@@ -274,9 +274,9 @@ def test_weights_and_factors_need_the_band_cell_flag_and_valid_weights():
     with pytest.raises(ValueError, match="convolve_from_band_cells"):
         _resolved(zpcell_factors_path="f.json")
     with pytest.raises(ValueError):
-        _resolved(convolve_from_band_cells=True, band_weights={"r": 1.0})
+        _resolved(geometry_mode="linear", convolve_from_band_cells=True, band_weights={"r": 1.0})
     with pytest.raises(ValueError):
-        _resolved(convolve_from_band_cells=True, band_weights={**D13, "y": -0.1})
+        _resolved(geometry_mode="linear", convolve_from_band_cells=True, band_weights={**D13, "y": -0.1})
 
 
 def test_recipe_params_only_record_flag_when_on():
@@ -289,7 +289,7 @@ def test_recipe_params_only_record_flag_when_on():
     mp = MappingStageParams()
 
     def params(flag):
-        ds = DownsampleStageParams(convolve_from_band_cells=flag)
+        ds = DownsampleStageParams(convolve_from_band_cells=flag, geometry_mode="linear")
         resolved = SimpleNamespace(stages=SimpleNamespace(downsample=ds, mapping=mp),
                                    template_output_base="x", downsample_remap_store_name=None)
         return model.downsample_recipe_params(resolved)

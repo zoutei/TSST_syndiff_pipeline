@@ -211,6 +211,13 @@ def config_fingerprint(
             )
 
             parts.append("zpcell_factors_sha256=" + zpcell_factors_identity(ds.zpcell_factors_path)["sha256"])
+        from syndiff_pipeline.template_creation.processing.band_convolve import (
+            field_route_fingerprint_params,
+        )
+
+        field_route = field_route_fingerprint_params(resolved)
+        if field_route is not None:
+            parts.append("field_band_route=" + json.dumps(field_route, sort_keys=True))
     elif stage == "ps1_download":
         pd = resolved.stages.ps1_download
         parts.extend([str(pd.overwrite), str(pd.use_local_files)])

@@ -292,6 +292,84 @@ def _source_for(data_root, combined_recipe, weights=None, band_factors=None) -> 
     return src
 
 
+ROUTE_NAME = "band_cells_read_time_blur"
+
+
+def combined_recipe_id(combined_recipe: Mapping) -> str:
+    """sha256[:16] of the canonical JSON of the combined recipe the band cells are keyed by."""
+    import hashlib
+    import json
+
+    text = json.dumps(dict(combined_recipe), sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def band_cell_route_provenance(
+    *,
+    combined_recipe: Mapping,
+    band_weights: Optional[Mapping[str, float]],
+    blur_method: str,
+    psf_sigma: float,
+    kernel_radius: int = DEFAULT_RADIUS,
+) -> dict:
+    """What a template built through this module was made from (sidecars, manifests, FITS cards).
+
+    ``band_weights`` None = the removal weights recorded in the cells (= the recipe's weights).
+    """
+    from syndiff_pipeline.template_creation.processing.band_cell_store import BAND_CELLS_ZARR_BASENAME
+    from syndiff_pipeline.template_creation.processing.convolved_store import PADDING_MODE
+
+    if band_weights is None:
+        weights, source = combined_recipe["band_weights"], "removal_weights_in_cells"
+    else:
+        weights, source = band_weights, "config"
+    return {
+        "route": ROUTE_NAME,
+        "convolve_from_band_cells": True,
+        "band_store": BAND_CELLS_ZARR_BASENAME,
+        "band_weighted_store": False,
+        "combined_recipe_id": combined_recipe_id(combined_recipe),
+        "band_weights": {b: float(weights[b]) for b in perband.BANDS},
+        "band_weights_source": source,
+        "zpcell": "off",
+        "blur_method": str(blur_method),
+        "psf_sigma": float(psf_sigma),
+        "kernel_radius": int(kernel_radius),
+        "canonical_geometry": PADDING_MODE,
+    }
+
+
+def field_route_fingerprint_params(resolved) -> Optional[dict]:
+    """Extra downsample fingerprint params of the band-cell route in geometry_mode FIELD, else None.
+
+    Linear mode returns None so its existing fingerprints (S26 production) are unchanged; the
+    weights and the flag itself are already recorded by the callers for both modes.
+    """
+    ds = resolved.stages.downsample
+    if not bool(getattr(ds, "convolve_from_band_cells", False)):
+        return None
+    wg = getattr(resolved.stages, "wcs_grouping", None)
+    geometry_mode = str(
+        getattr(ds, "geometry_mode", None) or getattr(wg, "geometry_mode", None) or "field"
+    ).lower()
+    if geometry_mode != "field":
+        return None
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        production_combined_recipe,
+    )
+    from syndiff_pipeline.template_creation.processing.convolved_store import PADDING_MODE
+
+    pp = getattr(resolved.stages, "ps1_process", None)
+    return {
+        "route": ROUTE_NAME,
+        "blur_method": str(getattr(ds, "blur_method", None) or "dask"),
+        "combined_recipe_id": combined_recipe_id(production_combined_recipe(pp)),
+        "psf_sigma": float(getattr(pp, "psf_sigma", 40.0)),
+        "kernel_radius": DEFAULT_RADIUS,
+        "canonical_geometry": PADDING_MODE,
+    }
+
+
 def load_padding_aware_convolved_cell_from_band_cells(
     data_root: str | Path,
     skycell: str,

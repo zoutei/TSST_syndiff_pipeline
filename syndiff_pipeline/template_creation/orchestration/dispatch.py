@@ -705,6 +705,9 @@ def _execute_template_stage(
                 camera=t.camera,
                 ccd=t.ccd,
             ),
+            convolve_from_band_cells=bool(getattr(ds, "convolve_from_band_cells", False)),
+            band_weights=getattr(ds, "band_weights", None),
+            blur_method=str(getattr(ds, "blur_method", None) or "dask"),
         )
         field_result = dict(field_result)
         if mp.store_name == "tvwcs":

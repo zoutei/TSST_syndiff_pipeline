@@ -150,15 +150,36 @@ def test_run_refuses_publish_band_cells_with_saturation_correction(tmp_path):
 
 
 # ------------------------------------------------------------------ 5. config + early downsample check
-def test_convolve_from_band_cells_needs_linear_geometry():
-    with pytest.raises(ValueError, match="geometry_mode: linear"):
-        parse_stage_params({"downsample": {"convolve_from_band_cells": True}})
-    with pytest.raises(ValueError, match="geometry_mode: linear"):
-        parse_stage_params({"downsample": {"convolve_from_band_cells": True, "geometry_mode": "field"},
-                            "wcs_grouping": {"geometry_mode": "linear"}})
-    st = parse_stage_params({"downsample": {"convolve_from_band_cells": True, "geometry_mode": "linear"}})
+def test_convolve_from_band_cells_geometry_rules():
+    on = {"convolve_from_band_cells": True}
+    # linear OK
+    st = parse_stage_params({"downsample": {**on, "geometry_mode": "linear"}})
     assert st.downsample.convolve_from_band_cells
-    parse_stage_params({"downsample": {"geometry_mode": "field"}})  # flag off: untouched
+    # field OK: explicit, and via the default
+    assert parse_stage_params({"downsample": {**on, "geometry_mode": "field"}}).downsample.convolve_from_band_cells
+    assert parse_stage_params({"downsample": dict(on)}).downsample.convolve_from_band_cells
+    # field + zpcell factors is linear-only
+    with pytest.raises(ValueError, match="zpcell_factors_path"):
+        parse_stage_params({"downsample": {**on, "zpcell_factors_path": "f.json"}})
+    with pytest.raises(ValueError, match="zpcell_factors_path"):
+        parse_stage_params({"downsample": {**on, "geometry_mode": "field", "zpcell_factors_path": "f.json"}})
+    # linear keeps zpcell factors
+    parse_stage_params({"downsample": {**on, "geometry_mode": "linear", "zpcell_factors_path": "f.json"}})
+    # blur_method: field only
+    with pytest.raises(ValueError, match="blur_method"):
+        parse_stage_params({"downsample": {**on, "geometry_mode": "linear", "blur_method": "fft"}})
+    with pytest.raises(ValueError, match="blur_method"):  # wcs_grouping decides when downsample is silent
+        parse_stage_params({"downsample": {**on, "blur_method": "fft"}, "wcs_grouping": {"geometry_mode": "linear"}})
+    st = parse_stage_params({"downsample": {**on, "geometry_mode": "field", "blur_method": "fft"}})
+    assert st.downsample.blur_method == "fft"
+    assert parse_stage_params({"downsample": {**on, "blur_method": "dask"}}).downsample.blur_method == "dask"
+    with pytest.raises(ValueError, match="blur_method"):
+        parse_stage_params({"downsample": {**on, "geometry_mode": "field", "blur_method": "bogus"}})
+    with pytest.raises(ValueError, match="blur_method"):
+        parse_stage_params({"downsample": {"geometry_mode": "field", "blur_method": "fft"}})  # flag missing
+    # flag off untouched
+    parse_stage_params({"downsample": {"geometry_mode": "field"}})
+    parse_stage_params({"downsample": {"geometry_mode": "linear"}})
 
 
 def test_downsample_start_check_lists_missing_cells_then_passes(tmp_path, monkeypatch):
