@@ -87,6 +87,7 @@ PS1_PROCESS_ALLOWED = frozenset(
         "write_per_scc_convolved_zarr",
         "publish_band_cells",
         "skip_convolved",
+        "allow_missing_bands",
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
@@ -337,6 +338,11 @@ class Ps1ProcessStageParams:
     # the combined cells. Overrides use_shared_convolved_store /
     # write_per_scc_convolved_zarr for the convolve steps.
     skip_convolved: bool = False
+    # Under skip_convolved / publish_band_cells a cell whose raw fetch lacks a PS1 band (after retries) is
+    # NOT published and the stage fails (the store is immutable: one network hiccup would otherwise store
+    # a band-less cell forever). True = publish it anyway (zero plane + missing_bands meta): only for cells
+    # where PS1 truly lacks the band, set by a human after checking.
+    allow_missing_bands: bool = False
     executor: str = "condor"
     condor_request_cpus: int = 64
     condor_request_memory: int = 300_000

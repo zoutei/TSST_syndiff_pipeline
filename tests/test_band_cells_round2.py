@@ -341,3 +341,87 @@ def test_skip_convolved_pipeline_uses_the_pool_and_publishes_everything(tmp_path
                                                    real(self, fn, *a, **k))[1])
     df, res, loaded = _run_skip(tmp_path, monkeypatch, publish_band_cells=True)
     assert "error" not in res and len(used) == len(_f01_cells(df))
+
+
+# ------------------------------------------------------------------ allow_missing_bands (strict by default)
+def _drop_y(cell_suffix, times=None):
+    """load_hook that removes band y of one cell (every fetch, or only the first ``times`` fetches)."""
+    state = {"n": 0}
+
+    def hook(skycell_id, bands, masks, wts, hdr, hdrw):
+        if skycell_id.endswith(cell_suffix):
+            state["n"] += 1
+            if times is None or state["n"] <= times:
+                for d in (bands, masks, wts, hdr, hdrw):
+                    d.pop("y", None)
+        return bands, masks, wts, hdr, hdrw
+    hook.state = state
+    return hook
+
+
+@pytest.mark.parametrize("flags", [dict(publish_band_cells=True), dict()])
+def test_strict_default_band_less_cell_not_published_and_stage_fails(tmp_path, monkeypatch, flags):
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    hook = _drop_y(".034")
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, load_hook=hook, **flags)
+    assert "error" in res and "skycell.2484.034" in res["error"] and "['y']" in res["error"]
+    assert hook.state["n"] == 4  # first fetch + 3 retries
+    recipe = cs.production_combined_recipe(RECIPE)
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe) is None
+    assert not bcs.band_cells_root(tmp_path).joinpath(SPROJ, "034").exists()
+    # the other cells are published; a retry (after PS1 recovers) only refetches the lost one
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "033", recipe) is not None
+    df, res2, loaded2 = _run_skip(tmp_path, monkeypatch, **flags)
+    assert "error" not in res2 and not any(c.endswith((".033", ".035")) for c in loaded2)
+    assert any(c.endswith(".034") for c in loaded2)
+
+
+def test_transient_missing_band_is_retried(tmp_path, monkeypatch):
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    hook = _drop_y(".034", times=2)  # fails twice, third fetch complete
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, load_hook=hook, publish_band_cells=True)
+    assert "error" not in res, res
+    assert hook.state["n"] == 3
+    recipe = cs.production_combined_recipe(RECIPE)
+    fp = bcs.resolve_band_cells_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe)
+    assert fp and bcs.try_load_band_cells(tmp_path, SPROJ, "034", fp)["missing_bands"] == []
+
+
+def test_allow_missing_bands_reproduces_round2_behaviour(tmp_path, monkeypatch):
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    hook = _drop_y(".034")
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, load_hook=hook, publish_band_cells=True,
+                                allow_missing_bands=True)
+    assert "error" not in res, res
+    recipe = cs.production_combined_recipe(RECIPE)
+    fp = bcs.resolve_band_cells_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe)
+    loaded_cell = bcs.try_load_band_cells(tmp_path, SPROJ, "034", fp)
+    assert loaded_cell["missing_bands"] == ["y"]
+    z = loaded_cell["band_images"]["y"]
+    assert np.all(z[~np.isnan(z)] == 0)
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe) == fp
+
+
+def test_publish_combined_result_strict_publishes_nothing(tmp_path):
+    recipe = cs.production_combined_recipe(RECIPE)
+    res = pp._materialize_shm_result(pp.process_single_cell(_combiner_bundle_without("y")))
+    log = {}
+    assert pp.publish_combined_result(str(tmp_path), recipe, dict(res), strict_missing_bands=True,
+                                      missing_band_log=log) is None
+    assert log == {SKYCELL: ["y"]}
+    assert not (tmp_path / "ps1_skycells_zarr").exists()
+    assert pp.publish_combined_result(str(tmp_path), recipe, dict(res)) is not None  # default: unchanged
+
+
+def test_allow_missing_bands_flag_plumbing_and_fingerprint():
+    r = _resolved(Path("/x"))
+    base = V.config_fingerprint(r, "ps1_process")
+    assert base == "743329f5987acd0e"  # pinned: flag-off / default unchanged
+    assert Ps1ProcessStageParams().allow_missing_bands is False
+    r.stages.ps1_process = Ps1ProcessStageParams(allow_missing_bands=True)
+    assert V.config_fingerprint(r, "ps1_process") != base
+    assert parse_stage_params({"ps1_process": {"allow_missing_bands": True}}).ps1_process.allow_missing_bands
+    from syndiff_pipeline.common.provenance import model
+
+    assert "allow_missing_bands" not in model.scc_assembly_recipe_params(_resolved(Path("/x")))
+    assert model.scc_assembly_recipe_params(r)["allow_missing_bands"] is True

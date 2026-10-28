@@ -568,6 +568,8 @@ def scc_assembly_recipe_params(resolved) -> dict:
         params["skip_convolved"] = True
     if bool(getattr(pp, "publish_band_cells", False)):
         params["publish_band_cells"] = True
+    if bool(getattr(pp, "allow_missing_bands", False)):
+        params["allow_missing_bands"] = True
     return params
 
 

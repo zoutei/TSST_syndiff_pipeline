@@ -816,6 +816,8 @@ def process_single_cell(bundle: dict) -> dict:
         if band_descs is not None:
             result["band_images_shm"] = band_descs
             result["band_missing"] = band_missing
+        elif bundle.get("band_missing"):
+            result["band_missing"] = list(bundle["band_missing"])
 
         logger.info(f"[PreProcessor] Processed {skycell_id}")
         return result
@@ -844,6 +846,7 @@ def ingest_worker(
     catalog_provider: Any = None,
     band_cells_required: bool = False,
     skip_on_store_hit: bool = False,
+    retry_missing_bands: int = 0,
 ):
     """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode).
 
@@ -858,6 +861,11 @@ def ingest_worker(
     ``skip_on_store_hit`` (``skip_convolved``): every task type (padding sources too) is checked
     against the store, and a fully published cell is simply skipped: nothing is loaded, cached or
     queued.
+
+    ``retry_missing_bands`` (strict band mode, see ``run_modern_sliding_window_pipeline``): a fetch that
+    returns fewer than the 12 arrays (4 bands x image/mask/weight) is repeated up to this many times
+    with a short backoff (1, 2, 4 s ...) before the cell is treated as band-less: the stream loader
+    turns a failed or transient download into a missing band without raising.
     """
     from pathlib import Path
 
@@ -965,27 +973,35 @@ def ingest_worker(
                 continue
 
         try:
-            if ps1_source == "stream":
-                if stream_loader is None:
-                    # Preserve direct-call/backward-compatible behavior.  The
-                    # top-level stream pipeline always supplies one run-scoped
-                    # loader, but tests and legacy callers may invoke workers
-                    # in isolation.
-                    bands, masks, weights, headers, headers_weight = fetch_skycell_bands_masks_and_headers(
+            def _fetch_cell():
+                if ps1_source == "stream":
+                    if stream_loader is None:
+                        # Preserve direct-call/backward-compatible behavior.  The
+                        # top-level stream pipeline always supplies one run-scoped
+                        # loader, but tests and legacy callers may invoke workers
+                        # in isolation.
+                        return fetch_skycell_bands_masks_and_headers(
+                            skycell_id,
+                            use_local_files=use_local_files,
+                            local_data_path=local_path,
+                        )
+                    return stream_loader.fetch_skycell_bands_masks_and_headers(
                         skycell_id,
                         use_local_files=use_local_files,
                         local_data_path=local_path,
                     )
-                else:
-                    bands, masks, weights, headers, headers_weight = stream_loader.fetch_skycell_bands_masks_and_headers(
-                        skycell_id,
-                        use_local_files=use_local_files,
-                        local_data_path=local_path,
-                    )
-            else:
-                bands, masks, weights, headers, headers_weight = zarr_utils.load_skycell_bands_masks_and_headers(
-                    zarr_store, projection, skycell_id
+                return zarr_utils.load_skycell_bands_masks_and_headers(zarr_store, projection, skycell_id)
+
+            bands, masks, weights, headers, headers_weight = _fetch_cell()
+            for _attempt in range(int(retry_missing_bands)):
+                if all(b in d for b in ("r", "i", "z", "y") for d in (bands, masks, weights)):
+                    break
+                logger.warning(
+                    f"[{ingest_label}] {skycell_id}: incomplete fetch (bands {sorted(bands)}, masks "
+                    f"{sorted(masks)}, weights {sorted(weights)}); refetching ({_attempt + 1}/{retry_missing_bands})"
                 )
+                time.sleep(min(1.0 * 2 ** _attempt, 8.0))
+                bands, masks, weights, headers, headers_weight = _fetch_cell()
             if not bands:
                 logger.warning(f"[{ingest_label}] No band data for {skycell_id}, skipping.")
                 continue
@@ -1054,6 +1070,7 @@ def band_combiner_worker(
     band_weights: Optional[dict] = None,
     band_cells_dtype: Optional[str] = None,
     shutdown_state: Optional[dict] = None,
+    track_missing_bands: bool = False,
 ):
     """Stage 1.5: Combines raw bands into a single image+mask+uncert in-process.
 
@@ -1116,6 +1133,8 @@ def band_combiner_worker(
                 "headers_data": raw_bundle["headers_data"],
                 "remove_saturated_stars": raw_bundle.get("remove_saturated_stars", True),
             }
+            if track_missing_bands:
+                reduced_bundle["band_missing"] = [b for b in ("r", "i", "z", "y") if b not in raw_bundle["bands_data"]]
             if band_cells_dtype:
                 from syndiff_pipeline.template_creation.processing import perband
 
@@ -1318,7 +1337,8 @@ def _publish_band_cells_now(data_root, projection, cell, band_images, band_missi
 
 
 def publish_combined_result(
-    data_root: str, recipe, result: dict, band_pool: Optional["_BandPublishPool"] = None
+    data_root: str, recipe, result: dict, band_pool: Optional["_BandPublishPool"] = None,
+    strict_missing_bands: bool = False, missing_band_log: Optional[dict] = None,
 ) -> Optional[dict]:
     """Publish one freshly combined, star-removed cell to the shared combined
     store under exactly the fingerprint readers resolve
@@ -1332,6 +1352,17 @@ def publish_combined_result(
     # row-assembly queue, whatever happens below.
     band_images = result.pop("band_images", None)
     band_missing = list(result.pop("band_missing", None) or [])
+    if strict_missing_bands and band_missing:
+        # The store is immutable and publishing idempotent: a band-less cell stored once would stay
+        # forever. Publish neither the combined nor the band cells; the stage fails at its end.
+        logger.error(
+            "[ProcessCoordinator] %s lacks PS1 band(s) %s after retries; NOT published "
+            "(stages.ps1_process.allow_missing_bands is false)",
+            result["skycell_id"], band_missing,
+        )
+        if missing_band_log is not None:
+            missing_band_log[result["skycell_id"]] = band_missing
+        return None
     parsed = combined_store._projection_and_cell(result["skycell_id"])
     if parsed is None:
         return None
@@ -1408,6 +1439,8 @@ def process_coordinator(
     combined_store_recipe=None,
     removal_ledger: bool = False,
     retain_results: bool = True,
+    strict_missing_bands: bool = False,
+    missing_band_log: Optional[dict] = None,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -1443,7 +1476,8 @@ def process_coordinator(
 
         def _publish_combined(result: dict) -> Optional[dict]:
             return publish_combined_result(
-                combined_store_data_root, combined_store_recipe, result, band_pool=_band_pool
+                combined_store_data_root, combined_store_recipe, result, band_pool=_band_pool,
+                strict_missing_bands=strict_missing_bands, missing_band_log=missing_band_log,
             )
 
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
@@ -3409,6 +3443,7 @@ def run_modern_sliding_window_pipeline(
     write_per_scc_convolved_zarr: bool = True,
     publish_band_cells: bool = False,
     skip_convolved: bool = False,
+    allow_missing_bands: bool = False,
     oversampling_factor: int = 1,
     band_weights: Optional[dict] = None,
     mapping_csv_path: str | None = None,
@@ -3746,6 +3781,10 @@ def run_modern_sliding_window_pipeline(
         logger.info("[Pipeline] Band-cell publish enabled (%s)", band_cells_dtype)
     if skip_convolved:
         logger.info("[Pipeline] skip_convolved: no convolution, no convolved-store writes")
+    # Strict band mode (default under skip_convolved / publish_band_cells): a cell whose raw fetch lacks
+    # a band is not published at all and the stage fails at its end (allow_missing_bands: false).
+    strict_missing_bands = bool((skip_convolved or publish_band_cells) and not allow_missing_bands)
+    missing_band_log: dict = {}
 
     # Fix 3 — event to pause coordinator new-submissions during cross-projection padding
     pipeline_paused_event = threading.Event()
@@ -3771,6 +3810,7 @@ def run_modern_sliding_window_pipeline(
                 "band_weights": ingest_config.get("band_weights"),
                 "band_cells_dtype": band_cells_dtype,
                 "shutdown_state": combiner_shutdown_state,
+                "track_missing_bands": strict_missing_bands,
             },
             daemon=True,
         )
@@ -3795,6 +3835,8 @@ def run_modern_sliding_window_pipeline(
             "combined_store_recipe": combined_store_recipe,
             "removal_ledger": bool(removal_ledger and remove_saturated_stars),
             "retain_results": not skip_convolved,
+            "strict_missing_bands": strict_missing_bands,
+            "missing_band_log": missing_band_log,
         },
         daemon=True,
     )
@@ -3820,6 +3862,7 @@ def run_modern_sliding_window_pipeline(
                     catalog_provider=catalog,
                     band_cells_required=bool(publish_band_cells),
                     skip_on_store_hit=bool(skip_convolved),
+                    retry_missing_bands=3 if strict_missing_bands else 0,
                 ))
 
             # --- Part B: per-projection classification (tiered ingest plan) ---
@@ -4021,6 +4064,8 @@ def run_modern_sliding_window_pipeline(
                             f"skip_convolved: {len(_missing)}/{len(produced_skycells_list)} cells not "
                             f"published ({'band cells' if publish_band_cells else 'combined cells'}), "
                             f"e.g. {_missing[:5]}"
+                            + (f"; cells lacking PS1 bands (allow_missing_bands is false): {missing_band_log}"
+                               if missing_band_log else "")
                         )
                     }
                 if ledger_finisher is not None:
@@ -4132,6 +4177,10 @@ def run_modern_sliding_window_pipeline(
         catalog_failures = _catalog_failures(catalog, catalog_order)
         if catalog_failures:
             return {"error": f"Gaia projection catalogue download failed: {catalog_failures}"}
+
+        if missing_band_log:
+            return {"error": f"cells lacking PS1 bands were not published (allow_missing_bands is false): "
+                             f"{missing_band_log}"}
 
         logger.info("[Pipeline] Pipeline completed successfully!")
 

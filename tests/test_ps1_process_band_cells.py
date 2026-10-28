@@ -319,7 +319,7 @@ def _f01_cells(df):
     return need
 
 
-def _run_skip(tmp_path, monkeypatch, **flags):
+def _run_skip(tmp_path, monkeypatch, load_hook=None, **flags):
     from syndiff_pipeline.template_creation.processing import convolution_utils
 
     df = _mapping_df()
@@ -330,7 +330,8 @@ def _run_skip(tmp_path, monkeypatch, **flags):
         bands = _raw_bands(len(loaded), nan_in_r=False)
         masks = {b: np.zeros((SIZE_, SIZE_), np.uint16) for b in perband.BANDS}
         wts = {b: np.full((SIZE_, SIZE_), 0.25, np.float32) for b in perband.BANDS}
-        return bands, masks, wts, _headers(), _headers()
+        out = (bands, masks, wts, _headers(), _headers())
+        return out if load_hook is None else load_hook(skycell_id, *out)
 
     def boom(*a, **k):
         raise AssertionError("Gaussian blur must never run with skip_convolved")

@@ -171,6 +171,8 @@ def config_fingerprint(
             parts.append("publish_band_cells=True")
         if bool(getattr(pp, "skip_convolved", False)):
             parts.append("skip_convolved=True")
+        if bool(getattr(pp, "allow_missing_bands", False)):
+            parts.append("allow_missing_bands=True")
     elif stage == "remap":
         rm = resolved.stages.remap
         mp = resolved.stages.mapping

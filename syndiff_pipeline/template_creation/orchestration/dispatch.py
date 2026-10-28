@@ -460,6 +460,7 @@ def _execute_template_stage(
             write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
             publish_band_cells=bool(getattr(pp, "publish_band_cells", False)),
             skip_convolved=skip_convolved,
+            allow_missing_bands=bool(getattr(pp, "allow_missing_bands", False)),
             oversampling_factor=mp.oversampling_factor,
             mapping_csv_path=mapping_csv_path,
         )

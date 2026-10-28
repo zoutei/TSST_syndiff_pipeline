@@ -504,6 +504,13 @@ band cache or pending results; the last band combiner forwards the single shutdo
 ingested are the mapping's cells of unfinished projections plus every cross-projection padding source
 (`_skip_convolved_padding_sources`, = `f01_select` `xproj_src`; same-projection neighbours are already
 mapping cells); cells already published are skipped (`ingest_worker(skip_on_store_hit=True)`).
+Strict bands: under `skip_convolved` / `publish_band_cells` a cell whose raw fetch lacks a PS1 band
+(the fetch is retried 3 times with backoff first) is NOT published (neither combined nor band cells) and the
+stage returns an error naming the cell and bands, so verify fails and a retry refetches it
+(`stages.ps1_process.allow_missing_bands: true` publishes it as a zero plane + `missing_bands`; for bands PS1
+truly lacks, set by a human). The store is immutable and publishing idempotent, so a transient download failure
+would otherwise be stored forever.
+
 Band-cell writes run on a bounded 3-thread pool (`_BandPublishPool`) so the coordinator thread is not
 serialised on zlib. After the coordinator finishes, every ingested cell is checked in the store; any
 missing one fails the stage (`{"error": ...}`). `verify_ps1_process`, the absence probe,
