@@ -214,8 +214,15 @@ def build_padding_aware_convolved_cell(
         return None
     md = metadata_for_cell(skycell_df, skycell)
     allowed = {skycell}
+    from syndiff_pipeline.template_creation.processing.band_cell_store import is_absent_cell
+
     for name in canonical_neighbour_names(md, skycell):
         if source.get(name) is None:
+            if is_absent_cell(source.data_root, name):
+                # PS1 has no data for this neighbour (recorded by ps1_process): as in the old path,
+                # ``canonical_cell_image`` leaves a neighbour whose fetch returns None NaN.
+                log.info("band-cell convolve: neighbour %s of %s absent from PS1; left NaN", name, skycell)
+                continue
             log.warning("band-cell convolve: neighbour %s of %s missing; cell unavailable", name, skycell)
             return None
         allowed.add(name)

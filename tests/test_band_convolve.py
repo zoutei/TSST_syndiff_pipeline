@@ -319,3 +319,85 @@ def test_loader_switch_dispatches_to_band_cells(monkeypatch):
         LD._load_ps1_skycell(
             NAMES["A"], data_root="/r", shared_convolved_store=True, legacy_zarr_path=None, zstore_cache={},
             skycell_df=df, psf_sigma=40.0, combined_recipe=None, convolve_from_band_cells=True)
+
+
+# ---------------------------------------------------------------- recorded-absent neighbours / seam sources
+def _partial_source(store, data_root, missing="001"):
+    cells, masks, loader, calls = store
+
+    def partial(dr, projection, cell, fp):
+        return None if cell == missing else loader(dr, projection, cell, fp)
+
+    return bc.BandCellPlaneSource(data_root, RECIPE, loader=partial)
+
+
+def test_recorded_absent_neighbour_stays_nan_like_the_old_path(store, tmp_path):
+    from syndiff_pipeline.template_creation.processing import band_cell_store as bcs
+
+    cells = store[0]
+    df, name = _df(), NAMES["A"]
+    bcs.write_absent_cell(tmp_path, NAMES["B"], {})  # PS1 has no data for cell B (A's right neighbour)
+    got = bc.load_padding_aware_convolved_cell_from_band_cells(
+        tmp_path, name, skycell_df=df, psf_sigma=40.0, combined_recipe=RECIPE,
+        source=_partial_source(store, tmp_path))
+    assert got is not None
+    img, mask = got
+    md = cc.metadata_for_cell(df, name)
+    ref = cc.canonical_cell_image(
+        name, md, lambda n: None if n in (NAMES["B"],) or n not in cells else _manual_plane(cells, n),
+        40.0, 470, window_dtype=np.float64)
+    assert np.array_equal(img, ref, equal_nan=True)
+    full = cc.canonical_cell_image(name, md, lambda n: _manual_plane(cells, n) if n in cells else None,
+                                   40.0, 470, window_dtype=np.float64)
+    assert not np.array_equal(img, full, equal_nan=True)  # the absent neighbour contributes nothing (NaN->0 in the blur)
+
+
+def test_unrecorded_missing_neighbour_still_fails(store, tmp_path):
+    assert bc.load_padding_aware_convolved_cell_from_band_cells(
+        tmp_path, NAMES["A"], skycell_df=_df(), psf_sigma=40.0, combined_recipe=RECIPE,
+        source=_partial_source(store, tmp_path)) is None
+    # a different cell recorded absent does not excuse it
+    from syndiff_pipeline.template_creation.processing import band_cell_store as bcs
+
+    bcs.write_absent_cell(tmp_path, NAMES["C"], {})
+    assert bc.load_padding_aware_convolved_cell_from_band_cells(
+        tmp_path, NAMES["A"], skycell_df=_df(), psf_sigma=40.0, combined_recipe=RECIPE,
+        source=_partial_source(store, tmp_path)) is None
+
+
+def _seam_df():
+    d = _df()
+    d["pad_skycell_left"] = ""
+    d.loc[NAMES["A"], "pad_skycell_left"] = "skycell.8888.000"
+    d.loc["skycell.8888.000"] = d.loc[NAMES["B"]].copy()
+    d.loc["skycell.8888.000", ["NAME", "pad_skycell_left"]] = ["skycell.8888.000", ""]
+    d.loc["skycell.8888.000", "projection"] = 8888
+    return d
+
+
+@pytest.mark.parametrize("recorded_absent", [True, False])
+def test_seam_source_unavailable_behaves_as_the_old_path(store, tmp_path, monkeypatch, recorded_absent):
+    """Old path: ``padding_correction._location_correction`` raises PaddingCorrectionError when the fetch of a
+    required cross-projection source returns None. The band-cell fetch returns None for an absent AND for a
+    missing source alike, so the behaviour is the same (no invented fallback)."""
+    from syndiff_pipeline.template_creation.processing import band_cell_store as bcs
+    from syndiff_pipeline.template_creation.processing import padding_correction as PC
+
+    if recorded_absent:
+        bcs.write_absent_cell(tmp_path, "skycell.8888.000", {})
+    seen = []
+
+    def stub(*, neighbors, fetch_image, skycell, location, **kw):
+        for n in neighbors:
+            seen.append(n)
+            if fetch_image(n) is None:
+                raise PC.PaddingCorrectionError(f"required combined skycell {n} for {skycell}/{location} is unavailable")
+        return np.zeros(kw["cell_shape"])
+
+    monkeypatch.setattr(PC, "_location_correction", stub)
+    monkeypatch.setattr(PC, "_cell_wcs", lambda row: None)
+    src = bc.BandCellPlaneSource(tmp_path, RECIPE, loader=store[2])
+    with pytest.raises(PC.PaddingCorrectionError, match="skycell.8888.000"):
+        bc.load_padding_aware_convolved_cell_from_band_cells(
+            tmp_path, NAMES["A"], skycell_df=_seam_df(), psf_sigma=40.0, combined_recipe=RECIPE, source=src)
+    assert seen == ["skycell.8888.000"]
