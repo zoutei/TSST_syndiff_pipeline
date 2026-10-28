@@ -390,6 +390,38 @@ def _linear_worker_process_skycell(skycell: str):
     )
 
 
+def add_band_cell_header_cards(header, weights: Mapping) -> None:
+    """Stamp the template band weights actually used and the band-cell provenance on ``header``."""
+    for band in ("r", "i", "z", "y"):
+        header[f"BANDW{band.upper()}"] = (float(weights[band]), "template band weight")
+    header["BANDSRC"] = ("band_cells", "template built from the band-cell store")
+    header["CONVBC"] = (True, "convolve_from_band_cells")
+
+
+def _write_group_templates(
+    store, groups, syndiff_header, accum_sums, accum_counts, accum_mask_counts,
+    *, sector, camera, ccd, oversampling_factor,
+) -> list[str]:
+    """Write one ``syndiff_template_*.fits.gz`` per offset group; return the paths."""
+    artifacts: list[str] = []
+    for gid, dx, dy in groups:
+        basename = _linear_template_basename(
+            sector, camera, ccd, dx, dy, oversampling_factor=oversampling_factor,
+        )
+        out_path = Path(store) / basename
+        offset_header = syndiff_header.copy()
+        offset_header["DX_SHIFT"] = (dx, "TESS pixel x shift")
+        offset_header["DY_SHIFT"] = (dy, "TESS pixel y shift")
+        offset_header["GROUP_ID"] = (gid, "SCC point-drift group id")
+        primary_hdu = fits.PrimaryHDU(header=offset_header)
+        hdu1 = fits.ImageHDU(data=accum_sums[gid], header=offset_header, name="FLUX_SUM")
+        hdu2 = fits.ImageHDU(data=accum_counts[gid], header=offset_header, name="COUNT")
+        hdu3 = fits.ImageHDU(data=accum_mask_counts[gid], header=offset_header, name="MASK")
+        fits.HDUList([primary_hdu, hdu1, hdu2, hdu3]).writeto(out_path, overwrite=True)
+        artifacts.append(str(out_path))
+    return artifacts
+
+
 def run_linear_downsample_scc(
     resolved,
     *,
@@ -669,22 +701,15 @@ def run_linear_downsample_scc(
         serialized = value if isinstance(value, (str, bool)) else int(value)
         syndiff_header[key] = (serialized, f"MappingGrid {key}")
 
-    artifacts: list[str] = []
-    for gid, dx, dy in groups:
-        basename = _linear_template_basename(
-            sector, camera, ccd, dx, dy, oversampling_factor=oversampling_factor,
-        )
-        out_path = store / basename
-        offset_header = syndiff_header.copy()
-        offset_header["DX_SHIFT"] = (dx, "TESS pixel x shift")
-        offset_header["DY_SHIFT"] = (dy, "TESS pixel y shift")
-        offset_header["GROUP_ID"] = (gid, "SCC point-drift group id")
-        primary_hdu = fits.PrimaryHDU(header=offset_header)
-        hdu1 = fits.ImageHDU(data=accum_sums[gid], header=offset_header, name="FLUX_SUM")
-        hdu2 = fits.ImageHDU(data=accum_counts[gid], header=offset_header, name="COUNT")
-        hdu3 = fits.ImageHDU(data=accum_mask_counts[gid], header=offset_header, name="MASK")
-        fits.HDUList([primary_hdu, hdu1, hdu2, hdu3]).writeto(out_path, overwrite=True)
-        artifacts.append(str(out_path))
+    if convolve_from_band_cells:
+        # Provenance cards only when on: flag-off headers stay byte-identical.
+        used_weights = band_weights if band_weights is not None else combined_recipe["band_weights"]
+        add_band_cell_header_cards(syndiff_header, used_weights)
+
+    artifacts = _write_group_templates(
+        store, groups, syndiff_header, accum_sums, accum_counts, accum_mask_counts,
+        sector=sector, camera=camera, ccd=ccd, oversampling_factor=oversampling_factor,
+    )
 
     assembly_path = store / LINEAR_ASSEMBLY_BASENAME
     assembly_payload = {
