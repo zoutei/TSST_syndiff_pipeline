@@ -11,10 +11,14 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 from astropy.io import fits
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = _ROOT / "scripts" / "rebuild_scc_ffi_list.py"
+
+# scripts/* is gitignored apart from force-added files; skip when this checkout lacks the script.
+pytestmark = pytest.mark.skipif(not _SCRIPT.is_file(), reason=f"{_SCRIPT} not in this checkout")
 
 
 def _write_gz_ffi(gz_path: Path) -> None:

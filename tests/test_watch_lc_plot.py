@@ -6,10 +6,14 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# dev/ is a separate, gitignored repo: skip (not error/fail) when it is not present in this checkout.
+pytest.importorskip("dev.forward_epsf_wcs", reason="dev/ repo not present in this checkout")
 
 
 class WatchLcPlotTests(unittest.TestCase):

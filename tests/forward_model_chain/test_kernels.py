@@ -137,6 +137,7 @@ KE = BF.E2E_RUN / "kernels/F1"
 
 
 def _f1_kernels_cfg(tmp_path):
+    BF.need_e2e_source_bundle()
     BF.need(KE / "band_epsf_a3.npz", BF.E2E / "s3_fit/fit/params.npz", BF.E2E / "s3_fit/scene", BF.E2E_RUN / "mapping/oversampling_4")
     cfg = BF.f1_cfg(tmp_path)
     BF.link(tmp_path / "F1/fit", BF.E2E / "s3_fit/fit")

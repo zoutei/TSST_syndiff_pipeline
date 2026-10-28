@@ -6,10 +6,28 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+# dev/ is a separate, gitignored repo: skip (not error/fail) when it is not present in this checkout.
+pytest.importorskip("dev.forward_epsf_wcs", reason="dev/ repo not present in this checkout")
+
+
+def _slim_leaves(FIT, value: float) -> dict:
+    """Tiny optimizer leaves whose ``epsf_base_raw`` is a *current* (pixel-integrated) grid.
+
+    ``load_params_npz`` treats a last dim with ``(g - 2*PAD) % OVERSAMPLE == 0`` as a legacy sub-pixel
+    leaf and converts it (and a 2x2 leaf is too small to convert), so give ``epsf_base_raw`` the smallest
+    valid pixel-integrated size; the other leaves stay 2x2."""
+    from dev.forward_epsf_wcs import epsf_model as EM
+
+    g = 2 * EM.PAD_SAMPLES + EM.OVERSAMPLE - 1
+    out = {k: np.full((2, 2), value, dtype=np.float32) for k in FIT.STAGE_LEAVES}
+    out["epsf_base_raw"] = np.full((g, g), value, dtype=np.float32)
+    return out
 
 
 class WatchParamsPlotTests(unittest.TestCase):
@@ -20,7 +38,7 @@ class WatchParamsPlotTests(unittest.TestCase):
         from dev.forward_epsf_wcs.checkpoint_history import save_params_leaves_npz
         from dev.forward_epsf_wcs.diagnostics import watch_params_plot as wpp
 
-        slim = {k: np.asarray(np.zeros((2, 2), dtype=np.float32)) for k in FIT.STAGE_LEAVES}
+        slim = _slim_leaves(FIT, 0.0)
         tracks_by_step = {
             20: np.ones((4, 3), dtype=np.float64),
             40: np.ones((4, 3), dtype=np.float64),
@@ -51,8 +69,8 @@ class WatchParamsPlotTests(unittest.TestCase):
         from dev.forward_epsf_wcs.checkpoint_history import save_params_leaves_npz
         from dev.forward_epsf_wcs.diagnostics.watch_params_plot import resolve_latest_params
 
-        slim_latest = {k: np.asarray(np.ones((2, 2), dtype=np.float32)) for k in FIT.STAGE_LEAVES}
-        slim_ckpt = {k: np.asarray(np.zeros((2, 2), dtype=np.float32)) for k in FIT.STAGE_LEAVES}
+        slim_latest = _slim_leaves(FIT, 1.0)
+        slim_ckpt = _slim_leaves(FIT, 0.0)
         with tempfile.TemporaryDirectory() as raw:
             artifacts = Path(raw) / "artifacts"
             ckpt = artifacts / "checkpoints"

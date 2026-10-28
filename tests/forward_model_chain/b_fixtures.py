@@ -67,6 +67,24 @@ def f1_cfg(tmp_path: Path, **over_inputs):
     return _View(cfg, inputs=_View(cfg.inputs, **{**F1_EXTRA, **over_inputs}))
 
 
+def e2e_source_bundle():
+    """The fit bundle the e2e F1 fit recorded in its ``fit_meta.json`` (``source_bundle``), or None when unreadable.
+
+    The e2e products reference it by absolute path; it lived under ``dev/paper/paper1_single_ffi`` until the paper
+    reorganisation of 2026-10-20 moved it, so parity tests must skip (not fail) when it is gone."""
+    try:
+        meta = json.loads((E2E / "s3_fit/fit/fit_meta.json").read_text())
+        return Path(meta["source_bundle"])
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def need_e2e_source_bundle():
+    p = e2e_source_bundle()
+    if p is None or not p.exists():
+        pytest.skip(f"e2e F1 source bundle {p} not available")
+
+
 def need(*paths):
     for p in paths:
         if not Path(p).exists():

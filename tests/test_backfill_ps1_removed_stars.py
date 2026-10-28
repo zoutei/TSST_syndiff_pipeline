@@ -15,6 +15,10 @@ import numpy as np
 import pandas as pd
 from astropy.io import fits
 
+import pytest
+
+pytest.importorskip("scripts.backfill_ps1_removed_stars", reason="scripts/backfill_ps1_removed_stars.py not in this checkout")
+
 from scripts.backfill_ps1_removed_stars import _backfill_target
 from syndiff_pipeline.template_creation.orchestration.runner_config import ResolvedTargetConfig
 from syndiff_pipeline.template_creation.orchestration.stage_params import (

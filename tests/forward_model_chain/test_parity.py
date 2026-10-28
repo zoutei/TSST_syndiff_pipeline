@@ -12,6 +12,7 @@ from syndiff_pipeline.forward_model.chain import config as C
 from syndiff_pipeline.forward_model.chain import scene as S
 from syndiff_pipeline.forward_model.chain import wcs_export as W
 
+from b_fixtures import need_e2e_source_bundle
 from chain_fixtures import CHAIN_DIR
 
 E = Path("/astro/armin/koji/syndiff/dev_runs/e2e_f1_20260930")
@@ -52,6 +53,7 @@ def test_scene_swap_demote_bitwise(tmp_path):
 
 
 def test_wcs_export_bitwise(tmp_path):
+    need_e2e_source_bundle()
     _need(E / "s3_fit/fit/params.npz", E / "run/wcs/e2e_f1_v1", E / "s3_fit/scene", C.load_config(CHAIN_DIR / "configs/F1.yaml").reference.tvwcs_store,
           C.load_config(CHAIN_DIR / "configs/F1.yaml").reference.old_store)
     cfg = _f1_cfg(tmp_path)
@@ -95,6 +97,7 @@ def test_compare_equals_e2e(tmp_path):
              ("R2_final_warm", "boot", "warm continuation on FINAL image from the calibration"),
              ("boot", "rehearsal_oldw", "bootstrap weights: adopted vs production (yardstick)"),
              ("lp7s_fold1", "lp7s_fold0", "split-half: different 80% star sets (yardstick)")]
+    need_e2e_source_bundle()
     _need(ref, E / "s3_fit/scene", *[fits[k] / "params.npz" for k in ("boot", "R1_final_xsec")])
     res = K.compare_fits(fits, pairs, E / "s3_fit/scene", tmp_path)
     _same(json.loads(json.dumps(res)), json.loads(ref.read_text()))

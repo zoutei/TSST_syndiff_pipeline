@@ -230,6 +230,10 @@ class TestSiteConfigLoader(unittest.TestCase):
         self.assertEqual(loaded.pipeline, cfg.pipeline)
         self.assertEqual(loaded.n_jobs, 4)
 
+    @unittest.skipUnless(
+        (_ROOT / "config" / "deployment.yaml").is_file(),
+        "config/deployment.yaml is per-user (gitignored); copy deployment.yaml.example to enable",
+    )
     def test_example_site_files_exist(self):
         example = SitePaths.from_site_dir(_ROOT / "config")
         self.assertTrue(example.template_config.is_file())

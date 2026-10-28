@@ -6,6 +6,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+# dev/ is a separate, gitignored repo: skip (not error) when it is not present in this checkout.
+pytest.importorskip("dev.kernel_experiment.background", reason="dev/ repo not present in this checkout")
+
 from dev.kernel_experiment.background import photutils_background_masked
 from dev.kernel_experiment.compare import compare_kernels
 from dev.kernel_experiment.context import find_template_by_offset

@@ -11,6 +11,11 @@ _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+import pytest
+
+# scripts/* is gitignored apart from force-added files; skip (not error) when this checkout lacks it.
+pytest.importorskip("scripts.migrate_workspace_layout", reason="scripts/migrate_workspace_layout.py not in this checkout")
+
 from scripts.migrate_workspace_layout import migrate_control_dir, normalize_events
 
 
