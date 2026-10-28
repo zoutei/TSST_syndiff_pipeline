@@ -477,6 +477,13 @@ def downsample_recipe_params(resolved) -> dict:
     # Only when ON, so every existing fingerprint is unchanged.
     if bool(getattr(ds, "convolve_from_band_cells", False)):
         params["convolve_from_band_cells"] = True
+    # Template weights / zpcell factors change the template: recorded only when set.
+    if getattr(ds, "band_weights", None) is not None:
+        params["band_weights"] = {b: float(ds.band_weights[b]) for b in ("r", "i", "z", "y")}
+    if getattr(ds, "zpcell_factors_path", None) is not None:
+        from syndiff_pipeline.template_creation.processing.band_convolve import zpcell_factors_identity
+
+        params["zpcell_factors"] = zpcell_factors_identity(ds.zpcell_factors_path)
     return params
 
 

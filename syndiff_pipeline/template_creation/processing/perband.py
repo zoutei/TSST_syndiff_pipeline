@@ -91,6 +91,43 @@ def sum_bands(band_images: Mapping[str, np.ndarray]) -> np.ndarray:
     return total
 
 
+UNIT_WEIGHTS: dict[str, float] = {b: 1.0 for b in BANDS}
+
+
+def validate_weights(weights: Mapping[str, float], name: str = "weights") -> dict[str, float]:
+    """``weights`` as a float dict ordered r, i, z, y; every band present, finite and > 0."""
+    if not isinstance(weights, Mapping) or any(b not in weights for b in BANDS):
+        raise ValueError(f"{name} must give every band {BANDS}: {weights!r}")
+    out = {b: float(weights[b]) for b in BANDS}
+    if not all(np.isfinite(v) and v > 0 for v in out.values()):
+        raise ValueError(f"{name} must be finite and > 0: {out}")
+    return out
+
+
+def weighted_sum(
+    band_images: Mapping[str, np.ndarray],
+    weights: Mapping[str, float],
+    factors: Optional[Mapping[str, float]] = None,
+    dtype=np.float64,
+) -> np.ndarray:
+    """``sum_b (w_b / f_b) * band_b`` accumulated in ``dtype`` (float64 default), r, i, z, y order.
+
+    ``band_images`` are the UNWEIGHTED ``Z F_b`` of the band-cell store; ``weights`` the template (or
+    removal) band weights; ``factors`` the optional per-band zpcell factors ``f_b`` of this cell
+    (``None`` = 1). No cast back: the caller decides (``combined_from_band_cells`` casts to float32,
+    the band-cell plane source keeps float64 for the blur).
+    """
+    w = validate_weights(weights)
+    f = None if factors is None else validate_weights(factors, "factors")
+    first = next(iter(band_images.values()))
+    total = np.zeros(np.shape(first), dtype=dtype)
+    for band in BANDS:
+        if band in band_images:
+            coef = w[band] if f is None else w[band] / f[band]
+            total += np.asarray(band_images[band], dtype=dtype) * coef
+    return total
+
+
 def zeroed_mask(combined_before: np.ndarray, combined_after: np.ndarray) -> np.ndarray:
     """Pixels ``remove_background`` zeroed: 0 after, not 0 before (NaN before counts as not 0)."""
     return (np.asarray(combined_after) == 0) & ~(np.asarray(combined_before) == 0)

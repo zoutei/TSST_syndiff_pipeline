@@ -778,7 +778,7 @@ def process_single_cell(bundle: dict) -> dict:
         for star in removed_stars_list:
             star["skycell_id"] = skycell_id
 
-        # Band cells C_b = Z w_b F_b (publish_band_cells): the weighted bands the combiner
+        # Band cells Z F_b (publish_band_cells, UNWEIGHTED): the flux-converted bands the combiner
         # attached, zeroed where remove_background zeroed the combined image, the combined
         # NaN pattern in every band. Best-effort: a failure only drops the band cells.
         band_descs = None
@@ -1064,7 +1064,7 @@ def band_combiner_worker(
     ``shutdown_state`` (``{"lock", "alive"}``, skip_convolved only): see the None branch below.
 
     ``band_cells_dtype`` (``"float32"``/``"float64"``, default ``None`` = off): also attach the
-    weighted band images ``w_b F_b`` (``perband.weighted_band_images``, the combiner's own
+    UNWEIGHTED band images ``F_b`` (``perband.weighted_band_images`` with unit weights, the combiner's own
     arithmetic) to the bundle as ``band_images`` so ``process_single_cell`` can turn them into
     the star-removed band cells (``band_cell_store``).
     """
@@ -1116,8 +1116,11 @@ def band_combiner_worker(
             if band_cells_dtype:
                 from syndiff_pipeline.template_creation.processing import perband
 
+                # UNWEIGHTED Z F_b store (SPEC D1): unit weights, so the band is exactly the
+                # float64 flux-converted F_b. ``band_weights`` (the removal/detection weights)
+                # still weights the combined image above and stays in the fingerprint.
                 wb = perband.weighted_band_images(
-                    raw_bundle["bands_data"], raw_bundle["headers_data"], weights=band_weights
+                    raw_bundle["bands_data"], raw_bundle["headers_data"], weights=perband.UNIT_WEIGHTS
                 )
                 reduced_bundle["band_images"] = {
                     b: np.asarray(img, dtype=np.dtype(band_cells_dtype)) for b, img in wb.items()

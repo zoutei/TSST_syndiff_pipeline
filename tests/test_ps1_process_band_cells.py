@@ -92,15 +92,21 @@ def _combine(bands, **kw):
     return out_q.get_nowait()
 
 
-def test_band_combiner_attaches_weighted_bands_only_when_asked():
+def test_band_combiner_attaches_unweighted_bands_only_when_asked():
     bands = _raw_bands(3, nan_in_r=False)
     off = _combine(bands)
     assert "band_images" not in off
     w = {"r": 0.3, "i": 0.3, "z": 0.2, "y": 0.2}
     on = _combine(bands, band_weights=w, band_cells_dtype="float64")
     assert set(on["band_images"]) == set(perband.BANDS)
-    # float64 weighted bands sum bitwise to the combiner's own float32 combined image
-    assert _same_bits(perband.sum_bands(on["band_images"]), on["combined_image"])
+    # UNWEIGHTED float64 bands (unit weights even though the combiner used ``w``): the removal
+    # weighted float64 sum, cast to float32, is the combiner's float32 combined image within 2 ulp
+    unit = perband.weighted_band_images(bands, _headers(), weights=perband.UNIT_WEIGHTS)
+    for b in perband.BANDS:
+        assert np.array_equal(on["band_images"][b], unit[b])
+    tot = perband.weighted_sum(on["band_images"], w).astype(np.float32)
+    ulp = np.spacing(np.abs(on["combined_image"]))
+    assert np.all(np.abs(tot.astype(np.float64) - on["combined_image"]) <= 2 * ulp)
 
 
 def test_flags_off_single_cell_result_has_no_band_payload():

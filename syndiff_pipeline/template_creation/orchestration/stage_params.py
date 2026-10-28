@@ -152,6 +152,8 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "apply_inter_skycell",
         "write_split_contribs",
         "convolve_from_band_cells",
+        "band_weights",
+        "zpcell_factors_path",
         "remap_store_name",
         "output_store_name",
     }
@@ -501,6 +503,13 @@ class DownsampleStageParams:
     # per-band cell store (``band_convolve``) instead of read from
     # ps1_convolved.zarr. Recorded in the downsample fingerprint only when true.
     convolve_from_band_cells: bool = False
+    # Template band weights {r,i,z,y} applied at read time to the UNWEIGHTED band cells
+    # (``convolve_from_band_cells`` only). None = the removal weights recorded in the cells.
+    # They change the template, so they are part of the downsample fingerprint when set.
+    band_weights: dict | None = None
+    # JSON ``{cell: {band: f}}`` of per-cell, per-band zpcell factors applied before the blur:
+    # plane = sum_b (w_b / f_{s,b}) Z F_b. None = off. Strictly validated, no silent f = 1.
+    zpcell_factors_path: str | None = None
     # INPUT: which remap lane to read; None → inherit stages.remap.store_name
     remap_store_name: str | None = None
     # OUTPUT: which templates lane to write; None → templates/
@@ -516,6 +525,21 @@ class DownsampleStageParams:
         if level not in ("INFO", "DEBUG"):
             raise ValueError(f"log_level must be INFO or DEBUG, got {self.log_level!r}")
         object.__setattr__(self, "log_level", level)
+        if self.band_weights is not None:
+            from syndiff_pipeline.template_creation.processing.perband import validate_weights
+
+            object.__setattr__(
+                self, "band_weights", validate_weights(self.band_weights, "stages.downsample.band_weights")
+            )
+        if self.zpcell_factors_path is not None:
+            object.__setattr__(self, "zpcell_factors_path", str(self.zpcell_factors_path))
+        if (self.band_weights is not None or self.zpcell_factors_path is not None) and not bool(
+            self.convolve_from_band_cells
+        ):
+            raise ValueError(
+                "stages.downsample.band_weights / zpcell_factors_path need convolve_from_band_cells: true "
+                "(they act on the unweighted band cells at read time)"
+            )
         # Both false is valid for coarse/bootstrap templates (plain per-skycell roll).
         object.__setattr__(
             self, "remap_store_name", normalize_store_name(self.remap_store_name)

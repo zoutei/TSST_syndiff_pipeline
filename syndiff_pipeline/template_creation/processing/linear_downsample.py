@@ -158,6 +158,8 @@ def _load_ps1_skycell(
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
     convolve_from_band_cells: bool = False,
+    band_weights: Mapping | None = None,
+    band_factors: Mapping | None = None,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Load one skycell's convolved (image, mask); shared store first, legacy zarr fallback.
 
@@ -193,7 +195,7 @@ def _load_ps1_skycell(
 
         return load_padding_aware_convolved_cell_from_band_cells(
             data_root, skycell, skycell_df=skycell_df, psf_sigma=psf_sigma,
-            combined_recipe=combined_recipe,
+            combined_recipe=combined_recipe, band_weights=band_weights, band_factors=band_factors,
         )
 
     if shared_convolved_store:
@@ -257,6 +259,8 @@ def _bin_one_skycell_all_groups(
     psf_sigma: float | None = None,
     combined_recipe: Mapping | None = None,
     convolve_from_band_cells: bool = False,
+    band_weights: Mapping | None = None,
+    band_factors: Mapping | None = None,
 ) -> dict[int, tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """For one skycell, bin its contribution into every group. Returns
     ``{group_id: (tess_pixel_indices, sums, counts, mask_counts)}`` (groups
@@ -280,6 +284,8 @@ def _bin_one_skycell_all_groups(
         psf_sigma=psf_sigma,
         combined_recipe=combined_recipe,
         convolve_from_band_cells=convolve_from_band_cells,
+        band_weights=band_weights,
+        band_factors=band_factors,
     )
     if loaded is None:
         return {}
@@ -380,6 +386,7 @@ def _linear_worker_process_skycell(skycell: str):
         skycell_df=p["skycell_df"], psf_sigma=p.get("psf_sigma"),
         combined_recipe=p.get("combined_recipe"),
         convolve_from_band_cells=bool(p.get("convolve_from_band_cells", False)),
+        band_weights=p.get("band_weights"), band_factors=p.get("band_factors"),
     )
 
 
@@ -400,6 +407,8 @@ def run_linear_downsample_scc(
     force_rerun: bool = False,
     progress_path: str | None = None,
     convolve_from_band_cells: bool = False,
+    band_weights: Mapping | None = None,
+    zpcell_factors_path: str | Path | None = None,
 ) -> dict:
     """Build ~19 frame-level offset-group templates for one SCC (linear mode).
 
@@ -414,6 +423,10 @@ def run_linear_downsample_scc(
     ``convolve_from_band_cells`` (default off, no behaviour/fingerprint change):
     build each padding-aware convolved cell from the shared band-cell store
     (``band_convolve``); ps1_convolved.zarr is neither read nor required.
+    ``band_weights`` (template weights {r,i,z,y}; None = the removal weights recorded in the cells) and
+    ``zpcell_factors_path`` (JSON ``{cell: {band: f}}``; None = off) act at read time:
+    plane = sum_b (w_b / f_{s,b}) Z F_b before the blur. Both default off and then change nothing;
+    when set they are recorded in ``linear_mode_assembly.json`` and the downsample fingerprint.
     """
     import json
     import time
@@ -481,6 +494,18 @@ def run_linear_downsample_scc(
     _master_map, name_to_id = _master_skycell_id_map(master_path)
     skycell_names = [n for n in name_to_id if n in skycell_df.index]
 
+    if (band_weights is not None or zpcell_factors_path is not None) and not convolve_from_band_cells:
+        raise ValueError("band_weights / zpcell_factors_path need convolve_from_band_cells")
+    band_factors = None
+    if zpcell_factors_path is not None:
+        from syndiff_pipeline.template_creation.processing.band_convolve import load_band_factors_json
+
+        # every skycell binned here needs factors (neighbours / seam sources are checked on read)
+        band_factors = load_band_factors_json(zpcell_factors_path, cells=skycell_names)
+    if band_weights is not None:
+        from syndiff_pipeline.template_creation.processing.perband import validate_weights
+
+        band_weights = validate_weights(band_weights, "band_weights")
     if convolve_from_band_cells:
         # Cells come from band cells; the convolved store may not exist at all.
         zarr_path, shared_convolved_store, legacy_zarr_path = None, True, None
@@ -555,6 +580,7 @@ def run_linear_downsample_scc(
             ignore_mask=ignore_mask, mapping_grid=mapping_grid,
             skycell_df=skycell_df, psf_sigma=psf_sigma, combined_recipe=combined_recipe,
             convolve_from_band_cells=convolve_from_band_cells,
+            band_weights=band_weights, band_factors=band_factors,
         )
 
     from syndiff_pipeline.template_creation.processing import downsample_progress
@@ -580,6 +606,7 @@ def run_linear_downsample_scc(
             "ignore_mask": ignore_mask, "mapping_grid": mapping_grid,
             "psf_sigma": psf_sigma, "combined_recipe": combined_recipe,
             "convolve_from_band_cells": bool(convolve_from_band_cells),
+            "band_weights": band_weights, "band_factors": band_factors,
         }
         # ``return_as="generator"`` (joblib >= 1.3) streams each skycell's
         # result back to the parent as soon as it completes, instead of
@@ -676,6 +703,12 @@ def run_linear_downsample_scc(
     if convolve_from_band_cells:
         # Only when on, so flag-off sidecars are byte-identical to before.
         assembly_payload["convolve_from_band_cells"] = True
+    if band_weights is not None:
+        assembly_payload["band_weights"] = {b: float(band_weights[b]) for b in ("r", "i", "z", "y")}
+    if zpcell_factors_path is not None:
+        from syndiff_pipeline.template_creation.processing.band_convolve import zpcell_factors_identity
+
+        assembly_payload["zpcell_factors"] = zpcell_factors_identity(zpcell_factors_path)
     assembly_path.write_text(json.dumps(assembly_payload, indent=2) + "\n")
 
     if progress_path is not None:

@@ -199,6 +199,16 @@ def config_fingerprint(
         )
         if bool(getattr(ds, "convolve_from_band_cells", False)):
             parts.append("convolve_from_band_cells=True")
+        if getattr(ds, "band_weights", None) is not None:
+            parts.append(
+                "band_weights=" + ",".join(f"{b}:{float(ds.band_weights[b])!r}" for b in ("r", "i", "z", "y"))
+            )
+        if getattr(ds, "zpcell_factors_path", None) is not None:
+            from syndiff_pipeline.template_creation.processing.band_convolve import (
+                zpcell_factors_identity,
+            )
+
+            parts.append("zpcell_factors_sha256=" + zpcell_factors_identity(ds.zpcell_factors_path)["sha256"])
     elif stage == "ps1_download":
         pd = resolved.stages.ps1_download
         parts.extend([str(pd.overwrite), str(pd.use_local_files)])

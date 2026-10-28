@@ -55,7 +55,8 @@ def _bundle(bands, weights, dtype):
     combined, mask, uncert = process_skycell_bands(
         bands, headers_data=_headers(), band_weights=weights
     )
-    wb = perband.weighted_band_images(bands, _headers(), weights=weights)
+    # UNWEIGHTED Z F_b store: unit weights; ``weights`` only weight the combined image
+    wb = perband.weighted_band_images(bands, _headers(), weights=perband.UNIT_WEIGHTS)
     return {
         "skycell_id": SKYCELL,
         "projection": f"skycell.{PROJ}",
@@ -85,52 +86,75 @@ def _same_bits(a, b):
     )
 
 
-def test_sum_of_float64_band_cells_is_bitwise_the_combined_image():
-    result = _run(_raw_bands(), dtype="float64")
-    assert (result["combined_image"] == 0).sum() > 0  # Z really zeroed something
+def _ulp_check(total, c, cells, nulp=4):
+    ok = np.isfinite(c)
+    assert np.array_equal(np.isnan(total), np.isnan(c))
+    big = np.max([np.abs(cells[b][ok]) for b in perband.BANDS] + [np.abs(c[ok])], axis=0)
+    ulp = np.spacing(big.astype(np.float32))
+    d = np.abs(total[ok].astype(np.float64) - c[ok])
+    assert np.all(d <= nulp * ulp), (d / ulp).max()
+    assert d.max() / np.abs(c[ok]).max() < 1e-6
+
+
+@pytest.mark.parametrize("dtype", ["float64", "float32"])
+@pytest.mark.parametrize("weights", [None, {"r": 0.3, "i": 0.3, "z": 0.2, "y": 0.2}])
+def test_removal_weighted_sum_of_unweighted_cells_is_the_combined_image(dtype, weights):
+    """sum_b w^rem_b Z F_b (float64, cast to float32) == combined cell within 4 float32 ulp."""
+    result = _run(_raw_bands(1), weights=weights, dtype=dtype)
+    c = result["combined_image"]
+    assert (c == 0).sum() > 0  # Z really zeroed something
     cells = result["band_images"]
-    # the NaN pattern of the combined image is in every band
-    for b in perband.BANDS:
-        assert np.array_equal(np.isnan(cells[b]), np.isnan(result["combined_image"]))
-    total = perband.sum_bands(cells)
+    for b in perband.BANDS:  # the combined NaN pattern is in every band
+        assert np.array_equal(np.isnan(cells[b]), np.isnan(c))
+    w = cs.DEFAULT_BAND_WEIGHTS if weights is None else weights
+    total = perband.weighted_sum(cells, w).astype(np.float32)
     assert total.dtype == np.float32
-    assert _same_bits(total, result["combined_image"])
+    _ulp_check(total, c, cells)
 
 
-def test_nan_pattern_goes_into_every_band_and_sum_is_bitwise():
+def test_weighted_sum_float64_matches_manual_formula_and_factors():
+    rng = np.random.default_rng(3)
+    cells = {b: rng.normal(5, 1, (6, 7)) for b in perband.BANDS}
+    cells["r"][1, 1] = np.nan
+    w = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
+    f = {"r": 1.02, "i": 0.97, "z": 1.01, "y": 1.05}
+    manual = np.zeros((6, 7))
+    for b in perband.BANDS:
+        manual += (w[b] / f[b]) * cells[b]
+    got = perband.weighted_sum(cells, w, f)
+    assert got.dtype == np.float64
+    assert np.array_equal(np.isnan(got), np.isnan(manual))
+    ok = ~np.isnan(got)
+    np.testing.assert_allclose(got[ok], manual[ok], rtol=1e-15, atol=0)
+    # unit factors == no factors, bitwise
+    unit = {b: 1.0 for b in perband.BANDS}
+    assert np.array_equal(perband.weighted_sum(cells, w, unit)[ok], perband.weighted_sum(cells, w)[ok])
+    with pytest.raises(ValueError):
+        perband.weighted_sum(cells, {**w, "y": 0.0})
+    with pytest.raises(ValueError):
+        perband.weighted_sum(cells, w, {**f, "z": float("nan")})
+    with pytest.raises(ValueError):
+        perband.weighted_sum(cells, {"r": 1.0})
+
+
+def test_nan_pattern_goes_into_every_band():
     """Direct check with NaN surviving in the combined image (NaN in one band only)."""
-    rng = np.random.default_rng(5)
     bands = _raw_bands(5, nan_in_r=True)
-    wb = perband.weighted_band_images(bands, _headers())
+    wb = perband.weighted_band_images(bands, _headers())  # default (removal) weights -> combined
     before = perband.sum_bands(wb)
     assert np.isnan(before).any()
     after = before.copy()
     after[10:20, 10:20] = 0.0  # Z zeroes a block (finite pixels only)
     after[np.isnan(before)] = np.nan
-    cells = bcs.build_band_cells(wb, before, after, "float64")
+    unit = perband.weighted_band_images(bands, _headers(), weights=perband.UNIT_WEIGHTS)
+    cells = bcs.build_band_cells(unit, before, after, "float64")
     for b in perband.BANDS:
         assert np.array_equal(np.isnan(cells[b]), np.isnan(after))
         assert np.all(cells[b][10:20, 10:20][~np.isnan(cells[b][10:20, 10:20])] == 0)
-    assert _same_bits(perband.sum_bands(cells), after)
-
-
-def test_float32_band_cells_sum_within_a_few_ulp():
-    result = _run(_raw_bands(1), dtype="float32")
-    total = perband.sum_bands(result["band_images"])
-    c = result["combined_image"]
-    ok = np.isfinite(c)
-    assert np.array_equal(np.isnan(total), np.isnan(c))
-    big = np.max([np.abs(result["band_images"][b][ok]) for b in perband.BANDS] + [np.abs(c[ok])], axis=0)
-    ulp = np.spacing(big.astype(np.float32))
-    d = np.abs(total[ok].astype(np.float64) - c[ok])
-    assert np.all(d <= 4 * ulp)
-    assert d.max() / np.abs(c[ok]).max() < 1e-6
-
-
-def test_non_default_weights_are_the_recipes():
-    w = {"r": 0.3, "i": 0.3, "z": 0.2, "y": 0.2}
-    result = _run(_raw_bands(2), weights=w, dtype="float64")
-    assert _same_bits(perband.sum_bands(result["band_images"]), result["combined_image"])
+        # unweighted: outside the zeroed block the cell is exactly F_b
+        ok = ~np.isnan(after)
+        ok[10:20, 10:20] = False
+        assert np.array_equal(cells[b][ok], unit[b][ok])
 
 
 def test_build_band_cells_rejects_non_zeroing_change():
@@ -175,14 +199,56 @@ def test_round_trip_and_same_fingerprint_as_combined(tmp_path, recipe):
 
     loaded = bcs.try_load_band_cells(tmp_path, PROJ, CELL, info["fingerprint"])
     assert set(loaded["band_images"]) == set(perband.BANDS)
-    assert loaded["band_weights"] == cs.DEFAULT_BAND_WEIGHTS
+    assert loaded["removal_band_weights"] == cs.DEFAULT_BAND_WEIGHTS
     assert loaded["headers_data"] == result["headers_data"]
-    assert _same_bits(bcs.combined_from_band_cells(loaded), result["combined_image"])
+    _ulp_check(bcs.combined_from_band_cells(loaded), result["combined_image"], loaded["band_images"])
     comb = bcs.try_load_combined_cell_from_band_cells(tmp_path, PROJ, CELL, info["fingerprint"])
-    assert _same_bits(comb["combined_image"], cs.try_load_combined_cell(
-        tmp_path, PROJ, CELL, info["fingerprint"])["combined_image"])
+    stored = cs.try_load_combined_cell(tmp_path, PROJ, CELL, info["fingerprint"])["combined_image"]
+    _ulp_check(comb["combined_image"], stored, loaded["band_images"])
     side = json.loads((d / "_provenance.json").read_text())
     assert side["kind"] == bcs.KIND and side["meta"]["band_dtype"] == "float64"
+    assert side["meta"]["band_weighted"] is False
+    assert side["meta"]["removal_band_weights"] == cs.DEFAULT_BAND_WEIGHTS
+    # UNWEIGHTED store: outside Z the stored cell is the plain flux-converted F_b
+    unit = perband.weighted_band_images(_raw_bands(), _headers(), weights=perband.UNIT_WEIGHTS)
+    keep = result["combined_image"] != 0
+    keep &= np.isfinite(result["combined_image"])
+    for b in perband.BANDS:
+        assert np.array_equal(loaded["band_images"][b][keep], unit[b][keep])
+
+
+def test_weighted_or_legacy_cell_is_refused(tmp_path, recipe):
+    result = _run(_raw_bands(), dtype="float32")
+    info = _publish(tmp_path, result, recipe, dtype="float32")
+    fp = info["fingerprint"]
+    assert bcs.try_load_band_cells(tmp_path, PROJ, CELL, fp) is not None
+    side_path = bcs.band_cell_dir(tmp_path, PROJ, CELL, fp) / "_provenance.json"
+    side = json.loads(side_path.read_text())
+    # legacy/weighted pilot cell: meta carries band_weights and no band_weighted flag
+    legacy = dict(side, meta={"band_weights": cs.DEFAULT_BAND_WEIGHTS, "band_dtype": "float32"})
+    side_path.write_text(json.dumps(legacy))
+    assert bcs.try_load_band_cells(tmp_path, PROJ, CELL, fp) is None
+    assert not bcs.band_cells_complete(tmp_path, PROJ, CELL, fp)
+    assert bcs.resolve_band_cells_fingerprint_for_recipe(tmp_path, PROJ, CELL, recipe, raw_fp="rawfp") is None
+    # explicitly weighted
+    side_path.write_text(json.dumps(dict(side, meta={**side["meta"], "band_weighted": True})))
+    assert bcs.try_load_band_cells(tmp_path, PROJ, CELL, fp) is None
+    # the immutable store is not overwritten by a publish onto a legacy cell
+    assert _publish(tmp_path, result, recipe, dtype="float32") is None
+
+
+def test_template_weights_change_the_plane_not_the_fingerprint(tmp_path, recipe):
+    result = _run(_raw_bands(), dtype="float32")
+    info = _publish(tmp_path, result, recipe, dtype="float32")
+    loaded = bcs.try_load_band_cells(tmp_path, PROJ, CELL, info["fingerprint"])
+    d13 = {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438}
+    a = bcs.combined_from_band_cells(loaded)
+    b = bcs.combined_from_band_cells(loaded, d13)
+    assert not np.allclose(a[np.isfinite(a)], b[np.isfinite(b)], rtol=1e-4)
+    # republishing the same cells is the same fingerprint whatever weights are read later
+    again = _publish(tmp_path, result, recipe, dtype="float32")
+    assert again["fingerprint"] == info["fingerprint"] and again["already_published"]
+    assert cs.expected_combined_fingerprint(tmp_path, PROJ, CELL, recipe, raw_fp="rawfp") == info["fingerprint"]
 
 
 def test_resolve_for_recipe(tmp_path, recipe):

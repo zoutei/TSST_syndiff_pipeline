@@ -270,6 +270,7 @@ def canonical_cell_image(
     fetch_image: Callable[[str], Optional[np.ndarray]],
     psf_sigma: float,
     radius: int,
+    window_dtype=np.float32,
 ) -> Optional[np.ndarray]:
     """The canonical convolved image of ``cell_name`` (float32, cell shape), or
     ``None`` if the cell's own combined image is unavailable.
@@ -278,6 +279,10 @@ def canonical_cell_image(
     ``None``. Neighbours that return ``None`` stay NaN, which is why the
     convolved fingerprint records the neighbour set (see
     :func:`neighbour_input_fingerprints`).
+
+    ``window_dtype``: dtype of the row window that is blurred (default float32, what the publisher
+    uses; ``band_convolve`` passes float64 so the read-time band sum is blurred without a float32
+    round-trip). The returned image is always float32.
     """
     from syndiff_pipeline.template_creation.processing import convolution_utils
 
@@ -294,7 +299,7 @@ def canonical_cell_image(
         cells = metadata["rows"].get(r)
         if not cells:
             return None, None
-        out = np.full((h + 2 * PAD_SIZE, c1 - c0), np.nan, dtype=np.float32)
+        out = np.full((h + 2 * PAD_SIZE, c1 - c0), np.nan, dtype=window_dtype)
         placed = set(place_row_cells(out, cells, fetch_image, anchor_x=anchor, cell_width=w, col0=c0))
         xs = [int(x) for name, x in cells if name in placed]
         return out, placed_columns_mask(xs, anchor, w, c0, c1 - c0)

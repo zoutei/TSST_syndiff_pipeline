@@ -1,33 +1,39 @@
-"""Shared, sky-keyed store of per-band star-removed PS1 skycells.
+"""Shared, sky-keyed store of per-band star-removed PS1 skycells (UNWEIGHTED).
 
 Companion of ``combined_store`` (design contract:
-``dev_runs/s26_ownwcs_20261027/band_cells_design.md``). The combined cell is
+``dev_runs/s26_ownwcs_20261027/band_cells_design.md``, revised by decision D1 of
+``dev_runs/perband_production_spec_20261028/SPEC.md``). The combined cell is
 
-    C = Z * sum_b w_b F_b,
+    C = Z * sum_b w^rem_b F_b,
 
-with ``Z`` the 0/1 keep mask of ``band_utils.remove_background``. This store keeps the
-four weighted band cells ``C_b = Z * w_b F_b`` (with the combined cell's NaN pattern added to
+with ``Z`` the 0/1 keep mask of ``band_utils.remove_background`` and ``w^rem_b`` the removal/detection
+weights of the combined recipe (default 0.238/0.344/0.283/0.135). This store keeps the four
+UNWEIGHTED, flux-converted band cells ``Z * F_b`` (float32, the combined cell's NaN pattern added to
 every band) under
 
     {data_root}/ps1_skycells_zarr/ps1_band_cells.zarr/{projection}/{skycell}/{fp}/
 
 where ``fp`` is **the fingerprint of the combined cell of the same recipe**
-(``combined_store.expected_combined_fingerprint``), so every lookup resolves through
-``combined_store.resolve_combined_fingerprint_for_recipe`` unchanged. Layout, atomic
-publish (``common.provenance.publish.try_publish_dir``), idempotence and the provenance sidecar
-mirror ``combined_store.publish_combined_cell`` line by line. Only the sidecar ``kind``
-differs (``KIND = "ps1_band_cells"``); the recipe and the fingerprint are the combined ones.
+(``combined_store.expected_combined_fingerprint``; it keeps the REMOVAL weights and never changes
+with template weights or zpcell factors), so every lookup resolves through
+``combined_store.resolve_combined_fingerprint_for_recipe`` unchanged. Layout, atomic publish
+(``common.provenance.publish.try_publish_dir``), idempotence and the provenance sidecar mirror
+``combined_store.publish_combined_cell``. Only the sidecar ``kind`` differs
+(``KIND = "ps1_band_cells"``).
 
 Payload: ``arrays.npz {band_r, band_i, band_z, band_y, combined_mask}``, ``headers.json``,
-``removed_stars.json``; ``band_weights`` and ``band_dtype`` are recorded in the sidecar ``meta``.
+``removed_stars.json``; the sidecar ``meta`` records ``band_weighted: false``,
+``removal_band_weights`` and ``band_dtype``. ``try_load_band_cells`` REFUSES a cell whose meta lacks
+``band_weighted: false`` (weighted pilot cells must never be mixed in).
 
-Bitwise sum identity
---------------------
-The combiner accumulates ``combined += float64_term`` into a float32 array, i.e. each add is done
-in float64 and rounded once. ``perband.sum_bands`` reproduces that exactly when given the float64
-weighted bands (``band_dtype="float64"``: ``combined_from_band_cells`` is then BITWISE the combined
-image). With float32 band cells (the default, half the bytes) every term is rounded to float32 first
-and the float32 sum differs from the combined image by at most 4 float32 ulp per pixel on roughly 30% of pixels (1 ulp typical); see ``tests/test_band_cell_store.py``.
+Read-time weighting
+-------------------
+Template weights ``w_b`` (and optional per-cell zpcell factors ``f_b``) are applied when a cell is
+read: ``plane = sum_b (w_b / f_b) Z F_b`` in float64 (``perband.weighted_sum``).
+``combined_from_band_cells(loaded)`` uses the recorded removal weights, sums in float64 and casts to
+float32: within 4 float32 ulp of the stored combined cell (the combiner accumulates float64 terms into a
+float32 accumulator, one rounding per band; we round the stored bands and the final sum). For float64
+band cells the difference is at the 1e-16 level.
 """
 from __future__ import annotations
 
@@ -84,9 +90,16 @@ def _payload_complete(cell_dir: Path) -> bool:
     return all((cell_dir / name).is_file() for name in _REQUIRED_MEMBERS)
 
 
+def _is_unweighted(cell_dir: Path) -> bool:
+    meta = _read_meta(cell_dir)
+    return meta is not None and meta.get("band_weighted") is False
+
+
 def band_cells_complete(data_root: str | Path, projection: str, skycell: str, fp: str) -> bool:
-    """True when the band-cell dir of ``fp`` has every required member."""
-    return _payload_complete(band_cell_dir(data_root, projection, skycell, fp))
+    """True when the band-cell dir of ``fp`` has every required member AND is unweighted
+    (``band_weighted: false`` in the sidecar meta; weighted/legacy cells do not count)."""
+    d = band_cell_dir(data_root, projection, skycell, fp)
+    return _payload_complete(d) and _is_unweighted(d)
 
 
 def resolve_band_cells_fingerprint_for_recipe(
@@ -137,7 +150,7 @@ def publish_band_cells(
 ) -> dict | None:
     """Atomically publish the band cells of one skycell under the combined cell's fingerprint.
 
-    ``band_images`` maps band name -> ``C_b = Z * w_b F_b`` (all four bands expected; the
+    ``band_images`` maps band name -> ``Z * F_b`` (UNWEIGHTED flux-converted; all four bands expected; the
     combined NaN pattern must already be in every band). ``recipe`` / ``input_fingerprints`` /
     ``code_version`` are those of the combined cell (the fingerprint is computed from them with
     ``combined_store``). Never raises; returns ``{fingerprint, recipe_id, dir, already_published}``
@@ -158,9 +171,19 @@ def publish_band_cells(
         dest_root = final_dir.parent
 
         if _payload_complete(final_dir):
+            if not _is_unweighted(final_dir):
+                logger.error(
+                    "publish_band_cells: %s holds a weighted/legacy band cell (meta lacks "
+                    "band_weighted=false); not overwriting the immutable store", final_dir,
+                )
+                return None
             return {"fingerprint": fp, "recipe_id": rid, "dir": final_dir, "already_published": True}
 
-        weights = perband.band_weights_from_recipe(recipe) if recipe.get("band_weights") else None
+        weights = (
+            perband.band_weights_from_recipe(recipe)
+            if recipe.get("band_weights")
+            else dict(perband.DEFAULT_BAND_WEIGHTS)
+        )
 
         def _write_payload(tmp_dir: Path) -> None:
             arrays = {
@@ -176,7 +199,7 @@ def publish_band_cells(
             with open(tmp_dir / _REMOVED_STARS_FILENAME, "w") as fh:
                 json.dump(list(removed_stars), fh, default=combined_store._json_default)
 
-        meta = {"band_weights": weights, "band_dtype": band_dtype}
+        meta = {"band_weighted": False, "removal_band_weights": weights, "band_dtype": band_dtype}
         if combined_store._HAVE_PROVENANCE_PUBLISH:
             published_dir = combined_store._prov_try_publish_dir(  # type: ignore[attr-defined]
                 dest_root,
@@ -208,14 +231,11 @@ def publish_band_cells(
         return None
 
 
-def _read_band_weights(cell_dir: Path) -> Optional[dict]:
+def _read_meta(cell_dir: Path) -> Optional[dict]:
     try:
         with open(cell_dir / _PROVENANCE_SIDECAR_FILENAME) as fh:
             rec = json.load(fh)
-        w = (rec.get("meta") or {}).get("band_weights")
-        if w is None:
-            w = (rec.get("recipe_params") or {}).get("band_weights")
-        return None if w is None else {b: float(w[b]) for b in BANDS}
+        return dict(rec.get("meta") or {})
     except Exception:
         return None
 
@@ -223,16 +243,27 @@ def _read_band_weights(cell_dir: Path) -> Optional[dict]:
 def try_load_band_cells(
     data_root: str | Path, projection: str, skycell: str, fp: str
 ) -> dict | None:
-    """Load a published band-cell dir, or ``None`` if absent/incomplete/corrupt.
+    """Load a published band-cell dir, or ``None`` if absent/incomplete/corrupt/not unweighted.
 
-    Returns ``{band_images: {b: C_b}, combined_mask, headers_data, removed_stars, band_weights}``
-    (``band_weights`` is ``None`` if the sidecar records none). The band arrays keep the stored
-    dtype.
+    A cell whose sidecar meta lacks ``band_weighted: false`` (the weighted S26 pilot cells, or
+    anything not written by this module) is REFUSED: ``None`` plus a warning, never mixed in.
+
+    Returns ``{band_images: {b: Z F_b}, combined_mask, headers_data, removed_stars,
+    removal_band_weights}``. The band arrays keep the stored dtype.
     """
     cell_dir = band_cell_dir(data_root, projection, skycell, fp)
     try:
         if not _payload_complete(cell_dir):
             return None
+        meta = _read_meta(cell_dir)
+        if meta is None or meta.get("band_weighted") is not False:
+            logger.warning(
+                "try_load_band_cells: refusing %s: sidecar meta lacks band_weighted=false "
+                "(weighted/legacy band cells must not be used)", cell_dir,
+            )
+            return None
+        rw = meta.get("removal_band_weights")
+        removal = None if rw is None else perband.validate_weights(rw, "removal_band_weights")
         with np.load(cell_dir / _ARRAYS_FILENAME, allow_pickle=False) as z:
             band_images = {b: np.array(z[f"band_{b}"]) for b in BANDS}
             combined_mask = np.array(z["combined_mask"])
@@ -245,20 +276,27 @@ def try_load_band_cells(
             "combined_mask": combined_mask,
             "headers_data": headers_data,
             "removed_stars": removed_stars,
-            "band_weights": _read_band_weights(cell_dir),
+            "removal_band_weights": removal,
         }
     except Exception:
         logger.warning("try_load_band_cells failed for %s (best-effort)", cell_dir, exc_info=True)
         return None
 
 
-def combined_from_band_cells(loaded: Mapping[str, Any]) -> np.ndarray:
-    """The combined image from loaded band cells: ``perband.sum_bands`` (float32, r,i,z,y order).
+def combined_from_band_cells(
+    loaded: Mapping[str, Any], weights: Optional[Mapping[str, float]] = None
+) -> np.ndarray:
+    """``sum_b w_b Z F_b`` accumulated in float64, cast to float32.
 
-    Bitwise the stored combined image for float64 band cells; within 4 float32 ulp per pixel for float32
-    band cells (module docstring).
+    ``weights`` default: the removal weights recorded in the cell's meta, which reproduces the stored
+    combined cell within 4 float32 ulp. No hidden global: a loaded cell without recorded weights needs
+    explicit ``weights``.
     """
-    return perband.sum_bands(loaded["band_images"])
+    if weights is None:
+        weights = loaded.get("removal_band_weights")
+        if weights is None:
+            raise ValueError("band cells record no removal weights; pass weights explicitly")
+    return perband.weighted_sum(loaded["band_images"], weights).astype(np.float32)
 
 
 def try_load_combined_cell_from_band_cells(
@@ -278,17 +316,18 @@ def try_load_combined_cell_from_band_cells(
 
 
 def build_band_cells(
-    weighted_bands: Mapping[str, np.ndarray],
+    bands: Mapping[str, np.ndarray],
     combined_before: np.ndarray,
     combined_after: np.ndarray,
     dtype: str = DEFAULT_BAND_DTYPE,
 ) -> dict[str, np.ndarray]:
-    """``C_b = Z * w_b F_b`` with the combined NaN pattern in every band.
+    """``Z * F_b`` (UNWEIGHTED) with the combined NaN pattern in every band.
 
-    ``weighted_bands`` are ``perband.weighted_band_images`` outputs, ``combined_before`` the
-    combined image fed to ``remove_background`` and ``combined_after`` its result. Raises
-    ``ValueError`` if ``remove_background`` changed any pixel other than by zeroing it (then
-    ``sum_b C_b`` could not equal the combined cell).
+    ``bands`` are the flux-converted bands (``perband.weighted_band_images`` with
+    ``perband.UNIT_WEIGHTS``), ``combined_before`` the (removal-weighted) combined image fed to
+    ``remove_background`` and ``combined_after`` its result. ``Z`` is recovered with
+    ``perband.zeroed_mask``. Raises ``ValueError`` if ``remove_background`` changed any pixel other
+    than by zeroing it (then the cells could not reproduce the combined cell).
     """
     zeroed = perband.zeroed_mask(combined_before, combined_after)
     nanmask = np.isnan(combined_after)
@@ -297,14 +336,14 @@ def build_band_cells(
     if not bool(same.all()):
         raise ValueError(
             f"remove_background changed {int((~same).sum())} pixels other than by zeroing; "
-            "band cells would not sum to the combined cell"
+            "band cells would not reproduce the combined cell"
         )
     dt = np.dtype(dtype)
     out: dict[str, np.ndarray] = {}
     for b in BANDS:
-        if b not in weighted_bands:
+        if b not in bands:
             continue
-        img = np.where(zeroed, np.float64(0) if dt == np.float64 else np.float32(0), weighted_bands[b])
+        img = np.where(zeroed, np.float64(0) if dt == np.float64 else np.float32(0), bands[b])
         img = np.asarray(img, dtype=dt)
         img[nanmask] = np.nan
         out[b] = img

@@ -637,6 +637,8 @@ def _execute_template_stage(
                 force_rerun=force_rerun,
                 progress_path=progress_path,
                 convolve_from_band_cells=bool(getattr(ds, "convolve_from_band_cells", False)),
+                band_weights=getattr(ds, "band_weights", None),
+                zpcell_factors_path=getattr(ds, "zpcell_factors_path", None),
             )
             linear_result = dict(linear_result)
             linear_result["template_dir_physical"] = str(linear_result["output_dir"])
