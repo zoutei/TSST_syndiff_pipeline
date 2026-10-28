@@ -326,17 +326,45 @@ def _format_arguments(cmd: Sequence[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in cmd)
 
 
-def _format_condor_environment(*, request_cpus: int | None = None) -> str | None:
+def scratch_dir_for(runs_root: str, run_id: str, target_label: str, stage: str) -> Path:
+    """Per-job scratch directory on the shared run tree (never ``/tmp``).
+
+    ``/tmp`` (4.9 GB) and the Condor execute dir (``/var/lib/condor/execute``,
+    on a ~10 GB ``/var``) are both small and shared; the run tree lives on
+    ``/astro`` NFS and is reachable from every execute host.
+    """
+    return Path(runs_root) / run_id / "scratch" / stage / target_label
+
+
+def _scratch_env_parts(scratch_dir: Path | str) -> list[str]:
+    """Environment entries redirecting temp/cache dirs into ``scratch_dir``."""
+    root = Path(scratch_dir)
+    return [
+        f"TMPDIR={shlex.quote(str(root / 'tmp'))}",
+        f"JOBLIB_TEMP_FOLDER={shlex.quote(str(root / 'joblib'))}",
+        f"MPLCONFIGDIR={shlex.quote(str(root / 'mpl'))}",
+        f"DASK_TEMPORARY_DIRECTORY={shlex.quote(str(root / 'dask'))}",
+    ]
+
+
+def _format_condor_environment(
+    *, request_cpus: int | None = None, scratch_dir: Path | str | None = None
+) -> str | None:
     """Format condor environment.
     
     Parameters
     ----------
     request_cpus : int | None, optional, default ``None``
+    scratch_dir : Path | str | None, optional
+        When given, TMPDIR/JOBLIB_TEMP_FOLDER/MPLCONFIGDIR/DASK_TEMPORARY_DIRECTORY
+        point at subdirectories of it (the wrapper creates them).
     
     Returns
     -------
     str | None"""
     parts: list[str] = []
+    if scratch_dir is not None:
+        parts.extend(_scratch_env_parts(scratch_dir))
     conda_sh = os.environ.get("SYNDIFF_CONDA_SH")
     if conda_sh:
         conda_env = os.environ.get("SYNDIFF_CONDA_ENV", "syndiff")
@@ -695,6 +723,7 @@ def write_submit_file(
     cmd: Sequence[str],
     artifacts: dict[str, Path],
     resources: CondorResourceRequest,
+    scratch_dir: Path | str | None = None,
 ) -> None:
     """Write submit file.
     
@@ -703,7 +732,9 @@ def write_submit_file(
     submit_path : Path
     cmd : Sequence[str]
     artifacts : dict[str, Path]
-    resources : CondorResourceRequest"""
+    resources : CondorResourceRequest
+    scratch_dir : Path | str | None, optional
+        Job scratch root exported as TMPDIR etc. (see :func:`scratch_dir_for`)."""
     if not _WRAPPER.is_file():
         raise FileNotFoundError(f"Condor wrapper missing: {_WRAPPER}")
     lines = [
@@ -716,7 +747,9 @@ def write_submit_file(
     ]
     if resources.request_disk_kb is not None:
         lines.append(f"request_disk = {int(resources.request_disk_kb)}")
-    environment = _format_condor_environment(request_cpus=resources.request_cpus)
+    environment = _format_condor_environment(
+        request_cpus=resources.request_cpus, scratch_dir=scratch_dir
+    )
     if environment:
         lines.append(f'environment = "{environment}"')
     if resources.requirements:
@@ -774,7 +807,10 @@ def submit_job(
 
     resources = apply_host_stats_policy(resources)
     resources = apply_bad_machine_exclusions(resources, artifacts)
-    write_submit_file(artifacts["submit"], cmd, artifacts, resources)
+    scratch = scratch_dir_for(runs_root, run_id, target_label, stage)
+    for sub in ("tmp", "joblib", "mpl", "dask"):
+        (scratch / sub).mkdir(parents=True, exist_ok=True)
+    write_submit_file(artifacts["submit"], cmd, artifacts, resources, scratch_dir=scratch)
     proc = _run_condor(["condor_submit", str(artifacts["submit"])])
     match = re.search(r"submitted to cluster (\d+)", proc.stdout)
     if not match:

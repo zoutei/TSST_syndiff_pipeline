@@ -28,6 +28,12 @@ if [[ -z "${CONDA_SH}" || ! -f "${CONDA_SH}" ]]; then
   exit 1
 fi
 
+# Python's tempfile silently falls back to /tmp (4.9 GB, shared) when TMPDIR
+# does not exist, so make sure the scratch dirs set by the submit file exist.
+for _d in "${TMPDIR:-}" "${JOBLIB_TEMP_FOLDER:-}" "${MPLCONFIGDIR:-}" "${DASK_TEMPORARY_DIRECTORY:-}"; do
+  [[ -n "${_d}" ]] && mkdir -p "${_d}" || true
+done
+
 source "${CONDA_SH}"
 conda activate "${CONDA_ENV}"
 exec "$@"

@@ -1023,3 +1023,25 @@ class TestRaNormalization(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSubmitScratchEnvironment(unittest.TestCase):
+    """Production jobs must keep temp/cache dirs off the small shared /tmp."""
+
+    def test_write_submit_file_scratch_not_tmp(self):
+        import tempfile as _tf
+
+        with _tf.TemporaryDirectory(dir=os.environ.get("TMPDIR")) as d:
+            d = Path(d)
+            scratch = condor.scratch_dir_for(str(d), "rid", "tgt", "diff")
+            artifacts = condor.condor_artifact_paths(str(d), "rid", "tgt", "diff")
+            sub = d / "x.submit"
+            condor.write_submit_file(
+                sub, ["echo", "hi"], artifacts, condor.CondorResourceRequest(), scratch_dir=scratch
+            )
+            text = sub.read_text()
+        env_line = next(l for l in text.splitlines() if l.startswith("environment"))
+        for var in ("TMPDIR", "JOBLIB_TEMP_FOLDER", "MPLCONFIGDIR", "DASK_TEMPORARY_DIRECTORY"):
+            self.assertIn(f"{var}={scratch}", env_line)
+        self.assertNotIn("=/tmp", env_line)
+        self.assertFalse(str(scratch).startswith("/tmp/"))
