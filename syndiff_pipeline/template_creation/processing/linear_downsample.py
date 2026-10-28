@@ -422,6 +422,35 @@ def _write_group_templates(
     return artifacts
 
 
+def check_band_cells_available(data_root, skycell_df, skycell_names, combined_recipe) -> list[str]:
+    """Fail EARLY (before any binning) unless band cells exist for every cell the template reads:
+    the SCC's cells, their canonical same-projection neighbours and cross-projection padding
+    sources (``band_cell_store.required_band_cells`` = f01_select's set). Returns that set."""
+    from syndiff_pipeline.template_creation.processing import band_cell_store
+
+    need = band_cell_store.required_band_cells(skycell_df, skycell_names)
+    missing: list[str] = []
+    for name in need:
+        try:
+            from syndiff_pipeline.template_creation.processing.combined_store import _projection_and_cell
+
+            proj, cell = _projection_and_cell(name)
+            ok = band_cell_store.resolve_band_cells_fingerprint_for_recipe(
+                data_root, proj, cell, combined_recipe
+            ) is not None
+        except Exception:
+            ok = False
+        if not ok:
+            missing.append(name)
+    if missing:
+        raise RuntimeError(
+            f"convolve_from_band_cells: band cells missing for {len(missing)}/{len(need)} cells the "
+            f"template needs (first: {missing[:5]}); run ps1_process with publish_band_cells: true "
+            f"for this SCC first"
+        )
+    return need
+
+
 def run_linear_downsample_scc(
     resolved,
     *,
@@ -599,6 +628,9 @@ def run_linear_downsample_scc(
         camera=camera,
         ccd=ccd,
     )
+
+    if convolve_from_band_cells:
+        check_band_cells_available(resolved.data_root, skycell_df, skycell_names, combined_recipe)
 
     def _process(skycell: str):
         return skycell, _bin_one_skycell_all_groups(

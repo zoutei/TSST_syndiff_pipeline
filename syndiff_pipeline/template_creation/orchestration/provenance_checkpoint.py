@@ -242,6 +242,77 @@ def _resolve_ffi_input_fingerprints(resolved: "ResolvedTargetConfig") -> List[st
         return []
 
 
+def _resolve_skip_convolved_input_fingerprints(
+    resolved: "ResolvedTargetConfig",
+) -> List[str]:
+    """Input fps of ``scc_assembly`` under ``skip_convolved``: the band-cell records
+    (``publish_band_cells``) or the combined cells of every mapping cell, resolved from THIS run's
+    own combined recipe (never the convolved store). ``[]`` when any of them is missing or
+    unresolvable, so the expected fingerprint then differs from the complete one."""
+    try:
+        from syndiff_pipeline.common.scc_paths import scc_mapping_master_skycells_csv
+        from syndiff_pipeline.template_creation.processing import band_cell_store, combined_store
+        from syndiff_pipeline.template_creation.processing.csv_utils import (
+            get_projections_from_csv,
+            load_csv_data,
+        )
+        from syndiff_pipeline.template_creation.processing.ps1_process import (
+            create_master_task_list,
+        )
+
+        pp = resolved.stages.ps1_process
+        t = resolved.target
+        os_factor = int(resolved.stages.mapping.oversampling_factor)
+        csv_path = scc_mapping_master_skycells_csv(
+            resolved.data_root, t.sector, t.camera, t.ccd, oversampling_factor=os_factor
+        )
+        if not Path(csv_path).is_file():
+            return []
+        df = load_csv_data(str(csv_path))
+        projections = get_projections_from_csv(str(csv_path))
+        limit = getattr(pp, "projections_limit", None)
+        if limit:
+            projections = projections[: int(limit)]
+        recipe = combined_store.production_combined_recipe(
+            pp, data_root=resolved.data_root, sector=t.sector, camera=t.camera, ccd=t.ccd
+        )
+        want_bands = bool(getattr(pp, "publish_band_cells", False))
+        fps: set[str] = set()
+        n = 0
+        for projection in projections:
+            _, task_list = create_master_task_list(df, projection)
+            for skycell_id, _proj, _row_id in task_list:
+                name = skycell_id[0] if isinstance(skycell_id, (tuple, list)) else skycell_id
+                parsed = combined_store._projection_and_cell(str(name))
+                if parsed is None:
+                    return []
+                projection_id, cell = parsed
+                n += 1
+                if want_bands:
+                    fp = band_cell_store.resolve_band_cells_fingerprint_for_recipe(
+                        resolved.data_root, projection_id, cell, recipe
+                    )
+                    if fp is None:
+                        return []
+                    rec = band_cell_store.band_cell_record_fingerprint(
+                        band_cell_store.band_cell_dir(resolved.data_root, projection_id, cell, fp)
+                    )
+                    if rec is None:
+                        return []
+                    fps.add(rec)
+                else:
+                    fp = combined_store.resolve_combined_fingerprint_for_recipe(
+                        resolved.data_root, projection_id, cell, recipe
+                    )
+                    if fp is None:
+                        return []
+                    fps.add(fp)
+        return sorted(fps) if n else []
+    except Exception:
+        log.debug("skip_convolved input resolution failed", exc_info=True)
+        return []
+
+
 def _resolve_convolved_skycell_fingerprints(
     resolved: "ResolvedTargetConfig",
 ) -> List[str]:
@@ -250,6 +321,8 @@ def _resolve_convolved_skycell_fingerprints(
     Returns ``[]`` when the CSV/store is missing, ambiguous, or any walk fails
     (scheduler hit path must fail open to empty edges, not raise).
     """
+    if bool(getattr(resolved.stages.ps1_process, "skip_convolved", False)):
+        return _resolve_skip_convolved_input_fingerprints(resolved)
     try:
         from syndiff_pipeline.common.scc_paths import (
             ps1_convolved_zarr_path,

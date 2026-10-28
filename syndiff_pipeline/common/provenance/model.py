@@ -561,6 +561,13 @@ def scc_assembly_recipe_params(resolved) -> dict:
     params = ps1_process_recipe_params(resolved)
     mp = resolved.stages.mapping
     params["mapping_grid"] = _mapping_grid_fragment_from_mapping_stage(mp)
+    # Only when ON, so every existing fingerprint is unchanged. Under skip_convolved the checkpoint
+    # is the band-cell / combined store, not the convolved store: never the same artifact.
+    pp = resolved.stages.ps1_process
+    if bool(getattr(pp, "skip_convolved", False)):
+        params["skip_convolved"] = True
+    if bool(getattr(pp, "publish_band_cells", False)):
+        params["publish_band_cells"] = True
     return params
 
 

@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import zipfile
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
@@ -53,6 +54,9 @@ BAND_CELLS_ZARR_BASENAME = "ps1_band_cells.zarr"
 BANDS = perband.BANDS
 #: dtype of the stored band cells ("float32" or "float64"; see the module docstring).
 DEFAULT_BAND_DTYPE = "float32"
+#: zlib level of ``arrays.npz`` (``np.savez_compressed`` hard-codes the default, 6). Measured on 6 real cells
+#: (round2_README.md): level 3 = 2.4 s/cell and 27.3 MB, default 6 = 4.3 s and 24.0 MB, level 9 = 10.8 s and 23.9 MB.
+BAND_CELL_ZLIB_LEVEL = 3
 
 _ARRAYS_FILENAME = "arrays.npz"
 _HEADERS_FILENAME = "headers.json"
@@ -128,6 +132,73 @@ def resolve_band_cells_fingerprint_for_recipe(
     return fp
 
 
+def band_record_fingerprint(
+    projection: str,
+    skycell: str,
+    recipe: Mapping,
+    input_fingerprints: Iterable[str],
+    fp: str,
+    code_version: int = combined_store.COMBINED_RECIPE_SCHEMA_VERSION,
+) -> tuple[str, str]:
+    """``(record_fingerprint, record_recipe_id)`` of the PROVENANCE record of a band-cell dir.
+
+    The directory is named by the combined cell's fingerprint ``fp`` (so lookups resolve through the
+    combined store unchanged), but the ``artifacts`` table has the fingerprint as primary key and
+    ingest does INSERT OR REPLACE: a record with the same fingerprint would overwrite the combined
+    cell's row. The record is therefore keyed by the Merkle name of the ``ps1_band_cells`` kind,
+    ``fingerprint(KIND, spatial_key, recipe_id(KIND, recipe), inputs + [fp])`` (the combined cell is
+    one of its inputs).
+    """
+    rid = combined_store._compute_recipe_id(KIND, recipe, code_version)
+    inputs = sorted(set(input_fingerprints)) + [str(fp)]
+    spatial_key = combined_store._spatial_key(projection, skycell)
+    return combined_store._compute_fingerprint(KIND, spatial_key, rid, inputs), rid
+
+
+def band_cell_record_fingerprint(cell_dir: str | Path) -> Optional[str]:
+    """The provenance record fingerprint stored in a band-cell dir's sidecar, or ``None``."""
+    try:
+        with open(Path(cell_dir) / _PROVENANCE_SIDECAR_FILENAME) as fh:
+            return str(json.load(fh)["fingerprint"])
+    except Exception:
+        return None
+
+
+def required_band_cells(skycell_df, cells: Iterable[str]) -> list[str]:
+    """Every cell whose band cells a template over ``cells`` reads: the cells, their canonical
+    same-projection neighbours and their cross-projection padding sources (f01_select's
+    ``cells | same_nbrs | xproj_src``). ``skycell_df``: mapping dataframe indexed by NAME."""
+    from syndiff_pipeline.template_creation.processing.padding_correction import (
+        cross_projection_padding_spec,
+    )
+    from syndiff_pipeline.template_creation.processing.ps1_process import (
+        _find_projection_neighbors,
+        extract_projection_metadata,
+    )
+
+    cells = sorted(cells)
+    need = set(cells)
+    md_cache: dict = {}
+    for name in cells:
+        proj = str(skycell_df.loc[name, "projection"])
+        if proj not in md_cache:
+            md_cache[proj] = extract_projection_metadata(skycell_df, proj)
+        nb = _find_projection_neighbors(
+            md_cache[proj], name, int(skycell_df.loc[name, "y"]), int(skycell_df.loc[name, "x"])
+        )
+        need |= {n for n, _, _ in nb}
+        need |= {s["neighbor"] for s in cross_projection_padding_spec(skycell_df.loc[name])}
+    return sorted(need)
+
+
+def _write_npz(path: Path, arrays: Mapping[str, np.ndarray], compresslevel: int) -> None:
+    """``np.savez_compressed`` with an explicit zlib level (same ``.npz`` layout; ``np.load`` reads it)."""
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED, compresslevel=int(compresslevel)) as zf:
+        for key, arr in arrays.items():
+            with zf.open(f"{key}.npy", "w", force_zip64=True) as fh:
+                np.lib.format.write_array(fh, np.asanyarray(arr), allow_pickle=False)
+
+
 # ---------------------------------------------------------------------------
 # Publish / load
 # ---------------------------------------------------------------------------
@@ -147,11 +218,16 @@ def publish_band_cells(
     code_version: int = combined_store.COMBINED_RECIPE_SCHEMA_VERSION,
     producer: str = "template_creation.processing.band_cell_store.publish_band_cells",
     band_dtype: str = DEFAULT_BAND_DTYPE,
+    missing_bands: Iterable[str] = (),
+    zlib_level: Optional[int] = None,
 ) -> dict | None:
     """Atomically publish the band cells of one skycell under the combined cell's fingerprint.
 
-    ``band_images`` maps band name -> ``Z * F_b`` (UNWEIGHTED flux-converted; all four bands expected; the
-    combined NaN pattern must already be in every band). ``recipe`` / ``input_fingerprints`` /
+    ``band_images`` maps band name -> ``Z * F_b`` (UNWEIGHTED flux-converted; all four bands present; the
+    combined NaN pattern must already be in every band). A band the PS1 cell does not have is passed as
+    an all-zero array with the NaN pattern (``build_band_cells`` does that) and named in
+    ``missing_bands``, which is recorded in the sidecar meta: it contributes 0, exactly as the combiner
+    skips a missing band. ``recipe`` / ``input_fingerprints`` /
     ``code_version`` are those of the combined cell (the fingerprint is computed from them with
     ``combined_store``). Never raises; returns ``{fingerprint, recipe_id, dir, already_published}``
     or ``None`` on failure.
@@ -167,6 +243,9 @@ def publish_band_cells(
         fp = combined_store.combined_fingerprint(projection, skycell, rid, input_fps)
         spatial_key = combined_store._spatial_key(projection, skycell)
 
+        record_fp, record_rid = band_record_fingerprint(
+            projection, skycell, recipe, input_fps, fp, code_version
+        )
         final_dir = band_cell_dir(data_root, projection, skycell, fp)
         dest_root = final_dir.parent
 
@@ -177,7 +256,10 @@ def publish_band_cells(
                     "band_weighted=false); not overwriting the immutable store", final_dir,
                 )
                 return None
-            return {"fingerprint": fp, "recipe_id": rid, "dir": final_dir, "already_published": True}
+            return {
+                "fingerprint": fp, "recipe_id": rid, "dir": final_dir, "already_published": True,
+                "record_fingerprint": record_fp,
+            }
 
         weights = (
             perband.band_weights_from_recipe(recipe)
@@ -189,38 +271,48 @@ def publish_band_cells(
             arrays = {
                 f"band_{b}": np.asarray(band_images[b], dtype=np.dtype(band_dtype)) for b in BANDS
             }
-            np.savez_compressed(
+            _write_npz(
                 tmp_dir / _ARRAYS_FILENAME,
-                combined_mask=np.asarray(combined_mask, dtype=np.uint16),
-                **arrays,
+                {**arrays, "combined_mask": np.asarray(combined_mask, dtype=np.uint16)},
+                BAND_CELL_ZLIB_LEVEL if zlib_level is None else zlib_level,
             )
             with open(tmp_dir / _HEADERS_FILENAME, "w") as fh:
                 json.dump(dict(headers_data), fh, default=combined_store._json_default)
             with open(tmp_dir / _REMOVED_STARS_FILENAME, "w") as fh:
                 json.dump(list(removed_stars), fh, default=combined_store._json_default)
 
-        meta = {"band_weighted": False, "removal_band_weights": weights, "band_dtype": band_dtype}
+        missing = sorted(set(missing_bands))
+        if any(b not in BANDS for b in missing):
+            raise ValueError(f"missing_bands must be bands of {BANDS}: {missing}")
+        meta = {
+            "band_weighted": False, "removal_band_weights": weights, "band_dtype": band_dtype,
+            "missing_bands": missing, "combined_fingerprint": fp,
+        }
         if combined_store._HAVE_PROVENANCE_PUBLISH:
             published_dir = combined_store._prov_try_publish_dir(  # type: ignore[attr-defined]
                 dest_root,
                 fp,
                 KIND,
                 spatial_key,
-                rid,
+                record_rid,
                 code_version,
-                input_fps,
+                input_fps + [fp],
                 _write_payload,
                 recipe_params=dict(recipe),
                 spool_dir=combined_store._spool_dir(data_root),
                 produced_by=producer,
                 meta=meta,
+                record_fingerprint=record_fp,
             )
             if published_dir is None:
                 return None
         else:  # pragma: no cover - provenance package always present in this tree
             raise RuntimeError("common.provenance.publish is required for band cells")
 
-        return {"fingerprint": fp, "recipe_id": rid, "dir": published_dir, "already_published": False}
+        return {
+            "fingerprint": fp, "recipe_id": rid, "dir": published_dir, "already_published": False,
+            "record_fingerprint": record_fp,
+        }
     except Exception:
         logger.warning(
             "publish_band_cells failed for projection=%s skycell=%s (best-effort, no raise)",
@@ -277,6 +369,7 @@ def try_load_band_cells(
             "headers_data": headers_data,
             "removed_stars": removed_stars,
             "removal_band_weights": removal,
+            "missing_bands": list(meta.get("missing_bands") or []),
         }
     except Exception:
         logger.warning("try_load_band_cells failed for %s (best-effort)", cell_dir, exc_info=True)
@@ -327,7 +420,8 @@ def build_band_cells(
     ``perband.UNIT_WEIGHTS``), ``combined_before`` the (removal-weighted) combined image fed to
     ``remove_background`` and ``combined_after`` its result. ``Z`` is recovered with
     ``perband.zeroed_mask``. Raises ``ValueError`` if ``remove_background`` changed any pixel other
-    than by zeroing it (then the cells could not reproduce the combined cell).
+    than by zeroing it (then the cells could not reproduce the combined cell). Bands absent from
+    ``bands`` come back as zero planes (see below); the caller records them in ``missing_bands``.
     """
     zeroed = perband.zeroed_mask(combined_before, combined_after)
     nanmask = np.isnan(combined_after)
@@ -342,9 +436,13 @@ def build_band_cells(
     out: dict[str, np.ndarray] = {}
     for b in BANDS:
         if b not in bands:
-            continue
-        img = np.where(zeroed, np.float64(0) if dt == np.float64 else np.float32(0), bands[b])
-        img = np.asarray(img, dtype=dt)
+            # The PS1 cell has no such band: the combiner skips it (contribution 0), so the cell
+            # stores an all-zero plane (with the combined NaN pattern) and records it in
+            # ``missing_bands`` (see publish_band_cells).
+            img = np.zeros(np.shape(combined_after), dtype=dt)
+        else:
+            img = np.where(zeroed, np.float64(0) if dt == np.float64 else np.float32(0), bands[b])
+            img = np.asarray(img, dtype=dt)
         img[nanmask] = np.nan
         out[b] = img
     return out

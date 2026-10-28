@@ -486,13 +486,15 @@ After step `i` is complete, `advance_sliding_window` moves `next_array` → `cur
 
 ### Band cells and `skip_convolved` (opt-in, default off)
 
-`publish_band_cells: true`: `band_combiner_worker` also attaches the weighted band images
-`w_b F_b` (`perband.weighted_band_images`, the combiner's arithmetic) to the bundle; `process_single_cell`
-turns them into $C_b = Z\,w_b F_b$ (`band_cell_store.build_band_cells`, refusing if `remove_background`
-changed any pixel other than by zeroing) and `publish_combined_result` publishes them right after the
-combined cell under the same fingerprint. Float32 cells (default) sum to the combined image within 4
-float32 ulp per pixel; float64 cells (`band_dtype`) are bitwise. A tier-2 combined-store hit only
-short-cuts the raw fetch when the band cells of that fingerprint also exist.
+`publish_band_cells: true`: `band_combiner_worker` also attaches the UNWEIGHTED flux-converted bands
+$F_b$ (`perband.weighted_band_images` with unit weights) and the list of bands the PS1 cell lacks to the
+bundle; `process_single_cell` turns them into $Z F_b$ (`band_cell_store.build_band_cells`, refusing if
+`remove_background` changed any pixel other than by zeroing; a missing band becomes a zero plane) and
+`publish_combined_result` publishes them right after the combined cell under the same directory
+fingerprint (own provenance record fingerprint, see `storage_layout.md`). Float32 cells (default)
+reproduce the combined cell within 4 float32 ulp per pixel. A tier-2 combined-store hit only
+short-cuts the raw fetch when the band cells of that fingerprint also exist. Incompatible with
+`enable_saturation_correction` (config error).
 
 `skip_convolved: true`: the stage does ingest -> band combine -> SEP/removal (ledger, Z) -> publish
 (combined cell, plus band cells with `publish_band_cells`) and nothing else. No row assembly, sliding
@@ -502,8 +504,12 @@ band cache or pending results; the last band combiner forwards the single shutdo
 ingested are the mapping's cells of unfinished projections plus every cross-projection padding source
 (`_skip_convolved_padding_sources`, = `f01_select` `xproj_src`; same-projection neighbours are already
 mapping cells); cells already published are skipped (`ingest_worker(skip_on_store_hit=True)`).
-`verify_ps1_process`, the absence probe and `resolve_ps1_process_checkpoint_location` look at the
-band-cell (or combined) store.
+Band-cell writes run on a bounded 3-thread pool (`_BandPublishPool`) so the coordinator thread is not
+serialised on zlib. After the coordinator finishes, every ingested cell is checked in the store; any
+missing one fails the stage (`{"error": ...}`). `verify_ps1_process`, the absence probe,
+`resolve_ps1_process_checkpoint_location` and the `scc_assembly` checkpoint (recipe params carry the two
+flags when on; input edges are the band-cell records or combined cells, never the convolved store) look
+at the band-cell (or combined) store.
 
 ### Step 3b — Shared convolved-store canonical snapshot (per-cell skip)
 

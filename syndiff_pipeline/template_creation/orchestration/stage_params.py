@@ -354,6 +354,12 @@ class Ps1ProcessStageParams:
     small_job_host_stats_min_mem_mb: int = 25_000
 
     def __post_init__(self) -> None:
+        if self.publish_band_cells and self.enable_saturation_correction:
+            raise ValueError(
+                "stages.ps1_process: publish_band_cells=True is incompatible with "
+                "enable_saturation_correction=True (remove_background would change pixels other "
+                "than by zeroing them, so the band cells could not reproduce the combined cell)"
+            )
         if self.stream_max_inflight_requests < 1:
             raise ValueError(
                 "stages.ps1_process.stream_max_inflight_requests must be positive"
@@ -623,6 +629,15 @@ def parse_stage_params(stages_raw: dict, *, strict: bool = True) -> TemplateStag
     validate_stage_keys(df, DIFF_ALLOWED, "diff")
     validate_stage_keys(st, STAR_ALLOWED, "star")
     validate_stage_keys(ph, PHOTOMETRY_ALLOWED, "photometry")
+    if ds.get("convolve_from_band_cells"):
+        # same effective rule as dispatch.py / stages.py: downsample.geometry_mode wins, else
+        # wcs_grouping.geometry_mode, else field
+        _geom = str(ds.get("geometry_mode") or wg.get("geometry_mode") or "field").lower()
+        if _geom != "linear":
+            raise ValueError(
+                "stages.downsample.convolve_from_band_cells needs geometry_mode: linear "
+                f"(effective geometry_mode is {_geom!r}; the flag is only implemented for linear mode)"
+            )
     if pp.get("executor", "condor") not in ("local", "condor"):
         raise ValueError("stages.ps1_process.executor must be 'local' or 'condor'")
     ps1_source = pp.get("ps1_source", "zarr")

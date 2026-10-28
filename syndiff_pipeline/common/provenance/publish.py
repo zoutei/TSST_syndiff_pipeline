@@ -236,9 +236,16 @@ def publish_dir(
     produced_by: Optional[str] = None,
     wall_time_s: Optional[float] = None,
     meta: Optional[Mapping[str, Any]] = None,
+    record_fingerprint: Optional[str] = None,
 ) -> Path:
     """
     Atomically publish a directory-shaped artifact at ``dest_root/{fp}/``.
+
+    ``record_fingerprint`` (default: *fingerprint*): the fingerprint written into the provenance
+    record (``_provenance.json`` and the spool line), for artifacts that deliberately share an
+    on-disk directory name with another kind (the band-cell store reuses the combined cell's
+    fingerprint as directory name; its record must not collide with the combined cell's
+    ``artifacts`` row, whose primary key is the fingerprint).
 
     *write_payload(tmp_dir)* must populate *tmp_dir* with the artifact's
     files; a ``_provenance.json`` sidecar is then written inside it before
@@ -257,7 +264,7 @@ def publish_dir(
     tmp_dir.mkdir(parents=True, exist_ok=False)
 
     record = build_record(
-        fingerprint,
+        record_fingerprint if record_fingerprint is not None else fingerprint,
         kind,
         spatial_key,
         recipe_id,

@@ -782,6 +782,7 @@ def process_single_cell(bundle: dict) -> dict:
         # attached, zeroed where remove_background zeroed the combined image, the combined
         # NaN pattern in every band. Best-effort: a failure only drops the band cells.
         band_descs = None
+        band_missing: list = []
         if combined_before is not None:
             try:
                 from syndiff_pipeline.template_creation.processing import band_cell_store
@@ -791,6 +792,7 @@ def process_single_cell(bundle: dict) -> dict:
                     dtype=str(next(iter(bundle["band_images"].values())).dtype),
                 )
                 band_descs = {b: _array_to_shm(a, f"bnd{b}_{skycell_id}") for b, a in cells.items()}
+                band_missing = list(bundle.get("band_missing") or [])
                 del cells
             except Exception as exc:
                 logger.error(f"[PreProcessor] Band cells not built for {skycell_id}: {exc}")
@@ -813,6 +815,7 @@ def process_single_cell(bundle: dict) -> dict:
         }
         if band_descs is not None:
             result["band_images_shm"] = band_descs
+            result["band_missing"] = band_missing
 
         logger.info(f"[PreProcessor] Processed {skycell_id}")
         return result
@@ -1125,6 +1128,9 @@ def band_combiner_worker(
                 reduced_bundle["band_images"] = {
                     b: np.asarray(img, dtype=np.dtype(band_cells_dtype)) for b, img in wb.items()
                 }
+                # A PS1 cell can lack a band (the combiner then skips it): the band cell stores a
+                # zero plane for it and records it (band_cell_store.build_band_cells).
+                reduced_bundle["band_missing"] = [b for b in perband.BANDS if b not in wb]
                 del wb
 
             del raw_bundle
@@ -1260,7 +1266,60 @@ def _inject_cell_catalogues(bundle: dict, catalog: Any, *, ledger: bool, data_ro
         logger.error(f"[Catalog] Could not prepare removal ledger for {skycell_id}: {exc}", exc_info=True)
 
 
-def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[dict]:
+class _BandPublishPool:
+    """Small thread pool for the (zlib-bound) band-cell writes, with a bounded backlog.
+
+    ``submit`` blocks when ``max_pending`` writes are queued, so the band arrays held in memory
+    stay bounded; ``close`` waits for every write. ``publish_band_cells`` never raises, so a failed
+    write is a ``None`` result logged by the worker; completeness is judged afterwards from the
+    store (``run_modern_sliding_window_pipeline`` under ``skip_convolved``)."""
+
+    def __init__(self, workers: int = 3, max_pending: int = 6):
+        self._pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="band-publish")
+        self._sem = threading.BoundedSemaphore(max_pending)
+
+    def submit(self, fn, *args, **kwargs):
+        self._sem.acquire()
+        try:
+            fut = self._pool.submit(fn, *args, **kwargs)
+        except BaseException:
+            self._sem.release()
+            raise
+        fut.add_done_callback(lambda _f: self._sem.release())
+        return fut
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True)
+
+
+def _publish_band_cells_now(data_root, projection, cell, band_images, band_missing, result, recipe, inputs, fingerprint):
+    from syndiff_pipeline.template_creation.processing import band_cell_store
+
+    band_info = band_cell_store.publish_band_cells(
+        data_root,
+        projection,
+        cell,
+        band_images=band_images,
+        combined_mask=result["combined_mask"],
+        headers_data=result.get("headers_data"),
+        removed_stars=result.get("removed_stars"),
+        recipe=recipe,
+        input_fingerprints=inputs,
+        producer="ps1_process",
+        band_dtype=str(next(iter(band_images.values())).dtype),
+        missing_bands=band_missing,
+    )
+    if band_info is None or band_info.get("fingerprint") != fingerprint:
+        logger.error(
+            "[ProcessCoordinator] band cells of %s not published under the combined fingerprint %s",
+            result["skycell_id"], fingerprint,
+        )
+    return band_info
+
+
+def publish_combined_result(
+    data_root: str, recipe, result: dict, band_pool: Optional["_BandPublishPool"] = None
+) -> Optional[dict]:
     """Publish one freshly combined, star-removed cell to the shared combined
     store under exactly the fingerprint readers resolve
     (``combined_store.combined_input_fingerprints``: raw PS1 token plus, for v2
@@ -1272,6 +1331,7 @@ def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[di
     # Taken out of the result up front so the (large) band cells never linger in the
     # row-assembly queue, whatever happens below.
     band_images = result.pop("band_images", None)
+    band_missing = list(result.pop("band_missing", None) or [])
     parsed = combined_store._projection_and_cell(result["skycell_id"])
     if parsed is None:
         return None
@@ -1298,27 +1358,14 @@ def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[di
     )
     if band_images and info is not None and info.get("fingerprint"):
         # Band cells under the SAME fingerprint, right after the combined cell
-        # (publish_band_cells; band_cell_store never raises).
-        from syndiff_pipeline.template_creation.processing import band_cell_store
-
-        band_info = band_cell_store.publish_band_cells(
-            data_root,
-            projection,
-            cell,
-            band_images=band_images,
-            combined_mask=result["combined_mask"],
-            headers_data=result.get("headers_data"),
-            removed_stars=result.get("removed_stars"),
-            recipe=recipe,
-            input_fingerprints=inputs,
-            producer="ps1_process",
-            band_dtype=str(next(iter(band_images.values())).dtype),
-        )
-        if band_info is None or band_info.get("fingerprint") != info.get("fingerprint"):
-            logger.error(
-                "[ProcessCoordinator] band cells of %s not published under the combined fingerprint %s",
-                result["skycell_id"], info.get("fingerprint"),
-            )
+        # (publish_band_cells; band_cell_store never raises). With ``band_pool`` the write runs
+        # on a worker thread (skip_convolved), else inline.
+        args = (data_root, projection, cell, band_images, band_missing, result, recipe, inputs,
+                info.get("fingerprint"))
+        if band_pool is not None:
+            band_pool.submit(_publish_band_cells_now, *args)
+        else:
+            _publish_band_cells_now(*args)
     ledger_fp = result.get("ledger_fingerprint")
     if result.get("ledger_path") and info is not None and ledger_fp and info.get("fingerprint") != ledger_fp:
         logger.error(
@@ -1389,10 +1436,15 @@ def process_coordinator(
     See ``_publish_canonical_convolved_snapshot`` below.
     """
     _publish_combined = None
+    # skip_convolved (retain_results=False): band-cell writes (zlib) run on a small bounded pool so the
+    # single coordinator thread is not serialised on them; closed (waited for) when the loop ends.
+    _band_pool = _BandPublishPool() if not retain_results else None
     if combined_store_data_root is not None and combined_store_recipe is not None:
 
         def _publish_combined(result: dict) -> Optional[dict]:
-            return publish_combined_result(combined_store_data_root, combined_store_recipe, result)
+            return publish_combined_result(
+                combined_store_data_root, combined_store_recipe, result, band_pool=_band_pool
+            )
 
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
     if band_cache is None:
@@ -1639,6 +1691,8 @@ def process_coordinator(
                 break
 
     _active_executor = None
+    if _band_pool is not None:
+        _band_pool.close()
     logger.info("[ProcessCoordinator] Finished")
 
 
@@ -3676,6 +3730,9 @@ def run_modern_sliding_window_pipeline(
                 exc_info=True,
             )
 
+    if publish_band_cells and enable_saturation_correction:
+        return {"error": "publish_band_cells is incompatible with enable_saturation_correction "
+                         "(the band cells could not reproduce the combined cell)"}
     if skip_convolved and combined_store_recipe is None:
         return {"error": "skip_convolved needs the combined-store recipe (publishing is its only output)"}
     if publish_band_cells and combined_store_recipe is None:
@@ -3949,6 +4006,23 @@ def run_modern_sliding_window_pipeline(
                 all_removed_stars = []
                 produced_skycells_list = [t_[0] for t_ in master_task_list]
                 results_queue.put(None)  # releases the (disabled) saver
+                # Hard failure: publishing is this mode's only output, so every task cell must now
+                # be published (band cells with publish_band_cells, else combined cells). A cell
+                # lost anywhere (SEP failure, band build/publish failure, ...) fails the stage.
+                _missing = [
+                    c for c in produced_skycells_list
+                    if not _cell_published_for_skip_convolved(
+                        data_root, c, combined_store_recipe, publish_band_cells
+                    )
+                ]
+                if _missing:
+                    return {
+                        "error": (
+                            f"skip_convolved: {len(_missing)}/{len(produced_skycells_list)} cells not "
+                            f"published ({'band cells' if publish_band_cells else 'combined cells'}), "
+                            f"e.g. {_missing[:5]}"
+                        )
+                    }
                 if ledger_finisher is not None:
                     for projection in dense_projections:
                         ledger_finisher.submit(projection)
