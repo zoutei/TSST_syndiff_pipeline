@@ -19,7 +19,10 @@ from syndiff_pipeline.difference_imaging.stages.temporal_wcs import (
     _extend_runtime_frame_index,
     republish_temporal_runtime_index,
 )
-from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import TemporalChebWcs
+from syndiff_pipeline.difference_imaging.wcs.temporal_cheb import (
+    TemporalChebWcs,
+    temporal_frame_contract,
+)
 
 
 def _fitted_frames():
@@ -146,6 +149,10 @@ def test_republish_only_updates_runtime_index_not_models_or_per_ffi(tmp_path):
         "version": "temporal_cheb5_bspline_v1",
         "spatial_basis": "chebyshev",
         "spatial_degree": 5,
+        # Full-FFI frame contract + science-local domain are required since
+        # 0af67480 ("add full-FFI temporal WCS contract").
+        "frame_contract": temporal_frame_contract(origin_ffi=(44, 0), shape=(200, 200)),
+        "domain": {"x_min": 0, "x_max": 200, "y_min": 0, "y_max": 200},
         "n_frames": 2,
         "n_fit": 2,
         "models": models,

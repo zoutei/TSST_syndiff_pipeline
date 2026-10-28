@@ -37,6 +37,14 @@ def bootstrap_tree(tmp_path):
         "mapping_grid": grid.to_mapping_dict(),
         "base_tess_shape": list(grid.array_shape_native()),
         "oversampling_factor": os_factor,
+        # MAPGRID=3 sidecars must declare the neutral padding policy.
+        "science_pad_policy": "neutral_invalid",
+        "template_support_bounds_ffi": {
+            "x_min": int(grid.template_xmin),
+            "x_max": int(grid.template_xmax),
+            "y_min": int(grid.template_ymin),
+            "y_max": int(grid.template_ymax),
+        },
     }
     (tmpl / "field_mode_assembly.json").write_text(json.dumps(sidecar))
 

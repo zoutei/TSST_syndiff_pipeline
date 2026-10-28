@@ -33,6 +33,7 @@ from syndiff_pipeline.common.orchestration.state import (
 )
 from syndiff_pipeline.common.orchestration.targets import Target
 from syndiff_pipeline.template_creation.orchestration.verify import (
+    AbsenceProbeResult,
     copy_manifest_to_stable,
     manifest_valid,
     read_manifest,
@@ -361,7 +362,15 @@ class TestVerifyScheduling(unittest.TestCase):
                 state.cache_external_check(run_id, label, stage, complete=True)
             _ensure_mapping_csv_exists(ctx, target)
 
+            # Only ``mapping`` has a stub artifact; the other external
+            # prerequisites (ps1_download, remap, ...) are genuinely absent and
+            # the fast path would fail them (and block downstream) by design
+            # (84f64f64).  Force every candidate through the full verify so the
+            # injected read error is what this test observes.
             with unittest.mock.patch(
+                "syndiff_pipeline.template_creation.orchestration.verify.stage_absence_probe",
+                return_value=AbsenceProbeResult.MAYBE_PRESENT,
+            ), unittest.mock.patch(
                 "syndiff_pipeline.common.orchestration.verify_worker.stage_complete",
                 side_effect=RuntimeError("disk read failed"),
             ):

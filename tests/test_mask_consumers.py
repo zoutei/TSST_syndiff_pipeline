@@ -51,13 +51,23 @@ def test_resume_loads_scc_asteroids(tmp_path):
     )
     from astropy.io import fits
 
+    from types import SimpleNamespace
+
+    from syndiff_pipeline.common.scc_paths import scc_diff_dir
+
     ws = tmp_path / "ws"
     ws.mkdir()
+    data_root = tmp_path / "data"
+    # The shared mask is read from the SCC diff lane root (flat SCC lanes,
+    # commit 0b62bd2b), not from the workspace root.
+    lane = scc_diff_dir(data_root, 20, 1, 1, store_name=None)
+    lane.mkdir(parents=True)
     static = np.zeros((20, 20), dtype=np.int16)
     static[0, 0] = bits.BRIGHT_CAT
-    fits.writeto(ws / "shared_mask.fits.gz", static, overwrite=True)
-
-    data_root = tmp_path / "data"
+    fits.writeto(lane / "shared_mask.fits.gz", static, overwrite=True)
+    cfg = SimpleNamespace(
+        data_root=str(data_root), sector=20, camera=1, ccd=1, output_store_name=None
+    )
     scc = data_root / "catalogs" / "sector_0020" / "camera_1" / "ccd_1" / "asteroids"
     scc.mkdir(parents=True)
     iv = pd.DataFrame(
@@ -83,6 +93,7 @@ def test_resume_loads_scc_asteroids(tmp_path):
         sector=20,
         camera=1,
         ccd=1,
+        cfg=cfg,
     )
     assert cat.has_temporal()
     m = cat.mask_at(0, which="full")

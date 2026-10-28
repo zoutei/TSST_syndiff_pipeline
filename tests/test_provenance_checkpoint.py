@@ -233,6 +233,7 @@ class TestEmitSccAssemblyCheckpoint(unittest.TestCase):
                     "y_edge_strip": 30,
                     "conv_pad_native": 8,
                     "oversampling_factor": 2,
+                    "mapgrid_version": 3,
                 },
             },
         )
