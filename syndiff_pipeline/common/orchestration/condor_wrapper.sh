@@ -30,7 +30,7 @@ fi
 
 # Python's tempfile silently falls back to /tmp (4.9 GB, shared) when TMPDIR
 # does not exist, so make sure the scratch dirs set by the submit file exist.
-for _d in "${TMPDIR:-}" "${JOBLIB_TEMP_FOLDER:-}" "${MPLCONFIGDIR:-}" "${DASK_TEMPORARY_DIRECTORY:-}"; do
+for _d in "${TMPDIR:-}" "${MPLCONFIGDIR:-}" "${DASK_TEMPORARY_DIRECTORY:-}"; do
   [[ -n "${_d}" ]] && mkdir -p "${_d}" || true
 done
 

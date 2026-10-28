@@ -1041,7 +1041,7 @@ class TestSubmitScratchEnvironment(unittest.TestCase):
             )
             text = sub.read_text()
         env_line = next(l for l in text.splitlines() if l.startswith("environment"))
-        for var in ("TMPDIR", "JOBLIB_TEMP_FOLDER", "MPLCONFIGDIR", "DASK_TEMPORARY_DIRECTORY"):
+        for var in ("TMPDIR", "MPLCONFIGDIR", "DASK_TEMPORARY_DIRECTORY"):
             self.assertIn(f"{var}={scratch}", env_line)
         self.assertNotIn("=/tmp", env_line)
         self.assertFalse(str(scratch).startswith("/tmp/"))

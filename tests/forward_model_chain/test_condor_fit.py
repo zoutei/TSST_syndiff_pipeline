@@ -140,7 +140,7 @@ def test_job_env_keeps_caches_and_tmp_off_tmp(tmp_path):
     """Chain Condor/local jobs must never put caches or temp files in /tmp (tiny, shared; filled on 2026-10-27)."""
     cfg = _cfg(tmp_path)
     env = D.job_env(cfg, "fit")
-    for k in ("MPLCONFIGDIR", "JAX_COMPILATION_CACHE_DIR", "TMPDIR", "JOBLIB_TEMP_FOLDER"):
+    for k in ("MPLCONFIGDIR", "JAX_COMPILATION_CACHE_DIR", "TMPDIR"):
         assert env[k].startswith(str(cfg.out_root) + "/scratch/fit"), (k, env[k])
     assert (D.job_scratch(cfg, "fit") / "tmp").is_dir()
     assert "/tmp/chain-" not in D.submit_text(cfg, "fit", ["python"], tmp_path / "logs", tag="fit")

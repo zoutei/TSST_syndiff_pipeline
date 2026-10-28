@@ -337,11 +337,13 @@ def scratch_dir_for(runs_root: str, run_id: str, target_label: str, stage: str) 
 
 
 def _scratch_env_parts(scratch_dir: Path | str) -> list[str]:
-    """Environment entries redirecting temp/cache dirs into ``scratch_dir``."""
+    """Environment entries redirecting temp/cache dirs into ``scratch_dir``.
+
+    JOBLIB_TEMP_FOLDER is deliberately NOT set: joblib memmaps large arrays in /dev/shm (RAM) first and only then
+    falls back to TMPDIR; forcing it onto NFS would slow ps1_process/downsample."""
     root = Path(scratch_dir)
     return [
         f"TMPDIR={shlex.quote(str(root / 'tmp'))}",
-        f"JOBLIB_TEMP_FOLDER={shlex.quote(str(root / 'joblib'))}",
         f"MPLCONFIGDIR={shlex.quote(str(root / 'mpl'))}",
         f"DASK_TEMPORARY_DIRECTORY={shlex.quote(str(root / 'dask'))}",
     ]
@@ -356,7 +358,7 @@ def _format_condor_environment(
     ----------
     request_cpus : int | None, optional, default ``None``
     scratch_dir : Path | str | None, optional
-        When given, TMPDIR/JOBLIB_TEMP_FOLDER/MPLCONFIGDIR/DASK_TEMPORARY_DIRECTORY
+        When given, TMPDIR/MPLCONFIGDIR/DASK_TEMPORARY_DIRECTORY
         point at subdirectories of it (the wrapper creates them).
     
     Returns
@@ -808,7 +810,7 @@ def submit_job(
     resources = apply_host_stats_policy(resources)
     resources = apply_bad_machine_exclusions(resources, artifacts)
     scratch = scratch_dir_for(runs_root, run_id, target_label, stage)
-    for sub in ("tmp", "joblib", "mpl", "dask"):
+    for sub in ("tmp", "mpl", "dask"):
         (scratch / sub).mkdir(parents=True, exist_ok=True)
     write_submit_file(artifacts["submit"], cmd, artifacts, resources, scratch_dir=scratch)
     proc = _run_condor(["condor_submit", str(artifacts["submit"])])

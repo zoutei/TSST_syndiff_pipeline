@@ -52,7 +52,6 @@ def job_env(cfg: ChainConfig, tag: str, omp_threads: int = 4) -> dict[str, str]:
         "MPLCONFIGDIR": f"{scratch}/mpl",
         "JAX_COMPILATION_CACHE_DIR": f"{scratch}/jax",
         "TMPDIR": f"{scratch}/tmp",
-        "JOBLIB_TEMP_FOLDER": f"{scratch}/tmp",
     }
 
 
