@@ -504,12 +504,18 @@ band cache or pending results; the last band combiner forwards the single shutdo
 ingested are the mapping's cells of unfinished projections plus every cross-projection padding source
 (`_skip_convolved_padding_sources`, = `f01_select` `xproj_src`; same-projection neighbours are already
 mapping cells); cells already published are skipped (`ingest_worker(skip_on_store_hit=True)`).
-Strict bands: under `skip_convolved` / `publish_band_cells` a cell whose raw fetch lacks a PS1 band
-(the fetch is retried 3 times with backoff first) is NOT published (neither combined nor band cells) and the
-stage returns an error naming the cell and bands, so verify fails and a retry refetches it
-(`stages.ps1_process.allow_missing_bands: true` publishes it as a zero plane + `missing_bands`; for bands PS1
-truly lacks, set by a human). The store is immutable and publishing idempotent, so a transient download failure
-would otherwise be stored forever.
+Strict bands (default under `skip_convolved` / `publish_band_cells`): after 3 retries with backoff, every
+absent band of a cell is classified from the real result of its image download
+(`download_and_process_band(outcome=...)`, HTTP status and exception types, no message matching). An
+explicit HTTP 404 is a GENUINE missing band (PS1 has no such file): logged, counted, and the cell is
+published with a zero plane and `missing_bands` in the meta. Anything else (timeout, connection error,
+5xx or other status, truncated/undecodable FITS, no recorded outcome, a present band lacking its
+mask/weight) is TRANSIENT: the cell is NOT published (neither combined nor band cells), the cause is
+logged per cell, and the stage returns an error so a retry refetches it (the store is immutable and
+publishing idempotent, so a band-less cell stored after a hiccup would stay forever). The stage result and
+a log line carry `band_counters` (`genuine_missing_band_cells`, `transient_failure_cells`, per-cell
+detail) to count genuine missing-band cells per CCD. `stages.ps1_process.allow_missing_bands: true` is an
+override that treats every absent band as missing (no classification, no retry).
 
 Band-cell writes run on a bounded 3-thread pool (`_BandPublishPool`) so the coordinator thread is not
 serialised on zlib. After the coordinator finishes, every ingested cell is checked in the store; any

@@ -159,8 +159,12 @@ class StreamSkycellLoader:
         *,
         use_local_files: bool = False,
         local_data_path: Optional[Path] = None,
+        outcomes: Optional[dict] = None,
     ) -> tuple[dict, dict, dict, dict, dict]:
-        """Fetch one skycell through this loader's shared bounded executor."""
+        """Fetch one skycell through this loader's shared bounded executor.
+
+        ``outcomes`` (optional dict, filled in place): ``{(band, data_type): outcome}`` with the
+        ``download_and_process_band`` outcome of every array of the cell."""
         self._ensure_open()
         # The slot is acquired before any request is submitted.  Admission is
         # serialized so a later ingest worker cannot interleave its twelve
@@ -172,6 +176,7 @@ class StreamSkycellLoader:
             executor=self._executor,
             admission_lock=self._admission_lock,
             cell_slots=self._cell_slots,
+            outcomes=outcomes,
         )
 
     def _ensure_open(self) -> None:
@@ -460,19 +465,32 @@ def download_and_process_band(
     use_local_files: bool = False,
     local_data_path: Optional[Path] = None,
     skycell_name: str = "",
+    outcome: Optional[dict] = None,
 ) -> Optional[dict[str, Any]]:
     """
     Downloads a single FITS file (.fz) and processes it directly in memory,
     avoiding temporary disk I/O operations for better performance.
 
     If use_local_files is True, will first try to load from local storage before downloading.
+
+    ``outcome`` (optional dict, filled in place) tells WHY ``None`` was returned, from the real HTTP
+    result and exception types (never from message text): ``{"status": "ok"}`` on success,
+    ``{"status": "not_found", "http_status": 404}`` ONLY for an explicit HTTP 404 (the archive has no such
+    file: PS1 genuinely lacks the band), otherwise ``{"status": "transient", "detail": ...}`` (other HTTP
+    status such as 5xx/403, timeout/connection error, truncated or undecodable FITS, funpack failure).
     """
+    def _out(status, **kw):
+        if outcome is not None:
+            outcome.clear()
+            outcome.update(status=status, **kw)
+
     # Try to load from local files first if enabled
     if use_local_files and local_data_path:
         local_result = load_local_fits_file(skycell_name_parts, band, data_type, local_data_path)
         if local_result is not None:
             if skycell_name:
                 logging.info("Downloaded and converted %s %s %s", skycell_name, band, data_type)
+            _out("ok")
             return local_result
         # If local file not found, fall back to downloading
         logging.info(f"Local file not found for {skycell_name_parts[1]}.{skycell_name_parts[2]} {band}_{data_type}, downloading...")
@@ -491,6 +509,10 @@ def download_and_process_band(
         response = requests.get(url, timeout=60)
         if response.status_code != 200:
             logging.warning(f"Failed to download {url}, status: {response.status_code}")
+            if response.status_code == 404:
+                _out("not_found", http_status=404)
+            else:
+                _out("transient", http_status=response.status_code, detail=f"HTTP {response.status_code}")
             return None
 
         # Process the FITS data directly in memory
@@ -504,6 +526,7 @@ def download_and_process_band(
                     data = hdu.data.astype(np.float32)
                 header = hdu.header.tostring()
                 logging.info("Downloaded and converted %s %s %s", skycell_name, band, data_type)
+                _out("ok")
                 return {"data": data, "header": header}
         except Exception as fits_error:
             # If direct decompression fails, fall back to funpack (should be rare)
@@ -520,6 +543,7 @@ def download_and_process_band(
 
                 if not fits_path.exists():
                     logging.error(f"funpack failed to create {fits_path}")
+                    _out("transient", detail="funpack produced no file")
                     return None
 
                 with fits.open(fits_path) as hdul:
@@ -530,10 +554,12 @@ def download_and_process_band(
                         data = hdu.data.astype(np.float32)
                     header = hdu.header.tostring()
                     logging.info("Downloaded and converted %s %s %s", skycell_name, band, data_type)
+                    _out("ok")
                     return {"data": data, "header": header}
 
     except (requests.exceptions.RequestException, subprocess.CalledProcessError, FileNotFoundError) as e:
         logging.error(f"Error processing {url}: {e}")
+        _out("transient", detail=f"{type(e).__name__}: {e}")
         return None
 
 
@@ -581,6 +607,7 @@ def fetch_skycell_bands_masks_and_headers(
     use_local_files: bool = False,
     local_data_path: Optional[Path] = None,
     max_workers: int = 12,
+    outcomes: Optional[dict] = None,
 ) -> tuple[dict, dict, dict, dict, dict]:
     """Download/decompress a skycell in memory (no Zarr write).
 
@@ -606,6 +633,7 @@ def fetch_skycell_bands_masks_and_headers(
             use_local_files=use_local_files,
             local_data_path=local_data_path,
             executor=executor,
+            outcomes=outcomes,
         )
 
 
@@ -617,8 +645,12 @@ def _fetch_skycell_with_executor(
     executor: concurrent.futures.Executor,
     admission_lock: Optional[threading.Lock] = None,
     cell_slots: Optional[threading.BoundedSemaphore] = None,
+    outcomes: Optional[dict] = None,
 ) -> tuple[dict, dict, dict, dict, dict]:
     """Fetch one skycell through an existing executor.
+
+    ``outcomes`` (optional dict, filled in place) receives ``{(band, data_type): outcome}`` per array;
+    an array that raised in the worker has no entry (callers treat that as transient).
 
     ``admission_lock`` and ``cell_slots`` are used by ``StreamSkycellLoader``.
     They cover only task submission; result collection happens after the lock
@@ -653,6 +685,7 @@ def _fetch_skycell_with_executor(
         Returns
         -------
         Optional[tuple[str, str, str, np.ndarray, str]]"""
+        outcome: dict = {}
         result = download_and_process_band(
             skycell_name_parts,
             task_band,
@@ -660,7 +693,10 @@ def _fetch_skycell_with_executor(
             use_local_files,
             local_path,
             skycell_name=skycell_name,
+            outcome=outcome,
         )
+        if outcomes is not None:
+            outcomes[(task_band, data_type)] = outcome
         if result is None:
             return None
         return task_band, data_type, _array_name, result["data"], result["header"]

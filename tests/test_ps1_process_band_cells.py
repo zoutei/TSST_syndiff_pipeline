@@ -319,7 +319,7 @@ def _f01_cells(df):
     return need
 
 
-def _run_skip(tmp_path, monkeypatch, load_hook=None, **flags):
+def _run_skip(tmp_path, monkeypatch, load_hook=None, stream_fetch=None, **flags):
     from syndiff_pipeline.template_creation.processing import convolution_utils
 
     df = _mapping_df()
@@ -337,10 +337,37 @@ def _run_skip(tmp_path, monkeypatch, load_hook=None, **flags):
         raise AssertionError("Gaussian blur must never run with skip_convolved")
 
     monkeypatch.setattr(convolution_utils, "apply_gaussian_convolution", boom)
+    # threads instead of forked workers: forking from a multi-threaded pytest process can deadlock
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(pp, "ProcessPoolExecutor", lambda max_workers=None, **k: ThreadPoolExecutor(max_workers))
     monkeypatch.setattr(pp, "sequential_processor", boom)  # no row assembly / window / padding
     monkeypatch.setattr(pp, "process_row_step_from_queue", boom)
     monkeypatch.setattr(pp, "apply_cross_projection_padding", boom)
     monkeypatch.setattr(pp.zarr_utils, "load_skycell_bands_masks_and_headers", fake_load)
+    if stream_fetch is not None:
+        class FakeStreamLoader:
+            max_inflight_requests = 24
+            effective_inflight_requests = 24
+            prefetch_cells = 6
+
+            def __init__(self, *a, **k):
+                pass
+
+            def fetch_skycell_bands_masks_and_headers(self, skycell_id, *, use_local_files=False,
+                                                      local_data_path=None, outcomes=None):
+                loaded.append(skycell_id)
+                bands = _raw_bands(len(loaded), nan_in_r=False)
+                masks = {b: np.zeros((SIZE_, SIZE_), np.uint16) for b in perband.BANDS}
+                wts = {b: np.full((SIZE_, SIZE_), 0.25, np.float32) for b in perband.BANDS}
+                out = (bands, masks, wts, _headers(), _headers())
+                return stream_fetch(skycell_id, outcomes, *out)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(pp, "StreamSkycellLoader", FakeStreamLoader)
+        flags = dict(flags, ps1_source="stream")
     monkeypatch.setattr(pp, "get_projections_from_csv", lambda p: ["2484"])
     monkeypatch.setattr(pp, "load_csv_data", lambda p: df)
     monkeypatch.setattr(pp, "expected_convolved_skycells", lambda *a, **k: set())

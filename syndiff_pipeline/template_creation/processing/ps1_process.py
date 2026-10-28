@@ -847,6 +847,7 @@ def ingest_worker(
     band_cells_required: bool = False,
     skip_on_store_hit: bool = False,
     retry_missing_bands: int = 0,
+    band_fetch_log: Optional[dict] = None,
 ):
     """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode).
 
@@ -866,6 +867,14 @@ def ingest_worker(
     returns fewer than the 12 arrays (4 bands x image/mask/weight) is repeated up to this many times
     with a short backoff (1, 2, 4 s ...) before the cell is treated as band-less: the stream loader
     turns a failed or transient download into a missing band without raising.
+
+    ``band_fetch_log`` (``{"genuine": {}, "transient": {}}``, strict band mode): after the retries every
+    absent band is classified from the real HTTP outcome of its image download
+    (``download_and_process_band(outcome=...)``): an explicit 404 is a GENUINE missing band (logged,
+    recorded in ``genuine[cell] = [bands]``, the cell is processed and published with ``missing_bands``);
+    anything else (timeout, connection error, 5xx/other status, truncated/undecodable FITS, no
+    information, a present band lacking its mask or weight) is TRANSIENT: the cell is not queued, the
+    cause is recorded in ``transient[cell]`` and the stage fails at its end so a retry refetches it.
     """
     from pathlib import Path
 
@@ -973,7 +982,11 @@ def ingest_worker(
                 continue
 
         try:
+            outcomes: dict = {}
+
             def _fetch_cell():
+                outcomes.clear()
+                extra = {"outcomes": outcomes} if band_fetch_log is not None and ps1_source == "stream" else {}
                 if ps1_source == "stream":
                     if stream_loader is None:
                         # Preserve direct-call/backward-compatible behavior.  The
@@ -984,17 +997,27 @@ def ingest_worker(
                             skycell_id,
                             use_local_files=use_local_files,
                             local_data_path=local_path,
+                            **extra,
                         )
                     return stream_loader.fetch_skycell_bands_masks_and_headers(
                         skycell_id,
                         use_local_files=use_local_files,
                         local_data_path=local_path,
+                        **extra,
                     )
                 return zarr_utils.load_skycell_bands_masks_and_headers(zarr_store, projection, skycell_id)
 
             bands, masks, weights, headers, headers_weight = _fetch_cell()
+            def _incomplete_unexplained() -> bool:
+                """Some of the 12 arrays are absent and not all of those are explicit 404s."""
+                for b in ("r", "i", "z", "y"):
+                    for d, dt in ((bands, "image"), (masks, "mask"), (weights, "weight")):
+                        if b not in d and outcomes.get((b, dt), {}).get("status") != "not_found":
+                            return True
+                return False
+
             for _attempt in range(int(retry_missing_bands)):
-                if all(b in d for b in ("r", "i", "z", "y") for d in (bands, masks, weights)):
+                if not _incomplete_unexplained():
                     break
                 logger.warning(
                     f"[{ingest_label}] {skycell_id}: incomplete fetch (bands {sorted(bands)}, masks "
@@ -1002,7 +1025,32 @@ def ingest_worker(
                 )
                 time.sleep(min(1.0 * 2 ** _attempt, 8.0))
                 bands, masks, weights, headers, headers_weight = _fetch_cell()
+            if band_fetch_log is not None and bands:
+                absent = [b for b in ("r", "i", "z", "y") if b not in bands]
+                genuine = [b for b in absent if outcomes.get((b, "image"), {}).get("status") == "not_found"]
+                transient = {
+                    b: dict(outcomes.get((b, "image"), {"status": "transient", "detail": "no fetch outcome"}))
+                    for b in absent if b not in genuine
+                }
+                for b in ("r", "i", "z", "y"):
+                    if b in bands and (b not in masks or b not in weights):
+                        transient[b] = {"status": "transient", "detail": "band present but mask/weight missing"}
+                if transient:
+                    band_fetch_log["transient"][skycell_id] = transient
+                    logger.error(
+                        f"[{ingest_label}] {skycell_id}: TRANSIENT band failure {transient}; "
+                        f"cell not published (stage will fail; retry refetches)"
+                    )
+                    continue
+                if genuine:
+                    band_fetch_log["genuine"][skycell_id] = genuine
+                    logger.warning(
+                        f"[{ingest_label}] {skycell_id}: PS1 band(s) {genuine} genuinely absent "
+                        f"(explicit HTTP 404); publishing with missing_bands"
+                    )
             if not bands:
+                if band_fetch_log is not None:
+                    band_fetch_log["transient"][skycell_id] = {"all": {"status": "transient", "detail": "no band data fetched"}}
                 logger.warning(f"[{ingest_label}] No band data for {skycell_id}, skipping.")
                 continue
             raw_bundle = {
@@ -1339,6 +1387,7 @@ def _publish_band_cells_now(data_root, projection, cell, band_images, band_missi
 def publish_combined_result(
     data_root: str, recipe, result: dict, band_pool: Optional["_BandPublishPool"] = None,
     strict_missing_bands: bool = False, missing_band_log: Optional[dict] = None,
+    genuine_missing: Optional[dict] = None,
 ) -> Optional[dict]:
     """Publish one freshly combined, star-removed cell to the shared combined
     store under exactly the fingerprint readers resolve
@@ -1354,15 +1403,20 @@ def publish_combined_result(
     band_missing = list(result.pop("band_missing", None) or [])
     if strict_missing_bands and band_missing:
         # The store is immutable and publishing idempotent: a band-less cell stored once would stay
-        # forever. Publish neither the combined nor the band cells; the stage fails at its end.
-        logger.error(
-            "[ProcessCoordinator] %s lacks PS1 band(s) %s after retries; NOT published "
-            "(stages.ps1_process.allow_missing_bands is false)",
-            result["skycell_id"], band_missing,
-        )
-        if missing_band_log is not None:
-            missing_band_log[result["skycell_id"]] = band_missing
-        return None
+        # forever. Only bands the archive explicitly 404'd (``genuine_missing``, classified at fetch)
+        # may be absent; anything else: publish neither the combined nor the band cells, the stage
+        # fails at its end.
+        expected = list((genuine_missing or {}).get(result["skycell_id"], []))
+        unexplained = [b for b in band_missing if b not in expected]
+        if unexplained:
+            logger.error(
+                "[ProcessCoordinator] %s lacks PS1 band(s) %s that are not explicit HTTP 404s; NOT "
+                "published (stages.ps1_process.allow_missing_bands is false)",
+                result["skycell_id"], unexplained,
+            )
+            if missing_band_log is not None:
+                missing_band_log[result["skycell_id"]] = unexplained
+            return None
     parsed = combined_store._projection_and_cell(result["skycell_id"])
     if parsed is None:
         return None
@@ -1441,6 +1495,7 @@ def process_coordinator(
     retain_results: bool = True,
     strict_missing_bands: bool = False,
     missing_band_log: Optional[dict] = None,
+    genuine_missing: Optional[dict] = None,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -1478,6 +1533,7 @@ def process_coordinator(
             return publish_combined_result(
                 combined_store_data_root, combined_store_recipe, result, band_pool=_band_pool,
                 strict_missing_bands=strict_missing_bands, missing_band_log=missing_band_log,
+                genuine_missing=genuine_missing,
             )
 
     logger.info(f"[ProcessCoordinator] Starting with {num_workers} process workers")
@@ -1683,7 +1739,8 @@ def process_coordinator(
         for future in list(active_tasks):
             skycell_id, task_type = futures.get(future, ("unknown", "regular"))
             try:
-                result = future.result(timeout=60 if retain_results else None)
+                # skip_convolved: publishing is the only output, so wait long (a hung worker still fails the cell/stage)
+                result = future.result(timeout=60 if retain_results else 1800)
                 if result is not None:
                     result = _materialize_shm_result(result)
                     if task_type == "padding_source":
@@ -3785,6 +3842,7 @@ def run_modern_sliding_window_pipeline(
     # a band is not published at all and the stage fails at its end (allow_missing_bands: false).
     strict_missing_bands = bool((skip_convolved or publish_band_cells) and not allow_missing_bands)
     missing_band_log: dict = {}
+    band_fetch_log: dict = {"genuine": {}, "transient": {}}  # filled by ingest_worker (strict mode)
 
     # Fix 3 — event to pause coordinator new-submissions during cross-projection padding
     pipeline_paused_event = threading.Event()
@@ -3837,6 +3895,7 @@ def run_modern_sliding_window_pipeline(
             "retain_results": not skip_convolved,
             "strict_missing_bands": strict_missing_bands,
             "missing_band_log": missing_band_log,
+            "genuine_missing": band_fetch_log["genuine"],
         },
         daemon=True,
     )
@@ -3863,6 +3922,7 @@ def run_modern_sliding_window_pipeline(
                     band_cells_required=bool(publish_band_cells),
                     skip_on_store_hit=bool(skip_convolved),
                     retry_missing_bands=3 if strict_missing_bands else 0,
+                    band_fetch_log=band_fetch_log if strict_missing_bands else None,
                 ))
 
             # --- Part B: per-projection classification (tiered ingest plan) ---
@@ -4064,8 +4124,9 @@ def run_modern_sliding_window_pipeline(
                             f"skip_convolved: {len(_missing)}/{len(produced_skycells_list)} cells not "
                             f"published ({'band cells' if publish_band_cells else 'combined cells'}), "
                             f"e.g. {_missing[:5]}"
-                            + (f"; cells lacking PS1 bands (allow_missing_bands is false): {missing_band_log}"
-                               if missing_band_log else "")
+                            + (f"; transient band failures {band_fetch_log['transient']}"
+                               if band_fetch_log["transient"] else "")
+                            + (f"; unexplained band-less cells {missing_band_log}" if missing_band_log else "")
                         )
                     }
                 if ledger_finisher is not None:
@@ -4178,9 +4239,21 @@ def run_modern_sliding_window_pipeline(
         if catalog_failures:
             return {"error": f"Gaia projection catalogue download failed: {catalog_failures}"}
 
-        if missing_band_log:
-            return {"error": f"cells lacking PS1 bands were not published (allow_missing_bands is false): "
-                             f"{missing_band_log}"}
+        band_counters = {
+            "genuine_missing_band_cells": len(band_fetch_log["genuine"]),
+            "transient_failure_cells": len(band_fetch_log["transient"]) + len(missing_band_log),
+            "genuine_missing_bands": dict(band_fetch_log["genuine"]),
+            "transient_failures": {**band_fetch_log["transient"], **missing_band_log},
+        }
+        if strict_missing_bands:
+            logger.info(
+                f"[Pipeline] PS1 band counters: {band_counters['genuine_missing_band_cells']} cell(s) with a "
+                f"genuine (HTTP 404) missing band {band_counters['genuine_missing_bands']}, "
+                f"{band_counters['transient_failure_cells']} cell(s) with a transient band failure"
+            )
+        if band_fetch_log["transient"] or missing_band_log:
+            return {"error": "cells with transient PS1 band failures were not published (retry refetches "
+                             f"them): {band_counters['transient_failures']}", "band_counters": band_counters}
 
         logger.info("[Pipeline] Pipeline completed successfully!")
 
@@ -4206,6 +4279,7 @@ def run_modern_sliding_window_pipeline(
             "expected_count": len(expected_skycells),
             "artifacts": [f"{output_path}/{name}_data" for name in produced_skycells],
             "removal_ledger": ledger_summary,
+            "band_counters": band_counters,
         }
 
     except Exception:

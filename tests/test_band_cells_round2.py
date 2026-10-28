@@ -364,7 +364,7 @@ def test_strict_default_band_less_cell_not_published_and_stage_fails(tmp_path, m
     monkeypatch.setattr(pp.time, "sleep", lambda s: None)
     hook = _drop_y(".034")
     df, res, loaded = _run_skip(tmp_path, monkeypatch, load_hook=hook, **flags)
-    assert "error" in res and "skycell.2484.034" in res["error"] and "['y']" in res["error"]
+    assert "error" in res and "skycell.2484.034" in res["error"] and "'y'" in res["error"]
     assert hook.state["n"] == 4  # first fetch + 3 retries
     recipe = cs.production_combined_recipe(RECIPE)
     assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe) is None
@@ -425,3 +425,124 @@ def test_allow_missing_bands_flag_plumbing_and_fingerprint():
 
     assert "allow_missing_bands" not in model.scc_assembly_recipe_params(_resolved(Path("/x")))
     assert model.scc_assembly_recipe_params(r)["allow_missing_bands"] is True
+
+
+# ------------------------------------------------------------------ 404 (genuine) vs transient, real classification
+def _stream_drop_y(cell_suffix, status, times=None, http_status=None, detail=None):
+    """stream_fetch hook: the y arrays of one cell are absent, with the given download outcome."""
+    state = {"n": 0}
+
+    def fetch(skycell_id, outcomes, bands, masks, wts, hdr, hdrw):
+        if skycell_id.endswith(cell_suffix):
+            state["n"] += 1
+            if times is None or state["n"] <= times:
+                for d in (bands, masks, wts, hdr, hdrw):
+                    d.pop("y", None)
+                for dt in ("image", "mask", "weight") if outcomes is not None else ():
+                    o = {"status": status}
+                    if http_status:
+                        o["http_status"] = http_status
+                    if detail:
+                        o["detail"] = detail
+                    outcomes[("y", dt)] = o
+        return bands, masks, wts, hdr, hdrw
+    fetch.state = state
+    return fetch
+
+
+def test_http_404_is_a_genuine_missing_band_published_with_meta(tmp_path, monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    fetch = _stream_drop_y(".034", "not_found", http_status=404)
+    with caplog.at_level(logging.INFO):
+        df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=True)
+    assert "error" not in res, res
+    assert fetch.state["n"] == 1  # an explicit 404 is not retried
+    recipe = cs.production_combined_recipe(RECIPE)
+    fp = bcs.resolve_band_cells_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe)
+    assert bcs.try_load_band_cells(tmp_path, SPROJ, "034", fp)["missing_bands"] == ["y"]
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe) == fp
+    assert res["band_counters"]["genuine_missing_band_cells"] == 1
+    assert res["band_counters"]["genuine_missing_bands"] == {"skycell.2484.034": ["y"]}
+    assert res["band_counters"]["transient_failure_cells"] == 0
+    assert any("genuinely absent" in r.message and "skycell.2484.034" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("kind,kw", [
+    ("timeout", dict(detail="ReadTimeout: timed out")),
+    ("5xx", dict(http_status=503, detail="HTTP 503")),
+    ("403", dict(http_status=403, detail="HTTP 403")),
+    ("truncated", dict(detail="OSError: Empty or corrupt FITS file")),
+])
+@pytest.mark.parametrize("publish_bands", [True, False])
+def test_transient_failures_are_not_published_and_fail_the_stage(tmp_path, monkeypatch, caplog, kind, kw, publish_bands):
+    import logging
+
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    fetch = _stream_drop_y(".034", "transient", **kw)
+    with caplog.at_level(logging.INFO):
+        df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=publish_bands)
+    assert "error" in res and "skycell.2484.034" in res["error"] and "transient" in res["error"]
+    assert fetch.state["n"] == 4  # first fetch + 3 retries with backoff
+    recipe = cs.production_combined_recipe(RECIPE)
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe) is None
+    assert not bcs.band_cells_root(tmp_path).joinpath(SPROJ, "034").exists()
+    assert any("TRANSIENT" in r.message and "skycell.2484.034" in r.message for r in caplog.records)
+    # recovery on retry of the stage: only the lost cell is refetched and published
+    df, res2, loaded2 = _run_skip(tmp_path, monkeypatch, publish_band_cells=publish_bands)
+    assert "error" not in res2 and [c for c in loaded2 if c.endswith(".034")]
+
+
+def test_band_without_any_fetch_outcome_is_transient(tmp_path, monkeypatch):
+    """Conservative: no explicit 404 recorded (e.g. the worker raised) -> transient."""
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+
+    def fetch(skycell_id, outcomes, bands, masks, wts, hdr, hdrw):
+        if skycell_id.endswith(".034"):
+            for d in (bands, masks, wts, hdr, hdrw):
+                d.pop("y", None)
+        return bands, masks, wts, hdr, hdrw
+
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=True)
+    assert "error" in res and "no fetch outcome" in res["error"]
+
+
+def test_allow_missing_bands_override_treats_every_absent_band_as_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    fetch = _stream_drop_y(".034", "transient", detail="ReadTimeout")
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=True,
+                                allow_missing_bands=True)
+    assert "error" not in res and fetch.state["n"] == 1
+    recipe = cs.production_combined_recipe(RECIPE)
+    fp = bcs.resolve_band_cells_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe)
+    assert bcs.try_load_band_cells(tmp_path, SPROJ, "034", fp)["missing_bands"] == ["y"]
+
+
+def test_download_outcome_classification_from_real_http_results(monkeypatch):
+    """download_and_process_band(outcome=): 404 -> not_found; everything else -> transient."""
+    import requests
+    from syndiff_pipeline.template_creation.processing import ps1_download as D
+
+    class Resp:
+        def __init__(self, code, content=b""):
+            self.status_code, self.content = code, content
+
+    def run(resp=None, exc=None):
+        def get(url, timeout):
+            if exc is not None:
+                raise exc
+            return resp
+        monkeypatch.setattr(D.requests, "get", get)
+        o = {}
+        assert D.download_and_process_band(["skycell", "2591", "016"], "y", "image", outcome=o) is None
+        return o
+
+    assert run(Resp(404))["status"] == "not_found"
+    for code in (500, 503, 403, 410, 429):
+        o = run(Resp(code)); assert o["status"] == "transient" and o["http_status"] == code
+    for exc in (requests.exceptions.ReadTimeout("t"), requests.exceptions.ConnectionError("c")):
+        assert run(exc=exc)["status"] == "transient"
+    # 200 with a truncated body: undecodable FITS (funpack fallback fails too) -> transient
+    monkeypatch.setattr(D.subprocess, "run", mock.Mock(side_effect=FileNotFoundError("funpack")))
+    assert run(Resp(200, b"SIMPLE  = T truncated"))["status"] == "transient"
