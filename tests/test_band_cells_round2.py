@@ -546,3 +546,81 @@ def test_download_outcome_classification_from_real_http_results(monkeypatch):
     # 200 with a truncated body: undecodable FITS (funpack fallback fails too) -> transient
     monkeypatch.setattr(D.subprocess, "run", mock.Mock(side_effect=FileNotFoundError("funpack")))
     assert run(Resp(200, b"SIMPLE  = T truncated"))["status"] == "transient"
+
+
+# ------------------------------------------------------------------ cells absent from PS1 (every band 404)
+def _stream_all_absent(cell_suffix, status="not_found"):
+    state = {"n": 0}
+
+    def fetch(skycell_id, outcomes, bands, masks, wts, hdr, hdrw):
+        if skycell_id.endswith(cell_suffix):
+            state["n"] += 1
+            for d in (bands, masks, wts, hdr, hdrw):
+                d.clear()
+            for b in "rizy":
+                for dt in ("image", "mask", "weight"):
+                    outcomes[(b, dt)] = {"status": status, **({"http_status": 404} if status == "not_found" else {"detail": "ReadTimeout"})}
+        return bands, masks, wts, hdr, hdrw
+    fetch.state = state
+    return fetch
+
+
+@pytest.mark.parametrize("publish_bands", [True, False])
+def test_all_404_cell_is_skipped_silently_and_not_expected_anywhere(tmp_path, monkeypatch, caplog, publish_bands):
+    import logging
+
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    fetch = _stream_all_absent(".034")
+    with caplog.at_level(logging.INFO):
+        df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=publish_bands)
+    assert "error" not in res, res
+    assert fetch.state["n"] == 1  # explicit 404s are not retried
+    bc = res["band_counters"]
+    assert bc["absent_cells"] == 1 and bc["absent_cell_names"] == ["skycell.2484.034"]
+    assert bc["transient_failure_cells"] == 0 and bc["genuine_missing_band_cells"] == 0
+    assert any("ABSENT from PS1" in r.message and "skycell.2484.034" in r.message for r in caplog.records)
+    recipe = cs.production_combined_recipe(RECIPE)
+    assert cs.resolve_combined_fingerprint_for_recipe(tmp_path, SPROJ, "034", recipe) is None
+    assert not bcs.band_cells_root(tmp_path).joinpath(SPROJ, "034").exists()
+    rec = bcs.absent_cells_dir(tmp_path) / "skycell.2484.034.json"
+    assert rec.is_file() and bcs.is_absent_cell(tmp_path, "skycell.2484.034")
+    assert not bcs.is_absent_cell(tmp_path, "skycell.2484.033")
+    # verify (skip_convolved gate): complete without the absent cell, still incomplete for any other
+    r = _cp_resolved(tmp_path, skip_convolved=True, publish_band_cells=publish_bands)
+    r.data_root = str(tmp_path)
+    csv = scc_paths.scc_mapping_master_skycells_csv(r.data_root, 22, 3, 3, oversampling_factor=1)
+    csv.parent.mkdir(parents=True, exist_ok=True)
+    _mapping_df().to_csv(csv, index=False)
+    names = list(_mapping_df()["NAME"])
+    assert V._count_skip_convolved_cells(r, names) == (3, [])
+    # checkpoint inputs resolve without it
+    assert len(PC._resolve_skip_convolved_input_fingerprints(r)) == 2
+    # downsample availability check: needs nothing for the absent cell (xproj sources are still required)
+    d2 = _mapping_df().set_index("NAME", drop=False)
+    if publish_bands:
+        need = LD.check_band_cells_available(tmp_path, d2, sorted(d2.index), recipe)  # passes
+        assert "skycell.2484.034" not in need and len(need) == 5
+    else:  # no band cells at all in this variant: raises, but never because of the absent cell
+        with pytest.raises(RuntimeError) as ei:
+            LD.check_band_cells_available(tmp_path, d2, sorted(d2.index), recipe)
+        assert "skycell.2484.034" not in str(ei.value)
+    # a rerun does not refetch it
+    df, res2, loaded2 = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=publish_bands)
+    assert "error" not in res2 and fetch.state["n"] == 1 and not any(c.endswith(".034") for c in loaded2)
+
+
+def test_no_data_with_a_non_404_cause_stays_transient(tmp_path, monkeypatch):
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    fetch = _stream_all_absent(".034", status="transient")
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=True)
+    assert "error" in res and "skycell.2484.034" in res["error"]
+    assert not bcs.is_absent_cell(tmp_path, "skycell.2484.034")
+
+
+def test_some_404_some_data_unchanged_from_round3(tmp_path, monkeypatch):
+    monkeypatch.setattr(pp.time, "sleep", lambda s: None)
+    fetch = _stream_drop_y(".034", "not_found", http_status=404)
+    df, res, loaded = _run_skip(tmp_path, monkeypatch, stream_fetch=fetch, publish_band_cells=True)
+    assert "error" not in res and res["band_counters"]["genuine_missing_band_cells"] == 1
+    assert res["band_counters"]["absent_cells"] == 0
+    assert not bcs.is_absent_cell(tmp_path, "skycell.2484.034")

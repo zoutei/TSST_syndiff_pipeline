@@ -1531,6 +1531,9 @@ def _count_skip_convolved_cells(
     for name in expected_names:
         parsed = combined_store._projection_and_cell(name)
         ok = False
+        if band_cell_store.is_absent_cell(resolved.data_root, name):
+            saved += 1  # absent from PS1 (recorded by ps1_process): not expected in the store
+            continue
         if parsed is not None:
             projection, cell = parsed
             if want_bands:

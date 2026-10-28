@@ -429,6 +429,9 @@ def check_band_cells_available(data_root, skycell_df, skycell_names, combined_re
     from syndiff_pipeline.template_creation.processing import band_cell_store
 
     need = band_cell_store.required_band_cells(skycell_df, skycell_names)
+    # cells PS1 does not have (recorded by ps1_process) have no band cells and need none: the loader
+    # returns None for them, as before, i.e. no PS1 coverage / COUNT 0
+    need = [n for n in need if not band_cell_store.is_absent_cell(data_root, n)]
     missing: list[str] = []
     for name in need:
         try:

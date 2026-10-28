@@ -132,6 +132,44 @@ def resolve_band_cells_fingerprint_for_recipe(
     return fp
 
 
+# ---------------------------------------------------------------------------
+# Cells PS1 does not have at all (every band an explicit HTTP 404)
+# ---------------------------------------------------------------------------
+
+ABSENT_CELLS_DIRNAME = "ps1_absent_cells"
+
+
+def absent_cells_dir(data_root: str | Path) -> Path:
+    """``{data_root}/ps1_skycells_zarr/ps1_absent_cells``: one small JSON per skycell the PS1 archive
+    answered 404 for in every band. Written by ps1_process, read by verify / the checkpoint / the
+    downsample availability check (no network): exactly these cells are legitimately not in the store."""
+    return Path(data_root).expanduser() / combined_store.PS1_SKYCELLS_ZARR_DIRNAME / ABSENT_CELLS_DIRNAME
+
+
+def _absent_path(data_root, skycell_name: str) -> Path:
+    return absent_cells_dir(data_root) / f"{skycell_name}.json"
+
+
+def write_absent_cell(data_root: str | Path, skycell_name: str, outcomes: Mapping) -> None:
+    """Record ``skycell_name`` as absent from PS1 (idempotent; never raises)."""
+    try:
+        d = absent_cells_dir(data_root)
+        d.mkdir(parents=True, exist_ok=True)
+        import time as _t
+
+        tmp = d / f".{skycell_name}.{_t.time_ns()}.tmp"
+        tmp.write_text(json.dumps({"skycell": skycell_name, "reason": "every band image HTTP 404",
+                                   "outcomes": {f"{b}_{dt}": o for (b, dt), o in dict(outcomes).items()}},
+                                  default=str))
+        tmp.replace(_absent_path(data_root, skycell_name))
+    except Exception:
+        logger.warning("could not record absent PS1 cell %s", skycell_name, exc_info=True)
+
+
+def is_absent_cell(data_root: str | Path, skycell_name: str) -> bool:
+    return _absent_path(data_root, skycell_name).is_file()
+
+
 def band_record_fingerprint(
     projection: str,
     skycell: str,

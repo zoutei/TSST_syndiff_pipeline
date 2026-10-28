@@ -286,6 +286,8 @@ def _resolve_skip_convolved_input_fingerprints(
                 parsed = combined_store._projection_and_cell(str(name))
                 if parsed is None:
                     return []
+                if band_cell_store.is_absent_cell(resolved.data_root, str(name)):
+                    continue  # absent from PS1: legitimately not in the store
                 projection_id, cell = parsed
                 n += 1
                 if want_bands:

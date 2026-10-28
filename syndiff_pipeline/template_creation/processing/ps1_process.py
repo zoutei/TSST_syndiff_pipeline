@@ -935,7 +935,10 @@ def ingest_worker(
                     _fp0 = _cs0.resolve_combined_fingerprint_for_recipe(
                         combined_store_data_root, _proj0, _cell0, combined_store_recipe
                     )
-                    hits = {skycell_id: None} if _fp0 is not None else {}
+                    from syndiff_pipeline.template_creation.processing import band_cell_store as _bcs0
+
+                    hits = {skycell_id: None} if (_fp0 is not None or _bcs0.is_absent_cell(
+                        combined_store_data_root, skycell_id)) else {}
                 else:
                     hits = seed_band_cache_from_combined_store(
                         combined_store_data_root, [skycell_id], combined_store_recipe
@@ -1050,6 +1053,18 @@ def ingest_worker(
                     )
             if not bands:
                 if band_fetch_log is not None:
+                    if all(outcomes.get((b, "image"), {}).get("status") == "not_found" for b in ("r", "i", "z", "y")):
+                        # the cell is in the mapping table but absent from the PS1 archive in every band:
+                        # as before the band-cell work it is simply skipped (no PS1 coverage downstream).
+                        # Recorded so verify / checkpoint / downsample treat exactly it as not expected.
+                        band_fetch_log.setdefault("absent_cells", {})[skycell_id] = ["r", "i", "z", "y"]
+                        if combined_store_data_root is not None:
+                            from syndiff_pipeline.template_creation.processing import band_cell_store as _bcs
+
+                            _bcs.write_absent_cell(combined_store_data_root, skycell_id, outcomes)
+                        logger.warning(f"[{ingest_label}] {skycell_id}: ABSENT from PS1 (HTTP 404 in every band); "
+                                       f"skipped, nothing published")
+                        continue
                     band_fetch_log["transient"][skycell_id] = {"all": {"status": "transient", "detail": "no band data fetched"}}
                 logger.warning(f"[{ingest_label}] No band data for {skycell_id}, skipping.")
                 continue
@@ -3471,6 +3486,8 @@ def _cell_published_for_skip_convolved(
     parsed = combined_store._projection_and_cell(skycell_name)
     if parsed is None:
         return False
+    if band_cell_store.is_absent_cell(data_root, skycell_name):
+        return True  # PS1 has no such cell: nothing to publish, nothing expected
     projection, cell = parsed
     if want_band_cells:
         return band_cell_store.resolve_band_cells_fingerprint_for_recipe(
@@ -3842,7 +3859,7 @@ def run_modern_sliding_window_pipeline(
     # a band is not published at all and the stage fails at its end (allow_missing_bands: false).
     strict_missing_bands = bool((skip_convolved or publish_band_cells) and not allow_missing_bands)
     missing_band_log: dict = {}
-    band_fetch_log: dict = {"genuine": {}, "transient": {}}  # filled by ingest_worker (strict mode)
+    band_fetch_log: dict = {"genuine": {}, "transient": {}, "absent_cells": {}}  # filled by ingest_worker (strict mode)
 
     # Fix 3 — event to pause coordinator new-submissions during cross-projection padding
     pipeline_paused_event = threading.Event()
@@ -4114,7 +4131,8 @@ def run_modern_sliding_window_pipeline(
                 # lost anywhere (SEP failure, band build/publish failure, ...) fails the stage.
                 _missing = [
                     c for c in produced_skycells_list
-                    if not _cell_published_for_skip_convolved(
+                    if c not in band_fetch_log["absent_cells"]
+                    and not _cell_published_for_skip_convolved(
                         data_root, c, combined_store_recipe, publish_band_cells
                     )
                 ]
@@ -4241,6 +4259,8 @@ def run_modern_sliding_window_pipeline(
 
         band_counters = {
             "genuine_missing_band_cells": len(band_fetch_log["genuine"]),
+            "absent_cells": len(band_fetch_log["absent_cells"]),
+            "absent_cell_names": sorted(band_fetch_log["absent_cells"]),
             "transient_failure_cells": len(band_fetch_log["transient"]) + len(missing_band_log),
             "genuine_missing_bands": dict(band_fetch_log["genuine"]),
             "transient_failures": {**band_fetch_log["transient"], **missing_band_log},
