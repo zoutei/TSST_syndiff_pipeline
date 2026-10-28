@@ -99,20 +99,9 @@ def _projection_cells(projection: str) -> pd.DataFrame:
     return cells
 
 
-def projection_footprint_polygon(
-    projection,
-    *,
-    margin_px: float = DEFAULT_MARGIN_PX,
-    edge_samples: int = 50,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Sky polygon (ra, dec in degrees) around all cells of a projection.
-
-    Bounding box, in the projection's tangent plane, of every cell's pixel
-    extent, expanded by ``margin_px``; its edges are sampled and mapped to
-    RA/Dec.  Depends only on the PS1 tessellation, never on an SCC.
-    """
-    from astropy.wcs import WCS
-
+def _projection_tangent_box(projection, margin_px: float = DEFAULT_MARGIN_PX):
+    """``(crval1, crval2, u0, u1, v0, v1)``: the padded bounding box of all cells of a
+    projection in its tangent plane (intermediate world coordinates, degrees)."""
     pid = projection_id(projection)
     cells = _projection_cells(pid)
     crval1 = float(cells["CRVAL1"].iloc[0])
@@ -131,12 +120,11 @@ def projection_footprint_polygon(
         vs.extend(v.ravel().tolist())
     cdelt = float(abs(cells["CDELT1"].iloc[0]))
     pad = margin_px * cdelt
-    u0, u1 = min(us) - pad, max(us) + pad
-    v0, v1 = min(vs) - pad, max(vs) + pad
+    return crval1, crval2, min(us) - pad, max(us) + pad, min(vs) - pad, max(vs) + pad
 
-    t = np.linspace(0.0, 1.0, int(edge_samples), endpoint=False)
-    uu = np.concatenate([u0 + (u1 - u0) * t, np.full_like(t, u1), u1 - (u1 - u0) * t, np.full_like(t, u0)])
-    vv = np.concatenate([np.full_like(t, v0), v0 + (v1 - v0) * t, np.full_like(t, v1), v1 - (v1 - v0) * t])
+
+def _projection_tan_wcs(crval1: float, crval2: float):
+    from astropy.wcs import WCS
 
     w = WCS(naxis=2)
     w.wcs.ctype = ["RA---TAN", "DEC--TAN"]
@@ -146,8 +134,138 @@ def projection_footprint_polygon(
     from syndiff_pipeline.common.ps1_wcs import set_pole_lonpole_wcs
 
     set_pole_lonpole_wcs(w)  # pole projection (CRVAL2=90.0): LONPOLE 180 as in the real PS1 headers
+    return w
+
+
+def projection_footprint_polygon(
+    projection,
+    *,
+    margin_px: float = DEFAULT_MARGIN_PX,
+    edge_samples: int = 50,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sky polygon (ra, dec in degrees) around all cells of a projection.
+
+    Bounding box, in the projection's tangent plane, of every cell's pixel
+    extent, expanded by ``margin_px``; its edges are sampled and mapped to
+    RA/Dec.  Depends only on the PS1 tessellation, never on an SCC.
+    """
+    crval1, crval2, u0, u1, v0, v1 = _projection_tangent_box(projection, margin_px)
+
+    t = np.linspace(0.0, 1.0, int(edge_samples), endpoint=False)
+    uu = np.concatenate([u0 + (u1 - u0) * t, np.full_like(t, u1), u1 - (u1 - u0) * t, np.full_like(t, u0)])
+    vv = np.concatenate([np.full_like(t, v0), v0 + (v1 - v0) * t, np.full_like(t, v1), v1 - (v1 - v0) * t])
+
+    w = _projection_tan_wcs(crval1, crval2)
     ra, dec = w.wcs_pix2world(uu, vv, 1)
     return np.mod(np.asarray(ra, dtype=float), 360.0), np.asarray(dec, dtype=float)
+
+
+# ---------------------------------------------------------------------------
+# Pole-adjacent projections
+# ---------------------------------------------------------------------------
+
+POLE_RA_SPAN_DEG = 180.0  # same threshold at which the flathub bbox path refuses
+POLE_RA_CHUNKS = 24       # 15 deg RA pieces
+POLE_DEC_PAD_DEG = 0.05
+
+
+def polygon_needs_pole_path(ra_coords, dec_coords=None) -> bool:
+    """True if the footprint polygon wraps in RA (span > 180 deg, so a single
+    lon/lat bbox or lon/lat polygon test is invalid) -- this is the case for
+    every polygon that contains or comes close to a celestial pole."""
+    ra = np.mod(np.asarray(ra_coords, dtype=float), 360.0)
+    return bool((ra.max() - ra.min()) > POLE_RA_SPAN_DEG)
+
+
+def _tan_offsets(crval1: float, crval2: float, ra, dec):
+    """Tangent-plane (u, v) offsets in degrees and a front-hemisphere flag."""
+    w = _projection_tan_wcs(crval1, crval2)
+    ra = np.asarray(ra, dtype=float)
+    dec = np.asarray(dec, dtype=float)
+    r0, d0 = np.radians(crval1), np.radians(crval2)
+    r, d = np.radians(ra), np.radians(dec)
+    cosc = np.sin(d0) * np.sin(d) + np.cos(d0) * np.cos(d) * np.cos(r - r0)
+    with np.errstate(all="ignore"):
+        u, v = w.wcs_world2pix(ra, dec, 1)
+    return np.asarray(u, dtype=float), np.asarray(v, dtype=float), cosc > 0.0
+
+
+def filter_to_projection_box(df: pd.DataFrame, projection, margin_px: float = DEFAULT_MARGIN_PX) -> pd.DataFrame:
+    """Rows inside the projection's padded tangent-plane box.
+
+    Pole-safe: a gnomonic (TAN) projection maps great circles to straight
+    lines, so this box *is* the spherical polygon (great-circle edges) that
+    :func:`projection_footprint_polygon` samples, with no RA wrapping issues.
+    """
+    crval1, crval2, u0, u1, v0, v1 = _projection_tangent_box(projection, margin_px)
+    ra = pd.to_numeric(df["ra"], errors="coerce").to_numpy(dtype=float)
+    dec = pd.to_numeric(df["dec"], errors="coerce").to_numpy(dtype=float)
+    ok = np.isfinite(ra) & np.isfinite(dec)
+    keep = np.zeros(len(df), dtype=bool)
+    if ok.any():
+        u, v, front = _tan_offsets(crval1, crval2, ra[ok], dec[ok])
+        # u, v from wcs_world2pix with crpix=0, cdelt=1 are the offsets in degrees
+        keep[ok] = front & np.isfinite(u) & np.isfinite(v) & (u >= u0) & (u <= u1) & (v >= v0) & (v <= v1)
+    return df.loc[keep].reset_index(drop=True)
+
+
+def _pole_dec_range(projection, margin_px: float) -> tuple[float, float]:
+    """Declination range [lo, hi] (deg) that bounds the padded box; hi = 90 if the
+    box contains the pole (tested in the tangent plane, not on the lon/lat polygon)."""
+    crval1, crval2, u0, u1, v0, v1 = _projection_tangent_box(projection, margin_px)
+    ra, dec = projection_footprint_polygon(projection, margin_px=margin_px, edge_samples=200)
+    u, v, front = _tan_offsets(crval1, crval2, [0.0], [90.0])
+    pole_inside = bool(front[0] and u0 <= u[0] <= u1 and v0 <= v[0] <= v1)
+    lo = max(-90.0, float(dec.min()) - POLE_DEC_PAD_DEG)
+    hi = 90.0 if pole_inside else min(90.0, float(dec.max()) + POLE_DEC_PAD_DEG)
+    return lo, hi
+
+
+def _flathub_chunk_fetch(ra_range, dec_range, retries: int = 5) -> pd.DataFrame:
+    """Plain bbox flathub fetch of one RA chunk (no polygon filter), with retries."""
+    from syndiff_pipeline.template_creation.processing import pancakes
+
+    last = None
+    for attempt in range(retries):
+        try:
+            arr = pancakes._fetch_flathub_numpy(
+                "gaiadr3", list(pancakes.GAIA_CATALOG_COLUMNS),
+                ra=(float(ra_range[0]), float(ra_range[1])),
+                dec=(float(dec_range[0]), float(dec_range[1])),
+            )
+            return pancakes._structured_array_to_gaia_dataframe(arr)
+        except Exception as exc:  # noqa: BLE001 - transient HTTP errors
+            last = exc
+            logger.warning(f"[GaiaProj] flathub chunk RA {ra_range} failed (attempt {attempt + 1}): {exc}")
+            time.sleep(min(60.0, 5.0 * (attempt + 1)))
+    raise RuntimeError(f"flathub chunk RA {ra_range} failed after {retries} attempts") from last
+
+
+def download_ra_chunked(
+    projection,
+    *,
+    margin_px: float = DEFAULT_MARGIN_PX,
+    n_chunks: int = POLE_RA_CHUNKS,
+    fetch: Optional[Callable] = None,
+) -> pd.DataFrame:
+    """Download all Gaia rows in RA chunks over the projection's dec range and
+    merge by source_id (rows are *not* yet cut to the footprint).
+
+    ``fetch(ra_range, dec_range) -> DataFrame``; default is a flathub bbox query.
+    """
+    fetch = fetch or _flathub_chunk_fetch
+    lo, hi = _pole_dec_range(projection, margin_px)
+    edges = np.linspace(0.0, 360.0, int(n_chunks) + 1)
+    parts = []
+    for a, b in zip(edges[:-1], edges[1:]):
+        part = fetch((float(a), float(b)), (lo, hi))
+        logger.info(f"[GaiaProj] pole path: RA {a:.1f}-{b:.1f}: {len(part)} rows")
+        parts.append(part)
+    df = pd.concat([p for p in parts if len(p)], ignore_index=True) if any(len(p) for p in parts) else (
+        parts[0] if parts else pd.DataFrame())
+    if "source_id" in df.columns and len(df):
+        df = df.drop_duplicates("source_id", keep="first")
+    return df.reset_index(drop=True)
 
 
 def _default_downloader(backend: str, gaia_credentials_file: Optional[str], parquet_path: Path) -> Downloader:
@@ -235,8 +353,12 @@ def ensure_projection_catalog(
     gaia_credentials_file: Optional[str] = None,
     downloader: Optional[Downloader] = None,
     margin_px: float = DEFAULT_MARGIN_PX,
+    provenance: Optional[dict] = None,
 ) -> Path:
     """Return the uncut projection catalogue path, downloading it once if absent.
+
+    ``provenance`` (optional, e.g. ``{"built_by_branch": ..., "built_by_commit": ...}``)
+    is copied into the meta file only; it never enters a content hash or fingerprint.
 
     An existing parquet + meta pair is never rewritten.  Writes are atomic
     and serialised with an ``fcntl`` lock so concurrent runs download once.
@@ -256,13 +378,25 @@ def ensure_projection_catalog(
                 return path
 
             ra, dec = projection_footprint_polygon(pid, margin_px=margin_px)
-            dl = downloader or _default_downloader(backend, gaia_credentials_file, path)
-            logger.info(f"[GaiaProj] Downloading uncut Gaia catalogue for projection {pid}")
-            df = dl(ra, dec, None)
-
             from syndiff_pipeline.template_creation.processing import pancakes
 
-            df = pancakes.filter_gaia_dataframe_to_polygon(df, ra, dec)
+            pole_path = polygon_needs_pole_path(ra, dec)
+            if pole_path:
+                logger.info(f"[GaiaProj] Projection {pid}: RA-wrapping footprint; RA-chunked download")
+                fetch = None
+                if downloader is not None:
+                    def fetch(ra_rng, dec_rng, _dl=downloader):
+                        r = [ra_rng[0], ra_rng[1], ra_rng[1], ra_rng[0]]
+                        d = [dec_rng[0], dec_rng[0], dec_rng[1], dec_rng[1]]
+                        return _dl(np.asarray(r), np.asarray(d), None)
+                pole_dec_range = _pole_dec_range(pid, margin_px)
+                df = download_ra_chunked(pid, margin_px=margin_px, fetch=fetch)
+                df = filter_to_projection_box(df, pid, margin_px)
+            else:
+                dl = downloader or _default_downloader(backend, gaia_credentials_file, path)
+                logger.info(f"[GaiaProj] Downloading uncut Gaia catalogue for projection {pid}")
+                df = dl(ra, dec, None)
+                df = pancakes.filter_gaia_dataframe_to_polygon(df, ra, dec)
             from syndiff_pipeline.template_creation.processing.pancakes import GAIA_CATALOG_COLUMNS
 
             cols = [c for c in GAIA_CATALOG_COLUMNS if c in df.columns]
@@ -299,6 +433,14 @@ def ensure_projection_catalog(
                 "removal_fingerprint_sha256": inherited[0] if inherited else removal_hash,
                 "file_sha256": _sha256_file(path),
             }
+            if pole_path:
+                meta_doc["download_mode"] = "ra_chunked"
+                meta_doc["ra_chunks"] = POLE_RA_CHUNKS
+                meta_doc["download_dec_range"] = [float(pole_dec_range[0]), float(pole_dec_range[1])]
+                meta_doc["download_dec_pad_deg"] = POLE_DEC_PAD_DEG
+                meta_doc["download_filter"] = "tangent_plane_box (pole-safe)"
+            if provenance:
+                meta_doc.update({str(k): v for k, v in provenance.items()})
             if inherited:
                 meta_doc["fingerprint_inherited_from"] = str(inherited[1])
             meta_tmp = meta.with_name(meta.name + f".tmp{os.getpid()}")
