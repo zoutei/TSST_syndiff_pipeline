@@ -31,8 +31,16 @@ def _condor_quote(tok: str) -> str:
     return tok
 
 
+def job_scratch(cfg: ChainConfig, tag: str) -> Path:
+    """Per-job scratch on the run's shared storage. /tmp on the execute hosts is tiny and shared by every
+    user (it filled on 2026-10-27), so caches and temp files never go there."""
+    return cfg.out_root / "scratch" / tag
+
+
 def job_env(cfg: ChainConfig, tag: str, omp_threads: int = 4) -> dict[str, str]:
     root = cfg.code.forward_model_root
+    scratch = job_scratch(cfg, tag)
+    (scratch / "tmp").mkdir(parents=True, exist_ok=True)   # TMPDIR must exist, or Python silently falls back to /tmp
     return {
         "PYTHONPATH": cfg.code.pythonpath,
         "JAX_PLATFORMS": "cpu",
@@ -41,8 +49,10 @@ def job_env(cfg: ChainConfig, tag: str, omp_threads: int = 4) -> dict[str, str]:
         "PYTHONUNBUFFERED": "1",
         "PYTHONFAULTHANDLER": "1",
         "PYTHONHASHSEED": "0",
-        "MPLCONFIGDIR": f"/tmp/chain-mpl-{cfg.field}-{tag}",
-        "JAX_COMPILATION_CACHE_DIR": f"/tmp/chain-jax-{cfg.field}-{tag}",
+        "MPLCONFIGDIR": f"{scratch}/mpl",
+        "JAX_COMPILATION_CACHE_DIR": f"{scratch}/jax",
+        "TMPDIR": f"{scratch}/tmp",
+        "JOBLIB_TEMP_FOLDER": f"{scratch}/tmp",
     }
 
 
