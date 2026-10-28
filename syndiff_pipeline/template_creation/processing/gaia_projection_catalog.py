@@ -143,6 +143,9 @@ def projection_footprint_polygon(
     w.wcs.crval = [crval1, crval2]
     w.wcs.crpix = [0.0, 0.0]
     w.wcs.cdelt = [1.0, 1.0]
+    from syndiff_pipeline.common.ps1_wcs import set_pole_lonpole_wcs
+
+    set_pole_lonpole_wcs(w)  # pole projection (CRVAL2=90.0): LONPOLE 180 as in the real PS1 headers
     ra, dec = w.wcs_pix2world(uu, vv, 1)
     return np.mod(np.asarray(ra, dtype=float), 360.0), np.asarray(dec, dtype=float)
 

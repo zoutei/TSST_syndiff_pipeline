@@ -35,6 +35,7 @@ MAPPING_ALLOWED = frozenset(
         "edge_exclusion",
         "edge_buffer_large",
         "edge_buffer_small",
+        "max_extrapolate_px",
         "n_threads",
         "max_workers",
         "oversampling_factor",
@@ -217,6 +218,9 @@ class MappingStageParams:
     edge_exclusion: int = 10
     edge_buffer_large: int = 410
     edge_buffer_small: int = 70
+    # Pole-adjacent chips: coordinates outside every PS1 skycell image by up to this many
+    # PS1 px are assigned to the nearest cell (0 = never extrapolate; unmapped stays an error).
+    max_extrapolate_px: float = 0.0
     n_threads: int = 8
     max_workers: int | None = None
     oversampling_factor: int = 1
@@ -265,6 +269,17 @@ class MappingStageParams:
         if version != 3:
             raise ValueError("stages.mapping.mapgrid_version must be exactly 3")
         object.__setattr__(self, "mapgrid_version", version)
+        try:
+            extrap = float(self.max_extrapolate_px)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"stages.mapping.max_extrapolate_px must be a number, got {self.max_extrapolate_px!r}"
+            ) from None
+        if not (extrap >= 0.0) or extrap == float("inf"):
+            raise ValueError(
+                f"stages.mapping.max_extrapolate_px must be finite and >= 0, got {self.max_extrapolate_px!r}"
+            )
+        object.__setattr__(self, "max_extrapolate_px", extrap)
         version = str(self.temporal_wcs_version or "").strip()
         if not version:
             raise ValueError("stages.mapping.temporal_wcs_version must be non-empty")

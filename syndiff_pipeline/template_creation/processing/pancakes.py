@@ -41,6 +41,7 @@ from syndiff_pipeline.common.ps1_wcs import (
     PS1_CRPIX_FITS_KEY,
     apply_ps1_crpix_convention,
     ps1_crpix_offset,
+    set_pole_lonpole_header,
     table_ps1_crpix_offset,
 )
 from syndiff_pipeline.template_creation.processing.downsample import load_cluster_template_job_payload
@@ -973,7 +974,111 @@ def find_relevant_skycells_for_grid(
     return skycell_wcs_df[sc_mask].reset_index(drop=True)
 
 
-def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, complete_wcs_skycells, edge_buffer_large=410, edge_buffer_small=70, buffer=200, n_threads=8):
+def _skycell_buffered_bounds(naxis1, naxis2, cell_x, cell_y, buffer_large, buffer_small, buffer_normal):
+    """Pixel rectangle ``(x0, x1, y0, y1)`` of the buffered skycell polygon.
+
+    Mirrors ``calculate_radec_corners_shift_numba`` exactly (same buffer rule per
+    cell index), but returns the pixel rectangle instead of RA/Dec vertices.
+    """
+    if cell_x == 0:
+        x0, x1 = buffer_normal, naxis1 - buffer_small
+    elif cell_x == 9:
+        x0, x1 = buffer_large, naxis1 - buffer_normal
+    else:
+        x0, x1 = buffer_large, naxis1 - buffer_small
+    if cell_y == 0:
+        y0, y1 = buffer_normal, naxis2 - buffer_small
+    elif cell_y == 9:
+        y0, y1 = buffer_large, naxis2 - buffer_normal
+    else:
+        y0, y1 = buffer_large, naxis2 - buffer_small
+    return float(x0), float(x1), float(y0), float(y1)
+
+
+def assign_unmapped_by_pixel_geometry(
+    tess_pix_skycell_id,
+    skycells,
+    ra_deg,
+    dec_deg,
+    proj_center_x,
+    proj_center_y,
+    pixel_coords,
+    edge_buffer_large,
+    edge_buffer_small,
+    buffer,
+    search_radius_deg=1.0,
+    max_extrapolate_px=0.0,
+):
+    """Second pass for coordinates the MOC polygon filter left unassigned (-1).
+
+    The MOC polygon filter is unreliable for polygons touching the celestial pole
+    (the buffered rectangles of the four pole-corner cells have a vertex ~0.02 deg from
+    the pole and their RA span is ~360 deg).  Those coordinates are tested exactly in each
+    candidate skycell's own pixel frame against the SAME buffered rectangle the MOC
+    polygon is meant to represent.  Ties are broken as in the first pass (closest
+    projection centre in TESS pixels).  Coordinates covered by no buffered rectangle but by a
+    skycell image (inside the overlap buffer) go to the skycell with the largest margin to
+    its image edge.  Coordinates outside every skycell image by more than
+    ``max_extrapolate_px`` stay -1 (no PS1 data exist there).
+
+    Already-assigned entries are never modified.  Returns ``(new_ids, info)``.
+    """
+    from astropy.wcs import WCS
+
+    ids = tess_pix_skycell_id.copy()
+    todo = np.flatnonzero(ids == -1)
+    info = {"n_unmapped_in": int(todo.size), "tier1": 0, "tier2": 0, "tier3": 0, "left": 0}
+    if todo.size == 0:
+        return ids, info
+    ra = np.asarray(ra_deg, dtype=np.float64)[todo]
+    dec = np.asarray(dec_deg, dtype=np.float64)[todo]
+    # candidate skycells: centre within search_radius_deg of any unmapped coordinate
+    c_ra = np.deg2rad(skycells["RA"].to_numpy(dtype=np.float64))
+    c_dec = np.deg2rad(skycells["DEC"].to_numpy(dtype=np.float64))
+    cand = np.zeros(len(skycells), dtype=bool)
+    r_ra, r_dec = np.deg2rad(ra), np.deg2rad(dec)
+    for i0 in range(0, todo.size, 512):
+        sl = slice(i0, i0 + 512)
+        cosd = (np.sin(c_dec)[:, None] * np.sin(r_dec[sl])[None, :]
+                + np.cos(c_dec)[:, None] * np.cos(r_dec[sl])[None, :]
+                * np.cos(c_ra[:, None] - r_ra[sl][None, :]))
+        cand |= (np.arccos(np.clip(cosd, -1.0, 1.0)) <= np.deg2rad(search_radius_deg)).any(axis=1)
+    best_d = np.full(todo.size, np.inf)
+    best_id = np.full(todo.size, -1, dtype=np.int64)
+    best_m = np.full(todo.size, -np.inf)       # raw-image margin (px) of best tier-2/3 cell
+    best_m_id = np.full(todo.size, -1, dtype=np.int64)
+    px = pixel_coords[todo, 1].astype(np.float64)
+    py = pixel_coords[todo, 0].astype(np.float64)
+    for j in np.flatnonzero(cand):
+        row = skycells.iloc[j]
+        _, w, _ = get_ps1_wcs_information(row)
+        x, y = w.world_to_pixel_values(ra, dec)
+        nx, ny = float(row["NAXIS1"]), float(row["NAXIS2"])
+        x0, x1, y0, y1 = _skycell_buffered_bounds(
+            nx, ny, int(row["x"]), int(row["y"]), edge_buffer_large, edge_buffer_small, buffer
+        )
+        inside = (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+        if inside.any():
+            d = np.hypot(px - float(proj_center_x[j]), py - float(proj_center_y[j]))
+            upd = inside & (d < best_d)
+            best_d[upd] = d[upd]
+            best_id[upd] = j
+        margin = np.minimum.reduce([x + 0.5, nx - 0.5 - x, y + 0.5, ny - 0.5 - y])
+        upd = margin > best_m
+        best_m[upd] = margin[upd]
+        best_m_id[upd] = j
+    t1 = best_id >= 0
+    ids[todo[t1]] = best_id[t1].astype(ids.dtype)
+    t2 = ~t1 & (best_m >= 0.0)
+    ids[todo[t2]] = best_m_id[t2].astype(ids.dtype)
+    t3 = ~t1 & ~t2 & (best_m >= -float(max_extrapolate_px)) & (best_m_id >= 0)
+    ids[todo[t3]] = best_m_id[t3].astype(ids.dtype)
+    info.update(tier1=int(t1.sum()), tier2=int(t2.sum()), tier3=int(t3.sum()),
+                left=int((ids[todo] == -1).sum()))
+    return ids, info
+
+
+def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, complete_wcs_skycells, edge_buffer_large=410, edge_buffer_small=70, buffer=200, n_threads=8, max_extrapolate_px=0.0):
     """
     Create optimized mapping from TESS pixels to skycells.
 
@@ -1022,6 +1127,7 @@ def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, comp
     _y_tess = tpix_coord_input[:, 0]
     print(f"  Converting {len(_x_tess)} coordinates to RA/Dec...")
     _ra_tess, _dec_tess = tess_wcs.all_pix2world(_x_tess, _y_tess, 0)
+    _ra_world = _ra_tess
     _ra_tess = shift_ras_for_moc(_ra_tess, ra_shift)
     print(f"  RA/Dec conversion complete. Running MOC filtering...")
 
@@ -1037,6 +1143,15 @@ def process_tess_to_skycell_mapping(tess_wcs, data_shape, tpix_coord_input, comp
     # Use actual number of coordinates (accounts for oversampling)
     total_coords = len(tpix_coord_input)
     tess_pix_skycell_id = create_closest_center_array_numba(rust_result_flat, rust_result_lengths, tess_proj_center_x, tess_proj_center_y, tpix_coord_input, total_coords)
+
+    # Exact pixel-frame re-test of anything the MOC pass left unassigned (never touches assigned ids).
+    tess_pix_skycell_id, _fb = assign_unmapped_by_pixel_geometry(
+        tess_pix_skycell_id, complete_wcs_skycells, _ra_world, _dec_tess,
+        tess_proj_center_x, tess_proj_center_y, tpix_coord_input,
+        edge_buffer_large, edge_buffer_small, buffer, max_extrapolate_px=max_extrapolate_px,
+    )
+    if _fb["n_unmapped_in"]:
+        print(f"  pixel-geometry fallback: {_fb}")
 
     # rust_result_noedge_flat = np.concatenate([arr for arr in rust_result_noedge if len(arr) > 0])
     # rust_result_noedge_lengths = np.array([len(arr) for arr in rust_result_noedge])
@@ -1090,6 +1205,7 @@ def get_ps1_wcs_information(skycell_data):
     header_dict = skycell_data[relevant_keys].to_dict()
 
     ps1_header = fits.Header(header_dict)
+    set_pole_lonpole_header(ps1_header)  # table CRVAL2=90.0 exact -> wcslib LONPOLE=0; real PS1 header => 180
     # CRPIX in the skycell table is already in the corrected (PS1CRPIX) convention;
     # record the offset in the header so every regmap carries it.
     if PS1_CRPIX_COLUMN in skycell_data.index:
@@ -2207,6 +2323,7 @@ def process_tess_image_optimized(
     max_workers=None,
     oversampling_factor=1,
     *,
+    max_extrapolate_px=0.0,
     x_left_dead=44,
     x_right_dead=44,
     y_edge_strip=30,
@@ -2364,6 +2481,7 @@ def process_tess_image_optimized(
         edge_buffer_small=edge_buffer_small,
         buffer=buffer,
         n_threads=n_threads,
+        max_extrapolate_px=max_extrapolate_px,
     )
 
     unmapped = int(np.count_nonzero(tess_pix_skycell_mapping == -1))
@@ -2506,6 +2624,7 @@ if __name__ == "__main__":
     parser.add_argument("--edge_exclusion", type=int, default=10, help="Edge exclusion in pixels for padding checks")
     parser.add_argument("--edge_buffer_large", type=int, default=410, help="Large edge buffer for WCS corner expansion")
     parser.add_argument("--edge_buffer_small", type=int, default=70, help="Small edge buffer for WCS corner expansion")
+    parser.add_argument("--max_extrapolate_px", type=float, default=0.0, help="Pole-adjacent chips: assign coordinates outside every skycell image by up to this many PS1 px to the nearest cell (0 = off)")
     parser.add_argument("--buffer", type=int, default=200, help="General buffer size in pixels")
     parser.add_argument("--tess_buffer", type=int, default=150, help="TESS footprint buffer in pixels used for MOC filtering")
     parser.add_argument("--n_threads", type=int, default=8, help="Number of threads to use in MOC filtering")
@@ -2585,6 +2704,7 @@ if __name__ == "__main__":
         edge_buffer_small=args.edge_buffer_small,
         buffer=args.buffer,
         tess_buffer=args.tess_buffer,
+        max_extrapolate_px=args.max_extrapolate_px,
         n_threads=args.n_threads,
         overwrite=args.overwrite,
         max_workers=args.max_workers,

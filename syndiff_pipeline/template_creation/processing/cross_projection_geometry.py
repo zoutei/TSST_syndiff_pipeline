@@ -81,7 +81,9 @@ def cell_wcs_from_row(row: pd.Series) -> WCS:
     wcs.wcs.cd = cd_matrix_from_row(row)
     wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     wcs.wcs.cunit = ["deg", "deg"]
-    return wcs
+    from syndiff_pipeline.common.ps1_wcs import set_pole_lonpole_wcs
+
+    return set_pole_lonpole_wcs(wcs)  # pole cell: table CRVAL2=90.0 -> LONPOLE 180 (as the real header)
 
 
 def padding_patch_geometry(

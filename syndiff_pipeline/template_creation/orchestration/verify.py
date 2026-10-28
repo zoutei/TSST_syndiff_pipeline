@@ -151,6 +151,8 @@ def config_fingerprint(
     if stage == "mapping":
         mp = resolved.stages.mapping
         parts.extend([str(mp.oversampling_factor), str(mp.pad_distance), str(mp.overwrite)])
+        if float(getattr(mp, "max_extrapolate_px", 0.0) or 0.0) > 0.0:
+            parts.append(f"max_extrapolate_px={float(mp.max_extrapolate_px)!r}")
     elif stage == "ps1_process":
         pp = resolved.stages.ps1_process
         parts.extend(

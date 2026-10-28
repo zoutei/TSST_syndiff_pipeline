@@ -72,6 +72,32 @@ def ps1_wcs_from_header(header: Union[str, Any]):
     return w
 
 
+# PS1 pole cells (projection 2643) have CRVAL2 = 89.999999999997 in the real image headers, so wcslib uses
+# LONPOLE = 180 for them.  The bundled skycell_wcs.csv stores CRVAL2 = 90.0 exactly, for which wcslib switches to
+# LONPOLE = 0 (FITS Paper II), i.e. a 180 deg RA flip about the pole.  Every WCS built from a table row must
+# therefore carry LONPOLE = 180 when CRVAL2 >= 90.  (dev_runs/s26_ownwcs_20261027/mapping_pole_diag/lonpole_check)
+POLE_LONPOLE_DEG = 180.0
+
+
+def table_row_needs_pole_lonpole(crval2) -> bool:
+    """True for a skycell-table row whose CRVAL2 sits on (or numerically above) the pole."""
+    return float(crval2) >= 90.0
+
+
+def set_pole_lonpole_header(header):
+    """Add ``LONPOLE=180`` to a skycell-table-derived ``fits.Header`` with ``CRVAL2 >= 90`` (in place; returns it)."""
+    if table_row_needs_pole_lonpole(header["CRVAL2"]):
+        header["LONPOLE"] = (POLE_LONPOLE_DEG, "PS1 pole cell, as real header")
+    return header
+
+
+def set_pole_lonpole_wcs(wcs):
+    """Set ``wcs.wcs.lonpole = 180`` on a table-derived ``astropy`` WCS with ``CRVAL2 >= 90`` (in place; returns it)."""
+    if table_row_needs_pole_lonpole(wcs.wcs.crval[1]):
+        wcs.wcs.lonpole = POLE_LONPOLE_DEG
+    return wcs
+
+
 def apply_ps1_crpix_convention(df):
     """Return a copy of a raw PS1 skycell table with ``CRPIX1/2`` corrected and the marker column set.
 

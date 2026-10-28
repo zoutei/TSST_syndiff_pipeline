@@ -416,12 +416,15 @@ def _mapping_grid_fragment_from_mapping_stage(
 def mapping_recipe_params(resolved) -> dict:
     """``mapping`` recipe params (verify.py:137-139 + mapping grid)."""
     mp = resolved.stages.mapping
-    return {
+    params = {
         "oversampling_factor": mp.oversampling_factor,
         "pad_distance": mp.pad_distance,
         "overwrite": mp.overwrite,
         "mapping_grid": _mapping_grid_fragment_from_mapping_stage(mp),
     }
+    if float(getattr(mp, "max_extrapolate_px", 0.0) or 0.0) > 0.0:
+        params["max_extrapolate_px"] = float(mp.max_extrapolate_px)
+    return params
 
 
 def ps1_process_recipe_params(resolved) -> dict:

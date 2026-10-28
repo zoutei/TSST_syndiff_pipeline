@@ -85,6 +85,7 @@ def do_mapping(cfg: ChainConfig, mode: str = "fitted", n_threads: int | None = N
         tess_file=str(ffi), skycell_wcs_csv=str(skycell_wcs_csv()), output_path=str(mapdir),
         pad_distance=mp.pad_distance, edge_exclusion=mp.edge_exclusion,
         edge_buffer_large=mp.edge_buffer_large, edge_buffer_small=mp.edge_buffer_small,
+        max_extrapolate_px=float(mp.max_extrapolate_px),
         buffer=mp.buffer, tess_buffer=mp.tess_buffer, n_threads=mp.n_threads, overwrite=True,
         max_workers=mp.max_workers, oversampling_factor=OS, x_left_dead=mp.x_left_dead,
         x_right_dead=mp.x_right_dead, y_edge_strip=mp.y_edge_strip,

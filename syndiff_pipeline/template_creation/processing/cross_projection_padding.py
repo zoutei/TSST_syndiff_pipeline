@@ -205,8 +205,9 @@ def create_master_array_wcs(metadata: dict, config, current_row_id: int) -> WCS:
     master_wcs.wcs.cd = cd
     master_wcs.wcs.ctype = ["RA---TAN", "DEC--TAN"]
     master_wcs.wcs.cunit = ["deg", "deg"]
+    from syndiff_pipeline.common.ps1_wcs import set_pole_lonpole_wcs
 
-    return master_wcs
+    return set_pole_lonpole_wcs(master_wcs)  # pole cell: LONPOLE 180 as in the real PS1 header
 
 
 # --- Core Logic ---

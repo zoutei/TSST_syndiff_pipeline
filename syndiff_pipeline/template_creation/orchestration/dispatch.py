@@ -313,6 +313,7 @@ def _execute_template_stage(
                 edge_exclusion=mp.edge_exclusion,
                 edge_buffer_large=mp.edge_buffer_large,
                 edge_buffer_small=mp.edge_buffer_small,
+                max_extrapolate_px=float(mp.max_extrapolate_px),
                 buffer=mp.buffer,
                 tess_buffer=mp.tess_buffer,
                 n_threads=mp.n_threads,

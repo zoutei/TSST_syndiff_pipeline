@@ -102,6 +102,9 @@ def build_ps1_wcs(row: pd.Series) -> tuple[WCS, tuple[int, int]]:
     header_dict["NAXIS1"] = int(header_dict["NAXIS1"])  # type: ignore[index]
     header_dict["NAXIS2"] = int(header_dict["NAXIS2"])  # type: ignore[index]
     ps1_header = fits.Header(header_dict)
+    from syndiff_pipeline.common.ps1_wcs import set_pole_lonpole_header
+
+    set_pole_lonpole_header(ps1_header)  # table CRVAL2=90.0 -> LONPOLE 180 as in the real PS1 header
     ps1_wcs = WCS(ps1_header)
     ps1_shape = (int(row["NAXIS1"]), int(row["NAXIS2"]))
     return ps1_wcs, ps1_shape
