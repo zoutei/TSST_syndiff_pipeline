@@ -85,6 +85,8 @@ PS1_PROCESS_ALLOWED = frozenset(
         "removal_ledger",
         "use_shared_convolved_store",
         "write_per_scc_convolved_zarr",
+        "publish_band_cells",
+        "skip_convolved",
         "executor",
         "condor_request_cpus",
         "condor_request_memory",
@@ -149,6 +151,7 @@ DOWNSAMPLE_ALLOWED = frozenset(
         "apply_intra_skycell",
         "apply_inter_skycell",
         "write_split_contribs",
+        "convolve_from_band_cells",
         "remap_store_name",
         "output_store_name",
     }
@@ -322,6 +325,16 @@ class Ps1ProcessStageParams:
     removal_ledger: bool = False
     use_shared_convolved_store: bool = False
     write_per_scc_convolved_zarr: bool = True
+    # Shared per-band star-removed cell store (band_cell_store.py): also publish
+    # the four weighted band cells C_b = Z w_b F_b of every freshly processed cell
+    # under the combined cell's fingerprint (design: band_cells_design.md). The
+    # combined cell is still published. Not part of the combined recipe.
+    publish_band_cells: bool = False
+    # Do not convolve and do not write ps1_convolved.zarr / per-SCC convolved zarr;
+    # stage completeness is then judged on the band cells (publish_band_cells) or
+    # the combined cells. Overrides use_shared_convolved_store /
+    # write_per_scc_convolved_zarr for the convolve steps.
+    skip_convolved: bool = False
     executor: str = "condor"
     condor_request_cpus: int = 64
     condor_request_memory: int = 300_000
@@ -483,6 +496,11 @@ class DownsampleStageParams:
     # convolution path; see convolved_templates_patch_cache.py and
     # spicy-squishing-ritchie.md Part H.
     write_split_contribs: bool = False
+    # Band-cell store (design 2026-10-27): when true (linear geometry mode only)
+    # the padding-aware convolved cell is built on the fly from the shared
+    # per-band cell store (``band_convolve``) instead of read from
+    # ps1_convolved.zarr. Recorded in the downsample fingerprint only when true.
+    convolve_from_band_cells: bool = False
     # INPUT: which remap lane to read; None → inherit stages.remap.store_name
     remap_store_name: str | None = None
     # OUTPUT: which templates lane to write; None → templates/

@@ -45,6 +45,7 @@ PS1_SKYCELLS_ZARR_BASENAME = "ps1_skycells.zarr"
 # these are path constants only.
 PS1_COMBINED_ZARR_BASENAME = "ps1_combined.zarr"
 PS1_CONVOLVED_ZARR_BASENAME = "ps1_convolved.zarr"
+PS1_BAND_CELLS_ZARR_BASENAME = "ps1_band_cells.zarr"
 
 # Provenance bookkeeping tree (provenance plan §7/§8): data_root-scoped, not
 # SCC-scoped -- ``{data_root}/bookkeeping/provenance.db`` + a per-host/pid
@@ -59,6 +60,7 @@ __all__ = [
     "CATALOGS_SUBDIR",
     "CONVOLVED_REMOVED_STARS_CSV_BASENAME",
     "CONVOLVED_ZARR_BASENAME",
+    "PS1_BAND_CELLS_ZARR_BASENAME",
     "EVENTS_SUBDIR",
     "FFI_SUBDIR",
     "LEGACY_SUBDIR",
@@ -76,6 +78,7 @@ __all__ = [
     "oversampling_dirname",
     "mapping_sector_tree_root",
     "mapping_write_dir",
+    "ps1_band_cells_zarr_path",
     "ps1_combined_zarr_path",
     "ps1_convolved_zarr_path",
     "ps1_skycells_zarr_dir",
@@ -674,3 +677,8 @@ def provenance_db_path(data_root: str | Path) -> Path:
 def provenance_spool_dir(data_root: str | Path) -> Path:
     """Directory of per-host/pid sidecar JSONL spool files the supervisor drains."""
     return Path(data_root).expanduser() / BOOKKEEPING_SUBDIR / PROVENANCE_SPOOL_SUBDIR
+
+
+def ps1_band_cells_zarr_path(data_root: str | Path) -> Path:
+    """Shared store of per-band star-removed PS1 skycells (``ps1_band_cells.zarr``)."""
+    return ps1_skycells_zarr_dir(data_root) / PS1_BAND_CELLS_ZARR_BASENAME

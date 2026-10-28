@@ -425,8 +425,11 @@ def _execute_template_stage(
         pd = resolved.stages.ps1_download
         mp = resolved.stages.mapping
         use_shared_convolved_store = bool(pp.use_shared_convolved_store)
+        skip_convolved = bool(getattr(pp, "skip_convolved", False))
         write_per_scc_convolved_zarr = (
-            False if use_shared_convolved_store else bool(pp.write_per_scc_convolved_zarr)
+            False
+            if (use_shared_convolved_store or skip_convolved)
+            else bool(pp.write_per_scc_convolved_zarr)
         )
         # Must resolve the exact same mapping master skycells CSV that
         # mapping/remap/downsample use (respecting oversampling_factor and
@@ -455,6 +458,8 @@ def _execute_template_stage(
             removal_ledger=pp.removal_ledger,
             use_shared_convolved_store=use_shared_convolved_store,
             write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
+            publish_band_cells=bool(getattr(pp, "publish_band_cells", False)),
+            skip_convolved=skip_convolved,
             oversampling_factor=mp.oversampling_factor,
             mapping_csv_path=mapping_csv_path,
         )
@@ -631,6 +636,7 @@ def _execute_template_stage(
                 rebuild_field_store=bool(getattr(ds, "rebuild_field_store", False)),
                 force_rerun=force_rerun,
                 progress_path=progress_path,
+                convolve_from_band_cells=bool(getattr(ds, "convolve_from_band_cells", False)),
             )
             linear_result = dict(linear_result)
             linear_result["template_dir_physical"] = str(linear_result["output_dir"])

@@ -277,6 +277,19 @@ only then to mtime, with a loud warning, when no recipe context is available
 at all. `scripts/audit_shared_store_recipes.py` reports cells with genuinely
 conflicting recipes (read-only, does not mutate the store).
 
+**Band-cell store (`ps1_band_cells.zarr`, opt-in).** `stages.ps1_process.publish_band_cells: true`
+also publishes, next to each combined cell and under the **same fingerprint**
+(`ps1_band_cells.zarr/{projection}/{cell}/{fp}/`, helper `scc_paths.ps1_band_cells_zarr_path`,
+module `template_creation/processing/band_cell_store.py`), the four weighted star-removed band
+cells $C_b = Z\,w_b F_b$ (`arrays.npz`: `band_r/i/z/y`, `combined_mask`; plus `headers.json`,
+`removed_stars.json`). $Z$ is the 0/1 keep mask of `remove_background`, $w_b$ the recipe band
+weights; the combined NaN pattern is in every band. Float32 cells sum to the combined image within 4
+float32 ulp per pixel (float64 cells, option `band_dtype`, bitwise). `stages.ps1_process.skip_convolved: true` makes ps1_process
+write nothing to `ps1_convolved.zarr` or the per-SCC convolved zarr (the convolution is then done
+later, at downsample, from the band cells); the stage's completeness check then looks at the band
+cells (with `publish_band_cells`) or the combined cells. Both flags default off and change no
+existing fingerprint.
+
 SCC-scoped diff store (field mode v2 — SCC-primary write-through):
 
 ```text

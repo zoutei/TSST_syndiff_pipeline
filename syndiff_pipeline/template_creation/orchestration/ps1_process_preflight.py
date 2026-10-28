@@ -137,7 +137,15 @@ def plan_ps1_process_launch(
     target_only = target_cells - os1_cells
     os1_only = os1_cells - target_cells
 
-    if not bool(getattr(params, "use_shared_convolved_store", False)):
+    if bool(getattr(params, "skip_convolved", False)) or not bool(
+        getattr(params, "use_shared_convolved_store", False)
+    ):
+        _why = (
+            "skip_convolved is enabled (no convolved store to classify against); "
+            "full profile required"
+            if bool(getattr(params, "skip_convolved", False))
+            else "use_shared_convolved_store is disabled; full profile required"
+        )
         return Ps1ProcessLaunchPlan(
             decision=DECISION_FULL,
             oversampling_factor=oversampling_factor,
@@ -146,7 +154,7 @@ def plan_ps1_process_launch(
             target_only_cells=target_only,
             os1_only_cells=os1_only,
             missing_cells=frozenset(),
-            reason="use_shared_convolved_store is disabled; full profile required",
+            reason=_why,
         )
 
     try:

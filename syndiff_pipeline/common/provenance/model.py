@@ -461,7 +461,7 @@ def downsample_recipe_params(resolved) -> dict:
     """``downsample`` recipe params (verify.py:163-175)."""
     ds = resolved.stages.downsample
     mp = resolved.stages.mapping
-    return {
+    params = {
         "oversampling_factor": ds.oversampling_factor,
         "single_offset": ds.single_offset,
         "ignore_mask_bits": list(ds.ignore_mask_bits),
@@ -474,6 +474,10 @@ def downsample_recipe_params(resolved) -> dict:
             mp, oversampling_factor=ds.oversampling_factor
         ),
     }
+    # Only when ON, so every existing fingerprint is unchanged.
+    if bool(getattr(ds, "convolve_from_band_cells", False)):
+        params["convolve_from_band_cells"] = True
+    return params
 
 
 def ps1_download_recipe_params(resolved) -> dict:

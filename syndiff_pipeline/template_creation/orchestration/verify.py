@@ -166,6 +166,11 @@ def config_fingerprint(
         )
         if getattr(pp, "band_weights", None) is not None:
             parts.append(json.dumps(pp.band_weights, sort_keys=True))
+        # Only when ON, so every existing fingerprint is unchanged.
+        if bool(getattr(pp, "publish_band_cells", False)):
+            parts.append("publish_band_cells=True")
+        if bool(getattr(pp, "skip_convolved", False)):
+            parts.append("skip_convolved=True")
     elif stage == "remap":
         rm = resolved.stages.remap
         mp = resolved.stages.mapping
@@ -192,6 +197,8 @@ def config_fingerprint(
                 str(bool(ds.apply_inter_skycell)),
             ]
         )
+        if bool(getattr(ds, "convolve_from_band_cells", False)):
+            parts.append("convolve_from_band_cells=True")
     elif stage == "ps1_download":
         pd = resolved.stages.ps1_download
         parts.extend([str(pd.overwrite), str(pd.use_local_files)])
@@ -788,8 +795,29 @@ def ps1_process_uses_shared_convolved_store(resolved: ResolvedTargetConfig) -> b
     return bool(getattr(resolved.stages.ps1_process, "use_shared_convolved_store", False))
 
 
+def ps1_process_skips_convolved(resolved: ResolvedTargetConfig) -> bool:
+    """``stages.ps1_process.skip_convolved``: no convolved store is written at all."""
+    return bool(getattr(resolved.stages.ps1_process, "skip_convolved", False))
+
+
+def ps1_process_publishes_band_cells(resolved: ResolvedTargetConfig) -> bool:
+    return bool(getattr(resolved.stages.ps1_process, "publish_band_cells", False))
+
+
 def resolve_ps1_process_checkpoint_location(resolved: ResolvedTargetConfig) -> Path:
-    """Canonical ps1_process artifact root for checkpoints and verify."""
+    """Canonical ps1_process artifact root for checkpoints and verify.
+
+    With ``skip_convolved`` there is no convolved store: the root is the band-cell store
+    (``publish_band_cells``) or the combined store."""
+    if ps1_process_skips_convolved(resolved):
+        from syndiff_pipeline.common.scc_paths import (
+            ps1_band_cells_zarr_path,
+            ps1_combined_zarr_path,
+        )
+
+        if ps1_process_publishes_band_cells(resolved):
+            return ps1_band_cells_zarr_path(resolved.data_root)
+        return ps1_combined_zarr_path(resolved.data_root)
     if ps1_process_uses_shared_convolved_store(resolved):
         return ps1_convolved_zarr_path(resolved.data_root)
     return _convolved_zarr_path(resolved)
@@ -1465,6 +1493,55 @@ def _count_shared_convolved_cells(
     return saved, missing
 
 
+def _count_skip_convolved_cells(
+    resolved: ResolvedTargetConfig, expected_names: list[str]
+) -> tuple[int, list[str]]:
+    """(saved, missing) for ``skip_convolved`` runs: a cell is saved when its band cells
+    (``publish_band_cells``) or its combined cell is complete under THIS run's own combined
+    fingerprint (recipe-resolved, never "some fingerprint exists")."""
+    from syndiff_pipeline.template_creation.processing import band_cell_store, combined_store
+    from syndiff_pipeline.template_creation.processing.combined_store import (
+        production_combined_recipe,
+    )
+
+    params = resolved.stages.ps1_process
+    t = resolved.target
+    try:
+        recipe = production_combined_recipe(
+            params, data_root=resolved.data_root, sector=t.sector, camera=t.camera, ccd=t.ccd,
+        )
+    except Exception:
+        log.warning("ps1_process verify: could not resolve combined recipe", exc_info=True)
+        return 0, list(expected_names)
+    want_bands = ps1_process_publishes_band_cells(resolved)
+    missing: list[str] = []
+    saved = 0
+    for name in expected_names:
+        parsed = combined_store._projection_and_cell(name)
+        ok = False
+        if parsed is not None:
+            projection, cell = parsed
+            if want_bands:
+                ok = (
+                    band_cell_store.resolve_band_cells_fingerprint_for_recipe(
+                        resolved.data_root, projection, cell, recipe
+                    )
+                    is not None
+                )
+            else:
+                ok = (
+                    combined_store.resolve_combined_fingerprint_for_recipe(
+                        resolved.data_root, projection, cell, recipe
+                    )
+                    is not None
+                )
+        if ok:
+            saved += 1
+        else:
+            missing.append(name)
+    return saved, missing
+
+
 def _store_has_any_data_array(zarr_path: Path) -> bool:
     """True if the convolved store contains any ``*_data`` array directory."""
     try:
@@ -1496,9 +1573,13 @@ def verify_ps1_process(
         return VerifyResult(
             "ps1_process", False, "scc_assembly not indexed", str(zarr_path)
         )
-    shared_store = ps1_process_uses_shared_convolved_store(resolved)
+    skip_conv = ps1_process_skips_convolved(resolved)
+    shared_store = ps1_process_uses_shared_convolved_store(resolved) and not skip_conv
     if not zarr_path.exists():
-        label = "Shared convolved store missing" if shared_store else "Convolved zarr missing"
+        label = (
+            "Band-cell/combined store missing" if skip_conv
+            else "Shared convolved store missing" if shared_store else "Convolved zarr missing"
+        )
         return VerifyResult("ps1_process", False, label, str(zarr_path))
     try:
         expected = expected_ps1_process_skycells(resolved)
@@ -1508,7 +1589,9 @@ def verify_ps1_process(
         return VerifyResult("ps1_process", False, "No expected skycells from mapping CSV", str(zarr_path))
 
     started = time.monotonic()
-    if shared_store:
+    if skip_conv:
+        saved, missing = _count_skip_convolved_cells(resolved, expected)
+    elif shared_store:
         saved, missing = _count_shared_convolved_cells(zarr_path, expected, resolved=resolved)
     else:
         saved, missing = _count_convolved_data_arrays(zarr_path, expected)
@@ -1522,7 +1605,9 @@ def verify_ps1_process(
     )
 
     if saved == 0:
-        if shared_store:
+        if skip_conv:
+            msg = f"Band-cell/combined store has no published cells: 0/{len(expected)} skycells saved"
+        elif shared_store:
             msg = f"Shared convolved store has no published cells: 0/{len(expected)} skycells saved"
         elif _store_has_any_data_array(zarr_path):
             msg = (
@@ -2248,7 +2333,9 @@ def collect_stage_artifacts(
         expected = expected_ps1_process_skycells(resolved)
         if not zarr_path.exists():
             return len(expected), 0, [str(zarr_path)]
-        if ps1_process_uses_shared_convolved_store(resolved):
+        if ps1_process_skips_convolved(resolved):
+            saved, _missing = _count_skip_convolved_cells(resolved, expected)
+        elif ps1_process_uses_shared_convolved_store(resolved):
             saved, _missing = _count_shared_convolved_cells(zarr_path, expected, resolved=resolved)
         else:
             saved, _missing = _count_convolved_data_arrays(zarr_path, expected)

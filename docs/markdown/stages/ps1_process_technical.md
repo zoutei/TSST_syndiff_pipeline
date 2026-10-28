@@ -484,6 +484,27 @@ Places each cell's `combined_image` into the master array at the correct x-offse
 
 After step `i` is complete, `advance_sliding_window` moves `next_array` → `current_array`, resets `next_array` to NaN, and updates all position tracking. Step `i+1` does not re-gather row `i+1` (it becomes the new current row that was the previous next row).
 
+### Band cells and `skip_convolved` (opt-in, default off)
+
+`publish_band_cells: true`: `band_combiner_worker` also attaches the weighted band images
+`w_b F_b` (`perband.weighted_band_images`, the combiner's arithmetic) to the bundle; `process_single_cell`
+turns them into $C_b = Z\,w_b F_b$ (`band_cell_store.build_band_cells`, refusing if `remove_background`
+changed any pixel other than by zeroing) and `publish_combined_result` publishes them right after the
+combined cell under the same fingerprint. Float32 cells (default) sum to the combined image within 4
+float32 ulp per pixel; float64 cells (`band_dtype`) are bitwise. A tier-2 combined-store hit only
+short-cuts the raw fetch when the band cells of that fingerprint also exist.
+
+`skip_convolved: true`: the stage does ingest -> band combine -> SEP/removal (ledger, Z) -> publish
+(combined cell, plus band cells with `publish_band_cells`) and nothing else. No row assembly, sliding
+window, Gaussian blur, cross-projection padding, convolved store or per-SCC zarr; the main thread only
+waits for the ingest workers and the coordinator (`process_coordinator(retain_results=False)` keeps no
+band cache or pending results; the last band combiner forwards the single shutdown signal). The cells
+ingested are the mapping's cells of unfinished projections plus every cross-projection padding source
+(`_skip_convolved_padding_sources`, = `f01_select` `xproj_src`; same-projection neighbours are already
+mapping cells); cells already published are skipped (`ingest_worker(skip_on_store_hit=True)`).
+`verify_ps1_process`, the absence probe and `resolve_ps1_process_checkpoint_location` look at the
+band-cell (or combined) store.
+
 ### Step 3b — Shared convolved-store canonical snapshot (per-cell skip)
 
 When the caller opts into the shared, content-addressed convolved store (`use_shared_convolved_store: true`, i.e. `convolved_store_recipe`/`convolved_store_data_root`/`combined_store_recipe` are all set), `process_row_step_from_queue` calls `_publish_canonical_convolved_snapshot` immediately after `apply_cross_row_padding` and *before* `apply_cross_projection_padding` — the one point in the row's lifecycle where `state.current_array` still holds the same-projection-only master array that the canonical cell definition requires. It operates on an independent copy and never mutates `state.current_array`, so the unchanged step 5 full convolution/save path is unaffected either way.

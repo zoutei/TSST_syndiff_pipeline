@@ -741,6 +741,10 @@ def process_single_cell(bundle: dict) -> dict:
             )
 
         convention = bundle.get("removal_convention", band_utils.REMOVAL_CONVENTION)
+        # Pre-removal combined image, kept only to recover Z for the band cells.
+        combined_before = (
+            np.array(bundle["combined_image"], copy=True) if bundle.get("band_images") else None
+        )
         combined_image = None
         ledger_path = None
         ledger_spec = bundle.get("ledger")
@@ -774,6 +778,24 @@ def process_single_cell(bundle: dict) -> dict:
         for star in removed_stars_list:
             star["skycell_id"] = skycell_id
 
+        # Band cells C_b = Z w_b F_b (publish_band_cells): the weighted bands the combiner
+        # attached, zeroed where remove_background zeroed the combined image, the combined
+        # NaN pattern in every band. Best-effort: a failure only drops the band cells.
+        band_descs = None
+        if combined_before is not None:
+            try:
+                from syndiff_pipeline.template_creation.processing import band_cell_store
+
+                cells = band_cell_store.build_band_cells(
+                    bundle["band_images"], combined_before, combined_image,
+                    dtype=str(next(iter(bundle["band_images"].values())).dtype),
+                )
+                band_descs = {b: _array_to_shm(a, f"bnd{b}_{skycell_id}") for b, a in cells.items()}
+                del cells
+            except Exception as exc:
+                logger.error(f"[PreProcessor] Band cells not built for {skycell_id}: {exc}")
+            combined_before = None
+
         image_desc = _array_to_shm(combined_image, f"img_{skycell_id}")
         mask_desc = _array_to_shm(bundle["combined_mask"], f"msk_{skycell_id}")
 
@@ -789,6 +811,8 @@ def process_single_cell(bundle: dict) -> dict:
             "ledger_path": ledger_path,
             "ledger_fingerprint": None if ledger_spec is None else ledger_spec["combined_fingerprint"],
         }
+        if band_descs is not None:
+            result["band_images_shm"] = band_descs
 
         logger.info(f"[PreProcessor] Processed {skycell_id}")
         return result
@@ -815,12 +839,22 @@ def ingest_worker(
     combined_store_recipe: Any = None,
     stream_loader: StreamSkycellLoader | None = None,
     catalog_provider: Any = None,
+    band_cells_required: bool = False,
+    skip_on_store_hit: bool = False,
 ):
     """Stage 1: Load raw cell data from Zarr (zarr mode) or HTTP (stream mode).
 
     ``catalog_provider`` (a ``ProjectionCatalogPrefetcher``): the tier-2
     combined-store lookup waits for the cell's projection catalogue first,
     because the cell fingerprint includes that catalogue's checksum.
+
+    ``band_cells_required`` (``publish_band_cells``): a combined-store hit only short-cuts the raw
+    fetch when the cell's band cells are also published under that fingerprint; otherwise the cell
+    is reprocessed from raw so its band cells get published.
+
+    ``skip_on_store_hit`` (``skip_convolved``): every task type (padding sources too) is checked
+    against the store, and a fully published cell is simply skipped: nothing is loaded, cached or
+    queued.
     """
     from pathlib import Path
 
@@ -856,11 +890,12 @@ def ingest_worker(
         # called for the one cell currently being ingested, so it's bounded
         # by the worker pool size instead of the whole SCC's cell count.
         if (
-            task_type == "regular"
+            (task_type == "regular" or skip_on_store_hit)
             and combined_store_data_root is not None
             and combined_store_recipe is not None
         ):
             from syndiff_pipeline.template_creation.processing.combined_store import (
+                _projection_and_cell as combined_store_projection_and_cell,
                 seed_band_cache_from_combined_store,
             )
 
@@ -873,9 +908,18 @@ def ingest_worker(
                     logger.warning("[%s] Gaia catalogue for %s unavailable before store lookup",
                                    ingest_label, skycell_id, exc_info=True)
             try:
-                hits = seed_band_cache_from_combined_store(
-                    combined_store_data_root, [skycell_id], combined_store_recipe
-                )
+                if skip_on_store_hit:
+                    from syndiff_pipeline.template_creation.processing import combined_store as _cs0
+
+                    _proj0, _cell0 = combined_store_projection_and_cell(skycell_id)
+                    _fp0 = _cs0.resolve_combined_fingerprint_for_recipe(
+                        combined_store_data_root, _proj0, _cell0, combined_store_recipe
+                    )
+                    hits = {skycell_id: None} if _fp0 is not None else {}
+                else:
+                    hits = seed_band_cache_from_combined_store(
+                        combined_store_data_root, [skycell_id], combined_store_recipe
+                    )
             except Exception:
                 hits = {}
                 logger.warning(
@@ -884,6 +928,25 @@ def ingest_worker(
                     skycell_id,
                     exc_info=True,
                 )
+            if skycell_id in hits and band_cells_required:
+                try:
+                    from syndiff_pipeline.template_creation.processing import band_cell_store
+
+                    _proj, _cell = combined_store_projection_and_cell(skycell_id)
+                    if band_cell_store.resolve_band_cells_fingerprint_for_recipe(
+                        combined_store_data_root, _proj, _cell, combined_store_recipe
+                    ) is None:
+                        hits = {}
+                        logger.info(
+                            f"[{ingest_label}] {skycell_id} has no band cells yet; reprocessing from raw"
+                        )
+                except Exception:
+                    hits = {}
+                    logger.warning("[%s] band-cell check failed for %s; reprocessing from raw",
+                                   ingest_label, skycell_id, exc_info=True)
+            if skycell_id in hits and skip_on_store_hit:
+                logger.info(f"[{ingest_label}] {skycell_id} already published; skipping")
+                continue
             if skycell_id in hits:
                 if band_cache is not None:
                     band_cache[skycell_id] = hits[skycell_id]
@@ -986,6 +1049,8 @@ def band_combiner_worker(
     raw_cell_queue: _thread_queue.Queue,
     combined_raw_queue: _thread_queue.Queue,
     band_weights: Optional[dict] = None,
+    band_cells_dtype: Optional[str] = None,
+    shutdown_state: Optional[dict] = None,
 ):
     """Stage 1.5: Combines raw bands into a single image+mask+uncert in-process.
 
@@ -995,11 +1060,27 @@ def band_combiner_worker(
 
     Passthrough tasks (regular_cache_hit, padding_source with no band data) are forwarded
     unchanged since they don't carry raw bands.
+
+    ``shutdown_state`` (``{"lock", "alive"}``, skip_convolved only): see the None branch below.
+
+    ``band_cells_dtype`` (``"float32"``/``"float64"``, default ``None`` = off): also attach the
+    weighted band images ``w_b F_b`` (``perband.weighted_band_images``, the combiner's own
+    arithmetic) to the bundle as ``band_images`` so ``process_single_cell`` can turn them into
+    the star-removed band cells (``band_cell_store``).
     """
     while True:
         raw_bundle = raw_cell_queue.get()
         if raw_bundle is None:
-            combined_raw_queue.put(None)
+            if shutdown_state is None:
+                combined_raw_queue.put(None)
+            else:
+                # skip_convolved: forward the shutdown signal only from the LAST combiner to
+                # exit, so every bundle another combiner is still processing is already queued.
+                with shutdown_state["lock"]:
+                    shutdown_state["alive"] -= 1
+                    last = shutdown_state["alive"] == 0
+                if last:
+                    combined_raw_queue.put(None)
             break
 
         task_type = raw_bundle.get("task_type", "regular")
@@ -1032,6 +1113,16 @@ def band_combiner_worker(
                 "headers_data": raw_bundle["headers_data"],
                 "remove_saturated_stars": raw_bundle.get("remove_saturated_stars", True),
             }
+            if band_cells_dtype:
+                from syndiff_pipeline.template_creation.processing import perband
+
+                wb = perband.weighted_band_images(
+                    raw_bundle["bands_data"], raw_bundle["headers_data"], weights=band_weights
+                )
+                reduced_bundle["band_images"] = {
+                    b: np.asarray(img, dtype=np.dtype(band_cells_dtype)) for b, img in wb.items()
+                }
+                del wb
 
             del raw_bundle
             combined_raw_queue.put(reduced_bundle)
@@ -1047,6 +1138,8 @@ def _materialize_shm_result(result: dict) -> dict:
     if "combined_image_shm" in result:
         result["combined_image"] = _shm_to_array(result.pop("combined_image_shm"))
         result["combined_mask"] = _shm_to_array(result.pop("combined_mask_shm"))
+    if "band_images_shm" in result:
+        result["band_images"] = {b: _shm_to_array(d) for b, d in result.pop("band_images_shm").items()}
     return result
 
 
@@ -1173,6 +1266,9 @@ def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[di
     publish here; also selects it as the cell's current artifact."""
     from syndiff_pipeline.template_creation.processing import combined_store
 
+    # Taken out of the result up front so the (large) band cells never linger in the
+    # row-assembly queue, whatever happens below.
+    band_images = result.pop("band_images", None)
     parsed = combined_store._projection_and_cell(result["skycell_id"])
     if parsed is None:
         return None
@@ -1197,6 +1293,29 @@ def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[di
         input_fingerprints=inputs,
         producer="ps1_process",
     )
+    if band_images and info is not None and info.get("fingerprint"):
+        # Band cells under the SAME fingerprint, right after the combined cell
+        # (publish_band_cells; band_cell_store never raises).
+        from syndiff_pipeline.template_creation.processing import band_cell_store
+
+        band_info = band_cell_store.publish_band_cells(
+            data_root,
+            projection,
+            cell,
+            band_images=band_images,
+            combined_mask=result["combined_mask"],
+            headers_data=result.get("headers_data"),
+            removed_stars=result.get("removed_stars"),
+            recipe=recipe,
+            input_fingerprints=inputs,
+            producer="ps1_process",
+            band_dtype=str(next(iter(band_images.values())).dtype),
+        )
+        if band_info is None or band_info.get("fingerprint") != info.get("fingerprint"):
+            logger.error(
+                "[ProcessCoordinator] band cells of %s not published under the combined fingerprint %s",
+                result["skycell_id"], info.get("fingerprint"),
+            )
     ledger_fp = result.get("ledger_fingerprint")
     if result.get("ledger_path") and info is not None and ledger_fp and info.get("fingerprint") != ledger_fp:
         logger.error(
@@ -1209,6 +1328,20 @@ def publish_combined_result(data_root: str, recipe, result: dict) -> Optional[di
         # "current" for this cell. Never overrides recipe-matched resolution.
         combined_store.update_current_pointer(data_root, projection, cell, info["fingerprint"])
     return info
+
+
+class _DiscardDict(dict):
+    """dict that stores nothing (skip_convolved coordinator band cache)."""
+
+    def __setitem__(self, key, value):
+        pass
+
+
+class _DiscardDeque(deque):
+    """deque that stores nothing (skip_convolved coordinator result queue)."""
+
+    def append(self, item):
+        pass
 
 
 def process_coordinator(
@@ -1224,6 +1357,7 @@ def process_coordinator(
     combined_store_data_root: Optional[str] = None,
     combined_store_recipe=None,
     removal_ledger: bool = False,
+    retain_results: bool = True,
 ):
     """Coordinates between the band-combiner output queue and ProcessPoolExecutor
     for source extraction (SEP).
@@ -1264,6 +1398,11 @@ def process_coordinator(
         band_cache_uses = {}
 
     pending_results: deque = deque()
+    if not retain_results:
+        # skip_convolved: results are only published (combined / band cells); nothing is kept
+        # for a row assembler, so memory stays at a few cells.
+        band_cache = _DiscardDict()
+        pending_results = _DiscardDeque()
     last_coordinator_log_time: float = 0.0
     last_mem_warn_time: float = 0.0
 
@@ -1455,7 +1594,7 @@ def process_coordinator(
         for future in list(active_tasks):
             skycell_id, task_type = futures.get(future, ("unknown", "regular"))
             try:
-                result = future.result(timeout=60)
+                result = future.result(timeout=60 if retain_results else None)
                 if result is not None:
                     result = _materialize_shm_result(result)
                     if task_type == "padding_source":
@@ -3122,6 +3261,78 @@ class _LedgerProjectionFinisher:
 # --- Main Orchestrator ---
 
 
+def _skip_convolved_padding_sources(df: pd.DataFrame, projections) -> dict:
+    """``{cell: source_projection}`` of every cross-projection padding source the downsample
+    loader reads for the cells of ``projections`` (``padding_correction.cross_projection_padding_spec``:
+    the same set ``forward_model.chain.perband.f01_select`` computes as ``xproj_src``)."""
+    from syndiff_pipeline.template_creation.processing.padding_correction import (
+        cross_projection_padding_spec,
+    )
+
+    out: dict = {}
+    wanted = {str(p) for p in projections}
+    for _, row in df.iterrows():
+        if str(row["projection"]) not in wanted:
+            continue
+        for item in cross_projection_padding_spec(row):
+            cell = item["neighbor"]
+            try:
+                out[cell] = cell.split(".")[1]
+            except IndexError:
+                continue
+    return out
+
+
+def _skip_convolved_task_list(df: pd.DataFrame, dense_projections, padding_sources: dict) -> list:
+    """Ingest tasks under ``skip_convolved``: each cell of the projections still to do (one
+    ``regular`` task, in mapping order) plus every padding source not already among them
+    (``padding_source``). Each cell appears once."""
+    tasks: list = []
+    seen: set = set()
+    for projection in dense_projections:
+        metadata = extract_projection_metadata(df, projection)
+        for row_id in sorted(metadata["rows"].keys()):
+            for cell_name, x_coord in metadata["rows"][row_id]:
+                if cell_name not in seen:
+                    seen.add(cell_name)
+                    tasks.append((cell_name, projection, row_id, x_coord))
+    for cell_name in sorted(padding_sources):
+        if cell_name not in seen:
+            seen.add(cell_name)
+            tasks.append((cell_name, padding_sources[cell_name], -1, 0, "padding_source"))
+    return tasks
+
+
+def _effective_convolve_flags(
+    use_shared_convolved_store: bool, write_per_scc_convolved_zarr: bool, skip_convolved: bool
+) -> tuple[bool, bool]:
+    """``skip_convolved`` switches both convolved writers off (no ``ps1_convolved.zarr``
+    publish, no per-SCC convolved zarr); with it off the flags pass through unchanged."""
+    if skip_convolved:
+        return False, False
+    return bool(use_shared_convolved_store), bool(write_per_scc_convolved_zarr)
+
+
+def _cell_published_for_skip_convolved(
+    data_root: str, skycell_name: str, recipe, want_band_cells: bool
+) -> bool:
+    """Is this cell published under THIS recipe's combined fingerprint (band cells too when
+    ``want_band_cells``)? Recipe-resolved, never "some fingerprint exists"."""
+    from syndiff_pipeline.template_creation.processing import band_cell_store, combined_store
+
+    parsed = combined_store._projection_and_cell(skycell_name)
+    if parsed is None:
+        return False
+    projection, cell = parsed
+    if want_band_cells:
+        return band_cell_store.resolve_band_cells_fingerprint_for_recipe(
+            data_root, projection, cell, recipe
+        ) is not None
+    return combined_store.resolve_combined_fingerprint_for_recipe(
+        data_root, projection, cell, recipe
+    ) is not None
+
+
 def run_modern_sliding_window_pipeline(
     sector: int,
     camera: int,
@@ -3139,6 +3350,8 @@ def run_modern_sliding_window_pipeline(
     bright_star_mag_threshold: float = 13.0,
     use_shared_convolved_store: bool = False,
     write_per_scc_convolved_zarr: bool = True,
+    publish_band_cells: bool = False,
+    skip_convolved: bool = False,
     oversampling_factor: int = 1,
     band_weights: Optional[dict] = None,
     mapping_csv_path: str | None = None,
@@ -3157,9 +3370,19 @@ def run_modern_sliding_window_pipeline(
     ``docs/markdown/stages/ps1_process_technical.md`` and the mapping/remap/
     downsample stages in ``dispatch.py``, which already resolve the correct
     CSV via ``resolved.mapping_root`` -- this must match.
+
+    ``publish_band_cells``: also publish each freshly processed cell's star-removed weighted band
+    cells (``band_cell_store``) under the combined cell's fingerprint. ``skip_convolved``: do not
+    convolve and write nothing to ``ps1_convolved.zarr`` or the per-SCC convolved zarr (it forces
+    ``use_shared_convolved_store`` and ``write_per_scc_convolved_zarr`` off for the convolve steps);
+    projections whose cells are all already published (band cells if ``publish_band_cells``, else
+    combined cells) are skipped. Both default off and then change nothing.
     """
     global _child_processes
     _child_processes.clear()
+    use_shared_convolved_store, write_per_scc_convolved_zarr = _effective_convolve_flags(
+        use_shared_convolved_store, write_per_scc_convolved_zarr, skip_convolved
+    )
     signal.signal(signal.SIGINT, shutdown_handler)
 
     logger.info(
@@ -3350,6 +3573,19 @@ def run_modern_sliding_window_pipeline(
         except Exception as e:
             logger.warning(f"[Pipeline] Failed to identify padding sources: {e}. Continuing without cache.")
 
+    if skip_convolved:
+        # The padding sources the downsample loader needs (f01's xproj_src), not the row-machinery
+        # subset: there is no row assembly any more.
+        try:
+            padding_sources = _skip_convolved_padding_sources(df, projections)
+            row_padding_map = {}
+            logger.info(
+                f"[Pipeline] skip_convolved: {len(padding_sources)} cross-projection padding "
+                f"source cells will be ingested"
+            )
+        except Exception as e:
+            return {"error": f"skip_convolved: cannot derive padding sources: {e}"}
+
     catalog_order: list[str] = []
     if enable_saturation_correction or remove_saturated_stars:
         # Per-projection Gaia catalogues are downloaded while the run goes:
@@ -3437,6 +3673,20 @@ def run_modern_sliding_window_pipeline(
                 exc_info=True,
             )
 
+    if skip_convolved and combined_store_recipe is None:
+        return {"error": "skip_convolved needs the combined-store recipe (publishing is its only output)"}
+    if publish_band_cells and combined_store_recipe is None:
+        logger.warning("[Pipeline] publish_band_cells requested but no combined-store recipe; disabled")
+        publish_band_cells = False
+    band_cells_dtype = None
+    if publish_band_cells:
+        from syndiff_pipeline.template_creation.processing import band_cell_store
+
+        band_cells_dtype = band_cell_store.DEFAULT_BAND_DTYPE
+        logger.info("[Pipeline] Band-cell publish enabled (%s)", band_cells_dtype)
+    if skip_convolved:
+        logger.info("[Pipeline] skip_convolved: no convolution, no convolved-store writes")
+
     # Fix 3 — event to pause coordinator new-submissions during cross-projection padding
     pipeline_paused_event = threading.Event()
 
@@ -3450,11 +3700,18 @@ def run_modern_sliding_window_pipeline(
     saver_thread.start()
 
     band_combiner_threads = []
+    combiner_shutdown_state = (
+        {"lock": threading.Lock(), "alive": num_band_combiners} if skip_convolved else None
+    )
     for _ in range(num_band_combiners):
         t = threading.Thread(
             target=band_combiner_worker,
             args=(raw_cell_queue, combined_raw_queue),
-            kwargs={"band_weights": ingest_config.get("band_weights")},
+            kwargs={
+                "band_weights": ingest_config.get("band_weights"),
+                "band_cells_dtype": band_cells_dtype,
+                "shutdown_state": combiner_shutdown_state,
+            },
             daemon=True,
         )
         t.start()
@@ -3477,6 +3734,7 @@ def run_modern_sliding_window_pipeline(
             "combined_store_data_root": data_root,
             "combined_store_recipe": combined_store_recipe,
             "removal_ledger": bool(removal_ledger and remove_saturated_stars),
+            "retain_results": not skip_convolved,
         },
         daemon=True,
     )
@@ -3484,8 +3742,9 @@ def run_modern_sliding_window_pipeline(
 
     try:
         with ThreadPoolExecutor(max_workers=num_ingest_workers) as ingest_executor:
+            ingest_futures = []
             for _ in range(num_ingest_workers):
-                ingest_executor.submit(
+                ingest_futures.append(ingest_executor.submit(
                     ingest_worker,
                     task_queue,
                     raw_cell_queue,
@@ -3499,7 +3758,9 @@ def run_modern_sliding_window_pipeline(
                     combined_store_recipe=combined_store_recipe,
                     stream_loader=stream_loader,
                     catalog_provider=catalog,
-                )
+                    band_cells_required=bool(publish_band_cells),
+                    skip_on_store_hit=bool(skip_convolved),
+                ))
 
             # --- Part B: per-projection classification (tiered ingest plan) ---
             # Cheap upfront classification (fingerprint checks only, no pixel
@@ -3521,7 +3782,32 @@ def run_modern_sliding_window_pipeline(
                 and combined_store_recipe is not None
                 and convolved_store_recipe is not None
             )
-            if not classify_enabled:
+            if skip_convolved and combined_store_recipe is not None:
+                # No convolved store to classify against: a projection is done when every
+                # one of its cells is published (band cells, else combined cells).
+                for projection in projections:
+                    try:
+                        metadata = extract_projection_metadata(df, projection)
+                        cells_in_proj = [n for cells in metadata["rows"].values() for n, _ in cells]
+                        if cells_in_proj and all(
+                            _cell_published_for_skip_convolved(
+                                data_root, n, combined_store_recipe, publish_band_cells
+                            )
+                            for n in cells_in_proj
+                        ):
+                            logger.info(
+                                f"[Pipeline] Projection {projection}: all {len(cells_in_proj)} cells "
+                                f"already published -- nothing to do."
+                            )
+                            already_canonical_cells.update(cells_in_proj)
+                            continue
+                    except Exception as e:
+                        logger.warning(
+                            f"[Pipeline] skip_convolved classification of {projection} failed ({e}); "
+                            f"processing it."
+                        )
+                    dense_projections.append(projection)
+            elif not classify_enabled:
                 dense_projections = list(projections)
             else:
                 from syndiff_pipeline.template_creation.processing.convolved_store import (
@@ -3628,6 +3914,11 @@ def run_modern_sliding_window_pipeline(
                 except Exception as e:
                     logger.error(f"[Pipeline] Failed to create tasks for projection {projection}: {e}")
 
+            if skip_convolved:
+                master_task_list = _skip_convolved_task_list(df, dense_projections, padding_sources)
+                num_regular_tasks = sum(1 for t_ in master_task_list if len(t_) == 4)
+                num_padding_tasks = len(master_task_list) - num_regular_tasks
+
             for task in master_task_list:
                 task_queue.put(task)
             logger.info(
@@ -3640,30 +3931,49 @@ def run_modern_sliding_window_pipeline(
                 task_queue.put(None)
 
             # --- Run Sequential Processor (Stage 3) in Main Thread ---
-            all_removed_stars, produced_skycells_list = sequential_processor(
-                dense_projections,
-                df,
-                combined_cell_queue,
-                results_queue,
-                psf_sigma,
-                ingest_config,
-                cell_buffer,
-                catalog,
-                enable_saturation_correction,
-                remove_saturated_stars,
-                csv_path,
-                total_rows=num_total_rows,
-                pipeline_paused_event=pipeline_paused_event,
-                band_cache=band_cache,
-                band_cache_uses=band_cache_uses,
-                row_padding_map=row_padding_map,
-                bright_star_mag_threshold=bright_star_mag_threshold,
-                convolved_store_data_root=data_root if use_shared_convolved_store else None,
-                combined_store_recipe=combined_store_recipe,
-                convolved_store_recipe=convolved_store_recipe,
-                write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
-                on_projection_done=None if ledger_finisher is None else ledger_finisher.submit,
-            )
+            if skip_convolved:
+                # No row assembly, blur, padding or convolved writes: ingest -> combine -> SEP ->
+                # publish only. Wait for every ingest worker, then shut the chain down in order
+                # (the last combiner forwards the single shutdown signal) and wait for the
+                # coordinator to finish publishing before reporting.
+                for fut in ingest_futures:
+                    fut.result()
+                for _ in range(num_band_combiners):
+                    raw_cell_queue.put(None)
+                for t in band_combiner_threads:
+                    t.join()
+                process_coordinator_thread.join()
+                all_removed_stars = []
+                produced_skycells_list = [t_[0] for t_ in master_task_list]
+                results_queue.put(None)  # releases the (disabled) saver
+                if ledger_finisher is not None:
+                    for projection in dense_projections:
+                        ledger_finisher.submit(projection)
+            else:
+                all_removed_stars, produced_skycells_list = sequential_processor(
+                    dense_projections,
+                    df,
+                    combined_cell_queue,
+                    results_queue,
+                    psf_sigma,
+                    ingest_config,
+                    cell_buffer,
+                    catalog,
+                    enable_saturation_correction,
+                    remove_saturated_stars,
+                    csv_path,
+                    total_rows=num_total_rows,
+                    pipeline_paused_event=pipeline_paused_event,
+                    band_cache=band_cache,
+                    band_cache_uses=band_cache_uses,
+                    row_padding_map=row_padding_map,
+                    bright_star_mag_threshold=bright_star_mag_threshold,
+                    convolved_store_data_root=data_root if use_shared_convolved_store else None,
+                    combined_store_recipe=combined_store_recipe,
+                    convolved_store_recipe=convolved_store_recipe,
+                    write_per_scc_convolved_zarr=write_per_scc_convolved_zarr,
+                    on_projection_done=None if ledger_finisher is None else ledger_finisher.submit,
+                )
             # Fast-path manifest accounting: union in cells that were never
             # touched this run because they were already canonical (whole
             # projections skipped entirely, or canonical neighbors within a
