@@ -71,6 +71,9 @@ def crop_bounds_from_header(header: fits.Header) -> dict[str, Any]:
     }
 
 
+_EXACT_MERGE_MIN_FRACTION = 0.5
+
+
 def join_stars(
     phot: Table,
     gaia: pd.DataFrame,
@@ -99,7 +102,10 @@ def join_stars(
     # the exact x_init/y_init == x/y merge actually finds a match.
     df_bare = df.drop(columns=[c for c in gcols if c in df.columns])
     exact = df_bare.merge(g, left_on=["x_init", "y_init"], right_on=["x", "y"], how="inner")
-    if len(exact) > 0:
+    # Accept the exact float merge only when it covers most phot rows.  A few
+    # coincidental x_init == x hits (e.g. the template reference FFI) must not
+    # short-circuit the KD-tree fallback.
+    if len(exact) > 0 and len(exact) >= _EXACT_MERGE_MIN_FRACTION * len(df_bare):
         return _propagate_joined(exact, epoch_btjd)
 
     if not {"x", "y", "ra", "dec"}.issubset(g.columns):
