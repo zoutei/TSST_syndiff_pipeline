@@ -142,3 +142,14 @@ def test_fingerprint_independent_of_convention(monkeypatch):
     new = _recipe()
     assert "ps1_crpix_offset" not in new
     assert cs.combined_recipe_id(new) == cs.combined_recipe_id(legacy)
+
+
+def test_reference_header_is_deterministic():
+    """One header per skycell regardless of band arrival order: i, else r, z, y."""
+    from syndiff_pipeline.common.ps1_wcs import ps1_reference_header
+    h = {"y": "Y", "z": "Z", "i": "I", "r": "R"}
+    assert ps1_reference_header(h) == "I"
+    assert ps1_reference_header(dict(reversed(list(h.items())))) == "I"
+    assert ps1_reference_header({"z": "Z", "r": "R"}) == "R"
+    assert ps1_reference_header({"y": "Y", "z": "Z"}) == "Z"
+    assert ps1_reference_header({"g": "G"}) == "G"

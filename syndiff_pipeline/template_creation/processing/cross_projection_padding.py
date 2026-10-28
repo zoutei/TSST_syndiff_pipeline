@@ -21,6 +21,7 @@ import pandas as pd
 from astropy.wcs import WCS
 from reproject import reproject_interp
 
+from syndiff_pipeline.common.ps1_wcs import ps1_reference_header
 from syndiff_pipeline.template_creation.processing.band_utils import process_skycell_bands, remove_background
 from syndiff_pipeline.template_creation.processing.csv_utils import load_csv_data
 from syndiff_pipeline.template_creation.processing.cross_projection_geometry import (
@@ -415,7 +416,7 @@ def _load_padding_source_once(
             # Same selection, convention and no-catalogue guard as every other
             # producer of a combined cell (ps1_process.process_single_cell).
             gaia_catalog_pixels = select_removal_catalog(
-                gaia_catalog, next(iter(headers.values())), data.shape,
+                gaia_catalog, ps1_reference_header(headers), data.shape,
                 skycell_id=placement.source_skycell,
                 bright_star_mag_threshold=bright_star_mag_threshold,
             )

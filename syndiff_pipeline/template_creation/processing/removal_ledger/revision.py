@@ -288,10 +288,10 @@ def derive_catalogue_rows(manifest, directory, regions_unused=None):
     from astropy.io import fits
     from astropy.time import Time
     from astropy.wcs import WCS
-    from syndiff_pipeline.common.ps1_wcs import ps1_wcs_from_header
+    from syndiff_pipeline.common.ps1_wcs import ps1_reference_header, ps1_wcs_from_header
     from .matching import gaia_sources, ps1_sources, match_gaia_ps1, attach_entities
     heads = json.loads((Path(directory) / 'headers.json').read_text())
-    header = fits.Header.fromstring(next(iter(heads.values())))
+    header = fits.Header.fromstring(ps1_reference_header(heads))
     wcs = ps1_wcs_from_header(header)
     cats = {c['catalogue']: Path(c['path']) / 'catalogue.parquet' for c in manifest['catalogues']}
     g = pd.read_parquet(cats['gaia'])

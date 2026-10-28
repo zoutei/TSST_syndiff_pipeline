@@ -96,3 +96,22 @@ def table_ps1_crpix_offset(df) -> float:
     if len(vals) != 1:
         raise ValueError(f"mixed {PS1_CRPIX_COLUMN} values in one skycell table: {vals.tolist()}")
     return float(vals[0])
+
+
+# Band preference for the single PS1 header used per skycell (WCS + MJD-OBS epoch).  The four band stacks share one
+# WCS but have different input exposures, so MJD-OBS differs by up to ~1 yr between bands; ``i`` carries the largest
+# template band weight in every recipe so far.  Dict order of ``headers_data`` is the thread-arrival order of the
+# bands, so ``next(iter(...))`` picked a different header (epoch) from run to run.
+REFERENCE_BAND_ORDER = ("i", "r", "z", "y")
+
+
+def ps1_reference_header(headers):
+    """The one deterministic PS1 header of a skycell: band ``i`` if present, else r, z, y, else the first sorted key.
+
+    ``headers`` maps band -> header string (``headers_data`` / ``headers.json``)."""
+    if not headers:
+        raise ValueError("no PS1 band headers")
+    for b in REFERENCE_BAND_ORDER:
+        if b in headers:
+            return headers[b]
+    return headers[sorted(headers)[0]]

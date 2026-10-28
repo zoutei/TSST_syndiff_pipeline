@@ -34,6 +34,7 @@ import zarr
 from astropy.wcs import FITSFixedWarning
 
 # Import existing utilities
+from syndiff_pipeline.common.ps1_wcs import ps1_reference_header
 from syndiff_pipeline.template_creation.processing import band_utils, convolution_utils, zarr_utils
 from syndiff_pipeline.template_creation.processing.band_utils import compute_tess_mag, process_skycell_bands, remove_background
 from syndiff_pipeline.template_creation.processing.convolved_store import ConvolvedFingerprintConflict
@@ -639,7 +640,7 @@ def _capture_cell_ledger(bundle, gaia_catalog_pixels, convention, *,
     )
     from syndiff_pipeline.common.ps1_wcs import ps1_crpix_offset
 
-    header_str = next(iter(bundle["headers_data"].values()))
+    header_str = ps1_reference_header(bundle["headers_data"])
     sources = links = calibration = calibrators = None
     association_error = None
     try:
@@ -730,7 +731,7 @@ def process_single_cell(bundle: dict) -> dict:
             # than silently running only the saturation pass.
             gaia_catalog_pixels = select_removal_catalog(
                 bundle.get("gaia_catalog"),
-                next(iter(bundle["headers_data"].values())),
+                ps1_reference_header(bundle["headers_data"]),
                 bundle["combined_image"].shape,
                 skycell_id=skycell_id,
                 bright_star_mag_threshold=bright_star_mag_threshold,
@@ -1131,7 +1132,7 @@ def _inject_cell_catalogues(bundle: dict, catalog: Any, *, ledger: bool, data_ro
     """Put the cell's cone-prefiltered removal catalogue (and, with the ledger,
     the uncut cone plus the ledger spec) into ``bundle``."""
     skycell_id = bundle["skycell_id"]
-    header_str = next(iter(bundle["headers_data"].values()))
+    header_str = ps1_reference_header(bundle["headers_data"])
     shape = bundle["combined_image"].shape
     removal = _cell_removal_catalog(catalog, skycell_id, "removal")
     bundle["gaia_catalog"] = None if removal is None else catalog_cone_prefilter(removal, header_str, shape)
@@ -1610,7 +1611,7 @@ def _manually_process_cell(
         if remove_saturated_stars:
             gaia_catalog_pixels = select_removal_catalog(
                 _cell_removal_catalog(gaia_catalog, skycell_name),
-                next(iter(headers.values())),
+                ps1_reference_header(headers),
                 combined_image.shape,
                 skycell_id=skycell_name,
                 bright_star_mag_threshold=bright_star_mag_threshold,

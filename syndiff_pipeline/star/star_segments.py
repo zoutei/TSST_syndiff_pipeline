@@ -12,6 +12,7 @@ import pandas as pd
 from astropy.io import fits
 from astropy.wcs import WCS
 
+from syndiff_pipeline.common.ps1_wcs import ps1_reference_header
 from syndiff_pipeline.common.ps1_wcs import ps1_wcs_from_header
 from syndiff_pipeline.common.wcs_grouping import world_ra_dec_to_pixel
 from syndiff_pipeline.star.context import (
@@ -224,7 +225,7 @@ def load_and_combine_skycell(
         headers,
         headers_weight,
     )
-    header_str = next(iter(headers.values()))
+    header_str = ps1_reference_header(headers)
     wcs = ps1_wcs_from_header(header_str)
     return combined_image, combined_mask, combined_uncert, wcs
 
