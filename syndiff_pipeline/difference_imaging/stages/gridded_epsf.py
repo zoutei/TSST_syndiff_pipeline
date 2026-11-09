@@ -770,12 +770,14 @@ def save_gridded_epsf_npz(
     return path
 
 
-def load_gridded_psf_model(path: str) -> GriddedPSFModel:
-    """Load a per-frame :class:`GriddedPSFModel` from npz."""
+def load_gridded_psf_model(
+    path: str, *, window_origin: tuple[int, int] = (0, 0)
+) -> GriddedPSFModel:
+    """Load a model in window coordinates given its origin within the science crop."""
     z = np.load(path, allow_pickle=False)
     try:
         stack = np.asarray(z["data"], dtype=np.float64)
-        grid_xypos = [tuple(row) for row in np.asarray(z["grid_xypos"])]
+        grid_xypos = np.asarray(z["grid_xypos"], dtype=float) - window_origin
         oversampling = int(z["oversampling"])
     finally:
         z.close()
@@ -875,12 +877,14 @@ class GriddedEpsfCatalog:
             return alt
         return None
 
-    def load_model(self, ffi_stem: str) -> GriddedPSFModel | None:
-        """Load gridded model for one frame."""
+    def load_model(
+        self, ffi_stem: str, *, window_origin: tuple[int, int] = (0, 0)
+    ) -> GriddedPSFModel | None:
+        """Load the frame model in the coordinates of the requested window."""
         path = self.path_for_stem(ffi_stem)
         if path is None:
             return None
-        return load_gridded_psf_model(path)
+        return load_gridded_psf_model(path, window_origin=window_origin)
 
 
 def catalog_from_workspace(output_dir: str) -> GriddedEpsfCatalog | None:

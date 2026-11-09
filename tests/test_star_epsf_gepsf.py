@@ -341,54 +341,50 @@ class TestStarGepsfMethodWiring(unittest.TestCase):
 
 
 class TestWindowedGepsfPhotometry(unittest.TestCase):
-    def test_gepsf_batch_writes_lightcurve_csv(self):
+    def test_gepsf_recovers_same_flux_across_stamp_origins(self):
         host = _resolved_host()
-        host_xy = (12.0, 12.0)
-        ffi_stem = "tess2019358235923"
+        host_xy = (12.25, 11.75)
+        true_flux = 1250.0
+        grid_xy = [(16, 16), (48, 16), (16, 48), (48, 48)]
+        py, px = np.mgrid[-8:9, -8:9]
+        profiles = []
+        for sigma in (0.8, 1.1, 1.4, 1.8):
+            profile = np.exp(-(px**2 + py**2) / (2 * sigma**2))
+            profiles.append(profile / profile.sum())
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
-            epsf_dir = tmp_path / "epsf_r1"
-            _write_fake_gridded_epsf_workspace(epsf_dir, ffi_stem=ffi_stem)
-            catalog = gridded_epsf.catalog_from_workspace(str(epsf_dir))
-            assert catalog is not None
-
             stamp_paths = []
-            for i in range(2):
-                stamp = np.full((25, 25), 5.0, dtype=np.float64)
-                stamp[int(round(host_xy[1])), int(round(host_xy[0]))] += 20.0 + i
-                path = tmp_path / "stamps" / f"{ffi_stem}_{i}.fits.fz"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                written = diff_runner.write_star_diff_stamp(
-                    str(path),
-                    stamp.astype(np.float32),
-                    window_origin=(10 + i, 20 + i),
-                    host_local_xy=(10 + i + host_xy[0], 20 + i + host_xy[1]),
+            frame_index = {}
+            sy, sx = np.indices((25, 25))
+            for i, (xmin, ymin) in enumerate([(0, 0), (10, 23), (40, 38)]):
+                stem = f"frame_{i}"
+                model_path = str(tmp_path / f"psf_{stem}.npz")
+                gridded_epsf.save_gridded_epsf_npz(
+                    model_path, np.array(profiles), grid_xy, oversampling=1
                 )
-                stamp_paths.append(written)
+                frame_index[stem] = model_path
+                model = gridded_epsf.load_gridded_psf_model(model_path)
+                x, y = host_xy[0] + xmin, host_xy[1] + ymin
+                # The injected image uses the original crop-wide PSF grid.
+                stamp = model.evaluate(sx + xmin, sy + ymin, true_flux, x, y)
+                stamp_paths.append(diff_runner.write_star_diff_stamp(
+                    str(tmp_path / f"{stem}.fits"),
+                    stamp.astype(np.float32),
+                    window_origin=(xmin, ymin),
+                    host_local_xy=(x, y),
+                ))
 
+            catalog = gridded_epsf.GriddedEpsfCatalog(str(tmp_path), frame_index)
             out_dir = tmp_path / "lc"
-            dfs = run_windowed_forced_photometry(
+            curves = run_windowed_forced_photometry(
                 stamp_paths,
                 host=host,
-                methods=[
-                    {
-                        "name": "gepsf",
-                        "type": "psf",
-                        "psf_type": "epsf",
-                        "inputs": {"epsf": "epsf_r1"},
-                        "gridded_catalog": catalog,
-                        "fit_shape": 11,
-                        "aperture_radius": 2,
-                        "psf_grouper_min_separation": 10,
-                    }
-                ],
+                methods=[dict(name="gepsf", type="psf", psf_type="epsf",
+                              gridded_catalog=catalog)],
                 output_dir=str(out_dir),
-                time_values=[2459000.1, 2459000.2],
             )
-
-            self.assertIn("gepsf", dfs)
-            self.assertEqual(len(dfs["gepsf"]), 2)
+            np.testing.assert_allclose(curves["gepsf"]["flux"], true_flux, rtol=1e-6)
             csv_path = out_dir / f"lightcurve_gepsf_gaia_{host.gaia_source_id}.csv"
             self.assertTrue(csv_path.is_file())
 
