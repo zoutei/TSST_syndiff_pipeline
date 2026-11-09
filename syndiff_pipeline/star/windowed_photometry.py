@@ -323,7 +323,9 @@ def run_windowed_forced_photometry(
                             "'gridded_catalog' in the method dict"
                         )
                     ffi_stem = _stamp_product_id(stamp_path)
-                    gridded_model = catalog.load_model(ffi_stem)
+                    gridded_model = catalog.load_model(
+                        ffi_stem, window_origin=(header["xmin"], header["ymin"])
+                    )
                     if gridded_model is None:
                         nan_rec = {
                             "btjd": btjd,
