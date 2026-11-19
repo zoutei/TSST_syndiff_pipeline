@@ -1,14 +1,10 @@
-# Host-star light curves (`syndiff star`)
+# Host-star light curves with syndiff star
 
-For saved per-band forward-model products, use [`syndiff star prepare-band` and `extract-band`](stages/star_band_extraction.md). This separate manifest-driven path supports exact transported-component add-back and joint target/neighbour photometry.
+Star measures TIC or Gaia targets on a completed SCC difference lane. It restores the retained PS1 light of each target using that lane's template recipe and saved Hotpants kernels.
 
-Produce forced-photometry light curves for TIC/Gaia host stars in an **already-existing** syndiff event. Star consumes transient diff outputs; it does **not** re-run Hotpants (and therefore has no Hotpants `stamp_mode`).
+## Run a lane
 
-Configuration is separate from the transient pipeline: see [star_config.md](stages/star_config.md) and the technical deep-dive [star_pipeline.md](stages/star_pipeline.md). When the baseline templates were built at `oversampling_factor F>1`, set the same `defaults.oversampling_factor` in `star_config.yaml` — details in [oversampled templates §10](oversampled_templates.md#10-star-branch).
-
-## Quick start
-
-**Foreground (one SCC):**
+Set `template_recipe` to the operator descriptor for the producing template, or place it at `star_template_recipe.yaml` in the producing template directory. See the [operator descriptor](stages/star_pipeline.md#template-operator-descriptor).
 
 ```bash
 syndiff star run \
@@ -18,138 +14,59 @@ syndiff star run \
   --target-name 20/3/2
 ```
 
-**Batch (all enabled rows in `star_targets.csv`):**
+Use `syndiff star submit` with the same site, config and targets options to run all enabled SCC rows through the supervisor. The host list CSV has `gaia_source_id`, `tic_id`, and `label` columns. Supply one identifier per row. Preserve Gaia IDs as decimal integers.
 
-```bash
-syndiff star submit \
-  --site config \
-  --star-config config/star_config.yaml \
-  --star-targets config/star_targets_example.csv \
-  --run-id star_lc_2026q1
+The default stamp uses the lane's `hp_d` and its saved `hp_d_kernels/*_kernel.npz`. The template, registration maps, Gaia catalogue, shared mask, and group schedule must be available. Save `NOISE` when producing the Hotpants differences. Use `stamp_source: reconstruct` to use the raw science, `baseline.convolved` (typically `hp_c`), and `baseline.phot_bkg` (typically `ks_b`) for the base image. Use the convolved and background planes from the same subtraction.
+
+## Options
+
+Set these in `defaults:` or in an SCC entry under `overrides:` in `star_config.yaml`.
+
+| Option | Meaning |
+|---|---|
+| `template_recipe` | Path to the producing operator descriptor. Relative paths resolve from the site directory. |
+| `template_store_name` | Name of the template and bootstrap store, for example `linear`. |
+| `output_store_name` | Name of the existing difference lane, for example `ownwcs_t1`. |
+| `output_directory` | Optional SCC-specific output directory. Otherwise Star writes to `host_star/` beside the difference products. |
+| `stamp_source` | `difference` by default. `reconstruct` uses the legacy science minus convolved template minus science background formula for the base. |
+| `stamp_size` | Native output side length, 35 by default. Allow room for the entire aperture and sky annulus. |
+| `cutout_size` | Native pre-kernel component side length, 96 by default. Star flags clipped component support. |
+| `max_ffis` | Optional cap on cadences processed. |
+| `cadence_positions` | Optional CSV or Parquet with integer `source_id`, timestamp-only `product_id`, and crop-local `x,y` for targets and potential neighbours. A row with `product_id: reference` gives the template reference position. Without the file, Star computes cadence positions from the FFI WCS and Gaia proper motions. |
+| `physical_mask_dir` | Optional directory of native science-crop `<SCC-bearing-stem>.npy` detector masks. Zero means usable. Without it, Star accepts Hotpants output flags 0 and 64. |
+| `perband` | Default `true`. Set `false` to run the historical weighted mini-template and CSV workflow for older datasets. The legacy workflow also reads `ps1_source` and `ps1_zarr_path`. |
+
+A per-band run rebuilds its target archives and tables from the configured inputs. Reuse a table for alternate weights. `kernel_margin_px` is deprecated. The PS1 Gaussian radius is specified in the template operator descriptor, and the native convolution guard comes from the fitted kernel.
+
+## Photometry configuration
+
+The default methods are circular pixel-centre apertures at radii 4, 6 and 8 native pixels. Every aperture uses the same detector support for the difference and the four bands. The difference measurement uses a 3σ-clipped median sky in the outer annulus. The band measurements are aperture sums of isolated retained components.
+
+```yaml
+photometry:
+  methods:
+    - {name: r6, type: aperture, radius: 6, annulus: [12, 16]}
+    - name: joint
+      type: psf
+      psf_type: epsf
+      inputs: {epsf: epsf_r1}
+      fit_radius: 6
 ```
 
-Use `--local` on submit for local executor instead of Condor. Monitor with `syndiff progress --run-id star_lc_2026q1`.
+A joint ePSF fit uses fixed catalogue centroids, lane noise, and a shared projection that removes constant sky and neighbouring profiles. Supply the existing ePSF catalogue referenced by `inputs.epsf`. An enabled `epsf` build block can populate it in the lane when using the standard lane output directory. The legacy `perband: false` path retains square `tar_ap` apertures and PRF methods.
 
-## Prerequisites
+## Outputs and rescoring
 
-Transient template + diff must have completed for the baseline workspace referenced in `star_targets` / `star_config`. Star validates these on disk before processing hosts:
+Each target directory contains `pre_kernel/group_<id>.npz`, `post_kernel/<product_id>.npz` and `perband.parquet`. The top-level `batch_manifest.csv` reports the completed targets and failed cadences. The [technical schema](stages/star_pipeline.md#output-schema) defines the arrays and table columns.
 
-| Artifact | Typical location | Stage |
-|----------|------------------|-------|
-| `bookkeeping/diff/frames.csv` | `{data_root}/s{SSSS}/c{C}/k{K}/` | `diff` (`scc_bootstrap`) |
-| `bookkeeping/diff/diff_job.json` | `{data_root}/s{SSSS}/c{C}/k{K}/` | `diff` (`scc_bootstrap`) |
-| Field template store | `templates/oversampling_{N}/` or `templates_{lane}/` | `downsample` |
-| Convolved template | `hp_c` | `hotpants` (`write_convolved: true`) |
-| Kernel solutions | `hp_d_kernels/*_kernel.npz` | `hotpants` (`write_kernel_solutions: true`) |
-| Photutils background | `ks_b_s` or `ks_b` | `kernel_subtract` + `background` |
-| Shared mask | `shared_mask.fits.fz` | `shared_mask` |
-| Mapping + Gaia catalog | `data_root/s{SSSS}/c{C}/k{K}/mapping/oversampling_{N}/…`, `.../catalogs/…` | `mapping` |
+```python
+import pandas as pd
+from syndiff_pipeline.star.perband_photometry import score
 
-Star subtracts **`phot_bkg`** (e.g. `ks_b_s`), not Hotpants `hp_b`. Baseline artifacts (`hp_c`, `hp_d_kernels/`, `ks_b`/`ks_b_s`) are resolved from the SCC diff lane, not an event `ws/` tree — `baseline.workspace_run_id` is a legacy config name kept for label-heuristic back-compat only; `_label_dir_has_fits` checks existence under the flat SCC lane exclusively, with no event-workspace fallback.
-
-### Kernel backfill
-
-Older workspaces may have `hp_d` without `hp_d_kernels/`. Run a one-time Hotpants backfill:
-
-```bash
-syndiff diff run \
-  --config config/archive/diff_config_star_full_backfill.yaml \
-  --deployment config/deployment.yaml \
-  --targets config/targets_example.csv \
-  --target-name 20/3/2
+table = pd.read_parquet("perband.parquet")
+result = score(table, {"r": 0.254, "i": 0.4368, "z": 0.1654, "y": 0.1438})
 ```
 
-`--config`/`--site` both always resolve a `pipeline.yaml`-style file now — its
-embedded `diff:` block is used when present, else its legacy `diff_config:`
-pointer is followed (a bare standalone `diff_config.yaml` is never passed
-directly). Then set `baseline.workspace_run_id: star_full_lc` (or your
-`workspace_run_id`) in `star_config` / `star_targets`. See
-[star_pipeline.md](stages/star_pipeline.md) and
-[`config/archive/diff_config_star_full_backfill.yaml`](../../config/archive/diff_config_star_full_backfill.yaml).
+`restored_flux` always uses the producing lane weights. `template_flux` uses the supplied trial weights. `flux_ratio` divides restored flux by trial template flux on valid rows with positive model flux. Formal errors propagate the saved pixel noise. Total-flux calibration, kernel uncertainty and residual crowding require separate assessment.
 
-## Config files
-
-| File | Purpose |
-|------|---------|
-| `config/star_config.yaml` | Defaults, baseline labels, photometry methods, SCC overrides |
-| `config/star_config_epsf_gepsf.yaml` | Example/verification policy for baseline gridded-ePSF fitting and gepsf stamp photometry |
-| `config/star_targets_example.csv` | Example SCC registry + per-row baseline overrides |
-| `config/star_targets_full.csv` | Production SCC registry |
-| `config/star_hosts/*.csv` | Host lists (`tic_id` / `gaia_source_id`) |
-
-Merge order: **star_targets row > overrides > defaults**.
-
-Related transient orchestrators (produce the baseline diff workspace star reads):
-
-| File | Purpose |
-|------|---------|
-| `config/archive/diff_config_multi_kernel.yaml` | Multi-kernel diff (`hp_d`, `hp_c`, `ks_b_s`, kernels) |
-| `config/archive/pipeline_multi_kernel_s20_astrometry.yaml` | Sector-20 astrometry template+diff (`ps1_source: stream`) |
-| `config/archive/pipeline_epsf_gepsf.yaml` | 2020ut ePSF/gepsf diff-only orchestrator |
-
-## `ps1_source`
-
-Controls how star loads PS1 skycells for mini-template isolation:
-
-| Mode | When to use |
-|------|-------------|
-| `zarr_download` | Default; download on cache miss to `{data_root}/ps1_skycells_zarr/ps1_skycells.zarr` |
-| `zarr_local_only` | Batch runs after `ps1_download` (or with a pre-populated shared store) |
-| `stream` | Always fetch from MAST (no zarr write); matches sector-20 stream template runs |
-
-Star and template `ps1_download` share
-`{data_root}/ps1_skycells_zarr/ps1_skycells.zarr`. Optional top-level
-`ps1_zarr_path` in `star_config.yaml` overrides that path for unusual
-deployments.
-
-## Photometry
-
-Methods come from `star_config.yaml` `photometry.methods` (default: `ap3` +
-`prf`). PRF uses TESS_PRF at the host's full-FFI pixel position (requires the
-`PRF` package).
-
-For spatially varying empirical-PSF photometry, add a method with `type: psf`,
-`psf_type: epsf`, and required `inputs.epsf: <label>`. If the baseline
-workspace does not already contain that catalog, add an enabled `epsf` block
-whose `output` matches the label; `epsf.inputs.diffs` optionally chooses the
-source baseline diffs. Star then fits the matching per-frame model on each
-diff stamp. See `config/star_config_epsf_gepsf.yaml`.
-
-CLI flags on `syndiff star run` override merged config: `--stars-file`, `--baseline-workspace-run-id`, `--baseline-diffs-label`, `--baseline-convolved-label`, `--baseline-phot-bkg-label`, `--cutout-size`, `--stamp-size`, `--ps1-source`, `--overwrite`, `--debug-plots`.
-
-## Outputs
-
-Star is per-SCC, not per-event: outputs land under `{lane_root}/host_star/`, beside the
-diff products they derive from — `{data_root}/s{SSSS}/c{C}/k{K}/diff_{lane}/host_star/`
-(`star_output_root()` derives the lane root directly from `data_root`/sector/camera/ccd,
-independent of any event workspace):
-
-```text
-{gaia_source_id}/
-  identifier.json
-  host_gaia_row.csv
-  mini_templates/
-    star_template_{id}_s{S}_{C}_{K}[_x…_y…]_dx{D}_dy{D}.fits.fz
-  diff_stamps/
-    {product_id}.fits.fz
-  lightcurve_ap3_gaia_{id}.csv
-  lightcurve_prf_gaia_{id}.csv
-  plots/                         # when debug_plots: true
-batch_manifest.csv               # per-host status (ok | error | skipped_*)
-```
-
-Legacy sibling trees `events/{label}/star/`, `star_{id}/`, and the older
-`phot_{run_id}/host_star/` event-scoped location are no longer read; star
-verify requires `{lane_root}/host_star/batch_manifest.csv`.
-
-## Stamp formula
-
-```text
-stamp = FFI - (conv_temp - S_conv) - phot_bkg
-```
-
-- `conv_temp` from `hp_c` (or `baseline.convolved`)
-- `S_conv` = mini star-template convolved with the per-frame Hotpants kernel from `hp_d_kernels/`
-- `phot_bkg` from `ks_b_s` (or `ks_b`)
-
-See [star_pipeline.md](stages/star_pipeline.md) for coordinate frames, module layout, and orchestration details.
+The [manifest-driven band commands](stages/star_band_extraction.md) remain available for externally produced component images.
