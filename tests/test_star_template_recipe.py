@@ -126,10 +126,12 @@ def test_row_overlap_is_single_writer():
     bits = np.zeros((shape[0], shape[1] // 8), "u1")
     donors = {name: Donor(shape, bits, bits, (0, 0), value, "retained")
               for name, value in ((name_a, bands), (name_b, bands * 2))}
-    current = ComponentOperator(SimpleNamespace(sigma=4, radius=10, geometry="canonical_v3"),
-                                rows, donors.__getitem__)
+    settings = dict(sigma=4, radius=10, left_writer_cells=set(), raw_fallback_cells=set())
+    current = ComponentOperator(
+        SimpleNamespace(geometry="canonical_v3", **settings), rows, donors.__getitem__
+    )
     previous = ComponentOperator(
-        SimpleNamespace(sigma=4, radius=10, geometry="june_row", cells=donors),
+        SimpleNamespace(geometry="june_row", cells=donors, **settings),
         rows, donors.__getitem__,
     )
     rect = (60, 0, 61, 24)
@@ -139,3 +141,61 @@ def test_row_overlap_is_single_writer():
     _, historical = previous.canonical(name_b, rect, True)
     np.testing.assert_array_equal(historical[:, :10], 1)
     np.testing.assert_array_equal(historical[:, 10:], 2)
+
+
+def test_june_recipe_overrides_writer_and_raw_receiver(tmp_path):
+    import json
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from syndiff_pipeline.star.component_window import ComponentOperator, transport_target
+    from syndiff_pipeline.star.template_recipe import Donor
+    from syndiff_pipeline.template_creation.processing.convolution_utils import gaussian_kernel_1d
+
+    left, right = "skycell.2100.010", "skycell.2100.011"
+    (tmp_path / "cells.json").write_text(json.dumps({left: "left", right: "right"}))
+    (tmp_path / "left.json").write_text(json.dumps([right]))
+    (tmp_path / "fallback.json").write_text(json.dumps([left]))
+    (tmp_path / "patches.json").write_text("{}")
+    spec = tmp_path / "operator.yaml"
+    spec.write_text(yaml.safe_dump(dict(
+        psf_sigma=1, kernel_radius=3, band_weights=dict.fromkeys("rizy", .25),
+        ignore_mask_bits=[], zpcell_factors_path=None, geometry="june_row",
+        removal_recipe_ids=["historic-v1", "historic-v2"], cell_index="cells.json",
+        registration_grid=dict(width=512, origin_full_ffi=[0, 0]),
+        raw_store="ps1.zarr", padding_patches="patches.json", reflect_below=0,
+        left_writer_cells="left.json", raw_fallback=dict(cells="fallback.json", psf_sigma=4),
+        registration_pattern="tess_s{sector}_{camera}_{ccd}_{cell}.fits.gz",
+        mapping_table="rows.parquet",
+    )))
+    recipe = TemplateRecipe.load(spec)
+    assert recipe.removal_id == ("historic-v1", "historic-v2")
+    assert recipe.mapping_table == tmp_path / "rows.parquet"
+    assert recipe.registration_pattern.endswith(".fits.gz")
+    assert recipe.reflect_below == 0
+
+    shape = (512, 512)
+    rows = pd.DataFrame([
+        dict(NAME=name, projection=2100, x=i, y=1, NAXIS1=512, NAXIS2=512)
+        for i, name in enumerate((left, right))
+    ])
+    homogeneous = np.ones((4, *shape), "f4")
+    packed = np.zeros((512, 64), "u1")
+    donors = {
+        left: Donor(shape, packed, packed, (0, 0), homogeneous, "retained"),
+        right: Donor(shape, packed, packed, (0, 0), 2*homogeneous, "retained"),
+    }
+    op = ComponentOperator(recipe, rows, donors.__getitem__)
+    _, light = op.canonical(right, (468, 250, 482, 251), True)
+    np.testing.assert_array_equal(light[..., :12], 1)
+    np.testing.assert_array_equal(light[..., 12:], 2)
+
+    impulse = np.array([1, 2, 3, 4], "f4")[:, None, None]
+    donors[left] = Donor(shape, packed, packed, (250, 251), impulse, "retained")
+    wcs = SimpleNamespace(all_world2pix=lambda ra, dec, origin: (250., 251.))
+    registration = np.arange(512**2, dtype=float).reshape(shape)
+    values = transport_target(op, [(left, wcs, registration, [(0, 0)])], (0, 0), [1], (247, 248), (7, 7))
+    expected = gaussian_kernel_1d(4, 3)
+    np.testing.assert_allclose(values[0], impulse * expected[:, None] * expected[None, :])
+    assert "raw_fallback_provisional" in op.component_flags

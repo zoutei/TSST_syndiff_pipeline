@@ -24,7 +24,7 @@ class TemplateRecipe:
     factors: dict | None
     veto_bits: int
     geometry: str
-    removal_id: str
+    removal_id: str | tuple[str, ...]
     cells: dict
     map_width: int
     map_origin: tuple
@@ -34,6 +34,11 @@ class TemplateRecipe:
     registration_dir: Path | None = None
     reference_ffi: Path | None = None
     reflect_below: int | None = None
+    left_writer_cells: frozenset[str] = frozenset()
+    raw_fallback_cells: frozenset[str] = frozenset()
+    raw_fallback_sigma: float | None = None
+    registration_pattern: str | None = None
+    mapping_table: Path | None = None
 
     @classmethod
     def load(cls, path, assembly=None):
@@ -68,6 +73,27 @@ class TemplateRecipe:
         index = json.loads(resolve(spec["cell_index"]).read_text())
         cells = {k: resolve(v) if v else None for k, v in index.items()}
         raw_store = resolve(spec["raw_store"]) if geometry == "june_row" else None
+        left_writers = frozenset(
+            json.loads(resolve(spec["left_writer_cells"]).read_text())
+            if "left_writer_cells" in spec else ()
+        )
+        fallback = spec.get("raw_fallback", {})
+        fallback_cells = frozenset(
+            json.loads(resolve(fallback["cells"]).read_text()) if fallback else ()
+        )
+        fallback_sigma = float(fallback["psf_sigma"]) if fallback else None
+        if (left_writers or fallback) and geometry != "june_row":
+            raise ValueError("Left-writer overrides and raw fallback use June row geometry")
+        if fallback and (not np.isfinite(fallback_sigma) or fallback_sigma <= 0):
+            raise ValueError("Invalid frozen raw-fallback Gaussian width")
+        if any(cells.get(cell) is None for cell in fallback_cells | left_writers):
+            raise ValueError("June overrides must reference indexed cells")
+        if "removal_recipe_ids" in spec:
+            removal = tuple(map(str, spec["removal_recipe_ids"]))
+            if not removal:
+                raise ValueError("At least one removal archive recipe ID is required")
+        else:
+            removal = str(spec["removal_recipe_id"])
         patches = (
             json.loads(resolve(spec["padding_patches"]).read_text())
             if raw_store
@@ -86,7 +112,7 @@ class TemplateRecipe:
             load_band_factors_json(factors_base / factors) if factors else None,
             sum(1 << int(b) for b in set(bits)),
             geometry,
-            str(spec["removal_recipe_id"]),
+            removal,
             cells,
             int(grid["width"]),
             tuple(grid["origin_full_ffi"]),
@@ -96,6 +122,11 @@ class TemplateRecipe:
             resolve(spec["registration_dir"]) if "registration_dir" in spec else None,
             resolve(spec["reference_ffi"]) if "reference_ffi" in spec else None,
             int(spec["reflect_below"]) if "reflect_below" in spec else None,
+            left_writers,
+            fallback_cells,
+            fallback_sigma,
+            spec.get("registration_pattern"),
+            resolve(spec["mapping_table"]) if "mapping_table" in spec else None,
         )
 
 
@@ -151,7 +182,8 @@ def read_donor(recipe, name, row, host, data_root):
     if root is None:
         raise FileNotFoundError(f"{name}: producing band cell missing from recipe")
     prov = json.loads((root / "_provenance.json").read_text())
-    if prov["recipe_id"] != recipe.removal_id:
+    allowed = (recipe.removal_id,) if isinstance(recipe.removal_id, str) else recipe.removal_id
+    if prov["recipe_id"] not in allowed:
         raise ValueError(f"{name}: removal recipe mismatch")
     hdr = fits.Header.fromstring(json.loads((root / "headers.json").read_text())["i"])
     wcs, _ = build_ps1_wcs(row)

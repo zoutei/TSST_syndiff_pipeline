@@ -72,7 +72,9 @@ class LaneComponents:
             raise ValueError("Per-band component binning currently requires an OS1 lane")
         self.recipe = recipe
         self.groups = groups
-        self.rows = pd.read_csv(ctx.mapping_csv).set_index("NAME", drop=False)
+        mapping = recipe.mapping_table or Path(ctx.mapping_csv)
+        read_mapping = pd.read_parquet if mapping.suffix == ".parquet" else pd.read_csv
+        self.rows = read_mapping(mapping).set_index("NAME", drop=False)
         if table_ps1_crpix_offset(self.rows) != recipe.ps1_crpix:
             raise ValueError("Frozen PS1 CRPIX disagrees with mapping table")
         self.master, ids = _master_skycell_id_map(Path(ctx.master_mapping_fits))
@@ -99,7 +101,13 @@ class LaneComponents:
     def receiver(self, name):
         row = self.rows.loc[name]
         wcs, _ = build_ps1_wcs(row)
-        path = _find_regmap(self.registration_dir, *self.scc, name, oversampling_factor=1)
+        if self.recipe.registration_pattern:
+            sector, camera, ccd = self.scc
+            path = self.registration_dir / self.recipe.registration_pattern.format(
+                sector=sector, camera=camera, ccd=ccd, cell=name
+            )
+        else:
+            path = _find_regmap(self.registration_dir, *self.scc, name, oversampling_factor=1)
         with fits.open(path) as hdul:
             hdu = hdul["TESS_PIXEL_MAP"]
             registration = np.asarray(hdu.data)
@@ -148,6 +156,8 @@ class LaneComponents:
         identity = "retained"
         if not np.any(planes):
             identity = "no_retained_component"
+        if "raw_fallback_provisional" in flags:
+            identity = "raw_fallback_provisional"
         if flags.intersection({"truncated", "shared_PS1_footprint"}):
             identity = "truncated" if "truncated" in flags else "shared_PS1_footprint"
         return planes, origin, identity

@@ -35,6 +35,11 @@ class ComponentOperator:
         self.donor = donor
         self.component_flags = set()
         self.gaussian = gaussian_kernel_1d(recipe.sigma, recipe.radius)
+        self.raw_cells = recipe.raw_fallback_cells
+        self.left_writers = recipe.left_writer_cells
+        self.raw_gaussian = (
+            gaussian_kernel_1d(recipe.raw_fallback_sigma, recipe.radius) if self.raw_cells else None
+        )
 
     def canonical(self, name, box, light=False):
         """Reproduce column single-writer and the two cross-row copies over this box."""
@@ -69,7 +74,7 @@ class ComponentOperator:
                     if self.recipe.geometry == "june_row"
                     else col - 1 in xs
                 )
-                src = 470 if skip else 0
+                src = (480 if nm in self.left_writers else 470) if skip else 0
                 ov = intersect(box, (dx + src, dy, dx + w, dy + h))
                 if not ov:
                     continue
@@ -184,25 +189,32 @@ class ComponentOperator:
         return valid, light
 
     def rendered(self, name, cx, cy):
-        # Certified footprint patches fit inside this source box; verify guard is empty.
         x, y = int(round(cx)), int(round(cy))
-        box = (x - 185, y - 185, x + 186, y + 186)
-        _, light = self.corrected_input(name, box)
-        nz = np.any(light != 0, axis=0)
-        if not nz.any():
-            return None
-        yy, xx = np.nonzero(nz)
-        if (
-            yy.min() == 0
-            or xx.min() == 0
-            or yy.max() == nz.shape[0] - 1
-            or xx.max() == nz.shape[1] - 1
-        ):
+        extents = (185, 370, 740, 1480) if self.recipe.geometry == "june_row" else (185,)
+        for extent in extents:
+            box = (x - extent, y - extent, x + extent + 1, y + extent + 1)
+            if name in self.raw_cells:
+                donor = self.donor(name)
+                _, light = donor.read(box)
+                if donor.flag == "truncated" or np.any(light):
+                    self.component_flags.add(donor.flag)
+            else:
+                _, light = self.corrected_input(name, box)
+            yy, xx = np.nonzero(np.any(light != 0, axis=0))
+            if not len(xx):
+                return None
+            if (
+                0 < xx.min() and xx.max() < light.shape[2] - 1
+                and 0 < yy.min() and yy.max() < light.shape[1] - 1
+            ):
+                break
+        else:
             raise ValueError("PS1 component exceeds rendering window")
-        light = light[:, yy.min() : yy.max() + 1, xx.min() : xx.max() + 1]
+        light = light[:, yy.min():yy.max()+1, xx.min():xx.max()+1].astype(float, copy=False)
+        gaussian = self.raw_gaussian if name in self.raw_cells else self.gaussian
         blurred = fftconvolve(
-            fftconvolve(light, self.gaussian[None, None, :], axes=2),
-            self.gaussian[None, :, None],
+            fftconvolve(light, gaussian[None, None, :], axes=2),
+            gaussian[None, :, None],
             axes=1,
         ).astype("f4")
         bx = box[0] + xx.min() - self.recipe.radius
@@ -225,11 +237,14 @@ class ComponentOperator:
         if not ov:
             return out
         x, y, X, Y = ov
-        valid = self.canonical(name, ov)
-        if self.recipe.geometry == "june_row" and any(
-            intersect(ov, p["bounds"]) for p in self.recipe.patches.get(name, ())
-        ):
-            valid = self.corrected_input(name, ov)[0]
+        if name in self.raw_cells:
+            valid = donor.read(ov, light=False)
+        else:
+            valid = self.canonical(name, ov)
+            if self.recipe.geometry == "june_row" and any(
+                intersect(ov, p["bounds"]) for p in self.recipe.patches.get(name, ())
+            ):
+                valid = self.corrected_input(name, ov)[0]
         veto = np.unpackbits(donor.veto[y:Y, x // 8 : (X + 7) // 8], axis=1)[
             :, x % 8 : x % 8 + X - x
         ]
@@ -274,9 +289,15 @@ def transport_target(operator, receivers, ra_dec, groups, origin, shape):
     The origin is in native registration indices, independent of the Hotpants grid.
     """
     planes = np.zeros((len(groups), 4, *shape), dtype="f4")
+    raw_norm = 0.0
     for name, wcs, registration, shifts in receivers:
         center = tuple(map(float, wcs.all_world2pix(*ra_dec, 0)))
-        planes += operator.bin_groups(name, center, registration, shifts, origin, shape)
+        contribution = operator.bin_groups(name, center, registration, shifts, origin, shape)
+        planes += contribution
+        if name in operator.raw_cells:
+            raw_norm += float(np.abs(contribution).sum(dtype=float))
+    if raw_norm and raw_norm > 1e-7 * np.abs(planes).sum(dtype=float):
+        operator.component_flags.add("raw_fallback_provisional")
     return planes
 
 
