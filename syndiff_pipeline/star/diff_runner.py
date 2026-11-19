@@ -319,6 +319,25 @@ def _resolve_frame_fits_path(directory: str, product_id: str, scc=None) -> str:
     return path
 
 
+def hotpants_fit_geometry(ctx):
+    """Return shape and origin offset of the grid used by the lane's Hotpants fit."""
+    from pathlib import Path
+
+    from syndiff_pipeline.difference_imaging.stages.hotpants import _resolve_linear_template_pad
+
+    grid = getattr(ctx, "mapping_grid", None)
+    crop_h, crop_w = map(int, ctx.crop_bounds["shape"])
+    if str(getattr(ctx, "cluster_job", {}).get("geometry_mode") or "linear").lower() == "field" and grid:
+        return grid.array_shape_native(), (grid.pad_left, grid.pad_bottom)
+    templates_dir = getattr(ctx, "templates_dir", "")
+    template = next(iter(sorted(Path(templates_dir).glob("syndiff_template_*.fits*"))), None)
+    if template is not None:
+        pad = _resolve_linear_template_pad(str(template), ctx.crop_bounds) or 0
+    else:
+        pad = grid.conv_pad_native if grid is not None else 0
+    return (crop_h + 2 * pad, crop_w + 2 * pad), (pad, pad)
+
+
 def compute_star_only_stamp_for_frame(
     *,
     ctx: StarEventContext,
@@ -326,7 +345,7 @@ def compute_star_only_stamp_for_frame(
     host_local_xy: tuple[float, float],
     mini_template_fits_paths: dict[tuple[float, float], str],
     stamp_size: int = 24,
-    kernel_margin_px: int = 470,
+    kernel_margin_px: int | None = None,
     science_fits_path: Optional[str] = None,
     field_group_to_template: Optional[dict[int, str]] = None,
 ) -> tuple[np.ndarray, dict]:
@@ -387,16 +406,15 @@ def compute_star_only_stamp_for_frame(
         max_x=crop_w,
         max_y=crop_h,
     )
-    conv_x0, conv_y0, conv_x1, conv_y1 = _expanded_window_bounds(
-        (stamp_x0, stamp_y0, stamp_x1, stamp_y1),
-        margin_px=kernel_margin_px,
-        max_x=crop_w,
-        max_y=crop_h,
-    )
+    # PS1 Gaussian support and native Hotpants support have different units.
+    radius = int(hp_config.rkernel)
+    conv_x0, conv_y0 = stamp_x0-radius, stamp_y0-radius
+    conv_x1, conv_y1 = stamp_x1+radius, stamp_y1+radius
     conv_shape = (conv_y1 - conv_y0, conv_x1 - conv_x0)
 
-    conv_path = _resolve_frame_fits_path(ctx.baseline_convolved_dir, product_id)
-    bkg_path = _resolve_frame_fits_path(ctx.baseline_phot_bkg_dir, product_id)
+    scc = (ctx.sector, ctx.camera, ctx.ccd)
+    conv_path = _resolve_frame_fits_path(ctx.baseline_convolved_dir, product_id, scc)
+    bkg_path = _resolve_frame_fits_path(ctx.baseline_phot_bkg_dir, product_id, scc)
 
     conv_temp_window = read_window(
         conv_path, y0=stamp_y0, y1=stamp_y1, x0=stamp_x0, x1=stamp_x1
@@ -435,17 +453,11 @@ def compute_star_only_stamp_for_frame(
         oversample=oversample,
     )
 
-    stamp = compute_star_only_stamp(
-        ffi_window=ffi_window,
-        conv_temp_window=conv_temp_window,
-        background_window=background_window,
-        mini_star_template_window=mini_star_template_window,
-        kernel_solution=kernel_solution,
-        hp_config=hp_config,
-        convolve_shape=conv_shape,
-        stamp_offset_in_conv=(stamp_y0 - conv_y0, stamp_x0 - conv_x0),
-        oversample=oversample,
-    )
+    from .kernel_window import FrameKernel
+    fit_shape, (dx, dy) = hotpants_fit_geometry(ctx)
+    kernel = FrameKernel(kernel_solution, hp_config, fit_shape, oversample)
+    component = kernel.apply(mini_star_template_window, conv_x0 + dx, conv_y0 + dy)
+    stamp = ffi_window - conv_temp_window - background_window + component
 
     metadata = {
         "window_x0": stamp_x0,
