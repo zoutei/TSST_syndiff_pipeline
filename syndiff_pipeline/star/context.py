@@ -85,6 +85,7 @@ class StarEventContext:
     oversampling_factor: int = 1
     mapping_grid: MappingGrid | None = None
     output_store_name: str | None = None
+    manifest_path: str | None = None
 
 
 def _resolve_hotpants_output_labels(
@@ -457,16 +458,19 @@ def load_event_context(
         template_store_name=template_store_name,
     )
     mapping_grid = None
-    output_store_name = None
+    output_store_name = getattr(star_run_config, "output_store_name", None)
     if diff_job is not None:
         # Modern SCC-bootstrapped lane: bookkeeping/diff_{lane}/oversampling_N/
         # holds both diff_job.json (already loaded above) and frames.csv.
         cluster_job_path = str(scc_bookkeeping_dir / DIFF_JOB_BASENAME)
         mapping_grid = MappingGrid.from_mapping_dict(diff_job["mapping_grid"])
         crop_bounds = diff_job.get("crop_bounds") or mapping_grid.science_ffi_bounds()
-        output_store_name = diff_job.get("output_store_name")
+        output_store_name = output_store_name or diff_job.get("output_store_name")
         cluster_job = diff_job
-        frames_csv_path = scc_bookkeeping_dir / FRAMES_CSV_BASENAME
+        lane_frames = scc_diff_dir(
+            data_root, target.sector, target.camera, target.ccd, store_name=output_store_name
+        ) / FRAMES_CSV_BASENAME
+        frames_csv_path = lane_frames if lane_frames.is_file() else scc_bookkeeping_dir / FRAMES_CSV_BASENAME
         frames_df = (
             pd.read_csv(frames_csv_path) if frames_csv_path.is_file() else pd.DataFrame()
         )
@@ -496,10 +500,20 @@ def load_event_context(
             )
 
     templates_dir = str(cfg.template_dir) if cfg.template_dir else ""
-    if star_run_config is not None:
-        output_store_name = output_store_name or getattr(
-            star_run_config, "output_store_name", None
-        )
+    lane_root = scc_diff_dir(
+        data_root, target.sector, target.camera, target.ccd, store_name=output_store_name
+    )
+    lane_diff_config = lane_root / "diff_config.yaml"
+    frozen_template_dir = None
+    if lane_diff_config.is_file():
+        import yaml
+
+        frozen = yaml.safe_load(lane_diff_config.read_text())
+        frozen_template_dir = frozen.get("template_dir")
+    if frozen_template_dir:
+        templates_dir = str((lane_root / frozen_template_dir).resolve())
+        if not Path(templates_dir).is_dir():
+            raise FileNotFoundError(f"Producing template directory is missing: {templates_dir}")
     expected_templates = resolve_scc_template_dir(
         data_root,
         target,
@@ -510,6 +524,7 @@ def load_event_context(
         templates_dir = str(expected_templates)
     elif (
         star_run_config is not None
+        and not frozen_template_dir
         and Path(templates_dir).resolve() != expected_templates.resolve()
         and expected_templates.is_dir()
     ):
@@ -605,6 +620,7 @@ def load_event_context(
         oversampling_factor=os_factor,
         mapping_grid=mapping_grid,
         output_store_name=output_store_name,
+        manifest_path=str(lane_root / FRAMES_CSV_BASENAME) if (lane_root / FRAMES_CSV_BASENAME).is_file() else None,
     )
 
 
@@ -641,7 +657,8 @@ def resolve_star_manifest_path(ctx: StarEventContext) -> Path:
     Every manifest reader and the prerequisite gate must go through this one
     function so they can never disagree about which lane they're reading.
     """
-    return Path(ctx.cluster_job_path).parent / DEFAULT_MANIFEST_BASENAME
+    manifest = getattr(ctx, "manifest_path", None)
+    return Path(manifest) if manifest else Path(ctx.cluster_job_path).parent / DEFAULT_MANIFEST_BASENAME
 
 
 def _dir_has_glob(path: str, pattern: str) -> bool:

@@ -17,10 +17,10 @@ from syndiff_pipeline.difference_imaging.stages.kernel import (
 )
 from syndiff_pipeline.difference_imaging.support.ffi_naming import (
     resolve_pipeline_fits_path,
+    tess_product_id_from_ffi_path,
     workspace_frame_stem,
     workspace_label_from_dir,
 )
-from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
 from syndiff_pipeline.difference_imaging.support.template_resolution import (
     template_offsets_for_ffi,
 )
@@ -49,9 +49,8 @@ def read_window(
 ) -> np.ndarray:
     """Memmap-read a 2D window from a pipeline or raw FFI FITS."""
     with wcs_grouping.open_fits_memmap(fits_path) as hdul:
-        data = hdul[0].data
-        if data is None or getattr(data, "ndim", 0) != 2:
-            data = hdul[1].data
+        hdu = next(h for h in hdul if h.header.get("NAXIS") == 2)
+        data = hdu.section if isinstance(hdu, fits.CompImageHDU) else hdu.data
         return np.asarray(data[y0:y1, x0:x1], dtype=np.float64)
 
 
@@ -279,8 +278,19 @@ def _manifest_path_for_ctx(ctx: StarEventContext) -> str:
     return str(resolve_star_manifest_path(ctx))
 
 
+def star_product_ids(manifest: pd.DataFrame) -> pd.Series:
+    """Resolve timestamp identifiers from a lane manifest or a raw FFI manifest."""
+    result = pd.Series("", index=manifest.index, dtype=str)
+    for col in ("ffi_product_id", "product_id", "ffi_basename", "filename", "path"):
+        if col in manifest:
+            result = result.mask(
+                result == "", manifest[col].map(lambda val: tess_product_id_from_ffi_path(str(val)) or "")
+            )
+    return result
+
+
 def _ffi_path_for_product_id(manifest: pd.DataFrame, product_id: str) -> str:
-    pids = row_ffi_product_id_series(manifest)
+    pids = star_product_ids(manifest)
     matches = manifest.loc[pids == product_id]
     if matches.empty:
         raise ValueError(f"No manifest row for product_id={product_id!r}")
@@ -291,12 +301,17 @@ def _ffi_path_for_product_id(manifest: pd.DataFrame, product_id: str) -> str:
     raise ValueError(f"Manifest row for {product_id!r} has no path/filename")
 
 
-def _resolve_frame_fits_path(directory: str, product_id: str) -> str:
+def _resolve_frame_fits_path(directory: str, product_id: str, scc=None) -> str:
     if not directory:
         raise FileNotFoundError(f"workspace directory unset for {product_id}")
     label = workspace_label_from_dir(directory)
     stem = workspace_frame_stem(product_id, label)
-    path = resolve_pipeline_fits_path(directory, stem)
+    path = None
+    if scc is not None:
+        sector, camera, ccd = scc
+        frame = f"{product_id}-s{sector:04d}-{camera}-{ccd}"
+        path = resolve_pipeline_fits_path(directory, workspace_frame_stem(frame, label))
+    path = path or resolve_pipeline_fits_path(directory, stem)
     if path is None:
         raise FileNotFoundError(
             f"Missing {stem} under {directory}"

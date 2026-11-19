@@ -146,18 +146,12 @@ def find_owning_skycell_for_host(
     x_pix = int(round(host_xy[0]))
     y_pix = int(round(host_xy[1]))
     os_factor = max(1, int(getattr(ctx, "oversampling_factor", 1) or 1))
-    mapping_grid = getattr(ctx, "mapping_grid", None)
-    if mapping_grid is not None:
-        lx, ly = mapping_grid.ffi_to_local(x_pix, y_pix)
-        x_lookup = lx * os_factor + os_factor // 2
-        y_lookup = ly * os_factor + os_factor // 2
-    else:
-        x_lookup = x_pix * os_factor + os_factor // 2
-        y_lookup = y_pix * os_factor + os_factor // 2
-
     with fits.open(ctx.master_mapping_fits) as hdul:
-        hdu_idx = 1 if len(hdul) > 1 and getattr(hdul[1], "data", None) is not None else 0
-        tess_data = hdul[hdu_idx].data
+        hdu = next(h for h in hdul if h.header.get("NAXIS") == 2)
+        tess_data = hdu.data
+        ox, oy = _mapping_origin(hdu.header, ctx)
+    x_lookup = (x_pix - ox) * os_factor + os_factor // 2
+    y_lookup = (y_pix - oy) * os_factor + os_factor // 2
 
     if (
         y_lookup < 0
@@ -372,6 +366,25 @@ def isolate_host_segment(
         blend_flag=blend_flag,
         blended_catalog_rows=blended,
     )
+
+
+def _mapping_origin(header, ctx):
+    grid = getattr(ctx, "mapping_grid", None)
+    return (int(header.get("XMIN", grid.ffi_xmin if grid else 0)),
+            int(header.get("YMIN", grid.ffi_ymin if grid else 0)))
+
+
+def lane_offsets(ctx):
+    if ctx.cluster_job.get("groups"):
+        return offsets_from_cluster_job_payload(ctx.cluster_job)
+    manifest = pd.read_csv(resolve_star_manifest_path(ctx))
+    cols = ["group_dx", "group_dy"]
+    if any(c not in manifest for c in cols):
+        raise ValueError("Offset schedule missing from lane handoff and frames.csv")
+    groups = manifest.dropna(subset=cols)
+    if "group_id" in groups and (groups.groupby("group_id")[cols].nunique() > 1).any().any():
+        raise ValueError("Conflicting offsets for a single lane group")
+    return offsets_from_cluster_job_payload({"groups": groups[cols].to_dict("records")})
 
 
 def _full_ffi_mapping_shape(ctx: StarEventContext) -> tuple[int, int]:
@@ -605,8 +618,8 @@ def isolate_and_write_mini_templates(
             gsf, group_ids, involved_names
         )
     else:
-        offsets = offsets_from_cluster_job_payload(ctx.cluster_job)
-        tess_wcs, _ = load_tess_wcs(Path(ctx.master_mapping_fits))
+        offsets = lane_offsets(ctx)
+        tess_wcs, _ = load_tess_wcs(Path(ctx.reference_ffi_path))
         skycell_df = _load_skycell_csv(ctx)
         skycell_df = skycell_df[skycell_df["NAME"].isin(involved_names)].reset_index(
             drop=True
@@ -636,6 +649,12 @@ def isolate_and_write_mini_templates(
     roi_bounds_full = _mini_roi_full_ffi(ctx, host_xy_full, cutout_size)
     base_tess_shape = _full_ffi_mapping_shape(ctx)
 
+    ox = oy = 0
+    if ctx.mapping_grid is not None or Path(ctx.master_mapping_fits).is_file():
+        with fits.open(ctx.master_mapping_fits) as hdus:
+            hdr = next(h.header for h in hdus if h.header.get("NAXIS") == 2)
+            ox, oy = _mapping_origin(hdr, ctx)
+    rx, ry, ex, ey = roi_bounds_full
     arrays_by_offset = downsample_star_arrays(
         arrays=convolved_arrays,
         reg_files=reg_files,
@@ -643,7 +662,7 @@ def isolate_and_write_mini_templates(
         offsets=offsets,
         shifts_dict=shifts_dict,
         base_tess_shape=base_tess_shape,
-        roi_bounds=roi_bounds_full,
+        roi_bounds=(rx-ox, ry-oy, ex-ox, ey-oy),
         oversampling_factor=int(getattr(ctx, "oversampling_factor", 1) or 1),
     )
 

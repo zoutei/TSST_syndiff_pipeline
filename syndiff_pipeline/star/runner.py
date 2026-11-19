@@ -10,7 +10,6 @@ from astropy.io import fits
 
 from syndiff_pipeline.common.scc_paths import scc_diff_dir
 from syndiff_pipeline.difference_imaging.support.ffi_naming import PIPELINE_FITS_EXT
-from syndiff_pipeline.difference_imaging.support.manifest import row_ffi_product_id_series
 from syndiff_pipeline.star.context import (
     StarEventContext,
     StarPrerequisiteError,
@@ -21,6 +20,7 @@ from syndiff_pipeline.star.context import (
 )
 from syndiff_pipeline.star.diff_runner import (
     compute_star_only_stamp_for_frame,
+    star_product_ids,
     write_star_diff_stamp,
 )
 from syndiff_pipeline.star.epsf_runner import ensure_star_epsf_catalog
@@ -96,7 +96,7 @@ def _load_manifest(ctx: StarEventContext) -> pd.DataFrame:
 
 def _load_product_ids(ctx: StarEventContext, *, max_ffis: int | None = None) -> list[str]:
     manifest = _load_manifest(ctx)
-    pids = row_ffi_product_id_series(manifest)
+    pids = star_product_ids(manifest)
     product_ids = [str(pid) for pid in pids if pid]
     if max_ffis is not None and max_ffis > 0:
         return product_ids[:max_ffis]
@@ -107,7 +107,7 @@ def _load_product_id_btjd_map(ctx: StarEventContext) -> dict[str, float]:
     manifest = _load_manifest(ctx)
     if "btjd" not in manifest.columns:
         return {}
-    pids = row_ffi_product_id_series(manifest)
+    pids = star_product_ids(manifest)
     return {
         str(pid): float(btjd)
         for pid, btjd in zip(pids, manifest["btjd"])

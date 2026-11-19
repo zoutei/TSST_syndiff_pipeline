@@ -51,6 +51,8 @@ class ResolvedHost:
     phot_rp_mean_mag: Optional[float]
     resolution_method: str
     label: Optional[str]
+    pmra: Optional[float] = None
+    pmdec: Optional[float] = None
 
 
 def _validate_gaia_source_id(source_id: int) -> None:
@@ -99,6 +101,8 @@ def _row_to_resolved_host(
         phot_rp_mean_mag=_optional_float(row.get("phot_rp_mean_mag")),
         resolution_method=resolution_method,
         label=label,
+        pmra=_optional_float(row.get("pmra")),
+        pmdec=_optional_float(row.get("pmdec")),
     )
 
 
@@ -121,7 +125,7 @@ def _lookup_gaia_local(
     matches = df[df["source_id"].astype(np.int64) == int(gaia_source_id)]
     if matches.empty:
         return None
-    return matches.iloc[0]
+    return matches.iloc[:1].astype(object).iloc[0]
 
 
 def _lookup_gaia_remote(gaia_source_id: int) -> pd.Series:
@@ -179,7 +183,8 @@ def _lookup_gaia_remote(gaia_source_id: int) -> pd.Series:
                 if row["phot_rp_mean_mag"] is not None
                 else np.nan
             ),
-        }
+        },
+        dtype=object,
     )
 
 
@@ -237,8 +242,11 @@ def _tic_gaia_source_id(table) -> int | None:
         text = str(val).strip()
         if not text or text.lower() in {"null", "nan", "none", "0"}:
             continue
+        # Float-valued catalogue IDs have already lost precision above 2**53.
+        if isinstance(val, (float, np.floating)) and abs(val) >= 2**53:
+            continue
         try:
-            gid = int(float(text))
+            gid = int(val) if isinstance(val, (float, np.floating)) and val.is_integer() else int(text)
         except (TypeError, ValueError):
             continue
         if gid > 0:
@@ -288,7 +296,7 @@ def _nearest_gaia_match(
         if sep[second_idx] - sep[best_idx] <= _AMBIGUOUS_SEP_ARCSEC:
             candidates = []
             for idx in order:
-                row = df.iloc[int(idx)]
+                row = df.iloc[[int(idx)]].astype(object).iloc[0]
                 candidates.append(
                     f"source_id={int(row['source_id'])} "
                     f"sep={sep[idx]:.3f}\" ra={float(row['ra']):.6f} "
@@ -299,7 +307,7 @@ def _nearest_gaia_match(
                 f"{_LOCAL_MATCH_RADIUS_ARCSEC}\" of TIC position; candidates: "
                 + "; ".join(candidates)
             )
-    return df.iloc[best_idx]
+    return df.iloc[[best_idx]].astype(object).iloc[0]
 
 
 def resolve_host(
@@ -354,6 +362,8 @@ def resolve_host(
             phot_rp_mean_mag=host.phot_rp_mean_mag,
             resolution_method=method,
             label=host.label,
+            pmra=host.pmra,
+            pmdec=host.pmdec,
         )
 
     tic_ra, tic_dec = _tic_radec(tic_table)
@@ -391,9 +401,9 @@ def write_host_gaia_row_csv(host: ResolvedHost, path: str) -> None:
         "parallax": "",
         "parallax_error": "",
         "pm": "",
-        "pmra": "",
+        "pmra": host.pmra if host.pmra is not None else "",
         "pmra_error": "",
-        "pmdec": "",
+        "pmdec": host.pmdec if host.pmdec is not None else "",
         "pmdec_error": "",
         "phot_g_mean_mag": host.phot_g_mean_mag if host.phot_g_mean_mag is not None else "",
         "phot_bp_mean_mag": (
