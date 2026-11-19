@@ -110,10 +110,10 @@ def execute_star_stage(ctx: StageRunContext):
     manifest_path = run_star_pipeline(event_ctx, run_config=run_config, validate=True)
     artifacts = [str(manifest_path)]
     host_root = star_output_root(
-        event_ctx, photometry_run_id=run_config.photometry_run_id
+        event_ctx, output_directory=run_config.output_directory
     )
     if host_root.is_dir():
-        artifacts.extend(str(p) for p in sorted(host_root.rglob("lightcurve_*.csv")))
+        artifacts.extend(str(p) for p in sorted(host_root.glob("*/perband.parquet" if run_config.perband else "*/lightcurve_*.csv")))
     expected = max(len(artifacts), 1)
     produced = len(artifacts)
     return expected, produced, artifacts
@@ -135,9 +135,9 @@ def _verify_star(ctx: StageRunContext) -> bool:
         host_root = resolve_star_host_root(
             event_ctx,
             run_config.workspace_run_id,
-            photometry_run_id=run_config.photometry_run_id,
+            output_directory=run_config.output_directory,
         )
-        return verify_star_batch_manifest(host_root / "batch_manifest.csv")
+        return verify_star_batch_manifest(host_root / "batch_manifest.csv", perband=run_config.perband)
     except (StarPrerequisiteError, KeyError, ValueError, FileNotFoundError):
         return False
 
@@ -157,14 +157,14 @@ def _collect_star_artifacts(ctx: StageRunContext) -> tuple[int, int, list[str]]:
     host_root = resolve_star_host_root(
         event_ctx,
         run_config.workspace_run_id,
-        photometry_run_id=run_config.photometry_run_id,
+        output_directory=run_config.output_directory,
     )
     artifacts: list[str] = []
     manifest_path = host_root / "batch_manifest.csv"
     if manifest_path.is_file():
         artifacts.append(str(manifest_path))
     if host_root.is_dir():
-        artifacts.extend(str(p) for p in sorted(host_root.rglob("lightcurve_*.csv")))
+        artifacts.extend(str(p) for p in sorted(host_root.glob("*/perband.parquet" if run_config.perband else "*/lightcurve_*.csv")))
     expected = max(len(artifacts), 1)
     produced = len(artifacts)
     return expected, produced, artifacts

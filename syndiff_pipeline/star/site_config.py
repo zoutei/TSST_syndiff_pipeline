@@ -100,7 +100,6 @@ class StarSitePolicy:
 
     deployment_file: str = "deployment.yaml"
     defaults: dict = field(default_factory=dict)
-    stamp_source: str = "difference"
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry: dict = field(default_factory=dict)
     epsf: dict = field(default_factory=dict)
@@ -130,8 +129,8 @@ class StarRunConfig:
     """Merged knobs for one SCC star run (row > overrides > defaults)."""
 
     cutout_size: int = 96
-    stamp_size: int = 24
-    kernel_margin_px: int = 470
+    stamp_size: int = 35
+    kernel_margin_px: int | None = None
     ps1_source: str = "zarr_download"
     debug_plots: bool = True
     workspace_run_id: str | None = None  # deprecated; unused for writes
@@ -140,7 +139,13 @@ class StarRunConfig:
     oversampling_factor: int = 1
     # Named templates lane → templates_{NAME}/; None → templates/
     template_store_name: str | None = None
+    output_store_name: str | None = None
     stamp_source: str = "difference"
+    perband: bool = True
+    template_recipe: str | None = None
+    output_directory: str | None = None
+    cadence_positions: str | None = None
+    physical_mask_dir: str | None = None
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry_methods: list[dict] = field(default_factory=list)
     epsf: StarEpsfConfig | None = None
@@ -457,12 +462,29 @@ def resolve_star_run_config(
 
     photometry_block = merged_defaults.pop("photometry", None) or policy.photometry or {}
     epsf_block = merged_defaults.pop("epsf", None) or policy.epsf or {}
+    perband = bool(merged_defaults.get("perband", True))
     methods = list(photometry_block.get("methods") or [])
     if not methods:
-        methods = [
-            {"name": "ap3", "type": "aperture", "tar_ap": 3, "sky_in": 5, "sky_out": 9},
-        ]
+        methods = (
+            [{"name": f"r{r}", "type": "aperture", "radius": r} for r in (4, 6, 8)]
+            if perband else
+            [{"name": "ap3", "type": "aperture", "tar_ap": 3, "sky_in": 5, "sky_out": 9}]
+        )
     methods = normalize_photometry_methods(methods)
+    if perband:
+        for method in methods:
+            if method["type"] == "aperture":
+                method["radius"] = float(method.get("radius", method.get("tar_ap", 6)))
+                method["annulus"] = tuple(float(r) for r in method.get("annulus", (12, 16)))
+                if len(method["annulus"]) != 2 or not (
+                    0 < method["radius"] < method["annulus"][0] < method["annulus"][1]
+                ):
+                    raise ValueError("Expected aperture radius < inner annulus < outer annulus")
+            elif method["type"] != "psf" or method.get("psf_type") != "epsf":
+                raise ValueError("Per-band photometry methods must be aperture or psf/epsf")
+        names = [m["name"] for m in methods]
+        if len(names) != len(set(names)):
+            raise ValueError("Per-band photometry method names must be unique")
     epsf_cfg = _parse_star_epsf(epsf_block)
     if epsf_cfg is not None:
         for label in required_epsf_workspaces(methods):
@@ -498,11 +520,26 @@ def resolve_star_run_config(
     stamp_source = merged_defaults.get("stamp_source", "difference")
     if stamp_source not in {"difference", "reconstruct"}:
         raise ValueError("stamp_source must be difference or reconstruct")
+    def path_option(key):
+        value = _optional_str(merged_defaults.get(key))
+        return str((site / Path(value).expanduser()).resolve()) if value else None
+
+    output_directory = path_option("output_directory")
+    if output_directory and epsf_cfg is not None and epsf_cfg.enabled:
+        raise ValueError("output_directory reads an existing ePSF workspace; disable the epsf build block")
+    margin = merged_defaults.get("kernel_margin_px")
+    if margin is not None:
+        log.warning("kernel_margin_px is deprecated; the frame kernel radius supplies the native guard")
     return StarRunConfig(
         stamp_source=stamp_source,
+        perband=perband,
+        template_recipe=path_option("template_recipe"),
+        output_directory=output_directory,
+        cadence_positions=path_option("cadence_positions"),
+        physical_mask_dir=path_option("physical_mask_dir"),
         cutout_size=int(merged_defaults.get("cutout_size", 96)),
-        stamp_size=int(merged_defaults.get("stamp_size", 24)),
-        kernel_margin_px=int(merged_defaults.get("kernel_margin_px", 470)),
+        stamp_size=int(merged_defaults.get("stamp_size", 35 if perband else 24)),
+        kernel_margin_px=int(margin) if margin is not None else None,
         ps1_source=ps1_source,
         debug_plots=bool(merged_defaults.get("debug_plots", True)),
         # Deprecated: kept for config compatibility only; outputs use phot_{run_id}/host_star/.
@@ -511,6 +548,7 @@ def resolve_star_run_config(
         overwrite=bool(merged_defaults.get("overwrite", False)),
         oversampling_factor=oversampling_factor,
         template_store_name=template_store_name,
+        output_store_name=normalize_store_name(merged_defaults.get("output_store_name")),
         baseline=baseline,
         photometry_methods=methods,
         epsf=epsf_cfg,

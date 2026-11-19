@@ -4,8 +4,10 @@ deployment_file: deployment.yaml
 
 defaults:
   cutout_size: 96
-  stamp_size: 24
-  kernel_margin_px: 470
+  stamp_size: 35
+  perband: true
+  stamp_source: difference
+  # template_recipe: <producing lane operator YAML>  # defaults to the template store sidecar
   oversampling_factor: 1   # SCC templates/mapping oversampling_{N}/
   ps1_source: zarr_download   # zarr_local_only | zarr_download | stream
   debug_plots: true
@@ -20,14 +22,9 @@ baseline:
 
 photometry:
   methods:
-    - name: ap3
-      type: aperture
-      tar_ap: 3
-      sky_in: 5
-      sky_out: 9
-    - name: prf
-      type: psf
-      psf_type: prf
+    - {name: r4, type: aperture, radius: 4, annulus: [12, 16]}
+    - {name: r6, type: aperture, radius: 6, annulus: [12, 16]}
+    - {name: r8, type: aperture, radius: 8, annulus: [12, 16]}
 
 condor:
   request_cpus: 8

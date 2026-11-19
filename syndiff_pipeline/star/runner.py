@@ -49,9 +49,12 @@ def star_output_root(
     ctx: StarEventContext,
     *,
     photometry_run_id: str | None = None,
+    output_directory: str | None = None,
 ) -> Path:
     """Return ``{lane_root}/host_star`` — per-SCC, beside the diff products it derives from."""
     del photometry_run_id  # legacy; SCC lane is not namespaced by photometry run
+    if output_directory:
+        return Path(output_directory)
     lane_root = scc_diff_dir(
         ctx.data_root,
         ctx.sector,
@@ -67,10 +70,11 @@ def resolve_star_host_root(
     workspace_run_id: str | None = None,
     *,
     photometry_run_id: str | None = None,
+    output_directory: str | None = None,
 ) -> Path:
     """Return ``{lane_root}/host_star`` (SCC-only storage layout)."""
     del workspace_run_id  # legacy; SCC lane root is not namespaced by workspace run
-    return star_output_root(ctx, photometry_run_id=photometry_run_id)
+    return star_output_root(ctx, photometry_run_id=photometry_run_id, output_directory=output_directory)
 
 
 def _mini_template_fits_paths(mini_paths: list[str]) -> dict[tuple[float, float], str]:
@@ -224,16 +228,13 @@ def run_star_pipeline(
         raise ValueError("stars_file is required")
 
     requests = load_star_hosts_file(hosts_path)
-    star_root = star_output_root(ctx, photometry_run_id=run_config.photometry_run_id)
-    star_root.mkdir(parents=True, exist_ok=True)
-
-    manifest_rows: list[dict] = []
-    product_ids = _load_product_ids(ctx, max_ffis=run_config.max_ffis)
-    btjd_by_product_id = _load_product_id_btjd_map(ctx)
+    star_root = star_output_root(ctx, output_directory=run_config.output_directory)
 
     epsf_catalogs: dict[str, object] = {}
     for label in required_epsf_workspaces(run_config.photometry_methods):
         build_cfg = run_config.epsf if run_config.epsf is not None and run_config.epsf.output == label else None
+        if build_cfg is not None and build_cfg.enabled and run_config.output_directory:
+            raise ValueError("An external output directory requires an existing ePSF workspace")
         epsf_catalogs[label] = ensure_star_epsf_catalog(
             ctx,
             label,
@@ -242,6 +243,16 @@ def run_star_pipeline(
             overwrite=run_config.overwrite,
             max_ffis=run_config.max_ffis,
         )
+
+    if run_config.perband and requests:
+        from .perband_runner import run_perband
+
+        return run_perband(ctx, run_config, requests, star_root, epsf_catalogs)
+
+    star_root.mkdir(parents=True, exist_ok=True)
+    manifest_rows: list[dict] = []
+    product_ids = _load_product_ids(ctx, max_ffis=run_config.max_ffis)
+    btjd_by_product_id = _load_product_id_btjd_map(ctx)
 
     for request in requests:
         host: ResolvedHost | None = None
@@ -431,7 +442,7 @@ def run_star_pipeline(
     return manifest_path
 
 
-def verify_star_batch_manifest(manifest_path: Path) -> bool:
+def verify_star_batch_manifest(manifest_path: Path, *, perband: bool = False) -> bool:
     """Return True when batch_manifest exists and every host row has status=ok."""
     if not manifest_path.is_file():
         return False
@@ -440,4 +451,12 @@ def verify_star_batch_manifest(manifest_path: Path) -> bool:
         return False
     if "status" not in df.columns:
         return False
+    if perband:
+        if "lightcurve_paths" not in df:
+            return False
+        for paths in df["lightcurve_paths"]:
+            if not isinstance(paths, str) or not paths.endswith("/perband.parquet"):
+                return False
+            if not Path(paths).is_file():
+                return False
     return bool((df["status"] == "ok").all())
