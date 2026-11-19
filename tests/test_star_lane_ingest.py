@@ -21,6 +21,25 @@ def test_master_origin_precedes_fit_grid():
     assert _mapping_origin({'XMIN':44,'YMIN':-8},ctx)==(44,-8)
 
 
+def test_difference_and_reconstruction_agree(tmp_path):
+    from astropy.io import fits
+    from syndiff_pipeline.star.diff_runner import baseline_window
+    scene = np.arange(30,dtype='f4').reshape(5,6)
+    for label,im in [('hp_d',scene-5),('hp_c',scene*0+3),('ks_b',scene*0+2)]:
+        folder=tmp_path/label
+        folder.mkdir()
+        fits.writeto(folder/f'tess123-s0026-2-2_{label}.fits',im)
+    raw=tmp_path/'raw.fits'
+    fits.writeto(raw,scene)
+    ctx=SimpleNamespace(sector=26,camera=2,ccd=2,baseline_diffs_dir=str(tmp_path/'hp_d'),
+        baseline_convolved_dir=str(tmp_path/'hp_c'),baseline_phot_bkg_dir=str(tmp_path/'ks_b'),
+        crop_bounds={'shape':scene.shape})
+    box=(1,0,5,3)
+    legacy=baseline_window(ctx,'tess123',box,'reconstruct',raw,raw)
+    ctx.baseline_convolved_dir=''
+    np.testing.assert_equal(baseline_window(ctx,'tess123',box,'difference',None),legacy)
+
+
 def test_tic_and_local_catalogue_preserve_gaia_integer(tmp_path):
     from astropy.table import Table
 

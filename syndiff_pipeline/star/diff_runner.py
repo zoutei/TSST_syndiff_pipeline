@@ -319,6 +319,45 @@ def _resolve_frame_fits_path(directory: str, product_id: str, scc=None) -> str:
     return path
 
 
+def baseline_window(ctx, product_id, bounds, source, ffi_path, science_fits_path=None):
+    stamp_x0, stamp_y0, stamp_x1, stamp_y1 = bounds
+    scc = (ctx.sector, ctx.camera, ctx.ccd)
+    if source == "difference":
+        path = _resolve_frame_fits_path(ctx.baseline_diffs_dir, product_id, scc)
+        return read_window(path, y0=stamp_y0, y1=stamp_y1, x0=stamp_x0, x1=stamp_x1)
+    if source != "reconstruct":
+        raise ValueError(f"Unknown stamp_source {source}")
+    conv_path = _resolve_frame_fits_path(ctx.baseline_convolved_dir, product_id, scc)
+    bkg_path = _resolve_frame_fits_path(ctx.baseline_phot_bkg_dir, product_id, scc)
+
+    conv_temp_window = read_window(
+        conv_path, y0=stamp_y0, y1=stamp_y1, x0=stamp_x0, x1=stamp_x1
+    )
+    background_window = read_window(
+        bkg_path, y0=stamp_y0, y1=stamp_y1, x0=stamp_x0, x1=stamp_x1
+    )
+    if science_fits_path is not None and _is_crop_sized_science(science_fits_path, ctx.crop_bounds):
+        ffi_window = read_window(
+            science_fits_path,
+            y0=stamp_y0,
+            y1=stamp_y1,
+            x0=stamp_x0,
+            x1=stamp_x1,
+        )
+    else:
+        ffi_window = _read_science_window(
+            ffi_path,
+            ctx.crop_bounds,
+            y0=stamp_y0,
+            y1=stamp_y1,
+            x0=stamp_x0,
+            x1=stamp_x1,
+        )
+
+    return ffi_window - conv_temp_window - background_window
+
+
+
 def hotpants_fit_geometry(ctx):
     """Return shape and origin offset of the grid used by the lane's Hotpants fit."""
     from pathlib import Path
@@ -337,7 +376,6 @@ def hotpants_fit_geometry(ctx):
         pad = grid.conv_pad_native if grid is not None else 0
     return (crop_h + 2 * pad, crop_w + 2 * pad), (pad, pad)
 
-
 def compute_star_only_stamp_for_frame(
     *,
     ctx: StarEventContext,
@@ -346,6 +384,7 @@ def compute_star_only_stamp_for_frame(
     mini_template_fits_paths: dict[tuple[float, float], str],
     stamp_size: int = 24,
     kernel_margin_px: int | None = None,
+    stamp_source: str = "reconstruct",
     science_fits_path: Optional[str] = None,
     field_group_to_template: Optional[dict[int, str]] = None,
 ) -> tuple[np.ndarray, dict]:
@@ -412,33 +451,8 @@ def compute_star_only_stamp_for_frame(
     conv_x1, conv_y1 = stamp_x1+radius, stamp_y1+radius
     conv_shape = (conv_y1 - conv_y0, conv_x1 - conv_x0)
 
-    scc = (ctx.sector, ctx.camera, ctx.ccd)
-    conv_path = _resolve_frame_fits_path(ctx.baseline_convolved_dir, product_id, scc)
-    bkg_path = _resolve_frame_fits_path(ctx.baseline_phot_bkg_dir, product_id, scc)
-
-    conv_temp_window = read_window(
-        conv_path, y0=stamp_y0, y1=stamp_y1, x0=stamp_x0, x1=stamp_x1
-    )
-    background_window = read_window(
-        bkg_path, y0=stamp_y0, y1=stamp_y1, x0=stamp_x0, x1=stamp_x1
-    )
-    if science_fits_path is not None and _is_crop_sized_science(science_fits_path, ctx.crop_bounds):
-        ffi_window = read_window(
-            science_fits_path,
-            y0=stamp_y0,
-            y1=stamp_y1,
-            x0=stamp_x0,
-            x1=stamp_x1,
-        )
-    else:
-        ffi_window = _read_science_window(
-            ffi_path,
-            ctx.crop_bounds,
-            y0=stamp_y0,
-            y1=stamp_y1,
-            x0=stamp_x0,
-            x1=stamp_x1,
-        )
+    base = baseline_window(ctx, product_id, (stamp_x0, stamp_y0, stamp_x1, stamp_y1),
+                           stamp_source, ffi_path, science_fits_path)
 
     mini_flux_sum, mini_xmin, mini_ymin, oversample = load_mini_template_flux_sum(
         mini_path
@@ -457,7 +471,7 @@ def compute_star_only_stamp_for_frame(
     fit_shape, (dx, dy) = hotpants_fit_geometry(ctx)
     kernel = FrameKernel(kernel_solution, hp_config, fit_shape, oversample)
     component = kernel.apply(mini_star_template_window, conv_x0 + dx, conv_y0 + dy)
-    stamp = ffi_window - conv_temp_window - background_window + component
+    stamp = base + component
 
     metadata = {
         "window_x0": stamp_x0,

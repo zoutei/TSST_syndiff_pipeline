@@ -217,7 +217,7 @@ def run_star_pipeline(
 ) -> Path:
     """Run mini-templates, stamps, and photometry for all hosts in *stars_file*."""
     if validate:
-        validate_star_prerequisites(ctx)
+        validate_star_prerequisites(ctx, stamp_source=run_config.stamp_source)
 
     hosts_path = stars_file or run_config.stars_file
     if not hosts_path:
@@ -353,6 +353,7 @@ def run_star_pipeline(
                     mini_template_fits_paths=mini_template_fits_paths,
                     stamp_size=run_config.stamp_size,
                     kernel_margin_px=run_config.kernel_margin_px,
+                    stamp_source=run_config.stamp_source,
                     field_group_to_template=field_group_to_template or None,
                 )
                 write_star_diff_stamp(

@@ -70,7 +70,7 @@ class TestStarContext(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ctx = _minimal_ctx(tmp)
             with self.assertRaises(StarPrerequisiteError) as cm:
-                validate_star_prerequisites(ctx)
+                validate_star_prerequisites(ctx, stamp_source="reconstruct")
             message = str(cm.exception)
             self.assertIn("event_job.json", message)
             self.assertIn("frames.csv", message)

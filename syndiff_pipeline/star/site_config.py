@@ -100,6 +100,7 @@ class StarSitePolicy:
 
     deployment_file: str = "deployment.yaml"
     defaults: dict = field(default_factory=dict)
+    stamp_source: str = "difference"
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry: dict = field(default_factory=dict)
     epsf: dict = field(default_factory=dict)
@@ -139,6 +140,7 @@ class StarRunConfig:
     oversampling_factor: int = 1
     # Named templates lane → templates_{NAME}/; None → templates/
     template_store_name: str | None = None
+    stamp_source: str = "difference"
     baseline: StarBaselineConfig = field(default_factory=StarBaselineConfig)
     photometry_methods: list[dict] = field(default_factory=list)
     epsf: StarEpsfConfig | None = None
@@ -493,7 +495,11 @@ def resolve_star_run_config(
         merged_defaults.get("template_store_name")
     )
 
+    stamp_source = merged_defaults.get("stamp_source", "difference")
+    if stamp_source not in {"difference", "reconstruct"}:
+        raise ValueError("stamp_source must be difference or reconstruct")
     return StarRunConfig(
+        stamp_source=stamp_source,
         cutout_size=int(merged_defaults.get("cutout_size", 96)),
         stamp_size=int(merged_defaults.get("stamp_size", 24)),
         kernel_margin_px=int(merged_defaults.get("kernel_margin_px", 470)),

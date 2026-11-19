@@ -668,7 +668,7 @@ def _dir_has_glob(path: str, pattern: str) -> bool:
     return any(root.glob(pattern))
 
 
-def validate_star_prerequisites(ctx: StarEventContext) -> None:
+def validate_star_prerequisites(ctx: StarEventContext, *, stamp_source="difference") -> None:
     """Fail fast with an actionable checklist when prerequisites are missing."""
     missing: list[str] = []
 
@@ -720,21 +720,22 @@ def validate_star_prerequisites(ctx: StarEventContext) -> None:
             "in the SCC diff lane or event workspace"
         )
 
-    conv_dir = Path(ctx.baseline_convolved_dir)
-    if not ctx.baseline_convolved_dir or not _dir_has_glob(str(conv_dir), "*.fits*"):
-        missing.append(
-            f"no convolved-template FITS under {conv_dir or '(unset)'}; "
-            "re-run the baseline hotpants stage with write_convolved: true"
-        )
+    if stamp_source == "reconstruct":
+        conv_dir = Path(ctx.baseline_convolved_dir)
+        if not ctx.baseline_convolved_dir or not _dir_has_glob(str(conv_dir), "*.fits*"):
+            missing.append(
+                f"no convolved-template FITS under {conv_dir or '(unset)'}; "
+                "re-run the baseline hotpants stage with write_convolved: true"
+            )
 
-    phot_bkg_dir = Path(ctx.baseline_phot_bkg_dir)
-    if not ctx.baseline_phot_bkg_dir or not _dir_has_glob(str(phot_bkg_dir), "*.fits*"):
-        missing.append(
-            f"no photutils background FITS under {phot_bkg_dir or '(unset)'}; "
-            f"ensure baseline.phot_bkg={ctx.baseline_phot_bkg_label!r} exists "
-            "(run background_estimate ks_b and/or inherit ks_b_s in the SCC lane "
-            "or baseline workspace)"
-        )
+        phot_bkg_dir = Path(ctx.baseline_phot_bkg_dir)
+        if not ctx.baseline_phot_bkg_dir or not _dir_has_glob(str(phot_bkg_dir), "*.fits*"):
+            missing.append(
+                f"no photutils background FITS under {phot_bkg_dir or '(unset)'}; "
+                f"ensure baseline.phot_bkg={ctx.baseline_phot_bkg_label!r} exists "
+                "(run background_estimate ks_b and/or inherit ks_b_s in the SCC lane "
+                "or baseline workspace)"
+            )
 
     kernels_dir = Path(ctx.baseline_kernels_dir)
     if not _dir_has_glob(str(kernels_dir), "*_kernel.npz"):
