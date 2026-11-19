@@ -771,7 +771,7 @@ def save_gridded_epsf_npz(
 
 
 def load_gridded_psf_model(
-    path: str, *, window_origin: tuple[int, int] = (0, 0)
+    path: str, *, window_origin: tuple[int, int] = (0, 0), normalize: bool = False
 ) -> GriddedPSFModel:
     """Load a model in window coordinates given its origin within the science crop."""
     z = np.load(path, allow_pickle=False)
@@ -781,6 +781,13 @@ def load_gridded_psf_model(
         oversampling = int(z["oversampling"])
     finally:
         z.close()
+    if normalize:
+        # Photutils assumes supplied arrays already have a unit native integral.
+        # The ePSF builder's subsequent crop removes a node-dependent fraction.
+        totals = stack.sum(axis=(1, 2)) / oversampling**2
+        if not np.all(np.isfinite(totals) & (totals > 0)):
+            raise ValueError(f"Invalid ePSF normalization in {path}")
+        stack = stack / totals[:, None, None]
     meta = {"grid_xypos": grid_xypos, "oversampling": oversampling}
     return GriddedPSFModel(NDData(data=stack, meta=meta))
 
@@ -878,13 +885,13 @@ class GriddedEpsfCatalog:
         return None
 
     def load_model(
-        self, ffi_stem: str, *, window_origin: tuple[int, int] = (0, 0)
+        self, ffi_stem: str, *, window_origin: tuple[int, int] = (0, 0), normalize: bool = False
     ) -> GriddedPSFModel | None:
         """Load the frame model in the coordinates of the requested window."""
         path = self.path_for_stem(ffi_stem)
         if path is None:
             return None
-        return load_gridded_psf_model(path, window_origin=window_origin)
+        return load_gridded_psf_model(path, window_origin=window_origin, normalize=normalize)
 
 
 def catalog_from_workspace(output_dir: str) -> GriddedEpsfCatalog | None:
